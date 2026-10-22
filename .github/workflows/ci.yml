@@ -77,9 +77,17 @@ jobs:
       # merge_group: the entry's own changes, merge_group.base_sha (main or
       # the entry ahead) to head_sha, as a PR's are its diff from its base.
       # Empty on every other event, which keeps the action's defaults.
+      #
+      # token: '' detects a pull request's changes with git (merge base with
+      # the PR base branch) instead of the REST pulls/files API. The default
+      # github.token shares the repository's hourly installation rate limit
+      # with every other workflow run; when that is spent the API call 403s
+      # and this job, and with it Check and CI / required, fails on a PR that
+      # changed nothing wrong. Other events never used the token.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
+          token: ''
           base: ${{ github.event.merge_group.base_sha }}
           ref: ${{ github.event.merge_group.head_sha }}
           filters: |

@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -348,5 +349,116 @@ func TestServerConfirmedDeadRealTmuxKilledServer(t *testing.T) {
 	}
 	if !p.ServerConfirmedDead() {
 		t.Fatal("ServerConfirmedDead() = false for a server stopped by kill-server")
+	}
+}
+
+// attachAfterCheck reads name detached, as the recycle's attach check does,
+// then attaches a real client to it before the kill (J17).
+func attachAfterCheck(t *testing.T, p *Provider, name string) {
+	t.Helper()
+	if attached, err := p.tm.SessionAttachedWithError(name); err != nil || attached {
+		t.Fatalf("attach check = (%v, %v), want detached (precondition)", attached, err)
+	}
+	if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
+		t.Fatalf("attach a client to %s: %v", name, err)
+	}
+	if attached, err := p.tm.SessionAttachedWithError(name); err != nil || !attached {
+		t.Fatalf("after the attach = (%v, %v), want attached (precondition)", attached, err)
+	}
+}
+
+// A human who attaches after the recycle's attach check keeps the session:
+// the no-client test runs in the same tmux command as the kill. Before the
+// fix the attached zombie was killed and replaced (J17: $23 killed for $24).
+func TestKillZombieObjectRealTmuxRefusesClientAttachedAfterCheck(t *testing.T) {
+	p := newObjectServer(t)
+	startObjectSession(t, p, "zombie", "sleep 300")
+	id, created := objectOf(t, p, "zombie")
+	pid := objectFormat(t, p, "zombie", "#{pane_pid}")
+	attachAfterCheck(t, p, "zombie")
+	if res, err := p.KillZombieObject("zombie", id, created, pid); err != nil || res != runtime.SessionObjectChanged {
+		t.Fatalf("KillZombieObject(attached) = %v, %v; want refused", res, err)
+	}
+	if got, _ := objectOf(t, p, "zombie"); got != id {
+		t.Fatalf("session object = %s, want the attached %s to survive", got, id)
+	}
+}
+
+// The corpse kill refuses an attached session the same way: a human looking
+// at the dead pane keeps it.
+func TestKillCorpseObjectRealTmuxRefusesClientAttachedAfterCheck(t *testing.T) {
+	p := newObjectServer(t)
+	id, created := makeCorpse(t, p, "corpse")
+	attachAfterCheck(t, p, "corpse")
+	if res, err := p.KillCorpseObject("corpse", id, created); err != nil || res != runtime.SessionObjectLive {
+		t.Fatalf("KillCorpseObject(attached) = %v, %v; want refused", res, err)
+	}
+	if got, _ := objectOf(t, p, "corpse"); got != id {
+		t.Fatalf("session object = %s, want the attached %s to survive", got, id)
+	}
+}
+
+// TestSeamBackedPeekReadsADeadPane (mc-g3la1). Kills a peek of a
+// remain-on-exit corpse that reads empty through the seam-backed provider
+// gc runs: the seam's Peek reads through an Attachment, which the tmux
+// transport opens only on a running session, so a dead pane's provider
+// rate-limit screen read as no output and the controller recycled it
+// instead of quarantining. The seam-backed Peek reads the corpse's screen as
+// the raw provider does.
+func TestSeamBackedPeekReadsADeadPane(t *testing.T) {
+	p := newObjectServer(t)
+	startObjectSession(t, p, "rl", "sleep 300")
+	if err := p.tm.SetRemainOnExit(paneTarget("rl"), true); err != nil {
+		t.Fatalf("remain-on-exit: %v", err)
+	}
+	if _, err := p.tm.run("respawn-pane", "-k", "-t", paneTarget("rl"), "sh -c 'echo You have hit your limit; echo /rate-limit-options; exit 1'"); err != nil {
+		t.Fatalf("respawn-pane: %v", err)
+	}
+	waitObjectCondition(t, "rl to become a corpse", func() bool { return objectFormat(t, p, "rl", "#{pane_dead}") == "1" })
+	rt, tp := p.Seams()
+	seamBacked := &seamBackedProvider{Provider: p, seams: runtime.NewProviderFromSeams(rt, tp)}
+	if seamBacked.IsRunning("rl") {
+		t.Fatal("the corpse reads running: the case is vacuous")
+	}
+	got, err := seamBacked.Peek("rl", 40)
+	if err != nil || !strings.Contains(got, "/rate-limit-options") {
+		t.Fatalf("seam-backed Peek of the corpse = (%q, %v), want its screen", got, err)
+	}
+	if raw, _ := p.Peek("rl", 40); raw != got {
+		t.Fatalf("seam-backed Peek %q differs from the raw provider's %q", got, raw)
+	}
+}
+
+// A fresh read on a real private tmux server: a name the server does not hold
+// reads absent without a process-table scan, and a live session is read from
+// the full refresh, whose scan finds its agent process (v5 O1). The agent runs
+// under a shell that cannot exec it, so only the scan can see it.
+func TestFreshReadRealTmuxAbsentNameSkipsProcessScan(t *testing.T) {
+	p := newObjectServer(t)
+	fetcher, ok := p.cache.fetcher.(*tmuxFetcher)
+	if !ok {
+		t.Fatalf("cache fetcher = %T, want *tmuxFetcher", p.cache.fetcher)
+	}
+	scans := 0
+	fetcher.snapshot = func(ctx context.Context) (processSnapshot, error) {
+		scans++
+		return fetchProcessSnapshot(ctx)
+	}
+	startObjectSession(t, p, "agent", "sh -c 'sleep 300; :'")
+
+	got, err := p.ObserveLivenessSince("missing", []string{"sleep"}, time.Now())
+	if err != nil || got != (runtime.Liveness{}) {
+		t.Fatalf("ObserveLivenessSince(missing) = (%+v, %v), want absent", got, err)
+	}
+	if scans != 0 {
+		t.Fatalf("process scans = %d, want 0 for an absent name", scans)
+	}
+
+	got, err = p.ObserveLivenessSince("agent", []string{"sleep"}, time.Now())
+	if err != nil || !got.Running || !got.Alive || got.ObjectID == "" {
+		t.Fatalf("ObserveLivenessSince(agent) = (%+v, %v), want running and alive with its object id", got, err)
+	}
+	if scans != 1 {
+		t.Fatalf("process scans = %d, want 1 (the full refresh)", scans)
 	}
 }

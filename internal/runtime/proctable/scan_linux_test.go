@@ -741,8 +741,7 @@ func TestScanWithRootNeverReportsInfrastructureAsRoot(t *testing.T) {
 // the scan does: no for the tmux server, yes for the agent beneath it.
 func TestIsScanRootNeverReportsInfrastructureAsRoot(t *testing.T) {
 	root := t.TempDir()
-	restore := SetScanRootForTesting(root)
-	defer restore()
+	SetScanRootForTesting(t, root)
 	env := map[string]string{"GC_SESSION_ID": "hq-session"}
 	buildFakeProcUnder(t, root, 100, 1, "tmux: server", env)
 	buildFakeProcUnder(t, root, 101, 100, "claude", env)
@@ -865,5 +864,173 @@ func TestScanWithRootReportsWhetherTheParentIsProviderInfrastructure(t *testing.
 	if parentIsInfra[402] {
 		t.Error("attributed a `systemd --user` parent to provider infrastructure; that is the orphaned-watchdog shape, " +
 			"and killing it signals the process group whose SIGTERM handler stops the city's shared dolt sql-server")
+	}
+}
+
+// A same-uid parent whose environ the kernel will not show (a capability-holding
+// subreaper such as `systemd --user`, or a setuid or non-dumpable parent) names
+// no session the scan can see, so a session child it adopted sits outside the
+// session's envelope and is a root. The parent's own unreadable environ is still
+// reported by its own scan entry, so the scan stays honest about what it could
+// not read.
+func TestScanWithRootReportsChildOfUnreadableParentAsRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 parent environ would stay readable")
+	}
+	const (
+		sessionID = "ga-unreadable-parent"
+		parent    = 3117
+		child     = 402
+	)
+	root := t.TempDir()
+	SetScanRootForTesting(t, root)
+	buildFakeProcUnder(t, root, parent, 1, "systemd", nil)
+	if err := os.Chmod(filepath.Join(root, strconv.Itoa(parent), "environ"), 0o000); err != nil {
+		t.Fatalf("chmod parent environ: %v", err)
+	}
+	buildFakeProcUnder(t, root, child, parent, "gc", map[string]string{"GC_SESSION_ID": sessionID})
+
+	got, err := scanWithRoot(root, sessionID)
+	if len(got) != 1 || got[0].PID != child {
+		t.Fatalf("scanWithRoot = %+v (error: %v), want the child of the unreadable parent reported as a root", got, err)
+	}
+	if got[0].ParentIsProviderInfrastructure {
+		t.Error("attributed an unreadable `systemd` parent to provider infrastructure; the drain-ack kill fence needs that to stay false")
+	}
+	if err == nil || !strings.Contains(err.Error(), "reading environ for pid "+strconv.Itoa(parent)) {
+		t.Errorf("scanWithRoot error = %v, want the parent's own unreadable environ still reported", err)
+	}
+	if !IsScanRoot(child) {
+		t.Error("IsScanRoot disagrees with the scan: the child of an unreadable parent is a root")
+	}
+}
+
+// Only a permission denial reads as "outside the envelope". Any other failure to
+// read the parent's environ (here the read fails with EISDIR) leaves the child's
+// root status unproven, so the scan omits the child and reports why.
+func TestScanWithRootOmitsChildWhenParentEnvironFailsForOtherReasons(t *testing.T) {
+	const (
+		sessionID = "ga-broken-parent"
+		parent    = 3117
+		child     = 402
+	)
+	root := t.TempDir()
+	buildFakeProcUnder(t, root, parent, 1, "systemd", nil)
+	environ := filepath.Join(root, strconv.Itoa(parent), "environ")
+	if err := os.Remove(environ); err != nil {
+		t.Fatalf("remove parent environ: %v", err)
+	}
+	if err := os.Mkdir(environ, 0o755); err != nil {
+		t.Fatalf("mkdir parent environ: %v", err)
+	}
+	buildFakeProcUnder(t, root, child, parent, "gc", map[string]string{"GC_SESSION_ID": sessionID})
+
+	got, err := scanWithRoot(root, sessionID)
+	if len(got) != 0 {
+		t.Fatalf("scanWithRoot = %+v, want the child omitted: a parent environ that fails for a reason other than permission proves nothing about the envelope", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "checking root for pid "+strconv.Itoa(child)) {
+		t.Fatalf("scanWithRoot error = %v, want it to name the child it could not classify", err)
+	}
+}
+
+// Kills: a scan that leaves StartIdentity or StartedAt unset, reads them from
+// another field, or reports a start time without a boot time.
+func TestScanWithRootReportsStartIdentity(t *testing.T) {
+	root := t.TempDir()
+	boot := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+	buildFakeProc(t, root, 100, map[string]string{"GC_SESSION_ID": "ga-start"})
+	writeFakeProcessStat(t, filepath.Join(root, strconv.Itoa(100)), 100, 1, 12345)
+
+	got, err := scanWithRoot(root, "ga-start")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("scanWithRoot = %v, %v; want one root", got, err)
+	}
+	if got[0].StartIdentity != "12345" || !got[0].StartedAt.IsZero() {
+		t.Fatalf("without btime: StartIdentity=%q StartedAt=%v, want 12345 and zero", got[0].StartIdentity, got[0].StartedAt)
+	}
+
+	writeFakeBootTime(t, root, boot)
+	got, err = scanWithRoot(root, "ga-start")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("scanWithRoot = %v, %v; want one root", got, err)
+	}
+	if want := boot.Add(123*time.Second + 450*time.Millisecond); !got[0].StartedAt.Equal(want) || got[0].StartIdentity != "12345" {
+		t.Fatalf("StartIdentity=%q StartedAt=%v, want 12345 and %v", got[0].StartIdentity, got[0].StartedAt, want)
+	}
+}
+
+// TestOrphanCandidateScanReadsOnlyReparentedProcesses (mc-ygved): the
+// empty-id scan reports the roots reparented to init or the user subreaper
+// and reads no other process's environment: a non-candidate whose environ
+// cannot be read adds no error, while a candidate's unreadable parent is
+// the entry's error (fail-closed). The id-scoped scan is unchanged.
+func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	const subreaper = 50
+	buildFakeProcUnder(t, root, subreaper, 1, "systemd", nil)
+	buildFakeProcUnder(t, root, 100, 1, "agent", map[string]string{"GC_SESSION_ID": "gc-init"})
+	buildFakeProcUnder(t, root, 101, subreaper, "agent", map[string]string{"GC_SESSION_ID": "gc-sub"})
+	buildFakeProcUnder(t, root, 200, 300, "tmux: server", nil)
+	buildFakeProcUnder(t, root, 300, 1, "bash", nil)
+	buildFakeProcUnder(t, root, 102, 300, "agent", map[string]string{"GC_SESSION_ID": "gc-paned"}) // its parent (bash) carries no session: a root, but no orphan
+	buildFakeProcUnder(t, root, 103, 300, "agent", map[string]string{"GC_SESSION_ID": "gc-x"})
+	if err := os.Chmod(filepath.Join(root, "103", "environ"), 0); err != nil { // a non-candidate's environ unreadable
+		t.Fatal(err)
+	}
+	buildFakeProcUnder(t, root, 104, 1, "agent", map[string]string{"GC_SESSION_ID": "gc-y"})
+	if err := os.Chmod(filepath.Join(root, "104", "stat"), 0); err != nil { // a process whose parent cannot be read
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every file; the unreadable fixtures need an unprivileged user")
+	}
+
+	got, err := scanOrphanCandidatesWithRoot(root, subreaper)
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.SessionID)
+	}
+	if strings.Join(ids, ",") != "gc-init,gc-sub" {
+		t.Fatalf("orphan candidates %v, want gc-init and gc-sub only", ids)
+	}
+	var entry *EntryError
+	if !errors.As(err, &entry) || entry.PID != 104 || HasWholeScanFailure(err) || strings.Contains(err.Error(), "103") {
+		t.Fatalf("scan error %v, want only pid 104's unreadable parent, as an entry error", err)
+	}
+	all, _ := scanWithRoot(root, "gc-paned")
+	if len(all) != 1 || all[0].PID != 102 {
+		t.Fatalf("id-scoped scan %+v, want the paned root still found", all)
+	}
+	// ScanBySessionID: the empty id is the orphan scan, a session id the
+	// full one.
+	SetScanRootForTesting(t, root)
+	savedDetect := detectSubreaper
+	detectSubreaper = func(int) int { return subreaper }
+	t.Cleanup(func() { detectSubreaper = savedDetect })
+	public, _ := ScanBySessionID("")
+	var publicIDs []string
+	for _, r := range public {
+		publicIDs = append(publicIDs, r.SessionID)
+	}
+	if strings.Join(publicIDs, ",") != "gc-init,gc-sub" { // the subreaper's orphan included (a systemd --user supervisor)
+		t.Fatalf("ScanBySessionID(\"\") = %v, want gc-init and gc-sub only", publicIDs)
+	}
+	if scoped, _ := ScanBySessionID("gc-paned"); len(scoped) != 1 {
+		t.Fatalf("ScanBySessionID(gc-paned) = %+v, want the paned root", scoped)
+	}
+}
+
+// TestOrphanCandidate (mc-ygved): init and the user subreaper are the
+// orphan parents; no subreaper, or any other parent, is not.
+func TestOrphanCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		ppid, subreaper int
+		want            bool
+	}{{1, 0, true}, {1, 50, true}, {50, 50, true}, {50, 0, false}, {77, 50, false}, {0, 0, false}} {
+		if got := OrphanCandidate(tc.ppid, tc.subreaper); got != tc.want {
+			t.Errorf("OrphanCandidate(%d, %d) = %t, want %t", tc.ppid, tc.subreaper, got, tc.want)
+		}
 	}
 }

@@ -163,7 +163,10 @@ func (s *Server) buildOrderCheckBody(fresh bool) OrderCheckListBody {
 		if err != nil {
 			storeInfos = nil
 		}
-		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, fresh)
+		// The newest run record among a bounded window: a plain bead carrying
+		// the order's labels is no run (orders.IsRunRecord, the #7766 review).
+		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), orderCheckRunScan, time.Time{}, fresh)
+		history = newestRunRecord(history)
 		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, fresh)
 		cr := orderCheckResponse{
 			Name:       a.Name,
@@ -202,7 +205,25 @@ func hasConditionOrder(aa []orders.Order) bool {
 	return false
 }
 
+// orderCheckRunScan is how many of an order's newest labeled beads the
+// check reads to find its newest run record.
+const orderCheckRunScan = 64
+
+// newestRunRecord is history (newest first) cut to its newest run record
+// (orders.IsRunRecord), or nothing.
+func newestRunRecord(history []orderHistoryStoreBead) []orderHistoryStoreBead {
+	for i, row := range history {
+		if orders.IsRunRecord(row.bead) {
+			return history[i : i+1]
+		}
+	}
+	return nil
+}
+
 func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
+	// history is the order's newest run record (newestRunRecord), or
+	// nothing: as in the dispatcher's cooldown and cursor, a plain bead
+	// carrying its labels moves neither (the #7766 review).
 	lastRunFn := func(string) (time.Time, error) {
 		if len(history) == 0 {
 			return time.Time{}, nil
@@ -676,15 +697,19 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	Body ordersFeedBody
 }, error,
 ) {
+	index := s.latestIndex()
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
 	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
+	// The key is the index captured before any state is read, and a hit
+	// needs an exact match, so a cached body reflects every change up to the
+	// current head. A key that can hit across index changes (the time bucket
+	// /status uses) would serve a body that misses later changes.
 	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {
 		return &struct {
 			Body ordersFeedBody

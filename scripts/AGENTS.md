@@ -28,6 +28,18 @@ hook that beads manages means adding its `.githooks` counterpart too —
 `TestGitHooksCoverEveryBeadsManagedHook` in `scripts/` fails otherwise. Hook
 ownership is explained in `CONTRIBUTING.md` ("Git hook ownership").
 
+The pre-push Go-change scan must consume the complete diff and fail if the
+comparison cannot be read. An early-exiting `grep -q` under `pipefail` can make
+a large diff look empty when Git receives SIGPIPE, silently skipping the suite.
+A remote tip missing from the local object store is refused first with a
+`git fetch <remote> <ref>` remedy: Git still runs the hook for a non-forced push
+over an unfetched tip and prints its own "fetch first" hint only if the hook
+passes. A forced push over an unfetched tip is refused too, until that fetch.
+The remedy names the ref because a plain `git fetch <remote>` can skip the tip
+(a single-branch clone, a URL push, a moved tag), and it strips credentials
+from a push URL. `githooks_pre_push_stdin_test.go` covers large diffs,
+unfetched remote tips, credentialed push URLs and unreadable comparisons.
+
 ## Make targets run Bazel; `-go` twins are the escape hatch
 
 `make test`, `check`, `check-all`, `check-docs`, `test-acceptance` and
@@ -41,3 +53,12 @@ the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because
 that suite is not what CI enforces; `GC_PREPUSH_SUITE=go` opts in explicitly.
+`auto` also falls back when a loader probe says the host cannot resolve the
+ICU runtime `MODULE.bazel`'s sysroot pins, or cannot say. The docs side of
+`.githooks/pre-commit` makes the same choice between `make check-docs` and
+`make check-docs-go` (`GC_PRECOMMIT_DOCS=auto|bazel|go`), again behind a
+banner. One shared decision, `.githooks/lib/local-runtime.sh`, serves both
+hooks; it derives the soname list from a single ICU-major constant, and
+`TestBazelLocalRuntimePinMatchesProbe` fails when that constant, the
+`MODULE.bazel` pin and `engdocs/bazel-quickstart.md` disagree. Only `auto`
+probes: an explicit mode is never replaced.

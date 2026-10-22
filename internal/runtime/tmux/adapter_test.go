@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -388,19 +389,582 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 }
 
+// Relaunch replaces the agent pane (the first pane of the first window), not
+// whichever pane is active. A human who split the agent's window and then
+// opened and focused a second window must keep both: before the fix,
+// respawn-pane -t "=name:" killed the focused window's pane, ran the new agent
+// there, and left the old agent running in pane 0.0.
+func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-relaunch-pane-%d-%d", os.Getpid(), time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-pane"
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf("sh -c 'echo %s > %s; sleep 300'", tag, marker)
+	}
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: agentCmd("first"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "first")
+
+	agentPane, err := agentPaneID(p.tm, name)
+	if err != nil {
+		t.Fatalf("agent pane id: %v", err)
+	}
+	agentPIDBefore, err := p.tm.GetPanePID(agentPane)
+	if err != nil {
+		t.Fatalf("agent pane pid: %v", err)
+	}
+
+	// pane-base-index 1 (a common tmux.conf setting) leaves no pane index 0,
+	// so a literal ":^.0" respawn target fails; the agent pane must still be found.
+	if _, err := p.tm.run("set-option", "-g", "pane-base-index", "1"); err != nil {
+		t.Fatalf("set pane-base-index: %v", err)
+	}
+
+	// The human's split in the agent's window: created without -d, so it is
+	// that window's active pane. Window ^ now has two panes, so a resolver
+	// that answers for the window's active pane (display-message on ":^.0"
+	// under pane-base-index 1) or picks the wrong line names the split.
+	splitPane, err := p.tm.run("split-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(name)+"^", "sleep 300")
+	if err != nil {
+		t.Fatalf("split agent window: %v", err)
+	}
+	if !wellFormedTmuxID(splitPane, '%') {
+		t.Fatalf("split pane id = %q, want %%<digits>", splitPane)
+	}
+	if active, err := p.tm.run("display-message", "-t", paneTarget(name)+"^", "-p", "#{pane_id}"); err != nil || strings.TrimSpace(active) != splitPane {
+		t.Fatalf("agent window active pane = (%q, %v), want the split %q (precondition)", strings.TrimSpace(active), err, splitPane)
+	}
+	splitPID, err := p.tm.GetPanePID(splitPane)
+	if err != nil {
+		t.Fatalf("split pane pid: %v", err)
+	}
+
+	// The human's window: created without -d, so it becomes the active window.
+	humanPane, err := p.tm.run("new-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(name), "sleep 300")
+	if err != nil {
+		t.Fatalf("create second window: %v", err)
+	}
+	if !wellFormedTmuxID(humanPane, '%') {
+		t.Fatalf("second-window pane id = %q, want %%<digits>", humanPane)
+	}
+	active, err := p.tm.run("display-message", "-t", paneTarget(name), "-p", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("read active pane: %v", err)
+	}
+	if strings.TrimSpace(active) != humanPane {
+		t.Fatalf("active pane = %q, want the second window's %q (precondition)", strings.TrimSpace(active), humanPane)
+	}
+	humanPID, err := p.tm.GetPanePID(humanPane)
+	if err != nil {
+		t.Fatalf("second-window pane pid: %v", err)
+	}
+
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("second"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "second")
+
+	// The agent pane was respawned: same pane, new process, old agent gone.
+	if got, err := agentPaneID(p.tm, name); err != nil || got != agentPane {
+		t.Fatalf("first pane after Relaunch = (%q, %v), want %q", got, err, agentPane)
+	}
+	agentPIDAfter, err := p.tm.GetPanePID(agentPane)
+	if err != nil {
+		t.Fatalf("agent pane pid after Relaunch: %v", err)
+	}
+	if agentPIDAfter == agentPIDBefore {
+		t.Fatalf("agent pane pid unchanged (%s): the agent pane was not respawned", agentPIDAfter)
+	}
+	if processAlive(agentPIDBefore) {
+		t.Fatalf("old agent process %s still alive after Relaunch", agentPIDBefore)
+	}
+
+	// The second window survived with its original process.
+	if got, err := p.tm.GetPanePID(humanPane); err != nil || got != humanPID {
+		t.Fatalf("second-window pane pid after Relaunch = (%q, %v), want %q (pane respawned or killed)", got, err, humanPID)
+	}
+	if !processAlive(humanPID) {
+		t.Fatalf("second-window process %s killed by Relaunch", humanPID)
+	}
+	if got, err := p.tm.GetPanePID(splitPane); err != nil || got != splitPID {
+		t.Fatalf("split pane pid after Relaunch = (%q, %v), want %q (pane respawned or killed)", got, err, splitPID)
+	}
+	if !processAlive(splitPID) {
+		t.Fatalf("split process %s killed by Relaunch", splitPID)
+	}
+}
+
+// agentPaneFixture is a Provider on its own tmux server holding one started
+// agent session, for the agent-pane resolution tests.
+type agentPaneFixture struct {
+	p        *Provider
+	name     string
+	marker   string
+	workDir  string
+	agent    string // the agent's pane id
+	agentPID string
+}
+
+func (f *agentPaneFixture) agentCmd(tag string) string {
+	return fmt.Sprintf("sh -c 'echo %s > %s; sleep 300'", tag, f.marker)
+}
+
+func (f *agentPaneFixture) mustRun(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := f.p.tm.run(args...)
+	if err != nil {
+		t.Fatalf("tmux %q: %v", args, err)
+	}
+	return strings.TrimSpace(out)
+}
+
+// newAgentPaneFixture starts an agent session on a private server whose
+// global base-index and pane-base-index are base (a holder session keeps the
+// server up while they are set, so the agent session is created under them).
+func newAgentPaneFixture(t *testing.T, tag, base string) *agentPaneFixture {
+	t.Helper()
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName(tag)
+	f := &agentPaneFixture{p: NewProviderWithConfig(cfg), name: "gc-test-agent-pane", workDir: t.TempDir()}
+	f.marker = filepath.Join(f.workDir, "marker")
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		if err := f.p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+	f.mustRun(t, "new-session", "-d", "-s", "gc-test-holder", "sleep 300")
+	f.mustRun(t, "set-option", "-g", "base-index", base)
+	f.mustRun(t, "set-option", "-wg", "pane-base-index", base)
+	if err := f.p.Start(context.Background(), f.name, runtime.Config{Command: f.agentCmd("first"), WorkDir: f.workDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, f.marker, "first")
+	f.agent = f.mustRun(t, "list-panes", "-t", paneTarget(f.name), "-F", "#{pane_id}")
+	f.agentPID = f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{pane_pid}")
+	return f
+}
+
+// requireAgentPaneResolved checks that the session-keyed reads and the kill
+// plan describe the agent's pane, whatever a human has done around it.
+func (f *agentPaneFixture) requireAgentPaneResolved(t *testing.T) {
+	t.Helper()
+	tm := f.p.tm
+	if got, err := agentPaneID(tm, f.name); err != nil || got != f.agent {
+		t.Errorf("agent pane id = (%q, %v), want the agent's %q", got, err, f.agent)
+	}
+	if got, err := tm.GetPanePID(f.name); err != nil || got != f.agentPID {
+		t.Errorf("GetPanePID = (%q, %v), want the agent's %q", got, err, f.agentPID)
+	}
+	if dead, err := tm.IsPaneDead(f.name); err != nil || dead {
+		t.Errorf("IsPaneDead = (%v, %v), want the live agent's false", dead, err)
+	}
+	want := f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{pane_current_command}|#{pane_current_path}|#{pane_dead_status}|#{pane_dead_signal}")
+	cmd, cmdErr := tm.GetPaneCommand(f.name)
+	dir, dirErr := tm.GetPaneWorkDir(f.name)
+	status, signal := tm.PaneDeadInfo(f.name)
+	if got := strings.Join([]string{cmd, dir, status, signal}, "|"); cmdErr != nil || dirErr != nil || got != want {
+		t.Errorf("GetPaneCommand|GetPaneWorkDir|PaneDeadInfo = %q (%v, %v), want the agent pane's %q", got, cmdErr, dirErr, want)
+	}
+	if !tm.IsSessionRunning(f.name) {
+		t.Error("IsSessionRunning = false, want true for the live agent")
+	}
+	plan, err := tm.capturePaneProcessKillPlan(f.name, nil)
+	if err != nil || plan.Leader == nil || strconv.Itoa(plan.Leader.PID) != f.agentPID {
+		t.Errorf("kill plan = (%+v, %v), want it rooted at the agent's %s", plan, err, f.agentPID)
+	}
+}
+
+// relaunchAndRequireAgentRespawned relaunches the session and checks that the
+// agent's pane, and only it, got the new process.
+func (f *agentPaneFixture) relaunchAndRequireAgentRespawned(t *testing.T, humanPanes ...string) {
+	t.Helper()
+	humanState := map[string]string{}
+	for _, pane := range humanPanes {
+		humanState[pane] = f.mustRun(t, "display-message", "-p", "-t", pane, "#{pane_pid} #{pane_dead}")
+	}
+	if err := f.p.Relaunch(context.Background(), f.name, runtime.Config{Command: f.agentCmd("second"), WorkDir: f.workDir}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, f.marker, "second")
+	if got := f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{pane_pid}"); got == f.agentPID {
+		t.Errorf("agent pane %s pid still %s, want a respawned process", f.agent, got)
+	} else {
+		f.agentPID = got
+	}
+	if !processAlive(f.agentPID) {
+		t.Errorf("respawned agent %s is not alive", f.agentPID)
+	}
+	for pane, before := range humanState {
+		if got := f.mustRun(t, "display-message", "-p", "-t", pane, "#{pane_pid} #{pane_dead}"); got != before {
+			t.Errorf("human pane %s = %q after Relaunch, want %q (untouched)", pane, got, before)
+		}
+	}
+	f.requireAgentPaneResolved(t)
+}
+
+// Session-keyed pane reads, the kill plan and Relaunch resolve to the agent's
+// pane, never the session's active pane. A human has split the agent's window
+// (the split's process exited, leaving a dead pane kept by remain-on-exit,
+// made active) and opened a second window, which is active. Run under tmux's
+// default indexes and under base-index 1 / pane-base-index 1, which has no
+// pane 0.
+func TestProvider_AgentPaneIgnoresHumanSplitAndWindow(t *testing.T) {
+	for _, base := range []string{"0", "1"} {
+		t.Run("base-index="+base, func(t *testing.T) {
+			f := newAgentPaneFixture(t, "aph"+base, base)
+			split := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "true")
+			waitForValue(t, "split pane "+split+" pane_dead", "1", func() string {
+				return f.mustRun(t, "display-message", "-p", "-t", split, "#{pane_dead}")
+			})
+			other := f.mustRun(t, "new-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(f.name), "sleep 300")
+			if got := f.mustRun(t, "display-message", "-p", "-t", paneTarget(f.name), "#{pane_id}"); got != other {
+				t.Fatalf("active pane = %s, want the second window's %s (precondition)", got, other)
+			}
+			if got := f.mustRun(t, "display-message", "-p", "-t", paneTarget(f.name)+"^", "#{pane_id}"); got != split {
+				t.Fatalf("first window's active pane = %s, want the split %s (precondition)", got, split)
+			}
+
+			f.requireAgentPaneResolved(t)
+			f.relaunchAndRequireAgentRespawned(t, split, other)
+		})
+	}
+}
+
+// The agent pane is found by its marker, not its position. Each case is a
+// human action that moves another pane ahead of the agent's in list order,
+// which a first-pane resolver would mistake for the agent.
+func TestProvider_AgentPaneMarkerSurvivesReorder(t *testing.T) {
+	cases := []struct {
+		name    string
+		reorder func(t *testing.T, f *agentPaneFixture) []string // returns the human panes
+	}{
+		{"split-window -b", func(t *testing.T, f *agentPaneFixture) []string {
+			return []string{f.mustRun(t, "split-window", "-b", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")}
+		}},
+		{"swap-pane", func(t *testing.T, f *agentPaneFixture) []string {
+			human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+			f.mustRun(t, "swap-pane", "-s", f.agent, "-t", human)
+			return []string{human}
+		}},
+		{"rotate-window", func(t *testing.T, f *agentPaneFixture) []string {
+			human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+			f.mustRun(t, "rotate-window", "-t", f.agent)
+			return []string{human}
+		}},
+		{"break-pane", func(t *testing.T, f *agentPaneFixture) []string {
+			human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+			f.mustRun(t, "break-pane", "-d", "-s", f.agent, "-t", paneTarget(f.name))
+			return []string{human}
+		}},
+		{"new-window -b", func(t *testing.T, f *agentPaneFixture) []string {
+			return []string{f.mustRun(t, "new-window", "-b", "-P", "-F", "#{pane_id}", "-t", paneTarget(f.name)+"^", "sleep 300")}
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentPaneFixture(t, fmt.Sprintf("apr%d", i), "1")
+			humans := tc.reorder(t, f)
+			first, _, _ := strings.Cut(f.mustRun(t, "list-panes", "-s", "-t", paneTarget(f.name), "-F", "#{pane_id}"), "\n")
+			if first == f.agent {
+				t.Fatalf("%s left the agent pane %s first (precondition)", tc.name, f.agent)
+			}
+
+			f.requireAgentPaneResolved(t)
+			f.relaunchAndRequireAgentRespawned(t, humans...)
+		})
+	}
+}
+
+// A human kills the marked agent pane and the session lives on in their
+// split. Nothing may be answered from, or done to, the human's pane: reads
+// see no agent, the kill plan is empty, and Relaunch refuses.
+func TestProvider_KilledAgentPaneFailsClosed(t *testing.T) {
+	f := newAgentPaneFixture(t, "apk", "1")
+	human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+	humanPID := f.mustRun(t, "display-message", "-p", "-t", human, "#{pane_pid}")
+	f.mustRun(t, "kill-pane", "-t", f.agent)
+	tm := f.p.tm
+
+	if _, err := agentPaneID(tm, f.name); !errors.Is(err, errAgentPaneGone) {
+		t.Errorf("agent pane id err = %v, want errAgentPaneGone", err)
+	}
+	if dead, err := tm.IsPaneDead(f.name); err != nil || !dead {
+		t.Errorf("IsPaneDead = (%v, %v), want dead: the agent's pane is gone", dead, err)
+	}
+	if tm.IsSessionRunning(f.name) {
+		t.Error("IsSessionRunning = true, want false with the agent's pane gone")
+	}
+	if plan, err := tm.capturePaneProcessKillPlan(f.name, nil); err != nil || plan.Leader != nil || len(plan.Descendants) != 0 {
+		t.Errorf("kill plan = (%+v, %v), want empty, never the human's tree", plan, err)
+	}
+	if err := f.p.Relaunch(context.Background(), f.name, runtime.Config{Command: f.agentCmd("second"), WorkDir: f.workDir}); err == nil {
+		t.Error("Relaunch = nil, want a refusal: it would replace the human's pane")
+	}
+	if got := f.mustRun(t, "display-message", "-p", "-t", human, "#{pane_pid} #{pane_dead}"); got != humanPID+" 0" {
+		t.Errorf("human pane %s = %q, want %q (untouched)", human, got, humanPID+" 0")
+	}
+}
+
+// Another gc session's agent pane, joined in front of this session's agent,
+// carries a marker valued with its own session's id: it reads as a foreign
+// pane, never as this session's agent.
+func TestProvider_JoinedForeignAgentPaneIsNotTheAgent(t *testing.T) {
+	f := newAgentPaneFixture(t, "apj", "1")
+	if err := f.p.Start(context.Background(), "gc-test-other", runtime.Config{Command: "sleep 300", WorkDir: f.workDir}); err != nil {
+		t.Fatalf("Start other: %v", err)
+	}
+	foreign := f.mustRun(t, "list-panes", "-t", "=gc-test-other:", "-F", "#{pane_id}")
+	f.mustRun(t, "new-session", "-d", "-s", "gc-test-keepalive", "sleep 300")
+	f.mustRun(t, "join-pane", "-b", "-s", foreign, "-t", f.agent)
+	agentWindow := f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{window_id}")
+	if got := f.mustRun(t, "display-message", "-p", "-t", foreign, "#{window_id}"); got != agentWindow {
+		t.Fatalf("joined pane %s is in window %s, want the agent's %s (precondition)", foreign, got, agentWindow)
+	}
+	// Whether join-pane -b lists the joined pane first depends on the tmux
+	// version, so put it first by id: the foreign pane must lead the list for
+	// a first-pane resolver to mistake it for the agent.
+	if first, _, _ := strings.Cut(f.mustRun(t, "list-panes", "-s", "-t", paneTarget(f.name), "-F", "#{pane_id}"), "\n"); first != foreign {
+		f.mustRun(t, "swap-pane", "-s", f.agent, "-t", foreign)
+	}
+	first, _, _ := strings.Cut(f.mustRun(t, "list-panes", "-s", "-t", paneTarget(f.name), "-F", "#{pane_id}"), "\n")
+	if first != foreign {
+		t.Fatalf("first pane = %s, want the joined foreign pane %s (precondition)", first, foreign)
+	}
+
+	f.requireAgentPaneResolved(t)
+	f.relaunchAndRequireAgentRespawned(t, foreign)
+}
+
+// A session created before the marker existed has no marked pane; it falls
+// back to the first pane of the first window.
+func TestProvider_UnmarkedSessionFallsBackToFirstPane(t *testing.T) {
+	f := newAgentPaneFixture(t, "apu", "1")
+	// A pre-marker session has neither the pane marker nor the session flag.
+	f.mustRun(t, "set-option", "-p", "-u", "-t", f.agent, agentPaneOption)
+	f.mustRun(t, "set-option", "-u", "-t", paneTarget(f.name), agentSessionOption)
+	if got := f.mustRun(t, "display-message", "-p", "-t", f.agent, agentPaneMarkerFormat); got != "pane" {
+		t.Fatalf("agent pane marker after unset = %q, want unmarked (precondition)", got)
+	}
+	human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+
+	f.requireAgentPaneResolved(t)
+	f.relaunchAndRequireAgentRespawned(t, human)
+}
+
+// Input and capture paths reach the marked agent pane, not a human pane that
+// runs the same CLI and is listed (and focused) first. Process detection alone
+// would pick the human pane here: both panes run sh, a configured process name.
+func TestProvider_InputPathsReachMarkedAgentPaneOverSameCLIHumanPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("api")
+	p := NewProviderWithConfig(cfg)
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+	dir := t.TempDir()
+	agentIn, humanIn := filepath.Join(dir, "agent-in"), filepath.Join(dir, "human-in")
+	pane := func(label, in string) string {
+		return fmt.Sprintf("sh -c 'echo %s-SCREEN; exec cat > %s'", label, in)
+	}
+	const name = "gc-test-input-paths"
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: pane("AGENT", agentIn),
+		WorkDir: dir,
+		Env:     map[string]string{"GT_PROCESS_NAMES": "sh,cat"},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tm := p.tm
+	agent := markedAgentPane(t, tm, name)
+	// Wait for the agent pane's program before splitting: on a slow default
+	// shell (zsh, tmux 3.2a) it may not have run yet, and its screen and
+	// input are what this test reads.
+	waitForValue(t, "agent pane screen", "true", func() string {
+		out, _ := tm.run("capture-pane", "-p", "-t", agent)
+		return strconv.FormatBool(strings.Contains(out, "AGENT-SCREEN"))
+	})
+	// The human's split goes first in the window (-b) and is focused.
+	human, err := tm.run("split-window", "-b", "-P", "-F", "#{pane_id}", "-t", agent, pane("HUMAN", humanIn))
+	if err != nil {
+		t.Fatalf("split-window: %v", err)
+	}
+	if first, _ := tm.run("display-message", "-p", "-t", paneTarget(name), "#{pane_id}"); first != human {
+		t.Fatalf("active pane = %q, want the human split %q (precondition)", first, human)
+	}
+	readFile := func(path string) string {
+		b, _ := os.ReadFile(path)
+		return string(b)
+	}
+	waitForValue(t, "human pane screen", "true", func() string {
+		out, _ := tm.run("capture-pane", "-p", "-t", human)
+		return strconv.FormatBool(strings.Contains(out, "HUMAN-SCREEN"))
+	})
+
+	if got, err := inputPaneID(tm, name); err != nil || got != agent {
+		t.Errorf("nudge input pane = (%q, %v), want the marked %q", got, err, agent)
+	}
+	peek, err := p.Peek(name, 20)
+	if err != nil || !strings.Contains(peek, "AGENT-SCREEN") || strings.Contains(peek, "HUMAN-SCREEN") {
+		t.Errorf("Peek = (%q, %v), want the agent pane's screen", peek, err)
+	}
+	if err := tm.SendKeysDebounced(name, "debounced", 0); err != nil {
+		t.Fatalf("SendKeysDebounced: %v", err)
+	}
+	if err := tm.SendKeysReplace(name, "replaced", 0); err != nil {
+		t.Fatalf("SendKeysReplace: %v", err)
+	}
+	waitForValue(t, "agent pane input", "debounced\nreplaced\n", func() string { return readFile(agentIn) })
+	if got := readFile(humanIn); got != "" {
+		t.Errorf("human pane received %q, want nothing", got)
+	}
+}
+
+// Idle detection and the approval check read the agent's pane, not a focused
+// human pane. A human prompt ("❯ ", which is Claude's ready prefix and a p10k
+// prompt line) on the active pane must not make a busy agent read idle, and a
+// real approval prompt on the agent's pane must be seen with the human pane
+// focused (#7657 review, mc-zndi7.101).
+func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T) {
+	f := newAgentPaneFixture(t, "api", "1")
+	tm := f.p.tm
+	show := func(pane, text string) {
+		t.Helper()
+		f.mustRun(t, "respawn-pane", "-k", "-t", pane, "printf '%b\\n' "+shellquote.Quote(text)+"; exec sleep 300")
+	}
+	human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+	show(human, "❯ ")
+	if active := f.mustRun(t, "display-message", "-p", "-t", paneTarget(f.name), "#{pane_id}"); active != human {
+		t.Fatalf("active pane = %s, want the human pane %s (precondition)", active, human)
+	}
+	captured := func(pane, want string) {
+		t.Helper()
+		waitForValue(t, "pane "+pane+" shows "+want, "true", func() string {
+			out, _ := tm.run("capture-pane", "-p", "-t", pane)
+			return strconv.FormatBool(strings.Contains(out, want))
+		})
+	}
+	captured(human, "❯")
+
+	// The agent is busy.
+	show(f.agent, "✻ Thinking… (12s · esc to interrupt)")
+	captured(f.agent, "esc to interrupt")
+	if idle, err := tm.SnapshotIdle(f.name); err != nil || idle {
+		t.Errorf("SnapshotIdle = (%v, %v), want busy: the agent's pane shows its spinner", idle, err)
+	}
+	if err := tm.WaitForIdle(context.Background(), f.name, time.Second); !errors.Is(err, ErrIdleTimeout) {
+		t.Errorf("WaitForIdle = %v, want ErrIdleTimeout while the agent is busy", err)
+	}
+
+	// The agent waits on an approval prompt.
+	show(f.agent, "● Read(file_path: /tmp/test.txt)\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for: Read:*\n   3. No")
+	captured(f.agent, "Do you want to proceed?")
+	if pending, err := tm.Pending(f.name); err != nil || pending == nil {
+		t.Errorf("Pending = (%v, %v), want the agent pane's approval prompt", pending, err)
+	}
+}
+
+// A nudge never lands in a human pane when the agent pane cannot be named: a
+// human killed the agent pane (the session lives on in theirs), or two panes
+// claim to be the agent's. The nudge errors and the human pane receives
+// nothing (#7677 review MF1).
+func TestProvider_NudgeFailsClosedWithoutOneAgentPane(t *testing.T) {
+	cases := []struct {
+		name    string
+		wantErr error
+		setup   func(t *testing.T, f *agentPaneFixture, human string)
+	}{
+		{"agent pane killed", errAgentPaneGone, func(t *testing.T, f *agentPaneFixture, _ string) {
+			f.mustRun(t, "kill-pane", "-t", f.agent)
+		}},
+		{"two marked panes", errAgentPaneAmbiguous, func(t *testing.T, f *agentPaneFixture, human string) {
+			f.mustRun(t, "set-option", "-p", "-F", "-t", human, agentPaneOption, "#{session_id}")
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentPaneFixture(t, fmt.Sprintf("anf%d", i), "1")
+			rec := filepath.Join(f.workDir, "human-input")
+			human := f.mustRun(t, "split-window", "-b", "-P", "-F", "#{pane_id}", "-t", f.agent, "cat > "+rec)
+			tc.setup(t, f, human)
+
+			if err := f.p.tm.NudgeSession(f.name, "NUDGE-TEXT"); !errors.Is(err, tc.wantErr) {
+				t.Errorf("NudgeSession = %v, want %v", err, tc.wantErr)
+			}
+			if err := f.p.tm.ClearInput(context.Background(), f.name, 0); !errors.Is(err, tc.wantErr) {
+				t.Errorf("ClearInput = %v, want %v", err, tc.wantErr)
+			}
+			// A sentinel typed after the attempts arrives after any stray
+			// keys, so once it lands the record is complete.
+			f.mustRun(t, "send-keys", "-t", human, "-l", "SENTINEL")
+			f.mustRun(t, "send-keys", "-t", human, "Enter")
+			waitForValue(t, "human pane record", "SENTINEL", func() string {
+				b, _ := os.ReadFile(rec)
+				return strings.TrimSpace(string(b))
+			})
+		})
+	}
+}
+
 func waitForMarker(t *testing.T, path, want string) {
+	t.Helper()
+	waitForValue(t, "marker "+strconv.Quote(path), want, func() string {
+		b, _ := os.ReadFile(path)
+		return strings.TrimSpace(string(b))
+	})
+}
+
+// waitForValue polls read until it returns want, failing after 10s.
+func waitForValue(t *testing.T, what, want string, read func() string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(path); err == nil {
-			if last = strings.TrimSpace(string(b)); last == want {
-				return
-			}
+		if last = read(); last == want {
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("marker %q = %q, want %q (timed out)", path, last, want)
+	t.Fatalf("%s = %q, want %q (timed out)", what, last, want)
 }
 
 func TestProvider_RecyclesDeadPaneWithoutProcessNames(t *testing.T) {

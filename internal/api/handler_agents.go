@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -105,15 +106,20 @@ type expandedAgent struct {
 // For bounded pool agents, this generates pool-1..pool-max members.
 // For unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
-func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
-	expanded, _ := expandAgentChecked(a, cityName, sessTmpl, sp)
+// That prefix never matches a named session running under the template's
+// bare name, so a template that leaves max_active_sessions unset (the shape
+// gc lint accepts for one) lists its own named session from config instead.
+func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) []expandedAgent {
+	expanded, _ := expandAgentChecked(a, cityName, sessTmpl, sp, named)
 	return expanded
 }
 
 // expandAgentChecked is expandAgent that also returns the session-listing
-// error behind an unlimited pool's empty expansion, so a caller can report
-// "could not list sessions" instead of mistaking it for "no sessions".
-func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLister) ([]expandedAgent, error) {
+// error that left an unlimited pool without its running instances, so a
+// caller can report "could not list sessions" instead of mistaking it for
+// "no sessions". A template's own named session comes from config, so its
+// row is returned even alongside that error.
+func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) ([]expandedAgent, error) {
 	maxSess := a.EffectiveMaxActiveSessions()
 
 	if !isMultiSessionAgent(a) {
@@ -131,7 +137,11 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 	// Unlimited: discover running instances via session prefix.
 	isUnlimited := maxSess == nil || *maxSess < 0
 	if isUnlimited && sp != nil {
-		return discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
+		instances, err := discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
+		if maxSess == nil && isOwnNamedSession(a, named) {
+			instances = append([]expandedAgent{configuredPoolRow(a)}, instances...)
+		}
+		return instances, err
 	}
 
 	// Bounded: static enumeration.
@@ -156,9 +166,10 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 	return result, nil
 }
 
-// configuredPoolRow is the identity of a multi-session agent itself, used to
-// list an on-demand pool that has no live session: its qualified name is both
-// the row name and the pool name.
+// configuredPoolRow is the identity of a multi-session agent itself: its
+// qualified name is both the row name and the pool name. It lists an
+// on-demand pool that has no live session, and a template's own named
+// session beside the instances discovered for it.
 func configuredPoolRow(a config.Agent) expandedAgent {
 	qn := a.QualifiedName()
 	return expandedAgent{
@@ -179,6 +190,18 @@ func agentPoolLimits(a config.Agent) *poolLimits {
 		limits.Max = *maxSess
 	}
 	return &limits
+}
+
+// isOwnNamedSession reports whether a configured named session is backed by
+// the agent and uses the agent's own qualified name as its identity.
+func isOwnNamedSession(a config.Agent, named []config.NamedSession) bool {
+	qn := a.QualifiedName()
+	for i := range named {
+		if named[i].QualifiedName() == qn && named[i].TemplateQualifiedName() == qn {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionLister is the subset of session.Provider needed for pool discovery.
@@ -334,6 +357,29 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
+// rigTemplateInstance reports whether name is a rig-qualified identity that
+// only resolves through a generic scope="rig" template ("myrig/rigbot" served
+// by template "rigbot", see agentutil.ResolveQualifiedRigScopedTemplate). Such
+// an instance has no config of its own: the template it reads through serves
+// every rig. It returns the template's identity and the instance's rig.
+func rigTemplateInstance(cfg *config.City, name string) (template, rig string, ok bool) {
+	if cfg == nil {
+		return "", "", false
+	}
+	for i := range cfg.Agents {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], name) {
+			return "", "", false
+		}
+	}
+	instance, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name)
+	if !ok {
+		return "", "", false
+	}
+	rig = instance.Dir
+	instance.Dir = ""
+	return instance.QualifiedName(), rig, true
+}
+
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
@@ -349,9 +395,11 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
 
-// findActiveBeadForAssigneesWithFreshness uses a targeted ListQuery with
-// Limit=1 instead of broad scans so active-bead lookup stays cheap even when
-// bead counts are large.
+// findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
+// highest-priority identity: identity order first, then store order, then
+// newest first within a store. Cached reads use a targeted ListQuery with
+// Limit=1 per identity and store, stopping at the first match; live reads go
+// through findLiveActiveBeadInStores.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
@@ -373,24 +421,24 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
+	if live {
+		return findLiveActiveBeadInStores(stores, rigNames, unique)
+	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
 			query := beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
-				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			}
-			if !live {
-				if cached, ok := stores[rn].(cachedListStore); ok {
-					matches, cacheOK := cached.CachedList(query)
-					if cacheOK {
-						if len(matches) > 0 {
-							return matches[0].ID
-						}
-						continue
+			if cached, ok := stores[rn].(cachedListStore); ok {
+				matches, cacheOK := cached.CachedList(query)
+				if cacheOK {
+					if len(matches) > 0 {
+						return matches[0].ID
 					}
+					continue
 				}
 			}
 			matches, err := stores[rn].List(query)
@@ -403,6 +451,56 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	return ""
+}
+
+// findLiveActiveBeadInStores makes one live List call per store for all
+// identities, not one per identity. That bounds the calls, not the backend
+// work: how far a store narrows its call varies. DoltliteReadStore filters
+// with assignee IN (...), NativeDoltStore and BdStore issue one keyed read per
+// identity, and SQLiteStore reads the store's whole in_progress set and
+// filters it client-side. Precedence matches the cached path. Reading stops
+// once the first identity has a match, since no later store can outrank it.
+func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
+	if len(identities) == 0 {
+		return ""
+	}
+	firstByIdentity := make(map[string]string, len(identities))
+	for _, rn := range rigNames {
+		for _, match := range liveActiveWork(stores[rn], rn, identities) {
+			if _, ok := firstByIdentity[match.Assignee]; !ok {
+				firstByIdentity[match.Assignee] = match.ID
+			}
+		}
+		if firstByIdentity[identities[0]] != "" {
+			break
+		}
+	}
+	for _, identity := range identities {
+		if id := firstByIdentity[identity]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// liveActiveWork returns a store's in_progress beads assigned to any of the
+// identities, newest first. A failed read is logged and skipped, but a partial
+// result keeps the rows that did decode: one unreadable bead must not hide the
+// session's own work.
+func liveActiveWork(store beads.Store, rig string, identities []string) []beads.Bead {
+	matches, err := store.List(beads.ListQuery{
+		Assignees: identities,
+		Status:    "in_progress",
+		Live:      true,
+		Sort:      beads.SortCreatedDesc,
+	})
+	if err != nil {
+		log.Printf("api: looking up active work in rig %q: %v", rig, err)
+		if !beads.IsPartialResult(err) {
+			return nil
+		}
+	}
+	return matches
 }
 
 // providerPathCheck returns the binary name to check for PATH availability.

@@ -429,7 +429,7 @@ func createPoolSessionBeadWithIdentifiers(
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
-				closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
+				closeSeat(store, nil, info, closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeRollback}, now, io.Discard)
 				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID, landed: true}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
@@ -446,7 +446,7 @@ func createPoolSessionBeadWithIdentifiers(
 // generations, so what keeps a slot at ONE unconfirmed generation is that a
 // fresh row may not be minted while an OPEN pool row of the same template and
 // identity is still an unconfirmed create — pending-create, or failed-create
-// whose runtime teardown has not been confirmed (releaseBeadScopedPoolRuntime
+// whose runtime teardown has not been confirmed (releaseRowOwnedRuntime
 // holds such a row open). This is the guarantee #5372 got from the
 // identity-derived name collision (ga-vcjr9), keyed on the identity instead of
 // the runtime name. Identities compare in their tmux-safe encoding, the same

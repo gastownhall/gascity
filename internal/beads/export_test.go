@@ -21,7 +21,7 @@ func NewNativeDoltStoreForConformance() Store {
 // trip; without that the fixture would clobber every id the suite pins and the
 // rows would pass against a store that never had to decide anything.
 func NewNativeDoltStoreForPinnedIDFenceConformance(mintPrefix string, namespaces ...string) Store {
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: mintPrefix, HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: mintPrefix, HonorExplicitIDs: true}}
 	store := newNativeDoltStoreForTest(storage, WithNativeDoltStoreReservedIDPrefixes(namespaces...))
 	store.idPrefix = normalizeIDPrefix(mintPrefix)
 	return store
@@ -57,7 +57,7 @@ func (c *CachingStore) NotifyChangeForTest(eventType string, b Bead) {
 // BdStore forks the `bd` binary. It is a second NativeDoltStore over the same
 // storage, which is the closest in-process thing to "the other door".
 func NewProxiedStoreForConformance(mintPrefix string) Store {
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: mintPrefix, HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: mintPrefix, HonorExplicitIDs: true}}
 
 	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 	native.idPrefix = normalizeIDPrefix(mintPrefix)
@@ -113,4 +113,11 @@ func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
 		}
 	}
 	panic("WriteRowForTest: no row " + id)
+}
+
+// SetTxProjectionTimeoutForTest shortens how long a staged Tx waits for an
+// update to read back, so a test of the unconfirmed outcome need not wait the
+// production bound.
+func (s *BdStore) SetTxProjectionTimeoutForTest(d time.Duration) {
+	s.txProjectionTimeout = d
 }

@@ -1118,7 +1118,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
-			"config_hash":                runtime.CoreFingerprint(seedCfg),
+			"test_config_hash":           runtime.CoreFingerprint(seedCfg),
 			"live_hash":                  runtime.LiveFingerprint(seedCfg),
 			"generation":                 "1",
 			"continuation_epoch":         "1",
@@ -2155,7 +2155,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		rec            *events.Fake
 		stdout, stderr *lockedBuffer
 	}
-	start := func(t *testing.T, prefix string, beforeRun func(dir string)) started {
+	start := func(t *testing.T, prefix string, refused bool, beforeRun func(dir string)) started {
 		t.Helper()
 		dir := shortSocketTempDir(t, prefix)
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
@@ -2168,7 +2168,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		cfg := &config.City{
 			Workspace: config.Workspace{Name: "test"},
 			Beads:     config.BeadsConfig{Provider: "file"},
-			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2"},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2", SessionCircuitBreaker: refused},
 		}
 		buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
 		s := started{dir: dir, done: make(chan struct{}), code: new(int), rec: events.NewFake(), stdout: &lockedBuffer{}, stderr: &lockedBuffer{}}
@@ -2181,7 +2181,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 
 	t.Run("refused", func(t *testing.T) {
 		var sockPath string
-		s := start(t, "gc-latch-", func(dir string) {
+		s := start(t, "gc-latch-", true, func(dir string) { // a feature v2 defers: the latch refuses
 			sockPath = controllerSocketPath(dir)
 			if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 				t.Fatal(err)
@@ -2200,8 +2200,8 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		if *s.code != 1 {
 			t.Fatalf("runController exit = %d, want 1\nstderr: %s", *s.code, s.stderr.String())
 		}
-		if !strings.Contains(s.stderr.String(), "not available in this build") {
-			t.Errorf("stderr = %q, want the v2 refusal", s.stderr.String())
+		if !strings.Contains(s.stderr.String(), "is refused") {
+			t.Errorf("stderr = %q, want the v2 latch refusal", s.stderr.String())
 		}
 		if data, err := os.ReadFile(sockPath); err != nil || string(data) != "sentinel" {
 			t.Errorf("controller socket path was touched before the refusal (sentinel read = %q, %v)", data, err)
@@ -2241,7 +2241,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		}
 		t.Cleanup(func() { openStoreFactoryForCity = restore })
 		wired := captureWiredControllerStates(t)
-		s := start(t, "gc-latch-v2-", nil)
+		s := start(t, "gc-latch-v2-", false, nil)
 		t.Cleanup(func() {
 			tryStopController(s.dir, &bytes.Buffer{})
 			awaitClose(t, s.done, "controller to exit after stop")
@@ -2259,7 +2259,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 	t.Run("capability refused", func(t *testing.T) {
 		admitV2(t)
 		wired := captureWiredControllerStates(t)
-		s := start(t, "gc-latch-c07-", nil)
+		s := start(t, "gc-latch-c07-", false, nil)
 		awaitWired(t, s, wired)
 		select {
 		case <-s.done:

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -70,10 +71,27 @@ const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed 
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
 // legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.
 // Queries that only match one label miss graph.v2-only roots and allow
-// --force to spawn duplicates.
+// --force to spawn duplicates. A controller-owned row (a session row, a
+// startup-health episode, a convergence root) is never one, whatever marks
+// it carries: no workflow lookup, teardown or cancel takes it (architecture
+// B).
 func IsWorkflowRoot(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
+	return (strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)) &&
+		!coordclass.ControllerOwned(b)
+}
+
+// KeyedRoots lists the workflow roots (IsWorkflowRoot) carrying metadata
+// key=value, every match read (opts as ListByMetadata's): a lookup by an
+// idempotence key (gc.graphv2_root_key, a drain's item-root key) takes only
+// a root, so another bead carrying the key (a task's) neither stands in for
+// the root a launch would mint nor makes it ambiguous (architecture B).
+func KeyedRoots(store beads.Store, key, value string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	matches, err := store.ListByMetadata(map[string]string{key: value}, 0, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(matches, func(b beads.Bead) bool { return !IsWorkflowRoot(b) }), nil
 }
 
 func (e *ConflictError) Error() string {
@@ -502,6 +520,78 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	return out, nil
 }
 
+// maxNestedDrainDepth bounds WorkflowTree. Real drain nesting is a handful of
+// levels deep, so a deeper chain is a corrupt or cyclic link.
+const maxNestedDrainDepth = 16
+
+// WorkflowTreeNode is one workflow of a run tree: its root and the members
+// ListWorkflowBeads read for it, the root included.
+type WorkflowTreeNode struct {
+	Root    beads.Bead
+	Members []beads.Bead
+}
+
+// WorkflowTree returns the workflow rooted at rootID together with every drain
+// item workflow nested under it at any depth, closed ones included, each with
+// its members, deepest first and rootID's own workflow last. A drain item
+// workflow is a root of its own: its steps carry ITS id in gc.root_bead_id, so
+// ListWorkflowBeads(rootID) never reaches them. Its only link to the parent is
+// gc.drain_control_id, naming a drain control that is a member of the parent
+// workflow. Deepest-first is the order a terminal sweep must close them in, so
+// an interrupted sweep leaves the outer levels open for its retry to find. The
+// members are the walk's own reads, so a caller that needs them (to find the
+// work in progress, say) reads each workflow once.
+func WorkflowTree(store beads.Store, rootID string) ([]WorkflowTreeNode, error) {
+	rootID = strings.TrimSpace(rootID)
+	if store == nil || rootID == "" {
+		return nil, nil
+	}
+	reader := beads.HandlesFor(store).Live
+	var out []WorkflowTreeNode
+	seen := map[string]bool{rootID: true}
+	var walk func(id string, depth int) error
+	walk = func(id string, depth int) error {
+		members, err := ListWorkflowBeads(store, id)
+		if err != nil {
+			return err
+		}
+		node := WorkflowTreeNode{Members: members}
+		for _, member := range members {
+			if member.ID == id {
+				node.Root = member
+			}
+			if depth >= maxNestedDrainDepth || member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+				continue
+			}
+			items, err := reader.List(beads.ListQuery{
+				IncludeClosed: true,
+				Metadata:      map[string]string{beadmeta.DrainControlIDMetadataKey: member.ID},
+			})
+			if err != nil {
+				return err
+			}
+			slices.SortFunc(items, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+			for _, item := range items {
+				// The unit convoys a drain creates carry the same link; only
+				// workflow roots are nested runs.
+				if !IsWorkflowRoot(item) || seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+				if err := walk(item.ID, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		out = append(out, node)
+		return nil
+	}
+	if err := walk(rootID, 0); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CloseWorkflowSubtree closes the root and every open descendant of a
 // workflow, marking each gc.outcome=skipped. It closes descendants before the
 // root and honors in-batch "blocks" dependencies so strict stores can close
@@ -674,7 +764,11 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string, exclude func(b
 	})
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" {
+		// A controller-owned row (a session row, a startup-health episode,
+		// a convergence root) is never a workflow member to close, whatever
+		// gc.root_bead_id or gc.kind it carries: its owner closes it
+		// (mc-dkblm, architecture B).
+		if bead.ID == "" || bead.Status == "closed" || coordclass.ControllerOwned(bead) {
 			continue
 		}
 		if exclude != nil && exclude(bead) {
@@ -715,7 +809,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 	}
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) {
+		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) || coordclass.ControllerOwned(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)

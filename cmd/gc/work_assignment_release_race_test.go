@@ -1,13 +1,402 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
+
+func TestWorkReleaseConditionalWritesPreservesNewIncarnation(t *testing.T) {
+	for name, release := range map[string]func(beads.Store, beads.Bead) error{
+		"retired session": func(store beads.Store, snapshot beads.Bead) error {
+			return workAssignmentForStore(beads.WorkStore{Store: store}).ReleaseWorkBead(snapshot, "")
+		},
+		"orphaned pool": func(store beads.Store, snapshot beads.Bead) error {
+			if releaseOrphanedPoolAssignment(store, snapshot, true) {
+				return errors.New("released a newer claim")
+			}
+			return nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+				ScopeRoot:         t.TempDir(),
+				Provider:          "file",
+				ConditionalWrites: gate.Require,
+				OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := result.Store
+			stale := seedClaimedBead(t, store, "reused-worker")
+			if err := store.Update(stale.ID, beads.UpdateOpts{
+				Status: stringPtr("open"), Assignee: stringPtr(""),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Update(stale.ID, beads.UpdateOpts{
+				Status:   stringPtr("in_progress"),
+				Assignee: stringPtr("reused-worker"),
+				Metadata: map[string]string{
+					beadmeta.SessionIDMetadataKey:         "successor-session",
+					beadmeta.ContinuationGroupMetadataKey: "successor-group",
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(stale.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseErr := release(store, stale)
+			if name == "retired session" {
+				if !beads.IsPreconditionFailed(releaseErr) {
+					t.Errorf("release error=%v, want a revision conflict", releaseErr)
+				}
+			} else if releaseErr != nil {
+				t.Errorf("release: %v", releaseErr)
+			}
+			after, err := store.Get(stale.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("stale release changed a successor using the same assignee:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
+	}
+}
+
+type revisionReleaseStore struct {
+	*beads.MemStore
+	conditionalCalls int
+	legacyCalls      int
+	writeErr         error
+}
+
+var _ beads.ConditionalWriter = (*revisionReleaseStore)(nil)
+
+func (s *revisionReleaseStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	s.conditionalCalls++
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *revisionReleaseStore) Update(id string, opts beads.UpdateOpts) error {
+	s.legacyCalls++
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *revisionReleaseStore) ReleaseIfCurrent(id, assignee string) (bool, error) {
+	s.legacyCalls++
+	return s.MemStore.ReleaseIfCurrent(id, assignee)
+}
+
+func openRevisionReleaseStore(t *testing.T, mode gate.Mode) *revisionReleaseStore {
+	t.Helper()
+	store := &revisionReleaseStore{MemStore: beads.NewMemStore()}
+	stampConditionalWrites(t, store, mode)
+	return store
+}
+
+// stampConditionalWrites opens store through the store factory so it carries
+// mode, the way a city's configured store does.
+func stampConditionalWrites(t *testing.T, store beads.Store, mode gate.Mode) {
+	t.Helper()
+	if _, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot:         t.TempDir(),
+		Provider:          "file",
+		ConditionalWrites: mode,
+		OpenFileStore:     func() (beads.Store, error) { return store, nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkReleaseConditionalWritesAtomicCleanup(t *testing.T) {
+	for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
+		for _, orphan := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/orphan=%t", mode, orphan), func(t *testing.T) {
+				store := openRevisionReleaseStore(t, mode)
+				claimed := seedClaimedBead(t, store, "retired-session")
+				if err := store.Update(claimed.ID, beads.UpdateOpts{Metadata: map[string]string{
+					beadmeta.SessionAffinityMetadataKey:   "retired-session",
+					beadmeta.ContinuationGroupMetadataKey: "old-group",
+					detachedProbeMetadataKey:              "old-probe",
+					"unrelated":                           "preserve",
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := store.Get(claimed.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store.legacyCalls = 0
+				if orphan {
+					if !releaseOrphanedPoolAssignment(store, snapshot, true) {
+						t.Fatal("orphan release failed")
+					}
+				} else if err := workAssignmentForStore(beads.WorkStore{Store: store}).ReleaseWorkBead(snapshot, "worker"); err != nil {
+					t.Fatal(err)
+				}
+				if store.conditionalCalls != 1 || store.legacyCalls != 0 {
+					t.Fatalf("conditional=%d legacy=%d, want one combined conditional write", store.conditionalCalls, store.legacyCalls)
+				}
+				got, err := store.Get(claimed.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Assignee != "" || got.Status != "open" || got.Metadata["unrelated"] != "preserve" {
+					t.Fatalf("incorrect release: %+v", got)
+				}
+				for key := range clearedSessionAffinityMetadata() {
+					if got.Metadata[key] != "" {
+						t.Errorf("%s not cleared: %q", key, got.Metadata[key])
+					}
+				}
+				if orphan && got.Metadata[detachedProbeMetadataKey] != "" {
+					t.Error("detached probe not cleared")
+				}
+				if !orphan && (got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" || got.Metadata[detachedProbeMetadataKey] != "old-probe") {
+					t.Error("fallback route or detached probe changed incorrectly")
+				}
+			})
+		}
+	}
+}
+
+func TestWorkReleaseConditionalWritesNeverFallsBackAfterFailure(t *testing.T) {
+	for _, writeErr := range []error{
+		errors.New("backend unavailable"),
+		beads.ErrConditionalWriteUnsupported,
+	} {
+		t.Run(writeErr.Error(), func(t *testing.T) {
+			store := openRevisionReleaseStore(t, gate.Require)
+			snapshot := seedClaimedBead(t, store, "retired-session")
+			store.legacyCalls = 0
+			store.writeErr = writeErr
+			err := workAssignmentForStore(beads.WorkStore{Store: store}).ReleaseWorkBead(snapshot, "")
+			if !errors.Is(err, writeErr) {
+				t.Fatalf("error=%v, want %v", err, writeErr)
+			}
+			if releaseOrphanedPoolAssignment(store, snapshot, true) {
+				t.Fatal("reported a failed orphan release as successful")
+			}
+			if store.legacyCalls != 0 || store.conditionalCalls != 2 {
+				t.Fatalf("conditional=%d legacy=%d, want no fallback", store.conditionalCalls, store.legacyCalls)
+			}
+			got, err := store.Get(snapshot.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, snapshot) {
+				t.Fatalf("failed release changed the bead: %+v", got)
+			}
+		})
+	}
+}
+
+func TestWorkReleaseConditionalWritesConflictDoesNotAcknowledgeRelease(t *testing.T) {
+	store := openRevisionReleaseStore(t, gate.Require)
+	snapshot := seedClaimedBead(t, store, "retired-session")
+	if err := store.Update(snapshot.ID, beads.UpdateOpts{Metadata: map[string]string{
+		"progress": "updated since the release snapshot",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Get(snapshot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.legacyCalls = 0
+	err = workAssignmentForStore(beads.WorkStore{Store: store}).ReleaseWorkBead(snapshot, "")
+	if !beads.IsPreconditionFailed(err) {
+		t.Fatalf("error=%v, want a conflict so the caller cannot count this as a released assignment", err)
+	}
+	if store.legacyCalls != 0 {
+		t.Fatalf("legacy writes=%d, want no fallback", store.legacyCalls)
+	}
+	after, err := store.Get(snapshot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("conflict changed the still-owned bead: %+v", after)
+	}
+}
+
+// TestWorkReleaseConditionalWritesRequireRefusesWithoutCapability resolves the
+// writer before it looks at the snapshot's revision, so require refuses a
+// store without the capability even for a revision-less list row: the only
+// shape the DoltLite read store lists.
+func TestWorkReleaseConditionalWritesRequireRefusesWithoutCapability(t *testing.T) {
+	t.Run("revision snapshot", func(t *testing.T) {
+		store := openRevisionReleaseStore(t, gate.Require)
+		snapshot := seedClaimedBead(t, store, "retired-session")
+		store.DisableConditionalWrites = true
+		store.legacyCalls = 0
+		err := workAssignmentForStore(beads.WorkStore{Store: store}).ReleaseWorkBead(snapshot, "")
+		if !beads.IsConditionalWritesRequired(err) {
+			t.Fatalf("want required-capability refusal, got %v", err)
+		}
+		if releaseOrphanedPoolAssignment(store, snapshot, true) {
+			t.Fatal("orphan release reported success without the required capability")
+		}
+		if store.conditionalCalls != 0 || store.legacyCalls != 0 {
+			t.Fatalf("conditional=%d legacy=%d, want no writes", store.conditionalCalls, store.legacyCalls)
+		}
+		got, err := store.Get(snapshot.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, snapshot) {
+			t.Fatalf("refused release changed the bead: %+v", got)
+		}
+	})
+	t.Run("revision-less list snapshot", func(t *testing.T) {
+		store := &listWithoutRevisionStore{MemStore: beads.NewMemStore()}
+		stampConditionalWrites(t, store, gate.Require)
+		claimed := seedClaimedBead(t, store, "retired-session")
+		store.DisableConditionalWrites = true
+		work := workAssignmentForStore(beads.WorkStore{Store: store})
+		snapshots, err := work.OpenAssignedTo("retired-session", "in_progress", beads.TierBoth, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshots) != 1 || snapshots[0].Revision != 0 {
+			t.Fatalf("listed %+v, want one revision-less list row", snapshots)
+		}
+		if err := work.ReleaseWorkBead(snapshots[0], ""); !beads.IsConditionalWritesRequired(err) {
+			t.Fatalf("ReleaseWorkBead err=%v, want required-capability refusal", err)
+		}
+		if releaseOrphanedPoolAssignment(store, snapshots[0], true) {
+			t.Fatal("orphan release reported success without the required capability")
+		}
+		got, err := store.Get(claimed.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, claimed) {
+			t.Fatalf("refused release changed the bead: %+v", got)
+		}
+	})
+}
+
+// listWithoutRevisionStore answers List the way BdStore does (`bd list
+// --json` publishes no revision, mc-3c8h5), and so a CachingStore over it: list
+// rows carry revision 0, and only Get carries the real one. Every release
+// snapshot comes from such a List.
+type listWithoutRevisionStore struct {
+	*beads.MemStore
+}
+
+var _ beads.ConditionalWriter = (*listWithoutRevisionStore)(nil)
+
+func (s *listWithoutRevisionStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.List(q)
+	for i := range rows {
+		rows[i].Revision = 0
+	}
+	return rows, err
+}
+
+// TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots sweeps the
+// snapshot shape a store whose lists carry no revision hands releases. The
+// live row is not at 0, so the revision guard has nothing to check and the
+// release takes the legacy tiers, which fence on the live status and assignee. Dead claims are released, with or without a
+// continuation group, instead of being refused on every tick, and a claim
+// another worker took after the List is left alone. Under the controller's
+// cache too, whose rows (primed from that List) are also at 0: the snapshot
+// is re-read past the cache, not from it.
+func TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots(t *testing.T) {
+	type shape struct{ group, reclaimed bool }
+	for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
+		for _, orphan := range []bool{false, true} {
+			for _, cached := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/orphan=%t/cached=%t", mode, orphan, cached), func(t *testing.T) {
+					store := &listWithoutRevisionStore{MemStore: beads.NewMemStore()}
+					stampConditionalWrites(t, store, mode)
+					if writer, _, err := beads.ResolveConditionalWriter(store); writer == nil || err != nil {
+						t.Fatalf("conditional writer=%v err=%v, want the revision guard engaged", writer, err)
+					}
+					shapes := map[string]shape{}
+					for _, s := range []shape{{false, false}, {true, false}, {false, true}, {true, true}} {
+						claimed := seedClaimedBead(t, store, "dead-worker")
+						metadata := map[string]string{beadmeta.SessionAffinityMetadataKey: "dead-worker"}
+						if s.group {
+							metadata[beadmeta.ContinuationGroupMetadataKey] = "old-group"
+						}
+						if err := store.Update(claimed.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
+							t.Fatal(err)
+						}
+						shapes[claimed.ID] = s
+					}
+					var target beads.Store = store
+					if cached {
+						target = primedCacheOver(t, store)
+					}
+					work := workAssignmentForStore(beads.WorkStore{Store: target})
+					snapshots, err := work.OpenAssignedTo("dead-worker", "in_progress", beads.TierBoth, true)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(snapshots) != len(shapes) {
+						t.Fatalf("listed %d snapshots, want %d", len(snapshots), len(shapes))
+					}
+					for _, snapshot := range snapshots {
+						if snapshot.Revision != 0 {
+							t.Fatalf("snapshot %s has revision %d, want a revision-less list row", snapshot.ID, snapshot.Revision)
+						}
+						if shapes[snapshot.ID].reclaimed {
+							if err := store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr("fresh-worker")}); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					for _, snapshot := range snapshots {
+						s := shapes[snapshot.ID]
+						label := fmt.Sprintf("group=%t/reclaimed=%t", s.group, s.reclaimed)
+						if orphan {
+							if released := releaseOrphanedPoolAssignment(target, snapshot, true); released == s.reclaimed {
+								t.Errorf("%s: orphan release reported released=%t", label, released)
+							}
+						} else if err := work.ReleaseWorkBead(snapshot, ""); err != nil {
+							t.Errorf("%s: release: %v", label, err)
+						}
+						got, err := store.Get(snapshot.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if s.reclaimed {
+							if got.Status != "in_progress" || got.Assignee != "fresh-worker" {
+								t.Errorf("%s: status=%q assignee=%q, want the newer claim left alone", label, got.Status, got.Assignee)
+							}
+							continue
+						}
+						if got.Status != "open" || got.Assignee != "" {
+							t.Errorf("%s: status=%q assignee=%q, want the dead claim released", label, got.Status, got.Assignee)
+						}
+						for key := range clearedSessionAffinityMetadata() {
+							if got.Metadata[key] != "" {
+								t.Errorf("%s: %s not cleared: %q", label, key, got.Metadata[key])
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
 
 // Every fake below embeds *beads.MemStore and overrides one method to shape a
 // specific race. These assertions exist because that override is silent when it
@@ -612,7 +1001,7 @@ func TestReassignWorkAssignedToRetiredSessionBeadLogsAndContinuesPastARefusal(t 
 	second := seedClaimedBead(t, mem, "retired-session")
 
 	var stderr strings.Builder
-	reassignWorkAssignedToRetiredSessionBead("", nil, incapableWorkStore{Store: mem}, nil, beads.Bead{ID: "retired-session"}, "successor-session", &stderr)
+	reassignWorkAssignedToRetiredSessionBead(testWorkLegs("", nil, incapableWorkStore{Store: mem}, nil), incapableWorkStore{Store: mem}, beads.Bead{ID: "retired-session"}, "successor-session", &stderr)
 
 	for _, id := range []string{first.ID, second.ID} {
 		if !strings.Contains(stderr.String(), "reassigning work "+id+" from retired session retired-session") {
@@ -701,4 +1090,51 @@ func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
 				got.Status, got.Assignee)
 		}
 	})
+}
+
+// legacyClaimStore is a stamped MemStore holding one claimed row at revision
+// 0, the default a legacy native row keeps until its first write.
+func legacyClaimStore(t *testing.T) (*beads.MemStore, beads.Bead) {
+	t.Helper()
+	row := beads.Bead{ID: "gc-1", Title: "work", Status: "in_progress", Type: "task", Assignee: "dead-worker"}
+	m := beads.NewMemStoreFrom(1, []beads.Bead{row}, nil)
+	stampConditionalWrites(t, m, gate.Auto)
+	snapshot, err := m.Get(row.ID)
+	if err != nil || snapshot.Revision != 0 {
+		t.Fatalf("legacy snapshot = (%+v, %v), want the row at revision 0", snapshot, err)
+	}
+	return m, snapshot
+}
+
+// Kills the revision-0 fallback to the tiers' weaker fence: a snapshot of a
+// legacy row still at 0 is released by one write fenced at 0, so a write
+// landing after the re-read refuses it, and a snapshot whose live row moved off
+// 0 is left to the tiers.
+func TestWorkReleaseFencesALegacyRowAtRevisionZero(t *testing.T) {
+	update := beads.UpdateOpts{Assignee: stringPtr(""), Status: stringPtr("open")}
+
+	store, snapshot := legacyClaimStore(t)
+	released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, snapshot, update)
+	got, _ := store.Get(snapshot.ID)
+	if err != nil || !handled || !released || got.Assignee != "" || got.Revision == 0 {
+		t.Fatalf("legacy release = (released %v, handled %v, err %v), row %+v; want one fenced write that moves the row off 0", released, handled, err, got)
+	}
+
+	store, snapshot = legacyClaimStore(t)
+	between := &interleavedStore{Store: store, id: snapshot.ID, between: func() {
+		_ = store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr("dead-worker")})
+	}}
+	released, handled, err = releaseWorkAssignmentIfRevisionMatches(between, snapshot, update)
+	got, _ = store.Get(snapshot.ID)
+	if !handled || released || !beads.IsPreconditionFailed(err) || got.Assignee != "dead-worker" {
+		t.Fatalf("release over a write after the re-read = (released %v, handled %v, err %v), assignee %q; want the fence at 0 refused and the claim kept", released, handled, err, got.Assignee)
+	}
+
+	store, snapshot = legacyClaimStore(t)
+	if err := store.SetMetadata(snapshot.ID, "touched", "yes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, handled, err := releaseWorkAssignmentIfRevisionMatches(store, snapshot, update); handled || err != nil {
+		t.Fatalf("snapshot at 0 over a live row off 0 = (handled %v, err %v), want it left to the tiers", handled, err)
+	}
 }

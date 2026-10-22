@@ -79,8 +79,9 @@ package main
 //     storage and says nothing about a bead the work ledger still serves. See
 //     resolve.
 //
-// Served here: show, update (fields and metadata, including --claim), close,
-// reopen, release-if-current, dep list, and dep tree. `gc bd heartbeat` is not — it
+// Served here: show, update (fields and metadata, including --claim), close
+// (with or without one --reason), reopen, release-if-current, dep list, and
+// dep tree. `gc bd heartbeat` is not — it
 // forwards to bd's native owner-only lease-refresh verb (commit 80aad8c), a
 // literal spelling parseBdByIDOp does not recognize, and it is no longer
 // rewritten to a metadata update the way it once was. On a city that relocates
@@ -169,6 +170,13 @@ package main
 // exactly once per process. A city that relocates nothing pays none of it:
 // the front door short-circuits on the config before any registry is built.
 //
+// Even an argv that addresses ids enters only when the answer can depend on
+// the verdict. The per-id twin census (by_id_relic_proof.go) runs first, and
+// when every subject is non-reserved and the binding answered that it holds no
+// copy, every verdict falls through, so the funnel — and its census of the
+// whole work store — is skipped. A plain `gc bd show <work-id>` on a split
+// city pays one binding Get, not a work-store listing.
+//
 // The subject arms are the widening, and the id shape is why they cannot be
 // narrower. A class store mints from its binding workspace's own prefix and
 // `gc storage migrate` preserves ids, so "gc-123" says nothing about which
@@ -196,6 +204,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storebinding"
@@ -244,12 +253,13 @@ const (
 	// work ledger and left the step open in the binding forever: a molecule
 	// that stalls with no error anywhere.
 	bdByIDUpdate bdByIDVerb = "update"
-	// bdByIDClose is `gc bd close <id> [--json]`, and bdByIDReopen its undo.
+	// bdByIDClose is `gc bd close <id> [-r|--reason <text>] [--json]`, and
+	// bdByIDReopen (`gc bd reopen <id> [--json]`) its undo.
 	//
 	// They are the drain verbs for a class resident: the row a class store
 	// minted under a work-shaped id has no other way to be retired, because
 	// every prefix-routed lane resolves it against a ledger that never held
-	// it. Only the bare form is served — see parseBdByIDCloseArgs.
+	// it. Only those spellings are served — see parseBdByIDCloseArgs.
 	bdByIDClose  bdByIDVerb = "close"
 	bdByIDReopen bdByIDVerb = "reopen"
 )
@@ -276,6 +286,9 @@ type bdByIDOp struct {
 	DepType   string
 	// MaxDepth is `dep tree`'s safety limit, always populated for that verb.
 	MaxDepth int
+	// Reason is close's --reason, trimmed: the text the close records as the
+	// bead's close reason. Empty means a bare close.
+	Reason string
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
 	Update beads.UpdateOpts
@@ -404,6 +417,13 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 				return bdByIDOp{}, name, false
 			}
 			metadata[key] = metaValue
+		case "--unset-metadata":
+			// bd's flag is a repeatable StringArray: one key per occurrence,
+			// never comma-split (a comma is not a legal key character, so bd
+			// refuses `a,b` as one invalid key — and so does
+			// doBdByIDUpdate). Key validity is checked at execution, where
+			// the error can be bd's rather than an "unserved" refusal.
+			op.Update.UnsetMetadata = append(op.Update.UnsetMetadata, value)
 		default:
 			return bdByIDOp{}, name, false
 		}
@@ -439,7 +459,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"--status": true, "-s": true, "--title": true, "--description": true,
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
-	"--remove-label": true, "--set-metadata": true,
+	"--remove-label": true, "--set-metadata": true, "--unset-metadata": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -461,23 +481,32 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 	return u.Status != nil || u.Title != nil || u.Description != nil ||
 		u.Assignee != nil || u.Type != nil || u.ParentID != nil ||
 		u.Priority != nil || len(u.Labels) > 0 || len(u.RemoveLabels) > 0 ||
-		len(metadata) > 0
+		len(metadata) > 0 || len(u.UnsetMetadata) > 0
 }
 
 // parseBdByIDCloseArgs parses the tail of `gc bd close` and `gc bd reopen`.
 //
 // rejected names the first flag that stopped this from being served, the same
 // way parseBdByIDUpdateArgs does, so a refusal can say WHICH spelling kept the
-// command off this surface.
+// command off this surface; for two reasons it names the second.
 //
-// The served form is one bare id plus --json, and that is the whole of what the
-// closed contract can express: GraphStore.Close and GraphStore.Reopen take an
-// id and return an error. bd's -r/--reason/--reason-file/--session carry text
-// the contract has nowhere to put, and --claim-next/--continue/--force/
-// --no-auto/--suggest-next name workflow this arm does not run. Serving any of
-// them by ignoring it would report a command as executed after silently
-// changing what it meant — the partial write this whole surface exists to
-// remove.
+// The served form is one id plus --json and, for close, bd's -r/--reason, and
+// that is the whole of what the closed contract can express. GraphStore.Close
+// and GraphStore.Reopen take an id and return an error. A close reason has a
+// place in it: GraphStore.CloseAll stamps the metadata it is given on the bead
+// it closes, and every store records a stamped metadata.close_reason as the
+// bead's close reason (doBdByIDClose). bd takes one reason for one id and drops
+// an empty one, and so does this arm; two reasons for one id are bd's own
+// refusal, so they stay unserved, and bd counts a blank reason toward them as
+// it counts any other non-empty one. The reason is recorded trimmed, as every
+// store records a close reason (recordCloseReason, BdStore.CloseAll), so a
+// blank one closes bare rather than stamping a metadata.close_reason the bead's
+// CloseReason reads as empty. bd's --reason-file/--session and its reason
+// aliases (--resolution, -m/--message, --comment) carry text this arm does not
+// read, and --claim-next/--continue/--force/--no-auto/--suggest-next name
+// workflow it does not run. Serving any of them by ignoring it would report a
+// command as executed after silently changing what it meant — the partial
+// write this whole surface exists to remove.
 //
 // Several ids stay unrecognized for a different reason: a batch spans stores,
 // so it would need per-id routing with partial-failure semantics bd's exit
@@ -485,7 +514,9 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 // one of its ids is class-owned; it is never half-applied here.
 func parseBdByIDCloseArgs(verb bdByIDVerb, args []string) (op bdByIDOp, rejected string, ok bool) {
 	op = bdByIDOp{Verb: verb}
-	for _, arg := range args {
+	hasReason := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if !strings.HasPrefix(arg, "-") {
 			if op.ID != "" || arg == "" {
 				// A second positional is a batch, not a flag: there is no
@@ -500,8 +531,29 @@ func parseBdByIDCloseArgs(verb bdByIDVerb, args []string) (op bdByIDOp, rejected
 			op.JSON = true
 			continue
 		}
-		name, _, _ := strings.Cut(arg, "=")
-		return bdByIDOp{}, name, false
+		name, reason, hasInline := strings.Cut(arg, "=")
+		if verb != bdByIDClose || (name != "--reason" && name != "-r") {
+			return bdByIDOp{}, name, false
+		}
+		// The reason is the next token whatever it looks like, as bd's flag
+		// parser takes it.
+		if !hasInline {
+			if i+1 >= len(args) {
+				return bdByIDOp{}, name, false
+			}
+			i++
+			reason = args[i]
+		}
+		if reason == "" {
+			continue
+		}
+		if hasReason {
+			// Two reasons for one id: the shape is what bd refuses, and the
+			// second reason is the spelling that made it that shape.
+			return bdByIDOp{}, "a second " + name, false
+		}
+		hasReason = true
+		op.Reason = strings.TrimSpace(reason)
 	}
 	if op.ID == "" {
 		return bdByIDOp{}, "", false
@@ -1084,6 +1136,14 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// only the spellings whose answers were wrong.
 		return 0, false
 	}
+	// The funnel is the boot gate, and on a split city its verdict costs a
+	// census of the whole work store. When every subject is non-reserved and
+	// the per-id twin census says the binding holds no copy of it, every
+	// verdict falls through to the passthrough, so the verdict is not taken.
+	// See by_id_relic_proof.go, "The same census answers before the funnel".
+	if len(classIDs) == 0 && bdByIDAnswerIsThePassthroughForEveryVerdict(cityPath, bdByIDDoorSubjects(op, served, subjectIDs)) {
+		return 0, false
+	}
 	door, routed, err := openBdByIDClassFrontDoor(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1096,6 +1156,17 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return refuseUnservedClassTarget(door, bdArgs, classIDs, subjectIDs, stderr)
 	}
 	return serveBdByIDResolved(door, op, bdArgs, rigName, classDoorRepoDirs(cityPath), stdout, stderr)
+}
+
+// bdByIDDoorSubjects is the id set the door resolves for one invocation: the
+// served op's one id, or every subject the scanners reduced an unserved argv
+// to. It is the funnel skip's input, and it has to be exactly what the door
+// would probe — a skip decided on fewer ids would let an unprobed one through.
+func bdByIDDoorSubjects(op bdByIDOp, served bool, subjectIDs []string) []string {
+	if served {
+		return []string{op.ID}
+	}
+	return subjectIDs
 }
 
 // classDoorRepoDirs is the checkout table this door hands its close gate. A
@@ -1221,7 +1292,7 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 	case bdByIDUpdate:
 		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	case bdByIDClose:
-		return doBdByIDClose(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+		return doBdByIDClose(resolution.Graph, op, resolution.Bead, door.bindingName(), stdout, stderr), true
 	case bdByIDReopen:
 		return doBdByIDReopen(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	}
@@ -1882,6 +1953,24 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
 func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	// bd validates every --set-metadata and --unset-metadata key before it
+	// writes anything (storage.ValidateMetadataKey), so an invalid one fails
+	// the whole command with nothing applied. Matching that keeps a typo from
+	// being reported as a successful unset of a key that was never there, and
+	// keeps a key bd would refuse from landing here. beadmeta.ValidateKey is
+	// the tree's one mirror of bd's key grammar, pinned to the real backend.
+	keys := make([]string, 0, len(op.Update.Metadata)+len(op.Update.UnsetMetadata))
+	for key := range op.Update.Metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	keys = append(keys, op.Update.UnsetMetadata...)
+	for _, key := range keys {
+		if err := beadmeta.ValidateKey(key); err != nil {
+			fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := graph.Update(op.ID, op.Update); err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1899,8 +1988,24 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 // The already-closed answer is the STORE's: the contract's Close carries the
 // canonical no-op semantics, and a "is it closed yet" check here would be a
 // second implementation of a rule the store already has, free to drift from it.
-func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	return doBdByIDLifecycleWrite(graph, op, "close", graph.Close, binding, stdout, stderr)
+//
+// A close with a reason is the contract's CloseAll of that one id stamping
+// metadata.close_reason, the write gc's own reasoned closes make (the stale
+// order-wisp sweep): whole-row stores record the key as the bead's close reason
+// when the write closes it, and BdStore and NativeDoltStore forward it to their
+// close. The already-closed rule is the one place this arm asks first, because
+// the contract leaves it to the caller: CloseAll keeps a closed bead closed, but
+// whether it rewrites that bead's metadata is store-specific, and bd's own close
+// of a closed issue changes nothing. current is the row the door just resolved.
+func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, current beads.Bead, binding string, stdout, stderr io.Writer) int {
+	closeBead := graph.Close
+	if op.Reason != "" && current.Status != "closed" {
+		closeBead = func(id string) error {
+			_, err := graph.CloseAll([]string{id}, map[string]string{"close_reason": op.Reason})
+			return err
+		}
+	}
+	return doBdByIDLifecycleWrite(graph, op, "close", closeBead, binding, stdout, stderr)
 }
 
 // doBdByIDReopen is doBdByIDClose's undo, and exists for the same reason: a

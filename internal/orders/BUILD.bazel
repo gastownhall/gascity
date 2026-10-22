@@ -22,7 +22,9 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/orders",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
+        "//internal/clock",
         "//internal/convergence",
         "//internal/events",
         "//internal/execenv",
@@ -86,8 +88,10 @@ go_test(
         "exec_outcome_test.go",
         "filenames_test.go",
         "filter_test.go",
+        "order_requires_backend_test.go",
         "order_test.go",
         "override_test.go",
+        "run_record_test.go",
         "runtime_helpers_test.go",
         "scanner_test.go",
         "store_reads_bounded_test.go",
@@ -115,6 +119,7 @@ go_test(
         "//internal/execenv",
         "//internal/fsys",
         "//internal/processgroup/processgrouptest",
+        "//internal/sourceworkflow",
         "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:aix": [

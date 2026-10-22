@@ -271,6 +271,10 @@ func TestOwnsNameIdentityOnly(t *testing.T) {
 // not Known.
 //
 // Kills: a known leaf type made identity-readable without revisiting X3.
+//
+// auto and hybrid are never leaves (ResolveBackend and inventoryLeaves walk
+// through them), but they forward the batched env read, so they are pinned
+// unreadable by their runtime.Router guard.
 func TestIdentityReadableLeaves(t *testing.T) {
 	for name, tc := range map[string]struct {
 		leaf runtime.Provider
@@ -289,6 +293,40 @@ func TestIdentityReadableLeaves(t *testing.T) {
 	} {
 		if got := identityReadable(tc.leaf); got != tc.want {
 			t.Errorf("identityReadable(%s) = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// batchEnvLeaf is a leaf with a batched environment read, as tmux is.
+type batchEnvLeaf struct {
+	*runtime.Fake
+	env map[string]string
+}
+
+func (l batchEnvLeaf) GetAllEnvironment(string) (map[string]string, error) {
+	if l.env == nil {
+		return nil, runtime.ErrSessionNotFound
+	}
+	return l.env, nil
+}
+
+// TestReadIdentityEnvRefusesComposite: a composite forwards GetAllEnvironment,
+// but readIdentityEnv reads identity only on a leaf, so handing it auto or
+// hybrid reads not Known instead of bypassing identityReadable.
+//
+// Kills: readIdentityEnv taking the batched read before the
+// identityReadable gate.
+func TestReadIdentityEnvRefusesComposite(t *testing.T) {
+	leaf := batchEnvLeaf{Fake: runtime.NewFake(), env: map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok-1"}}
+	if id := readIdentityEnv(leaf, "s"); !id.Known || id.SessionID != "gc-1" {
+		t.Fatalf("readIdentityEnv(leaf) = %+v, want Known gc-1", id)
+	}
+	for name, sp := range map[string]runtime.Provider{
+		"auto":   auto.New(leaf, runtime.NewFake()),
+		"hybrid": hybrid.New(leaf, runtime.NewFake(), func(string) bool { return false }),
+	} {
+		if id := readIdentityEnv(sp, "s"); id.Known {
+			t.Errorf("readIdentityEnv(%s) = %+v, want not Known", name, id)
 		}
 	}
 }

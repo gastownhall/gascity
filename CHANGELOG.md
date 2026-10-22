@@ -9,6 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
+  `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
+  bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
+  >= 1.3.0)`. bd 1.3.0 is the first tested release with `bd update
+  --if-assignee/--if-status`, which `ReleaseIfCurrent` (the orphan-sweep
+  release of a stale work assignment) requires. A 1.2.x version is not enough:
+  bd 1.2.0 and 1.2.1 were accidental, untested releases, and bd 1.2.2
+  re-released the 1.1.2 code without the flags. The raw-SQL fallback (`bd sql`,
+  and the `dolt sql` CLI on embedded Dolt) that served older bd is deleted, so
+  gc no longer bypasses bd with direct SQL for old-bd compatibility. A bd
+  without the flags now gets a typed "conditional assignment release
+  unsupported" error, and gc releases no stale assignment through it: the
+  fenced fallback cannot guard its write on that bd either, so it refuses,
+  and orphaned work stays assigned to its dead session until bd is upgraded.
+  The default `beads.bd_compatibility` (`bd-1.0.4` semantics) is unchanged.
+  Upgrade with `brew upgrade beads` or from
+  https://github.com/gastownhall/beads/releases.
+
+- **The generic bead API no longer writes session rows, startup-health
+  episodes or convergence roots.** `POST /beads`, `PATCH /bead/{id}`,
+  `POST /bead/{id}/update`, `/close`, `/reopen`, `/assign`, `DELETE
+  /bead/{id}`, `POST /sling` naming one, and convoy create, add and remove
+  tracking one return 422, writing nothing. Workflow delete, graph convoy
+  delete, run cancel, sling `force` and wisp autoclose leave one alone
+  whatever links it to the workflow. Type and label match in any case and
+  spacing. A row is a session row by type `session` or by the `gc:session`
+  label. Use the owner's routes instead:
+  - client metadata: the new `metadata` map (`real_world_app_*` keys only)
+    on `POST /v0/city/{cityName}/sessions` and `PATCH /session/{id}`;
+  - pinning: the new `POST /session/{id}/pin` and `/unpin` (`gc session
+    pin|unpin`);
+  - title and alias: `PATCH /session/{id}`; lifecycle: the session verbs.
+
+  **Deliberately removed, with no replacement route:** setting a session
+  row's labels, description, priority, assignee or parent, or any other
+  metadata key, over HTTP. A typed work bead carrying the `gc:session`
+  label is written only by `bd`. `bd update` stays the operator escape
+  hatch for all of these.
+
+- **The generic bead API no longer writes coordination beads either.** Mail
+  messages, session waits (the `gc:wait` label, or a `gate` carrying its
+  `session:<id>`), queued nudges (`gc:nudge`, `gc:nudge-queue`), order run
+  records (`order-tracking`, `order-run:*`) and external-messaging rows
+  (`gc:extmsg-*`) get the same 422, on a class-split city too, whatever rig
+  the body names; `POST /beads` no longer creates them, and neither a formula
+  (`PUT /formulas`, its pour, `POST /sling`) nor a sling batch makes or routes
+  one. Use their routes: `/mail`, `gc session wait`, `gc nudge`,
+  `gc order run`, `/extmsg/*`. One generic write remains on an order's run
+  root (the wisp or molecule root a run poured): close (`POST
+  /bead/{id}/close`, `DELETE /bead/{id}`); for anything else use `bd` or the
+  workflow's teardown. Wisps stay generic. `POST /mail` and its reply now
+  send only as a configured identity: the operator (`human`, or the
+  dashboard's `DASHBOARD_OPERATOR_WIRE_ALIAS`), a configured agent, a named
+  session or a live session of a configured agent; any other `from`, or none,
+  is a 422. And an `order-run:` label, or an `order:` and `seq:` pair, counts
+  toward an order's cooldown, event cursor and single-flight (in dispatch,
+  `gc order check` and `GET /orders/check`) only on its tracking bead or the
+  root its run poured.
+
+- **`gc runtime drain-check` has a third exit code, 3 ("unknown").** It now
+  reads the session row's state as well as the runtime's `GC_DRAIN`, and
+  exits 1 ("not draining") only when both sources answered. When a source
+  cannot be read and none says draining, it exits 3 with one stderr line
+  naming the source that failed. `if gc runtime drain-check` still treats 3
+  as false. Under `--json`, that case is now the error envelope with code
+  `drain_state_unknown` and `exit_code` 3, where it used to be
+  `command_failed` with exit 1; a successful result adds a `source` field.
+  Cases that move from exit 1 to exit 3: a `[name]` target that cannot be
+  resolved because the city, its config or its store cannot be read, or
+  that is ambiguous (a name a store that opened does not know still exits
+  1); a session row that cannot be read or found (for example a
+  `GC_SESSION_ID` that names no session row) while `GC_DRAIN` is clear; a
+  session provider that cannot be constructed; a runtime error that is not
+  a typed "session not found", including a local city whose tmux server is
+  not running and an exec adapter whose `get-meta` fails for any reason.
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
@@ -89,8 +165,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controller warned and ran with that gate off. Correct the value before
   upgrading (#7036).
 
+- **An exec runtime that declares `report-activity`, `report-attachment` and
+  `proc.exec` now reports `sleep_capability = full`, and its sleep is
+  `stop`.** Before, every exec runtime reported `timed_only`. With all three
+  declared, an interactive `[session_sleep]` policy applies: an idle
+  interactive session is stopped and started again on wake, so anything kept
+  only inside the box, such as the agent's conversation, is lost unless
+  `stop` preserves it. Interrupts, nudges and restarts on such a runtime wait
+  for the agent's ready prompt in the in-box tmux session `main`. For any
+  runtime that declares `report-attachment`, an `is-attached` op that fails
+  (any non-zero exit, 2 included) used to read as "not attached"; it now
+  keeps the session awake and holds destructive actions. No runtime shipped
+  with gc declares these capabilities (#7533).
+
+- **A convoy sling through the API that routes some children and fails others
+  answers 200 with `status: "partial"`.** The routed children have already
+  changed state, so `POST /sling` returns the per-child outcomes instead of an
+  error; a child refused because its source bead already has a live workflow
+  also names the blocking workflows and the cleanup command. `gc sling`
+  against a remote city prints the same per-child lines as a local sling and
+  exits 1, or 3 when a child was refused that way. A gc built before this
+  release, slinging a convoy through an upgraded supervisor, prints
+  `"success": true` and exits 0 for such a result, though its `status` reads
+  `partial`: upgrade gc with the supervisor, or have scripts check `status`
+  (#7083).
+
+- **`session.pending` and `session.pending_cleared` now carry actor
+  `controller` instead of `api`.** The controller records them whether or not
+  a client watches the event stream; a consumer that matches these events on
+  actor `api` must match `controller` (#7083).
+
+- **An ACP agent's permission request now waits for an answer through `/pending`
+  and `/respond`.** gc used to drop the agent's `session/request_permission`, so
+  the turn hung. It now holds the request, and `POST .../respond` answers it
+  with 202 where it used to return 501. Echo the `request_id` from `/pending`;
+  ACP ids have the form `acp-<nonce>-<id>`, so do not construct one. A stale id,
+  an unknown `action` or an option kind the agent did not offer gets `409
+  invalid_interaction`, and the request stays pending. An `action` equal to an
+  offered option id selects that option, even an id that reads like `approve` or
+  `cancel`. While a request is outstanding, a submit or nudge is refused with
+  `409 pending_interaction`, including one already waiting on the busy turn,
+  which used to wait out `nudge_busy_timeout`. Queued nudges stay queued,
+  without spending retry attempts, until the request is answered or the nudge
+  expires. The reconciler treats such a session as waiting on a human: it stays
+  awake, and it is exempt from idle kill, max-age restart and config-drift
+  drain. An unattended agent that asks therefore waits until an API client
+  answers, so configure unattended pools not to ask, through the agent's
+  permission mode or a permission timeout in the agent. A pool slot that
+  holds a claimed bead is the exception, as before: the pool-slot backstop
+  still drains it once it goes quiet, and the request goes with it. Every
+  other agent-to-client request, such as `fs/read_text_file`, now gets
+  JSON-RPC `-32601` instead of hanging the turn (#6598).
+
+- **The core pack now runs `gc convoy check` every hour.** The new
+  `convoy-autoclose-backstop` order closes any open convoy whose members are
+  all closed and that is not labeled `owned`, catching closes the controller
+  never acted on (made while it was down, before its autoclose sweep
+  shipped, or in a store it does not cache). Its first run in an existing
+  city can close many old convoys at once, each with a `convoy.closed`
+  event. Label a convoy `owned` to keep it open, or turn the order off with
+  `[orders] skip = ["convoy-autoclose-backstop"]` or an
+  `[[orders.overrides]]` entry for it with `enabled = false`; the same
+  entry's `interval` and `timeout` retune it (keep the timeout shorter than
+  the interval). `gc convoy check` itself now skips suspended rigs (naming
+  them on stderr), re-reads each convoy before closing it, goes on past a
+  store it cannot open or list and a convoy it cannot read or close, and
+  exits 1 when any convoy or store went unchecked; a convoy that changed or
+  disappeared after the list is left for the next run and does not fail the
+  check. Before, it stopped at the first error and skipped a store it could
+  not open without saying so (#6614).
+
+- **Builtin `codex` agents no longer default to `gpt-5.5` at `xhigh`
+  reasoning effort.** Unless the city, agent or session chooses a `model` or
+  `effort`, Gas City passes no `--model` or `model_reasoning_effort` flag, and
+  codex runs on the model and effort from the user's own
+  `~/.codex/config.toml`, which is often a different model and a lower effort.
+  The builtin pin broke every turn for logins that cannot use that model. The
+  launch command of every unpinned `builtin:codex` session changes, so each
+  such session restarts once after the upgrade. To keep the old behavior, pin
+  it for every agent on the harness in `city.toml` (`[providers.codex]` with
+  `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
+  agent with the same `option_defaults` line in its `agent.toml` (#7944).
+
 ### Added
 
+- **`gc agent is-foreign <identity>` reports whether this city can vouch for
+  a claim's assignee.** It exits 0 (`local`) when the identity resolves
+  against this city's roster, or when one of this city's own session records,
+  open or closed, answers to it under its bead ID, session name, alias,
+  configured named identity or sole alias-history entry; 1 (`foreign`) when
+  neither does; and 2 (`unknown`) when it cannot answer (no roster, a failed
+  lookup, an unresolvable city, bad usage). `--json` adds the reason
+  (`roster`, `session_record`, `foreign_binding`, `absent_from_roster`,
+  `no_config`, `lookup_failed`) and its detail. `local` is not a liveness
+  claim. Scripts and formulas that reap claims should ask it instead of
+  re-deriving identity rules, and treat anything but exit 0 as "protect"
+  (#5955).
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
@@ -114,6 +284,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GC_BEADS_FORCE_FALLBACK=1` still works as a deprecated alias for
   `"off"`; it overrides every city in the process and logs a deprecation
   warning once (#7036).
+
+- **`gc rig add --include <binding>=<source>` chooses the rig import's
+  binding.** Without it the binding is still the pack's name (its `[packs]` key
+  or the source's last path segment); `--include gc=<source>` writes
+  `[rigs.imports.gc]` instead. The left side must be letters, digits, `-` and
+  `_`, so a URL or path is never split. A binding that two `--include` flags
+  claim for different packs fails the add.
 
 ### Changed
 
@@ -144,6 +321,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured value with the scope's sidecar and with the running proxy,
   and reports drift as an advisory (#6561).
 
+- **`submit`, `messages` and `interrupt_now` refuse a Claude session that is
+  waiting on a permission prompt.** `POST /v0/session/{id}/submit` and
+  `POST /v0/session/{id}/messages` used to answer 202 and deliver later, which
+  typed the text into the prompt. While `GET .../pending` reports a prompt
+  they now answer 409 `session-conflict` with a `pending_interaction:` detail
+  right away, and accept nothing. `submit` with intent `interrupt_now` is
+  refused the same way instead of interrupting, because its interrupt key
+  would dismiss the prompt. Answer the prompt with `respond`, then send again
+  (#2892).
+- **Stopping a Claude turn clears its input box.** On the tmux runtime, once
+  `POST .../stop` (or `interrupt_now`) has left the turn idle, gc waits up to
+  2 s for Claude Code to put the interrupted prompt back into the input box,
+  then deletes it with Ctrl-U Ctrl-K (never Ctrl-C), so a stop can take up to
+  2 s longer. When a client is attached to the session, or gc cannot tell,
+  the input box is left alone, since a human may be typing in it. A draft
+  that will not clear is logged; neither case fails the stop.
+- **A Claude session waiting on a permission prompt no longer reads as
+  idle.** Idle detection scans the pane for Claude's `❯` ready prompt, and the
+  permission prompt's highlighted option (`❯ 1. Yes`) matched it. A permission
+  prompt is now never an idle boundary: the idle probe behind
+  `sleep_after_idle` does not pass while one is up, and `idle_timeout` judges
+  such a session by pane activity alone (#2892).
+
 - **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
   that relocates classes to a `sqlite-beads` binding, that ledger's ready read
   returned rows oldest-first (`created_at, id`). It now returns the canonical
@@ -156,7 +356,271 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without re-sorting them, so on a split city the graph rows at the end of the
   response are now priority-ordered.
 
+- **`gc rig add --include` resolves a remote pack's version like
+  `gc import add`.** A non-bundled remote include used to be written with no
+  version and no `packs.lock` entry, so `gc import check` reported a missing
+  lock entry and the import floated. It now gets the constraint
+  `gc import add` would write (the constraint the city already holds for that
+  source, else the newest registry release, else the newest semver tag, else
+  the remote HEAD commit) and a `packs.lock` entry in the same add. That needs
+  network access to the source; if resolution fails, the add fails and
+  `city.toml` and `packs.lock` are untouched. Only explicit `--include` flags
+  changed: bundled packs, local paths, sources with an embedded `#ref`, and the
+  imports a new rig gets from `[defaults.rig.imports]` or `default_rig_includes`
+  are written as before.
+
+- **`gc import add` without `--version` keeps the constraint the city already
+  holds for a source.** `packs.lock` has one entry per source, so adding a
+  source the city already imports (in any scope) or locks now writes the
+  existing import's constraint, else one matching the source's `packs.lock`
+  entry, instead of the newest release's, which could conflict with the
+  existing constraint or move the lock entry every importer shares. A local
+  path inside a git worktree is still locked to its current commit. Adding a
+  pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
+  same way. Pass `--version` to choose another constraint.
+
 ### Fixed
+
+- **The work ladder and the execution backstop read a rig seat's started
+  graph steps as started.** On a city that relocates its coordination classes
+  (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
+  a graph step it claimed in the session's `work_started` cell under the
+  rig's work store (`rig:<rig>`), while the step lives in the city-scope
+  class binding, where the ladder and the backstop look it up (`city`). The
+  ladder then treated the seat's started claim as unstarted and nudged it as
+  claimed (a release was still refused by the bead's `gc.session_id`), and
+  the backstop missed the record. The hook now records the store the claim
+  resides in, the spelling every reader uses, and marks the entry
+  `resident`. An unmarked entry (one an older `gc` wrote, or an adoption
+  whose store the hook could not prove) is read by bead alone, and only at
+  the session generation it was recorded in; the hook rewrites an entry of
+  the current generation to the resident spelling the next time it proves the
+  claim's store. A rollback still reads the new entries.
+
+- **A config reload no longer creates or rebinds a city's bead store.** When a
+  city's `.beads/metadata.json` went missing (for example, a `git` checkout
+  deleted a file an older commit had tracked), the next reload fell back to
+  the default `hq` database, created it with `bd init`, and rebound the live
+  city to that empty store. Reload, including a plain `gc reload` with no
+  config change, now holds the city to the store binding it booted on. If
+  metadata.json is missing or unusable, or names a different store, the
+  reload fails and keeps the old config. The error says whether to restore
+  the file (do not restart first: boot treats a missing binding as a new
+  city) or to restart to adopt a deliberate rebinding. Switching a city from
+  a non-bd beads provider (such as `file`) to bd now also takes a restart; a
+  reload refuses it. Rig scopes and boot are unchanged.
+
+- **Codex structured history keeps every turn's model and token usage.**
+  Usage was read only from the rollout tail, so older turns (and older
+  history pages) lost it once the session grew (thanks @csells).
+
+- **Stopping a Claude turn that is waiting on a permission prompt now cancels
+  the prompt.** The tmux interrupt sent Ctrl-C, which leaves Claude's prompt
+  up; it now sends Escape (the prompt's own cancel key) when a prompt is on
+  screen, never a numbered option. When it cannot read the pane it logs a
+  warning and sends Ctrl-C as before. (thanks @csells)
+
+- **A Claude API failure now shows as a provider error in structured session
+  history, not as an assistant reply.** Entries Claude flags with
+  `isApiErrorMessage` carry a `provider_error` system event (with Claude's
+  error code) and are projected as system messages; refusals and text that
+  merely quotes an API error stay replies. (thanks @csells)
+
+- **A Claude turn interrupted while a tool was running now reads as idle.**
+  Claude writes `[Request interrupted by user for tool use]` for that case,
+  which the transcript activity check did not recognize, so the session kept
+  reporting `in-turn`. The marker counts only as the whole message, not inside
+  ordinary prose. (thanks @csells)
+
+- **Claude transcripts are found again for work directories with underscores,
+  spaces or other punctuation.** Current Claude Code names a project
+  directory by replacing every UTF-16 code unit outside `[A-Za-z0-9]` with
+  `-`; Gas City only replaced `/` and `.`, so history, resume-key probes and activity missed
+  the transcript. Both spellings are now searched. (thanks @csells)
+
+- **The Dolt compactor docs no longer claim it only rewrites history this
+  city grew.** The `gc-compact-base` watermark is a position, not an author:
+  a database several cities write to is flattened for all of them when the
+  city whose managed server holds it, or any city that reaches it over
+  loopback, compacts it. A city skips an external endpoint on a non-loopback
+  (for example cloud-hosted) Dolt host with exit 0, so it never compacts that
+  database. "Shared and non-local databases" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` covers keeping a shared
+  database out of `mol-dog-compactor` and a stop-everything `gc bd compact`
+  procedure (#7896).
+
+- **The core `orphan-sweep` order no longer releases claims it cannot vouch
+  for.** On a rig store shared with another city it used to release that
+  city's live claims as dead, in every shape they take: `<rig>/<name>` crew,
+  foreign-binding pool instances (`<rig>/<binding>.<name>-<n>`), runtime
+  session names and bare session bead IDs, with a false cause note and a mail
+  for each sweep (#5955). The order now asks `gc agent is-foreign` about every
+  claimant that is neither configured nor live, in HQ and in every rig, before
+  any revalidation or session probe, and keeps the claim unless the verb
+  answers `local`. Each sweep that keeps claims prints `protected K
+  foreign/unknown claims` in its summary and a line naming every kept identity
+  and its claims, and declares a `partial` outcome, which the controller
+  records as an `order.skipped` event with one scope per identity; the run
+  still exits 0, and a sweep that only protects sends no mail. The verb is
+  asked at most once per distinct identity per sweep, within a gate budget of
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  timeout); past it, the remaining claimants are not asked, their claims are
+  kept and named with a "gate budget … exhausted" reason, and the sweep says
+  how many identities it did not ask. Where `timeout` is installed, an ask
+  still running when the budget runs out is abandoned and its claim kept and
+  named too, so one stalled store cannot run the sweep into the order's
+  timeout. Identities are asked from a random starting point each sweep, so a
+  large set of foreign claimants delays, but does not starve, release of a
+  dead local claim. Unlike the Go
+  pool sweep, the order has no route filter, so it gives bare identities no
+  shape exemption: a dead local ephemeral or bead-ID claim stays releasable
+  through its own session record. Migration notes: a person's claim, or a
+  local agent's claim whose config and session records are both gone, is now
+  kept and named every sweep instead of released; release it by hand with
+  `gc bd release-if-current <id> <assignee>`.
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, a binding this city
+  imports only on another rig, or an agent, binding or namepool name since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  The dead-assignee sweep now keeps such a claim unless one of this city's
+  own session beads, open or closed, answers to the identity under its alias,
+  its configured named identity or its sole alias-history entry (looked up per
+  identity, at most once per pass), and logs one
+  `protected N foreign/unknown identities` summary per pass naming each
+  identity it kept and its claims. A namepool seat whose name was trimmed
+  therefore stays reapable after it closes; claims under the earlier aliases
+  of a seat renamed more than once are kept and named. The orphan-close
+  release of a confirmed orphaned session is unchanged. The core `orphan-sweep`
+  order now applies the same gate through `gc agent is-foreign`; see the entry
+  above. Migration notes: a `<rig>/<name>` identity moved to another city on
+  the shared rig store keeps being released here until this city's closed
+  session records for it are purged or re-aliased.
+  The session record of a removed agent, binding or namepool name lasts until
+  closed session beads are purged, which happens only after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
+  ledger with `wisp_ttl` set, or after `GC_REAPER_SESSION_PURGE_AGE` (default
+  720h) in the city store when the reaper's `GC_REAPER_SESSION_BEAD_PATTERN`
+  (default `gm-*`) matches the city's session bead IDs or is set to `""`.
+  Anywhere else closed session beads are kept indefinitely. Once the record is
+  purged, the sweep protects the identity's outstanding claims, so release them
+  explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
+  retiring one, and watch the summary line for claims held back.
+
+- **Codex `suggest` sessions start on current codex-cli and ask before
+  acting.** `permission_mode = "suggest"` passed `--ask-for-approval
+  untrusted`, a policy codex-cli 0.149.0 retired, so suggest sessions exited
+  at launch. Suggest now passes `--ask-for-approval on-request --sandbox
+  read-only`. Provider or agent `args` that spell the retired `untrusted`
+  policy, or name `--ask-for-approval on-request` alone or beside `--sandbox
+  workspace-write`, select suggest. Before, depending on the shape and the
+  start path, they launched with the unrestricted
+  `--dangerously-bypass-approvals-and-sandbox` default or failed to start.
+  Agent `args` are now normalized like provider `args` when every
+  schema-managed flag in them belongs to an option the `args` select: the
+  options they select beat the agent's own `option_defaults` for those keys.
+  Before, `gc session new` and API-created sessions dropped such flags and
+  launched the provider's default mode, so an agent that asked for approvals
+  through `args` could run with the bypass flag. Agent `args` with a flag that
+  belongs to no option they select, such as a lone `--ask-for-approval never`
+  or `--sandbox workspace-write`, are kept as written, as before, and are
+  still stripped by `gc session new` and API-created sessions, which then
+  launch the default mode: for codex, the bypass flag unless `option_defaults`
+  choose another mode (ga-kg2mqb). A provider `resume_command` that names an
+  `--ask-for-approval` policy no longer gets the bypass flag added beside it,
+  which codex rejected. Suggest sessions, and sessions of agents whose `args`
+  are now normalized, restart once after the upgrade because their launch
+  command changes (#7671).
+
+- **The OpenCode and MiMo Code plugins keep the stable prime at the head of
+  the system prompt and drain queued nudges once per turn, per session.**
+  `experimental.chat.system.transform` fires once per model generation, and
+  on every generation of every session in the directory it ran the
+  consumptive `gc nudge drain --inject` and `gc mail check --inject` and
+  prepended their output, with the cached `gc prime --hook` output, to
+  `system[0]` as one block. The drain emits a `Current time: ...` line on
+  every call, even with an empty queue, so the bytes right after the prime
+  changed every generation and the provider's prompt-cache prefix ended at
+  the prime; everything after it, including OpenCode's own system text, was
+  re-prefilled each time (#5732). Every tool call in a turn also emptied the
+  queue again, into whichever generation won the race (#5552). The plugins
+  now prepend only the prime to `system[0]` and append the per-turn text as
+  a trailing system entry, after every stable entry, and they stop injecting
+  from `chat.message`: OpenCode persists that hook's `output.message.system`
+  on the user message and joins it into the tail of `system[0]` on every
+  generation of the turn, which put the prime and the clock line back into
+  the header. They run the two commands once per turn per session and repeat
+  the drained text verbatim for every later generation of that turn, so a
+  turn's system messages are identical across generations; with no known
+  session or turn they drain every time as before. A turn opens on a user
+  message the session has not reported before (its `message.updated`, which
+  OpenCode publishes before the turn's first generation), so the background
+  diff-summary update to an earlier user message, which can land several
+  turns later, does not rewind the turn. Message ids are not compared: their
+  encoded creation time wrapped on 2026-08-14 and follows the wall clock, so
+  a newer message can sort below an older one. Each session remembers its
+  last 64 user-message ids, so an update that arrives after its id has aged
+  out of that window opens a turn and costs at most one extra drain. Child
+  sessions no longer refresh the shared prime on `session.created` /
+  `session.compacted`, which re-baked the beacon time into the parent's
+  `system[0]` mid-turn and handed the child id to `gc prime --hook` as a
+  candidate resume key. The MiMo Code plugin now also closes the `gc`
+  child's stdin, as the OpenCode plugin already did (#5562); without that,
+  `gc nudge drain --inject` waited for input until the 30-second timeout and
+  the drain returned nothing. Turn state is per session, but the nudge queue
+  is not: a child or human session in the same directory still drains the
+  agent's queue, once per its own turn. OpenCode hook version 8, MiMo Code
+  hook version 4; `gc` upgrades installed plugins below those or without the
+  new transform and turn handling. (#5552, #5732, #6629)
+
+- **An attached session is no longer idle-slept.** Under a `[session_sleep]`
+  policy or an agent's `sleep_after_idle`, interactive sessions on local tmux
+  and on exec runtimes that declare `report-activity`, `report-attachment` and
+  `proc.exec` were drained "idle" once their pane had been quiet for the
+  window, while someone was reading them in a terminal. On any runtime that
+  reports attachment (tmux, k8s, ssh, exec with `report-attachment`), so were
+  non-interactive sessions someone had attached to. An attached session now
+  stays awake, and an attach overrides an idle drain the reconciler had
+  already begun. For the interactive sessions above, the idle window starts at
+  detach; a non-interactive session's window still runs from its pane's last
+  activity, so a quiet one can sleep as soon as it is detached. A user hold or
+  another explicit sleep request still wins over the attachment. Both the
+  legacy reconciler and the v2 allocator apply the rule (#7594, follow-up to
+  #7533).
+
+- **Text sent to a Claude session no longer answers its permission prompt,
+  and approvals are detected and answered on current Claude Code.** On
+  Claude Code 2.1.28x the tmux pane scraper missed the permission dialog
+  (new tool-line glyph, no "This command requires approval" line in the
+  default mode, a fourth menu option), so `GET .../pending` stayed empty and
+  `respond` returned `409 no_pending`, while an ordinary `submit` typed into
+  the prompt and its Enter approved the pending tool call. The dialog is now
+  recognized by its "Do you want to …?" question and numbered menu, and
+  `respond` picks the option by its label ("Yes", "No", …) instead of a fixed
+  digit, so `deny` can no longer select "Yes, and switch to auto mode"; when
+  no single option matches it sends nothing and returns 409
+  `invalid_interaction`. A question that Claude wraps onto several rows (a
+  long file name) is recognized too. While a prompt is pending, `submit` and
+  `messages` return 409 (see Changed), `gc session nudge
+  --delivery=immediate` exits non-zero, `--delivery=wait-idle` queues behind
+  the prompt, and the tmux runtime refuses to type into it on every other
+  delivery path. It looks again under the nudge lock, right before it pastes
+  and right before it presses Enter, so a prompt that appears mid-delivery is
+  not answered either. Sessions that the auto and hybrid providers route to
+  tmux are covered too; the exec, k8s, ssh and herdr runtimes do not look for
+  the prompt yet, so text sent to their sessions can still answer it (#2892).
+
+- **A message sent after stopping a Claude turn early is no longer merged
+  into the stopped prompt.** When `POST .../stop` (or `interrupt_now`) lands
+  before Claude's first response chunk, Claude Code puts the interrupted
+  prompt back into its input box. gc cleared the input box with one Ctrl-U,
+  which on Claude Code 2.1.288 deletes only one wrapped row, so the next
+  message was pasted behind the rest of the old prompt and both went out as
+  one. On the tmux runtime gc now presses Ctrl-U Ctrl-K until the input box
+  reads empty, wherever the cursor is, and fails the delivery if it will not
+  empty; `stop` clears the restored prompt too (see Changed). A submit whose
+  input box still holds any text is no longer reported as delivered.
 
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**
@@ -192,6 +656,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **Unchanged Dolt backup sync failures and reaper anomalies no longer mail
+  on every run.** `escalate.sh` takes `--incident-key` and `--fingerprint`:
+  an alert whose fingerprint matches its last delivered one stays quiet for
+  `GC_ESCALATE_REMINDER_SECONDS` (default one day), a changed fingerprint
+  alerts at once, and both orders pass `--resolve-incident` on a clean run so
+  the next failure alerts at once too. Deduplication is best-effort: when the
+  state under `.gc/incidents/` cannot be read or written the alert is sent
+  anyway, and a failed send is retried on the next run. The reaper's
+  fingerprint ignores only a measured backup age, so a backup that goes
+  missing alerts at once. The backup order's escalation reports each
+  database's first failed attempt instead of its last, with common credential
+  shapes redacted from every diagnostic. When `GC_ESCALATE_SEND_TIMEOUT_SECS`
+  cuts a send off before `gc mail send` reports the mail written,
+  `escalate.sh` now exits non-zero so callers that check the exit status can
+  retry it; keyed incidents also retry, because a failed send records no
+  incident state. A send cut off only after that report still counts as
+  delivered. The backup order's missing-`flock` and offsite-publication
+  alerts still mail on every run, and an `escalate.sh` override must accept
+  or ignore the new flags.
+
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which
   ones survive into the persisted service file.** The two allowlists used to
@@ -222,6 +706,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while running inside an agent session (or under a supervisor that
   inherited one's `GC_*` session variables) now exit 1 with "does not match
   this session's own identity".
+
+- **The reaper's stale workflow-root sweep works on large stores again.**
+  Step 2 checked every candidate workflow root for live descendants in one
+  recursive query, which on a large store ran past bd's 10s read timeout, so
+  no stale root ever closed. It now checks
+  `GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE` candidates per query (a positive
+  integer, default 1) in id order, and stamps and closes each page's stale
+  roots before it reads the next. Keep the batch small: one query walks the
+  subtrees of a whole page, so a batch as large as the candidate set brings
+  back the single query that timed out. `GC_REAPER_WORKFLOW_ROOT_BUDGET_SECS`
+  (default 300s, inside `GC_REAPER_RUN_BUDGET_SECS`) is a window that opens at
+  the run's first census and runs on through the purge, the later steps and
+  the later scopes; once it has closed, each census checks one page. Each
+  census starts at a random candidate and wraps around, so roots it keeps
+  cannot hold back the roots behind them run after run. A census cut short is
+  reported as a partial outcome. The summary's new
+  `workflow_root_census:<checked>/<candidates>` field shows how many of the
+  counted candidates a run checked; a root that becomes a candidate during a
+  census can wait for the next run. Outside the city scope, workflow issue
+  roots are only counted: `skipped_non_city_workflow_issue_roots` is now a
+  candidate count (#6050).
+- **`gc dolt compact` no longer looks for a pinned rig's database on the
+  city's managed Dolt server.** A rig pinned to another Dolt endpoint
+  (`gc rig set-endpoint --external`, a rig-local `--self` server,
+  `[[rigs]] dolt_host`/`dolt_port`, or a bd binding to a remote host) keeps its
+  database there, but the compactor queried the managed server for it. The
+  `mol-dog-compactor` order failed every two hours with `Error 1049 (HY000):
+  database not found`, or, when the managed server still held a same-named
+  copy, flattened that copy and reported the rig's database as compacted.
+  Compact now skips such a rig with a log line naming its endpoint, and skips
+  a same-named copy on the managed server with a warning; `--only-db` cannot
+  reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
+  too, with a warning naming the file. Rigs that inherit the city endpoint are
+  compacted as before (#7994).
+
+- **Suspending a session shortly after it woke keeps its conversation.** An
+  operator, idle or `gc stop` suspend no longer counts as a rapid crash or
+  churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
 
 ## [1.5.0] - 2026-10-05
 

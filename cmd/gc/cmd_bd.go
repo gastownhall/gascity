@@ -110,11 +110,16 @@ filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
---watch" (or "show --current --watch", or the "view" alias) on a scope that
-uses bd's proxied-server transport (the default for a new city), where bd
-refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
-seconds and redraws when the bead's status or update time changes, until
-Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+--watch" (or "show --current --watch", or the "view" alias) is served by gc
+on two kinds of scope: one that uses bd's proxied-server transport (the
+default for a new city), where bd refuses watch mode, and one whose store bd
+reaches over http, where enterprise bd refuses it and OSS bd would poll the
+shared server every 2 seconds. gc re-runs "bd show" every 2 seconds on a
+proxied scope and every 10 to 12 seconds on an http scope, and redraws when
+the bead's status or update time changes, until Ctrl+C. A failing read is
+reported once, with bd's error; the last view stays up and the wait between
+reads doubles, up to 5 minutes, until a read succeeds, which is reported
+too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
@@ -259,11 +264,13 @@ func pinBdGCEnvironmentBestEffort(env map[string]string) {
 // carries.
 //
 // Each link has to name a binary that still runs. gc-beads-bd.sh treats any
-// non-empty GC_BIN as authoritative (resolve_gc_helper_bin) and `die`s when the
-// exec fails, so handing it the removed path the strict resolver just rejected
-// turns a recover that would have completed through the script's shell-native
-// fallbacks into one that SIGTERMs the managed Dolt and exits before restarting
-// it. An empty GC_BIN is the better answer than a dead one.
+// non-empty GC_BIN as authoritative (resolve_gc_helper_bin), and its
+// require_executable_gc_bin guard refuses one that is not executable before
+// any side effect: stop and shutdown clear it and continue on the script's
+// shell-native fallbacks, and every other operation dies. Handing it the
+// removed path the strict resolver just rejected therefore turns a recover
+// that would have completed through those fallbacks into a refusal. An empty
+// GC_BIN is the better answer than a dead one.
 func bestEffortInvokingGCBinary() string {
 	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) && runnableGCBinary(executable) {
 		return executable
@@ -431,6 +438,11 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
+	// From here on the passthrough only reads the city config, so the guards
+	// and env builders below share one composed load instead of each walking
+	// the packs again (see invocationConfigMemo for which loads it answers).
+	defer beginInvocationConfigMemo()()
+
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -455,12 +467,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Use the full config load path (includes pack expansion + site
+	// Use the full composed load (includes pack expansion + site
 	// binding overlay) so migrated rigs (path only in .gc/site.toml)
 	// resolve to their bound path. A raw config.Load here would make
 	// every already-migrated rig look unbound and fail the new guard
-	// in resolveBdScopeTarget / bdRigScopeTarget.
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// in resolveBdScopeTarget / bdRigScopeTarget. The passthrough loader
+	// is that same composition without the builtin readiness pass; see
+	// loadCityConfigForBdPassthrough.
+	cfg, err := loadBdPassthroughConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -572,7 +586,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// bd's fuzzy/substring resolver can silently match a longer ID that
 	// contains the supplied ID as a substring (e.g. "gcy-dv7" → "gcy-wisp-dv78").
 	// Verify via BdStore.Get — which already enforces an exact-ID match —
-	// before forwarding any mutation to the bd subprocess.
+	// before forwarding any mutation to the bd subprocess. The read goes
+	// through the scope's bd front door (bdWriteGuardStore), never a native
+	// store: only bd's own resolver can show the collision. A scope whose bd
+	// resolves prefixed ids exactly skips the read when every id the write
+	// names is prefixed, unless the write is close-shaped
+	// (bdWriteGuardNeedsRead).
 	//
 	// Fail-closed: if the arg scanner reports ambiguity (unrecognized
 	// value-consuming flag), the command is rejected rather than forwarded
@@ -601,42 +620,40 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
-			// Store-unavailable: we cannot verify, but we must not block
-			// legitimate writes. Fall through; bd will error on actual problems.
-			if storeErr == nil {
-				guardStore = store
-				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				// A bulk mutation (e.g. a maintenance order closing a batch of
-				// stale wisps) reads every id in one bd show instead of one or
-				// two bd forks per id. Only ids bd answered exactly are
-				// accepted from the batch; the rest take the exact per-id Get
-				// below, which is what tells a substring collision from an
-				// absent bead.
-				verifyIDs := writeIDs
-				if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
-					if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
-						for id, bead := range found {
-							guardBeads[id] = bead
-						}
-						verifyIDs = unresolved
-					}
-				}
-				for _, id := range verifyIDs {
-					bead, getErr := store.Get(id)
-					if errors.Is(getErr, beads.ErrIDCollision) {
-						// bd resolved a different bead — block the write to prevent
-						// mutating the wrong bead via substring resolution.
-						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
-						return 1
-					}
-					if getErr == nil {
+		if len(writeIDs) > 0 && bdWriteGuardNeedsRead(bdArgs, writeIDs, target.ScopeRoot) {
+			store := bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
+			guardStore = store
+			guardBeads = make(map[string]beads.Bead, len(writeIDs))
+			// A bulk mutation (e.g. a maintenance order closing a batch of
+			// stale wisps) reads every id in one bd show instead of one or
+			// two bd forks per id. Only ids bd answered exactly are
+			// accepted from the batch; the rest take the exact per-id Get
+			// below, which is what tells a substring collision from an
+			// absent bead.
+			verifyIDs := writeIDs
+			if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+				if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
+					for id, bead := range found {
 						guardBeads[id] = bead
 					}
-					// ErrNotFound or any other error: bead may be absent, ephemeral,
-					// or the read seam differs from the write seam — fall through.
+					verifyIDs = unresolved
 				}
+			}
+			for _, id := range verifyIDs {
+				bead, getErr := store.Get(id)
+				if errors.Is(getErr, beads.ErrIDCollision) {
+					// bd resolved a different bead — block the write to prevent
+					// mutating the wrong bead via substring resolution.
+					fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				if getErr == nil {
+					guardBeads[id] = bead
+				}
+				// ErrNotFound or any other error: bead may be absent, ephemeral,
+				// or the read seam differs from the write seam — fall through.
+				// An unavailable bd cannot verify, but must not block
+				// legitimate writes; bd will error on actual problems.
 			}
 		}
 	}
@@ -691,15 +708,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport
 	// for a new city, and bd cannot call back into gc. gc serves the watch
-	// itself there by polling plain `bd show` reads; every other scope keeps
-	// bd's own watch. Every bd call the watch makes goes through the same
-	// trace and the same silent-fallback / dolt-start stderr checks as this
-	// passthrough. See cmd_bd_show_watch.go.
-	if req, ok := parseBdShowWatchArgs(bdArgs); ok && bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
+	// itself there by polling plain `bd show` reads at bd's own interval. It
+	// does the same on a remote (http) scope, where enterprise bd refuses
+	// --watch and OSS bd would poll the server every 2s, but at the slower
+	// remote interval. Every other scope keeps bd's own watch. Every bd call
+	// the watch makes goes through the same trace and the same
+	// silent-fallback / dolt-start stderr checks as this passthrough. See
+	// cmd_bd_show_watch.go.
+	if req, interval, ok := bdShowWatchServedByGC(bdArgs, cityPath, target, cmd.Env); ok {
 		return serveBdShowWatch(req, &bdWatchRunner{
 			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
 			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
-		}, stdout, stderr)
+		}, interval, stdout, stderr)
 	}
 
 	traceStart := time.Now()
@@ -744,6 +764,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return bdSilentFallbackExitCode
 	}
 
+	// A close the bd subprocess just made reaches the supervisor's run views
+	// only through the city event log, so announce it (bd_close_events.go).
+	announceBdPassthroughCloses(cityPath, guardStore, guardBeads, bdArgs)
 	return 0
 }
 
@@ -925,11 +948,25 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	return 0
 }
 
+// resolveBdCityPath and loadBdPassthroughConfig are the passthrough's city
+// resolution and its one config load. They are variables only so the routing
+// parity tests can run doBd with the full loaders (resolveCity, loadCityConfig)
+// and compare; production never reassigns them.
+var (
+	resolveBdCityPath       = resolveCityPathOnly
+	loadBdPassthroughConfig = loadCityConfigForBdPassthrough
+)
+
+// resolveBdCity names the city a gc bd invocation runs against. It resolves
+// the city only: every rig decision the passthrough makes is
+// resolveBdScopeTarget's, from the composed config, so the rig name the
+// general resolver derives from cwd (with a full config load) would be
+// discarded unread.
 func resolveBdCity(cityName string) (string, error) {
 	if strings.TrimSpace(cityName) != "" {
 		return validateCityPath(cityName)
 	}
-	return resolveCity()
+	return resolveBdCityPath()
 }
 
 // extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
@@ -1019,22 +1056,61 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return cityTarget, nil
 	}
 
-	cityPrefix := config.EffectiveHQPrefix(cfg)
-	if cityPrefix != "" {
+	// A by-id read or write routes by its subjects' prefix: the verb's flag
+	// manifest says which tokens are ids, and an id's prefix names its store.
+	if target, ok := bdSubjectPrefixTarget(cfg, cityTarget, cityPath, args); ok {
+		return target, nil
+	}
+
+	// Bead-ID auto-detect accepts a candidate store only when the id actually
+	// exists there, which costs a full bd round trip per probe. A probe can only
+	// matter when some outcome differs from another, so when every candidate
+	// store AND the store the rest of the chain would pick are the same store,
+	// the answer is that store whatever the probes say — and the passthrough
+	// below is the one bd invocation the command pays.
+	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, args)
+	fallback, gcRigDiscarded, fallbackErr := bdScopeFallbackTarget(cfg, cityPath, cityTarget, args)
+	if len(candidates) > 0 && fallbackErr == nil && gcRigDiscarded == "" && bdScopeCandidatesAgree(candidates, fallback) {
+		return fallback, nil
+	}
+	for _, c := range candidates {
+		if bdBeadExists(cityPath, cfg, c.target, c.id) {
+			return c.target, nil
+		}
+	}
+	if fallbackErr != nil {
+		return execStoreTarget{}, fallbackErr
+	}
+	if gcRigDiscarded != "" {
+		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(fallback)) //nolint:errcheck // best-effort stderr
+	}
+	return fallback, nil
+}
+
+// bdScopeProbe is one bead-ID auto-detect candidate: the store id would route
+// to if it exists there.
+type bdScopeProbe struct {
+	id     string
+	target execStoreTarget
+}
+
+// bdScopeProbeCandidates lists, in probe order, the stores bead-ID auto-detect
+// would try: first every city-prefixed id against the city store (so a city
+// source bead resolves to the city even from a rig cwd), then every
+// rig-prefixed id against its bound rig. Hyphenated flag values and other
+// non-ID args only become candidates; they are accepted later only when the
+// bead exists, which keeps them from silently retargeting the command.
+// Unbound rigs are skipped so they are not aliased to the city store.
+func bdScopeProbeCandidates(cfg *config.City, cityTarget execStoreTarget, cityPath string, args []string) []bdScopeProbe {
+	var candidates []bdScopeProbe
+	if cityPrefix := config.EffectiveHQPrefix(cfg); cityPrefix != "" {
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
-			if bdBeadExists(cityPath, cfg, cityTarget, arg) {
-				return cityTarget, nil
-			}
+			candidates = append(candidates, bdScopeProbe{id: arg, target: cityTarget})
 		}
 	}
-
-	// Auto-detect from bead IDs in args, but only accept candidates that
-	// actually exist in the resolved rig store. This keeps hyphenated flag
-	// values and other non-ID args from silently retargeting the command.
-	// Unbound rigs are skipped so we don't alias them to the city store.
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
@@ -1043,62 +1119,72 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
-			target := bdRigScopeTarget(cityPath, rig)
-			if bdBeadExists(cityPath, cfg, target, arg) {
-				return target, nil
-			}
+			candidates = append(candidates, bdScopeProbe{id: arg, target: bdRigScopeTarget(cityPath, rig)})
 		}
 	}
+	return candidates
+}
 
-	// Honor -C / --directory passed to bd: if it names a path inside a
-	// registered rig, use that rig's store. This lets `gc bd create -C
-	// /path/to/packs-rig ...` route to the packs rig even when GC_RIG
-	// or cwd point elsewhere. The flag stays in bdArgs so bd itself still
-	// sees it and changes directory accordingly.
+// bdScopeCandidatesAgree reports whether every candidate routes to fallback,
+// in which case no existence probe can change the resolved store.
+func bdScopeCandidatesAgree(candidates []bdScopeProbe, fallback execStoreTarget) bool {
+	for _, c := range candidates {
+		if c.target != fallback {
+			return false
+		}
+	}
+	return true
+}
+
+// bdScopeFallbackTarget is the store resolveBdScopeTarget picks when no
+// bead-ID candidate exists. It has no side effects: the GC_RIG discard is
+// returned rather than printed, so a caller that resolved via a candidate
+// never emits it.
+//
+// Honor -C / --directory passed to bd: if it names a path inside a registered
+// rig, use that rig's store. This lets `gc bd create -C /path/to/packs-rig ...`
+// route to the packs rig even when GC_RIG or cwd point elsewhere. The flag
+// stays in bdArgs so bd itself still sees it and changes directory
+// accordingly.
+//
+// Then honor GC_RIG env (set by the controller on every rig agent). This is a
+// weaker signal than an explicit flag or a bead-prefix hit, but a stronger
+// default than cwd: the controller sets GC_RIG reliably, while cwd detection
+// fails for polecat worktrees (they live under .gc/worktrees/, not the
+// configured rig path). Priority: explicit --rig > bead-prefix detect > -C >
+// GC_RIG env > cwd > city.
+//
+// A GC_RIG naming an unknown or unbound rig is not an error, unlike the same
+// value via --rig: falling through to cwd/city keeps cross-city queries
+// working from rig agents whose GC_RIG names a rig this city does not bind.
+// But the discard must not be silent, so it is reported back to the caller
+// to warn about, naming the store actually answered.
+func bdScopeFallbackTarget(cfg *config.City, cityPath string, cityTarget execStoreTarget, args []string) (execStoreTarget, string, error) {
 	if cdDir := extractBdDirectoryFlag(args); cdDir != "" {
 		if rig, ok, err := resolveRigForDir(cfg, cityPath, cdDir); err != nil {
-			return execStoreTarget{}, err
+			return execStoreTarget{}, "", err
 		} else if ok {
-			return bdRigScopeTarget(cityPath, rig), nil
+			return bdRigScopeTarget(cityPath, rig), "", nil
 		}
 	}
 
-	// Honor GC_RIG env (set by the controller on every rig agent) when no
-	// explicit --rig flag was given and no bead-ID in the args matched a
-	// specific store. This is a weaker signal than an explicit flag or a
-	// bead-prefix hit, but a stronger default than cwd: the controller sets
-	// GC_RIG reliably, while cwd detection fails for polecat worktrees (they
-	// live under .gc/worktrees/, not the configured rig path).
-	// Priority: explicit --rig > bead-prefix detect > GC_RIG env > cwd > city.
 	gcRigDiscarded := ""
 	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
 		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
-			return bdRigScopeTarget(cityPath, rig), nil
+			return bdRigScopeTarget(cityPath, rig), "", nil
 		}
-		// GC_RIG names an unknown or unbound rig. Unlike an explicit --rig
-		// (which exits 1 on the identical value), we do not error: falling
-		// through to cwd/city keeps cross-city queries working from rig agents
-		// whose GC_RIG names a rig this city does not bind. But the discard
-		// must not be silent — a stale or typo'd GC_RIG would otherwise
-		// redirect a query to a different store than the operator intended with
-		// no diagnostic, while the same value via --rig fails loudly. Record it
-		// and warn below, naming the store actually answered.
 		gcRigDiscarded = gcRig
 	}
 
 	target := cityTarget
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
-		return execStoreTarget{}, err
+		return execStoreTarget{}, "", err
 	} else if ok {
 		// resolveRigForDir already skips unbound rigs, so rig.Path is
 		// guaranteed non-empty here.
 		target = bdRigScopeTarget(cityPath, rig)
 	}
-
-	if gcRigDiscarded != "" {
-		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
-	}
-	return target, nil
+	return target, gcRigDiscarded, nil
 }
 
 // bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose

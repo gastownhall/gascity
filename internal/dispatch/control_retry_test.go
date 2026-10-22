@@ -119,6 +119,11 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt invalid connection timeout", err: errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"), want: TierAvailability},
 		{name: "mysql lock timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded; try restarting transaction"), want: TierAvailability},
 		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: TierAvailability},
+		// Every live Dolt 1213/40001 message carries both serialization needles
+		// (doltSerializationFailureErr); one row per needle keeps each
+		// load-bearing on its own if Dolt rewords the other half.
+		{name: "dolt serialization envelope only", err: errors.New("Error 1213 (40001): serialization failure: write conflict on branch main, try restarting transaction"), want: TierAvailability},
+		{name: "dolt conflict detail only", err: errors.New("committing: this transaction conflicts with a committed transaction from another client"), want: TierAvailability},
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: TierAvailability},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: TierAvailability},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: TierAvailability},

@@ -2297,10 +2297,10 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
 	var nudged, nudgedMessageID string
-	nf := func(recipient, messageID string) error {
+	nf := func(recipient, messageID string) (string, error) {
 		nudged = recipient
 		nudgedMessageID = messageID
-		return nil
+		return "", nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2324,8 +2324,8 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_, _ string) error {
-		return fmt.Errorf("session not found")
+	nf := func(_, _ string) (string, error) {
+		return "", fmt.Errorf("session not found")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3553,10 +3553,10 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var nudged, nudgedMessageID string
-	nf := func(recipient, messageID string) error {
+	nf := func(recipient, messageID string) (string, error) {
 		nudged = recipient
 		nudgedMessageID = messageID
-		return nil
+		return "", nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3575,13 +3575,43 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	}
 }
 
+// TestMailSendReportsSentBeforeNudging pins that the sent confirmation is on
+// stdout before the recipient is nudged. escalate.sh relies on that order: a
+// send its timeout cuts off after this line counts as delivered, so printing
+// it only after the nudge would make a stalled wake look like a lost mail.
+func TestMailSendReportsSentBeforeNudging(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout, stderr bytes.Buffer
+	nudged := false
+	var stdoutAtNudge string
+	nf := func(_, _ string) (string, error) {
+		nudged = true
+		stdoutAtNudge = stdout.String()
+		return "", nil
+	}
+
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "wake up"}, nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !nudged {
+		t.Fatal("nudgeFn was not called")
+	}
+	if !strings.Contains(stdoutAtNudge, "Sent message gc-1 to mayor") {
+		t.Errorf("stdout when the nudge ran = %q, want the sent confirmation already printed", stdoutAtNudge)
+	}
+}
+
 func TestMailSendNotifyNudgeError(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_, _ string) error {
-		return fmt.Errorf("session not found")
+	nf := func(_, _ string) (string, error) {
+		return "", fmt.Errorf("session not found")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3605,9 +3635,9 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_, _ string) error {
+	nf := func(_, _ string) (string, error) {
 		nudgeCalled = true
-		return nil
+		return "", nil
 	}
 
 	var stdout bytes.Buffer

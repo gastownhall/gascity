@@ -44,6 +44,9 @@ type Provider struct {
 	procs    map[string]*sessionConn // in-process tracking
 	workDirs map[string]string       // session name → workDir (for CopyTo)
 	ops      providerOps
+	// fenceChecked is a test seam run between a fenced operation's check and
+	// its signal.
+	fenceChecked func(name string)
 }
 
 type providerOps struct {
@@ -65,6 +68,7 @@ type sessionConn struct {
 	done     chan struct{} // closed when process exits
 	reaped   chan struct{} // closed once reap has finished, after done
 	token    string        // the GC_INSTANCE_TOKEN this incarnation seeded
+	fence    string        // the input-fence digest of this incarnation ("" when its env names none)
 	listener net.Listener  // unix socket listener
 }
 
@@ -222,6 +226,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	// Create control socket for cross-process discovery.
 	sc := &sessionConn{cmd: cmd, done: make(chan struct{}), reaped: make(chan struct{}), token: cfg.Env["GC_INSTANCE_TOKEN"]}
+	if f, ok := runtime.InputFenceFromEnv(cfg.Env); ok {
+		sc.fence = f.Digest()
+	}
 	lis, err := p.startControlSocket(name, sc, socketDir, euid)
 	if err != nil {
 		// Socket creation failed — kill the process and bail.
@@ -396,7 +403,7 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	if r.PID <= 1 {
 		return fmt.Errorf("subprocess: invalid PID %d for session %s", r.PID, r.SessionID)
 	}
-	if err := proctable.KillByPID(r.PID); err != nil {
+	if err := proctable.KillByPIDIdentity(r.PID, r.StartIdentity); err != nil {
 		return fmt.Errorf("subprocess: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
 	}
 	return nil
@@ -456,6 +463,9 @@ func (p *Provider) SetMeta(name, key, value string) error {
 // LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
 // reads the session's local sidecar file.
 func (p *Provider) LocalIdentitySidecar() bool { return true }
+
+// LivenessReadsFresh implements [runtime.FreshByConstruction].
+func (p *Provider) LivenessReadsFresh() bool { return true }
 
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.

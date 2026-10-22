@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,7 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // --- gc convoy create ---
@@ -1038,7 +1042,7 @@ func TestConvoyCheckJSONAutoCloseEmitsSingleResult(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, events.Discard, true, &stdout, &stderr)
+	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, 0, events.Discard, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1068,12 +1072,29 @@ func TestConvoyCheckJSONReportsWriteError(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stderr bytes.Buffer
-	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, events.Discard, true, errWriter{}, &stderr)
+	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, 0, events.Discard, true, errWriter{}, &stderr)
 	if code != 1 {
 		t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "writing JSON result") {
 		t.Fatalf("stderr = %q, want JSON write error", stderr.String())
+	}
+}
+
+// TestConvoyCheckJSONWritesNoResultWhenIncomplete: the result schema's ok is
+// always true, so a check that could not reach a store reports on stderr and
+// exits non-zero with no result line, like every convoy command's failure.
+func TestConvoyCheckJSONWritesNoResultWhenIncomplete(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: beads.NewMemStore()}}, 1, events.Discard, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doConvoyCheckAcrossStoresJSON = %d with a store unopened, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no result line for an incomplete check", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "1 store(s) could not be checked") {
+		t.Fatalf("stderr = %q, want the incomplete check reported", stderr.String())
 	}
 }
 
@@ -1148,6 +1169,649 @@ func TestConvoyCheckAcrossStores(t *testing.T) {
 	if got, _ := rigStore.Get("gc-1"); got.Status != "closed" {
 		t.Fatalf("rig convoy status = %q, want closed", got.Status)
 	}
+}
+
+// TestConvoyCheckStoreCandidatesSkipSuspendedRigs: gc convoy check runs on a
+// timer as the core pack's convoy-autoclose-backstop order, so its store
+// list leaves the suspended rigs out, as the order-tracking sweep's does
+// (TestOrderTrackingSweepTargetsSkipSuspendedRigs). A store the city or an
+// awake rig also reads stays in, and the fan-out readers (gc convoy list,
+// gc workflow delete) keep every store. By-id resolution leaves suspended rigs
+// out too; see TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened.
+func TestConvoyCheckStoreCandidatesSkipSuspendedRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SUSPENDED", "")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "/rigs/alpha"},
+			{Name: "beta", Path: "/rigs/beta", SuspendedOnStart: true},
+			{Name: "gamma", Path: "/rigs/alpha", SuspendedOnStart: true},
+			{Name: "delta", Path: "/city", SuspendedOnStart: true},
+		},
+	}
+
+	got, skipped := convoyCheckStoreCandidates(cfg, "/city")
+	if want := []string{"/city", "/rigs/alpha"}; !slices.Equal(got, want) {
+		t.Fatalf("check candidates = %v, want %v", got, want)
+	}
+	if want := []string{"beta"}; !slices.Equal(skipped, want) {
+		t.Fatalf("skipped rigs = %v, want %v", skipped, want)
+	}
+	if all := convoyStoreCandidates(cfg, "/city", ""); !slices.Contains(all, "/rigs/beta") {
+		t.Fatalf("the fan-out readers' candidates lost the suspended rig's store: %v", all)
+	}
+}
+
+// suspendedRigByIDCity is a city with an awake rig (alpha, prefix "al"), a
+// suspended rig with a store of its own (beta, prefix "be"), and a suspended
+// rig sharing alpha's store (gamma). Each named store is a memstore keyed by
+// its directory; opened records every directory the resolver opens.
+func suspendedRigByIDCity(t *testing.T) (cfg *config.City, stores map[string]*beads.MemStore, opened *[]string, openStore func(string) (beads.Store, error)) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SUSPENDED", "")
+	cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "/rigs/alpha", Prefix: "al"},
+			{Name: "beta", Path: "/rigs/beta", Prefix: "be", SuspendedOnStart: true},
+			{Name: "gamma", Path: "/rigs/alpha", Prefix: "ga", SuspendedOnStart: true},
+		},
+	}
+	stores = map[string]*beads.MemStore{}
+	for _, dir := range []string{"/city", "/rigs/alpha", "/rigs/beta"} {
+		store := beads.NewMemStore()
+		store.HonorExplicitIDs = true
+		stores[dir] = store
+	}
+	opened = &[]string{}
+	openStore = func(dir string) (beads.Store, error) {
+		*opened = append(*opened, dir)
+		store, ok := stores[dir]
+		if !ok {
+			t.Fatalf("unexpected store dir %q", dir)
+		}
+		return store, nil
+	}
+	return cfg, stores, opened, openStore
+}
+
+// TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened: by-id resolution
+// is a periodic reader too (bd's on-close autoclose, the supervisor's sweep,
+// execution-fact emission, convoy status run by orders), and on a bd-owned
+// proxied rig any read of the store restarts the pair the controller stopped
+// when the rig was suspended. So the uniqueness probe leaves a suspended rig's
+// store unopened, even when it holds the same id; awake stores are still
+// probed in full.
+func TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened(t *testing.T) {
+	cfg, stores, opened, openStore := suspendedRigByIDCity(t)
+	if _, err := stores["/rigs/alpha"].Create(beads.Bead{ID: "al-7", Title: "awake work"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stores["/rigs/beta"].Create(beads.Bead{ID: "al-7", Title: "a copy only a probe of the suspended rig would see"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store, dir, err := resolveOwningStoreDir("al-7", cfg, "/city", openStore)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir: %v", err)
+	}
+	if store != stores["/rigs/alpha"] || dir != "/rigs/alpha" {
+		t.Fatalf("resolved to %q, want /rigs/alpha", dir)
+	}
+	if slices.Contains(*opened, "/rigs/beta") {
+		t.Fatalf("opened %v: the suspended rig's store was opened to answer for an id it does not own", *opened)
+	}
+	if want := []string{"/rigs/alpha", "/city"}; !slices.Equal(*opened, want) {
+		t.Fatalf("opened %v, want every awake store %v", *opened, want)
+	}
+}
+
+// TestResolveOwningStoreDirStillProbesAwakeStoresForUniqueness: leaving the
+// suspended stores out does not weaken the uniqueness contract among the
+// awake ones.
+func TestResolveOwningStoreDirStillProbesAwakeStoresForUniqueness(t *testing.T) {
+	cfg, stores, _, openStore := suspendedRigByIDCity(t)
+	for _, dir := range []string{"/city", "/rigs/alpha"} {
+		if _, err := stores[dir].Create(beads.Bead{ID: "al-7", Title: "one of two awake copies"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, err := resolveOwningStoreDir("al-7", cfg, "/city", openStore)
+	if err == nil || !strings.Contains(err.Error(), "exists in multiple stores") {
+		t.Fatalf("resolveOwningStoreDir = %v, want the uniqueness refusal", err)
+	}
+}
+
+// TestResolveOwningStoreDirReadsASuspendedRigForItsOwnID: an id whose prefix
+// routes to a suspended rig is a question about that rig's bead, so its store
+// is read. Only the probes for ids that route elsewhere are left out.
+func TestResolveOwningStoreDirReadsASuspendedRigForItsOwnID(t *testing.T) {
+	cfg, stores, _, openStore := suspendedRigByIDCity(t)
+	if _, err := stores["/rigs/beta"].Create(beads.Bead{ID: "be-3", Title: "suspended rig work"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store, dir, err := resolveOwningStoreDir("be-3", cfg, "/city", openStore)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir: %v", err)
+	}
+	if store != stores["/rigs/beta"] || dir != "/rigs/beta" {
+		t.Fatalf("resolved to %q, want /rigs/beta", dir)
+	}
+}
+
+// byIDSuspendedRigCity is a file-store city with an awake rig (ops) and a
+// suspended rig (dormant), each holding a bead under one ops id. A by-id
+// resolution that probed the suspended rig would refuse the id as ambiguous;
+// one that leaves it alone answers from ops.
+func byIDSuspendedRigCity(t *testing.T) (cityDir string, id string) {
+	t.Helper()
+	cityDir = convoyCheckRigCity(t, `
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "OP"
+
+[[rigs]]
+name = "dormant"
+path = "dormant"
+prefix = "DM"
+`, "ops", "dormant")
+	ops, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, "ops"), cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bead, err := ops.Create(beads.Bead{Title: "ops task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Minting under ops' prefix is how the dormant rig comes to hold the
+	// same id: two ledgers disagreeing, which only a probe of it would see.
+	dormant, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, "dormant", ".gc", "beads.json"), beads.WithFileStoreIDPrefix("OP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twin, err := dormant.Create(beads.Bead{Title: "dormant task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if twin.ID != bead.ID {
+		t.Fatalf("the fixture minted %s and %s; the collision needs one id", bead.ID, twin.ID)
+	}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "dormant", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, bead.ID
+}
+
+// TestAutocloseOwningStoreLeavesASuspendedRigUnprobed covers the background
+// by-id callers: bd's on-close autoclose hooks and the supervisor's autoclose
+// sweep resolve through autocloseOwningStore, and execution-fact emission
+// falls back to it on a primary-store miss.
+func TestAutocloseOwningStoreLeavesASuspendedRigUnprobed(t *testing.T) {
+	cityDir, id := byIDSuspendedRigCity(t)
+
+	store, dir, ok := autocloseOwningStore(id, cityDir)
+	if !ok {
+		t.Fatalf("autocloseOwningStore(%s) found no owner; the suspended rig's copy was probed", id)
+	}
+	if want := filepath.Join(cityDir, "ops"); !samePath(dir, want) {
+		t.Fatalf("autocloseOwningStore(%s) dir = %q, want %q", id, dir, want)
+	}
+	if got, err := store.Get(id); err != nil || got.Title != "ops task" {
+		t.Fatalf("owning store Get(%s) = %+v, %v; want the ops copy", id, got, err)
+	}
+
+	emit := executionEmitStore(beads.NewMemStore(), cityDir)
+	got, err := emit.Get(id)
+	if err != nil {
+		t.Fatalf("executionEmitStore Get(%s) on a primary miss: %v", id, err)
+	}
+	if got.Title != "ops task" {
+		t.Fatalf("executionEmitStore Get(%s) = %q, want the ops copy", id, got.Title)
+	}
+}
+
+// convoyCheckRigCity is a file-store city with scope-local stores for the gc
+// convoy check fallback: rigsTOML is appended to city.toml, and the city and
+// each of rigDirs (relative to the city) get a persisted store.
+func convoyCheckRigCity(t *testing.T, rigsTOML string, rigDirs ...string) string {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SUSPENDED", "")
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY_PATH", cityDir)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, cityDir, "[workspace]\nname = \"demo\"\n"+rigsTOML)
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range rigDirs {
+		if err := ensurePersistedScopeLocalFileStore(filepath.Join(cityDir, dir)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cityDir
+}
+
+// seedCompletedConvoy creates a convoy in the rig store at cityDir/rigDir with
+// one member, closed.
+func seedCompletedConvoy(t *testing.T, cityDir, rigDir string) beads.Bead {
+	t.Helper()
+	store, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, rigDir), cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: rigDir + " batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.Create(beads.Bead{Title: rigDir + " task", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(member.ID); err != nil {
+		t.Fatal(err)
+	}
+	return convoy
+}
+
+// rigConvoyStatus reads id back from the rig store at cityDir/rigDir.
+func rigConvoyStatus(t *testing.T, cityDir, rigDir, id string) string {
+	t.Helper()
+	store, err := openStoreAtForCity(filepath.Join(cityDir, rigDir), cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statusOf(t, store, id)
+}
+
+// TestConvoyCheckLeavesASuspendedRigsConvoysAlone: suspension is quiescence
+// (beads_quiescence.go) — a bd read restarts a suspended rig's retired proxy —
+// so while `gc rig suspend` holds a rig the check leaves its store unread. It
+// names the rig, closes what the awake stores hold, and closes the suspended
+// rig's completed convoy on the first check after the rig resumes.
+func TestConvoyCheckLeavesASuspendedRigsConvoysAlone(t *testing.T) {
+	cityDir := convoyCheckRigCity(t, `
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "OP"
+
+[[rigs]]
+name = "dormant"
+path = "dormant"
+prefix = "DM"
+`, "ops", "dormant")
+	awake := seedCompletedConvoy(t, cityDir, "ops")
+	asleep := seedCompletedConvoy(t, cityDir, "dormant")
+	setDormant := func(suspended bool) {
+		t.Helper()
+		if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "dormant", &suspended); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	setDormant(true)
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityDir, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy check exited %d:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `rig "dormant" is suspended`) {
+		t.Errorf("stderr does not name the suspended rig it skipped: %q", stderr.String())
+	}
+	if got := rigConvoyStatus(t, cityDir, "ops", awake.ID); got != "closed" {
+		t.Errorf("the awake rig's completed convoy is %q, want closed", got)
+	}
+	if got := rigConvoyStatus(t, cityDir, "dormant", asleep.ID); got != "open" {
+		t.Fatalf("the suspended rig's completed convoy is %q, want it left open", got)
+	}
+
+	setDormant(false)
+	stdout.Reset()
+	stderr.Reset()
+	if code := doConvoyCheckFallback(cityDir, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy check after resume exited %d:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "is suspended") {
+		t.Errorf("stderr still names a suspended rig after resume: %q", stderr.String())
+	}
+	if got := rigConvoyStatus(t, cityDir, "dormant", asleep.ID); got != "closed" {
+		t.Errorf("the resumed rig's completed convoy is %q, want closed", got)
+	}
+}
+
+// writeUnreadableFileStore leaves a file store at scopeRoot that fails to open.
+func writeUnreadableFileStore(t *testing.T, scopeRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".gc", "beads.json"), []byte("not a bead store"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConvoyCheckNamesAStoreItCannotOpen: a store the check cannot open is
+// named and fails the run, after the stores it could open are checked, rather
+// than dropped from a sweep that then reports success.
+func TestConvoyCheckNamesAStoreItCannotOpen(t *testing.T) {
+	cityDir := convoyCheckRigCity(t, `
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "OP"
+
+[[rigs]]
+name = "broken"
+path = "broken"
+prefix = "BR"
+`, "ops")
+	writeUnreadableFileStore(t, filepath.Join(cityDir, "broken"))
+	convoy := seedCompletedConvoy(t, cityDir, "ops")
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityDir, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("gc convoy check exited %d with a store it could not open, want 1:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	if broken := resolveStoreScopeRoot(cityDir, "broken"); !strings.Contains(stderr.String(), "opening the store at "+broken) {
+		t.Errorf("stderr does not name the store at %s: %q", broken, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Auto-closed convoy "+convoy.ID) {
+		t.Errorf("the stores that opened were not checked:\n%s", stdout.String())
+	}
+	if got := rigConvoyStatus(t, cityDir, "ops", convoy.ID); got != "closed" {
+		t.Errorf("the awake rig's completed convoy is %q, want closed", got)
+	}
+}
+
+// TestConvoyCheckRereadsEachConvoyLiveBeforeClosing: the check decides from a
+// convoy list that may be stale (here a cached row), so it closes through the
+// reactive autoclose's fence: a convoy that changed behind the list is left
+// alone, with no event and no count.
+func TestConvoyCheckRereadsEachConvoyLiveBeforeClosing(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		change     func(backing beads.Store, id string) error
+		wantStatus string
+		wantReason string
+	}{{
+		name: "labeled owned",
+		change: func(backing beads.Store, id string) error {
+			return backing.Update(id, beads.UpdateOpts{Labels: []string{"owned"}})
+		},
+		wantStatus: "open",
+	}, {
+		name: "closed by an operator",
+		change: func(backing beads.Store, id string) error {
+			return closeConvoyWithReason(backing, id, convoyManualCloseReason)
+		},
+		wantStatus: "closed",
+		wantReason: convoyManualCloseReason,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			member, err := backing.Create(beads.Bead{Title: "task", ParentID: convoy.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backing.Close(member.ID); err != nil {
+				t.Fatal(err)
+			}
+			cached := beads.NewCachingStoreForTest(backing, nil)
+			if err := cached.Prime(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.change(backing, convoy.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			rec := events.NewFake()
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: cached}}, 0, rec, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "0 convoy(s) auto-closed") {
+				t.Errorf("stdout = %q, want no convoy counted as auto-closed", stdout.String())
+			}
+			for _, evt := range rec.Events {
+				if evt.Type == events.ConvoyClosed {
+					t.Errorf("recorded %s for a convoy this check did not close", evt.Type)
+				}
+			}
+			live, err := backing.Get(convoy.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if live.Status != tc.wantStatus {
+				t.Errorf("convoy %s, want %s", live.Status, tc.wantStatus)
+			}
+			if got := live.Metadata["close_reason"]; got != tc.wantReason {
+				t.Errorf("close_reason = %q, want %q", got, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestConvoyCheckLeavesAConvoyThatMovedUnderItsClose: a convoy written after
+// the fence's live re-read (so its CAS loses) or deleted after the list is
+// not a failure. The check leaves it to its next run: exit 0, nothing on
+// stderr, no event and no count.
+func TestConvoyCheckLeavesAConvoyThatMovedUnderItsClose(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		require bool // conditional writes required, so the close is a CAS
+		wrap    func(t *testing.T, backing *beads.MemStore, id string) beads.Store
+	}{{
+		name:    "CAS lost to a write after the re-read",
+		require: true,
+		wrap: func(_ *testing.T, backing *beads.MemStore, id string) beads.Store {
+			return &interleavedStore{Store: backing, id: id, between: func() { _ = backing.SetMetadata(id, "touched", "yes") }}
+		},
+	}, {
+		name: "deleted after the list",
+		wrap: func(t *testing.T, backing *beads.MemStore, id string) beads.Store {
+			cached := beads.NewCachingStoreForTest(backing, nil)
+			if err := cached.Prime(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := backing.Delete(id); err != nil {
+				t.Fatal(err)
+			}
+			return cached
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			if tc.require {
+				stampedMemStore(t, backing)
+			}
+			convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			member, err := backing.Create(beads.Bead{Title: "task", ParentID: convoy.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backing.Close(member.ID); err != nil {
+				t.Fatal(err)
+			}
+			store := tc.wrap(t, backing, convoy.ID)
+
+			rec := events.NewFake()
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, 0, rec, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 0:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing for a convoy left to the next check", stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "0 convoy(s) auto-closed") {
+				t.Errorf("stdout = %q, want no convoy counted as auto-closed", stdout.String())
+			}
+			for _, evt := range rec.Events {
+				if evt.Type == events.ConvoyClosed {
+					t.Errorf("recorded %s for a convoy this check did not close", evt.Type)
+				}
+			}
+		})
+	}
+}
+
+// convoyCheckFailStore fails the reads and writes gc convoy check makes: the
+// store's convoy list, or one convoy's members or close.
+type convoyCheckFailStore struct {
+	beads.Store
+	failConvoyList      bool
+	failDeps, failClose string
+}
+
+func (s convoyCheckFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.failConvoyList && query.Type == "convoy" {
+		return nil, errors.New("convoy list unavailable")
+	}
+	return s.Store.List(query)
+}
+
+func (s convoyCheckFailStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if id == s.failDeps {
+		return nil, errors.New("member edges unavailable")
+	}
+	return s.Store.DepList(id, direction)
+}
+
+func (s convoyCheckFailStore) Close(id string) error {
+	if id == s.failClose {
+		return errors.New("close rejected")
+	}
+	return s.Store.Close(id)
+}
+
+// seedCompletedMemConvoy creates a convoy in store with one member, closed.
+func seedCompletedMemConvoy(t *testing.T, store beads.Store, title string) beads.Bead {
+	t.Helper()
+	convoy, err := store.Create(beads.Bead{Title: title, Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.Create(beads.Bead{Title: title + " task", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(member.ID); err != nil {
+		t.Fatal(err)
+	}
+	return convoy
+}
+
+// TestConvoyCheckContinuesPastAConvoyItCannotCheck: one convoy whose members
+// or close fail does not stop the sweep. The convoys after it are still
+// checked, the failure is named with its convoy, and the check exits non-zero.
+func TestConvoyCheckContinuesPastAConvoyItCannotCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(id string) convoyCheckFailStore
+	}{
+		{"members unreadable", func(id string) convoyCheckFailStore { return convoyCheckFailStore{failDeps: id} }},
+		{"close rejected", func(id string) convoyCheckFailStore { return convoyCheckFailStore{failClose: id} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			bad, good := seedCompletedMemConvoy(t, mem, "first"), seedCompletedMemConvoy(t, mem, "second")
+			if bad.ID >= good.ID {
+				t.Fatalf("the check walks convoys in id order; %s must come before %s", bad.ID, good.ID)
+			}
+			store := tc.fail(bad.ID)
+			store.Store = mem
+
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, 0, events.Discard, false, &stdout, &stderr); code != 1 {
+				t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 1:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), bad.ID) {
+				t.Errorf("stderr does not name %s: %q", bad.ID, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Auto-closed convoy "+good.ID) {
+				t.Errorf("the convoy after the failure was not closed:\n%s", stdout.String())
+			}
+			if got := statusOf(t, mem, good.ID); got != "closed" {
+				t.Errorf("%s is %q, want closed", good.ID, got)
+			}
+			if got := statusOf(t, mem, bad.ID); got != "open" {
+				t.Errorf("%s is %q, want open", bad.ID, got)
+			}
+		})
+	}
+}
+
+// TestConvoyCheckContinuesPastAStoreItCannotList: an ordinary store whose
+// convoy list fails is named and counted as unchecked, and the other stores'
+// convoys are still closed. A class binding whose convoy list fails ends the
+// check before it closes anything, as doConvoyCheckFallback does for a binding
+// it cannot read, even though the binding still answers which of the migration
+// source's ids it holds.
+func TestConvoyCheckContinuesPastAStoreItCannotList(t *testing.T) {
+	t.Run("ordinary store", func(t *testing.T) {
+		readable := beads.NewMemStore()
+		convoy := seedCompletedMemConvoy(t, readable, "batch")
+		stores := []convoyStoreView{
+			{path: "/rigs/broken", store: convoyCheckFailStore{Store: beads.NewMemStore(), failConvoyList: true}},
+			{path: "/rigs/ops", store: readable},
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := doConvoyCheckAcrossStoresJSON(stores, 0, events.Discard, false, &stdout, &stderr); code != 1 {
+			t.Fatalf("doConvoyCheckAcrossStoresJSON = %d with a store it could not list, want 1:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "listing convoys in the store at /rigs/broken") {
+			t.Errorf("stderr does not name the store it could not list: %q", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "0 convoy(s) and 1 store(s) could not be checked") {
+			t.Errorf("stderr = %q, want the unlisted store counted as unchecked", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Auto-closed convoy "+convoy.ID) {
+			t.Errorf("the store that listed was not checked:\n%s", stdout.String())
+		}
+		if got := statusOf(t, readable, convoy.ID); got != "closed" {
+			t.Errorf("%s is %q, want closed", convoy.ID, got)
+		}
+	})
+
+	t.Run("class binding", func(t *testing.T) {
+		city := beads.NewMemStore()
+		convoy := seedCompletedMemConvoy(t, city, "batch")
+		stores := []convoyStoreView{
+			{path: "/city", store: city, role: convoyViewMigrationSource},
+			{path: convoyBindingViewPath, store: convoyCheckFailStore{Store: beads.NewMemStore(), failConvoyList: true}, role: convoyViewClassBinding},
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := doConvoyCheckAcrossStoresJSON(stores, 0, events.Discard, false, &stdout, &stderr); code != 1 {
+			t.Fatalf("doConvoyCheckAcrossStoresJSON = %d with a binding it could not list, want 1:\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "listing convoys in "+convoyBindingViewPath) {
+			t.Errorf("stderr does not name the binding it could not list: %q", stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want nothing from a check that stopped at the binding", stdout.String())
+		}
+		if got := statusOf(t, city, convoy.ID); got != "open" {
+			t.Errorf("the migration source's copy of %s is %q; a check without the binding must not close it", convoy.ID, got)
+		}
+	})
 }
 
 // --- gc convoy stranded ---

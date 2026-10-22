@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,7 +62,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		return
 	}
 
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.RLock()
 	if c.state != cacheLive && c.state != cachePartial {
 		c.mu.RUnlock()
@@ -80,9 +81,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	// A local write keeps a conflicting event under backing verification
 	// after a later scan clears its beadSeq fence, for as long as a consumer
 	// may still be waiting on its watermark.
+	// It covers every local write inside the recency window too: writeAt is
+	// stamped with localBeadAt and pruned only past recentWriteVerifyWindow.
 	recentWrite := c.recentWriteLocked(patch.ID, now)
-	localBeadAt := c.localBeadAt[patch.ID]
-	recentlyLocal := recentLocalMutation(localBeadAt, now)
+	recentlyLocal := recentLocalMutation(c.localBeadAt[patch.ID], now)
 	_, locallyDeleted := c.deletedSeq[patch.ID]
 	fieldConflictCached := cached && cacheEventConflictsCurrent(current, patch, fields)
 	dependencyConflictCached := cached && cacheEventDependencyConflict(currentDeps, depsKnown, patch, fields)
@@ -126,14 +128,29 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	// drops a clean row's unverified field update, and this verification is
 	// what still lets a real one apply.
 	staleRisk := eventType == "bead.updated" && fieldConflictCached
-	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || staleRisk) && !recentlyLocal && !verifiedConflict {
-		// The bead is flagged locally mutated only because a prior applied
-		// event set its mutation seq (noteMutationLocked sets beadSeq on every
-		// applied event), or because of a local write older than the recency
-		// window, including one whose beadSeq a later scan cleared (a late
-		// event snapshotted before that write must not roll it back), or it
-		// is clean and the patch would change its fields (above). Backing reads are reliable here (no in-flight write-through),
-		// so verify the conflicting event against the backing store instead of
+	// Inside the recency window, this cache's own emission coming back after
+	// a later local write superseded it (Update then Release on one tick,
+	// both fed back) drops without a read, as every conflicting event there
+	// once did. That blanket drop also lost an operator's write landing
+	// seconds after the controller's own, leaving the row clean until the
+	// next scan (mc-xlphf); any other conflicting event is verified below.
+	// The echo is told by identity, not by updated_at: Dolt stamps whole
+	// seconds, so two writes in one second tie, and an operator's write in
+	// that second ties with them.
+	if conflictsCached && eventType != "bead.closed" && eventType != "bead.deleted" &&
+		recentlyLocal && locallyMutated && !verifiedConflict && c.ownEmission(patch, now) {
+		return
+	}
+	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || staleRisk) && !verifiedConflict {
+		// The bead is flagged locally mutated because a prior applied event
+		// set its mutation seq (noteMutationLocked sets beadSeq on every
+		// applied event) or a local write did, or it carries a local write,
+		// including one whose beadSeq a later scan cleared (a late event
+		// snapshotted before that write must not roll it back), or it is
+		// clean and the patch would change its fields (above). Backing reads
+		// are reliable here: a local write installs only after its backing
+		// write commits, so a check inside the recency window reads it too.
+		// So verify the conflicting event against the backing store instead of
 		// dropping it outright: drop only genuinely stale events (which would
 		// clobber an unflushed local write); apply when the backing store
 		// already reflects the event — e.g. a gc.routed_to stamp written by
@@ -170,28 +187,6 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		verifiedRecentLocal = true
 		verifiedRecentLocalBase = conflictBase
 		verifiedFresh = check.fresh
-	} else {
-		if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
-			return
-		}
-		if dependencyConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
-			return
-		}
-	}
-	if conflictsCached && recentlyLocal && !verifiedConflict {
-		verifiedRecentLocal = true
-		verifiedRecentLocalBase = conflictBase
-		check, verifyErr := c.checkEvent(patch.ID, patch, fields)
-		if verifyErr == nil && !check.matches {
-			return
-		}
-		verifiedFresh = check.fresh
-		if verifyErr != nil {
-			// An unverifiable event must not overwrite a recent local write
-			// as a clean row.
-			c.dirtyUncheckedEvent(eventType, patch.ID, verifyErr)
-			return
-		}
 	}
 
 	b := patch
@@ -277,7 +272,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				}
 			} else {
 				_, locallyMutated := c.beadSeq[patch.ID]
-				locallyMutated = locallyMutated || c.recentWriteLocked(patch.ID, time.Now())
+				locallyMutated = locallyMutated || c.recentWriteLocked(patch.ID, c.clockNow())
 				// A concurrent local write can land in the RUnlock->Lock window.
 				// beadChanged compares only the cached Bead, but DepAdd/DepRemove
 				// mutate c.deps and bump the mutation seq without touching
@@ -291,20 +286,16 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				changedSinceVerify := beadChanged(current, verifiedRecentLocalBase, false) ||
 					current.Revision != verifiedRecentLocalBase.Revision ||
 					c.beadSeq[patch.ID] != seqBase
-				// Re-check a genuine recent local write under the write lock to
-				// catch a write that landed between the read-lock verification
-				// and here; it wins unconditionally.
-				dropped := recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) &&
-					(!verifiedRecentLocal || changedSinceVerify)
-				// For a bead flagged locally mutated only by a prior event,
-				// apply the conflict only if it was verified against the
-				// backing store under the read lock and nothing changed since
-				// (no concurrent local write); otherwise drop and let
-				// reconciliation reconverge (gastownhall/gascity#2210). A clean
-				// row's field update is held to the same rule (mc-03lk4),
-				// including one that first conflicts here, with a row a read
-				// installed since the read phase.
-				dropped = dropped || (locallyMutated || (eventType == "bead.updated" && fieldConflict)) &&
+				// For a locally mutated bead (a write that landed between the
+				// read-lock verification and here included), apply the conflict
+				// only if it was verified against the backing store under the
+				// read lock and nothing changed since (no concurrent local
+				// write); otherwise drop and let reconciliation reconverge
+				// (gastownhall/gascity#2210). A clean row's field update is held
+				// to the same rule (mc-03lk4), including one that first
+				// conflicts here, with a row a read installed since the read
+				// phase.
+				dropped := (locallyMutated || (eventType == "bead.updated" && fieldConflict)) &&
 					(!verifiedRecentLocal || changedSinceVerify)
 				if dropped {
 					// What changed a verified event's row since its check, with
@@ -321,6 +312,27 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		}
 		if eventType != "bead.closed" || !verifiedClosedFromBacking {
 			b = mergeCacheEventPatch(current, patch, fields)
+			// The merge keeps the cached revision, since an event carries
+			// none. A verified event was checked against a backing read, and
+			// when the merged row reproduces that read it is that row, so it
+			// is installed as the read, whole: its revision, and the stamp,
+			// fence and tier fields the merge never takes and beadChanged
+			// does not compare. A CAS at the stale revision would otherwise
+			// be refused once for nothing. A merge that differs from the read
+			// keeps the merged row, and the guard is what keeps it safe: the
+			// difference may be a field the event's own write has no event
+			// for yet (pairing the read's revision with it is the mc-03lk4
+			// hazard), a local write that landed after the read (installing
+			// the read would roll this process's own write back), or edges
+			// the event carries and a point read omits (installing the read
+			// would wipe a live blocker). The readiness projection is not
+			// stored state, and a point read carries none, so the cached one
+			// is kept and not compared.
+			read := verifiedFresh
+			read.IsBlocked = b.IsBlocked
+			if verifiedRecentLocal && !beadChanged(b, read, false) {
+				b = read
+			}
 		}
 	}
 
@@ -331,7 +343,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			c.noteMutationLocked(b.ID)
 			// OC-3: absorb installs the row before updateEventDepsLocked, whose
 			// clearReadyProjectionLocked must observe the newly absorbed row.
-			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+			c.absorbFreshLocked(b.ID, b, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: !heldAtLock,
@@ -350,7 +362,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
-			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+			c.absorbFreshLocked(b.ID, b, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: !heldAtLock,
@@ -376,13 +388,14 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			c.updateStatsLocked()
 		}
 		// OC-3: absorb before updateEventDepsLocked (see bead.created).
-		c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+		c.absorbFreshLocked(b.ID, b, c.clockNow(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
 			clearDirty: !heldAtLock,
 			// The bead.closed being applied is already on the bus.
 			closeAnnounced: true,
 		})
+		c.noteCloseAnnouncedLocked(b.ID)
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
@@ -401,7 +414,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	}
 
 	if mutated {
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 	}
 }
 
@@ -576,6 +589,10 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
 		merged.IndefinitelyDeferred = patch.IndefinitelyDeferred
+		// An event's status is bd's raw one (decodeRawBead keeps all but
+		// deferred) or gc's folded one, so it does not say what the store
+		// recorded; the next backing read does.
+		merged.SourceStatus = ""
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type
@@ -845,7 +862,7 @@ func (c *CachingStore) settleUnconfirmedEventLocked(id string, check eventCheck,
 		return
 	}
 	cached := c.beads[id]
-	now := time.Now()
+	now := c.clockNow()
 	opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
 	if check.depsRead {
 		opts.depsMode, opts.deps = depsExplicit, check.deps
@@ -904,6 +921,81 @@ func closedEventCarriesRichCloseSnapshot(patch Bead) bool {
 
 func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {
 	return !cacheEventConflictsCached(current, depsFromBeadFields(current), true, patch, fields)
+}
+
+// ownEmitsPerRow bounds the emissions ownEmits keeps per row.
+const ownEmitsPerRow = 8
+
+// ownEmit is the digest of a snapshot this cache emitted through onChange,
+// and when.
+type ownEmit struct {
+	at     time.Time
+	digest [sha256.Size]byte
+}
+
+// eventDigest hashes an event's decoded form re-encoded, so it covers every
+// field the payload carries or omits, an emptied one included, and no byte
+// difference the event picks up in transit counts.
+func eventDigest(patch Bead) ([sha256.Size]byte, bool) {
+	canonical, err := EncodeBeadEventPayload(patch)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	return sha256.Sum256(canonical), true
+}
+
+// recordOwnEmission remembers payload, which this cache is about to emit,
+// for the recency window, so its echo can be told from another writer's
+// event (ownEmission). It keeps the newest ownEmitsPerRow per row and sweeps
+// expired rows at most once a window.
+func (c *CachingStore) recordOwnEmission(payload json.RawMessage) {
+	patch, _, err := decodeCacheEvent(payload)
+	if err != nil {
+		return
+	}
+	digest, ok := eventDigest(patch)
+	if !ok {
+		return
+	}
+	now := c.clockNow()
+	c.ownEmitMu.Lock()
+	defer c.ownEmitMu.Unlock()
+	if c.ownEmits == nil {
+		c.ownEmits = make(map[string][]ownEmit)
+	}
+	if !recentLocalMutation(c.ownEmitsSweptAt, now) {
+		for id, emits := range c.ownEmits {
+			if !recentLocalMutation(emits[len(emits)-1].at, now) {
+				delete(c.ownEmits, id)
+			}
+		}
+		c.ownEmitsSweptAt = now
+	}
+	emits := c.ownEmits[patch.ID]
+	for len(emits) > 0 && (len(emits) >= ownEmitsPerRow || !recentLocalMutation(emits[0].at, now)) {
+		emits = emits[1:]
+	}
+	c.ownEmits[patch.ID] = append(slices.Clip(emits), ownEmit{at: now, digest: digest})
+}
+
+// ownEmission reports whether an event is exactly, updated_at included, a
+// snapshot this cache emitted for the row within the recency window: its own
+// echo, which carries nothing the cache did not already hold. Only another
+// writer leaving the row identical to an emitted snapshot, stamp included, is
+// mistaken for one.
+func (c *CachingStore) ownEmission(patch Bead, now time.Time) bool {
+	digest, ok := eventDigest(patch)
+	if !ok {
+		return false
+	}
+	c.ownEmitMu.Lock()
+	defer c.ownEmitMu.Unlock()
+	for _, e := range c.ownEmits[patch.ID] {
+		if recentLocalMutation(e.at, now) && e.digest == digest {
+			return true
+		}
+	}
+	return false
 }
 
 func recentLocalMutation(mutatedAt time.Time, now time.Time) bool {
@@ -986,9 +1078,14 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 // make stale (mc-zndi7.43, .56). Treat an inferred notification as a hint and
 // re-read the store before acting on it durably.
 //
-// ApplyEvent and the list/Get refetch installs notify nothing, so they have no
-// source (mc-zndi7.55), except for a close they install over a cached open row:
-// that close is queued and announced as ChangeRefresh (gastownhall/gascity#6860).
+// ApplyEvent installs notify nothing, so they have no source (mc-zndi7.55),
+// except for a close they install over a cached open row: that close is queued
+// and announced as ChangeRefresh (gastownhall/gascity#6860). The list/Get
+// refetch installs announce the same queued close, and also a change to a held
+// open row's status, assignee or metadata, as a ChangeRefresh bead.updated
+// (caching_store_read_announce.go): such a read is often the first to see
+// another process's claim, and the reconcile that follows finds nothing left
+// to announce.
 type ChangeSource uint8
 
 const (
@@ -1001,8 +1098,9 @@ const (
 	ChangeScan
 	// ChangeRefresh is a point read: RefreshRow, Update's refetch that found
 	// the row gone after the write (its bead.closed is the read's inference,
-	// not a close this process made), and a close a list, dirty-row read or
-	// event patch installed over a cached open row.
+	// not a close this process made), a close a list, dirty-row read or
+	// event patch installed over a cached open row, and an update a list,
+	// dirty-row read or dirty overlay installed over a held open row.
 	ChangeRefresh
 )
 
@@ -1024,15 +1122,21 @@ func (s ChangeSource) String() string {
 	}
 }
 
-// notifyChange announces one change. Any close a read or an event patch
-// installed without announcing goes out first, so a close is never reported
-// after a later change to the same bead.
+// notifyChange announces one change. Any update or close a read or an event
+// patch installed without announcing goes out first, so neither is ever
+// reported after a later change to the same bead.
 func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bead) {
-	c.announceUnannouncedCloses()
+	c.announceReadInstalls()
 	c.emitChange(source, eventType, b)
 }
 
 func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead) {
+	if eventType == "bead.closed" {
+		// Recorded before the announcement reaches onChange, so a refresh
+		// that reads this close meanwhile does not announce it again
+		// (announcedCloses).
+		c.recordAnnouncedClose(b)
+	}
 	if c.onChange == nil {
 		return
 	}
@@ -1041,6 +1145,8 @@ func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead)
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
 		return
 	}
+	// Recorded before onChange, so the echo cannot arrive first.
+	c.recordOwnEmission(payload)
 	// Resolve the opaque run/session correlation ids from the bead's metadata at
 	// the record site and pass ONLY those two ids to onChange — never the
 	// free-form metadata map. The run-chain (workflow_id || molecule_id ||

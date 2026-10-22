@@ -146,7 +146,7 @@ func (r *recordingLeaf) localSidecarHandle() *localSidecar {
 // opener latches it.
 func newSplitFixture(t *testing.T) (*ProxiedStore, *NativeDoltStore, *recordingLeaf) {
 	t.Helper()
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 
 	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 	native.idPrefix = "prx"
@@ -667,7 +667,7 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 
 	t.Run("a generation change across a write stands the native leaf down", func(t *testing.T) {
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		restarting := &restartingLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			// bd's child restarted the proxy while the write was in flight.
@@ -695,7 +695,7 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 
 	t.Run("a steady generation leaves the native leaf alone", func(t *testing.T) {
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		store, err := NewProxiedStore(native, newNativeDoltStoreForTest(storage), PinForTest("/scope", root, "beads"))
 		if err != nil {
@@ -711,7 +711,7 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 
 	t.Run("an unreadable record is not treated as a change", func(t *testing.T) {
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		removing := &restartingLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			// bd removes the record on an orderly stop and rewrites it on start,
@@ -818,6 +818,11 @@ func TestProxiedStoreDepListBatchGuardsEveryIDBeforeTheNativeBatch(t *testing.T)
 	bd := NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
 		forks++
 		if len(args) > 1 && args[0] == "dep" && args[1] == "list" {
+			// Real bd: one id prints the depended-on beads' rows; several
+			// print the dependency records.
+			if len(args) == 4 {
+				return []byte(`[{"id":"prx-9","status":"open","dependency_type":"blocks"}]`), nil
+			}
 			return []byte(`[{"issue_id":"prx-1","depends_on_id":"prx-9","type":"blocks"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected bd %v", args)
@@ -953,7 +958,7 @@ func TestProxiedStoreBracketsTheConditionalWriteHandles(t *testing.T) {
 	newSplit := func(t *testing.T, restart bool) *ProxiedStore {
 		t.Helper()
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		leaf := &conditionalRestartLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			if restart {
@@ -1043,7 +1048,7 @@ func TestProxiedStoreBracketsTheConditionalWriteHandles(t *testing.T) {
 }
 
 // bracketLeaf is a write leaf whose every mutating method — the Store surface's
-// and the four write capabilities the wrapper implements as methods — runs
+// and the five write capabilities the wrapper implements as methods — runs
 // onWrite and succeeds. The bracket is the subject, not the write.
 type bracketLeaf struct {
 	Store
@@ -1074,6 +1079,11 @@ func (l *bracketLeaf) CreateWithForeignID(Bead) (Bead, error)        { l.onWrite
 func (l *bracketLeaf) CreateWithStorage(Bead, StorageClass) (Bead, error) {
 	l.onWrite()
 	return Bead{}, nil
+}
+
+func (l *bracketLeaf) ApplyGuarded(context.Context, GuardedBatch) (GuardedResult, error) {
+	l.onWrite()
+	return GuardedResult{}, nil
 }
 
 // TestProxiedStoreBracketsEveryInsideWriteMethod is council pr2 E-I6.
@@ -1110,7 +1120,7 @@ func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
 	newSplit := func(t *testing.T, restart bool) *ProxiedStore {
 		t.Helper()
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		leaf := &bracketLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			if restart {
@@ -1144,6 +1154,19 @@ func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
 		{"CreateWithForeignID", func(s *ProxiedStore) error { _, err := s.CreateWithForeignID(Bead{ID: "gcg-1"}); return err }},
 		{"CreateWithStorage", func(s *ProxiedStore) error {
 			_, err := s.CreateWithStorage(Bead{Title: "t", Type: "task"}, StorageDefault)
+			return err
+		}},
+		// Reached the way every caller reaches it: through discovery, which
+		// lands on the wrapper itself, never on the write leaf.
+		{"ApplyGuarded", func(s *ProxiedStore) error {
+			batcher, ok := GuardedBatcherFor(s)
+			if !ok {
+				return errors.New("GuardedBatcherFor(*ProxiedStore) = false over a capable write leaf")
+			}
+			if batcher != GuardedBatcher(s) {
+				return fmt.Errorf("GuardedBatcherFor(*ProxiedStore) = %T, want the bracketing wrapper", batcher)
+			}
+			_, err := batcher.ApplyGuarded(context.Background(), GuardedBatch{Items: []GuardedItem{{Create: &Bead{ID: "prx-9", Title: "t"}}}})
 			return err
 		}},
 	}
@@ -1207,7 +1230,7 @@ func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
 // or that hands out some third object, fails here and the register has to be
 // rewritten with it.
 func TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap(t *testing.T) {
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 	bd := &conditionalRestartLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {}}
 	store, err := NewProxiedStore(native, bd, PinForTest("/scope", "", "beads"))
@@ -1244,6 +1267,18 @@ func TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap(t *testing.T) {
 	}
 	if _, claims := any(store).(AtomicConditionalCloserHandleProvider); claims {
 		t.Error("ProxiedStore claims AtomicConditionalCloserHandleProvider again, which AtomicConditionalCloserFor never consults on it")
+	}
+
+	// INSIDE the bracket: GuardedBatcherFor does not follow the resolve
+	// target, so over a capable write leaf it lands on the wrapper's own
+	// bracketed ApplyGuarded, and over this bd leaf (no batcher) it reports
+	// no capability rather than reaching past the wrapper.
+	if batcher, ok := GuardedBatcherFor(store); ok {
+		t.Fatalf("GuardedBatcherFor over a write leaf with no batcher = (%T, true), want no capability", batcher)
+	}
+	capable := NewProxiedStoreForGuardedBatchConformance("prx").(*ProxiedStore)
+	if batcher, ok := GuardedBatcherFor(capable); !ok || batcher != GuardedBatcher(capable) {
+		t.Fatalf("GuardedBatcherFor = (%T, %v), want the wrapper's bracketed batcher", batcher, ok)
 	}
 
 	// INSIDE the bracket: the one lookup that reaches the adapter.

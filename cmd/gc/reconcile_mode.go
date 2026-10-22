@@ -28,62 +28,33 @@ func (m reconcilerMode) String() string {
 	return config.SessionReconcilerLegacy
 }
 
-// v2EffectsReal reports whether the planner submits what admission lets
-// through. Until C9 it is false: the planner runs trace-only.
-const v2EffectsReal = false
-
-// v2ControllersInBuild reports whether v2 would act. While the planner is
-// trace-only it would start, restart and scale nothing, so selecting it is
-// refused.
-const v2ControllersInBuild = v2EffectsReal
-
-// v2SkeletonEnv is the developer-only override that admits v2 before its
-// controllers are in the build, for smoke runs of the skeleton on a throwaway
-// city. Only the exact value "1" counts. Deleted in P4.1, when v2 becomes
-// admissible on its own (OQ-1).
-const v2SkeletonEnv = "GC_RECONCILER_V2_SKELETON"
-
-// v2EffectsEnv is the staging-only knob (D-14) that runs the planner's
-// effects before C9, under the skeleton override only. Only the exact value
-// "1" counts. C9 deletes it with the override.
-const v2EffectsEnv = "GC_RECONCILER_V2_EFFECTS"
-
-// v2EffectsEnabled reports whether the planner submits the effects it
-// admits; otherwise its passes are trace-only.
-func v2EffectsEnabled(lookupEnv func(string) (string, bool)) bool {
-	if v2EffectsReal {
-		return true
-	}
-	if !v2SkeletonOverride(lookupEnv) {
-		return false
-	}
-	v, ok := lookupEnv(v2EffectsEnv)
-	return ok && v == "1"
-}
+// v2EffectsReal reports that the planner submits what admission lets
+// through (C9, the cutover): v2 is admissible from config alone, and its
+// passes act. The v2purity analyzer reads it as its cutover gate.
+const v2EffectsReal = true
 
 // reconcilerModeLookupEnv is the environment the composition edges (gc start,
-// the supervisor, doctor) latch with. Tests replace it instead of setting the
-// process environment; a test that does MUST NOT call t.Parallel().
+// the supervisor, doctor, the drain-ack CLI) latch with: the latch reads
+// GC_SESSION from it for its runtime refusals (v2SessionRuntimeName). Tests
+// replace it instead of setting the process environment; a test that does
+// MUST NOT call t.Parallel().
 var reconcilerModeLookupEnv = os.LookupEnv
 
 // latchReconcilerMode resolves the boot mode. Unknown values and an
 // inadmissible v2 are errors: the city does not start. v2 is admissible when
-// this build carries its controllers, or when lookupEnv reports the developer
-// override (a nil lookupEnv has none), and the composed config enables no
-// feature v2 defers (v2LatchRefusals). An alias latches legacy silently; its
-// load warning already tells the operator.
+// the composed config enables no feature v2 defers (v2LatchRefusals). An
+// alias latches legacy silently; its load warning already tells the
+// operator.
 func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)) (reconcilerMode, error) {
 	raw := cfg.Daemon.SessionReconciler
 	mode, _, ok := cfg.Daemon.SessionReconcilerMode()
 	switch {
 	case !ok:
 		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, raw)
-	case mode == config.SessionReconcilerV2 && !v2ControllersInBuild && !v2SkeletonOverride(lookupEnv):
-		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is not available in this build: the v2 session reconciler has no session controllers yet; remove the key to run the legacy reconciler`, raw)
 	case mode != config.SessionReconcilerV2:
 		return reconcilerLegacy, nil
 	}
-	if refusals := v2LatchRefusals(cfg); len(refusals) > 0 {
+	if refusals := v2LatchRefusals(cfg, lookupEnv); len(refusals) > 0 {
 		parts := make([]string, len(refusals))
 		for i, r := range refusals {
 			parts[i] = r.String()
@@ -91,14 +62,6 @@ func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)
 		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is refused: %s; remove those settings or run legacy`, raw, strings.Join(parts, "; "))
 	}
 	return reconcilerV2, nil
-}
-
-func v2SkeletonOverride(lookupEnv func(string) (string, bool)) bool {
-	if lookupEnv == nil {
-		return false
-	}
-	v, ok := lookupEnv(v2SkeletonEnv)
-	return ok && v == "1"
 }
 
 // reconcilerModeDrift reports, once per transition, that the session_reconciler
@@ -169,19 +132,17 @@ func (*sessionReconcilerDoctorCheck) WarmupEligible() bool { return false }
 func (*sessionReconcilerDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // Run implements doctor.Check: an error for any value the controller latch
-// refuses (unknown, or v2 while inadmissible), a warning for an alias or an
-// admissible v2, OK for legacy or unset. Admissibility comes from the latch
-// itself, the developer override included, so doctor and controller start never
-// disagree. Under every mode it also lists, as Details, the v2 refusals the
-// config would hit, a dry run of the switch, and the floors outside the
-// control dispatcher (v2FloorWarnings), a warning under v2 and a note
-// otherwise; under v2, the last pass's age when the controller answers; and
+// refuses (unknown, or v2 while inadmissible), a warning for an alias, OK for
+// legacy, unset or an admissible v2. Admissibility comes from the latch
+// itself, so doctor and controller start never disagree. Under every mode it also lists, as Details, the v2 refusals the
+// config would hit, a dry run of the switch; under v2, the last pass's age
+// when the controller answers; and
 // each class store's C0.7 capabilities. Only C0.7 changes the status: an
 // error for a latched v2 whose boot it would refuse.
 func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 	raw := c.cfg.Daemon.SessionReconciler
-	configured, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
+	_, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
 	mode, err := latchReconcilerMode(c.cfg, c.lookupEnv)
 	switch {
 	case err != nil:
@@ -193,22 +154,14 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Message = fmt.Sprintf("[daemon] session_reconciler = %q is a deprecated alias for legacy", raw)
 		r.FixHint = "remove the key: legacy is the default, and a gc that predates the key rejects it under strict mode"
 	case mode == reconcilerV2:
-		r.Status = doctor.StatusWarning
-		r.Message = "session reconciler: v2 (skeleton: no session controllers)"
-		r.FixHint = "remove the key to run the legacy reconciler"
+		r.Status = doctor.StatusOK
+		r.Message = "session reconciler: v2"
 	default:
 		r.Status = doctor.StatusOK
 		r.Message = "session reconciler: legacy"
 	}
-	for _, refusal := range v2LatchRefusals(c.cfg) {
+	for _, refusal := range v2LatchRefusals(c.cfg, c.lookupEnv) {
 		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())
-	}
-	floor := "v2 note: "
-	if configured == config.SessionReconcilerV2 {
-		floor = "v2 warning: "
-	}
-	for _, w := range v2FloorWarnings(c.cfg) {
-		r.Details = append(r.Details, floor+w)
 	}
 	if mode == reconcilerV2 && ctx != nil && ctx.CityPath != "" && c.queryPass != nil {
 		if st, qerr := c.queryPass(ctx.CityPath); qerr == nil && st.Passes > 0 {

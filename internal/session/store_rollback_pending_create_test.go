@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -80,13 +81,13 @@ func TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence(t *testing.T)
 			store, backing := backend.open(t)
 			created, info := seedRollbackPendingSession(t, store)
 			hooked := &closedReadHookStore{Store: store, hook: func(id string) {
-				if err := backing.SetMetadata(id, "archived_note", "kept"); err != nil {
+				if err := backing.SetMetadata(id, "test_archived_note", "kept"); err != nil {
 					t.Errorf("SetMetadata: %v", err)
 				}
 			}}
 			front := NewStore(beads.SessionStore{Store: hooked})
 
-			closed, postClosed, err := front.RollbackPendingCreateAtomically(info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
+			closed, postClosed, err := front.RollbackPendingCreateAtomically(context.Background(), info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
 			if err != nil || !closed || !postClosed {
 				t.Fatalf("RollbackPendingCreateAtomically = (%v, %v, %v), want (true, true, nil)", closed, postClosed, err)
 			}
@@ -95,9 +96,9 @@ func TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence(t *testing.T)
 				t.Fatalf("Get: %v", err)
 			}
 			if got.Status != "closed" || got.Metadata["state"] != string(StateFailedCreate) ||
-				got.Metadata["session_name"] != "" || got.Metadata["archived_note"] != "kept" {
+				got.Metadata["session_name"] != "" || got.Metadata["test_archived_note"] != "kept" {
 				t.Fatalf("row = status %q state %q session_name %q archived_note %q, want closed failed-create, name released, the other write kept",
-					got.Status, got.Metadata["state"], got.Metadata["session_name"], got.Metadata["archived_note"])
+					got.Status, got.Metadata["state"], got.Metadata["session_name"], got.Metadata["test_archived_note"])
 			}
 		})
 	}
@@ -120,7 +121,7 @@ func TestRollbackPendingCreateAtomicallyLeavesAReopenedRowItsName(t *testing.T) 
 			}}
 			front := NewStore(beads.SessionStore{Store: hooked})
 
-			closed, postClosed, err := front.RollbackPendingCreateAtomically(info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
+			closed, postClosed, err := front.RollbackPendingCreateAtomically(context.Background(), info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
 			if err != nil || !closed || postClosed {
 				t.Fatalf("RollbackPendingCreateAtomically = (%v, %v, %v), want (true, false, nil)", closed, postClosed, err)
 			}
@@ -143,7 +144,7 @@ func TestRollbackPendingCreateAtomicallyReportsUnsupportedWithoutWriting(t *test
 	created, info := seedRollbackPendingSession(t, store)
 	front := NewStore(beads.SessionStore{Store: store})
 
-	closed, postClosed, err := front.RollbackPendingCreateAtomically(info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
+	closed, postClosed, err := front.RollbackPendingCreateAtomically(context.Background(), info, rollbackClosePatch(), MetadataPatch{"session_name": ""})
 	if closed || postClosed || !beads.IsConditionalWriteUnsupported(err) {
 		t.Fatalf("RollbackPendingCreateAtomically = (%v, %v, %v), want (false, false, unsupported)", closed, postClosed, err)
 	}

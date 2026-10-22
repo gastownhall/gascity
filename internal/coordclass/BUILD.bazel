@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "class.go",
         "classify.go",
+        "coordination.go",
+        "owned.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/coordclass",
     visibility = ["//:__subpackages__"],
@@ -19,7 +21,10 @@ go_test(
     srcs = [
         "classify_nudge_queue_test.go",
         "classify_test.go",
+        "coordination_orders_pin_test.go",
+        "coordination_test.go",
         "guard_test.go",
+        "owned_test.go",
         "testenv_import_test.go",
     ],
     embed = [":coordclass"],
@@ -27,6 +32,7 @@ go_test(
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/nudgequeue",
+        "//internal/orders",
         "//internal/session",
         "//internal/storebinding",
         "//internal/testenv",

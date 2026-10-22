@@ -28,12 +28,32 @@ type rawGraphStorage interface {
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependenciesWithMetadata(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	GetDependentsWithMetadata(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
+	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }
 
 type rawDeleter struct{ raw rawGraphStorage }
 
+// Delete honors DeleteRequest.ExpectedVersion, matching the real role's own
+// ordering: the existence probe, then the version precondition, then the
+// deletion -- all deletes nothing on a miss. Validation (a non-nil
+// ExpectedVersion beside more than one id) matches issueops.ErrValidation.
 func (d rawDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
+	if req.ExpectedVersion != nil && len(req.IDs) != 1 {
+		return issueops.DeleteResult{}, fmt.Errorf("%w: rawDeleter: ExpectedVersion requires exactly one id", issueops.ErrValidation)
+	}
 	for _, id := range req.IDs {
+		if req.ExpectedVersion != nil {
+			current, err := d.raw.GetIssue(ctx, id)
+			if err != nil {
+				return issueops.DeleteResult{}, err
+			}
+			if current == nil {
+				return issueops.DeleteResult{}, fmt.Errorf("not found: issue %s", id)
+			}
+			if current.RowVersion != *req.ExpectedVersion {
+				return issueops.DeleteResult{}, issueops.ErrVersionMismatch
+			}
+		}
 		if err := d.raw.DeleteIssue(ctx, id); err != nil {
 			return issueops.DeleteResult{}, err
 		}
@@ -108,6 +128,55 @@ func (reachableStatsReporter) AssigneeStats(context.Context, issueops.AssigneeSt
 }
 
 func (s *nativeDoltStorageSpy) Deleter() (issueops.Deleter, error) { return rawDeleter{raw: s}, nil }
+
+// rawConfigStorage is the raw hook nativeReadIssuePrefix's role port replaced.
+// Both in-package doubles implement it (nativeDoltStorageSpy's getConfig hook,
+// nativeDoltMemStorage's issue-prefix fixture), so rawWorkspaceConfig is their
+// shared adapter rather than a separate one per double.
+type rawConfigStorage interface {
+	GetConfig(context.Context, string) (string, error)
+}
+
+// rawWorkspaceConfig stands in for the issueops.WorkspaceConfig role over a
+// double's raw GetConfig hook. Only GetSetting is forwarded: it is the only
+// method nativeReadIssuePrefix, this role's sole production caller, ever
+// calls. The other three follow the spy's own "unset hook is a no-op"
+// convention rather than the raw-panic tripwire's, since nothing in this
+// package exercises them yet; the first caller that needs ListSettings,
+// SetSetting or UnsetSetting through a double extends them here rather than
+// inventing a second role fake.
+type rawWorkspaceConfig struct{ raw rawConfigStorage }
+
+var _ issueops.WorkspaceConfig = rawWorkspaceConfig{}
+
+func (w rawWorkspaceConfig) GetSetting(ctx context.Context, req issueops.GetSettingRequest) (issueops.SettingResult, error) {
+	value, err := w.raw.GetConfig(ctx, req.Key)
+	if err != nil {
+		return issueops.SettingResult{}, err
+	}
+	return issueops.SettingResult{Key: req.Key, Value: value}, nil
+}
+
+func (w rawWorkspaceConfig) ListSettings(context.Context, issueops.ListSettingsRequest) (issueops.ListSettingsResult, error) {
+	return issueops.ListSettingsResult{Settings: map[string]string{}}, nil
+}
+
+func (w rawWorkspaceConfig) SetSetting(context.Context, issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
+	return issueops.SetSettingResult{}, nil
+}
+
+func (w rawWorkspaceConfig) UnsetSetting(context.Context, issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
+	return issueops.UnsetSettingResult{}, nil
+}
+
+func (s *nativeDoltStorageSpy) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return rawWorkspaceConfig{raw: s}, nil
+}
+
+func (s *nativeDoltMemStorage) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return rawWorkspaceConfig{raw: s}, nil
+}
+
 func (s *nativeDoltStorageSpy) DependencyEditor() (issueops.DependencyEditor, error) {
 	return rawDependencyEditor{raw: s}, nil
 }
@@ -274,14 +343,32 @@ func (s *nativeDoltMemStorage) Releaser() (issueops.Releaser, error) {
 }
 
 // rawBatchApplier reproduces issueops.BatchApplier over the double's own
-// lifecycle role, so a fixture that records or applies UpdateRequests keeps
-// seeing the requests the store composed even when the store routes a patch
-// through the batch door.
+// lifecycle and dependency-editor roles, so a fixture that records or applies
+// UpdateRequests (or AddDependency calls) keeps seeing the requests the store
+// composed even when the store routes a patch, close, or edge through the
+// batch door — including the native graph-apply route, which composes
+// create/dep_add/update items in one request.
+//
+// Ref.Key resolution is LOCAL to one ApplyBatch call, matching the role's own
+// per-request scoping: a key an earlier create item in THIS request named
+// resolves to the id that item minted, and nothing else is consulted.
+// CreateItem.MetadataRefs is spliced AFTER every item in the request has run
+// (a second write per spliced issue), matching the role's documented
+// "every id is minted before any splice is applied" rule, including refs
+// that reach FORWARD to a create item later in the same request.
 //
 // It is deliberately NOT atomic: the doubles it serves have no transaction to
 // roll back, and inventing one here would let a test pass against a store that
 // dialed a partial batch.
 type rawBatchApplier struct{ storage beadslib.Storage }
+
+// rawBatchApplierPendingSplice defers a CreateItem.MetadataRefs splice until
+// every item in the request has run and every id is known, per
+// CreateItem.MetadataRefs's own rule.
+type rawBatchApplierPendingSplice struct {
+	issueID string
+	refs    map[string]issueops.Ref
+}
 
 // ApplyBatch applies each item and answers ONE ItemResult per item, in request
 // order, carrying the Changed the underlying operation reported.
@@ -305,12 +392,30 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 		return issueops.ApplyBatchResult{}, err
 	}
 	result := issueops.ApplyBatchResult{Keys: map[string]string{}, Items: make([]issueops.ItemResult, 0, len(req.Items))}
+	keys := map[string]string{}
+	var splices []rawBatchApplierPendingSplice
+
+	resolve := func(ref issueops.Ref) (string, error) {
+		if ref.ID != "" {
+			return ref.ID, nil
+		}
+		id, ok := keys[ref.Key]
+		if !ok {
+			return "", fmt.Errorf("rawBatchApplier: ref key %q does not resolve to any create item in this request", ref.Key)
+		}
+		return id, nil
+	}
+
 	for _, item := range req.Items {
 		switch item.Kind {
 		case issueops.ItemUpdate:
+			targetID, err := resolve(item.Update.Target)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
 			updated, err := lifecycle.Update(ctx, issueops.UpdateRequest{
 				Actor:                 req.Actor,
-				IssueID:               item.Update.Target.ID,
+				IssueID:               targetID,
 				Patch:                 item.Update.Patch,
 				ForceAssigneeTransfer: item.Update.ForceAssigneeTransfer,
 				ForceClosePolicy:      item.Update.ForceClosePolicy,
@@ -322,12 +427,16 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 				return issueops.ApplyBatchResult{}, err
 			}
 			result.Items = append(result.Items, issueops.ItemResult{
-				Kind: item.Kind, IssueID: item.Update.Target.ID, Changed: updated.Changed,
+				Kind: item.Kind, IssueID: targetID, Changed: updated.Changed,
 			})
 		case issueops.ItemClose:
+			targetID, err := resolve(item.Close.Target)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
 			closed, err := lifecycle.Close(ctx, issueops.CloseRequest{
 				Actor:           req.Actor,
-				IssueID:         item.Close.Target.ID,
+				IssueID:         targetID,
 				Reason:          item.Close.Reason,
 				Session:         item.Close.Session,
 				Force:           item.Close.Force,
@@ -337,7 +446,7 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 				return issueops.ApplyBatchResult{}, err
 			}
 			result.Items = append(result.Items, issueops.ItemResult{
-				Kind: item.Kind, IssueID: item.Close.Target.ID, Changed: closed.Changed,
+				Kind: item.Kind, IssueID: targetID, Changed: closed.Changed,
 			})
 		case issueops.ItemCreate:
 			created, err := lifecycle.Create(ctx, issueops.CreateRequest{Actor: req.Actor, Issue: item.Create.Issue})
@@ -350,14 +459,69 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 			}
 			if item.Create.Key != "" && id != "" {
 				result.Keys[item.Create.Key] = id
+				keys[item.Create.Key] = id
+			}
+			if len(item.Create.MetadataRefs) > 0 && id != "" {
+				splices = append(splices, rawBatchApplierPendingSplice{issueID: id, refs: item.Create.MetadataRefs})
 			}
 			result.Items = append(result.Items, issueops.ItemResult{
 				Kind: item.Kind, IssueID: id, Changed: true,
+			})
+		case issueops.ItemDepAdd:
+			graph, ok := a.storage.(rawGraphStorage)
+			if !ok {
+				return issueops.ApplyBatchResult{}, fmt.Errorf("rawBatchApplier: storage %T does not support dependency edges", a.storage)
+			}
+			sourceID, err := resolve(item.DepAdd.Source)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			targetID, err := resolve(item.DepAdd.Target)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			dep := &beadslib.Dependency{
+				IssueID:     sourceID,
+				DependsOnID: targetID,
+				Type:        item.DepAdd.Type,
+				Metadata:    item.DepAdd.Metadata,
+			}
+			if err := graph.AddDependency(ctx, dep, req.Actor); err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			result.Items = append(result.Items, issueops.ItemResult{
+				Kind: item.Kind, IssueID: sourceID, DependsOnID: targetID, Changed: true,
 			})
 		default:
 			return issueops.ApplyBatchResult{}, fmt.Errorf("rawBatchApplier: unsupported item kind %q", item.Kind)
 		}
 	}
+
+	// The splice pass runs only after every item above has landed, so a
+	// MetadataRefs entry naming a create item LATER in the request resolves
+	// exactly as issueops.CreateItem.MetadataRefs documents.
+	for _, splice := range splices {
+		values := make(map[string]json.RawMessage, len(splice.refs))
+		for metaKey, ref := range splice.refs {
+			resolvedID, err := resolve(ref)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			raw, err := json.Marshal(resolvedID)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			values[metaKey] = raw
+		}
+		if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
+			Actor:   req.Actor,
+			IssueID: splice.issueID,
+			Patch:   issueops.IssuePatch{Metadata: issueops.MetadataPatch{Set: values}},
+		}); err != nil {
+			return issueops.ApplyBatchResult{}, err
+		}
+	}
+
 	return result, nil
 }
 
@@ -365,8 +529,25 @@ func (s *nativeDoltStorageSpy) BatchApplier() (issueops.BatchApplier, error) {
 	return rawBatchApplier{storage: s}, nil
 }
 
+// The mem storage applies one batch request at a time because the facade does:
+// it runs a whole request in one transaction, so two concurrent requests never
+// interleave item by item. rawBatchApplier alone would let them, and this
+// storage cannot survive that: a losing request's fenced update fails inside
+// RunInTransaction, which restores the snapshot it took on entry and so erases
+// a winning request's close (the lifecycle double's Close writes outside any
+// transaction) that landed in between. Serializing requests models the
+// facade's isolation without the atomicity rawBatchApplier deliberately leaves
+// out: a request that fails part-way still keeps its earlier items.
 func (s *nativeDoltMemStorage) BatchApplier() (issueops.BatchApplier, error) {
-	return rawBatchApplier{storage: s}, nil
+	return nativeDoltMemBatchApplier{storage: s}, nil
+}
+
+type nativeDoltMemBatchApplier struct{ storage *nativeDoltMemStorage }
+
+func (a nativeDoltMemBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+	a.storage.batchMu.Lock()
+	defer a.storage.batchMu.Unlock()
+	return rawBatchApplier{storage: a.storage}.ApplyBatch(ctx, req)
 }
 
 // The failing-label double gets its own batch applier for the reason embedding

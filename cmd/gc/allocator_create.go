@@ -139,7 +139,8 @@ func createPlanOf(id, template string, p poolSessionCreatePlan) createPlan {
 type createPass struct {
 	cfg *config.City
 	// sp answers transport capability checks; no effect probes it, except
-	// that a named AdoptLive stamps the adopted runtime's identity (LL5).
+	// that a named AdoptLive stamps the adopted runtime's identity (LL5) and
+	// a named reopen confirms its name free (nameConfirmedFree).
 	sp                runtime.Provider
 	store             beads.Store
 	rigStores         map[string]beads.Store
@@ -209,11 +210,29 @@ func newCreateEffects(h createEffectHost) (*createEffects, error) {
 // wrote nothing. The executor settled it at the deadline already (P3).
 var errCreateAbandoned = errors.New("create effect: context ended before the write")
 
-// checkCreateContext is the create's last check, under the identifier locks
-// just before its write: an effect abandoned at its deadline never writes.
-func checkCreateContext(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
+// beginWrite is the create's last check, under the identifier locks just
+// before its write: the context, then the transaction's latch (begin), so an
+// effect abandoned at its deadline never writes.
+func (p *createProgress) beginWrite(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil && p.begin != nil {
+		err = p.begin(ctx)
+	}
+	if err != nil {
 		return fmt.Errorf("%w: %w", errCreateAbandoned, err)
+	}
+	p.writing = true
+	return nil
+}
+
+// afterWrite runs the after-write seam once the row write landed; its
+// error is an ambiguous write, as a panic there is.
+func (p *createProgress) afterWrite(ctx context.Context, rowID string) error {
+	if p.wrote == nil {
+		return nil
+	}
+	if err := p.wrote(ctx); err != nil {
+		return poolCreateWriteError{err: err, rowID: rowID, landed: true}
 	}
 	return nil
 }
@@ -221,15 +240,16 @@ func checkCreateContext(ctx context.Context) error {
 // Create effect stages. A no-write failure names the stage it failed in as
 // its refusal's cause (ineligible:create-refused:<cause>).
 const (
-	createStageStalePlan = "stale-plan" // the plan's template or identity left config
-	createStageWorktree  = "worktree"   // the plan's worktree evidence failed verification
-	createStagePrepare   = "prepare"    // transport, tmux alias, identifiers
-	createStageLock      = "lock"       // the city identifier locks
-	createStageFence     = "fence"      // the locked re-census and availability checks
-	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
-	createStagePanic     = "panic"      // a panic before the write
-	createStageResolve   = "resolve"    // a named create's read-only template resolution
-	createStageNoWriter  = "no-writer"  // a named reopen whose store resolves no conditional writer (v5 C2)
+	createStageStalePlan = "stale-plan"   // the plan's template or identity left config
+	createStageWorktree  = "worktree"     // the plan's worktree evidence failed verification
+	createStagePrepare   = "prepare"      // transport, tmux alias, identifiers
+	createStageLock      = "lock"         // the city identifier locks
+	createStageFence     = "fence"        // the locked re-census and availability checks
+	createStageFenceRead = "fence-read"   // a pool create's locked failure that proves no name taken
+	createStagePanic     = "panic"        // a panic before the write
+	createStageResolve   = "resolve"      // a named create's read-only template resolution
+	createStageNoWriter  = "no-writer"    // a named reopen whose store resolves no conditional writer (v5 C2)
+	createStageRedecided = causeRedecided // a named reopen whose fresh read finds a live runtime under the name
 )
 
 // createProgress is how far one effect got: the stage a no-write failure
@@ -238,6 +258,8 @@ const (
 // carried evidence.
 type createProgress struct {
 	stage    string
+	begin    func(context.Context) error // the transaction's write begin, or nil
+	wrote    func(context.Context) error // its after-write seam, or nil
 	writing  bool
 	rowID    string
 	retarget string
@@ -248,11 +270,12 @@ type createProgress struct {
 // (P3, P6). A panic before the row write wrote nothing; from the write on,
 // the row may exist, so it settles as ambiguous. A plan without its token
 // refuses before anything: a minted token would never match the entry's.
-func (x *createEffects) run(ctx context.Context, pass *createPass, p createPlan) (s createSettlement) {
+// begin is txCaps.beginWrite and wrote txCaps.afterWrite; nil skips them.
+func (x *createEffects) run(ctx context.Context, pass *createPass, p createPlan, begin, wrote func(context.Context) error) (s createSettlement) {
 	var (
 		info session.Info
 		err  error
-		prog = createProgress{stage: createStagePrepare}
+		prog = createProgress{stage: createStagePrepare, begin: begin, wrote: wrote}
 	)
 	defer func() {
 		if r := recover(); r != nil {
@@ -286,10 +309,10 @@ func (x *createEffects) run(ctx context.Context, pass *createPass, p createPlan)
 	prog.stage = createStagePrepare
 	view := x.view(pass, p.Token)
 	view.beforeWrite = func(id string) error {
-		if err := checkCreateContext(ctx); err != nil {
+		if err := prog.beginWrite(ctx); err != nil {
 			return err
 		}
-		prog.writing, prog.rowID = true, id
+		prog.rowID = id
 		return nil
 	}
 	locks := func(cityPath string, identifiers []string, fn func() error) error {
@@ -299,7 +322,9 @@ func (x *createEffects) run(ctx context.Context, pass *createPass, p createPlan)
 			return fn()
 		})
 	}
-	info, err = createPoolSessionBeadWithGuardedAliasUsingLock(view, cfgAgent, p.Template, p.QualifiedInstance, p.Slot, metadata, locks)
+	if info, err = createPoolSessionBeadWithGuardedAliasUsingLock(view, cfgAgent, p.Template, p.QualifiedInstance, p.Slot, metadata, locks); err == nil {
+		err = prog.afterWrite(ctx, info.ID)
+	}
 	return // the deferred settle sets s
 }
 

@@ -48,8 +48,8 @@ func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool)
 	w.wake = newLegacyWake(w.pokeCh, w.controlDispatcherCh)
 	if mode == reconcilerV2 {
 		w.v2 = newDefaultPlanner(stderr)
-		w.wake.planner, w.wake.waitDepClosed = w.v2.planner, w.v2.waitDependencyClosed
-		fmt.Fprintln(stderr, "session reconciler: v2 (planner: trace-only)") //nolint:errcheck // best-effort stderr
+		w.wake.planner, w.wake.waitDepClosed, w.wake.wakeReads = w.v2.planner, w.v2.waitDependencyClosed, w.v2.wakeReads
+		fmt.Fprintln(stderr, "session reconciler: v2") //nolint:errcheck // best-effort stderr
 	}
 	return w, nil
 }
@@ -81,14 +81,14 @@ type reloadIntent struct {
 	Soft   bool
 }
 
-// v2SoftReloadUnavailable answers a soft reload under v2: drift acceptance
-// (MAINT-025) is a legacy session phase, off under v2 until C7c hands the
-// planner a soft-reload request and deletes this hook (v5 M2). The reply says
-// so instead of reporting zero accepted sessions.
+// v2SoftReloadUnavailable answers a soft reload under a trace-only v2
+// planner, which writes no row: legacy's drift acceptance (MAINT-025) is
+// off, and A8 accepts only with effects on (acceptSoftReload). The reply
+// says so instead of reporting zero accepted sessions.
 func v2SoftReloadUnavailable(intent reloadIntent, r *reloadControlReply) {
 	if intent.Soft {
 		r.Warnings = append(r.Warnings, v2SoftReloadUnavailableWarning)
 	}
 }
 
-const v2SoftReloadUnavailableWarning = "soft reload: config drift acceptance is not available under session_reconciler=v2 yet; the config applied, and drifted sessions keep their accepted config hashes"
+const v2SoftReloadUnavailableWarning = "soft reload: config drift acceptance is not available under a trace-only session_reconciler=v2; the config applied, and drifted sessions keep their accepted config hashes"

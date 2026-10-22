@@ -249,7 +249,7 @@ var wakeSources = []wakeSource{
 		after: func(w *controllerWake, in wakeInput) { w.OnBeadEvent(events.Event{}, in.snapshot) },
 	},
 	{
-		site:   "api_state.go:mutateAndPoke",
+		site:   "api_state.go:mutateAndPokeLocked",
 		call:   "WakeMaintenance()",
 		before: func(p, d chan<- struct{}, _ wakeInput) { legacyEnqueue(p, d, allocatorKey...) }, // was cs.Enqueue(reconcilekey.Allocator())
 		after:  func(w *controllerWake, _ wakeInput) { w.WakeMaintenance() },
@@ -316,6 +316,17 @@ var wakeSources = []wakeSource{
 		call:   "Enqueue(wakeReasonFollowUp, reconcilekey.Allocator())",
 		before: func(p, _ chan<- struct{}, _ wakeInput) { legacyEnqueue(p, nil, allocatorKey...) },
 		after:  func(w *controllerWake, _ wakeInput) { w.Enqueue(wakeReasonFollowUp, reconcilekey.Allocator()) },
+	},
+	{
+		// New with the ledger feed (CH-4): one legacy wake per refresh pass
+		// that changed a row, the allocator plus the changed session rows
+		// and the control dispatcher for graph rows (critic A2). Under v2
+		// legacyWakeOf returns nil and the feed never enqueues (critic D7).
+		site:   "ledger_feed.go:refreshRows",
+		call:   "Enqueue(wakeReasonLedgerFeed, keys...)",
+		inputs: keyedWakeInputs(),
+		before: func(p, d chan<- struct{}, in wakeInput) { legacyEnqueue(p, d, in.keys...) }, // new: no pre-wake send
+		after:  func(w *controllerWake, in wakeInput) { w.Enqueue(wakeReasonLedgerFeed, in.keys...) },
 	},
 	{
 		site:   "service_runtime.go:Poke",

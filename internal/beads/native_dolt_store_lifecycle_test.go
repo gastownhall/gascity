@@ -117,6 +117,21 @@ func (l nativeDoltLifecycleForTest) Update(ctx context.Context, request issueops
 		if current == nil {
 			return fmt.Errorf("not found: issue %s", request.IssueID)
 		}
+		// The three Expected* guards are evaluated AS-MODIFIED, against the row
+		// as this transaction sees it right now -- which, inside a batch's
+		// per-item sequential calls into this same double, is already the row
+		// as earlier items in the request left it. A miss leaves this
+		// transaction's body unrun: the double returns before any of the
+		// writes below are issued.
+		if request.ExpectedVersion != nil && current.RowVersion != *request.ExpectedVersion {
+			return issueops.ErrVersionMismatch
+		}
+		if request.ExpectedStatus != nil && current.Status != *request.ExpectedStatus {
+			return issueops.ErrStatusMismatch
+		}
+		if request.ExpectedAssignee != nil && current.Assignee != *request.ExpectedAssignee {
+			return issueops.ErrAssigneeMismatch
+		}
 		if request.Patch.ParentID.Set {
 			if err := nativeDoltLifecycleReparentForTest(ctx, tx, request); err != nil {
 				return err
@@ -234,6 +249,13 @@ func (l nativeDoltLifecycleForTest) Close(ctx context.Context, request issueops.
 	}
 	if current == nil {
 		return issueops.CloseResult{}, fmt.Errorf("not found: issue %s", request.IssueID)
+	}
+	// ExpectedVersion is checked BEFORE the idempotent-close short-circuit
+	// below, per CloseRequest.ExpectedVersion's own doc: a re-close of an
+	// already-closed issue still refuses on a stale token rather than
+	// reporting the no-op it would otherwise be.
+	if request.ExpectedVersion != nil && current.RowVersion != *request.ExpectedVersion {
+		return issueops.CloseResult{}, issueops.ErrVersionMismatch
 	}
 	if current.Status == beadslib.StatusClosed {
 		return issueops.CloseResult{Issue: current}, nil

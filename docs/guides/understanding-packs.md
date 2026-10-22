@@ -146,6 +146,14 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 ```
 
+`gc rig add ../checkout-service --include gc=https://github.com/gastownhall/gascity-packs/tree/main/gascity`
+writes a `[rigs.imports.gc]` entry for this source. The `gc=` prefix sets the
+binding; without it, the binding is the source's last path segment
+(`gascity`). Because this pack ships with `gc`, `gc rig add` pins it to the
+bundled `sha:` version rather than the `^0.1` constraint shown above. Any
+other remote pack gets the constraint `gc import add` would write, plus a
+`packs.lock` entry.
+
 If that same pack defines a rig-scoped agent named `planner`, the runtime agent
 is stamped with the rig name as well as the binding:
 

@@ -20,6 +20,11 @@ import (
 )
 
 func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
+	if onWorkerSite(cityPath) {
+		// The box's guard runs nothing, so its IsRunning is not the remote
+		// runtime's liveness: the catalog reports the persisted state.
+		sp = nil
+	}
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err
@@ -31,12 +36,30 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
 }
 
+// workerFactoryWithStaleKeyDetectionWaiter builds a factory whose usage
+// attribution reads work beads from store only: city-resident beads. A caller
+// that serves rig-resident work uses workerFactoryWithAttribution.
 func workerFactoryWithStaleKeyDetectionWaiter(
 	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
+	return workerFactoryWithAttribution(cityPath, store, sp, cfg, waiter, nil, nil)
+}
+
+// workerFactoryWithAttribution is the factory constructor with formula
+// attribution injected: resolveBead reads a work bead wherever it lives (nil
+// falls back to store) and memo outlives the factory (nil derives every time).
+func workerFactoryWithAttribution(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+	resolveBead func(id string) (beads.Bead, error),
+	memo *worker.FormulaNameMemo,
 ) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
@@ -89,6 +112,12 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
+		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
+		ResolveBead:             resolveBead,
+		FormulaMemo:             memo,
+		// The zero store resolves no class store: a deferred submit writes
+		// no shadow, so it opens nothing.
+		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,
 	})
 }
 
@@ -494,12 +523,51 @@ func runtimeWorkerHandleWithConfig(
 	return factory.RuntimeHandle(sessionName, providerName, transport, processNames)
 }
 
+// sessionActor is kind's Actor on cityPath. A cityPath that names no city
+// directory gives an Actor with no City, whose verbs that take the runtime
+// lease refuse with session.ErrRuntimeLeaseNoCity.
+func sessionActor(kind session.ActorKind, cityPath string) session.Actor {
+	city, _ := session.NewCityDir(cityPath)
+	return session.Actor{Kind: kind, City: city}
+}
+
+// workerKillSessionTargetWithConfig is an operator's kill: it waits for the
+// session's runtime lease (CONTRACT O3).
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+	return workerKillSessionTargetCtx(context.Background(), sessionActor(session.ActorOperator, cityPath), cityPath, store, sp, cfg, target)
+}
+
+// controllerKillSessionRow is the controller's kill of the row it decided
+// on (legacyAct.Stop): it never waits for the runtime lease, and once it
+// holds the lease it reads the row fresh and stops only while the row still
+// carries decided's facts (sessionpkg.FactsLegacyKill); otherwise it returns
+// session.ErrKillPremiseMoved, which the caller defers like a busy lease.
+func controllerKillSessionRow(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, decided session.Info) error {
+	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(session.Decide(decided, session.FactsLegacyKill))
+}
+
+// controllerKillRowCtx is a controller kill by by (ActorController, and
+// by.Lease when the caller holds one), under ctx's kill premise, resolved
+// strictly by the row's ID: a row that does not resolve (gone, unreadable) is
+// an error the caller defers on, never a runtime handle named after the ID.
+func controllerKillRowCtx(ctx context.Context, by session.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) error {
+	if store == nil || strings.TrimSpace(id) == "" {
+		return fmt.Errorf("controller kill: no session row to resolve (id %q)", id)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
+	if err != nil {
+		return err
+	}
+	return handle.Kill(ctx, by)
+}
+
+// workerKillSessionTargetCtx kills target in by's lease mode.
+func workerKillSessionTargetCtx(ctx context.Context, by session.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
 	}
-	return handle.Kill(context.Background())
+	return handle.Kill(ctx, by)
 }
 
 // workerStopSessionTargetForShutdownWithConfig is the city stop/restart sweep's

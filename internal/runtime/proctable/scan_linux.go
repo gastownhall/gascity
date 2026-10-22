@@ -13,17 +13,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
+// GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
+// with any GC_SESSION_ID that were reparented away from their spawner, to
+// init or the user subreaper ([OrphanCandidate]), the only roots the sweep
+// may reap. It reads a process's environment only when its parent makes it
+// a candidate, so a host's other processes cost one stat read each, not an
+// environ read (mc-ygved).
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	if id == "" {
+		return scanOrphanCandidatesWithRoot(scanRoot, detectSubreaper(os.Getpid()))
+	}
 	return scanWithRoot(scanRoot, id)
 }
+
+// detectSubreaper is the user subreaper the empty-id scan counts as an
+// orphan parent (a systemd --user supervisor); a test sets its fixture's.
+var detectSubreaper = pidutil.DetectUserSubreaperPID
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
 // failures from processes proven to predate incarnationStartedAt do not make
@@ -39,7 +52,7 @@ func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.
 // carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
 // client is never a root, whoever its parent is — and sits outside its
 // parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
-// or is infrastructure.
+// is infrastructure, or cannot be read (permission denied).
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -73,6 +86,26 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 }
 
 func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runtime.LiveRuntime, error) {
+	return scanEntries(root, id, incarnationStartedAt, nil)
+}
+
+// scanOrphanCandidatesWithRoot is the all-roots scan restricted to processes
+// reparented to init or subreaperPID (OrphanCandidate), each decided on its
+// stat before anything else is read. A stat that cannot be read is the
+// entry's error, as an unreadable owner is: the scan stays fail-closed.
+func scanOrphanCandidatesWithRoot(root string, subreaperPID int) ([]runtime.LiveRuntime, error) {
+	return scanEntries(root, "", time.Time{}, func(pid int) (bool, error) {
+		ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
+		if err != nil || !ok {
+			return false, err // a vanished process is no candidate; a failed read is the entry's error
+		}
+		return OrphanCandidate(ppid, subreaperPID), nil
+	})
+}
+
+// scanEntries scans root's entries for id's roots; candidate, when set,
+// decides first whether an entry is read at all.
+func scanEntries(root, id string, incarnationStartedAt time.Time, candidate func(pid int) (bool, error)) ([]runtime.LiveRuntime, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return []runtime.LiveRuntime{}, fmt.Errorf("enumerating %s: %w", root, err)
@@ -82,9 +115,22 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 		out     []runtime.LiveRuntime
 		scanErr error
 	)
+	// Boot time turns each root's start ticks into a wall-clock StartedAt;
+	// without it StartedAt stays zero and callers that bound on it refuse.
+	bootedAt, bootErr := readBootTime(root)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
+		}
+		if pid, perr := strconv.Atoi(entry.Name()); candidate != nil && perr == nil && pid > 1 {
+			keep, err := candidate(pid)
+			if err != nil {
+				scanErr = errors.Join(scanErr, &EntryError{PID: pid, Err: fmt.Errorf("reading parent for pid %d: %w", pid, err)})
+				continue
+			}
+			if !keep {
+				continue
+			}
 		}
 		live, reported, err := scanProcEntry(root, entry.Name(), id, incarnationStartedAt)
 		if err != nil {
@@ -94,6 +140,9 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 		}
 		if !reported {
 			continue
+		}
+		if ticks, err := strconv.ParseUint(live.StartIdentity, 10, 64); err == nil && bootErr == nil {
+			live.StartedAt = processStartedAt(bootedAt, ticks)
 		}
 		out = append(out, live)
 	}
@@ -164,7 +213,7 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if city == "" {
 		city = env["GC_CITY"]
 	}
-	ppid, _, _ := readParentPID(filepath.Join(root, entryName, "stat"))
+	ppid, _, startIdentity, _, _ := readProcStatIdentity(filepath.Join(root, entryName, "stat"))
 	comm, _ := os.ReadFile(filepath.Join(root, entryName, "comm"))
 	return runtime.LiveRuntime{
 		SessionID: sessionID,
@@ -177,7 +226,10 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 		// parent is init or an unreadable stat, never the provider's server, so
 		// it is refused without a comm read.
 		ParentIsProviderInfrastructure: ppid > 1 && isInfrastructureProcess(root, ppid),
-		Name:                           strings.TrimSpace(string(comm)),
+		// The same token ProcessIdentity and RootStartIdentity read, so a
+		// killer can re-check it against the live process.
+		StartIdentity: startIdentity,
+		Name:          strings.TrimSpace(string(comm)),
 	}, true, nil
 }
 
@@ -564,7 +616,11 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 		return true, nil
 	}
 	parentEnv, err := parseEnvironFile(filepath.Join(root, strconv.Itoa(ppid), "environ"))
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		// An unreadable parent names no session we can see: outside the envelope.
+		parentEnv = nil
+	case err != nil:
 		return false, err
 	}
 	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {

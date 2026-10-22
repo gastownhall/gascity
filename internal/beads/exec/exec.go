@@ -289,6 +289,11 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 
 // Update modifies fields of an existing bead: script update <id> (stdin: JSON)
 func (s *Store) Update(id string, opts beads.UpdateOpts) error {
+	// The exec protocol's update document has no removal field; a script
+	// would see only the sets and report success with the keys still set.
+	if len(opts.UnsetMetadata) > 0 {
+		return fmt.Errorf("exec beads update %q: %w", id, beads.ErrUnsetMetadataUnsupported)
+	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)
@@ -327,6 +332,13 @@ func (s *Store) Close(id string) error {
 
 // Reopen sets a bead's status to "open": script reopen <id>
 func (s *Store) Reopen(id string) error {
+	// metadata.close_reason is a closer's input; a reopened bead must not hand
+	// it to its next close, so it is cleared before the reopen, as BdStore does.
+	if b, err := s.Get(id); err == nil && b.Status != "open" && strings.TrimSpace(b.Metadata["close_reason"]) != "" {
+		if err := s.SetMetadata(id, "close_reason", ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	_, err := s.run(nil, "reopen", id)
 	if err != nil {
 		if isNotFoundError(err) {

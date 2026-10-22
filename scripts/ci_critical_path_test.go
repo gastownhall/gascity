@@ -117,8 +117,11 @@ func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration --keep_going //test:integration_packages`) {
-		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration")
+	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration-packages --keep_going //test:integration_packages`) {
+		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration-packages")
+	}
+	if !regexp.MustCompile(`(?m)^test:integration-packages --config=integration$`).Match(bazelrc) {
+		t.Error(".bazelrc test:integration-packages does not include --config=integration; the lane would skip the process suite")
 	}
 }
 

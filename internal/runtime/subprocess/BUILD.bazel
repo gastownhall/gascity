@@ -4,6 +4,8 @@ go_library(
     name = "subprocess",
     srcs = [
         "cutover.go",
+        "fence.go",
+        "local_transcripts.go",
         "seams.go",
         "subprocess.go",
     ],
@@ -18,16 +20,19 @@ go_library(
 go_test(
     name = "subprocess_test",
     srcs = [
+        "fence_test.go",
         "meta_privacy_test.go",
         "seam_conformance_test.go",
         "seams_test.go",
         "socket_probe_test.go",
         "subprocess_test.go",
+        "terminate_identity_test.go",
         "testenv_import_test.go",
     ],
     embed = [":subprocess"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",

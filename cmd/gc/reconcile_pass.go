@@ -35,6 +35,7 @@ type passTrace struct {
 	Err                string
 	Admitted, Deferred []intent
 	Rows               []rowTrace
+	IdleTraces         []rowTrace // A15's ladder deferrals and decided stops, legacy's idle-timeout trace
 	Alerts             []string
 }
 
@@ -43,6 +44,7 @@ type passTrace struct {
 // name, which the trace sink files it under.
 type rowTrace struct {
 	Key                   rowKey
+	Site                  TraceSiteCode // the trace site; zero is the v2 session decision
 	Template, SessionName string
 	Reason, Outcome       string
 }
@@ -89,7 +91,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	a, err := decideAllocation(allocInputs{
 		Now: now, Cfg: cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen, CityPath: e.CityPath, CityName: e.CityName,
 		CitySuspended: w.CitySuspended, SuspendedRigPaths: w.SuspendedRigPaths, Census: w.Census, Demand: w.Demand,
-		ScaleCheck: w.ScaleCheck, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
+		ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
 		Episodes: w.Episodes, SleepPolicies: w.SleepPolicies, TransportRefused: w.TransportRefused, ReadyWaits: w.ReadyWaits,
 		InFlight: w.InFlight, Backoff: w.Backoff,
 	})
@@ -98,6 +100,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		return passResult{}
 	}
 	rec.Alerts = a.Alerts
+	rec.IdleTraces = p.idleWants(&w, &a)
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {
@@ -119,19 +122,24 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 			intents = append(intents, it)
 		}
 	}
+	rec.IdleTraces = append(rec.IdleTraces, p.idle.stopTraces(&w, &a, intents, p.patrol())...)
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
+	closeSoftReload(&w, &a)
 	var unregistered []intent
 	if p.effects != nil {
-		intents, unregistered = splitRegistered(intents, p.creates != nil)
+		intents, unregistered = splitRegistered(&w, intents, p.creates != nil)
 	}
+	intents, paced := p.paceIdleProbes(&w, intents, now)
+	unregistered = append(unregistered, paced...)
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
 		BootOpen: w.Boot.open(), // P2
 	}, intents)
 	res.Deferred = append(res.Deferred, unregistered...)
+	next = earliest(next, res.NextBackoff) // a row backoff's expiry is a row deadline (v5.10d (b))
 	// The planner state admission leaves is stored before any submit. A
 	// trace-only pass submits nothing, so it keeps no token debit, and no
 	// refill is a reason for a pass.
@@ -151,9 +159,10 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	return passResult{Next: next, Counts: counts}
 }
 
-// newAllocSummary is the summary a pass at now publishes for C8's steps. Any
-// census leg error makes it partial, a hard one on a rig leg included
-// (Census.Partial counts only partial reads), so the release fails closed.
+// newAllocSummary is the summary a pass at now publishes for C8's steps. A
+// census that is not complete (a leg error, a hard one on a rig leg
+// included; Census.Partial counts only partial reads) makes it partial, so
+// the release fails closed.
 func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	v := w.Demand
 	s := &allocSummary{
@@ -161,8 +170,8 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 		AssignedWork: v.AssignedWork, AssignedStores: v.AssignedStores, AssignedStoreRefs: v.AssignedStoreRefs,
 		ReadyAssigned: v.ReadyAssigned, ReadyRouted: a.ReadyRouted, ReadyRoutedRefs: a.ReadyRoutedRefs,
 	}
-	for _, l := range w.Census.Legs {
-		s.Partial = s.Partial || l.Err != nil
+	if _, ok := w.Census.complete(); !ok {
+		s.Partial = true
 	}
 	for _, row := range w.Census.Canonical() {
 		s.OpenSessions = append(s.OpenSessions, row.Info)
@@ -170,15 +179,32 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	return s
 }
 
+// Rests causes, a deferral before admission like causeNoEffect.
+const (
+	causeRestsUnread  = "rests-unread"  // rests on a fresh fact its kind does not read
+	causeRestsMissing = "rests-missing" // a fresh kind's intent that records no rest
+)
+
 // splitRegistered splits off the intents whose kind has no registered
 // effect yet, and the creates when no create runner is wired, deferred with
 // cause no-effect before admission, so they take no cap, no token and no
 // backoff: the row is traced and the arm stays visible until its effect
-// lands.
-func splitRegistered(intents []intent, creates bool) (registered, unregistered []intent) {
+// lands. So, with cause rests-unread or rests-missing, are the intents whose
+// rests do not match what their kind reads fresh on w (ruling (c)): an arm
+// that rests on a fresh fact proposes a fresh kind, and a fresh kind's arm
+// records the facts it rests on.
+func splitRegistered(w *World, intents []intent, creates bool) (registered, unregistered []intent) {
 	for _, it := range intents {
-		if effectRegistry[it.Kind] == nil || (it.Kind == intentCreate && !creates) {
+		spec := effectSpecs[it.Kind]
+		switch reads := spec.reads(w, it); {
+		case !spec.runs() || (it.Kind == intentCreate && !creates):
 			it.Cause = causeNoEffect
+		case it.Rests&^reads != 0:
+			it.Cause = causeRestsUnread
+		case reads != 0 && it.Rests == 0:
+			it.Cause = causeRestsMissing
+		}
+		if it.Cause != "" {
 			unregistered = append(unregistered, it)
 			continue
 		}
@@ -198,15 +224,22 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 		return
 	}
 	pass := newEffectPass(w, a)
-	pass.creates = p.creates
+	pass.Clock, pass.held.creates, pass.seam = p.clock, p.creates, p.seam
+	pass.held.start = startCaps{rec: p.rec, stderr: p.stderr}
+	if p.capacity != nil {
+		pass.held.start.capacity = p.capacity()
+	}
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
+		if (it.Kind == intentClose || it.Kind == intentStop && stopReason(it) == executionStalledDrainReason) && pass.held.release == nil {
+			pass.held.release = newCloseReleases(w, p.stranded, p.stderr)
+		}
 		if it.Kind == intentCreate {
-			if pass.create == nil {
-				pass.create = newCreatePass(w)
+			if pass.held.create == nil {
+				pass.held.create = newCreatePass(w)
 			}
 			it.CreatePlan.Token = session.NewInstanceToken()
-			e = createInflightEntry(it, w.SessionsLeg)
+			e = createInflightEntry(it, w.Census.sessionsLeg())
 		}
 		seq := p.inflight.add(e)
 		if seq == 0 {
@@ -215,8 +248,64 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 		it.CreatePlan.Seq = seq
 		if err := p.effects.submitIntent(pass, it, seq); err != nil {
 			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq, Token: e.Token})
+			continue
+		}
+		if it.Kind == intentDrainBeginFresh && drainBeginNeeds(w, it).Idle {
+			if p.idleProbes == nil {
+				p.idleProbes = make(map[rowKey]idleProbe)
+			}
+			p.idleProbes[it.Key] = idleProbe{Basis: it.Basis, At: w.Now}
 		}
 	}
+}
+
+// causeIdlePaced defers, before admission like causeNoEffect, an idle begin
+// whose agent was probed for the same incarnation within the last patrol.
+const causeIdlePaced = "idle-paced"
+
+// idleProbe is a submitted idle begin's probe: the incarnation it probed,
+// and the pass that submitted it.
+type idleProbe struct {
+	Basis rowBasis
+	At    time.Time
+}
+
+// paceIdleProbes splits off the idle begins that would probe a row's agent
+// (SESS-621) again within a patrol of the last probe of the same
+// incarnation. A busy agent's probe is a no-op, never a backoff, so without
+// the pace every settlement's pass would probe it again, 4x the pass
+// duration apart, and the probes would take the probe cap from other rows'
+// heals and stops (C6a2 review 1a). Legacy probes once a tick. The pace
+// sets no deadline: the probe after it waits for the next pass. Probes a
+// patrol old are forgotten.
+func (p *planner) paceIdleProbes(w *World, intents []intent, now time.Time) (kept, paced []intent) {
+	patrol := p.patrol()
+	for k, probe := range p.idleProbes {
+		if now.Sub(probe.At) >= patrol {
+			delete(p.idleProbes, k)
+		}
+	}
+	for _, it := range intents {
+		probe, ok := p.idleProbes[it.Key]
+		if ok && it.Kind == intentDrainBeginFresh && probe.Basis == it.Basis && drainBeginNeeds(w, it).Idle {
+			it.Cause = causeIdlePaced
+			paced = append(paced, it)
+			continue
+		}
+		kept = append(kept, it)
+	}
+	return kept, paced
+}
+
+// idleWants advances A15's memory on the pass (setting its view on w),
+// asks the lane for the content clock's panes, and returns the ladder's
+// deferral traces.
+func (p *planner) idleWants(w *World, a *allocDecision) []rowTrace {
+	want, traces := p.idle.update(w, a, p.patrol(), p.stderr)
+	if p.observations != nil {
+		p.observations().WantContent(want)
+	}
+	return traces
 }
 
 // createInflightEntry is an admitted create's in-flight entry: its token, identity
@@ -239,19 +328,27 @@ func createInflightEntry(it intent, leg string) inflightEntry {
 // hard bound passed, alerting on each hard-bound clear (P5), and refreshes
 // w's in-flight view.
 func (p *planner) clearAmbiguous(w *World, now time.Time) {
-	c := inflightCensus{Tokens: make(map[string]bool), Named: make(map[string]bool)}
-	for _, row := range w.Census.Rows {
-		if row.InstanceToken != "" {
-			c.Tokens[row.InstanceToken] = true
-		}
-	}
-	for _, row := range w.Census.Canonical() {
-		if id := strings.TrimSpace(row.Info.ConfiguredNamedIdentity); id != "" && !row.Info.Closed {
-			c.Named[createIdentity{QualifiedInstance: id, Named: true}.key()] = true
-		}
-	}
-	p.alertCleared(p.inflight.clearVisible(c, now))
+	p.alertCleared(p.inflight.clearVisible(inflightCensusOf(w.Census), now))
 	w.InFlight = p.inflight.view()
+}
+
+// inflightCensusOf is what census c shows of the creates in flight: every
+// row's token, and every named identity with an open canonical row (a
+// named identity has one open row, so its row stands for the create
+// whatever token it carries).
+func inflightCensusOf(c *sessionCensus) inflightCensus {
+	out := inflightCensus{Tokens: make(map[string]bool), Named: make(map[string]bool)}
+	for _, row := range c.Rows {
+		if row.InstanceToken != "" {
+			out.Tokens[row.InstanceToken] = true
+		}
+	}
+	for _, row := range c.Canonical() {
+		if id := strings.TrimSpace(row.Info.ConfiguredNamedIdentity); id != "" && !row.Info.Closed {
+			out.Named[createIdentity{QualifiedInstance: id, Named: true}.key()] = true
+		}
+	}
+	return out
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics

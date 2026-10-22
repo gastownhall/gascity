@@ -172,7 +172,7 @@ func assertQuarantineBlocksFurtherMaterializedStarts(t *testing.T, env *reconcil
 // TestSyncSessionBeads_SeedsStartupKickoffMetadataForBoundNamedSession
 // already exercising the named path with cfg: nil.
 func TestNamedSessionStartupHealthEpisodeAccruesViaRealMaterialization(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	const configuredKey = "gs__captain"
 	env.desiredState[configuredKey] = TemplateParams{
 		Command:                 "chaos-cmd",
@@ -253,7 +253,7 @@ func TestNamedSessionStartupHealthEpisodeAccruesViaRealMaterialization(t *testin
 // index (via runMaterializedStartupFailureCycles), never assumed, and pinned
 // stable across every replacement cycle.
 func TestPoolSessionStartupHealthEpisodeAccruesViaRealMaterialization(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	const placeholderKey = "polecat-1"
 	const instanceName = "pack/worker-1"
 	env.desiredState[placeholderKey] = TemplateParams{

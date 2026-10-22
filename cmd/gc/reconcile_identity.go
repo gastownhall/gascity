@@ -117,13 +117,25 @@ func identityEpochs(row session.Info, rt runtimeIdentity) (int, int, bool) {
 	return epoch, generation, err == nil && genErr == nil
 }
 
-// ownsName is C8.2(a)'s bead-scoped name, legacy's predicate verbatim
-// (staleAsyncStartRuntimeAttribution): a pool-managed row whose stored
-// session name embeds its bead ID, and name is that stored name. The
-// pending-create rollback reads it as the own-runtime attribution, with L3
-// waived (v5 C3, F2). The stop verb (v5 D3) reads it as own for the identity
-// leg (L2) only, never Foreign, with L3 kept.
+// ownsName is C8.2(a)'s bead-scoped name, legacy's pool arm
+// (staleAsyncStartRuntimeAttribution; its manual arm cannot arise under v2,
+// which admits only runtimes that vouch for identity): a pool-managed row
+// whose stored session name embeds its bead ID, and name is that stored
+// name. The pending-create rollback reads it as the own-runtime attribution,
+// with L3 waived (v5 C3, F2). The stop verb (v5 D3) reads it as own for the
+// identity leg (L2) only, never Foreign, with L3 kept.
 func ownsName(row session.Info, name string) bool {
 	return isPoolManagedSessionInfo(row) && infoOwnsPoolSessionName(row) &&
 		strings.TrimSpace(row.SessionNameMetadata) == strings.TrimSpace(name)
+}
+
+// deadToken is a dead runtime's identity key for the classified set (v5 S5,
+// X10): its session ID and token.
+func deadToken(id runtimeIdentity) string {
+	return strings.TrimSpace(id.SessionID) + "/" + strings.TrimSpace(id.Token)
+}
+
+// classifies reports that c, a classified set's entry, is id's dead runtime.
+func (c classifiedRuntime) classifies(id runtimeIdentity) bool {
+	return c.Token == deadToken(id)
 }
