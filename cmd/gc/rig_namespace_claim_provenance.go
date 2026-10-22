@@ -32,6 +32,10 @@ type rigNamespaceProvenance struct {
 //   - rigName must be a configured rig of this city, matched exactly (case
 //     included); otherwise the verdict is unknown, reason no_config. An
 //     unknown rig is never read as an unguarded one.
+//   - The rig's namespace is decided by store identity
+//     (guardedRigNamespaceForRigName), as the guarded store, gc bd and the
+//     hook claim decide it: an unguarded rig whose store is a guarded rig's,
+//     or a guarded rig whose store is not its own, admits no identity.
 //   - An unguarded rig: provenance() unchanged.
 //   - A guarded rig whose namespace refuses identity: foreign, reason
 //     namespace. That is decided without a store read unless identity embeds
@@ -43,31 +47,25 @@ type rigNamespaceProvenance struct {
 //   - Admitted lexically: provenance() (the roster and the session records
 //     still have to vouch for it, as on any rig).
 //
-// sessions must be this city's own resolver; provenance is today's
-// claimIdentityProvenance for the identity.
-func rigNamespaceClaimProvenance(cfg *config.City, rigName, identity string, sessions ownSessionResolver, provenance func() claimProvenance) rigNamespaceProvenance {
+// cityPath is the city's real path. sessions must be this city's own
+// resolver; provenance is today's claimIdentityProvenance for the identity.
+func rigNamespaceClaimProvenance(cfg *config.City, cityPath, rigName, identity string, sessions ownSessionResolver, provenance func() claimProvenance) rigNamespaceProvenance {
 	if !rigConfigHasRigNamed(cfg, rigName) {
 		return rigNamespaceProvenance{claimProvenance: claimProvenance{
 			Verdict: claimVerdictUnknown, Reason: claimReasonNoConfig, Detail: fmt.Sprintf("unknown rig %q", rigName),
 		}}
 	}
-	ns, guarded, known := rigNamespaceForRigName(cfg, rigName, sessions)
-	if !known {
-		// Unreachable after the check above; kept so a change to either
-		// lookup cannot turn an unknown rig into an unguarded one.
-		return rigNamespaceProvenance{claimProvenance: claimProvenance{
-			Verdict: claimVerdictUnknown, Reason: claimReasonNoConfig, Detail: fmt.Sprintf("unknown rig %q", rigName),
-		}}
-	}
-	if !guarded {
+	ns := guardedRigNamespaceForRigName(cfg, cityPath, rigName, sessions)
+	if ns == nil {
 		return rigNamespaceProvenance{claimProvenance: provenance()}
 	}
 	out := rigNamespaceProvenance{Checked: true}
 	if ns.namespace() == "" {
-		out.claimProvenance = claimProvenance{
-			Verdict: claimVerdictForeign, Reason: claimReasonNamespace,
-			Detail: fmt.Sprintf("rig %q admits no identity (federation = %q)", rigName, config.RigFederationRig),
+		detail := fmt.Sprintf("rig %q admits no identity (federation = %q)", rigName, config.RigFederationRig)
+		if ns.denyReason != "" {
+			detail += ": " + ns.denyReason
 		}
+		out.claimProvenance = claimProvenance{Verdict: claimVerdictForeign, Reason: claimReasonNamespace, Detail: detail}
 		return out
 	}
 	a := ns.admission(strings.TrimSpace(identity))

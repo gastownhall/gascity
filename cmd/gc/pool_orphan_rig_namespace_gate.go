@@ -23,11 +23,16 @@ import (
 // With the guarded rig store in place such rows rarely reach the sweep; this
 // is the second layer.
 type poolRigNamespaceGate struct {
-	cfg      *config.City
+	cfg *config.City
+	// cityPath is the city's real path, for the store identity checks.
+	cityPath string
 	sessions ownSessionResolver
 	keepLog  *deadAssigneeKeepLog
 	// kept counts the claims kept per rig name this pass.
 	kept map[string]int
+	// byRig memoizes, for this pass, the namespace each configured rig's
+	// store belongs to (nil: unguarded).
+	byRig map[string]*rigNamespace
 }
 
 // newPoolRigNamespaceGate returns the gate for one sweep pass, or nil when no
@@ -38,7 +43,7 @@ func newPoolRigNamespaceGate(cfg *config.City, cityPath string, sessionStore bea
 		keepLog.logNamespaceKept("")
 		return nil
 	}
-	return &poolRigNamespaceGate{cfg: cfg, sessions: poolRigNamespaceSessions(cfg, cityPath, sessionStore), keepLog: keepLog}
+	return &poolRigNamespaceGate{cfg: cfg, cityPath: cityPath, sessions: poolRigNamespaceSessions(cfg, cityPath, sessionStore), keepLog: keepLog}
 }
 
 // poolRigNamespaceSessions returns the own-session resolver the sweep judges
@@ -77,19 +82,37 @@ func registeredRigNamespaceSessions(cityPath string) (*rigNamespaceSessions, boo
 	return rigNamespaceResolvers.controllers[filepath.Clean(cityPath)], rigNamespaceResolvers.controllerProcess > 0
 }
 
-// namespaceFor returns the namespace guarding the claim's store: the rig its
-// leg names ("rig:<name>"), or, when the leg is unknown or names no
-// configured rig, the guarded rig whose bead prefix workID carries.
+// namespaceFor returns the namespace guarding the claim's store: that of the
+// rig its leg names ("rig:<name>"), decided by store identity as the guarded
+// store decides it (guardedRigNamespaceForRigName: an unguarded rig whose
+// store is a guarded rig's, or a guarded rig whose store is not its own,
+// admits nothing), or, when the leg is unknown or names no configured rig,
+// the guarded rig whose bead prefix workID carries.
 func (n *poolRigNamespaceGate) namespaceFor(workID, leg string) (*rigNamespace, bool) {
 	if name, ok := strings.CutPrefix(strings.TrimSpace(leg), "rig:"); ok {
-		if ns, guarded, known := rigNamespaceForRigName(n.cfg, name, n.sessions); known {
-			return ns, guarded
+		if rigConfigHasRigNamed(n.cfg, name) {
+			ns := n.rigNamespace(name)
+			return ns, ns != nil
 		}
 	} else if strings.TrimSpace(leg) != "" {
 		// A city-scope leg: not a rig's store.
 		return nil, false
 	}
 	return rigNamespaceForBeadID(n.cfg, workID, n.sessions)
+}
+
+// rigNamespace returns the namespace the store of the configured rig name
+// belongs to, or nil, once per pass.
+func (n *poolRigNamespaceGate) rigNamespace(name string) *rigNamespace {
+	if ns, ok := n.byRig[name]; ok {
+		return ns
+	}
+	ns := guardedRigNamespaceForRigName(n.cfg, n.cityPath, name, n.sessions)
+	if n.byRig == nil {
+		n.byRig = make(map[string]*rigNamespace)
+	}
+	n.byRig[name] = ns
+	return ns
 }
 
 // keeps reports whether the claim must be kept because it sits in a guarded
@@ -117,12 +140,22 @@ func (n *poolRigNamespaceGate) keeps(g *foreignClaimGate, assignee, workID, leg 
 	if n.kept == nil {
 		n.kept = make(map[string]int)
 	}
-	name := ns.rigName()
-	if name == "" {
-		name = "(ambiguous)"
-	}
-	n.kept[name]++
+	n.kept[n.keptRigName(ns, leg)]++
 	return true
+}
+
+// keptRigName names the rig a kept claim is counted under: the namespace's
+// rig, else the configured rig the claim's leg names (a rig whose store is
+// a guarded rig's admits nothing and carries no rig of its own), else
+// "(ambiguous)" for a bead prefix two guarded rigs share.
+func (n *poolRigNamespaceGate) keptRigName(ns *rigNamespace, leg string) string {
+	if name := ns.rigName(); name != "" {
+		return name
+	}
+	if name, ok := strings.CutPrefix(strings.TrimSpace(leg), "rig:"); ok && rigConfigHasRigNamed(n.cfg, name) {
+		return name
+	}
+	return "(ambiguous)"
 }
 
 // summary renders the pass's count line, or "" when nothing was kept.

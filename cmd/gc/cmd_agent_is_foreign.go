@@ -253,7 +253,7 @@ func doAgentIsForeign(fs fsys.FS, cityPath string, rig *string, identity string,
 			}
 			return cliStores(cityPath, cityStore).Sessions(), nil
 		})
-		verdict = rigNamespaceClaimProvenance(cfg, *rig, identity, sessions, provenance)
+		verdict = rigNamespaceClaimProvenance(cfg, cityPath, *rig, identity, sessions, provenance)
 	}
 	if verdict.Verdict == claimVerdictUnknown {
 		detail := verdict.Detail

@@ -31,6 +31,28 @@ func rnfCity() *config.City {
 	}
 }
 
+// rnfCityOnDisk is rnfCity with each rig given a bead store of its own on
+// disk (distinct databases), so store identity resolves as in a real city.
+func rnfCityOnDisk(t *testing.T) (*config.City, string) {
+	t.Helper()
+	cityPath := rnsBdCity(t)
+	cfg := rnfCity()
+	for i := range cfg.Rigs {
+		dir := filepath.Join(cityPath, cfg.Rigs[i].Name)
+		rnsScope(t, dir, `{"backend":"dolt","dolt_database":"`+cfg.Rigs[i].Name+`"}`)
+		cfg.Rigs[i].Path = dir
+	}
+	return cfg, cityPath
+}
+
+// rnfGuardRepo guards foreignIdentityTestCity's rig "repo" and gives it a
+// bead store of its own on disk, so store identity resolves.
+func rnfGuardRepo(t *testing.T, cfg *config.City) {
+	t.Helper()
+	cfg.Rigs[0].Federation = config.RigFederationRig
+	rnsScope(t, cfg.Rigs[0].Path, `{"backend":"dolt","dolt_database":"repo"}`)
+}
+
 // rnfProvenance returns a provenance func that records whether it ran.
 func rnfProvenance(verdict claimProvenance, called *bool) func() claimProvenance {
 	return func() claimProvenance {
@@ -57,7 +79,7 @@ func (r rnfPanicResolver) lookupOwnSessionsByName(v string, _ func(ownSessionRec
 // in one table, so neither half is satisfiable by a gate that answers the
 // same way for everything.
 func TestRigNamespaceClaimProvenance_Verdicts(t *testing.T) {
-	cfg := rnfCity()
+	cfg, cityPath := rnfCityOnDisk(t)
 	roster := claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonRoster}
 	absent := claimProvenance{Verdict: claimVerdictForeign, Reason: claimReasonAbsentFromRoster}
 	ownSessions, _ := rnsCityBResolver(t)
@@ -141,7 +163,7 @@ func TestRigNamespaceClaimProvenance_Verdicts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			got := rigNamespaceClaimProvenance(cfg, tc.rig, tc.identity, tc.sessions, rnfProvenance(tc.fallback, &called))
+			got := rigNamespaceClaimProvenance(cfg, cityPath, tc.rig, tc.identity, tc.sessions, rnfProvenance(tc.fallback, &called))
 			if got.claimProvenance != tc.want {
 				t.Fatalf("verdict = %+v, want %+v", got.claimProvenance, tc.want)
 			}
@@ -160,13 +182,13 @@ func TestRigNamespaceClaimProvenance_Verdicts(t *testing.T) {
 // to answer, so the claim is protected. It must not fall through to today's
 // provenance, which could answer local from the roster or a record.
 func TestRigNamespaceClaimProvenance_LookupErrorIsNeverLocal(t *testing.T) {
-	cfg := rnfCity()
+	cfg, cityPath := rnfCityOnDisk(t)
 	store := rnsNewCountingStore(rnsSessionBead(poolIDB, templateB, poolNameB))
 	store.setErr(errors.New("session store unreachable"))
 	sessions := newControllerSessionResolver(cityPathB, nil, rnsStoreOpener(store))
 	for _, identity := range []string{poolIDB, poolNameB} {
 		called := false
-		got := rigNamespaceClaimProvenance(cfg, "beta", identity, sessions, rnfProvenance(claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonRoster}, &called))
+		got := rigNamespaceClaimProvenance(cfg, cityPath, "beta", identity, sessions, rnfProvenance(claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonRoster}, &called))
 		if got.Verdict != claimVerdictUnknown || got.Reason != claimReasonLookupFailed || !got.Checked {
 			t.Fatalf("%s: verdict = %+v (checked %v), want unknown/lookup_failed, checked", identity, got.claimProvenance, got.Checked)
 		}
@@ -180,7 +202,7 @@ func TestRigNamespaceClaimProvenance_LookupErrorIsNeverLocal(t *testing.T) {
 	// A fake resolver that reports a record together with an error is still
 	// an error: the namespace never admits on a failed lookup.
 	fake := rnsFakeResolver{rec: ownSessionRecord{ID: poolIDB, Template: templateB}, ok: true, err: errors.New("partial read")}
-	got := rigNamespaceClaimProvenance(cfg, "beta", poolIDB, fake, func() claimProvenance {
+	got := rigNamespaceClaimProvenance(cfg, cityPath, "beta", poolIDB, fake, func() claimProvenance {
 		t.Fatal("today's provenance ran after a failed lookup")
 		return claimProvenance{}
 	})
@@ -202,6 +224,13 @@ func rnfVerbCity(t *testing.T) string {
 	for _, dir := range []string{"beta", "alpha", ".gc"} {
 		if err := os.MkdirAll(filepath.Join(cityPath, dir), 0o755); err != nil {
 			t.Fatalf("MkdirAll(%s): %v", dir, err)
+		}
+	}
+	// Each rig has a file bead store of its own, so store identity tells it
+	// from the city's (the guard refuses a guarded rig without one).
+	for _, dir := range []string{"beta", "alpha"} {
+		if err := ensurePersistedScopeLocalFileStore(filepath.Join(cityPath, dir)); err != nil {
+			t.Fatalf("file store for %s: %v", dir, err)
 		}
 	}
 	cityToml := `[workspace]
@@ -345,11 +374,11 @@ func TestAgentIsForeign_RigNamespaceBadUsageExitsTwo(t *testing.T) {
 // and still sends an admitted claim through the usual liveness path. An
 // unguarded rig's claim is untouched by the namespace.
 func TestForeignClaimGate_RigNamespace(t *testing.T) {
-	cfg := rnfCity()
+	cfg, cityPath := rnfCityOnDisk(t)
 	ownSessions, _ := rnsCityBResolver(t)
 	sessionStore := beads.NewMemStore()
 	gate := newForeignClaimGate(cfg, beads.SessionStore{Store: sessionStore})
-	gate.namespaces = &poolRigNamespaceGate{cfg: cfg, sessions: ownSessions}
+	gate.namespaces = &poolRigNamespaceGate{cfg: cfg, cityPath: cityPath, sessions: ownSessions}
 	live := map[string]bool{}
 
 	// Kept by the namespace: counted for beta, not named.
@@ -403,11 +432,11 @@ func TestForeignClaimGate_RigNamespace(t *testing.T) {
 // cannot be read keeps a pool claim, and the claim is named, not counted, so
 // a persistent failure stays visible.
 func TestForeignClaimGate_RigNamespaceLookupErrorProtects(t *testing.T) {
-	cfg := rnfCity()
+	cfg, cityPath := rnfCityOnDisk(t)
 	store := rnsNewCountingStore(rnsSessionBead(poolIDB, templateB, poolNameB))
 	store.setErr(errors.New("session store unreachable"))
 	gate := newForeignClaimGate(cfg, beads.SessionStore{Store: beads.NewMemStore()})
-	gate.namespaces = &poolRigNamespaceGate{cfg: cfg, sessions: newControllerSessionResolver(cityPathB, nil, rnsStoreOpener(store))}
+	gate.namespaces = &poolRigNamespaceGate{cfg: cfg, cityPath: cityPath, sessions: newControllerSessionResolver(cityPathB, nil, rnsStoreOpener(store))}
 	if !gate.claimMayStillBeHeld(poolIDB, "bt-1", "rig:beta", map[string]bool{}) {
 		t.Fatal("a pool claim was released after the session lookup failed")
 	}
@@ -466,7 +495,7 @@ func TestReleaseOrphanedPoolAssignments_GuardedRigKeepsClaimsOutsideNamespace(t 
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 	cfg := foreignIdentityTestCity(t)
-	cfg.Rigs[0].Federation = config.RigFederationRig
+	rnfGuardRepo(t, cfg)
 
 	kept := []beads.Bead{
 		seedForeignIdentityWork(t, rigStore, "claimed by a bare name", "neighbor"),
@@ -582,7 +611,7 @@ func TestReleaseOrphanedPoolAssignments_GuardedRigOwnPoolSessionFromSessionStore
 	rigStore := beads.NewMemStore()
 	cfg := foreignIdentityTestCity(t)
 	cfg.Workspace.Prefix = "hq"
-	cfg.Rigs[0].Federation = config.RigFederationRig
+	rnfGuardRepo(t, cfg)
 	record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
 	record.Status = "closed"
 	sessions := wrapStoreWithBeadPolicies(rnsNewCountingStore(record), cfg)
@@ -612,7 +641,7 @@ func TestPoolRigNamespaceGate_UsesTheCityControllerResolver(t *testing.T) {
 	cityPath := t.TempDir()
 	rigStore := beads.NewMemStore()
 	cfg := foreignIdentityTestCity(t)
-	cfg.Rigs[0].Federation = config.RigFederationRig
+	rnfGuardRepo(t, cfg)
 	record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
 	record.Status = "closed"
 	registered := rnsNewCountingStore(record)
@@ -665,7 +694,7 @@ func TestPoolRigNamespaceGate_UsesTheCityControllerResolver(t *testing.T) {
 func TestPoolRigNamespaceGate_ControllerWithoutRegisteredResolverKeepsClaims(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := foreignIdentityTestCity(t)
-	cfg.Rigs[0].Federation = config.RigFederationRig
+	rnfGuardRepo(t, cfg)
 	record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
 	sessions := rnsNewCountingStore(record)
 	done := markRigNamespaceControllerProcess()
@@ -704,7 +733,7 @@ func TestReleaseOrphanedPoolAssignments_ControllerSweepReleasesThroughTheGuarded
 		t.Run(name, func(t *testing.T) {
 			cityPath := t.TempDir()
 			cfg := foreignIdentityTestCity(t)
-			cfg.Rigs[0].Federation = config.RigFederationRig
+			rnfGuardRepo(t, cfg)
 			record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
 			record.Status = "closed"
 			registered := rnsNewCountingStore(record)
@@ -790,5 +819,45 @@ func TestReleaseOrphanedPoolAssignments_ControllerSweepReleasesThroughTheGuarded
 				t.Errorf("missing the namespace count line:\n%s", logBuf.String())
 			}
 		})
+	}
+}
+
+// TestRigNamespaceVerdictsFollowStoreIdentity: is-foreign --rig-namespace
+// and the pool gate decide a rig's namespace by store identity, as the
+// guarded store, gc bd and the hook claim do. Unguarded rig alpha, whose
+// .beads names guarded rig beta's database, opens beta's store: a claim
+// there is answered foreign (checked, and never from the roster) and kept by
+// the pool gate, where a lookup by rig name alone would call alpha
+// unguarded.
+func TestRigNamespaceVerdictsFollowStoreIdentity(t *testing.T) {
+	cfg, cityPath := rnfCityOnDisk(t)
+	rnsScope(t, hrgDir(cfg, "alpha"), `{"backend":"dolt","dolt_database":"beta"}`)
+	called := false
+	got := rigNamespaceClaimProvenance(cfg, cityPath, "alpha", "alpha/worker", rnfPanicResolver{t}, rnfProvenance(claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonRoster}, &called))
+	if got.Verdict != claimVerdictForeign || got.Reason != claimReasonNamespace || !got.Checked || called {
+		t.Fatalf("alpha over beta's store: verdict = %+v (checked %v, roster asked %v), want foreign/namespace, checked, roster not asked", got.claimProvenance, got.Checked, called)
+	}
+	if !strings.Contains(got.Detail, "admits no identity") {
+		t.Fatalf("detail %q does not say the rig admits nothing", got.Detail)
+	}
+
+	gate := newForeignClaimGate(cfg, beads.SessionStore{Store: beads.NewMemStore()})
+	gate.namespaces = &poolRigNamespaceGate{cfg: cfg, cityPath: cityPath, sessions: rnfPanicResolver{t}}
+	if !gate.namespaces.keeps(gate, "alpha/worker", "al-1", "rig:alpha") {
+		t.Fatal("the pool gate did not keep a claim in a store that is a guarded rig's")
+	}
+	if got := gate.namespaces.kept["alpha"]; got != 1 {
+		t.Fatalf("kept = %v, want the claim counted under rig alpha, the rig its leg names", gate.namespaces.kept)
+	}
+
+	// With its own store again, alpha is unguarded on both paths.
+	rnsScope(t, hrgDir(cfg, "alpha"), `{"backend":"dolt","dolt_database":"alpha"}`)
+	called = false
+	if got := rigNamespaceClaimProvenance(cfg, cityPath, "alpha", "alpha/worker", rnfPanicResolver{t}, rnfProvenance(claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonRoster}, &called)); got.Checked || !called {
+		t.Fatalf("alpha with its own store: verdict = %+v (checked %v), want today's provenance", got.claimProvenance, got.Checked)
+	}
+	fresh := &poolRigNamespaceGate{cfg: cfg, cityPath: cityPath, sessions: rnfPanicResolver{t}}
+	if fresh.keeps(gate, "alpha/worker", "al-1", "rig:alpha") {
+		t.Fatal("the pool gate kept a claim in an unguarded rig with its own store")
 	}
 }
