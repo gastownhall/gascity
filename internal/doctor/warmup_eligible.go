@@ -86,6 +86,10 @@ func (c *DoltNomsSizeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *DoltUnboundDatabasesCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *DoltServerCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
