@@ -66,7 +66,10 @@ type OpsConfig struct {
 	// host that delivers lane ops, and gc doctor reports a listed kind as an
 	// error when no lane host serves the city. A keystroke-mode runtime (tmux)
 	// takes a boundary delivery at an idle boundary, a protocol-mode runtime
-	// (t3bridge) at its turn boundary.
+	// (t3bridge) at its turn boundary. A message the ops route proposes with
+	// when now, or the legacy interrupt, runs as one deliver-now unit: the
+	// lane host interrupts the session's running turn, then delivers the
+	// message at the boundary the interrupt leaves.
 	// A listed kind needs a sessions store with guarded batches. A change
 	// takes effect at the controller's next start; gc session nudge reads it
 	// at once.

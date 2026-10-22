@@ -473,3 +473,109 @@ func TestLaneNowUnsupportedWaitsForTheBoundary(t *testing.T) {
 		t.Fatalf("nudges %+v, want one boundary nudge", n)
 	}
 }
+
+// TestLaneHostJournalsTheTurnADeliverNowDelivers pins DES-O1 §7.7 for a
+// deliver-now unit to an idle session (the direct path): the worker that ran
+// the unit stays until its observer has journaled the turn the message
+// started, start and end, then exits.
+func TestLaneHostJournalsTheTurnADeliverNowDelivers(t *testing.T) {
+	l := newLaneHostTurns(t)
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.nowMsg())
+	ready := new(atomic.Bool)
+	ready.Store(true)
+	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+		return laneReadyExec{clk: l.f.clk, ready: ready}
+	}
+	l.hh.start()
+	if p := l.hh.nextPass(t); p.out.res.Took != opjournal.TakeNow || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the unit taken and its message delivered", p.out.res)
+	}
+	l.hh.nextPass(t)
+	l.send(laneIdle())
+	l.batch(t, "the first read")
+	l.noExit(t, "before the delivered turn started")
+	l.send(laneRunning("t1"))
+	l.batch(t, "the delivered turn's start")
+	l.noExit(t, "while the delivered turn runs")
+	l.send(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
+	l.batch(t, "the delivered turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the delivered turn ended")
+	}
+	if got, want := laneFactList(t, l.store, l.f.id, 1), []string{"turn.started:t1", "turn.ended:t1:completed"}; !slices.Equal(got, want) {
+		t.Fatalf("facts = %q, want %q", got, want)
+	}
+}
+
+// laneReplaceExec is a ready executor whose runtime runs turn t0, with no
+// boundary, until a replacement step settles t0 at the boundary, so a
+// deliver-now unit takes the replace path.
+type laneReplaceExec struct {
+	laneReadyExec
+	replaced *atomic.Bool
+}
+
+func (e laneReplaceExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
+	p, err := e.laneReadyExec.Probe(ctx, conv)
+	if !e.replaced.Load() {
+		p.Boundary, p.TurnLive, p.Turn = opjournal.TriNo, opjournal.TriYes, "t0"
+	}
+	return p, err
+}
+
+func (e laneReplaceExec) Interrupt(_ context.Context, c opjournal.InterruptCall) opjournal.ControlResult {
+	if !c.ForReplacement {
+		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
+	}
+	e.replaced.Store(true)
+	return opjournal.Settled{Turn: "t0", Via: "test", After: opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriNo, Known: []string{"t0"}}}
+}
+
+// TestLaneHostKeepsTheDeliverNowTurnPastTheReplacedEnd pins DES-O1 §7.7 for
+// a deliver-now unit that replaces the turn the observer saw running: the
+// replaced turn's end, folded first, does not end the worker's wait for the
+// turn the message started, and both turns are journaled, the replaced
+// one's end credited to the unit's interrupt.
+func TestLaneHostKeepsTheDeliverNowTurnPastTheReplacedEnd(t *testing.T) {
+	l := newLaneHostTurns(t, string(opjournal.KindMessage))
+	st := l.f.laneStore(t)
+	ready, replaced := new(atomic.Bool), new(atomic.Bool)
+	ready.Store(true)
+	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+		return laneReplaceExec{laneReadyExec: laneReadyExec{clk: l.f.clk, ready: ready}, replaced: replaced}
+	}
+	l.hh.start()
+	if !l.hh.h.Poke(l.f.id) {
+		t.Fatal("Poke refused")
+	}
+	l.hh.nextPass(t)
+	l.send(laneRunning("t0"))
+	l.batch(t, "the running turn")
+	l.f.clk.Advance(10 * time.Second)
+	m := l.f.propose(t, st, l.f.nowMsg())
+	if !l.hh.h.Poke(l.f.id) {
+		t.Fatal("Poke refused")
+	}
+	if p := l.hh.nextPass(t); p.out.err != nil || p.out.res.Took != opjournal.TakeNow || p.out.res.Done != opjournal.DoneAccepted || !replaced.Load() {
+		t.Fatalf("pass = %+v, %v (replaced %v), want the unit to replace t0 and deliver its message", p.out.res, p.out.err, replaced.Load())
+	}
+	take := l.f.clk.Now()
+	l.hh.nextPass(t)
+	t0 := laneEnded("t0", runtime.TurnStatusCancelled)
+	l.send(laneIdle(t0))
+	l.batch(t, "the replaced turn's end")
+	l.noExit(t, "at the replaced turn's end, before the turn its message started")
+	l.send(laneRunningAt("t1", take.Add(time.Second), t0))
+	l.batch(t, "the delivered turn's start")
+	l.noExit(t, "while the delivered turn runs")
+	l.send(laneIdle(laneCompletedAt("t1", take.Add(time.Second)), t0))
+	l.batch(t, "the delivered turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the delivered turn ended")
+	}
+	want := []string{"turn.started:t0", "turn.ended:t0:interrupted:" + laneNowID(t, st, m), "turn.started:t1", "turn.ended:t1:completed"}
+	if got := laneFactList(t, l.store, l.f.id, 1); !slices.Equal(got, want) {
+		t.Fatalf("facts = %q, want %q", got, want)
+	}
+}

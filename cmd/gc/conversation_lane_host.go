@@ -687,14 +687,14 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, queued: w.queued, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
 			pass: func() lanePassOutcome {
-				// The turn a content take starts begins after the pass
-				// does, never before.
+				// The turn a content take, or a deliver-now unit's
+				// message, starts begins after the pass does, never before.
 				began := h.clk.Now()
 				out := h.pass(conv)
 				if laneTurnsWatchAfter(out, len(h.kinds) > 0 || resumeTurns) {
 					h.watchTurns(conv, turns)
 				}
-				if out.err == nil && out.res.Took == opjournal.TakeContent {
+				if out.err == nil && (out.res.Took == opjournal.TakeContent || out.res.Took == opjournal.TakeNow) {
 					turns.expect(began)
 				}
 				return out
