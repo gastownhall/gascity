@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // implicitSlotCity builds a city whose rig app is a git checkout with one
@@ -180,6 +181,148 @@ func TestImplicitSlotWorktreesKeepTodaysWorkDirOutsideTheirScope(t *testing.T) {
 			}
 			if got := gitOut(t, rig, "for-each-ref"); got != refs {
 				t.Errorf("rig refs changed:\nbefore:\n%s\nafter:\n%s", refs, got)
+			}
+		})
+	}
+}
+
+// provisionImplicitSlot provisions app/claude-<n> on a host-local runtime and
+// returns its slot.
+func provisionImplicitSlot(t *testing.T, city string, cfg *config.City, a *config.Agent, n string) workdirutil.ImplicitSlot {
+	t.Helper()
+	slot, ok := workdirutil.ImplicitSlotFor(city, "app/claude-"+n, *a, cfg.Rigs)
+	if !ok {
+		t.Fatalf("app/claude-%s is not a pool slot", n)
+	}
+	if err := ensureImplicitSlotWorktree(slot); err != nil {
+		t.Fatalf("provisioning %s: %v", slot.Path, err)
+	}
+	return slot
+}
+
+// slotSnapshot is a slot's checked-out ref, commit, status and top-level
+// entries, the state a reused slot must keep.
+func slotSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return strings.Join([]string{
+		gitOut(t, dir, "symbolic-ref", "HEAD"),
+		gitOut(t, dir, "rev-parse", "HEAD"),
+		gitOut(t, dir, "status", "--porcelain"),
+		strings.Join(names, ","),
+	}, "\n")
+}
+
+func TestImplicitSlotWithStaleMarkerIsReusedWithoutGit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		dirty func(t *testing.T, dir string)
+	}{
+		{"dirty", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"committed", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "done.txt"), []byte("done\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			mustGit(t, dir, "add", "done.txt")
+			mustGit(t, dir, "commit", "-q", "-m", "slot work")
+		}},
+		{"switched_branch", func(t *testing.T, dir string) {
+			mustGit(t, dir, "checkout", "-q", "-b", "feature-x")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, _, cfg, a := implicitSlotCity(t)
+			slot := provisionImplicitSlot(t, city, cfg, a, "1")
+			tc.dirty(t, slot.Path)
+			marker := filepath.Join(slot.Path, worktreeStaleFileName)
+			before := slotSnapshot(t, slot.Path)
+			if err := os.WriteFile(marker, []byte("branch=x\nreason=uncommitted-work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			path := os.Getenv("PATH")
+			t.Setenv("PATH", t.TempDir()) // any git subprocess fails
+			err := ensureImplicitSlotWorktree(slot)
+			t.Setenv("PATH", path)
+			if err != nil {
+				t.Fatalf("reusing marked slot: %v", err)
+			}
+			if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+				t.Errorf("marker %s still present (lstat err %v)", marker, err)
+			}
+			if after := slotSnapshot(t, slot.Path); after != before {
+				t.Errorf("reused slot changed:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
+func TestImplicitSlotMissingDirIsRecreated(t *testing.T) {
+	advanceRig := func(t *testing.T, rig string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(rig, "next.txt"), []byte("next\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustGit(t, rig, "add", "next.txt")
+		mustGit(t, rig, "commit", "-q", "-m", "next")
+	}
+	for _, tc := range []struct {
+		name         string
+		unmerged     bool
+		dropRegister bool
+	}{
+		{name: "merged_registered"},
+		{name: "merged_unregistered", dropRegister: true},
+		{name: "unmerged_registered", unmerged: true},
+		{name: "unmerged_unregistered", unmerged: true, dropRegister: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, rig, cfg, a := implicitSlotCity(t)
+			slot := provisionImplicitSlot(t, city, cfg, a, "1")
+			var slotWork string
+			if tc.unmerged {
+				if err := os.WriteFile(filepath.Join(slot.Path, "work.txt"), []byte("work\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				mustGit(t, slot.Path, "add", "work.txt")
+				mustGit(t, slot.Path, "commit", "-q", "-m", "slot work")
+				slotWork = gitOut(t, slot.Path, "rev-parse", "HEAD")
+			}
+			if err := os.RemoveAll(slot.Path); err != nil {
+				t.Fatal(err)
+			}
+			if tc.dropRegister {
+				mustGit(t, rig, "worktree", "prune")
+			}
+			advanceRig(t, rig)
+			rigHead := gitOut(t, rig, "rev-parse", "HEAD")
+
+			if err := ensureImplicitSlotWorktree(slot); err != nil {
+				t.Fatalf("re-creating missing slot: %v", err)
+			}
+			if got := gitOut(t, slot.Path, "symbolic-ref", "--short", "HEAD"); got != slot.Branch {
+				t.Errorf("re-created slot branch = %q, want %q", got, slot.Branch)
+			}
+			want := rigHead
+			if tc.unmerged {
+				want = slotWork
+			}
+			if got := gitOut(t, slot.Path, "rev-parse", "HEAD"); got != want {
+				t.Errorf("re-created slot HEAD = %s, want %s", got, want)
+			}
+			if got := strings.Count(gitOut(t, rig, "worktree", "list", "--porcelain"), "worktree "); got != 2 {
+				t.Errorf("rig has %d worktrees, want the rig root and the slot", got)
 			}
 		})
 	}
