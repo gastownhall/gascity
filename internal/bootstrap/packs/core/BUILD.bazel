@@ -71,6 +71,7 @@ go_library(
         "template-fragments/claim-protocol.template.md",
         "assets/scripts/order_outcome.sh",
         "assets/scripts/scope_bd.sh",
+        "assets/scripts/worktree-setup.sh",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],
@@ -87,6 +88,7 @@ go_test(
         "pack_orders_test.go",
         "pack_prompt_bead_ids_test.go",
         "testenv_import_test.go",
+        "worktree_setup_script_test.go",
     ],
     data = glob(
         ["**"],
