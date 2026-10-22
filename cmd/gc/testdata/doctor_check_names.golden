@@ -49,6 +49,7 @@ order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
+pool-isolation
 prompt-delivery-budget
 mcp-config
 mcp-shared-target
