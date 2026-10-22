@@ -538,24 +538,26 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 5 {
-		t.Fatalf("tmux calls = %d (%v), want 5 (set-environment, adopt check, pane lookup, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
+	markAt, respawnAt := -1, -1
+	for i, call := range exec.calls {
+		joined := strings.Join(call, " ")
+		switch {
+		case strings.Contains(joined, "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN"):
+			markAt = i
+		case tmuxSubcommand(call) == "respawn-pane":
+			respawnAt = i
+		}
+		if strings.Contains(joined, "set-environment") && strings.Contains(joined, "-u GC_CONTROLLER_TOKEN") {
+			t.Errorf("call %q uses -u; that unsets the session entry and re-exposes the server's global value", joined)
+		}
+		// A non-empty key is a real value, not a withholding, and must not be
+		// marked for removal.
+		if strings.Contains(joined, "-r GC_CITY") {
+			t.Errorf("call %q marked GC_CITY removed; only empty-valued keys are withheld", joined)
+		}
 	}
-
-	setEnv := strings.Join(exec.calls[0], " ")
-	if !strings.Contains(setEnv, "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
-		t.Errorf("first call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
-	}
-	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
-		t.Errorf("first call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
-	}
-	if respawn := strings.Join(exec.calls[3], " "); !strings.Contains(respawn, "respawn-pane") {
-		t.Errorf("fourth call = %q, want respawn-pane", respawn)
-	}
-	// A non-empty key is a real value, not a withholding, and must not be
-	// marked for removal.
-	if strings.Contains(setEnv, "GC_CITY") {
-		t.Errorf("first call = %q marked GC_CITY removed; only empty-valued keys are withheld", setEnv)
+	if markAt < 0 || respawnAt < 0 || markAt > respawnAt {
+		t.Fatalf("tmux calls = %v, want GC_CONTROLLER_TOKEN marked removed from the session env before respawn-pane", exec.calls)
 	}
 
 	t.Run("hosted beads namespace", func(t *testing.T) {
@@ -610,8 +612,10 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 4 {
-		t.Fatalf("tmux calls = %d (%v), want 4 (adopt check, pane lookup, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	for _, call := range exec.calls {
+		if joined := strings.Join(call, " "); strings.Contains(joined, "set-environment") && strings.Contains(joined, " -r ") {
+			t.Errorf("call %q marked a key removed from the session env; nesting flags must not be marked", joined)
+		}
 	}
 }
 
@@ -634,7 +638,11 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	}{
 		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
 			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
-		}, [][]string{adopt, lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"}, {"show-environment", "-t", "=gc-test-agent-pane"}}},
+		}, [][]string{
+			{"show-environment", "-t", "=gc-test-agent-pane"},
+			{"show-options", "-qv", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys"},
+			{"set-option", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys", ""},
+			adopt, lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"}, {"show-environment", "-t", "=gc-test-agent-pane"}}},
 		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
 		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@3.%7", "claude"}}},
