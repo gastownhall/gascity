@@ -187,7 +187,11 @@ type ProviderSpec struct {
 	// When empty, Command is used for both tmux and ACP transports.
 	ACPCommand string `toml:"acp_command,omitempty"`
 	// ACPArgs overrides Args when the session transport is ACP.
-	// When nil, Args is used for both tmux and ACP transports.
+	// When nil, Args is used for both tmux and ACP transports. When any layer
+	// sets acp_args, args and args_append reach only the CLI launch: a layer
+	// more specific than the acp_args layer that declares args makes the CLI
+	// transport the default, and an explicit ACP session that still drops
+	// args prints a warning.
 	ACPArgs []string `toml:"acp_args,omitempty"`
 }
 

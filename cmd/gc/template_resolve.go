@@ -223,6 +223,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		for _, pin := range resolved.UnhonoredOptionPins() {
 			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
 		}
+		if sessionTransport == config.SessionTransportACP {
+			// The ACP launch takes its args from ACPArgs alone, so provider
+			// args recorded as omitted and agent-level args both miss it.
+			dropped := append([]string(nil), resolved.ACPOmittedArgs...)
+			if resolved.ACPArgs != nil {
+				dropped = append(dropped, cfgAgent.Args...)
+			}
+			if len(dropped) > 0 {
+				fmt.Fprintln(p.stderr, config.FormatACPOmittedArgs(qualifiedName, resolved.Name, command, dropped)) //nolint:errcheck
+			}
+		}
 	}
 	var sa string
 	if p.readOnly {
