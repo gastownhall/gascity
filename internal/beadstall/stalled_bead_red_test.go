@@ -249,7 +249,6 @@ func TestEpisodeStoreTrackingNeverBecomesReadyOrMutatesTarget(t *testing.T) {
 	priority := 1
 	target, err := store.Create(beads.Bead{
 		Title:       "target work",
-		Status:      "in_progress",
 		Type:        "task",
 		Priority:    &priority,
 		Assignee:    "gascity/worker",
@@ -262,6 +261,14 @@ func TestEpisodeStoreTrackingNeverBecomesReadyOrMutatesTarget(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create target: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(target.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("start target work: %v", err)
+	}
+	store, err = beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatalf("reopen started target: %v", err)
 	}
 	before, err := store.Get(target.ID)
 	if err != nil {
