@@ -56,6 +56,7 @@ go_test(
         "e2e_lifecycle_test.go",
         "e2e_mail_test.go",
         "e2e_multi_test.go",
+        "e2e_named_drift_test.go",
         "e2e_pool_test.go",
         "e2e_test.go",
         "gastown_config_test.go",
