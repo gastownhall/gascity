@@ -203,7 +203,7 @@ func TestDoltUnboundDatabasesCheck(t *testing.T) {
 			writeCommittedDoltDatabase(t, dataDir, "pa")
 			rigs := tc.setup(t, cityDir, dataDir)
 
-			r := NewDoltUnboundDatabasesCheckForConfig(cityDir, &config.City{Rigs: rigs}, nil).Run(&CheckContext{})
+			r := NewDoltUnboundDatabasesCheckForConfig(cityDir, false, &config.City{Rigs: rigs}, nil).Run(&CheckContext{})
 			if r.Status != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; msg = %s", r.Status, tc.wantStatus, r.Message)
 			}
@@ -263,7 +263,7 @@ func TestDoltCorruptAsideCheck(t *testing.T) {
 				writeCommittedDoltDatabase(t, asideRoot, entry)
 			}
 
-			r := NewDoltCorruptAsideCheck(cityDir).Run(&CheckContext{})
+			r := NewDoltCorruptAsideCheckForConfig(cityDir, false, &config.City{}, nil).Run(&CheckContext{})
 			if r.Status != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; msg = %s", r.Status, tc.wantStatus, r.Message)
 			}
@@ -289,8 +289,71 @@ func TestDoltCorruptAsideCheckHonorsCityRuntimeDir(t *testing.T) {
 	aside := filepath.Join(runtimeDir, "packs", "dolt", "corrupt-aside", "prod.20261022T010203Z")
 	writeCommittedDoltDatabase(t, filepath.Dir(aside), filepath.Base(aside))
 
-	r := NewDoltCorruptAsideCheck(cityDir).Run(&CheckContext{})
+	r := NewDoltCorruptAsideCheckForConfig(cityDir, false, &config.City{}, nil).Run(&CheckContext{})
 	if r.Status != StatusWarning || !strings.Contains(r.Message, aside) {
 		t.Fatalf("status = %d, msg = %q; want a warning naming %s", r.Status, r.Message, aside)
+	}
+}
+
+func TestDoltRecoveryChecksSkipOutsideManagedLocalDolt(t *testing.T) {
+	shapes := []struct {
+		name string
+		// setup returns a city whose data dir holds an unbound database pa
+		// and whose pack state holds an aside copy of prod, and the skip flag.
+		setup func(t *testing.T) (string, bool)
+	}{
+		{
+			name: "bd-owned proxied city",
+			setup: func(t *testing.T) (string, bool) {
+				dir := t.TempDir()
+				writeDoctorCanonicalConfig(t, fsys.OSFS{}, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+				writeDoctorProxiedMetadata(t, dir, "hq")
+				return dir, false
+			},
+		},
+		{
+			name: "external endpoint city",
+			setup: func(t *testing.T) (string, bool) {
+				dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+				fs := fsys.OSFS{}
+				writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+					IssuePrefix:    "gc",
+					EndpointOrigin: contract.EndpointOriginCityCanonical,
+					EndpointStatus: contract.EndpointStatusVerified,
+					DoltHost:       "db.example.com",
+					DoltPort:       "4411",
+				})
+				writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+				return dir, false
+			},
+		},
+		{
+			name: "GC_DOLT=skip",
+			setup: func(t *testing.T) (string, bool) {
+				return setupManagedDoltCity(t), true
+			},
+		},
+	}
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			cityDir, skip := shape.setup(t)
+			writeCommittedDoltDatabase(t, filepath.Join(cityDir, ".beads", "dolt"), "pa")
+			writeCommittedDoltDatabase(t, filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "corrupt-aside"), "prod.20261022T010203Z")
+
+			for _, check := range []Check{
+				NewDoltUnboundDatabasesCheckForConfig(cityDir, skip, &config.City{}, nil),
+				NewDoltCorruptAsideCheckForConfig(cityDir, skip, &config.City{}, nil),
+			} {
+				r := check.Run(&CheckContext{})
+				if r.Status != StatusOK || !strings.Contains(r.Message, "skipped") {
+					t.Errorf("%s: status = %d, msg = %q; want OK skipped", check.Name(), r.Status, r.Message)
+				}
+				for _, db := range []string{"pa", "prod"} {
+					if strings.Contains(r.Message, db) {
+						t.Errorf("%s: message = %q, must not name %q", check.Name(), r.Message, db)
+					}
+				}
+			}
+		})
 	}
 }

@@ -12,6 +12,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// doltRecoveryChecksSkippedMessage is reported where gc does not manage the
+// local Dolt data dir, so neither recovery check applies.
+const doltRecoveryChecksSkippedMessage = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
+
 // DoltUnboundDatabasesCheck warns about databases in the managed Dolt data
 // dir that no city or rig scope binds and that have no usable local backup.
 // mol-dog-backup and jsonl-export cover only bound scopes, so such a database
@@ -19,14 +23,18 @@ import (
 // anything that replaces the shared data dir loses it (#1979).
 type DoltUnboundDatabasesCheck struct {
 	cityPath   string
+	skip       bool
+	applicable bool
 	scopeRoots []string
 }
 
 // NewDoltUnboundDatabasesCheckForConfig creates the unbound-database check
 // using preloaded city config.
-func NewDoltUnboundDatabasesCheckForConfig(cityPath string, cfg *config.City, cfgErr error) *DoltUnboundDatabasesCheck {
+func NewDoltUnboundDatabasesCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltUnboundDatabasesCheck {
 	return &DoltUnboundDatabasesCheck{
 		cityPath:   cityPath,
+		skip:       skip,
+		applicable: ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
 		scopeRoots: managedDoltScopeRootsForConfig(cityPath, cfg, cfgErr),
 	}
 }
@@ -38,6 +46,11 @@ func (c *DoltUnboundDatabasesCheck) Name() string { return "dolt-unbound-databas
 // and that no usable local backup covers.
 func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if c.skip || !c.applicable {
+		r.Status = StatusOK
+		r.Message = doltRecoveryChecksSkippedMessage
+		return r
+	}
 	targets, unresolved := managedLocalDoltScanTargetsForScopeRoots(c.cityPath, c.scopeRoots)
 	if unresolved {
 		// A scope whose database cannot be read would make its own database
@@ -151,12 +164,19 @@ func usableLocalDoltBackup(dataDir, db string) (string, error) {
 // one marks a database that was restored from a backup and is missing the
 // writes made after that backup's last sync.
 type DoltCorruptAsideCheck struct {
-	cityPath string
+	cityPath   string
+	skip       bool
+	applicable bool
 }
 
-// NewDoltCorruptAsideCheck creates the corrupt-aside check.
-func NewDoltCorruptAsideCheck(cityPath string) *DoltCorruptAsideCheck {
-	return &DoltCorruptAsideCheck{cityPath: cityPath}
+// NewDoltCorruptAsideCheckForConfig creates the corrupt-aside check using
+// preloaded city config.
+func NewDoltCorruptAsideCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltCorruptAsideCheck {
+	return &DoltCorruptAsideCheck{
+		cityPath:   cityPath,
+		skip:       skip,
+		applicable: ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+	}
 }
 
 // Name returns the check identifier.
@@ -165,6 +185,11 @@ func (c *DoltCorruptAsideCheck) Name() string { return "dolt-corrupt-aside" }
 // Run lists the stores kept aside by journal recovery.
 func (c *DoltCorruptAsideCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if c.skip || !c.applicable {
+		r.Status = StatusOK
+		r.Message = doltRecoveryChecksSkippedMessage
+		return r
+	}
 	asideRoot := filepath.Join(doctorDoltPackStateDir(c.cityPath), "corrupt-aside")
 	entries, err := os.ReadDir(asideRoot)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {

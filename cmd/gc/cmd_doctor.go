@@ -511,10 +511,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Databases no scope binds have no backup or JSONL export, so recovery
 	// has no source for them (#1979).
-	register(doctor.NewDoltUnboundDatabasesCheckForConfig(cityPath, cfg, cfgErr))
+	register(doctor.NewDoltUnboundDatabasesCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Stores journal recovery moved aside mark databases restored from an
 	// older backup.
-	register(doctor.NewDoltCorruptAsideCheck(cityPath))
+	register(doctor.NewDoltCorruptAsideCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltCompactStateCheck(cityPath, opts.SkipManagedDoltCheck))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at
