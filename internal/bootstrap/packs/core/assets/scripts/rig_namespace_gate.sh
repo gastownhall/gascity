@@ -48,6 +48,39 @@ rig_namespace_guarded_rig_for_bead() {
         | sort_by(.prefix | length) | reverse | .[0].name // empty' 2>/dev/null || return 2
 }
 
+# rig_namespace_guarded_rigs_for_row <rig-list-json> <store-rig> <bead-id>
+# prints the guarded rigs a row is judged in, one per line: the rig whose
+# store the row was read from (store-rig, "" for HQ or unknown) when it is
+# guarded, and the guarded rig the bead's prefix maps to when that differs.
+# The store the row came from is the authority; the prefix only adds a check.
+rig_namespace_guarded_rigs_for_row() {
+    local rigs_json="${1:-}"
+    local store_rig="${2:-}"
+    local id="${3:-}"
+    local by_prefix
+    if [ -n "$store_rig" ] && rig_namespace_rig_is_guarded "$rigs_json" "$store_rig"; then
+        printf '%s\n' "$store_rig"
+    fi
+    by_prefix="$(rig_namespace_guarded_rig_for_bead "$rigs_json" "$id")" || return 1
+    if [ -n "$by_prefix" ] && [ "$by_prefix" != "$store_rig" ]; then
+        printf '%s\n' "$by_prefix"
+    fi
+}
+
+# rig_namespace_admits_row <rig-list-json> <store-rig> <bead-id> <identity>
+# succeeds when every guarded rig the row is judged in
+# (rig_namespace_guarded_rigs_for_row) vouches for identity; a row in no
+# guarded rig always succeeds. It fails when those rigs cannot be read.
+rig_namespace_admits_row() {
+    local rig rigs
+    rigs="$(rig_namespace_guarded_rigs_for_row "$1" "$2" "$3")" || return 1
+    while IFS= read -r rig; do
+        [ -n "$rig" ] || continue
+        rig_namespace_admits "$rig" "$4" || return 1
+    done <<<"$rigs"
+    return 0
+}
+
 # rig_namespace_ask <rig> <identity> asks `gc agent is-foreign --rig-namespace`
 # and sets RIG_NAMESPACE_VERDICT to local, foreign or unknown and
 # RIG_NAMESPACE_REASON to the verdict's reason (and detail). Fail-closed: the

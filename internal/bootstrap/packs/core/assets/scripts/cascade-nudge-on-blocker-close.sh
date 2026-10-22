@@ -199,6 +199,9 @@ while IFS= read -r blocker; do
 
     set_rig_args "$blocker"
     [ -z "$RIG_SUSPENDED" ] || continue
+    # The dependents are read from the blocker's rig store, so that store is
+    # the one whose namespace judges their assignees.
+    blocker_rig="$RIG_ARG2"
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
@@ -233,8 +236,7 @@ while IFS= read -r blocker; do
         [ -z "$RIG_SUSPENDED" ] || continue
         # In a guarded rig, the nudge target (assignee or routed target) must
         # be one this city can vouch for there.
-        guarded_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$dep_id")"
-        if [ -n "$guarded_rig" ] && ! rig_namespace_admits "$guarded_rig" "$target"; then
+        if ! rig_namespace_admits_row "$RIGS_JSON" "$blocker_rig" "$dep_id" "$target"; then
             SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
             continue
         fi

@@ -76,7 +76,17 @@ fi
 # non-empty array above, so CLOSED_IDS is non-empty here.
 RESOLVED=0
 CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
+# The rig list says which rigs are guarded (federation = "rig"). Without it a
+# dependent in a guarded rig cannot be told apart, so nothing is rewritten
+# this run, as the reaper and the JSONL export skip the rig scopes then.
 RIGS_JSON=$(gc rig list --json 2>/dev/null) || RIGS_JSON=""
+if ! printf '%s' "$RIGS_JSON" | jq -e '(.rigs | type) == "array"' >/dev/null 2>&1; then
+    echo "cross-rig-deps: gc rig list failed; no dependencies rewritten this run" >&2
+    order_outcome_scope_skipped "rigs" "rig list unavailable"
+    order_outcome_set skipped "rig list unavailable"
+    order_outcome_write
+    exit 0
+fi
 # Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd
 # read restarts its retired proxy, so its beads wait for it to resume.
 SUSPENDED_PREFIXES=$(printf '%s' "$RIGS_JSON" \

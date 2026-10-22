@@ -227,6 +227,35 @@ row's route names an identity outside the namespace the row is another
 city's to this city: it drops out of this city's discovery reads, and this
 city's writes to it, a route back included, are refused.
 
+## Maintenance orders on a guarded rig
+
+The core pack's orders treat a guarded rig's store as shared:
+
+- The reaper and the JSONL export skip guarded rigs. This city neither reaps
+  nor archives the shared store, so whoever operates it must maintain and back
+  it up.
+- `cross-rig-deps` leaves dependents in guarded rigs alone, and rewrites
+  nothing in a run where it cannot read `gc rig list`.
+- The orphan sweep asks `gc agent is-foreign --rig-namespace <rig>` about
+  every rig claim. A claim held outside the rig's namespace (another city's
+  agent or a person) is never released; the sweep counts such claims per rig
+  (`kept N claims outside guarded rig namespaces (beta: N)`) without naming
+  them.
+- The nudge and gate-notification orders check a guarded rig's assignee,
+  route or addressee first. They are best effort: in a run where
+  `gc rig list` cannot be read they cannot tell a guarded rig apart, and they
+  nudge and notify as they would without the setting. Only `cross-rig-deps`,
+  which rewrites rows, stops on an unreadable rig list.
+
+<Warning>
+Run the core pack from the same build as `gc`. Only the core pack's own
+scripts ask with `--rig-namespace`: an older copy of the core pack (pinned,
+vendored or left from an earlier install) running under a newer `gc` asks
+without it, gets the answer for the city's roster, and does not apply the
+namespace. That combination does not fail closed. (A newer core pack under an
+older `gc` does: the older `gc` rejects the flag, and the claim is kept.)
+</Warning>
+
 ## What it does not cover
 
 - `bd` run directly by people or agents, and any writer other than Gas City.

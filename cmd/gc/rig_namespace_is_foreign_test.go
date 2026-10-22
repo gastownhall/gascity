@@ -276,6 +276,9 @@ func TestAgentIsForeign_RigNamespaceVerdicts(t *testing.T) {
 		{"unguarded rig, roster", "alpha", "alpha/worker", agentIsForeignExitLocal, agentIsForeignVerdictLocal, claimReasonRoster, "", false, ""},
 		{"unknown rig", "gamma", "gamma/worker", agentIsForeignExitUnknown, agentIsForeignVerdictUnknown, claimReasonNoConfig, `unknown rig "gamma"`, false, ""},
 		{"rig name in another case", "Beta", "neighbor", agentIsForeignExitUnknown, agentIsForeignVerdictUnknown, claimReasonNoConfig, `unknown rig "Beta"`, false, ""},
+		// The flag decides the mode, not its value: an empty rig is still a
+		// rig question, and no rig answers it.
+		{"empty rig name", "", "beta/worker", agentIsForeignExitUnknown, agentIsForeignVerdictUnknown, claimReasonNoConfig, `unknown rig ""`, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, raw, stderr := runIsForeign(t, rigNamespaceArgs(cityPath, tc.rig, tc.identity)...)
@@ -502,5 +505,95 @@ func TestReleaseOrphanedPoolAssignments_GuardedRigKeepsClaimsOutsideNamespace(t 
 	released = releaseOrphanedPoolAssignmentsFromBeads(cityStore, cfg, cityPath, nil, []beads.Bead{bare}, []beads.Store{rigStore}, []string{"repo"}, map[string]beads.Store{"repo": rigStore})
 	if len(released) != 1 {
 		t.Fatalf("unguarded rig: released = %v, want the bare claim released as before", released)
+	}
+}
+
+// TestAgentIsForeign_RigNamespaceOwnPoolSessionFromStore takes the CLI's
+// store path, not the environment fast path: the caller is no session, and
+// the city's own pool session record is found in its sessions store by id.
+// Another pool id under the same prefix, with no record, is foreign.
+func TestAgentIsForeign_RigNamespaceOwnPoolSessionFromStore(t *testing.T) {
+	cityPath := rnfVerbCity(t)
+	for _, key := range []string{"GC_CITY_PATH", "GC_CITY", "GC_SESSION_ID", "GC_SESSION_NAME", "GC_TEMPLATE"} {
+		t.Setenv(key, "")
+	}
+	ownPoolID := "tc-session-" + rnfToken
+	store, err := openStoreAtForCityWithConfig(cityPath, cityPath, nil)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	engine, _, _ := unwrapBeadPolicyStore(splitStrictFrontOf(store))
+	fileStore, ok := engine.(*beads.FileStore)
+	if !ok {
+		t.Fatalf("city store engine is %T, want *beads.FileStore", engine)
+	}
+	fileStore.HonorExplicitIDs = true
+	rec := rnsSessionBead(ownPoolID, "beta/worker", "worker-"+ownPoolID)
+	rec.Status = ""
+	created, err := store.Create(rec)
+	if err != nil || created.ID != ownPoolID {
+		t.Fatalf("seed own pool session record: id %q, err %v", created.ID, err)
+	}
+
+	for _, tc := range []struct {
+		identity   string
+		wantCode   int
+		wantReason claimProvenanceReason
+		wantVia    string
+	}{
+		{ownPoolID, agentIsForeignExitLocal, claimReasonSessionRecord, "session_record"},
+		{"worker-" + ownPoolID, agentIsForeignExitLocal, claimReasonSessionRecord, "session_record"},
+		{"tc-session-fedcba9876543210fedcba9876543210", agentIsForeignExitForeign, claimReasonNamespace, ""},
+	} {
+		code, out, raw, stderr := runIsForeign(t, rigNamespaceArgs(cityPath, "beta", tc.identity)...)
+		if code != tc.wantCode || out.Reason != string(tc.wantReason) || out.NamespaceVia != tc.wantVia {
+			t.Fatalf("%s: exit/reason/via = %d/%q/%q, want %d/%q/%q\nstdout: %s\nstderr: %s", tc.identity, code, out.Reason, out.NamespaceVia, tc.wantCode, tc.wantReason, tc.wantVia, raw, stderr)
+		}
+	}
+}
+
+// TestForeignClaimGate_UnknownRigLegFallsBackToPrefix: a leg naming a rig
+// this city does not configure says nothing about the store; the bead's
+// prefix still finds the guarded rig, so the claim is judged there.
+func TestForeignClaimGate_UnknownRigLegFallsBackToPrefix(t *testing.T) {
+	cfg := rnfCity()
+	ownSessions, _ := rnsCityBResolver(t)
+	gate := newForeignClaimGate(cfg, beads.SessionStore{Store: beads.NewMemStore()})
+	gate.namespaces = &poolRigNamespaceGate{cfg: cfg, sessions: ownSessions}
+	if !gate.namespaces.keeps(gate, "neighbor", "bt-7", "rig:gamma") {
+		t.Fatal("a guarded rig's claim under an unknown-rig leg was not judged by the rig's namespace")
+	}
+	if gate.namespaces.keeps(gate, "neighbor", "zz-7", "rig:gamma") {
+		t.Fatal("a claim with no guarded rig by leg or prefix was kept by a namespace")
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_GuardedRigOwnPoolSessionFromSessionStore
+// runs the controller's path end to end: newPoolRigNamespaceGate's resolver
+// reads the city's sessions store, behind the bead-policy layer (which hides
+// the store's pool id prefix; the HQ prefix differs, so only the look-through
+// finds it). This city's own dead pool session's claim is released; another
+// city's pool session claim is kept.
+func TestReleaseOrphanedPoolAssignments_GuardedRigOwnPoolSessionFromSessionStore(t *testing.T) {
+	cityPath := t.TempDir()
+	rigStore := beads.NewMemStore()
+	cfg := foreignIdentityTestCity(t)
+	cfg.Workspace.Prefix = "hq"
+	cfg.Rigs[0].Federation = config.RigFederationRig
+	record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
+	record.Status = "closed"
+	sessions := wrapStoreWithBeadPolicies(rnsNewCountingStore(record), cfg)
+
+	own := seedForeignIdentityWork(t, rigStore, "held by this city's dead pool session", poolIDB)
+	foreign := seedForeignIdentityWork(t, rigStore, "held by another city's pool session", poolIDA)
+	logBuf := captureSweepLog(t)
+	released := releaseOrphanedPoolAssignments(beads.NewMemStore(), beads.SessionStore{Store: sessions}, cfg, cityPath, nil,
+		[]beads.Bead{own, foreign}, []beads.Store{rigStore, rigStore}, []string{"repo", "repo"},
+		map[string]beads.Store{"repo": rigStore}, nil, nil, nil)
+	if len(released) != 1 || released[0].ID != own.ID {
+		t.Fatalf("released = %v, want exactly [%s] (this city's own dead pool session)\n%s", released, own.ID, logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "kept 1 claims outside guarded rig namespaces (repo: 1)") {
+		t.Fatalf("missing the namespace count for the other city's claim:\n%s", logBuf.String())
 	}
 }

@@ -124,8 +124,9 @@ fi
 while IFS="$(printf '\t')" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
     if [ -n "$GUARDED_RIGS" ]; then
-        guarded_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$bead_id")"
-        if [ -n "$guarded_rig" ] && ! rig_namespace_admits "$guarded_rig" "$routed_to"; then
+        # A bead.updated event names the bead, not its store, so the bead's
+        # prefix is the only way to find its rig here.
+        if ! rig_namespace_admits_row "$RIGS_JSON" "" "$bead_id" "$routed_to"; then
             SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
             continue
         fi

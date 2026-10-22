@@ -194,8 +194,9 @@ while IFS= read -r gate_id; do
         '[.assignee, .metadata."gc.deferred_assignee"]
          | map(select(. != null and . != "")) | (.[0] // "")' 2>/dev/null)"
     if [ -n "$ADDRESSEE" ]; then
-        guarded_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$gate_id")"
-        if [ -n "$guarded_rig" ] && ! rig_namespace_admits "$guarded_rig" "$ADDRESSEE"; then
+        # The gate was read from RIG_ARG2's store; that rig's namespace judges
+        # its addressee (and the prefix's rig too, if it differs).
+        if ! rig_namespace_admits_row "$RIGS_JSON" "$RIG_ARG2" "$gate_id" "$ADDRESSEE"; then
             SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
             continue
         fi

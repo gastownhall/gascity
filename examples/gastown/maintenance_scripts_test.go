@@ -12647,15 +12647,16 @@ exit 0
 // For a rig listed in ORPHAN_SWEEP_GUARDED_RIGS (federation = "rig") an
 // identity outside "<rig>/" that is not listed in ORPHAN_SWEEP_OWN_POOL_IDS
 // (this city's own pool sessions of the rig) is foreign with reason
-// "namespace". ORPHAN_SWEEP_GATE_OLD models a gc that predates the flag (an
-// unknown flag: exit 1, no JSON); ORPHAN_SWEEP_GATE_NO_ACK models one that
-// answers without echoing it.
+// "namespace". ORPHAN_SWEEP_GATE_OLD models a gc that predates the flag, as
+// a real older binary answers: exit 1 with its generic command_failed JSON;
+// ORPHAN_SWEEP_GATE_NO_ACK models one that answers without echoing it.
 const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]; then
   if [ -n "${ORPHAN_SWEEP_GATE_SLEEP:-}" ]; then sleep "$ORPHAN_SWEEP_GATE_SLEEP"; fi
   ns_rig=""
   if [ "${3:-}" = "--rig-namespace" ]; then
     if [ -n "${ORPHAN_SWEEP_GATE_OLD:-}" ]; then
-      echo "Error: unknown flag: --rig-namespace" >&2
+      echo "gc: unknown flag: --rig-namespace" >&2
+      echo '{"schema_version":"1","ok":false,"error":{"code":"command_failed","message":"command failed; see stderr for diagnostics","exit_code":1}}'
       exit 1
     fi
     ns_rig="$4"
@@ -13587,11 +13588,11 @@ func TestOrphanSweepSummaryQuotesUntrustedIdentities(t *testing.T) {
 
 // TestOrphanSweepNeverVouchesForAnEmptyIdentity keeps the gate's memo from
 // answering for an identity the gate was never asked about. A newline in an
-// assignee splits its row, so the tail reads as a row of its own whose bead ID
-// is attacker-chosen text and whose assignee is empty. Once a dead local claim
-// has been vouched for, the memo must not vouch for "" too: that would release
-// an unrelated in-progress bead that has no assignee at all, a bead the sweep
-// never selects on its own.
+// assignee used to split its row, so the tail read as a row of its own whose
+// bead ID was attacker-chosen text and whose assignee was empty. The row is
+// now one untrusted claim, its line break turned into a space: it is
+// protected and named, never asked about, and the unassigned bead it named is
+// never released, even once a dead local claim has primed the memo.
 func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	run := runOrphanSweepGateFixture(t, nil,
 		[]orphanSweepGateRow{
@@ -13607,17 +13608,59 @@ func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	}
 	for _, bead := range []string{"sh-split", "sh-unassigned"} {
 		if run.released(bead) {
-			t.Fatalf("%s was released under an empty identity the gate never vouched for\n%s", bead, run.context())
+			t.Fatalf("%s was released under an identity the gate never vouched for\n%s", bead, run.context())
 		}
 	}
-	if !strings.Contains(run.out, `"" (2: sh-split, sh-unassigned)`) {
-		t.Fatalf("output does not name the claims kept under the empty identity:\n%s", run.out)
+	if !strings.Contains(run.out, `" sh-unassigned" (1: sh-split)`) {
+		t.Fatalf("output does not name the untrusted claim as one row:\n%s", run.out)
 	}
-	// An empty identity cannot name a scope; it must not shift its reason into
-	// the scope name either.
+	if strings.Contains(run.log, "agent is-foreign --json -- \n") || strings.Contains(run.log, "agent is-foreign --json -- sh-unassigned") {
+		t.Fatalf("the gate was asked about the untrusted claim\n%s", run.context())
+	}
 	outcome, ok := run.outcome(t)
-	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 0 {
-		t.Fatalf("outcome = %+v (written %v), want partial with no scope", outcome, ok)
+	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 1 || !strings.Contains(outcome.Scopes[0].Reason, "tab or line break") {
+		t.Fatalf("outcome = %+v (written %v), want partial with the untrusted claim's scope and reason", outcome, ok)
+	}
+}
+
+// TestOrphanSweepRefusesForgedClaimRows is the row-forging regression: an
+// assignee carrying a newline and tabs spells a whole claim row of its own
+// ("<bead>\t<scope token>\t<assignee>") that names another city's claim in a
+// guarded rig with the HQ scope token. Read naively, the forged row would be
+// asked about without --rig-namespace and the other city's claim released.
+// The forging row is protected and named instead, and the claim it named is
+// asked about in its own scope and kept.
+func TestOrphanSweepRefusesForgedClaimRows(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{
+			inProgress("sh-1", "worker7"),
+			inProgress("sh-9", "zz\nsh-1\thq\tworker7"),
+			inProgress("sh-2", "carriage\rreturn"),
+		}, nil, nil, map[string]string{"ORPHAN_SWEEP_GUARDED_RIGS": "shared"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	for _, bead := range []string{"sh-1", "sh-9", "sh-2"} {
+		if run.released(bead) {
+			t.Fatalf("%s was released through a forged claim row\n%s", bead, run.context())
+		}
+	}
+	for _, line := range nonEmptyLogLines(run.log) {
+		if strings.HasPrefix(line, "agent is-foreign ") && !strings.HasPrefix(line, "agent is-foreign --rig-namespace shared ") {
+			t.Fatalf("a rig claim was asked about outside its scope: %q\n%s", line, run.context())
+		}
+	}
+	if got := run.gateCalls(); got != 1 {
+		t.Fatalf("gate calls = %d, want 1 (worker7 in shared; the untrusted rows are never asked)\n%s", got, run.context())
+	}
+	for _, want := range []string{
+		`"zz sh-1 hq worker7" (1: sh-9)`,
+		`"carriage return" (1: sh-2)`,
+		"kept 1 claims outside guarded rig namespaces (shared: 1)",
+	} {
+		if !strings.Contains(run.out, want) {
+			t.Fatalf("output missing %q:\n%s", want, run.out)
+		}
 	}
 }
 
@@ -13920,20 +13963,25 @@ func TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename(t *testing.T) {
 // sweep orders that act on rig rows. `agent is-foreign --rig-namespace <rig>`
 // answers as the verb does on a guarded rig: local for "<rig>/..." (echoing
 // rig_namespace), else foreign with reason "namespace". Reads come from
-// GUARD_* variables; every call is logged to GC_CALL_LOG. GUARD_READY is what
+// GUARD_* variables; every call is logged to GC_CALL_LOG. GUARD_FEDERATION
+// spells beta's federation value, GUARD_NO_ACK drops the rig_namespace echo,
+// GUARD_RIG_LIST_FAIL makes "rig list" fail, and GUARD_READY is what
 // `gc ready --status open` lists (the formula gates).
 const guardedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$1 $2" in
   "rig list")
-    echo '{"rigs":[{"name":"city-b","hq":true,"prefix":"gcx"},{"name":"alpha","hq":false,"prefix":"al"},{"name":"beta","hq":false,"prefix":"bt","federation":"rig","namespace":"exclusive"}]}'
+    if [ -n "${GUARD_RIG_LIST_FAIL:-}" ]; then exit 1; fi
+    echo "{\"rigs\":[{\"name\":\"city-b\",\"hq\":true,\"prefix\":\"gcx\"},{\"name\":\"alpha\",\"hq\":false,\"prefix\":\"al\"},{\"name\":\"beta\",\"hq\":false,\"prefix\":\"bt\",\"federation\":\"${GUARD_FEDERATION:-rig}\",\"namespace\":\"exclusive\"}]}"
     exit 0
     ;;
   "agent is-foreign")
     rig="$4"
     for identity; do :; done
+    ack=",\"rig_namespace\":\"$rig\""
+    if [ -n "${GUARD_NO_ACK:-}" ]; then ack=""; fi
     case "$identity" in
-      "$rig"/*) echo "{\"schema_version\":\"1\",\"ok\":true,\"verdict\":\"local\",\"reason\":\"roster\",\"roster_source\":\"stub\",\"rig_namespace\":\"$rig\",\"namespace_checked\":true,\"namespace_via\":\"lexical\"}"; exit 0 ;;
+      "$rig"/*) echo "{\"schema_version\":\"1\",\"ok\":true,\"verdict\":\"local\",\"reason\":\"roster\",\"roster_source\":\"stub\",\"namespace_checked\":true,\"namespace_via\":\"lexical\"$ack}"; exit 0 ;;
     esac
     echo "{\"schema_version\":\"1\",\"ok\":true,\"verdict\":\"foreign\",\"reason\":\"namespace\",\"detail\":\"outside $rig/\",\"roster_source\":\"stub\",\"rig_namespace\":\"$rig\",\"namespace_checked\":true}"
     exit 1
@@ -14278,4 +14326,142 @@ func countExactLinePrefix(log, prefix string) int {
 		}
 	}
 	return n
+}
+
+// TestRigNamespaceGateRequiresTheEcho: a local answer that does not echo
+// rig_namespace cannot have applied the rig's namespace, so the order acts on
+// it as on a refusal: the admitted-looking assignee is not nudged.
+func TestRigNamespaceGateRequiresTheEcho(t *testing.T) {
+	out, log := runGuardedRigOrder(t, "cascade-nudge-on-blocker-close.sh", map[string]string{
+		"GUARD_NO_ACK": "1",
+		"GUARD_EVENTS": `{"type":"bead.closed","payload":{"bead":{"id":"al-1"}}}`,
+		"GUARD_DEPS":   `[{"id":"bt-3","status":"open","assignee":"beta/worker"}]`,
+	})
+	if strings.Contains(log, "session nudge --rig beta beta/worker ") {
+		t.Fatalf("a local answer without the rig_namespace echo was trusted\n%s", log)
+	}
+	if !strings.Contains(out, "skipped 1 dependent(s) in guarded rigs") {
+		t.Fatalf("output does not report the skipped dependent:\n%s", out)
+	}
+}
+
+// TestRigNamespaceGateReadsFederationCaseInsensitively: any federation value
+// but "" or "city" is guarded, so a spelling like "Rig" never fails open.
+func TestRigNamespaceGateReadsFederationCaseInsensitively(t *testing.T) {
+	_, log := runGuardedRigOrder(t, "cascade-nudge-on-blocker-close.sh", map[string]string{
+		"GUARD_FEDERATION": "Rig",
+		"GUARD_EVENTS":     `{"type":"bead.closed","payload":{"bead":{"id":"al-1"}}}`,
+		"GUARD_DEPS":       `[{"id":"bt-2","status":"open","assignee":"neighbor"}]`,
+	})
+	if strings.Contains(log, "session nudge --rig beta neighbor ") {
+		t.Fatalf("federation = \"Rig\" was read as unguarded\n%s", log)
+	}
+	_, log = runGuardedRigOrder(t, "nudge-on-route.sh", map[string]string{
+		"GUARD_FEDERATION": "Rig",
+		"GUARD_EVENTS":     `{"type":"bead.updated","payload":{"id":"bt-1","metadata":{"gc.routed_to":"pk.worker"}}}`,
+	})
+	if strings.Contains(log, "session nudge pk.worker ") {
+		t.Fatalf("federation = \"Rig\" was read as unguarded by nudge-on-route\n%s", log)
+	}
+}
+
+// TestCascadeNudgeJudgesDependentsInTheBlockersRig: the dependents are read
+// from the blocker's rig store, so that rig's namespace judges them, whatever
+// their own id prefix says.
+func TestCascadeNudgeJudgesDependentsInTheBlockersRig(t *testing.T) {
+	_, log := runGuardedRigOrder(t, "cascade-nudge-on-blocker-close.sh", map[string]string{
+		"GUARD_EVENTS": `{"type":"bead.closed","payload":{"bead":{"id":"bt-1"}}}`,
+		"GUARD_DEPS": `[{"id":"zz-2","status":"open","assignee":"neighbor"},
+			{"id":"zz-3","status":"open","assignee":"beta/worker"}]`,
+	})
+	if !strings.Contains(log, "bd dep list bt-1 --rig beta ") {
+		t.Fatalf("the blocker's dependents were not read from its rig\n%s", log)
+	}
+	if strings.Contains(log, "session nudge neighbor ") {
+		t.Fatalf("a dependent read from a guarded rig's store was nudged outside its namespace\n%s", log)
+	}
+	if !strings.Contains(log, "agent is-foreign --rig-namespace beta --json -- beta/worker") || !strings.Contains(log, "session nudge beta/worker ") {
+		t.Fatalf("the admitted dependent was not checked in the blocker's rig and nudged\n%s", log)
+	}
+}
+
+// TestCrossRigDepsRewritesNothingWithoutTheRigList: without the rig list a
+// dependent in a guarded rig cannot be told apart, so nothing is rewritten and
+// the run is declared skipped, as the reaper and the export do.
+func TestCrossRigDepsRewritesNothingWithoutTheRigList(t *testing.T) {
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+	_, log := runGuardedRigOrder(t, "cross-rig-deps.sh", map[string]string{
+		"GUARD_RIG_LIST_FAIL":   "1",
+		"GC_ORDER_OUTCOME_FILE": outcomeFile,
+		"GUARD_CLOSED":          `[{"id":"al-1"}]`,
+		"GUARD_DEPS":            `[{"id":"external:beta/bt-2"},{"id":"external:alpha/al-3"}]`,
+	})
+	if strings.Contains(log, "bd dep remove") || strings.Contains(log, "bd dep add") {
+		t.Fatalf("dependencies were rewritten without the rig list\n%s", log)
+	}
+	data, err := os.ReadFile(outcomeFile)
+	if err != nil {
+		t.Fatalf("no outcome declared: %v", err)
+	}
+	var outcome scriptOutcome
+	if err := json.Unmarshal(data, &outcome); err != nil {
+		t.Fatalf("outcome is not the typed declaration: %v\n%s", err, data)
+	}
+	if outcome.Outcome != "skipped" || len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != "rigs" || outcome.Scopes[0].Reason != "rig list unavailable" {
+		t.Fatalf("outcome = %+v, want skipped with scope rigs: rig list unavailable", outcome)
+	}
+}
+
+// TestCrossRigDepsChecksTheRigNameOfADependent: a dependent named under a
+// guarded rig ("external:beta/<id>") is left alone even when its id carries
+// no guarded prefix.
+func TestCrossRigDepsChecksTheRigNameOfADependent(t *testing.T) {
+	out, log := runGuardedRigOrder(t, "cross-rig-deps.sh", map[string]string{
+		"GUARD_CLOSED": `[{"id":"al-1"}]`,
+		"GUARD_DEPS":   `[{"id":"external:beta/zz-5"}]`,
+	})
+	if strings.Contains(log, "bd dep remove external:beta/zz-5 ") {
+		t.Fatalf("a dependent named under a guarded rig was rewritten\n%s", log)
+	}
+	if !strings.Contains(out, "left 1 dependencies in guarded rigs") {
+		t.Fatalf("output does not report the skipped dependent:\n%s", out)
+	}
+}
+
+// TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest: a rig listing that
+// cannot be tagged with its scope is dropped (its claims kept), while the
+// other scopes are still swept.
+func TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{"ORPHAN_SWEEP_SHARED_BEADS_JSON": `[{"id":"sh-x","status":"in_progress","assignee":"neighbor"}] not json`})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("one unreadable rig listing stopped the HQ sweep\n%s", run.context())
+	}
+	if run.released("sh-x") {
+		t.Fatalf("a claim from an unreadable listing was released\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "could not read the in-progress listing of shared") {
+		t.Fatalf("no note for the unreadable listing:\n%s", run.out)
+	}
+}
+
+// TestOrphanSweepSkipsRowsWithoutAScope: a listing that is a lone object
+// carries rows no scope tag reaches; they are neither asked about nor
+// released, never read as HQ rows.
+func TestOrphanSweepSkipsRowsWithoutAScope(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil, nil, nil, nil, map[string]string{
+		"ORPHAN_SWEEP_HQ_BEADS_JSON":     " ",
+		"ORPHAN_SWEEP_SHARED_BEADS_JSON": `{"wrap":{"id":"sh-x","status":"in_progress","assignee":"neighbor"}}`,
+	})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("sh-x") || run.gateCalls() != 0 {
+		t.Fatalf("an untagged row was asked about (%d calls) or released\n%s", run.gateCalls(), run.context())
+	}
 }

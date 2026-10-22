@@ -586,6 +586,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning and act on every row of the rig's bead store, including rows another
   city that shares the store owns. Detach the rig first.
 
+- **A city with a `federation = "rig"` rig must run the core pack from the
+  same build as gc.** An older core pack under a newer gc asks
+  `gc agent is-foreign` about rig claims without `--rig-namespace`, so its
+  orphan sweep does not apply the rig's namespace; that combination does not
+  fail closed.
+
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
@@ -1114,8 +1120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc agent is-foreign --rig-namespace <rig>` asks about a claim in a
   rig's bead store.** On a rig with `federation = "rig"`, an identity outside
   the rig's namespace that is none of this city's own pool sessions of the
-  rig answers `foreign` with the new reason `namespace`, without reading any
-  store; an unknown rig (matched exactly) exits 2. The JSON echoes
+  rig answers `foreign` with the new reason `namespace`; only an identity
+  shaped like a pool session reads this city's sessions store to decide it.
+  An unknown rig (matched exactly) exits 2. The JSON echoes
   `rig_namespace` and adds `namespace_checked` and `namespace_via`
   (`lexical`, `session_record`). It is a new flag rather than `--rig`, which
   an older gc accepts and answers from the roster: an older gc rejects
@@ -1125,10 +1132,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces (beta: N)`) without naming them or declaring a partial outcome.
   The pool dead-assignee sweep keeps and counts the same claims. The reaper
   and JSONL export skip guarded rigs; `cross-rig-deps` leaves their
-  dependents alone; the nudge and gate-notification orders check a guarded
+  dependents alone, and rewrites nothing when it cannot read the rig list; the nudge and gate-notification orders check a guarded
   rig's assignee, route or addressee first, and the stale human-gate
   re-nudge leaves an unaddressed gate whose creation stamp names another
   city's namespace.
+  The reaper and export no longer touch a guarded rig, so whoever operates
+  that shared store must maintain and back it up. Run the core pack from the
+  same build as gc: an older core pack under a newer gc asks without
+  `--rig-namespace` and does not apply the namespace (a newer core pack under
+  an older gc fails closed).
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

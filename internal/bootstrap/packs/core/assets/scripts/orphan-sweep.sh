@@ -625,7 +625,7 @@ claim_gate_verdict() {
         GATE_VERDICT=unknown
         GATE_UNKNOWN="${GATE_UNKNOWN}${key}"$'\n'
         GATE_BUDGET_SKIPPED=$((GATE_BUDGET_SKIPPED + 1))
-        gate_record_reason "$identity" "the foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; not asked this pass"
+        gate_record_reason "$scope" "$identity" "the foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; not asked this pass"
         return 0
     fi
     ask=(gc agent is-foreign --json -- "$identity")
@@ -679,43 +679,58 @@ claim_gate_verdict() {
             fi
             ;;
     esac
-    gate_record_reason "$identity" "$reason"
+    gate_record_reason "$scope" "$identity" "$reason"
     return 0
 }
 
-# gate_record_reason remembers why an identity was protected, when there is a
-# reason to give.
+# spool_field neutralizes text read off a bead (which another city may have
+# written) for a tab-separated spool: tabs, newlines and carriage returns
+# become spaces, so it cannot re-key a grouping or forge a row.
+spool_field() {
+    local v="${1//$'\t'/ }"
+    v="${v//$'\n'/ }"
+    printf '%s' "${v//$'\r'/ }"
+}
+
+# scope_token_of names a scope ("" for HQ, else the rig) the way the claim
+# rows do: "hq" or "rig:<name>".
+scope_token_of() {
+    if [ -n "$1" ]; then printf 'rig:%s' "$1"; else printf 'hq'; fi
+}
+
+# gate_record_reason remembers why a (scope, identity) was protected, when
+# there is a reason to give. One identity can be protected for different
+# reasons in different scopes.
 gate_record_reason() {
-    local identity="$1"
-    local reason="$2"
+    local scope="$1"
+    local identity="$2"
+    local reason="$3"
     [ -n "$reason" ] || return 0
-    # Keyed the way record_protected_claim spools the identity.
-    local key="${identity//$'\t'/ }"
-    reason="${reason//$'\t'/ }"
-    GATE_REASONS="${GATE_REASONS}${key//$'\n'/ }"$'\t'"${reason//$'\n'/ }"$'\n'
+    GATE_REASONS="${GATE_REASONS}$(scope_token_of "$scope")"$'\t'"$(spool_field "$identity")"$'\t'"$(spool_field "$reason")"$'\n'
 }
 
-# record_protected_claim spools one protected claim. Identity and bead are read
-# off beads another city may have written: tabs and newlines are neutralized so
-# they cannot re-key the grouping or forge a row in the summary.
+# record_protected_claim spools one protected claim under its scope token.
+# Identity and bead are neutralized (spool_field).
 record_protected_claim() {
-    local identity="${1//$'\t'/ }"
-    local bead="${2//$'\t'/ }"
-    identity="${identity//$'\n'/ }"
-    bead="${bead//$'\n'/ }"
+    local scope_tok="$1"
+    local identity
+    local bead
+    identity="$(spool_field "$2")"
+    bead="$(spool_field "$3")"
     PROTECTED=$((PROTECTED + 1))
-    PROTECTED_ROWS="${PROTECTED_ROWS}${identity}"$'\t'"${bead}"$'\n'
+    PROTECTED_ROWS="${PROTECTED_ROWS}${scope_tok}"$'\t'"${identity}"$'\t'"${bead}"$'\n'
     return 0
 }
 
-# protected_claims_json groups the spool by identity, sorted, with each
-# identity's gate reason when the gate gave one.
+# protected_claims_json groups the spool by identity, sorted, with the gate's
+# reasons for that identity in each scope it was protected in.
 protected_claims_json() {
     jq -R -s -c --arg reasons "$GATE_REASONS" '
-        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
-        | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], bead: (.[1] // "")})
+        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: (.[0] + "\u001f" + (.[1] // "")), value: (.[2] // "")}) | from_entries) as $why
+        | split("\n") | map(select(length > 0) | split("\t") | {scope: .[0], identity: (.[1] // ""), bead: (.[2] // "")})
         | group_by(.identity)
-        | map({identity: .[0].identity, beads: map(.bead), reason: ($why[.[0].identity] // "")})
+        | map({identity: .[0].identity, beads: map(.bead),
+               reason: ([.[] | $why[.scope + "\u001f" + .identity] // empty | select(. != "")] | unique | join("; "))})
     ' <<<"$PROTECTED_ROWS"
 }
 
@@ -734,10 +749,16 @@ token_scope() {
 # claim is classified once, here; a recognized holder's claim is never
 # released, so it needs no gate answer and no probe. A row without a scope tag
 # is skipped: the gate could not be asked the right question about it.
+#
+# The rows are re-read line by line, so a bead id or assignee carrying a tab,
+# newline or carriage return could forge a row of its own, with any scope
+# token. Such a row gets the scope token "untrusted" and that text replaced by
+# spaces: it is never asked about or released, only protected and named.
 CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[]
     | select(type == "object" and (._gc_scope | type) == "string")
     | select(.assignee != null and .assignee != "")
-    | "\(.id)\t\(if ._gc_scope == "" then "hq" else "rig:" + ._gc_scope end)\t\(.assignee)"' 2>/dev/null) || CLAIM_ROWS=""
+    | ([.id, .assignee] | map(tostring | test("[\\t\\n\\r]")) | any) as $untrusted
+    | "\(.id | tostring | gsub("[\\t\\n\\r]"; " "))\t\(if $untrusted then "untrusted" elif ._gc_scope == "" then "hq" else "rig:" + ._gc_scope end)\t\(.assignee | tostring | gsub("[\\t\\n\\r]"; " "))"' 2>/dev/null) || CLAIM_ROWS=""
 UNRECOGNIZED_ROWS=""
 if [ -n "$CLAIM_ROWS" ]; then
     UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _scope _assignee; do
@@ -753,6 +774,7 @@ if [ -n "$UNRECOGNIZED_ROWS" ]; then
     while IFS= read -r _pair; do
         [ -n "$_pair" ] && UNRECOGNIZED+=("$_pair")
     done < <(while IFS=$'\t' read -r _bead _scope _assignee; do
+        [ "$_scope" = untrusted ] && continue
         printf '%s\t%s\n' "$_scope" "$_assignee"
     done <<<"$UNRECOGNIZED_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
 fi
@@ -777,6 +799,11 @@ FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id scope_tok assignee; do
+    if [ "$scope_tok" = untrusted ]; then
+        GATE_REASONS="${GATE_REASONS}untrusted"$'\t'"${assignee}"$'\t'"its bead id or assignee contains a tab or line break; never asked about or released"$'\n'
+        record_protected_claim untrusted "$assignee" "$bead_id"
+        continue
+    fi
     scope=$(token_scope "$scope_tok")
     claim_gate_verdict "$scope" "$assignee"
     if [ "$GATE_VERDICT" = "namespace" ]; then
@@ -785,7 +812,7 @@ while IFS=$'\t' read -r bead_id scope_tok assignee; do
         continue
     fi
     if [ "$GATE_VERDICT" != "local" ]; then
-        record_protected_claim "$assignee" "$bead_id"
+        record_protected_claim "$scope_tok" "$assignee" "$bead_id"
         continue
     fi
     if work_bead_still_resettable "$bead_id" "$assignee"; then
