@@ -642,7 +642,10 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 			{"show-environment", "-t", "=gc-test-agent-pane"},
 			{"show-options", "-qv", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys"},
 			{"set-option", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys", ""},
-			adopt, lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"}, {"show-environment", "-t", "=gc-test-agent-pane"}}},
+			adopt, lookup,
+			{"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"},
+			{"show-environment", "-t", "=gc-test-agent-pane"},
+		}},
 		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
 		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@3.%7", "claude"}}},
