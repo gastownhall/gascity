@@ -1005,6 +1005,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
+	if err := validateImplicitAgentIsolationRuntime(newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating implicit agent isolation: %w", err))
+	}
 	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
 		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
 	}
