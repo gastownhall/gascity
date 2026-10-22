@@ -356,7 +356,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	if sessionFilter == "" {
-		targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads, duePendingNudgeAgents)
+		targets, err := pendingNudgeTargets(d.cityPath, cfg, store.Store, sessionBeads, duePendingNudgeAgents)
 		if err != nil {
 			fmt.Fprintf(d.stderr, "%s: nudge event dispatch sweep: %v\n", d.logPrefix, err) //nolint:errcheck
 			return
@@ -382,7 +382,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		}
 		return false, nil
 	}
-	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
+	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, store.Store, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck
 	}
 }
@@ -395,7 +395,7 @@ func (d *nudgeEventDispatcher) handQueueToPollers() {
 	if cfg == nil || sp == nil || d.stores == nil || nudgeDispatcherIsSupervisor(cfg) {
 		return
 	}
-	_, sessStore := d.stores(cfg)
+	store, sessStore := d.stores(cfg)
 	if sessStore == nil {
 		return
 	}
@@ -404,7 +404,7 @@ func (d *nudgeEventDispatcher) handQueueToPollers() {
 		fmt.Fprintf(d.stderr, "%s: nudge poller handoff: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck
 		return
 	}
-	targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads, outstandingNudgeAgents)
+	targets, err := pendingNudgeTargets(d.cityPath, cfg, store.Store, sessionBeads, outstandingNudgeAgents)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge poller handoff: %v\n", d.logPrefix, err) //nolint:errcheck
 		return

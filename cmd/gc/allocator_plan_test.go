@@ -75,21 +75,26 @@ func hasNamedPlan(d allocDecision) bool {
 	return false
 }
 
-// reserveAll turns d's plans into uncleared create entries, as P3-5b's
-// admission would: each reserved at now with its plan's trigger work, and
-// no row in the census yet.
-func reserveAll(f *allocFixture, d allocDecision, at time.Time) {
-	for i, p := range d.Plans {
-		id := fmt.Sprintf("c-%d-%s", len(f.in.Ledger)+i, p.identity())
-		f.in.Ledger = append(f.in.Ledger, ledgerEntry{
-			ID: id, Kind: kindCreate, Key: rowKey{Leg: allocSessionsLeg}, Template: p.Template,
-			State: ledgerReserved, ReservedAt: at, Marker: ledgerMarker{InstanceToken: "tok-" + id},
-		})
-		f.in.Reservations = append(f.in.Reservations, planReservation{
-			EntryID: id, Template: p.Template, QualifiedInstance: p.Plan.qualifiedInstance, Slot: p.Plan.poolSlot,
-			WorkBeadID: p.Request.WorkBeadID, ReservedAt: at,
+// submitAll records d's plans as running creates in the in-flight view, as
+// the planner submits them: each under its own token, with its plan's
+// identity and trigger work, and no row in the census yet.
+func submitAll(f *allocFixture, d allocDecision) {
+	for _, p := range d.Plans {
+		f.in.InFlight.Entries = append(f.in.InFlight.Entries, inflightEntry{
+			Kind: inflightCreate, Token: fmt.Sprintf("tok-%d", len(f.in.InFlight.Entries)), Identity: p.identity(),
+			Template: p.Template, QualifiedInstance: p.Plan.qualifiedInstance, Slot: p.Plan.poolSlot, WorkBeadID: p.Request.WorkBeadID,
 		})
 	}
+}
+
+// inFlightCreate is a running create entry for a pool slot, or for a named
+// identity when instance is "named:<identity>".
+func inFlightCreate(token, template, instance string, slot int, work string) inflightEntry {
+	e := inflightEntry{Kind: inflightCreate, Token: token, Identity: template + "/" + instance, Template: template, QualifiedInstance: instance, Slot: slot, WorkBeadID: work}
+	if strings.HasPrefix(instance, "named:") {
+		e = inflightEntry{Kind: inflightCreate, Token: token, Identity: instance, Template: template}
+	}
+	return e
 }
 
 func TestDecideSmokePlansFreshPoolSessionsForDemand(t *testing.T) {
@@ -531,12 +536,12 @@ func TestAllocator_UnknownStateRowKeepsItsSlot(t *testing.T) {
 }
 
 // Kills: duplicate creates while creates are in flight (POOL-028/029, C5.13
-// row 1: in-flight demand counts census ∪ ledger). Pass 1 plans two creates;
-// P3-5b reserves them; pass 2 runs before either row reaches the census and
-// plans nothing more, with or without a pool max. Once one row shows (by its
-// token) and demand grows by one, the next pass counts the row once and
-// plans only the new work.
-func TestAllocator_InFlightCreate_CountsCacheUnionLedger(t *testing.T) {
+// row 1: in-flight demand counts census ∪ the in-flight map). Pass 1 plans
+// two creates; the planner submits them; pass 2 runs before either row
+// reaches the census and plans nothing more, with or without a pool max.
+// Once one row shows (by its token) and demand grows by one, the next pass
+// counts the row once and plans only the new work.
+func TestAllocator_InFlightCreate_CountsCensusUnionInFlight(t *testing.T) {
 	unlimited := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
 	for label, agent := range map[string]config.Agent{"max-10": allocPoolAgent("worker", 10), "no-max": unlimited} {
 		cfg := &config.City{Agents: []config.Agent{agent}}
@@ -545,7 +550,7 @@ func TestAllocator_InFlightCreate_CountsCacheUnionLedger(t *testing.T) {
 		if got := planWork(first); fmt.Sprint(got) != "[w-1 w-2]" {
 			t.Fatalf("%s: pass 1 plans %v", label, got)
 		}
-		reserveAll(f, first, allocNow)
+		submitAll(f, first)
 		second := f.decide()
 		if len(second.Plans) != 0 {
 			t.Fatalf("%s: pass 2 replanned in-flight creates: %v", label, planWork(second))
@@ -555,9 +560,9 @@ func TestAllocator_InFlightCreate_CountsCacheUnionLedger(t *testing.T) {
 		}
 
 		// One create lands: its row carries its token; demand grows.
-		landed := f.in.Reservations[0]
+		landed := f.in.InFlight.Entries[0]
 		row := poolRow("gc-new", "worker", landed.Slot, "start-pending", "pending_create_claim", "true",
-			"pending_create_started_at", ago(5*time.Second), "instance_token", "tok-"+landed.EntryID,
+			"pending_create_started_at", ago(5*time.Second), "instance_token", landed.Token,
 			"gc.trigger_bead_id", landed.WorkBeadID)
 		f.legs = nil
 		f.sessions(row).demand("worker", "w-1", "w-2", "w-3")
@@ -578,7 +583,7 @@ func TestAllocator_InFlightCreate_CountsCacheUnionLedger(t *testing.T) {
 func TestAllocator_InFlightCreateKeepsItsWork(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 5)}}
 	f := newAllocFixture(t, cfg).demand("worker", "w-2")
-	reserveAll(f, f.decide(), allocNow)
+	submitAll(f, f.decide())
 	f.demand("worker", "w-1", "w-2")
 	if got := planWork(f.decide()); fmt.Sprint(got) != "[w-1]" {
 		t.Fatalf("plans carry %v, want [w-1]: w-2's create is in flight", got)
@@ -587,20 +592,17 @@ func TestAllocator_InFlightCreateKeepsItsWork(t *testing.T) {
 
 // Kills: an in-flight create dropped from the demand floor (POOL-028): two
 // creates are in flight and the demand has shrunk to one of their items (the
-// other was claimed elsewhere); both creates keep their place, whatever stamp
-// their entries carry.
+// other was claimed elsewhere); both creates keep their place, and an
+// ambiguous one too until a census row carries its token.
 func TestAllocator_InFlightCreateHoldsTheDemandFloor(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 5)}}
-	for label, at := range map[string]time.Time{"now": allocNow, "unstamped": {}, "future": allocNow.Add(time.Hour)} {
-		f := newAllocFixture(t, cfg).demand("worker", "w-1")
-		f.in.Reservations = []planReservation{
-			{EntryID: "c-1", Template: "worker", QualifiedInstance: "worker-1", Slot: 1, WorkBeadID: "w-1", ReservedAt: at},
-			{EntryID: "c-2", Template: "worker", QualifiedInstance: "worker-2", Slot: 2, WorkBeadID: "w-2", ReservedAt: at},
-		}
-		d := f.decide()
-		if got := d.Snapshot.PoolDesired["worker"]; got != 2 || len(d.Plans) != 0 {
-			t.Errorf("%s: PoolDesired = %d plans %+v, want the 2 in flight and no plan", label, got, d.Plans)
-		}
+	f := newAllocFixture(t, cfg).demand("worker", "w-1")
+	ambiguous := inFlightCreate("tok-2", "worker", "worker-2", 2, "w-2")
+	ambiguous.Ambiguous = true
+	f.in.InFlight.Entries = []inflightEntry{inFlightCreate("tok-1", "worker", "worker-1", 1, "w-1"), ambiguous}
+	d := f.decide()
+	if got := d.Snapshot.PoolDesired["worker"]; got != 2 || len(d.Plans) != 0 {
+		t.Errorf("PoolDesired = %d plans %+v, want the 2 in flight and no plan", got, d.Plans)
 	}
 }
 
@@ -612,7 +614,7 @@ func TestAllocator_NamedReservationIsNoPoolStandIn(t *testing.T) {
 		NamedSessions: []config.NamedSession{{Name: "boss", Template: "worker", Mode: "on_demand"}},
 	}
 	f := newAllocFixture(t, cfg).demand("worker", "w-1")
-	f.in.Reservations = []planReservation{{EntryID: "c-1", Template: "worker", NamedIdentity: "boss", SessionName: "boss", ReservedAt: allocNow}}
+	f.in.InFlight.Entries = []inflightEntry{inFlightCreate("tok-1", "worker", "named:boss", 0, "")}
 	if got := planWork(f.decide()); fmt.Sprint(got) != "[w-1]" {
 		t.Fatalf("plans carry %v, want [w-1]", got)
 	}
@@ -666,18 +668,15 @@ func TestAllocator_InFlightSingletonCreateNotReplanned(t *testing.T) {
 	if len(first.Plans) != 1 {
 		t.Fatalf("pass 1 plans %+v", first.Plans)
 	}
-	reserveAll(f, first, allocNow.Add(-time.Second))
+	submitAll(f, first)
 	if second := f.decide(); len(second.Plans) != 0 {
 		t.Fatalf("pass 2 replanned the singleton: %+v (trace %v)", second.Plans, second.Trace)
 	}
 }
 
-// Kills: stickiness creeping back (C6.1, S2-5). Whatever the previous
-// snapshot bound (another work item still in demand, the same work on
-// another row, work no longer in demand), a pass binds and plans exactly as
-// a pass with no previous snapshot does. Within the pass a selected start
-// candidate is bound to its request's work, a live row never is, and no work
-// item is bound twice.
+// Kills: stickiness creeping back (C6.1, S2-5): the decide has no previous
+// snapshot to read. Within the pass a selected start candidate is bound to
+// its request's work, a live row never is, and no work item is bound twice.
 func TestBindingRecomputedEachPass(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	rows := []beads.Bead{
@@ -698,31 +697,13 @@ func TestBindingRecomputedEachPass(t *testing.T) {
 	if dead.Binding == nil || dead.Binding.WorkBeadID != "w-1" || fmt.Sprint(planWork(fresh)) != "[]" {
 		t.Fatalf("no previous snapshot: %s, want gc-1 bound to w-1", bindings(fresh))
 	}
-	prevBound := func(id, work string) *selectionSnapshot {
-		return &selectionSnapshot{Entries: map[rowKey]*selectionEntry{
-			{allocSessionsLeg, id}: {Binding: &bindingTarget{WorkBeadID: work, WorkStoreRef: "city"}},
-		}}
-	}
-	for label, prev := range map[string]*selectionSnapshot{
-		"other-work-in-demand": prevBound("gc-1", "w-2"),
-		"same-work-other-row":  prevBound("gc-3", "w-1"),
-		"work-left-demand":     prevBound("gc-1", "w-9"),
-		"previous-pass":        fresh.Snapshot,
-	} {
-		f := fixture()
-		f.in.Prev, f.in.SelGen = prev, 2
-		if got, want := bindings(f.decide()), bindings(fresh); got != want {
-			t.Errorf("%s: %s, want the pass without a previous snapshot: %s", label, got, want)
-		}
-	}
 }
 
 // Kills: binding one work bead to a second row while a row that is alive or
-// holds a start lease carries it (C6.3, S2-5). gc-2 carries w-1 as its
-// trigger (the lease is v5's: a pending-create claim or the creating state,
-// with no last_woke_at, which legacy's StartLease needs); dead gc-1 is selected with w-1 as its binding
-// candidate and is
-// not bound to it. A gc-2 that is neither alive nor leased consumes nothing,
+// is starting carries it (C6.3, S2-5). gc-2 carries w-1 as its trigger
+// (starting is v5's: a pending-create claim or the creating state, with no
+// lease); dead gc-1 is selected with w-1 as its binding candidate and is not
+// bound to it. A gc-2 that is neither alive nor starting consumes nothing,
 // so gc-1 is.
 func TestWorkConsumedByAliveOrStartingRow(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
@@ -810,19 +791,15 @@ func TestLiveHolderKeepsItsWorkEndToEnd(t *testing.T) {
 	}
 }
 
-// Kills: a binding for a row that is not a start candidate (AM2), fresh or
-// carried over from the previous snapshot, and a live row's selection
+// Kills: a binding for a row that is not a start candidate (AM2), and a
+// live row's selection
 // dropped for a refused worktree (owner decision at P3-5a review: keep the
 // selection, drop only the binding).
 func TestAllocator_BindingsOnlyForStartCandidates(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 1)}}
-	prev := &selectionSnapshot{Entries: map[rowKey]*selectionEntry{
-		{allocSessionsLeg, "gc-1"}: {Binding: &bindingTarget{WorkBeadID: "w-1", WorkStoreRef: "city"}},
-	}}
 	for label, setup := range map[string]func(*allocFixture){
-		"unknown":      func(f *allocFixture) { f.noInventory = true },
-		"unknown-prev": func(f *allocFixture) { f.noInventory, f.in.Prev = true, prev },
-		"alive-prev":   func(f *allocFixture) { f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).in.Prev = prev },
+		"unknown": func(f *allocFixture) { f.noInventory = true },
+		"alive":   func(f *allocFixture) { f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true}) },
 	} {
 		f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).demand("worker", "w-1")
 		setup(f)
@@ -875,8 +852,10 @@ func namedRuntimeName(t *testing.T, cfg *config.City) string {
 	return spec.SessionName
 }
 
-// Kills: a probe reintroduced, adopting an attributed runtime, and the S3
-// storm or stall (AM-N6, P3-6b §2.2): every row of the occupancy table.
+// Kills: a probe reintroduced, adopting an attributed runtime (a Foreign
+// acp runtime, whose OwnerState is never set, included) or an unread one,
+// and the S3 storm or stall (AM-N6, P3-6b §2.2): every row of the occupancy
+// table, AdoptLive by adoptableIdentity's rule.
 func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 	cfg := chatCity("always")
 	name := namedRuntimeName(t, cfg)
@@ -891,10 +870,28 @@ func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 		{"absent", func(*allocFixture) {}, true, false, ""},
 		{"corpse", func(f *allocFixture) { f.corpse(name) }, true, false, ""},
 		{"zombie", func(f *allocFixture) { f.alive(name, InventoryAttrs{}).fact(name, FactProcessAlive, ObsNo) }, true, false, ""},
-		{"alive-ownerless", func(f *allocFixture) { f.alive(name, InventoryAttrs{OwnerState: OwnerNone}) }, true, true, ""},
-		{"alive-unattributable", func(f *allocFixture) { f.alive(name, InventoryAttrs{}) }, true, true, ""},
-		{"alive-attribution-pending", func(f *allocFixture) { f.alive(name, InventoryAttrs{Incarnation: "i-1"}) }, false, false, gateOwnerPending},
+		// Another session's dead runtime holds the name (CONTRACT v5.10e): the
+		// A14 generator's seed 892 created, rolled back and created again.
+		{"zombie-foreign", func(f *allocFixture) {
+			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, SessionID: "gc-other", Token: "other-tok"}}).fact(name, FactProcessAlive, ObsNo)
+		}, false, false, gateNameHeld + "gc-other"},
+		{"corpse-foreign", func(f *allocFixture) {
+			f.corpse(name)
+			delete(f.own, name) // its identity is the one set below, not the census row's
+			a := f.attrs[name]
+			a.Identity = runtimeIdentity{Known: true, SessionID: "gc-other", Token: "other-tok"}
+			f.attrs[name] = a
+		}, false, false, gateNameHeld + "gc-other"},
+		{"alive-ownerless", func(f *allocFixture) { f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true}}) }, true, true, ""},
+		{"alive-legacy-adopted", func(f *allocFixture) {
+			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, Token: "rt-tok"}})
+		}, true, true, ""},
+		{"alive-identity-unread", func(f *allocFixture) { f.alive(name, InventoryAttrs{Incarnation: "i-1"}).unread(name) }, false, false, gateOwnerPending},
 		{"alive-owned", func(f *allocFixture) { f.alive(name, InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-closed"}) }, false, false, gateNameHeld + "gc-closed"},
+		// acp never sets OwnerState: the identity alone decides (C2d review).
+		{"alive-foreign-acp", func(f *allocFixture) {
+			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, SessionID: "gc-other", Token: "other-tok"}})
+		}, false, false, gateNameHeld + "gc-other"},
 	}
 	for _, tc := range cases {
 		f := newAllocFixture(t, cfg)
@@ -961,7 +958,9 @@ func TestAllocator_NamedPlan_PlanTimeGates(t *testing.T) {
 func TestAllocator_NamedPlan_OnePerIdentityWhileEntryUncleared(t *testing.T) {
 	cfg := chatCity("always")
 	f := newAllocFixture(t, cfg)
-	f.in.Reservations = []planReservation{{EntryID: "create-1", Template: "chat", NamedIdentity: "chat", SessionName: namedRuntimeName(t, cfg)}}
+	e := inFlightCreate("tok-1", "chat", "named:chat", 0, "")
+	e.SessionName = namedRuntimeName(t, cfg)
+	f.in.InFlight.Entries = []inflightEntry{e}
 	d := f.decide()
 	if len(d.Plans) != 0 || !traceHas(d, gateInFlight) {
 		t.Fatalf("plans %+v trace %v: one create per identity while its entry is uncleared", d.Plans, d.Trace)
@@ -1093,11 +1092,7 @@ func TestAllocator_PlanNeverEditsItsInputs(t *testing.T) {
 		in.Demand.Collected.UnassignedRoutedRefs = gap.in.Demand.Collected.UnassignedRoutedRefs
 		in.Demand.Collected.DefaultCounts[dispatcher] = 1
 		in.Demand.Collected.DefaultDemand[dispatcher] = gap.in.Demand.Collected.DefaultDemand[dispatcher]
-		in.Reservations = []planReservation{{EntryID: "c-1", Template: "worker", QualifiedInstance: "worker-4", Slot: 4, WorkBeadID: "w-4", ReservedAt: allocNow}}
-		in.Ledger = []ledgerEntry{{ID: "c-1", Kind: kindCreate, Key: rowKey{Leg: allocSessionsLeg}, Template: "worker", State: ledgerReserved, ReservedAt: allocNow}}
-		in.Prev = &selectionSnapshot{Entries: map[rowKey]*selectionEntry{
-			{allocSessionsLeg, "gc-2"}: {Binding: &bindingTarget{WorkBeadID: "w-2", WorkStoreRef: "city"}},
-		}}
+		in.InFlight.Entries = []inflightEntry{inFlightCreate("tok-1", "worker", "worker-4", 4, "w-4")}
 		return in
 	}
 	in, control := build(), build()
@@ -1109,7 +1104,10 @@ func TestAllocator_PlanNeverEditsItsInputs(t *testing.T) {
 
 // Kills: a scale_check partial read for a template with no custom check
 // (P3-3 obligation): every other template reads partial on the lane's
-// result, so only the custom-check templates are asked.
+// result, so only the custom-check templates are asked. Also kills an unread
+// source traced as the template's own check failing: with no lane result
+// the cause is scale-check-source-unread, and with a result whose check
+// failed it is pool-scale-check-partial.
 func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3), allocPoolAgent("custom", 3)}}
 	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "asleep"))
@@ -1118,8 +1116,12 @@ func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	if _, partial := d.Snapshot.Partial.Templates["worker"]; partial {
 		t.Fatalf("worker read partial with no custom check: %+v", d.Snapshot.Partial)
 	}
-	if !d.Snapshot.Partial.Templates["custom"].Retain {
-		t.Fatalf("custom with no lane result must read partial: %+v", d.Snapshot.Partial)
+	if tp := d.Snapshot.Partial.Templates["custom"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckUnread) || slices.Contains(tp.Causes, causeScaleCheckPartial) {
+		t.Fatalf("custom with no lane result = %+v, want retained for %s, not %s", tp, causeScaleCheckUnread, causeScaleCheckPartial)
+	}
+	f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"custom": 0}, Partial: map[string]bool{"custom": true}}
+	if tp := f.decide().Snapshot.Partial.Templates["custom"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckPartial) || slices.Contains(tp.Causes, causeScaleCheckUnread) {
+		t.Fatalf("custom whose check failed = %+v, want retained for %s, not %s", tp, causeScaleCheckPartial, causeScaleCheckUnread)
 	}
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
 		t.Fatalf("idle worker row = %s, want drain (not retained by another template's partial)", e.Desired)
@@ -1195,7 +1197,7 @@ func TestAllocator_CreateAndWorkBackoffRefusePlans(t *testing.T) {
 func TestAllocator_PlanningCensusHoldsCensusRowsOnly(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).demand("worker", "w-1", "w-2", "w-3")
-	f.in.Reservations = []planReservation{{EntryID: "create-9", Template: "worker", QualifiedInstance: "worker-2", Slot: 2, WorkBeadID: "w-2"}}
+	f.in.InFlight.Entries = []inflightEntry{inFlightCreate("tok-9", "worker", "worker-2", 2, "w-2")}
 	d := f.decide()
 	if got := planSlots(d, "worker"); fmt.Sprint(got) != "[3]" {
 		t.Fatalf("plans = %v, want [3]: slot 2 is reserved by an uncleared create", got)
@@ -1330,4 +1332,236 @@ func TestAllocator_RealizeNeverSelectsANamedRowForAPoolRequest(t *testing.T) {
 	if len(p.selected) != 0 || len(p.plans) != 0 {
 		t.Fatalf("a named row realized for a pool request: selected %v plans %+v", maps.Keys(p.selected), p.plans)
 	}
+}
+
+// claimGuardCity decides a city with worker (custom check, count) and plain
+// (no check): gc-1 (worker, slot 1) busy on old work w-0, gc-3 (worker, slot
+// 2, alias worker-2 when alias) and gc-2 (plain) awake. w is the claim under
+// test, first seen at seen relative to the run's start (noSeen: never), and
+// noRun publishes no run.
+func claimGuardCity(t *testing.T, w beads.Bead, count int, seen time.Duration, noSeen, noRun, alias bool, counts map[string]int) allocDecision {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4), allocPoolAgent("plain", 4)}}
+	gc3 := poolRow("gc-3", "worker", 2, "active")
+	if alias {
+		gc3 = poolRow("gc-3", "worker", 2, "active", "alias", "worker-2")
+	}
+	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active"), gc3, poolRow("gc-2", "plain", 1, "active")).
+		alive("s-gc-1", InventoryAttrs{}).alive("s-gc-3", InventoryAttrs{}).alive("s-gc-2", InventoryAttrs{})
+	started := allocNow.Add(-time.Minute)
+	w0 := beads.Bead{ID: "w-0", Title: "w-0", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	f.in.Demand.AssignedWork, f.in.Demand.AssignedStoreRefs = []beads.Bead{w0, w}, []string{"", ""}
+	if !noRun {
+		if counts == nil {
+			counts = map[string]int{"worker": count}
+		}
+		f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: counts}, started
+	}
+	c0, _ := workClaimOf(f.in.Demand, 0)
+	f.in.ClaimsSeen = map[workClaim]time.Time{c0: started.Add(-time.Hour)}
+	if c1, ok := workClaimOf(f.in.Demand, 1); ok && !noSeen {
+		f.in.ClaimsSeen[c1] = started.Add(seen)
+	}
+	return f.decide()
+}
+
+// workerAllocation is worker's accepted count and planned slots.
+func workerAllocation(d allocDecision) string {
+	var slots []int
+	for _, plan := range d.Plans {
+		if plan.Template == "worker" {
+			slots = append(slots, plan.Plan.poolSlot)
+		}
+	}
+	return fmt.Sprintf("desired %d, creates %v", d.Snapshot.PoolDesired["worker"], slots)
+}
+
+// Kills the pairing guard cutting the wrong template's count, or none, or
+// cutting by the wrong amount (PAR-SC re-review). A run's count may still
+// include a bead claimed after the run started; the decide subtracts each
+// such claim from the count of the template that owns it: the template its
+// work routes to, normalized as pool demand attributes it (a slot-suffixed
+// route, a legacy workflow run target), or for unrouted work the claimant
+// row's template. Over the review's ownership matrix the subtracted
+// decision (stale count, claim newer than the run) equals the decision a
+// run that saw the claim gives (fresh count), and a cut is traced
+// scale-check-stale-vs-claim. An older claim, a claim the planner never
+// saw, or no run cuts nothing; a template the run lacks reads
+// scale-check-source-unread.
+func TestAllocator_ScaleCheckClaimHold(t *testing.T) {
+	work := func(assignee, routed string, extra map[string]string) beads.Bead {
+		b := beads.Bead{ID: "w-1", Title: "w-1", Type: "task", Status: "in_progress", Assignee: assignee, Metadata: map[string]string{}}
+		if routed != "" {
+			b.Metadata[beadmeta.RoutedToMetadataKey] = routed
+		}
+		maps.Copy(b.Metadata, extra)
+		return b
+	}
+	workflow := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.RunTargetMetadataKey: "worker"}
+	matrix := []struct {
+		name, assignee, routed string
+		extra                  map[string]string
+		alias                  bool
+		stale, fresh           int // the run's count for worker, before and after the claim
+		cut                    bool
+	}{
+		{name: "worker-routed, by worker row id", assignee: "gc-3", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row session name", assignee: "s-gc-3", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row agent name", assignee: "worker-2", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row alias", assignee: "worker-2", routed: "worker", alias: true, stale: 1, fresh: 0, cut: true},
+		{name: "unrouted, by worker row id", assignee: "gc-3", stale: 0, fresh: 0},
+		{name: "unrouted, by worker row id, check counts it", assignee: "gc-3", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by plain row", assignee: "gc-2", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by a human", assignee: "alice", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "plain-routed, by worker row", assignee: "gc-3", routed: "plain", stale: 2, fresh: 2},
+		{name: "plain-routed, by plain row", assignee: "gc-2", routed: "plain", stale: 2, fresh: 2},
+		{name: "slot-suffixed worker-3 route, check counts canonical only", assignee: "gc-2", routed: "worker-3", stale: 0, fresh: 0},
+		{name: "slot-suffixed worker-3 route, check counts it", assignee: "gc-2", routed: "worker-3", stale: 1, fresh: 0, cut: true},
+		{name: "legacy workflow run target, check counts it", assignee: "gc-2", extra: workflow, stale: 1, fresh: 0, cut: true},
+	}
+	for _, c := range matrix {
+		t.Run(c.name, func(t *testing.T) {
+			w := work(c.assignee, c.routed, c.extra)
+			guarded := claimGuardCity(t, w, c.stale, time.Second, false, false, c.alias, nil)
+			fresh := claimGuardCity(t, w, c.fresh, -time.Hour, false, false, c.alias, nil)
+			if got, want := workerAllocation(guarded), workerAllocation(fresh); got != want {
+				t.Errorf("stale count with a newer claim: %s; a run that saw the claim: %s", got, want)
+			}
+			if cut := slices.Contains(guarded.Snapshot.Partial.Templates["worker"].Causes, causeScaleCheckStaleClaim); cut != c.cut {
+				t.Errorf("traced %s = %t, want %t", causeScaleCheckStaleClaim, cut, c.cut)
+			}
+		})
+	}
+	claim := work("gc-3", "worker", nil)
+	for _, c := range []struct {
+		name          string
+		seen          time.Duration
+		noSeen, noRun bool
+		counts        map[string]int
+		wantDesired   int
+		cut, unread   bool
+	}{
+		{name: "claim seen as the run started", seen: 0, wantDesired: 3, cut: true},
+		{name: "claim older than the run", seen: -time.Second, wantDesired: 4},
+		{name: "claim the planner never saw", noSeen: true, wantDesired: 4},
+		{name: "no run", seen: time.Second, noRun: true, wantDesired: 2, unread: true},
+		{name: "run lacks the template", seen: time.Second, counts: map[string]int{"other": 1}, wantDesired: 2, unread: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := claimGuardCity(t, claim, 2, c.seen, c.noSeen, c.noRun, false, c.counts)
+			tp := d.Snapshot.Partial.Templates["worker"]
+			if got := d.Snapshot.PoolDesired["worker"]; got != c.wantDesired {
+				t.Errorf("worker desired %d, want %d (%s)", got, c.wantDesired, workerAllocation(d))
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckStaleClaim); got != c.cut {
+				t.Errorf("cut = %t (causes %v), want %t", got, tp.Causes, c.cut)
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckUnread); got != c.unread {
+				t.Errorf("unread = %t (causes %v), want %t", got, tp.Causes, c.unread)
+			}
+			if c.unread && (!tp.Retain || slices.Contains(tp.Causes, causeScaleCheckPartial)) {
+				t.Errorf("causes %v retain %t; want retained, not %s", tp.Causes, tp.Retain, causeScaleCheckPartial)
+			}
+		})
+	}
+}
+
+// Kills the all-or-nothing hold the subtraction replaced (PAR-SC re-review),
+// and a cut by anything but the number of newer claims: with one or two
+// claims first seen during every run, a backlog of 5 still scales up, by
+// the count less those claims, on every cycle.
+func TestScaleCheckClaimStreamStillScalesUp(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 8)}}
+	rows := []beads.Bead{poolRow("gc-1", "worker", 1, "active")}
+	for cycle := range 10 {
+		f := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-1", InventoryAttrs{})
+		runStart := allocNow.Add(time.Duration(cycle) * 4 * time.Second)
+		claims := 1 + cycle%2
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: map[string]int{"worker": 5}}, runStart
+		f.in.ClaimsSeen = map[workClaim]time.Time{}
+		for i := range claims {
+			f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+				ID: fmt.Sprintf("w-%d-%d", cycle, i), Title: "w", Type: "task", Status: "in_progress", Assignee: "gc-1",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+			})
+			f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "")
+			c, _ := workClaimOf(f.in.Demand, i)
+			f.in.ClaimsSeen[c] = runStart.Add(time.Second) // seen while the run was in flight
+		}
+		// gc-1 takes its claims; the count less the newer claims is new demand.
+		if got, want := len(f.decide().Plans), 5-claims; got != want {
+			t.Fatalf("cycle %d: %d creates for a count of 5 less %d newer claim(s), want %d", cycle, got, claims, want)
+		}
+	}
+}
+
+// claimCutPool decides worker (custom check, count 2) with gc-1 working w-0
+// and gc-2, gc-3 awake and idle, kept by the count; extra are more claims
+// by gc-1, each first seen at its value relative to the run's start, and
+// w-0 is first seen at w0Seen.
+func claimCutPool(t *testing.T, w0Seen time.Duration, extra map[string]time.Duration) allocDecision {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
+	f := newAllocFixture(t, cfg).sessions(
+		poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"), poolRow("gc-3", "worker", 3, "active"),
+	).alive("s-gc-1", InventoryAttrs{}).alive("s-gc-2", InventoryAttrs{}).alive("s-gc-3", InventoryAttrs{})
+	started := allocNow.Add(-time.Minute)
+	seen := map[string]time.Duration{"w-0": w0Seen}
+	maps.Copy(seen, extra)
+	ids := slices.Sorted(maps.Keys(seen))
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	for _, id := range ids {
+		f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+			ID: id, Title: id, Type: "task", Status: "in_progress", Assignee: "gc-1",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		})
+		f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "")
+	}
+	f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: map[string]int{"worker": 2}}, started
+	f.in.ClaimsSeen = map[workClaim]time.Time{}
+	for i, id := range ids {
+		c, _ := workClaimOf(f.in.Demand, i)
+		f.in.ClaimsSeen[c] = started.Add(seen[id])
+	}
+	return f.decide()
+}
+
+// Kills a claim cut that puts rows to sleep (PAR-SC review must-fix): a
+// claim the check never counted (work assigned at creation) is cut like any
+// newer claim, and the first pass after a controller restart sees every
+// assignment as new. Either way the cut count is below the true one, so the
+// template retains its rows while the cut lasts: no row the true count
+// keeps sleeps or drains, and creates still follow the cut count.
+func TestScaleCheckClaimCutKeepsRows(t *testing.T) {
+	quiet := func(t *testing.T, cut, truth allocDecision) {
+		t.Helper()
+		if tp := cut.Snapshot.Partial.Templates["worker"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckStaleClaim) {
+			t.Fatalf("cut template = %+v, want retained for %s", tp, causeScaleCheckStaleClaim)
+		}
+		for k, e := range cut.Snapshot.Entries {
+			if (e.Desired == desireDrain || e.Desired == desireSleep) && truth.Snapshot.Entries[k].Desired != e.Desired {
+				t.Errorf("row %s: %s/%s under the cut, %s without it", k.ID, e.Desired, e.Reason, truth.Snapshot.Entries[k].Desired)
+			}
+		}
+		if len(cut.Plans) > len(truth.Plans) {
+			t.Errorf("the cut planned %d creates, more than the true count's %d", len(cut.Plans), len(truth.Plans))
+		}
+	}
+	t.Run("a claim the check never counted", func(t *testing.T) {
+		truth := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-9": -time.Second})
+		cut := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-9": time.Second})
+		quiet(t, cut, truth)
+	})
+	t.Run("first pass after a restart", func(t *testing.T) {
+		truth := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-1": -time.Hour})
+		boot := claimCutPool(t, time.Second, map[string]time.Duration{"w-1": time.Second})
+		quiet(t, boot, truth)
+		for k, e := range boot.Snapshot.Entries {
+			if e.Desired == desireDrain || e.Desired == desireSleep {
+				t.Errorf("first pass after a restart: row %s %s/%s", k.ID, e.Desired, e.Reason)
+			}
+		}
+	})
 }

@@ -31,12 +31,18 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // are intentionally silent: the patrol-tick fallback in supervisor mode
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
-func pingNudgeWakeSocket(cityPath string) {
+//
+// It dials through dialCitySocket, so on a worker site it sends nothing.
+//
+// It is a variable so the file queue's characterization tests can count the
+// pings a queue verb sends without opening a listener; tests that replace it
+// must stay serial.
+var pingNudgeWakeSocket = func(cityPath string) {
 	if cityPath == "" {
 		return
 	}
 	path := nudgequeue.WakeSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
+	conn, err := dialCitySocket(cityPath, path, pingNudgeWakeSocketDialTimeout)
 	if err != nil {
 		return
 	}
@@ -137,7 +143,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+	return deliverPendingQueuedNudges(cityPath, cfg, store, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
 		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 	})
 }
@@ -174,15 +180,16 @@ func outstandingNudgeAgents(state nudgequeue.State, _ time.Time) map[string]bool
 	return agents
 }
 
-func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot, selectAgents func(nudgequeue.State, time.Time) map[string]bool) ([]nudgeTarget, error) {
+func pendingNudgeTargets(cityPath string, cfg *config.City, store beads.Store, sessionBeads *sessionBeadSnapshot, selectAgents func(nudgequeue.State, time.Time) map[string]bool) ([]nudgeTarget, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return nil, nil
 	}
 	now := time.Now()
-	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+	queue := openNudgeQueue(cityPath, beads.NudgesStore{Store: store})
+	if _, err := queue.Queue.Maintain(context.Background(), now); err != nil {
 		return nil, fmt.Errorf("nudge queue maintenance sweep: %w", err)
 	}
-	state, err := nudgequeue.LoadState(cityPath)
+	state, err := queue.Queue.Snapshot()
 	if err != nil {
 		return nil, fmt.Errorf("loading nudge queue: %w", err)
 	}
@@ -208,10 +215,23 @@ func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessio
 	return targets, nil
 }
 
-func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
+	return dispatchQueuedNudgesWith(openNudgeQueue(cityPath, beads.NudgesStore{Store: store}), cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, debugOut, deliver)
+}
+
+// dispatchQueuedNudges is the dispatcher pass of dispatchAllQueuedNudges over
+// queue. A DueKeys read that comes back partial still dispatches the agents it
+// read, and the pass reports its error.
+func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
+	return dispatchQueuedNudgesWith(queue, cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+	})
+}
+
+func dispatchQueuedNudgesWith(queue nudgeQueueHandle, cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
 	now := time.Now()
 	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
 	// independent of whether any item below matches an open session. The
@@ -220,19 +240,28 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 	// (target agent has no open session, and never will again) can never
 	// reach — leaving it in Pending past its ExpiresAt forever. See
 	// ra-oudpha finding-3.
-	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+	if _, err := queue.Queue.Maintain(context.Background(), now); err != nil {
 		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
 	}
-	state, err := nudgequeue.LoadState(cityPath)
+	// The agents with a due pending item, or with an in-flight item whose
+	// lease has expired: that one is recoverable on the next claim attempt,
+	// so including its agent retries without waiting for the patrol tick.
+	// A record DueKeys cannot decode costs only its own agent this pass: the
+	// agents it did read are dispatched, and the partial result is reported.
+	var firstErr error
+	dueKeys, err := queue.Queue.DueKeys(now)
 	if err != nil {
-		return 0, fmt.Errorf("loading nudge queue: %w", err)
+		if !beads.IsPartialResult(err) {
+			return 0, fmt.Errorf("loading nudge queue: %w", err)
+		}
+		firstErr = fmt.Errorf("loading nudge queue: %w", err)
 	}
-	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
-		return 0, nil
+	if len(dueKeys) == 0 {
+		return 0, firstErr
 	}
-	pendingAgents := duePendingNudgeAgents(state, now)
-	if len(pendingAgents) == 0 {
-		return 0, nil
+	pendingAgents := make(map[string]bool, len(dueKeys))
+	for _, key := range dueKeys {
+		pendingAgents[key] = true
 	}
 
 	// The dispatcher receives the nudges-class store (store) PLUS the session-class
@@ -244,7 +273,6 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 	// (deriving sessStore from the nudges base would mis-resolve session beads once
 	// nudges relocates independently of sessions).
 	delivered := 0
-	var firstErr error
 	// skipCounts accumulates this tick's silent-skip reasons in memory; it is
 	// merged into the persisted queue state's running totals once, after the
 	// loop, rather than on every skip — recordNudgeDispatchSkips takes the
@@ -331,7 +359,7 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 		}
 		logNudgeDispatchSkip(debugOut, reason, target.agentKey(), target.sessionName, detail)
 	}
-	if err := recordNudgeDispatchSkips(cityPath, skipCounts); err != nil && firstErr == nil {
+	if err := queue.Skips.RecordDispatchSkips(skipCounts); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr

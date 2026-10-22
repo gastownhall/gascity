@@ -23,7 +23,7 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 	targets := buildDemandTargets(env.CityName, env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths,
 		env.OpenSessions, controllerQueryRuntimeEnv, io.Discard)
 	var v demandView
-	v.AssignedWork, _, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
+	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, newReadyDemandCache())
 	routed, _, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(
 		env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, io.Discard, nil, nil)
@@ -45,6 +45,7 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 	if len(targets.defaultNamedScaleTargets) > 0 {
 		v.NamedDefault, v.Collected.NamedPartials, _ = defaultNamedSessionDemand(targets.defaultNamedScaleTargets, cfg, env.CityName, demandCache)
 	}
+	v.ProbeStores = demandProbeStores(targets) // the default probes K1's lane reads (Gate S fix 2)
 	v.RelocatedClaimRefs = assignedWorkRelocatedClaimRefs(env.CityPath, cfg, env.CityStore)
 	v.WakeClaimRefs = assignedWorkClaimRefs(env.CityPath, cfg, env.CityStore)
 	return v
@@ -53,8 +54,8 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 // sortedDemandView orders v's index-aligned rows by (store ref, ID) and each
 // demand's work bead IDs: cached Lists come back in map order.
 func sortedDemandView(v demandView) demandView {
-	v.AssignedWork, v.AssignedStoreRefs = sortedAlignedRows(v.AssignedWork, v.AssignedStoreRefs)
-	v.Collected.UnassignedRouted, v.Collected.UnassignedRoutedRefs = sortedAlignedRows(v.Collected.UnassignedRouted, v.Collected.UnassignedRoutedRefs)
+	v.AssignedWork, v.AssignedStoreRefs, v.AssignedStores = sortedAlignedRows(v.AssignedWork, v.AssignedStoreRefs, v.AssignedStores)
+	v.Collected.UnassignedRouted, v.Collected.UnassignedRoutedRefs, _ = sortedAlignedRows(v.Collected.UnassignedRouted, v.Collected.UnassignedRoutedRefs, nil)
 	for template, d := range v.Collected.DefaultDemand {
 		d.WorkBeadIDs = slices.Sorted(slices.Values(d.WorkBeadIDs))
 		v.Collected.DefaultDemand[template] = d
@@ -62,20 +63,27 @@ func sortedDemandView(v demandView) demandView {
 	return v
 }
 
-func sortedAlignedRows(rows []beads.Bead, refs []string) ([]beads.Bead, []string) {
+func sortedAlignedRows(rows []beads.Bead, refs []string, stores []beads.Store) ([]beads.Bead, []string, []beads.Store) {
 	type pair struct {
-		row beads.Bead
-		ref string
+		row   beads.Bead
+		ref   string
+		store beads.Store
 	}
 	pairs := make([]pair, len(rows))
 	for i := range rows {
-		pairs[i] = pair{rows[i], refs[i]}
+		pairs[i] = pair{row: rows[i], ref: refs[i]}
+		if stores != nil {
+			pairs[i].store = stores[i]
+		}
 	}
 	slices.SortFunc(pairs, func(a, b pair) int { return cmp.Or(cmp.Compare(a.ref, b.ref), cmp.Compare(a.row.ID, b.row.ID)) })
 	for i, p := range pairs {
 		rows[i], refs[i] = p.row, p.ref
+		if stores != nil {
+			stores[i] = p.store
+		}
 	}
-	return rows, refs
+	return rows, refs, stores
 }
 
 // gatherMatchFixture is a city store and one rig store with demand for every

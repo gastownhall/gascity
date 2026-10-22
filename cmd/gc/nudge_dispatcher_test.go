@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // supervisorCfg returns a minimal *config.City wired for supervisor-mode
@@ -234,7 +236,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
@@ -278,6 +280,104 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 }
 
+// dueKeysErrQueue answers DueKeys with its queue's keys beside err, as a store
+// holding a record it cannot decode answers.
+type dueKeysErrQueue struct {
+	storebinding.NudgeQueue
+	err error
+}
+
+func (q dueKeysErrQueue) DueKeys(now time.Time) ([]string, error) {
+	keys, err := q.NudgeQueue.DueKeys(now)
+	if err != nil {
+		return nil, err
+	}
+	return keys, q.err
+}
+
+// TestDispatchQueuedNudgesDeliversThePartialDueKeysRead: a partial DueKeys
+// read still dispatches the keys it returned, and the pass reports its error,
+// even when no key is due; any other DueKeys error abandons the pass before a
+// claim, though the read returned keys beside it.
+func TestDispatchQueuedNudgesDeliversThePartialDueKeysRead(t *testing.T) {
+	partial := &beads.PartialResultError{Op: "nudge queue", Err: errors.New("record n-corrupt did not decode")}
+	failure := errors.New("nudges store unreachable")
+	for _, tc := range []struct {
+		name          string
+		dueKeysErr    error
+		wantPartial   bool
+		enqueue       bool
+		wantDelivered int
+		wantPending   int
+	}{
+		{name: "partial read delivers its keys", dueKeysErr: partial, wantPartial: true, enqueue: true, wantDelivered: 1},
+		{name: "partial read with nothing due", dueKeysErr: partial, wantPartial: true},
+		{name: "failed read delivers nothing", dueKeysErr: failure, enqueue: true, wantPending: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+
+			store := openNudgeBeadStore(dir)
+			fake := runtime.NewFake()
+			mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+			if tc.enqueue {
+				if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+					t.Fatalf("enqueueQueuedNudge: %v", err)
+				}
+			}
+			snapshot, err := loadSessionBeadSnapshot(store.Store)
+			if err != nil {
+				t.Fatalf("loadSessionBeadSnapshot: %v", err)
+			}
+
+			queue := openNudgeQueue(dir, store)
+			queue.Queue = dueKeysErrQueue{NudgeQueue: queue.Queue, err: tc.dueKeysErr}
+			delivered, err := dispatchQueuedNudges(queue, dir, supervisorCfg(), store.Store, store.Store, fake, snapshot, nil)
+			if !errors.Is(err, tc.dueKeysErr) {
+				t.Fatalf("dispatchQueuedNudges error = %v, want it to report %v", err, tc.dueKeysErr)
+			}
+			if got := beads.IsPartialResult(err); got != tc.wantPartial {
+				t.Fatalf("beads.IsPartialResult(%v) = %t, want %t", err, got, tc.wantPartial)
+			}
+			if delivered != tc.wantDelivered {
+				t.Fatalf("delivered = %d, want %d", delivered, tc.wantDelivered)
+			}
+			var nudgeMessages []string
+			for _, call := range fake.Calls {
+				if call.Method == "Nudge" {
+					nudgeMessages = append(nudgeMessages, call.Message)
+				}
+			}
+			if len(nudgeMessages) != tc.wantDelivered {
+				t.Fatalf("nudge calls = %q, want %d", nudgeMessages, tc.wantDelivered)
+			}
+			if tc.wantDelivered > 0 && !strings.Contains(nudgeMessages[0], "review the deploy logs") {
+				t.Fatalf("nudge message = %q, want original reminder", nudgeMessages[0])
+			}
+			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			if len(pending) != tc.wantPending || len(inFlight) != 0 || len(dead) != 0 {
+				t.Fatalf("queue after the pass: pending=%d inFlight=%d dead=%d, want pending=%d and nothing else",
+					len(pending), len(inFlight), len(dead), tc.wantPending)
+			}
+		})
+	}
+}
+
 // TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession: while a
 // `gc session kill` is tearing the runtime down, a queued nudge must stay
 // queued instead of being typed into the dying process and acked.
@@ -295,7 +395,7 @@ func TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}

@@ -274,5 +274,6 @@ func (h *handoffFixture) ops() hookClaimOps {
 		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		PublishRunMap:     func(string, string, ...string) error { return nil },
 		DrainAck:          func(io.Writer) error { h.drainAcked = true; return nil },
+		ReadWorkStarted:   noStartedClaims,
 	}
 }

@@ -1523,9 +1523,9 @@ start_command = "true"
 
 	calls := 0
 	orig := hookNudgePollerSessionProviderFn
-	hookNudgePollerSessionProviderFn = func(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
+	hookNudgePollerSessionProviderFn = func(spctx sessionProviderContext, sessionStart *primeSessionStart, stderr io.Writer) runtime.Provider {
 		calls++
-		return orig(spctx, stderr)
+		return orig(spctx, sessionStart, stderr)
 	}
 	t.Cleanup(func() { hookNudgePollerSessionProviderFn = orig })
 
@@ -1583,7 +1583,7 @@ start_command = "true"
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 	spctx := sessionProviderContextForCity(cfg, cityDir, "fake")
-	sp := hookNudgePollerSessionProvider(spctx, io.Discard)
+	sp := hookNudgePollerSessionProvider(spctx, nil, io.Discard)
 	target := nudgeTarget{sessionName: cliSessionName(cityDir, "gastown", "worker", cfg.Workspace.SessionTemplate)}
 	if !providerRetiresNudgePollers(target, sp) {
 		t.Fatal("hook provider did not know the event-capable default route")

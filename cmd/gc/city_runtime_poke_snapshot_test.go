@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -207,5 +209,165 @@ func TestPokedTickFeedsOutOfProcessSessionToDesiredStateBuild(t *testing.T) {
 	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
 	if saw, n := sawSession(); n == 0 || !saw {
 		t.Fatalf("poked tick: builds=%d sawSession=%v, want the build to see session %s written by another process", n, saw, id)
+	}
+}
+
+// mc-03yxh: `gc session new`'s poke lands while a tick runs, and the patrol
+// ticker fires during the same tick. The loop then takes the poke (arming its
+// debouncer) and the ticker in either order. When the ticker wins, the patrol
+// must not drop the poke's live read: the tick it runs is the poke's, so its
+// desired-state build sees the session another process wrote. Before the fix
+// the patrol dropped the poke and read the stale cache, and the session sat
+// start-pending until some later, unrelated poke (97-129s on stage-dolt).
+func TestPatrolOverPendingPokeTickSeesOutOfProcessCreate(t *testing.T) {
+	backing := &listCountingStore{Store: beads.NewMemStore()}
+	cr := newPokeSnapshotRuntime(t, backing)
+	cr.cityPath = t.TempDir()
+	cr.sp = runtime.NewFake()
+	var (
+		mu    sync.Mutex
+		built []*sessionBeadSnapshot
+	)
+	cr.buildFnWithSessionBeads = func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, snap *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+		mu.Lock()
+		built = append(built, snap)
+		mu.Unlock()
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+	id := createSessionBeadOutOfProcess(t, backing)
+
+	pokeDB, ctrlDB := newTickDebouncer(), newTickDebouncer()
+	pokeDB.arm(0) // the select took the poke first
+	ctrlDB.arm(0)
+	trigger := patrolTickTrigger(pokeDB, ctrlDB) // then the ticker
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, trigger)
+	mu.Lock()
+	saw := false
+	for _, snap := range built {
+		saw = saw || snapshotHasSession(snap, id)
+	}
+	n := len(built)
+	mu.Unlock()
+	if n == 0 || !saw {
+		t.Fatalf("patrol over a pending poke (trigger %q): builds=%d sawSession=%v, want the build to see session %s written by another process", trigger, n, saw, id)
+	}
+	// The patrol's tick was the poke's: no second tick is queued for it, and
+	// the control-dispatcher fire is still superseded.
+	if got := drainFiredCount(pokeDB, 5*time.Millisecond); got != 0 {
+		t.Fatalf("poke fires left after the patrol = %d, want 0", got)
+	}
+	if got := drainFiredCount(ctrlDB, 5*time.Millisecond); got != 0 {
+		t.Fatalf("control-dispatcher fires left after the patrol = %d, want 0", got)
+	}
+}
+
+func TestPatrolTickTrigger(t *testing.T) {
+	tests := []struct {
+		name string
+		arm  func(pokeDB, ctrlDB *tickDebouncer)
+		want string
+	}{
+		{name: "nothing pending", arm: func(_, _ *tickDebouncer) {}, want: "patrol"},
+		{name: "queued poke fire", arm: func(p, _ *tickDebouncer) { p.arm(0) }, want: "poke"},
+		{name: "debouncing poke", arm: func(p, _ *tickDebouncer) { p.arm(time.Hour) }, want: "poke"},
+		{name: "control dispatch only", arm: func(_, c *tickDebouncer) { c.arm(0) }, want: "patrol"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pokeDB, ctrlDB := newTickDebouncer(), newTickDebouncer()
+			tt.arm(pokeDB, ctrlDB)
+			if got := patrolTickTrigger(pokeDB, ctrlDB); got != tt.want {
+				t.Fatalf("patrolTickTrigger = %q, want %q", got, tt.want)
+			}
+			if pokeDB.cancelPending() || ctrlDB.cancelPending() {
+				t.Fatal("patrolTickTrigger left a fire pending")
+			}
+		})
+	}
+}
+
+// The run loop's patrol case itself (mc-03yxh). With a 1h
+// tick_debounce a poke stays pending (debouncing) when the 50ms patrol fires,
+// so only a patrol that runs the poke's tick reads sessions live and sees the
+// session another process wrote. Real time, no fake clock: the debounce dwarfs
+// the patrol, so the interleaving is forced.
+func TestRunLoopPatrolOverDebouncingPokeSeesOutOfProcessCreate(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	appendToFile(t, tomlPath, "\n[daemon]\npatrol_interval = \"50ms\"\ntick_debounce = \"1h\"\n")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	backing := beads.NewMemStore()
+	sp := runtime.NewFake()
+	var (
+		mu    sync.Mutex
+		want  string
+		seen  bool
+		ticks int
+	)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	pokeCh := make(chan struct{}, 1)
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath, CityName: "test-city", TomlPath: tomlPath, Cfg: cfg, SP: sp, PokeCh: pokeCh,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		BuildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, snap *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+			mu.Lock()
+			defer mu.Unlock()
+			ticks++
+			if want != "" && snapshotHasSession(snap, want) {
+				seen = true
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:      newDrainOps(sp),
+		Rec:       events.Discard,
+		OnStarted: func() { readyOnce.Do(func() { close(ready) }) },
+		Stdout:    io.Discard,
+		Stderr:    io.Discard,
+	})
+	cr.od = &recordingOrderDispatcher{}
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = primeTestCache(t, backing)
+	cr.setControllerState(cs)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	awaitClose(t, ready, "readiness")
+
+	id := createSessionBeadOutOfProcess(t, backing) // gc session new, in its own process
+	mu.Lock()
+	want = id
+	mu.Unlock()
+	pokeCh <- struct{}{} // then its poke
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		s, n := seen, ticks
+		mu.Unlock()
+		if s {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("after 5s (%d builds, patrol every 50ms) no tick saw session %s: the patrol dropped the debouncing poke", n, id)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

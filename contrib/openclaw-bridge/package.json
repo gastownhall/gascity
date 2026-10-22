@@ -8,9 +8,13 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
   },
   "dependencies": {
-    "openclaw": "2026.6.5"
+    "@openclaw/imessage": "2026.8.35",
+    "openclaw": "2026.8.35"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "1.31.0"
   }
 }

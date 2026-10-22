@@ -251,7 +251,7 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -633,7 +633,7 @@ func TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSession(%s): %v", template, err)
 		}
-		if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 			t.Fatalf("Start(%s): %v", template, err)
 		}
 		return info
@@ -1470,7 +1470,7 @@ func assertReloadHandsQueuedNudgeToPoller(t *testing.T, newItem func() queuedNud
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: cityPath}); err != nil {
+	if err := mgr.Start(context.Background(), testOperatorIn(t, cityPath), info.ID, "", runtime.Config{WorkDir: cityPath}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 

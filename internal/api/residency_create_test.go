@@ -52,11 +52,17 @@ func (b createBody) bead() beads.Bead {
 // the way the class's real beads are shaped. Every entry's class is asserted
 // against coordclass.Classify before it is used, so a classifier change breaks
 // the fixture instead of quietly turning a row into a work-class no-op.
+// refusedInfraClass reports a class whose generic create is refused as
+// coordination-owned (architecture B v2): all but graph (wisps) and work.
+func refusedInfraClass(class coordclass.Class) bool {
+	return class != coordclass.ClassGraph && class != coordclass.ClassWork
+}
+
 func infraCreateBodies() map[coordclass.Class]createBody {
 	return map[coordclass.Class]createBody{
 		coordclass.ClassGraph:     {Title: "a wisp", Type: "task", Labels: []string{"gc:wisp"}},
 		coordclass.ClassMessaging: {Title: "mail", Type: "message"},
-		coordclass.ClassSessions:  {Title: "a session", Type: "session"},
+		coordclass.ClassSessions:  {Title: "a wait", Type: "task", Labels: []string{"gc:wait"}}, // a session row itself is never created over HTTP (CONTRACT v5.9p)
 		coordclass.ClassOrders:    {Title: "an order run", Type: "task", Labels: []string{"order-tracking"}},
 		coordclass.ClassNudges:    {Title: "a nudge", Type: "task", Labels: []string{"gc:nudge"}},
 	}
@@ -160,6 +166,11 @@ func storeCount(t *testing.T, store beads.Store) int {
 // The id is the tell: hq-1 is the work ledger's own prefix, so the bead is not
 // merely in the wrong store, it carries an id minted from the wrong namespace
 // and cannot be relocated by copying it.
+//
+// Architecture B v2 (mc-v8g4p): only the graph class (a wisp) is still created
+// through POST /beads; the messaging, sessions (a wait), orders and nudges
+// rows are coordination-owned, refused with 422 before placement writes
+// anything, their owning routes creating them through the class store.
 func TestBeadCreateRoutesEveryInfraClassToTheBinding(t *testing.T) {
 	for class, body := range infraCreateBodies() {
 		t.Run(class.String(), func(t *testing.T) {
@@ -167,6 +178,16 @@ func TestBeadCreateRoutesEveryInfraClassToTheBinding(t *testing.T) {
 				t.Fatalf("fixture body %+v classifies as %s, want %s", body, got, class)
 			}
 			fs, binding := newWholeSplitCreateState(t)
+			if refusedInfraClass(class) {
+				rec := postBead(t, newTestCityHandler(t, fs), fs, body, "")
+				if rec.Code != http.StatusUnprocessableEntity {
+					t.Fatalf("status = %d, want 422: a %s bead is coordination-owned (body=%q)", rec.Code, class, rec.Body.String())
+				}
+				if n, m := storeCount(t, binding), storeCount(t, fs.cityBeadStore); n != 0 || m != 0 {
+					t.Fatalf("the refused create wrote %d bead(s) to the binding and %d to the work ledger, want none", n, m)
+				}
+				return
+			}
 
 			created := createBead(t, newTestCityHandler(t, fs), fs, body, "")
 
@@ -210,6 +231,12 @@ func TestBeadCreateOnAnUnsplitCityIsUnchanged(t *testing.T) {
 		t.Run(class.String(), func(t *testing.T) {
 			fs := newUnsplitCreateState(t)
 			h := newTestCityHandler(t, fs)
+			if refusedInfraClass(class) {
+				if rec := postBead(t, h, fs, body, ""); rec.Code != http.StatusUnprocessableEntity {
+					t.Fatalf("status = %d, want 422: a %s bead is coordination-owned", rec.Code, class)
+				}
+				return
+			}
 			created := createBead(t, h, fs, body, "")
 			if !storeHolds(t, fs.cityBeadStore, created.ID) {
 				t.Errorf("bead %s is not in the city work ledger; an unsplit city has no binding and must be byte-identical", created.ID)
@@ -241,8 +268,14 @@ func TestBeadCreateRefusesAnInfraClassWithAnExplicitRig(t *testing.T) {
 
 			rec := postBead(t, newTestCityHandler(t, fs), fs, body, "")
 
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400 (body=%q)", rec.Code, rec.Body.String())
+			// A coordination-owned class is refused first, whatever rig it
+			// names (the #7766 review): 422, not the placement's 400.
+			want := http.StatusBadRequest
+			if refusedInfraClass(class) {
+				want = http.StatusUnprocessableEntity
+			}
+			if rec.Code != want {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, want, rec.Body.String())
 			}
 			if n := storeCount(t, binding); n != 0 {
 				t.Errorf("the refused create still wrote %d bead(s) to the binding", n)

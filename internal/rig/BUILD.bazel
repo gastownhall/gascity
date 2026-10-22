@@ -7,6 +7,7 @@ go_library(
         "deps.go",
         "doc.go",
         "imports.go",
+        "include_spec.go",
         "path_durability.go",
         "provision.go",
         "rollback.go",
@@ -31,6 +32,7 @@ go_test(
     srcs = [
         "clone_seam_test.go",
         "imports_test.go",
+        "include_spec_test.go",
         "path_durability_test.go",
         "provision_branch_source_test.go",
         "rig_test.go",
@@ -58,6 +60,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

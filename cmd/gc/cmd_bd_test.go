@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -511,6 +510,54 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "points outside declared city rigs") {
 		t.Fatalf("resolveBdScopeTarget() error = %v, want foreign redirect error", err)
+	}
+}
+
+// TestResolveBdScopeTargetCityStoreRedirectUsesCityStore is the positive twin
+// of TestResolveBdScopeTargetErrorsOnForeignRedirect: a city-scoped agent's
+// worktree of the city repo redirects to the city's own HQ store, and that is
+// city scope, not a foreign store. Only an arg naming an existing bead skips
+// the cwd step (via the prefix probes above it), which is why `show` and
+// `update` of an HQ bead worked from that cwd while create, list, --help and
+// a show of a missing id were refused (ga-k1e9yp). The probe is stubbed to
+// miss, so every case here must resolve through the cwd step.
+func TestResolveBdScopeTargetCityStoreRedirectUsesCityStore(t *testing.T) {
+	cityDir := t.TempDir()
+	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "gascity", "pack-author")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(city .beads): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".beads", "redirect"), []byte(filepath.Join(cityDir, ".beads")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(redirect): %v", err)
+	}
+	setCwd(t, worktreeDir)
+	// City-scoped agents run without GC_RIG; an ambient one would win before
+	// the cwd step this test exercises.
+	t.Setenv("GC_RIG", "")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
+	}
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
+
+	for _, args := range [][]string{
+		{"create", "--title", "probe"},
+		{"list"},
+		{"--help"},
+		{"show", config.EffectiveHQPrefix(cfg) + "-missing"},
+	} {
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", args, false, io.Discard)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget(%v) error = %v, want city store", args, err)
+		}
+		if got.ScopeKind != "city" || got.ScopeRoot != cityDir {
+			t.Fatalf("resolveBdScopeTarget(%v) = %#v, want the city store at %q", args, got, cityDir)
+		}
 	}
 }
 
@@ -2787,7 +2834,12 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 	}
 }
 
-func TestDoBdReleaseIfCurrentWorksForBdStoreFallback(t *testing.T) {
+// TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL is the CLI twin of the
+// store-level floor: a bd below 1.3.0 rejects the conditional-release flags,
+// and the command must fail with the typed refusal naming the floor. It must
+// never reach `bd sql` (or, on this embedded-Dolt rig, the `dolt sql` CLI): no
+// release path writes the row behind bd's back.
+func TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
@@ -2824,9 +2876,9 @@ prefix = "fe"
 	}
 	fakeBin := t.TempDir()
 	sqlLog := filepath.Join(fakeBin, "sql.log")
-	// bd 1.0.4 — the contract-tested minimum (deps.env BD_PREV_VERSION) — has no
-	// conditional-release flags and rejects them the way its flag parser does,
-	// which is what latches the store onto the raw-SQL path this test pins.
+	// A bd older than 1.3.0 has no conditional-release flags and rejects them
+	// the way its flag parser does. The sql branch only records a call, so the
+	// test can prove none happened.
 	fakeBD := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'unknown flag: --if-assignee\\n' >&2\n" +
@@ -2859,22 +2911,19 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
-		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 1 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "released" {
-		t.Fatalf("output = %q, want released", stdout.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing on a refusal", stdout.String())
 	}
-	query, err := os.ReadFile(sqlLog)
-	if err != nil {
-		t.Fatalf("read SQL log: %v", err)
+	for _, want := range []string{beads.ErrConditionalReleaseUnsupported.Error(), "bd >= 1.3.0"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
 	}
-	// The release mints a fresh revision so the pre-release token is stale, so
-	// the token itself is not pinnable — everything around it is.
-	gotQuery := strings.TrimSpace(string(query))
-	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
-	if !wantQuery.MatchString(gotQuery) {
-		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
+	if _, err := os.Stat(sqlLog); !os.IsNotExist(err) {
+		t.Fatalf("an old bd reached `bd sql` (log stat err=%v)", err)
 	}
 }
 

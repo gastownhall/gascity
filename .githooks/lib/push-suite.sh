@@ -12,17 +12,22 @@
 #                and the maintainer's mTLS client certificate, either
 #                .bazelrc.local's build:remote-exec lines or a machine rc
 #                (agent hosts set `build --remote_executor=...` in ~/.bazelrc).
-#   CI           the trusted writer (bazel-test.yml); never this script.
+#   CI           the trusted writer (bazel.yml); never this script.
 #
 # GC_PREPUSH_SUITE picks the mode (default auto):
 #   auto   remote-exec when bazel is installed and its effective options name
-#          a remote executor; fork-cache when bazel is installed without one
-#          and .bazelrc's pinned test PATH has `go`; make test-fast-parallel
-#          otherwise.
+#          a remote executor; fork-cache when bazel is installed without one,
+#          .bazelrc's pinned test PATH has `go`, and this host's loader can
+#          resolve the pinned ICU runtime (lib/local-runtime.sh); make
+#          test-fast-parallel otherwise.
 #   rbe    --config=remote-exec; fails when no rc names an executor (the suite
 #          would otherwise compile and run on this machine at --jobs=64).
 #   cache  --config=fork-cache (it resets any rc's executor).
-#   go     make test-fast-parallel (plain go test, the pre-Bazel suite).
+#   go     make test-fast-parallel (plain go test, the pre-Bazel suite), with a
+#          banner saying it is not what CI enforces. auto falls back to it
+#          (with the same banner and the reason) only when bazel cannot run
+#          locally, or when the loader probe says a local run would fail or
+#          cannot say. Only auto probes; the explicit modes are never replaced.
 #
 # Remote execution also needs a current worker-env pin (worker_env_refusal
 # below): rbe-west's workers serve only main's pin. On a stale pin, or an open
@@ -31,9 +36,32 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
+# shellcheck source=local-runtime.sh
+. "$repo_root/.githooks/lib/local-runtime.sh"
 
 mode="${GC_PREPUSH_SUITE:-auto}"
 executor=""
+# Why the push runs plain go test instead of bazel, and how to get bazel back;
+# announce_go_suite prints them. An explicit GC_PREPUSH_SUITE=go is its own
+# reason.
+go_why="GC_PREPUSH_SUITE=go"
+go_fix="unset GC_PREPUSH_SUITE to run the bazel suite"
+
+# The go suite is not what CI enforces: bazel.yml gates on bazel test, whose
+# nogo, format, generated-artifact and policy targets have no make
+# test-fast-parallel counterpart. Say so loudly, with the reason, so a green
+# push is not read as CI parity.
+announce_go_suite() {
+  {
+    echo "pre-push: ========================================================================"
+    echo "pre-push: running make test-fast-parallel (plain go test): NOT the bazel suite CI gates on."
+    echo "pre-push: why: $go_why"
+    echo "pre-push: CI runs bazel test //... (.github/workflows/bazel.yml); a push that passes"
+    echo "pre-push: here can still fail there (nogo lint/vet, formatting, generated artifacts)."
+    echo "pre-push: fix: $go_fix"
+    echo "pre-push: ========================================================================"
+  } >&2
+}
 
 # The remote executor some rc file names for this workspace, empty for none:
 # the last non-empty --remote_executor among the rc options Bazel reads
@@ -79,32 +107,6 @@ probe_executor() {
   if ! executor="$(effective_remote_executor)"; then
     echo "pre-push: bazel info could not read this workspace's options (above); fix the rc, or set GC_PREPUSH_SUITE=go|rbe|cache" >&2
     exit 2
-  fi
-}
-
-# run_bounded SECONDS CMD...: CMD in its own process group, which is killed
-# after SECONDS (exit 124). timeout(1), else Homebrew's gtimeout, else perl
-# (stock macOS has neither timeout); unbounded only without all three.
-run_bounded() {
-  local seconds=$1
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    perl -e '
-      my $seconds = shift;
-      my $pid = fork;
-      defined $pid or die "fork: $!\n";
-      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
-      $SIG{ALRM} = sub { kill "TERM", -$pid; kill "CONT", -$pid; exit 124 };
-      alarm $seconds;
-      waitpid $pid, 0;
-      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
-    ' "$seconds" "$@"
-  else
-    "$@"
   fi
 }
 
@@ -216,8 +218,8 @@ pinned_path_has_go() {
 case "$mode" in
 auto)
   if ! have_bazel; then
-    echo "pre-push: bazel is not installed; running make test-fast-parallel." >&2
-    echo "pre-push: install bazelisk to reuse CI's cached test results (TESTING.md \"Bazel cache tiers\")." >&2
+    go_why="bazel is not installed"
+    go_fix="install bazelisk (engdocs/bazel-quickstart.md)"
     mode=go
   else
     probe_executor
@@ -231,11 +233,18 @@ auto)
     if [ -n "$executor" ]; then
       mode=rbe
     elif ! pinned_path_has_go; then
-      echo "pre-push: no go on .bazelrc's pinned test PATH ($(pinned_test_path)); running make test-fast-parallel." >&2
-      echo "pre-push: link your GOROOT to /usr/local/go to run the bazel suite (TESTING.md \"Bazel cache tiers\")." >&2
+      go_why="no go on .bazelrc's pinned test PATH ($(pinned_test_path))"
+      go_fix="link your GOROOT to /usr/local/go: sudo ln -s \"\$(go env GOROOT)\" /usr/local/go (TESTING.md \"Bazel cache tiers\")"
       mode=go
     else
-      mode=cache
+      local_runtime_assess
+      if [ "$local_runtime_state" = ok ]; then
+        mode=cache
+      else
+        go_why="$(local_runtime_why)"
+        go_fix="use a remote executor (GC_PREPUSH_SUITE=rbe, or build:remote-exec in .bazelrc.local), or $(local_runtime_resolve_hint); GC_PREPUSH_SUITE=cache forces the local bazel suite regardless"
+        mode=go
+      fi
     fi
   fi
   ;;
@@ -262,6 +271,7 @@ esac
 
 case "$mode" in
 go)
+  announce_go_suite
   exec make test-fast-parallel
   ;;
 rbe) config=remote-exec ;;

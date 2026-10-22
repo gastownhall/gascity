@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,12 +21,31 @@ type v2SessionMigration struct {
 	UnknownStates, SharedSlotNames, DuplicateNamed map[string]int
 }
 
-// readV2SessionMigration counts one live census of every session leg, folded
-// first-leg-wins by bead ID as legacy folds it. A failed or partial read is an
-// error: a row it missed may be one v2 refuses.
+// readV2SessionMigration counts one live census of every session leg, at
+// beads.FederatedReadTier as the planner's census reads it (CONTRACT v5 AL1),
+// folded first-leg-wins by bead ID as legacy folds it. A failed or partial
+// read is an error: a row it missed may be one v2 refuses.
 func readV2SessionMigration(cityPath, cityName string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store) (v2SessionMigration, error) {
-	rows, err := collectOpenSessionInfos(cityPath, cfg, sessions, rigs, buildSuspendedRigPathsForCity(cfg, cityPath), true, true, nil)
-	return tallyV2SessionMigration(cfg, cityName, rows), err
+	legs, err := sessionCensusStoreCandidates(cityPath, cfg, sessions, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
+	if err != nil {
+		return tallyV2SessionMigration(cfg, cityName, nil), err
+	}
+	var rows []session.Info
+	var errs []error
+	seen := make(map[string]bool)
+	for _, leg := range legs {
+		infos, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true, TierMode: beads.FederatedReadTier})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("session census leg %q: %w", leg.ref, err))
+		}
+		for _, info := range infos {
+			if id := strings.TrimSpace(info.ID); !info.Closed && !seen[id] {
+				seen[id] = id != ""
+				rows = append(rows, info)
+			}
+		}
+	}
+	return tallyV2SessionMigration(cfg, cityName, rows), errors.Join(errs...)
 }
 
 // tallyV2SessionMigration counts open rows, already folded, by class.

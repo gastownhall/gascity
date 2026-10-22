@@ -74,7 +74,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		env.OpenSessions, noProbeEnv, stderr)
 	cache := newReadyDemandCacheWithReads(reads)
 
-	v.AssignedWork, _, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
+	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, cache)
 	c := &v.Collected
 	c.UnassignedRouted, _, c.UnassignedRoutedRefs, c.UnassignedRoutedPartial = collectOpenUnassignedRoutedWork(
@@ -87,6 +87,9 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		var errs []error
 		c.DefaultProbed = true
 		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(env.Cfg, targets.defaultScaleTargets, cache)
+		// A bead whose claims keep failing the same way is not spawn demand
+		// (claim_loop_guard.go).
+		c.DefaultCounts, c.DefaultDemand = claimLoopGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
 		for _, probeErr := range errs {
 			fmt.Fprintf(stderr, "gatherDemand: %v (counts above may be a partial of one demand source)\n", probeErr) //nolint:errcheck
 		}
@@ -98,6 +101,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 			fmt.Fprintf(stderr, "gatherDemand: %v (using named demand=false)\n", probeErr) //nolint:errcheck
 		}
 	}
+	v.ProbeStores = demandProbeStores(targets)
 	v.RelocatedClaimRefs = assignedWorkRelocatedClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	v.WakeClaimRefs = assignedWorkClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	return v, nil

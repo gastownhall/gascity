@@ -15,8 +15,9 @@ import (
 // with a non-zero exit naming the rig, because a short array is
 // indistinguishable from an empty queue (cmd/gc/ready_federation.go). If the
 // generated shell captured that exit into an empty $r and fell through to the
-// next tier — which is exactly what the single-store tiers do, on purpose — the
-// query would print "[]" and exit 0, and the whole slice would buy nothing.
+// next tier, the query would print "[]" and exit 0, and the whole slice would
+// buy nothing. The single-store tiers hold the same property against a failing
+// `bd` (workquery_fails_loudly_test.go).
 //
 // So each case runs the real generated script against a fake `gc` that fails the
 // way a dead rig makes it fail, and asserts the script's own exit status and
@@ -112,27 +113,25 @@ func TestFederatedPoolDemandPropagatesADeadLeg(t *testing.T) {
 // unreadable store makes the real one fail. A single-store city shells `bd`, not
 // `gc`, so this — not fakeGCReadyFails — is what actually exercises its tiers.
 //
-// It appends each invocation to $FAKE_BD_LOG because the single-store tiers
-// redirect bd's stderr to /dev/null: without the log there is no evidence the
-// failure injection was reached at all, which is how the case used to pass
-// vacuously.
+// It appends each invocation to $FAKE_BD_LOG so a case can prove the failure
+// injection was reached at all, not merely that the script exited somewhere.
 const fakeBDFails = `#!/bin/sh
 [ -n "$FAKE_BD_LOG" ] && printf '%s\n' "$*" >> "$FAKE_BD_LOG"
 printf 'bd: store unreadable\n' >&2
 exit 1
 `
 
-// TestSingleStoreWorkQueryKeepsItsFallThrough is the other half of the byte
-// identity claim, stated as behavior rather than as bytes: a non-relocated city
-// still swallows `bd ready`'s failure and falls through to the next tier. This
-// is not an oversight being pinned — the tiers have somewhere to fall through
-// TO, and changing it would alter what every deployed city does on a flaky
-// store.
+// TestSingleStoreRoutedReadFailureFailsTheWorkQuery is the single-store mirror
+// of TestFederatedWorkQueryPropagatesADeadLeg. It used to pin the opposite —
+// that a single-store city swallowed `bd ready`'s failure and fell through to
+// "[]" — and that fall-through is what drained live seats as idle while bd was
+// missing from their PATH. With no session identity only the routed tier reads,
+// so the failure under test is `bd ready`'s.
 //
 // The failing binary is `bd`, and it has to be: a single-store work query never
 // invokes `gc`, so installing the failure as `gc` would leave every tier reading
 // a healthy stub and the case would pass no matter what the tiers did.
-func TestSingleStoreWorkQueryKeepsItsFallThrough(t *testing.T) {
+func TestSingleStoreRoutedReadFailureFailsTheWorkQuery(t *testing.T) {
 	a := &Agent{Name: "worker"}
 	command := a.EffectiveWorkQueryFor(singleStoreTopology())
 	if strings.Contains(command, "gc ready") {
@@ -143,15 +142,20 @@ func TestSingleStoreWorkQueryKeepsItsFallThrough(t *testing.T) {
 		"GC_SESSION_ORIGIN": "ephemeral",
 		"FAKE_BD_LOG":       bdLog,
 	}, fakeGCReadyFails, fakeBDFails)
-	if res.exit != 0 {
-		t.Fatalf("the single-store work_query exited %d over a failing bd; a non-relocated city must behave exactly as it does today (stderr=%q)", res.exit, res.stderr)
-	}
-	if strings.TrimSpace(res.stdout) != "[]" {
-		t.Errorf("single-store work_query stdout = %q, want %q", res.stdout, "[]")
-	}
 	invocations, err := os.ReadFile(bdLog)
 	if err != nil || !strings.Contains(string(invocations), "ready") {
-		t.Fatalf("the failing `bd` was never asked for `ready` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing about the fall-through", invocations, err)
+		t.Fatalf("the failing `bd` was never asked for `ready` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing", invocations, err)
+	}
+	if res.exit == 0 {
+		t.Fatalf("the single-store work_query exited 0 over a failing `bd ready` and printed %q; that is the answer an idle queue gives", res.stdout)
+	}
+	if strings.Contains(res.stdout, "[]") {
+		t.Errorf("single-store work_query printed %q over a failing `bd ready`", res.stdout)
+	}
+	for _, want := range []string{"gc work query: bd ready failed (exit 1)", "bd: store unreadable"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("single-store work_query stderr = %q, want %q", res.stderr, want)
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -83,7 +84,7 @@ func agreementRows() []agreementRow {
 			// is the #2763 shape the fallback exists for — a root-only molecule
 			// whose root IS the unit of work. This one was compiled with real
 			// child steps, so gc.workflow_expanded is stamped and the root is
-			// only ever claimable via gc.routed_to (#5900). Counting it would
+			// no longer executable itself (#5900). Counting it would
 			// be permanent demand for a row every worker's claim matcher
 			// refuses: seat spawns, hook reads empty, drains, counted again.
 			name: "fully-expanded workflow root with only run_target",
@@ -91,6 +92,31 @@ func agreementRows() []agreementRow {
 				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
 				beadmeta.RunTargetMetadataKey:        agreementTemplate,
 				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "fully-expanded workflow root with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-root", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "scope latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-scope", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindScope,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "spec latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-spec", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindSpec,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
 			}},
 			wantServable: false,
 		},
@@ -116,7 +142,7 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
-			// The discriminating row for LABEL comparison, and it points the
+			// The discriminating row for HOLD comparison, and it points the
 			// other way: the reader serves it (exact-match miss) but the hook
 			// strips it (EqualFold hit), so the worker never sees it.
 			name: "routed bead held by a case-variant hold label",
@@ -126,6 +152,42 @@ func agreementRows() []agreementRow {
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
 			},
 			wantServable: false,
+		},
+		{
+			// The discriminating row for a label the worker's query excludes that is
+			// NOT a dispatch hold: bd's native human label, a bead parked for a
+			// person. beadmeta.DispatchHoldLabels names only the two canonical
+			// holds, so the generated hold rows below cannot reach it. Without its
+			// own row demand would keep counting a bead no worker is ever served:
+			// the seat spawns, its hook reads empty, it drains, and the row is
+			// counted again.
+			name: "routed bead flagged for a human",
+			bead: beads.Bead{
+				ID: "a-14", Status: "open", Type: "task",
+				Labels:   []string{"human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: false,
+		},
+		{
+			// Human labels are exact-match exclusions; case variants remain
+			// claimable and must also count as demand.
+			name: "routed bead with Human label",
+			bead: beads.Bead{
+				ID: "a-15", Status: "open", Type: "task",
+				Labels:   []string{"Human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
+		},
+		{
+			name: "routed bead with HUMAN label",
+			bead: beads.Bead{
+				ID: "a-16", Status: "open", Type: "task",
+				Labels:   []string{"HUMAN"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
 		},
 		{
 			// Collapse x hold: the route form is fixed by the pass, and the row
@@ -496,8 +558,8 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 	query := agent.EffectiveWorkQueryFor(config.QueryTopology{})
 	args := tierThreeReaderArgs(t, query, agreementTemplate)
 
-	opts, metaWant := parseReadyArgsForTest(t, args)
-	legacyOpts, legacyMetaWant := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
+	matches := parseReadyArgsForTest(t, args)
+	legacyMatches := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
 	assertLegacyTierFilterUnchanged(t, query)
 
 	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
@@ -505,7 +567,7 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 			bead := postCanonicalizeBead(cfg, row.bead)
 
 			_, counted := demandServableForTemplates(cfg, bead, templates)
-			served := workerIsServed(bead, opts, metaWant) || legacyWorkflowTierServes(bead, legacyOpts, legacyMetaWant)
+			served := workerIsServed(bead, matches) || legacyWorkflowTierServes(bead, legacyMatches)
 
 			if counted != served {
 				t.Fatalf("AGREEMENT VIOLATED for %s: the Go demand predicate says %v, the generated pool-demand query form says %v",
@@ -527,8 +589,8 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 // still speak for (workflowRunTargetFallbackEligible, #5900). Mirroring those
 // jq clauses here is the single restatement in this conformance, and
 // assertLegacyTierFilterUnchanged is what keeps it honest.
-func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
-	if !workerIsServed(bead, opts, metaWant) {
+func legacyWorkflowTierServes(bead beads.Bead, matches func(beads.Bead) bool) bool {
+	if !workerIsServed(bead, matches) {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
@@ -537,18 +599,18 @@ func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metada
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
 }
 
-// workerIsServed is what the WORKER ends up holding: the reader's own filter
-// (filterReadyBeads, behind `gc ready`) and then the hook's Go post-filter over
+// workerIsServed is what the WORKER ends up holding: the reader's own row
+// predicate (readywork.Query.Matcher, behind `gc ready`) and then the hook's Go
+// post-filter over
 // that output (filterUnreadyHookCandidates). Both are production code and both
 // are part of the serving path — comparing the demand predicate against only the
 // first would miss every exclusion the hook applies afterwards, which is exactly
 // where the two use different comparisons (see demandRowServable).
-func workerIsServed(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
-	readerServed := filterReadyBeads([]beads.Bead{bead}, opts, metaWant)
-	if len(readerServed) != 1 {
+func workerIsServed(bead beads.Bead, matches func(beads.Bead) bool) bool {
+	if !matches(bead) {
 		return false
 	}
-	encoded, err := json.Marshal(readerServed)
+	encoded, err := json.Marshal([]beads.Bead{bead})
 	if err != nil {
 		return false
 	}
@@ -664,23 +726,23 @@ func splitShellWords(s string) []string {
 }
 
 // parseReadyArgsForTest parses argv through the REAL `gc ready` flag surface and
-// the real metadata-filter parser, so the conformance runs the production
-// serving semantics rather than a test's reading of them.
-func parseReadyArgsForTest(t *testing.T, args []string) (readyOpts, []metadataFieldFilter) {
+// returns the reader's real row predicate, so the conformance runs the
+// production serving semantics rather than a test's reading of them.
+func parseReadyArgsForTest(t *testing.T, args []string) func(beads.Bead) bool {
 	t.Helper()
-	var opts readyOpts
+	var opts readywork.Query
 	var includeEphemeral, jsonOut bool
 	cmd := &cobra.Command{Use: "ready"}
 	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
 	if err := cmd.Flags().Parse(args); err != nil {
 		t.Fatalf("parsing the generated tier's flags %v: %v", args, err)
 	}
-	if len(opts.metadataFields) == 0 {
+	if len(opts.MetadataFields) == 0 {
 		t.Fatalf("parsed no metadata filters from %v; the conformance would pass vacuously", args)
 	}
-	metaWant, err := parseMetadataFieldFilters(opts.metadataFields)
+	matches, err := opts.Matcher()
 	if err != nil {
-		t.Fatalf("parsing metadata filters: %v", err)
+		t.Fatalf("compiling the generated tier's query: %v", err)
 	}
-	return opts, metaWant
+	return matches
 }

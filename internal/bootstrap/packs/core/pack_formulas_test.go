@@ -358,3 +358,92 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
 	}
 }
+
+// TestMolDoWorkWorkBeadCloseFailsClosed pins that a refused work-bead close
+// (for example, the typed work-record close gate) stops the step instead of
+// falling through to close the formula step over still-open work.
+func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	closes := 0
+	for _, line := range strings.Split(step, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `gc bd close "$WORK_BEAD_ID"`) {
+			continue
+		}
+		closes++
+		if !strings.HasSuffix(line, "|| exit 1") {
+			t.Errorf("work-bead close must fail closed with `|| exit 1`: %s", line)
+		}
+	}
+	if closes == 0 {
+		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}
+
+// graphBeadVars are the shell variables core formulas use for workflow
+// infrastructure beads: the claimed formula step, the drain continuation and
+// the workflow root. Every one carries gc.root_bead_id, so on a city that
+// keeps its coordination classes in a separate store each is held by that
+// store and `gc bd` serves writes to it in process.
+var graphBeadVars = []string{"GC_BEAD_ID", "DRAIN_BEAD_ID", "ROOT_BEAD_ID", "STEP_BEAD_ID"}
+
+// graphBeadRefusedShapes are the spellings the in-process door refuses on such
+// a bead, because the class store has nothing to write them into (notes, a
+// heartbeat lease, an audit actor). A close reason is not among them: the door
+// records `close --reason` as the bead's close reason. A core formula that uses
+// one of these breaks on gc's own split store.
+var graphBeadRefusedShapes = []string{"--notes", "--append-notes", "--actor", "heartbeat"}
+
+// TestCoreFormulasUseNoRefusedShapeOnGraphBeads scans every core formula for a
+// `bd` write naming a graph-bead variable and fails on a refused shape, or on a
+// bare `bd` (which cannot see a relocated bead at all). Continuation lines are
+// joined first so a flag on the next line of a `\`-continued command counts.
+func TestCoreFormulasUseNoRefusedShapeOnGraphBeads(t *testing.T) {
+	entries, err := fs.ReadDir(PackFS, "formulas")
+	if err != nil {
+		t.Fatalf("reading formulas: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		data, err := fs.ReadFile(PackFS, "formulas/"+entry.Name())
+		if err != nil {
+			t.Fatalf("reading %s: %v", entry.Name(), err)
+		}
+		joined := strings.ReplaceAll(string(data), "\\\n", " ")
+		for _, line := range strings.Split(joined, "\n") {
+			bd := strings.Index(line, "bd ")
+			if bd < 0 || !namesGraphBeadVar(line[bd:]) {
+				continue
+			}
+			command := line[bd:]
+			verb := strings.Fields(command)
+			if len(verb) < 2 || (verb[1] != "update" && verb[1] != "close" && verb[1] != "heartbeat") {
+				continue
+			}
+			checked++
+			if !strings.HasSuffix(strings.TrimRight(line[:bd], " `"), "gc") {
+				t.Errorf("%s: bare `bd` on a graph bead cannot reach a relocated class store; use `gc bd`: %s", entry.Name(), strings.TrimSpace(line))
+			}
+			for _, refused := range graphBeadRefusedShapes {
+				if strings.Contains(command, refused) {
+					t.Errorf("%s: %s is refused on a relocated graph bead: %s", entry.Name(), refused, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no graph-bead write in the core formulas; the scan is not looking where the writes are")
+	}
+}
+
+func namesGraphBeadVar(command string) bool {
+	for _, name := range graphBeadVars {
+		if strings.Contains(command, "$"+name) || strings.Contains(command, "${"+name) {
+			return true
+		}
+	}
+	return false
+}

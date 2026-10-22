@@ -70,10 +70,11 @@ func enqueueRoutedNudge(t *testing.T, cityPath string) queuedNudge {
 	return item
 }
 
-// TestNudgeOwningFramesLeaveTheStorageRoutesServingALiveStore covers every
-// nudge frame that opens and closes its own store (#5979), each on a relocated
-// city: the controller's fence census, `gc nudge drop`, the maintenance sweep,
-// and the enqueue / record-failure helpers when the caller passes no store.
+// TestNudgeOwningFramesLeaveTheStorageRoutesServingALiveStore covers the nudge
+// frames that open and close their own store (#5979), each on a relocated city:
+// the controller's fence census, `gc nudge drop`, the maintenance sweep, the
+// enqueue / record-failure helpers when the caller passes no store, and the
+// wait-nudge withdrawal.
 func TestNudgeOwningFramesLeaveTheStorageRoutesServingALiveStore(t *testing.T) {
 	cases := []struct {
 		name string
@@ -107,6 +108,12 @@ func TestNudgeOwningFramesLeaveTheStorageRoutesServingALiveStore(t *testing.T) {
 				t.Fatalf("record failure: %v", err)
 			}
 		}},
+		{"wait-nudge withdrawal", func(t *testing.T, cityPath string) {
+			item := enqueueRoutedNudge(t, cityPath)
+			if err := withdrawQueuedWaitNudges(cityPath, []string{item.ID}); err != nil {
+				t.Fatalf("withdraw wait nudges: %v", err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,9 +127,14 @@ func TestNudgeOwningFramesLeaveTheStorageRoutesServingALiveStore(t *testing.T) {
 }
 
 // closeCountingWorkStore is a work store handle that counts its own closes.
+// Once closed it refuses the reads and writes a wait-nudge withdrawal makes, as
+// a backend that holds a database handle per store handle (native Dolt,
+// DoltLite, the proxied store) does. The file store's own close is a no-op, so
+// without the refusal a frame that closes before it is done still passes there.
 type closeCountingWorkStore struct {
 	beads.Store
-	closes int
+	closes         int
+	usedAfterClose []string
 }
 
 // CloseStore counts the close and forwards it to the real work store, so the
@@ -130,6 +142,48 @@ type closeCountingWorkStore struct {
 func (s *closeCountingWorkStore) CloseStore() error {
 	s.closes++
 	return closeBeadStoreHandle(s.Store)
+}
+
+// refuseAfterClose records op and refuses it once the handle has been closed.
+func (s *closeCountingWorkStore) refuseAfterClose(op string) error {
+	if s.closes == 0 {
+		return nil
+	}
+	s.usedAfterClose = append(s.usedAfterClose, op)
+	return beads.ErrStoreClosed
+}
+
+// Get reads through to the real work store unless the handle is closed.
+func (s *closeCountingWorkStore) Get(id string) (beads.Bead, error) {
+	if err := s.refuseAfterClose("Get"); err != nil {
+		return beads.Bead{}, err
+	}
+	return s.Store.Get(id)
+}
+
+// List reads through to the real work store unless the handle is closed.
+func (s *closeCountingWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if err := s.refuseAfterClose("List"); err != nil {
+		return nil, err
+	}
+	return s.Store.List(query)
+}
+
+// SetMetadataBatch writes through to the real work store unless the handle is
+// closed.
+func (s *closeCountingWorkStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.refuseAfterClose("SetMetadataBatch"); err != nil {
+		return err
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Close closes the bead in the real work store unless the handle is closed.
+func (s *closeCountingWorkStore) Close(id string) error {
+	if err := s.refuseAfterClose("Close"); err != nil {
+		return err
+	}
+	return s.Store.Close(id)
 }
 
 // countNudgeWorkStoreOpens wraps every work store the nudge openers open in a
@@ -191,6 +245,11 @@ func TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity(t *testing
 				t.Fatalf("record failure: %v", err)
 			}
 		}},
+		{"wait-nudge withdrawal", func(t *testing.T, cityPath string, item queuedNudge) {
+			if err := withdrawQueuedWaitNudges(cityPath, []string{item.ID}); err != nil {
+				t.Fatalf("withdraw wait nudges: %v", err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,6 +274,47 @@ func TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity(t *testing
 			}
 			requireRoutesServeALiveStore(t, cityPath, tc.name)
 		})
+	}
+}
+
+// TestWaitNudgeWithdrawalClosesTheWorkStoreAfterUsingItOnAnUnrelocatedCity is
+// the withdrawal frame's ownership rule on the default city shape. With the
+// nudges class not relocated, the class store is the very handle the frame
+// opened, so the frame must close it exactly once and only after the
+// withdrawal. A frame that closes first runs the whole withdrawal on a closed
+// store, and on a backend that holds a handle the queued nudge stays pending.
+// The relocated table above cannot see that: there the handle the frame opened
+// is not the store doing the work.
+func TestWaitNudgeWithdrawalClosesTheWorkStoreAfterUsingItOnAnUnrelocatedCity(t *testing.T) {
+	setWaitTestFileBeads(t)
+	cityPath := t.TempDir()
+	item := newQueuedNudgeWithOptions("worker", "Wait satisfied.", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		ID:        "wait-gc-1-1-1",
+		Reference: &nudgeReference{Kind: "bead", ID: "gc-1"},
+	})
+	if err := enqueueQueuedNudge(cityPath, item); err != nil {
+		t.Fatalf("enqueueing a wait nudge: %v", err)
+	}
+	work := beads.NewMemStore()
+	if cliNudgesStore(work, nil, cityPath).Store != beads.Store(work) {
+		t.Fatalf("fixture is relocated: the nudges route did not hand back the work store")
+	}
+	opened := countNudgeWorkStoreOpens(t)
+
+	err := withdrawQueuedWaitNudges(cityPath, []string{item.ID})
+
+	if len(*opened) != 1 {
+		t.Fatalf("the withdrawal opened %d work store(s), want exactly 1", len(*opened))
+	}
+	handle := (*opened)[0]
+	if handle.closes != 1 {
+		t.Errorf("the withdrawal closed the work store it opened %d time(s), want exactly 1", handle.closes)
+	}
+	if len(handle.usedAfterClose) != 0 {
+		t.Errorf("the withdrawal used the work store after closing it: %v", handle.usedAfterClose)
+	}
+	if err != nil {
+		t.Fatalf("withdraw wait nudges: %v", err)
 	}
 }
 

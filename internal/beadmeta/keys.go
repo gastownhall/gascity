@@ -11,8 +11,12 @@
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
 // (internal/events.KnownEventTypes), telemetry metric names (internal/telemetry),
-// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), and the
-// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge). Pack- and
+// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), the
+// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge), and the
+// conversation operation journal's gc.op.* / gc.fact.* row namespace
+// (internal/opjournal, whose bead codec is the only reader and writer), and the
+// event-fact gc.ev.* and projector-checkpoint gc.evproj.* row namespaces
+// (internal/eventfact, likewise). Pack- and
 // prompt-private keys that no Go file reads stay open-world by design and are
 // intentionally NOT declared here (see KnownMetadataPrefixes for the dynamic
 // gc.var.<name> case).
@@ -130,7 +134,15 @@ const (
 	// epoch fence committing. Cleared on activation; a root still carrying it
 	// is a pre-fence candidate that idempotency recovery either activates
 	// (deterministically, when it is the surviving candidate) or neutralizes.
-	AttachFencePendingMetadataKey        = "gc.attach_fence_pending"
+	AttachFencePendingMetadataKey = "gc.attach_fence_pending"
+	// AttachRootIDMetadataKey is stamped on every non-root bead of a sub-DAG
+	// molecule.Attach creates, holding that sub-DAG's root ID. It is consumed
+	// by existingAttachIDMapping, which scopes idempotency recovery's step-ref
+	// match to one attachment so it never adopts a sibling attachment's bead
+	// under the same workflow root. It is deliberately not MoleculeIDMetadataKey:
+	// ResolveRunID ranks that key above RootBeadIDMetadataKey, so reusing it
+	// would re-root these beads' run chain at the sub-DAG.
+	AttachRootIDMetadataKey              = "gc.attach_root_id"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -249,6 +261,15 @@ const (
 	ScopeRoleMetadataKey                = "gc.scope_role"
 	SessionAffinityMetadataKey          = "gc.session_affinity"
 	SessionIDMetadataKey                = "gc.session_id"
+	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
+	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
+	// when it was kept) mark a claim a close kept because no lane serves it
+	// (owner ruling O5, revised): stranded work, which session.stranded_claims
+	// reports while the claim is still assigned as it was kept. A release
+	// clears all three (SessionAffinityMetadataKeys).
+	StrandedMetadataKey         = "gc.stranded"
+	StrandedSessionMetadataKey  = "gc.stranded_session"
+	StrandedAssigneeMetadataKey = "gc.stranded_assignee"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -325,10 +346,11 @@ const (
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
 	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
-	// IS the unit of work and must remain claimable via the
-	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
-	// children have all closed and is only waiting on workflow-finalize —
-	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	// IS the unit of work and must remain claimable via its RoutedToMetadataKey
+	// or the legacy RunTargetMetadataKey fallback, from an expanded root, which
+	// is a latch closed by workflow-finalize and is never fresh worker demand
+	// through any route, an explicit RoutedToMetadataKey included — see
+	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
@@ -523,6 +545,7 @@ var KnownMetadataKeys = []string{
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,
+	AttachRootIDMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -625,6 +648,9 @@ var KnownMetadataKeys = []string{
 	ScopeRoleMetadataKey,
 	SessionAffinityMetadataKey,
 	SessionIDMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
@@ -691,4 +717,7 @@ var KnownMetadataPrefixes = []string{
 var SessionAffinityMetadataKeys = []string{
 	SessionAffinityMetadataKey,
 	ContinuationGroupMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 }

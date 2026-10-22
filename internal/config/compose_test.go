@@ -142,6 +142,65 @@ session_reconciler = "v2"
 	}
 }
 
+// The work ladder's rollback switch survives a fragment that defines
+// another [daemon] key, as session_reconciler does.
+func TestComposeDaemonFragmentPreservesWorkLadder(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fragment string
+		want     string
+	}{
+		{name: "fragment sets another daemon key", fragment: "[daemon]\npatrol_interval = \"1m\"\n", want: "off"},
+		{name: "fragment sets the switch", fragment: "[daemon]\nwork_ladder = \"on\"\n", want: "on"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+work_ladder = "off"
+`)
+			fs.Files["/city/fragment.toml"] = []byte(tc.fragment)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if got := cfg.Daemon.WorkLadder; got != tc.want {
+				t.Fatalf("Daemon.WorkLadder = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A [daemon] work_ladder value other than "on" or "off" loads with a
+// warning naming it: "false" or "disabled" keep the ladder on.
+func TestWorkLadderUnknownValueWarns(t *testing.T) {
+	for raw, warn := range map[string]bool{"on": false, "off": false, "OFF": false, "false": true, "disabled": true} {
+		fs := fsys.NewFake()
+		fs.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test\"\n\n[daemon]\nwork_ladder = \"" + raw + "\"\n")
+		cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+		if err != nil {
+			t.Fatalf("%s: LoadWithIncludes: %v", raw, err)
+		}
+		got := false
+		for _, w := range prov.Warnings {
+			if strings.Contains(w, "work_ladder") {
+				got = true
+			}
+		}
+		if got != warn {
+			t.Errorf("work_ladder = %q: warned %v, want %v (%v)", raw, got, warn, prov.Warnings)
+		}
+		if raw == "false" && !cfg.Daemon.WorkLadderEnabled() {
+			t.Error(`"false" turned the ladder off`)
+		}
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

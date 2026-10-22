@@ -105,7 +105,7 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		a := cfg.Agents[rng.Intn(nTemplates)]
 		id, slot := fmt.Sprintf("or-%04d", i), 1+rng.Intn(14)
 		name := instance(a, slot)
-		state := pick("active", "active", "active", "asleep", "asleep", "creating", "draining", "drained", "failed_create")
+		state := pick("active", "active", "active", "asleep", "asleep", "creating", "draining", "drained", "failed-create")
 		template := a.QualifiedName()
 		switch rng.Intn(10) {
 		case 0:
@@ -234,10 +234,8 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		col.DefaultCounts[template], col.DefaultDemand[template] = d.Count, d
 		if rng.Intn(4) == 0 {
 			slot := 1 + rng.Intn(6)
-			f.in.Reservations = append(f.in.Reservations, planReservation{
-				EntryID: fmt.Sprintf("e-%s-%d", template, slot), Template: template,
-				QualifiedInstance: fmt.Sprintf("%s-%d", template, slot), Slot: slot, ReservedAt: allocNow,
-			})
+			f.in.InFlight.Entries = append(f.in.InFlight.Entries,
+				inFlightCreate(fmt.Sprintf("e-%s-%d", template, slot), template, fmt.Sprintf("%s-%d", template, slot), slot, ""))
 		}
 		if rng.Intn(4) == 0 {
 			if f.in.Backoff == nil {
@@ -361,7 +359,7 @@ func TestRealizationNilIndexIsLegacy(t *testing.T) {
 	}
 	bp := baseAgentBuildParams("city", "/city", cfg, nil, allocNow, nil, nil)
 	bp.sessionBeads = newSessionBeadSnapshotFromInfos(primary)
-	bp.sessionOccupancyInfos = []session.Info{info("gc-2", "worker-4", "4", "active"), info("rig-9", "worker-1", "1", "failed_create")}
+	bp.sessionOccupancyInfos = []session.Info{info("gc-2", "worker-4", "4", "active"), info("rig-9", "worker-1", "1", "failed-create")}
 	bp.assignedWorkBeads = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-3"}}
 
 	var ids []string
@@ -455,4 +453,90 @@ func titled(row beads.Bead, title, label string) beads.Bead {
 		row.Labels = append(slices.Clone(row.Labels), label)
 	}
 	return row
+}
+
+// freshSlotScan is legacy's fresh-slot scan: the lowest slot neither held
+// nor used, within upper unless unlimited, marked used.
+func freshSlotScan(held, used map[int]bool, upper int, unlimited bool) (int, bool) {
+	for slot := 1; unlimited || slot <= upper; slot++ {
+		if !used[slot] && !held[slot] {
+			used[slot] = true
+			return slot, true
+		}
+	}
+	return 0, false
+}
+
+// Kills a cursor that skips a free slot: over seeded runs of fresh claims,
+// claims of a chosen slot (claimDesiredPoolSlotInfo's), releases of the
+// slot just claimed (selectOrPlanPoolSessionBead's error paths) and claims
+// against a new used set, the memo's resumed scan claims exactly the slot
+// legacy's scan from 1 does.
+func TestClaimFreshSlotCursorMatchesScan(t *testing.T) {
+	for seed := int64(0); seed < 300; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		upper, unlimited := 1+rng.Intn(40), rng.Intn(3) == 0
+		held := map[int]bool{}
+		for range rng.Intn(15) {
+			held[1+rng.Intn(45)] = true
+		}
+		m := &poolRealizeMemo{}
+		mine, legacy := map[int]bool{}, map[int]bool{}
+		last := 0
+		for op := range 120 {
+			switch rng.Intn(6) {
+			case 0: // a desired row's slot
+				slot := 1 + rng.Intn(50)
+				mine[slot], legacy[slot] = true, true
+			case 1: // release the slot just claimed
+				if last > 0 {
+					delete(mine, last)
+					delete(legacy, last)
+					last = 0
+				}
+			case 2: // another realization's used set
+				if rng.Intn(4) == 0 {
+					mine, legacy, last = map[int]bool{}, map[int]bool{}, 0
+				}
+			default:
+				got, gotOK := m.claimFreshSlot(held, mine, upper, unlimited)
+				want, wantOK := freshSlotScan(held, legacy, upper, unlimited)
+				if got != want || gotOK != wantOK {
+					t.Fatalf("seed %d op %d: cursor claimed %d, %t; legacy's scan %d, %t", seed, op, got, gotOK, want, wantOK)
+				}
+				last = got
+			}
+		}
+	}
+}
+
+// Kills the O(N²) fresh-slot scan: a custom count of 20,000 on an unlimited
+// pool reuses its live row and plans the other 19,999 fresh slots in order,
+// skipping the row's, while its claims look at a linear number of slots.
+// Rescanning from slot 1 looks at about N²/2 (2×10⁸ here, seconds per pass).
+func TestFreshSlotClaimsAreLinear(t *testing.T) {
+	const n = 20000
+	agent := allocPoolAgent("worker", 1)
+	agent.MaxActiveSessions = nil
+	cfg := &config.City{Agents: []config.Agent{agent}, Daemon: config.DaemonConfig{MaxWakesPerTick: intPtr(n)}}
+	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 3, "active")).alive("s-gc-1", InventoryAttrs{})
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": n}}
+	p, d := realizePass(t, f.inputs(), true)
+	if len(d.Plans) != n-1 {
+		t.Fatalf("planned %d fresh slots, want %d", len(d.Plans), n-1)
+	}
+	want := 1
+	for i, plan := range d.Plans {
+		if want == 3 {
+			want++ // the live row's slot
+		}
+		if plan.Plan.poolSlot != want {
+			t.Fatalf("plan %d claimed slot %d, want %d", i, plan.Plan.poolSlot, want)
+		}
+		want++
+	}
+	if p.index.probes > 3*n {
+		t.Fatalf("fresh-slot claims looked at %d slots for %d plans, want at most %d", p.index.probes, n, 3*n)
+	}
 }

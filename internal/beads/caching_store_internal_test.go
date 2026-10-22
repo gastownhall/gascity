@@ -3147,6 +3147,8 @@ func TestCachingStoreApplyEventMergesProjectedIsBlocked(t *testing.T) {
 		t.Fatalf("CachedReady before event = %+v, ok=%v, want bd-event ready", ready, ok)
 	}
 
+	blocked := true
+	backing.beads[0].IsBlocked = &blocked
 	cache.ApplyEvent("bead.updated", []byte(`{"id":"bd-event","status":"open","is_blocked":true}`))
 
 	ready, ok = cache.CachedReady()
@@ -4009,6 +4011,7 @@ func TestCachingStoreStatusBasedDeferralCanReopen(t *testing.T) {
 				t.Fatalf("Prime: %v", err)
 			}
 
+			backing.WriteRowForTest(created.ID, func(b *Bead) { b.IndefinitelyDeferred = true })
 			cache.ApplyEvent("bead.updated", json.RawMessage(
 				fmt.Sprintf(`{"id":%q,"status":"deferred"}`, created.ID),
 			))
@@ -4022,6 +4025,7 @@ func TestCachingStoreStatusBasedDeferralCanReopen(t *testing.T) {
 
 			switch reopen {
 			case "event":
+				backing.WriteRowForTest(created.ID, func(b *Bead) { b.IndefinitelyDeferred = false })
 				cache.ApplyEvent("bead.updated", json.RawMessage(
 					fmt.Sprintf(`{"id":%q,"status":"open"}`, created.ID),
 				))
@@ -4373,6 +4377,15 @@ func (s *completeEmbeddedDepsStore) List(query ListQuery) ([]Bead, error) {
 		items = append(items, cloneBead(b))
 	}
 	return ApplyListQuery(items, query), nil
+}
+
+func (s *completeEmbeddedDepsStore) Get(id string) (Bead, error) {
+	for _, b := range s.beads {
+		if b.ID == id {
+			return cloneBead(b), nil
+		}
+	}
+	return Bead{}, ErrNotFound
 }
 
 func (s *completeEmbeddedDepsStore) DepList(string, string) ([]Dep, error) {

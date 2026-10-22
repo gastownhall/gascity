@@ -11,6 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/session"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows"
 )
@@ -2506,6 +2511,47 @@ type = "task"
 	}
 }
 
+func TestCompile_ExtendsPropagatesChildContentHash(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := `
+formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`
+	childContent := `
+formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), []byte(parentContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, []byte(childContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-hash-child", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if recipe.FormulaSource != childPath {
+		t.Fatalf("FormulaSource = %q, want child path %q", recipe.FormulaSource, childPath)
+	}
+	if want := ContentHash([]byte(childContent)); recipe.ContentHash != want {
+		t.Fatalf("ContentHash = %q, want child file hash %q", recipe.ContentHash, want)
+	}
+}
+
 func TestCompile_PropagatesRootMetadata(t *testing.T) {
 	dir := t.TempDir()
 	content := `
@@ -2656,4 +2702,77 @@ func TestApplyDrainControlMetadata(t *testing.T) {
 			t.Errorf("metadata = %v, want unchanged", metadata)
 		}
 	})
+}
+
+// TestValidateRejectsSessionSteps (mc-okw9n): a step typed session or
+// tagged gc:session, at the top level, in a child, in a loop body or in a
+// template, is refused at compile, since compile copies the type and tags
+// onto its bead and would mint a session row; an ordinary step passes.
+func TestValidateRejectsSessionSteps(t *testing.T) {
+	session := func(s *Step) *Step { s.Type = " Session "; return s }
+	tagged := func(s *Step) *Step { s.Labels = []string{"note", "gc:session"}; return s }
+	aspect := func(r *AdviceRule) *Formula {
+		return &Formula{Formula: "f", Type: TypeAspect, Advice: []*AdviceRule{r}}
+	}
+	for _, c := range []struct {
+		name    string
+		formula *Formula
+		want    string
+	}{
+		{"a session step", &Formula{Formula: "f", Steps: []*Step{session(&Step{ID: "s", Title: "S"})}}, `steps[0] (s): type " Session " makes a session row`},
+		{"a gc:session tag", &Formula{Formula: "f", Steps: []*Step{tagged(&Step{ID: "s", Title: "S"})}}, `steps[0] (s): tag "gc:session" marks a session row`},
+		{"in a child", &Formula{Formula: "f", Steps: []*Step{{ID: "p", Title: "P", Children: []*Step{session(&Step{ID: "c", Title: "C"})}}}}, `steps[0] (p).children[0] (c): type`},
+		{"in a loop body", &Formula{Formula: "f", Steps: []*Step{{ID: "l", Title: "L", Loop: &LoopSpec{Count: 2, Body: []*Step{tagged(&Step{ID: "b", Title: "B"})}}}}}, `steps[0] (l).loop.body[0] (b): tag`},
+		{"in a template", &Formula{Formula: "f", Type: TypeExpansion, Template: []*Step{session(&Step{ID: "t", Title: "T"})}}, `template[0] (t): type`},
+		{"the session verbs' route", &Formula{Formula: "f", Steps: []*Step{session(&Step{ID: "s", Title: "S"})}}, `(gc session new, POST /v0/city/{cityName}/sessions)`},
+		{"a startup-health episode step (mc-lp7zb)", &Formula{Formula: "f", Steps: []*Step{{ID: "e", Title: "E", Type: " Startup-Health-Episode "}}}, `steps[0] (e): type " Startup-Health-Episode " makes a startup-health episode`},
+		{"an advice step before", aspect(&AdviceRule{Target: "*", Before: &AdviceStep{ID: "b", Type: "session"}}), `advice[0] (*).before (b): type "session" makes a session row`},
+		{"an advice step after", aspect(&AdviceRule{Target: "*", After: &AdviceStep{ID: "a", Type: "startup-health-episode"}}), `advice[0] (*).after (a): type "startup-health-episode" makes a startup-health episode`},
+		{"an advice step around, before", aspect(&AdviceRule{Target: "*", Around: &AroundAdvice{Before: []*AdviceStep{{ID: "ok"}, {ID: "rb", Type: "session"}}}}), `advice[0] (*).around.before[1] (rb): type`},
+		{"an advice step around, after", aspect(&AdviceRule{Target: "*", Around: &AroundAdvice{After: []*AdviceStep{{ID: "ra", Type: "session"}}}}), `advice[0] (*).around.after[0] (ra): type`},
+	} {
+		err := c.formula.Validate()
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: Validate = %v, want %q", c.name, err, c.want)
+		}
+	}
+	ok := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: "task", Labels: []string{"note"}}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("an ordinary step: Validate = %v", err)
+	}
+	if err := aspect(&AdviceRule{Target: "*", Before: &AdviceStep{ID: "b", Type: "task"}, Around: &AroundAdvice{After: []*AdviceStep{{ID: "a"}}}}).Validate(); err != nil {
+		t.Fatalf("ordinary advice: Validate = %v", err)
+	}
+}
+
+// TestValidateRefusesWhatControllerOwnedNames pins formula.Validate's
+// literal check against coordclass.ControllerOwned and CoordinationOwned
+// (architecture B, the #7742 and #7766 reviews): a step is refused exactly
+// when the bead it compiles to would be owned, for every owned type, the
+// session label and the coordination labels and wait shape in any case and
+// spacing, and for none of the work types or wisps.
+func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
+	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "op", " OP ", "message", " Message ", "task", "bug", "convoy", "molecule", "gate", "Wait", ""} {
+		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"GC:Nudge"}, {"gc:nudge-queue"}, {"order-tracking"}, {"note", "Order-Run:digest"}, {"gc:extmsg-binding"}, {"session:s-1"}, {"session:s-2"}, {"gc:wisp"}, {"gc:session-x"}, {"extmsg:binding:conv:v1:x"}} {
+			for _, meta := range []map[string]string{nil, {"session_id": "s-1"}} {
+				f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels, Metadata: meta}}}
+				refused := f.Validate() != nil
+				b := beads.Bead{Type: typ, Labels: labels, Metadata: meta}
+				if owned := coordclass.ControllerOwned(b) || coordclass.CoordinationOwned(b); refused != owned {
+					t.Errorf("type %q labels %q meta %v: Validate refused %t, owned %t", typ, labels, meta, refused, owned)
+				}
+			}
+		}
+	}
+}
+
+// TestSessionStepMarksAreTheSessionPackages pins sessionStepType,
+// sessionStepLabel and startupHealthStepType to the session package's.
+func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
+	if opStepType != opjournal.BeadType {
+		t.Fatalf("opStepType %q, want opjournal's %q", opStepType, opjournal.BeadType)
+	}
+	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType || convergenceStepType != "convergence" {
+		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
+	}
 }

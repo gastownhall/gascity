@@ -445,6 +445,110 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	}
 }
 
+// TestProcessScopeCheckSubjectSkipsFanoutBlocker pins that a scoped on_complete
+// source's scope-check, which blocks on both the source and its
+// <source>-fanout control, resolves the source as its subject even when the
+// fanout edge is listed first. The fanout edge is a readiness gate only: scope
+// output and the pass/fail decision come from the source.
+func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		sourceOutcome string
+		wantAction    string
+	}{
+		{name: "pass", sourceOutcome: "pass", wantAction: "scope-pass"},
+		{name: "fail", sourceOutcome: "fail", wantAction: "scope-fail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			body := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "body",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": "wf-1",
+					"gc.step_ref":     "demo.body",
+				},
+			})
+			source := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "member",
+					"gc.outcome":      tc.sourceOutcome,
+					"gc.output_json":  `{"from":"source"}`,
+				},
+			})
+			fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "Expand fanout for A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.kind":         "fanout",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+					"gc.outcome":      "pass",
+					"gc.output_json":  `{"from":"fanout"}`,
+				},
+			})
+			control := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "Finalize scope for A",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope-check",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+				},
+			})
+
+			// The fanout edge goes in first so a first-blocker lookup would
+			// pick the fanout control.
+			mustDepAdd(t, store, control.ID, fanout.ID, "blocks")
+			mustDepAdd(t, store, control.ID, source.ID, "blocks")
+			mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+			subjectID, err := resolveScopeCheckSubjectID(store, control.ID)
+			if err != nil {
+				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+			}
+			if subjectID != source.ID {
+				t.Fatalf("subject = %s, want source %s (fanout is %s)", subjectID, source.ID, fanout.ID)
+			}
+
+			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != tc.wantAction {
+				t.Fatalf("scope result = %+v, want processed %s", result, tc.wantAction)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" {
+				t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+			}
+			if got := bodyAfter.Metadata["gc.outcome"]; got != tc.sourceOutcome {
+				t.Fatalf("body outcome = %q, want %q", got, tc.sourceOutcome)
+			}
+			if tc.sourceOutcome == "pass" {
+				if got := bodyAfter.Metadata["gc.output_json"]; got != `{"from":"source"}` {
+					t.Fatalf("body output_json = %q, want the source's output", got)
+				}
+			}
+		})
+	}
+}
+
 // TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl covers the shape
 // that TestProcessScopeCheckAbortsScopeOnFailure deliberately omits: a scope
 // member whose only blocker is the scope-check currently aborting the scope.
@@ -2928,7 +3032,6 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 		"scope-check bead=" + control.ID + " phase=load-snapshot start",
 		"scope-check bead=" + control.ID + " phase=load-snapshot ok",
 		"scope-check bead=" + control.ID + " snapshot root=" + workflow.ID,
-		"scope-check bead=" + control.ID + " phase=propagate-metadata",
 		"scope-check bead=" + control.ID + " phase=close-body",
 	} {
 		if !strings.Contains(traceText, want) {
@@ -3164,6 +3267,15 @@ func (s *failBodyMetadataStore) SetMetadataBatch(id string, kvs map[string]strin
 		return errors.New("injected body metadata failure")
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Update fails the same body closeout when it arrives as one write: the
+// propagated member metadata and the close together.
+func (s *failBodyMetadataStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Metadata["review.verdict"] != "" {
+		return errors.New("injected body metadata failure")
+	}
+	return s.Store.Update(id, opts)
 }
 
 func newStrictCloseStore() *strictCloseStore {
@@ -5069,6 +5181,107 @@ func TestProcessWorkflowFinalizeClosesIntraStoreSourceBeadWithoutResolver(t *tes
 	}
 	if got := sourceAfter.Metadata["gc.outcome"]; got != "pass" {
 		t.Fatalf("source gc.outcome = %q, want pass", got)
+	}
+}
+
+// TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled guards the race
+// between a run cancel and the work it interrupts. Run cancel durably stamps
+// gc.cancel_requested on the run root first, then interrupts the sessions
+// executing its steps while it closes the rest of the run. An interrupted agent
+// winding down its turn may still close its step as passed before the cancel
+// reaches it; that can make the workflow finalizer ready, and the finalizer is
+// exempt from the dispatcher's canceled-root gate because it is the bead that
+// settles the root. It must settle the root as canceled, not as a success
+// computed from the steps, and it must not close the source bead as done. A
+// drain item workflow whose own root is still live but whose parent run is
+// canceled finalizes the same way: the cancel will close it as canceled anyway.
+func TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		nested bool
+	}{
+		{name: "run root marked canceled"},
+		{name: "drain item under a run marked canceled", nested: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			source := mustCreateWorkflowBead(t, store, beads.Bead{Title: "work item", Type: "task"})
+			run := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "implement run",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+					"gc.cancel_requested": "true",
+				},
+			})
+			workflow := run
+			if tc.nested {
+				drain := mustCreateWorkflowBead(t, store, beads.Bead{
+					Title:    "drain work",
+					Type:     "task",
+					Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": run.ID},
+				})
+				workflow = mustCreateWorkflowBead(t, store, beads.Bead{
+					Title: "do-work item",
+					Type:  "task",
+					Metadata: map[string]string{
+						"gc.kind":             "workflow",
+						"gc.formula_contract": "graph.v2",
+						"gc.drain_control_id": drain.ID,
+					},
+				})
+			}
+			if err := store.SetMetadata(workflow.ID, "gc.source_bead_id", source.ID); err != nil {
+				t.Fatal(err)
+			}
+			// The interrupted agent closed its step as passed.
+			step := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "implement",
+				Type:     "task",
+				Status:   "closed",
+				Metadata: map[string]string{"gc.outcome": "pass", "gc.root_bead_id": workflow.ID},
+			})
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "Finalize workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+			})
+			mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
+			mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-canceled" {
+				t.Fatalf("result = %+v, want processed workflow-canceled", result)
+			}
+			rootAfter, err := store.Get(workflow.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "canceled" {
+				t.Fatalf("workflow root = status %q outcome %q, want closed canceled: a step passed after the cancel must not settle the run as a success", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+			}
+			sourceAfter, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sourceAfter.Status == "closed" {
+				t.Fatalf("source bead closed with outcome %q; a canceled workflow must not close its source as done", sourceAfter.Metadata["gc.outcome"])
+			}
+			finalizerAfter, err := store.Get(finalizer.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+			}
+		})
 	}
 }
 
@@ -11309,8 +11522,8 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 
 // TestCloseScopeAsPassedSharedConvergence exercises the single scope-close
 // helper that both processScopeCheck branches and reconcileTerminalScopedMember
-// now share: propagate non-gc.* member metadata onto the body, write the
-// resolved output_json, and close the body pass unless it is already closed.
+// now share: propagate non-gc.* member metadata and the resolved output_json
+// onto the body, and close it pass unless it is already closed, as one write.
 func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 	t.Parallel()
 
@@ -11387,14 +11600,18 @@ func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 			}
 
 			traceText := trace.String()
-			for _, want := range []string{"phase=propagate-metadata", "phase=resolve-output", "phase=write-output", "phase=reload-body"} {
-				if !strings.Contains(traceText, want) {
-					t.Fatalf("trace missing %q:\n%s", want, traceText)
-				}
+			if !strings.Contains(traceText, "phase=resolve-output") {
+				t.Fatalf("trace missing %q:\n%s", "phase=resolve-output", traceText)
 			}
+			// An open body takes its metadata and its close in one write; an
+			// already closed body takes the metadata alone.
 			gotClose := strings.Contains(traceText, "phase=close-body ")
 			if gotClose != tc.wantCloseTrace {
 				t.Fatalf("close-body trace present=%v, want %v:\n%s", gotClose, tc.wantCloseTrace, traceText)
+			}
+			gotPropagate := strings.Contains(traceText, "phase=propagate-metadata ")
+			if gotPropagate == tc.wantCloseTrace {
+				t.Fatalf("propagate-metadata trace present=%v, want %v:\n%s", gotPropagate, !tc.wantCloseTrace, traceText)
 			}
 		})
 	}

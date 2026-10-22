@@ -440,7 +440,10 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 	}
 }
 
-func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
+// A rig-bound seat's gate reads the census leg set, so its city-store claim
+// holds it (mc-3ixn3.16 ruling: one leg set for gate and cascade); its rig claim
+// does too.
+func TestSessionHasOpenAssignedWorkCountsCityStoreWorkForARigBoundSeat(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
 	cfg := &config.City{
@@ -461,21 +464,25 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 			"session_name": "worker-session",
 		},
 	}
-	if _, err := cityStore.Create(beads.Bead{
+	cityWork, err := cityStore.Create(beads.Bead{
 		ID:       "city-work",
 		Type:     "task",
 		Status:   "open",
 		Assignee: session.ID,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create city work: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, sessiontest.SeedBead(t, session))
+	has, err := sessionHasOpenAssignedWorkForReachableStore(testSeatWork(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
-	if has {
-		t.Fatal("city-store assigned work should not count for a rig-scoped session")
+	if !has {
+		t.Fatal("city-store assigned work must count for a rig-bound seat")
+	}
+	if err := cityStore.Close(cityWork.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	if _, err := rigStore.Create(beads.Bead{
@@ -486,7 +493,7 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Create rig work: %v", err)
 	}
-	has, err = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, sessiontest.SeedBead(t, session))
+	has, err = sessionHasOpenAssignedWorkForReachableStore(testSeatWork(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -542,7 +549,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatalf("mark rig work in progress: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session))
+	has, err := sessionHasOpenAssignedWorkForReachableStore(testSeatWork(cityPath, cfg, cityStore, rigStores), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -550,7 +557,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatal("city-scoped session must see its rig-store work across stores (close/drain guard)")
 	}
 
-	awake, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session))
+	awake, err := sessionHasAwakeAssignedWorkForReachableStore(testSeatWork(cityPath, cfg, cityStore, rigStores), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("sessionHasAwakeAssignedWorkForReachableStore: %v", err)
 	}
@@ -560,7 +567,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 
 	// The in_progress arm resolves the same cross-store reachability, so a
 	// city-scoped session's in_progress rig-store row is found across legs.
-	bead, found, err := firstInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session))
+	bead, found, err := firstInProgressAssignedWorkBeadForReachableStore(testSeatWork(cityPath, cfg, cityStore, rigStores), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("firstInProgressAssignedWorkBeadForReachableStore: %v", err)
 	}
@@ -568,7 +575,7 @@ func TestSessionAssignedWorkGuardsFederateForCityScopedSession(t *testing.T) {
 		t.Fatalf("in_progress lookup must find rig-store work for a city-scoped session; found=%v bead=%q want=%q", found, bead.ID, rigWork.ID)
 	}
 
-	stranded, err := collectSessionAssignedWorkInfo(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session))
+	stranded, err := collectSessionAssignedWorkInfo(testSeatWork(cityPath, cfg, cityStore, rigStores), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("collectSessionAssignedWorkInfo: %v", err)
 	}
@@ -652,7 +659,7 @@ func TestFirstOpenClaimableAssignedWorkBeadFederatesAcrossReachableStores(t *tes
 				t.Fatalf("Create strand: %v", err)
 			}
 
-			bead, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(cityPath, cfg, cityStore, rigStores, sessiontest.SeedBead(t, session), now)
+			bead, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(testSeatWork(cityPath, cfg, cityStore, rigStores), sessiontest.SeedBead(t, session), now)
 			if err != nil {
 				t.Fatalf("firstOpenClaimableAssignedWorkBeadForReachableStore: %v", err)
 			}
@@ -699,7 +706,7 @@ func TestSessionHasOpenAssignedWorkMatchesConfiguredNamedSessionRuntimeFallback(
 		t.Fatalf("Create named work: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore("", cfg, store, nil, sessiontest.SeedBead(t, session))
+	has, err := sessionHasOpenAssignedWorkForReachableStore(testSeatWork("", cfg, store, nil), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -878,7 +885,7 @@ func TestSessionHasOpenAssignedWorkIncludesReachableAssignedWisp(t *testing.T) {
 		t.Fatalf("mark rig wisp in progress: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, sessiontest.SeedBead(t, session))
+	has, err := sessionHasOpenAssignedWorkForReachableStore(testSeatWork(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}), sessiontest.SeedBead(t, session))
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
@@ -904,9 +911,9 @@ func TestFirstInProgressAssignedWorkBeadIncludesAssignedWisp(t *testing.T) {
 	}
 
 	// An in_progress wisp assigned to the seat is surfaced for session diagnostics.
-	got, found, err := firstInProgressAssignedWorkBeadInStoreByIdentifiers(store, []string{"worker-session"})
+	got, found, err := firstInProgressAssignedWorkBeadForReachableStore(testSeatWork("", nil, store, nil), sessionpkg.Info{ID: "worker-session"})
 	if err != nil {
-		t.Fatalf("firstInProgressAssignedWorkBeadInStoreByIdentifiers: %v", err)
+		t.Fatalf("firstInProgressAssignedWorkBeadForReachableStore: %v", err)
 	}
 	if !found {
 		t.Fatal("assigned wisp work should be found for session diagnostics")

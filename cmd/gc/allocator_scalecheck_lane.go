@@ -17,10 +17,14 @@ import (
 // It runs the same work legacy's demand pass runs (evaluatePendingPools under
 // the probe_concurrency semaphore) over the same pools: non-suspended,
 // generic-ephemeral agents with a custom scale_check outside suspended rigs,
-// and none while the city is suspended (the lane skips the pass).
+// and none while the city is suspended (a suspended pass skips the source).
 // One difference is deliberate (BEHAVIORS #38): a pool whose probe env cannot
 // be built is marked partial rather than silently skipped, so its count reads
 // as untrusted (retain, block create) instead of zero.
+//
+// A run records no trace.scale_check_exec operation (legacy's demand pass
+// records one per check), and a failed check logs under legacy's
+// "buildDesiredState:" prefix (ga-f4vclk).
 
 // scaleCheckResult is one scale_check run: each custom scale_check pool's
 // count (additive new demand) and the pools whose count cannot be trusted.
@@ -41,6 +45,48 @@ func (r *scaleCheckResult) partial(template string) bool {
 	}
 	_, ok := r.Counts[template]
 	return !ok
+}
+
+// countOf is template's count in r, and whether r has one: false for a
+// template the run did not evaluate, or with no run.
+func (r *scaleCheckResult) countOf(template string) (int, bool) {
+	if r == nil {
+		return 0, false
+	}
+	n, ok := r.Counts[template]
+	return n, ok
+}
+
+// sameChecks is r limited to the templates whose scale_check is the same
+// in from and to, for serving a run of from's config under to's: a template
+// whose check changed, or that has none in to, reads partial until a run of
+// to's ends. Nil stays nil.
+func (r *scaleCheckResult) sameChecks(from, to *config.City) *scaleCheckResult {
+	if r == nil || from == to {
+		return r
+	}
+	checks := func(cfg *config.City) map[string]string {
+		m := make(map[string]string)
+		if cfg != nil {
+			for i := range cfg.Agents {
+				if check := strings.TrimSpace(cfg.Agents[i].ScaleCheck); check != "" {
+					m[cfg.Agents[i].QualifiedName()] = check
+				}
+			}
+		}
+		return m
+	}
+	before, after := checks(from), checks(to)
+	out := &scaleCheckResult{Counts: make(map[string]int)}
+	for template, n := range r.Counts {
+		if check, ok := after[template]; ok && check == before[template] {
+			out.Counts[template] = n
+			if r.Partial[template] {
+				out.Partial = markScaleCheckPartialTemplate(out.Partial, template)
+			}
+		}
+	}
+	return out
 }
 
 // runCustomScaleChecks runs every custom scale_check once over env.

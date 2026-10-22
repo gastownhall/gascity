@@ -32,7 +32,7 @@ import (
 // and the reset rotated it to 3445a81d… while clearing started_config_hash —
 // forcing the wake exec to use --session-id instead of --resume.
 func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinuationReset(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 
 	const (
@@ -47,7 +47,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	})
 
 	tp := driftResumeSessionIDCapableTemplateParams()
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -66,16 +66,18 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 
 	prepared, err := prepareStartCandidateForCity(
 		startCandidate{info: env.sessionInfo(got.ID), tp: tp, order: 0},
-		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
+		"", "", cfg, env.sp, env.store, clk, io.Discard, nil, dispatchOptionSources{},
 	)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 
+	leased, release := leasedStart(t, env.city, *prepared)
+	defer release()
 	if _, err := startPreparedStartCandidate(
 		context.Background(),
-		*prepared,
-		"",
+		leased,
+		env.city,
 		env.store,
 		env.sp,
 		cfg,
@@ -117,7 +119,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 }
 
 func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Providers: map[string]config.ProviderSpec{
@@ -237,7 +239,7 @@ func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *te
 // Deterministic inner and outer lifecycle signals keep the fake-runtime path
 // in the fast suite without weakening either liveness probe.
 func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 
 	const (
@@ -252,7 +254,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 	})
 
 	tp := driftResumeSessionIDCapableTemplateParams()
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -262,7 +264,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
 	clk := &clock.Fake{Time: time.Date(2026, 5, 13, 16, 23, 30, 0, time.UTC)}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		[]startCandidate{{info: env.sessionInfo(got.ID), tp: tp, order: 0}},
 		cfg,
@@ -270,11 +272,13 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		env.sp,
 		env.store,
 		"test-city",
+		env.city,
 		clk,
 		events.Discard,
 		10*time.Second,
 		&env.stdout,
 		&env.stderr,
+		nil,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
@@ -315,7 +319,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 // are covered by
 // TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey.
 func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	const (
 		priorSessionKey        = "old-provider-conversation"
@@ -326,7 +330,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 		"started_config_hash": priorStartedConfigHash,
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -349,11 +353,11 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 // next wake has a valid --session-id argument. Preserving resume metadata is
 // conditional on having a prior conversation to resume.
 func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserve(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	// No session_key, no started_config_hash — the session never started.
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), driftResumeSessionIDCapableTemplateParams(), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -427,7 +431,7 @@ func driftResumeResumeOnlyTemplateParams() TemplateParams {
 // 4b0c5b88, b995ac9e, 355012d9, de9b6c4b, 40f28aed — and every one produced
 // `reconciler.start.failed` / `deadline_exceeded` on the following wake.
 func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	// A healthy provider-minted OpenCode key, as captured by `gc prime --hook`.
 	const priorSessionKey = "ses_fcde424edffeE5J9OJuN9YG869"
@@ -437,7 +441,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey(t
 		"resume_style": "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), driftResumeResumeOnlyTemplateParams(), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), driftResumeResumeOnlyTemplateParams(), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -455,7 +459,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderClearsKey(t
 // provider command, never a `--session <uuid>` resume of a conversation that
 // was never created.
 func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	env.setSessionMetadata(&session, map[string]string{
 		"session_key":  "ses_fcde424edffeE5J9OJuN9YG869",
@@ -464,19 +468,21 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(
 	})
 
 	tp := driftResumeResumeOnlyTemplateParams()
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city, env.sessionInfo(session.ID), tp, env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
 	clk := &clock.Fake{Time: time.Date(2026, 8, 24, 12, 46, 13, 0, time.UTC)}
 	prepared, err := prepareStartCandidateForCity(
 		startCandidate{info: env.sessionInfo(session.ID), tp: tp, order: 0},
-		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
+		"", "", cfg, env.sp, env.store, clk, io.Discard, nil, dispatchOptionSources{},
 	)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
+	leased, release := leasedStart(t, env.city, *prepared)
+	defer release()
 	if _, err := startPreparedStartCandidate(
-		context.Background(), *prepared, "", env.store, env.sp, cfg, nil,
+		context.Background(), leased, env.city, env.store, env.sp, cfg, nil,
 		immediateSessionStaleKeyDetectionWaiter, nil,
 	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
@@ -522,13 +528,13 @@ func driftResumeResumeCommandOnlyTemplateParams() TemplateParams {
 // rotation must clear the stored key exactly as it does for the resume_flag
 // shape.
 func TestResetConfiguredNamedSessionForConfigDrift_ResumeCommandOnlyProviderClearsKey(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	env.setSessionMetadata(&session, map[string]string{
 		"session_key": "prior-provider-conversation",
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(
+	resetConfiguredNamedSessionForConfigDriftInfo(env.city,
 		env.sessionInfo(session.ID), driftResumeResumeCommandOnlyTemplateParams(),
 		env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
@@ -542,7 +548,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeCommandOnlyProviderClea
 }
 
 func TestReconcileSessionBeads_ConfigDriftDefersPinnedNamedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "worker", StartCommand: "new-cmd", MaxActiveSessions: restartRequestTestIntPtr(1)}},
