@@ -389,6 +389,82 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 }
 
+// TestProvider_RelaunchAppliesLaunchEnv proves a relaunch carries the
+// relaunch config's environment into the warm box, as a fresh start would:
+// respawn-pane takes no env, so the respawned agent inherits the SESSION
+// environment, and a launch-only env change that left it alone would restart
+// the agent on the old values. A changed value reaches the new process, a key
+// the config no longer sets is gone, and a key now pinned empty is withheld.
+// What names the incarnation (the instance token) and what was set on the
+// session by other means stay as they were.
+func TestProvider_RelaunchAppliesLaunchEnv(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-env"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := fmt.Sprintf(`sh -c 'echo "${GC_RELAUNCH_CHANGED-unset} ${GC_RELAUNCH_DROPPED-unset} ${GC_RELAUNCH_WITHHELD-unset}" > %s; sleep 300'`, marker)
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: agentCmd,
+		WorkDir: workDir,
+		Env: map[string]string{
+			"GC_RELAUNCH_CHANGED":  "v1",
+			"GC_RELAUNCH_DROPPED":  "gone-soon",
+			"GC_RELAUNCH_WITHHELD": "visible",
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "v1 gone-soon visible")
+	token, err := p.Tmux().GetEnvironment(name, runtime.InstanceTokenEnv)
+	if err != nil || token == "" {
+		t.Fatalf("instance token after Start = (%q, %v), want one", token, err)
+	}
+	if err := p.Tmux().SetEnvironment(name, "GC_RELAUNCH_META", "kept"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd,
+		WorkDir: workDir,
+		Env: map[string]string{
+			"GC_RELAUNCH_CHANGED":    "v2",
+			"GC_RELAUNCH_WITHHELD":   "",
+			runtime.InstanceTokenEnv: "not-this-incarnation",
+		},
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "v2 unset unset")
+
+	if got, err := p.Tmux().GetEnvironment(name, runtime.InstanceTokenEnv); err != nil || got != token {
+		t.Errorf("instance token after Relaunch = (%q, %v), want %q (a relaunch keeps the incarnation)", got, err, token)
+	}
+	if got, err := p.Tmux().GetEnvironment(name, "GC_RELAUNCH_META"); err != nil || got != "kept" {
+		t.Errorf("GC_RELAUNCH_META after Relaunch = (%q, %v), want %q (set on the session, not by a launch)", got, err, "kept")
+	}
+
+	// A second relaunch with the same config changes nothing more: the box
+	// now records what the first relaunch set.
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd,
+		WorkDir: workDir,
+		Env:     map[string]string{"GC_RELAUNCH_CHANGED": "v3"},
+	}); err != nil {
+		t.Fatalf("second Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "v3 unset unset")
+}
+
 // Relaunch replaces the agent pane (the first pane of the first window), not
 // whichever pane is active. A human who split the agent's window and then
 // opened and focused a second window must keep both: before the fix,
