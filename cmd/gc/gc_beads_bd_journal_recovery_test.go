@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,10 @@ import (
 //     touched;
 //   - the corrupt store is preserved (moved aside, never deleted) before any
 //     restore;
-//   - restore only runs from a non-empty local file:// <db>-backup remote;
+//   - restore only runs from a non-empty local file:// backup: bd's
+//     "default" backup when it names the database, else the legacy
+//     <db>-backup;
+//   - every recovery line reaches both stderr and $LOG_FILE;
 //   - fail-closed: when no usable backup exists or the restore fails, the
 //     store ends up back in the data dir and the function fails so the server
 //     cannot start silently missing a database.
@@ -41,8 +45,12 @@ func journalRecoveryHarness(t *testing.T) string {
 		"run_with_timeout",
 		"journal_corruption_signature",
 		"database_journal_corrupt",
+		"repo_state_backups_object",
 		"backup_remote_url_for_recovery",
 		"backup_restore_source_usable",
+		"backup_url_names_database",
+		"select_recovery_backup",
+		"recovery_notice",
 		"attempt_journal_corruption_recovery",
 	} {
 		harness.WriteString(extractShellFunction(t, script, fn))
@@ -54,7 +62,8 @@ func journalRecoveryHarness(t *testing.T) string {
 
 // writeJournalFakeDolt stubs `dolt status` (corrupt when the database dir
 // contains a .corrupt marker) and `dolt backup restore` (recreates the
-// database with a restored-marker, honoring FAKE_RESTORE_EXIT).
+// database with a restored-marker holding the restore URL, honoring
+// FAKE_RESTORE_EXIT).
 func writeJournalFakeDolt(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -75,7 +84,7 @@ case "${1:-}" in
       fi
       db="$4"
       mkdir -p "$PWD/$db/.dolt"
-      echo restored > "$PWD/$db/restored-marker"
+      printf '%s\n' "$3" > "$PWD/$db/restored-marker"
       exit 0
     fi
     ;;
@@ -305,6 +314,85 @@ func prodRepoState(backupDir string) string {
 	return `{"head":"refs/heads/main","backups":{"prod-backup":{"name":"prod-backup","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
 }
 
+// repoStateWithBackups renders a repo_state.json whose backups object holds
+// one object-form entry per name -> url.
+func repoStateWithBackups(backups map[string]string) string {
+	names := make([]string, 0, len(backups))
+	for name := range backups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]string, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, fmt.Sprintf(`%q:{"name":%q,"url":%q,"fetch_specs":null,"params":{}}`, name, name, backups[name]))
+	}
+	return `{"head":"refs/heads/main","remotes":{},"backups":{` + strings.Join(entries, ",") + `},"branches":{}}`
+}
+
+// seedBackupDir creates a non-empty backup directory and returns its
+// file:// URL.
+func seedBackupDir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir backup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("backup"), 0o644); err != nil {
+		t.Fatalf("seed backup content: %v", err)
+	}
+	return "file://" + dir
+}
+
+func readRestoredFrom(t *testing.T, dbDir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dbDir, "restored-marker"))
+	if err != nil {
+		t.Fatalf("database at %s was not restored: %v", dbDir, err)
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func readLogFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recovery log %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// mol-dog-backup registers each scope through `bd backup init`, which names
+// the backup "default" (#6751); recovery must find it.
+func TestJournalRecoveryRestoresFromBdDefaultBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	url := seedBackupDir(t, env.backupDir)
+	env.addDatabase(t, "prod", true, repoStateWithBackups(map[string]string{"default": url}))
+
+	out, err := env.run(t, journalRecoveryHarness(t))
+	if err != nil {
+		t.Fatalf("recovery failed: %v\n%s", err, out)
+	}
+	if got := readRestoredFrom(t, filepath.Join(env.dataDir, "prod")); got != url {
+		t.Fatalf("restored from %q, want %q\n%s", got, url, out)
+	}
+	asides, err := filepath.Glob(filepath.Join(env.stateDir, "corrupt-aside", "prod.*"))
+	if err != nil || len(asides) != 1 {
+		t.Fatalf("corrupt store must be preserved aside, got %v (err %v)\n%s", asides, err, out)
+	}
+	if _, err := os.Stat(filepath.Join(asides[0], "original-marker")); err != nil {
+		t.Fatalf("aside copy missing original content: %v", err)
+	}
+	want := "RESTORED 'prod' from backup default (" + url + ")"
+	if !strings.Contains(out, want) {
+		t.Fatalf("stderr missing %q:\n%s", want, out)
+	}
+	if log := readLogFile(t, env.logFile); !strings.Contains(log, want) {
+		t.Fatalf("LOG_FILE missing %q:\n%s", want, log)
+	}
+}
+
 func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
@@ -438,12 +526,17 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 	if err != nil {
 		t.Fatalf("read script: %v", err)
 	}
-	fn := extractShellFunction(t, string(scriptBytes), "backup_remote_url_for_recovery")
+	var fns strings.Builder
+	for _, name := range []string{"repo_state_backups_object", "backup_remote_url_for_recovery"} {
+		fns.WriteString(extractShellFunction(t, string(scriptBytes), name))
+		fns.WriteString("\n")
+	}
 
 	tests := []struct {
-		name      string
-		repoState string
-		want      string
+		name       string
+		backupName string
+		repoState  string
+		want       string
 	}{
 		{
 			name:      "object form",
@@ -454,6 +547,36 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 			name:      "legacy string form",
 			repoState: `{"backups":{"prod-backup":"file:///backups/prod"}}`,
 			want:      "file:///backups/prod",
+		},
+		{
+			name:       "bd default object form",
+			backupName: "default",
+			repoState:  `{"head":"refs/heads/main","remotes":{},"backups":{"default":{"name":"default","url":"file:///city/.dolt-backup/prod","fetch_specs":null,"params":{}}},"branches":{}}`,
+			want:       "file:///city/.dolt-backup/prod",
+		},
+		{
+			name:       "bd default string form",
+			backupName: "default",
+			repoState:  `{"backups":{"default":"file:///city/.dolt-backup/prod"}}`,
+			want:       "file:///city/.dolt-backup/prod",
+		},
+		{
+			name:       "default only in remotes after backups",
+			backupName: "default",
+			repoState:  `{"backups":{"default":{"name":"default","url":"file:///city/.dolt-backup/prod","params":{}}},"remotes":{"default":{"name":"default","url":"file:///remotes/prod","params":{}}}}`,
+			want:       "file:///city/.dolt-backup/prod",
+		},
+		{
+			name:       "default only in remotes before backups",
+			backupName: "default",
+			repoState:  `{"remotes":{"default":{"name":"default","url":"file:///remotes/prod","params":{}}},"backups":{"default":{"name":"default","url":"file:///city/.dolt-backup/prod","params":{}}},"branches":{}}`,
+			want:       "file:///city/.dolt-backup/prod",
+		},
+		{
+			name:       "default registered only as a remote",
+			backupName: "default",
+			repoState:  `{"remotes":{"default":{"name":"default","url":"file:///remotes/prod","params":{}}},"backups":{"prod-backup":{"name":"prod-backup","url":"file:///backups/prod","params":{}}}}`,
+			want:       "",
 		},
 	}
 	for _, tc := range tests {
@@ -471,8 +594,14 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 				// gets exercised regardless of the host toolchain.
 				harness += "command() { case \"$*\" in '-v jq') return 1 ;; esac; builtin command \"$@\"; }\n"
 			}
-			harness += fn + "\nbackup_remote_url_for_recovery prod \"$1\"\n"
-			out, err := exec.Command("bash", "-c", harness, "harness", dbDir).CombinedOutput()
+			harness += fns.String() + "\nbackup_remote_url_for_recovery prod \"$1\" $2\n"
+			out, err := exec.Command("bash", "-c", harness, "harness", dbDir, tc.backupName).CombinedOutput()
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("backup_remote_url_for_recovery = %q, want not found", out)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("backup_remote_url_for_recovery failed: %v\n%s", err, out)
 			}
