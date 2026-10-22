@@ -9,10 +9,11 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 # `bazel test //...` neither links nor stages them;
 # scripts/cmd_gc_testhooks_test.go pins GC_LANE_GC_BIN. Unsharded: one action
 # in //test:integration_packages, whose action count is pinned
-# (scripts/bazel_integration_packages_budget_test.go). The tests that measure
-# latency (X6, X12's load) run first and alone; the others then run their
-# cities in parallel (harness_test.go's cityParallel). X12 runs its gating
-# subset here.
+# (scripts/bazel_integration_packages_budget_test.go). X6 measures latency
+# alone, before the others run their cities in parallel (harness_test.go's
+# cityParallel); X12 runs its gating subset here, its small load in parallel
+# with the rest (it reports latency without asserting it). Only the evidence
+# load runs alone.
 go_test(
     name = "conversationlane_test",
     size = "large",
@@ -25,6 +26,7 @@ go_test(
         "x12_incapable_test.go",
         "x12_load_test.go",
         "x12_matrix_test.go",
+        "x12_evidence_guard_test.go",
         "x12_report_test.go",
         "x2_test.go",
         "x6_test.go",
@@ -62,9 +64,11 @@ go_test(
 # each op's finish_by (P1-P3, P5) and, on Dolt, the incapable-store arm; the
 # load part runs the six-round fault-free load (P4, R1-R3). Each writes
 # x12-report-<backend>-<part>.{json,md} to its undeclared outputs. Manual,
-# outside the integration lane's suite, and local: a part runs from 30
-# minutes (SQLite) to well over an hour (embedded Dolt), past the remote
-# executor's action timeout. Run with
+# outside the integration lane's suite, and local (tagged so: a part runs
+# from 30 minutes on SQLite to well over an hour on embedded Dolt, past the
+# remote executor's 1200 s action cap). Every variant also selects
+# TestX12EvidenceNeedsTheIntegrationBuild, which fails a run built without
+# --config=integration instead of letting it pass with no test. Run with
 #
 #   bazel test --config=ci --config=integration --strategy=TestRunner=local \
 #     --test_timeout=7200 //test/conversationlane:x12_evidence
@@ -79,14 +83,18 @@ go_test(
         "GC_X12_EVIDENCE": "1",
         "GC_X12_PART": part,
     },
-    tags = ["manual"],
+    tags = [
+        "local",
+        "manual",
+        "no-remote",
+    ],
     test = ":conversationlane_test",
 ) for backend in [
     "sqlite",
     "dolt",
 ] for part, run in [
-    ("matrix", "^TestX12(KillMatrix|IncapableStore)$$"),
-    ("load", "^TestX12FaultFreeLoad$$"),
+    ("matrix", "^TestX12(KillMatrix|IncapableStore|EvidenceNeedsTheIntegrationBuild)$$"),
+    ("load", "^TestX12(FaultFreeLoad|EvidenceNeedsTheIntegrationBuild)$$"),
 ]]
 
 test_suite(

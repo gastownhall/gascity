@@ -135,45 +135,66 @@ func TestX12FaultFreeLoad(t *testing.T) {
 		record.Problem = append(record.Problem, "["+line+"] "+msg)
 		t.Errorf("[%s] %s", line, msg)
 	}
+	defer func() {
+		if t.Failed() && len(record.Problem) == 0 {
+			record.Problem = append(record.Problem, "[harness] "+t.Name()+" failed outside every recorded check; its log says why")
+		}
+		x12Report.addLoad(record)
+	}()
 	var all []*x12LoadReq
 	latency := map[string][]time.Duration{}
-	var sizeBefore int64
-	sizeTaken := false
+	// R3 is measured over the recorded rounds: the op rows the store gained
+	// from the first one's start to the last one's end, and each round's
+	// physical growth, so a recorded round's can be set against the off
+	// round before it (the same mix, recording nothing).
+	opsBefore := -1
+	var rounds []x12RoundGrowth
 	for round, mode := range modes {
 		c.setMode(mode)
 		c.restart("")
-		if mode != "off" && !sizeTaken {
-			sizeBefore, sizeTaken = c.bindingSize(), true
+		if mode != "off" && opsBefore < 0 {
+			opsBefore = len(c.allOps())
 		}
+		start := c.bindingSize()
 		reqs := c.loadRound(round, mode, mix)
 		for _, r := range reqs {
 			if r.cause == "" && r.verb.async {
 				latency[mode+" "+r.verb.endpoint] = append(latency[mode+" "+r.verb.endpoint], r.orig.latency)
 			}
 		}
-		c.waitLoadSettled(reqs)
+		c.waitLoadSettled(reqs, fail)
 		if mode != "off" {
 			// B: a restart empties the LRU and the in-flight registry, so
 			// phase C replays through the op rows.
 			c.restart("")
-			c.replayRound(reqs)
+			c.replayRound(reqs, fail)
 		}
+		rounds = append(rounds, x12RoundGrowth{Mode: mode, Bytes: c.bindingSize() - start})
 		all = append(all, reqs...)
 	}
-	sizeAfter := c.bindingSize()
+	newRows := len(c.allOps()) - opsBefore
 
-	// P4.
+	// P4: every closed op of a well-formed recorded request; a mail
+	// notify has no replay surface (its key is its message's), so it is
+	// counted apart.
 	p4 := x12P4{}
 	for _, r := range all {
 		if r.mode == "off" || r.cause != "" || !r.hasOp {
 			continue
 		}
+		if r.verb.name == "cli-mail-notify" {
+			p4.MailNotifyExcluded++
+			continue
+		}
 		if r.op.Status != opjournal.StatusClosed {
 			p4.NotReplay++
+			if !retryableError(r) {
+				p4.OpenUnexplained = append(p4.OpenUnexplained, fmt.Sprintf("%s %s %s: op %s still open after the client saw %s (outcome %q)", r.mode, r.verb.name, r.opID, r.op.Status, r.orig, r.origOut.state))
+			}
 			continue
 		}
 		p4.Requests++
-		rowClass := opClass(r.op, r.verb.async)
+		rowClass := opClass(r.op, r.verb.message())
 		by, _, _ := closer(r.op)
 		if r.class == rowClass && r.replayClass == rowClass {
 			p4.Equal++
@@ -199,9 +220,14 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	if p4.Requests == 0 || p4.EqualShare < threshold || len(p4.Other) > 0 {
 		fail("P4", "%d of %d requests equal (%.4f, want >= %.3f), %d other mismatches: %v", p4.Equal, p4.Requests, p4.EqualShare, threshold, len(p4.Other), p4.Other)
 	}
+	if len(p4.OpenUnexplained) > 0 {
+		fail("P4", "%d ops open with no retryable error to explain them: %v", len(p4.OpenUnexplained), p4.OpenUnexplained)
+	}
+	x12Report.eval("P4", p4.Requests+p4.NotReplay)
 	record.P4 = p4
 
 	// P1 and P5 over every request; R1.
+	x12Report.eval("R1", len(all))
 	for _, r := range all {
 		c.checkLoadRequest(r, baselines, fail)
 		surface := r.verb.surface
@@ -231,11 +257,33 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	}
 
 	// R3.
-	record.R3 = c.growth(all, sizeAfter-sizeBefore)
+	x12Report.eval("R3", 1)
+	record.R3 = c.growth(all, newRows, rounds)
 	if record.R3.Recorded != record.R3.NewRows {
-		fail("R3", "%d recorded requests made %d op rows, want one each", record.R3.Recorded, record.R3.NewRows)
+		fail("R3", "%d recorded requests, but the store gained %d op rows over the recorded rounds; want one each", record.R3.Recorded, record.R3.NewRows)
 	}
-	x12Report.addLoad(record)
+}
+
+// retryableError reports whether r's client saw the retryable error after
+// which the API leaves a client-keyed op open for a same-key retry (DES-O0API
+// D10): a sync verb's error answer, or an async verb's failed outcome. The
+// CLI closes every op it records.
+func retryableError(r *x12LoadReq) bool {
+	switch {
+	case r.verb.surface != surfaceAPI:
+		return false
+	case r.verb.async:
+		return r.orig.ok() && r.origOut.state == "failed"
+	default:
+		return r.orig.answered && !r.orig.ok()
+	}
+}
+
+// x12RoundGrowth is one load round's physical growth of the sessions
+// binding, from its start to the end of its replays.
+type x12RoundGrowth struct {
+	Mode  string `json:"mode"`
+	Bytes int64  `json:"bytes"`
 }
 
 // loadRound runs one round's phase A.
@@ -281,7 +329,7 @@ func (c *x12City) loadRound(round int, mode string, mix x12LoadMix) []*x12LoadRe
 		}
 	}
 	for range mix.cliSubmit {
-		r := add(x12Verb{name: "cli-submit-api", surface: surfaceCLI, cli: []string{"session", "submit"}, kind: opjournal.KindMessage, shape: "api-submit", via: "legacy.delivered"}, w, "")
+		r := add(verbByName("cli-submit-api"), w, "")
 		r.key = "" // the CLI mints the API's key
 		run(r)
 	}
@@ -401,6 +449,8 @@ func clientClass(v x12Verb, a x12Answer, out x12Outcome) string {
 			return out.class
 		}
 		return "outcome-" + out.state
+	case a.ok() && v.message():
+		return cliMessageClass(a)
 	case a.ok():
 		return classSucceeded
 	default:
@@ -408,9 +458,20 @@ func clientClass(v x12Verb, a x12Answer, out x12Outcome) string {
 	}
 }
 
-// waitLoadSettled waits until every recorded request's op is closed and the
-// deliveries stop, then reads each request's op.
-func (c *x12City) waitLoadSettled(reqs []*x12LoadReq) {
+// cliMessageClass is a CLI message verb's success class: delivered or
+// queued, as its --json result says.
+func cliMessageClass(a x12Answer) string {
+	if a.queued == nil {
+		return "succeeded-without-queued-flag"
+	}
+	return deliveredClass(*a.queued)
+}
+
+// waitLoadSettled waits until every recorded request's op that should close
+// is closed (all but those a retryable error leaves open until their
+// finish_by) and the deliveries stop, then reads each request's op. An op
+// still open at the deadline fails P4.
+func (c *x12City) waitLoadSettled(reqs []*x12LoadReq, fail func(line, format string, args ...any)) {
 	c.t.Helper()
 	for _, r := range reqs {
 		r.opID = c.loadOpID(r)
@@ -420,13 +481,17 @@ func (c *x12City) waitLoadSettled(reqs []*x12LoadReq) {
 	deadline := time.Now().Add(x12StateWait)
 	for {
 		ops = c.opsByID()
-		open := 0
+		var open []string
 		for _, r := range reqs {
-			if op, ok := ops[r.opID]; ok && op.Status != opjournal.StatusClosed {
-				open++
+			if op, ok := ops[r.opID]; ok && op.Status != opjournal.StatusClosed && !retryableError(r) {
+				open = append(open, r.verb.name+" "+r.opID)
 			}
 		}
-		if open == 0 || time.Now().After(deadline) {
+		if len(open) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			fail("P4", "%d ops still open %s after their round: %v", len(open), x12StateWait, open)
 			break
 		}
 		time.Sleep(time.Second)
@@ -473,7 +538,7 @@ func (c *x12City) loadOpID(r *x12LoadReq) string {
 
 // replayRound is phase C: replay every request whose op closed, same key,
 // endpoint and target, and check the replay is marked and does nothing.
-func (c *x12City) replayRound(reqs []*x12LoadReq) {
+func (c *x12City) replayRound(reqs []*x12LoadReq, fail func(line, format string, args ...any)) {
 	c.t.Helper()
 	before := c.offsets()
 	for _, r := range reqs {
@@ -492,8 +557,7 @@ func (c *x12City) replayRound(reqs []*x12LoadReq) {
 		}
 		if r.verb.name == "cli-mail-notify" {
 			// A notify's key is its message's: the CLI has no verb that
-			// replays it. Its projection is the op row's.
-			r.replayClass = opClass(r.op, false)
+			// replays it, and P4 counts it apart.
 			continue
 		}
 		r.replay = c.send(r.verb, target, key, r.payload, nil)
@@ -505,13 +569,13 @@ func (c *x12City) replayRound(reqs []*x12LoadReq) {
 	time.Sleep(settleWindow)
 	after := c.offsets()
 	if after.deliveries != before.deliveries {
-		c.t.Errorf("[P4] phase C delivered %d texts; a replay delivers nothing", after.deliveries-before.deliveries)
+		fail("P4", "phase C delivered %d texts; a replay delivers nothing", after.deliveries-before.deliveries)
 	}
 	invs := c.invocations()
 	for i := before.invocations; i < len(invs); i++ {
 		inv := invs[i]
 		if inv.Op != "start" && inv.Op != "stop" && slices.Contains(runtimeEffectOps, inv.Op) {
-			c.t.Errorf("[P4] phase C ran %s on %v; a replay runs nothing", inv.Op, inv.Args)
+			fail("P4", "phase C ran %s on %v; a replay runs nothing", inv.Op, inv.Args)
 		}
 	}
 }
@@ -538,6 +602,9 @@ func replayClass(r *x12LoadReq) string {
 		}
 		return "not-replayed"
 	default:
+		if a.ok() && a.replayed && r.verb.message() {
+			return cliMessageClass(a)
+		}
 		if a.ok() && a.replayed {
 			return classSucceeded
 		}
@@ -579,6 +646,9 @@ func causeOr(cause, def string) string {
 
 // checkLoadRequest is P1, P5 and R1's expected class for one request.
 func (c *x12City) checkLoadRequest(r *x12LoadReq, baselines map[string]x12Shape, fail func(line, format string, args ...any)) {
+	if r.mode == "require" && r.orig.ok() {
+		x12Report.eval("P1", 1)
+	}
 	if r.mode == "require" && r.orig.ok() && r.verb.surface == surfaceAPI {
 		if !r.hasOp || r.orig.opID == "" {
 			fail("P1", "require answered %s for %s with no op", r.orig, r.verb.name)
@@ -623,6 +693,7 @@ func (c *x12City) checkLoadRequest(r *x12LoadReq, baselines map[string]x12Shape,
 		if r.verb.shape == "cli-mail-notify" || !strings.Contains(d.Text, r.payload) {
 			continue
 		}
+		x12Report.eval("P5", 1)
 		if !strings.HasPrefix(r.verb.shape, "cli-nudge-wait") && !strings.HasPrefix(r.verb.shape, "cli-nudge-queue") {
 			if want := sh.expected(r.payload); d.Text != want {
 				fail("P5", "%s delivery %d = %q, want off's %q", r.verb.name, d.Seq, d.Text, want)
@@ -697,9 +768,12 @@ func (c *x12City) bindingSize() int64 {
 	return n
 }
 
-// growth is R3 over the load's recorded requests.
-func (c *x12City) growth(reqs []*x12LoadReq, physical int64) x12Growth {
-	g := x12Growth{LogicalByKind: map[string]x12Size{}, PhysicalBytes: physical}
+// growth is R3 over the load's recorded requests: newRows is how many op
+// rows the store gained over the recorded rounds, measured, not derived from
+// the requests; the physical figure per op is each recorded round's growth
+// less the growth of the off round before it, over newRows.
+func (c *x12City) growth(reqs []*x12LoadReq, newRows int, rounds []x12RoundGrowth) x12Growth {
+	g := x12Growth{LogicalByKind: map[string]x12Size{}, NewRows: newRows, Rounds: rounds}
 	seen := map[string]bool{}
 	for _, r := range reqs {
 		if r.mode == "off" || !r.hasOp {
@@ -708,7 +782,16 @@ func (c *x12City) growth(reqs []*x12LoadReq, physical int64) x12Growth {
 		g.Recorded++
 		seen[r.opID] = true
 	}
-	g.NewRows = len(seen)
+	var lastOff int64
+	haveOff := false
+	for _, rg := range rounds {
+		if rg.Mode == "off" {
+			lastOff, haveOff = rg.Bytes, true
+			continue
+		}
+		g.PhysicalBytes += rg.Bytes
+		g.PhysicalOverOff += rg.Bytes - lastOff
+	}
 	sizes := map[string][]int{}
 	c.mustStore(func(raw beads.Store, _ *opjournal.Store) error {
 		for id := range seen {
@@ -740,7 +823,7 @@ func (c *x12City) growth(reqs []*x12LoadReq, physical int64) x12Growth {
 		}
 		return nil
 	})
-	total := 0
+	total, logicalRows := 0, 0
 	for kind, ns := range sizes {
 		sort.Ints(ns)
 		sum := 0
@@ -748,21 +831,24 @@ func (c *x12City) growth(reqs []*x12LoadReq, physical int64) x12Growth {
 			sum += n
 		}
 		total += sum
+		logicalRows += len(ns)
 		g.LogicalByKind[kind] = x12Size{N: len(ns), Mean: float64(sum) / float64(len(ns)), P95: ns[min(len(ns)-1, int(0.95*float64(len(ns))))]}
 	}
-	if g.NewRows > 0 {
-		g.PhysicalPerOp = float64(physical) / float64(g.NewRows)
+	physical := "no off round to set it against"
+	if haveOff && g.NewRows > 0 {
+		g.PhysicalPerOp = float64(g.PhysicalOverOff) / float64(g.NewRows)
+		physical = fmt.Sprintf("%.0f physical bytes per op over the off round", g.PhysicalPerOp)
 	}
 	mean := 0.0
-	if g.NewRows > 0 {
-		mean = float64(total) / float64(g.NewRows)
+	if logicalRows > 0 {
+		mean = float64(total) / float64(logicalRows)
 	}
-	g.DailyFormulaMD = fmt.Sprintf("bytes per day = ops per day × %.0f logical (%.0f physical) bytes per op", mean, g.PhysicalPerOp)
+	g.DailyFormulaMD = fmt.Sprintf("bytes per day = ops per day × %.0f logical bytes per op (%s)", mean, physical)
 	if v := os.Getenv(x12DailyOpsEnv); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			g.DailyOps = n
 			g.DailyBytes = float64(n) * mean
-			g.DailyFormulaMD = fmt.Sprintf("%d ops per day × %.0f bytes = %.0f logical bytes per day (%.0f physical)", n, mean, g.DailyBytes, float64(n)*g.PhysicalPerOp)
+			g.DailyFormulaMD = fmt.Sprintf("%d ops per day × %.0f logical bytes = %.0f bytes per day (%s)", n, mean, g.DailyBytes, physical)
 		}
 	}
 	return g

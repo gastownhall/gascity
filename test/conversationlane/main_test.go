@@ -18,6 +18,8 @@ const (
 	fakeRuntimeEnv = "GC_LANE_FAKE_RUNTIME"
 )
 
+func init() { x12IntegrationBuild = true }
+
 func TestMain(m *testing.M) {
 	if os.Getenv(gcBinEnv) == "" || os.Getenv(fakeRuntimeEnv) == "" {
 		if bazeltest.IsBazel() {
@@ -28,6 +30,6 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	code := m.Run()
-	writeX12Report()
+	writeX12Report(code)
 	os.Exit(code)
 }

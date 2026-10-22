@@ -44,14 +44,20 @@ func runX12Incapable(t *testing.T, mode string, verbs []string, per int, baselin
 			own += per
 		}
 	}
-	c := newX12City(t, armDolt, mode, own, true)
-	c.start("")
 	arm := x12ArmRecord{Backend: string(armDolt), Mode: mode}
 	fail := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
 		arm.Problems = append(arm.Problems, msg)
 		t.Errorf("[I8] %s: %s", mode, msg)
 	}
+	defer func() {
+		if t.Failed() && len(arm.Problems) == 0 {
+			arm.Problems = append(arm.Problems, t.Name()+" failed outside every recorded check; its log says why")
+		}
+		x12Report.addArm(arm)
+	}()
+	c := newX12City(t, armDolt, mode, own, true)
+	c.start("")
 	degradesBefore := c.degradeEvents("propose", "type_unregistered")
 	for _, name := range verbs {
 		v := verbByName(name)
@@ -67,6 +73,7 @@ func runX12Incapable(t *testing.T, mode string, verbs []string, per int, baselin
 			payload := fmt.Sprintf("x12 incapable %s %s %d alpha", mode, strings.ReplaceAll(name, "-", " "), i)
 			a := c.send(v, s, key, payload, nil)
 			arm.Requests++
+			x12Report.eval("I8", 1)
 			if mode == "require" {
 				refused := (v.surface == surfaceAPI && a.status == 503 && strings.Contains(a.body, "op-journal-unavailable")) ||
 					(v.surface == surfaceCLI && a.status == 1 && a.code == "op_journal_unavailable")
@@ -123,5 +130,4 @@ func runX12Incapable(t *testing.T, mode string, verbs []string, per int, baselin
 			fail("%d ops.recording_degraded{api, propose, type_unregistered} events for %d gates, want one each", n, apiGates)
 		}
 	}
-	x12Report.addArm(arm)
 }

@@ -3022,7 +3022,7 @@ tagged = true
 [[count]]
 path = "test/conversationlane/x12_harness_test.go"
 resource = "fixed_sleep"
-calls = 8
+calls = 9
 tagged = true
 
 [[count]]
@@ -3040,7 +3040,7 @@ tagged = true
 [[count]]
 path = "test/conversationlane/x12_matrix_test.go"
 resource = "fixed_sleep"
-calls = 5
+calls = 7
 tagged = true
 
 [[count]]

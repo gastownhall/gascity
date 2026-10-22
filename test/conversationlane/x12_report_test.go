@@ -2,10 +2,12 @@
 
 package conversationlane_test
 
-// The X12 report: the pass lines P1 to P5 and T3I with their measured
-// values and offending items, and the measurements R1 to R3, as JSON and as
-// the Markdown table the PR body carries. Every pass line is asserted in the
-// test that measures it; the report only aggregates.
+// The X12 report: the pass lines P1 to P5, I4, I8, R1, R3 and harness with
+// their measured values and offending items, and the measurements R1 to R3,
+// as JSON and as the Markdown table the PR body carries. Every pass line is
+// asserted in the test that measures it; the report only aggregates, says
+// "not run" for a line nothing evaluated, and is stamped FAILED when the
+// test binary failed.
 
 import (
 	"encoding/json"
@@ -29,31 +31,41 @@ type x12Collector struct {
 	problems []x12ProblemRecord
 	loads    []x12LoadRecord
 	arms     []x12ArmRecord
+	// evals counts, per pass line, the items checks evaluated under it.
+	evals map[string]int
 }
 
 // x12Report is the test binary's collector.
-var x12Report = &x12Collector{started: time.Now()}
+var x12Report = &x12Collector{started: time.Now(), evals: map[string]int{}}
+
+// eval counts n items evaluated under line.
+func (r *x12Collector) eval(line string, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evals[line] += n
+}
 
 // x12CellRecord is one matrix cell in the report.
 type x12CellRecord struct {
-	Tier       string         `json:"tier"`
-	Backend    string         `json:"backend"`
-	Mode       string         `json:"mode"`
-	Cell       string         `json:"cell"`
-	Surface    string         `json:"surface"`
-	Original   string         `json:"original"`
-	OrigOut    string         `json:"original_outcome,omitempty"`
-	Retry      string         `json:"retry,omitempty"`
-	RetryOut   string         `json:"retry_outcome,omitempty"`
-	Rerun      string         `json:"rerun_after_finish_by,omitempty"`
-	Op         string         `json:"op"`
-	Outcome    string         `json:"outcome"`
-	Closer     string         `json:"closer"`
-	Attempt    int            `json:"attempt"`
-	Executions int            `json:"executions"`
-	Deliveries int            `json:"deliveries"`
-	Effects    map[string]int `json:"runtime_effects,omitempty"`
-	Problems   []string       `json:"problems,omitempty"`
+	Tier         string         `json:"tier"`
+	Backend      string         `json:"backend"`
+	Mode         string         `json:"mode"`
+	Cell         string         `json:"cell"`
+	Surface      string         `json:"surface"`
+	Original     string         `json:"original"`
+	OrigOut      string         `json:"original_outcome,omitempty"`
+	Retry        string         `json:"retry,omitempty"`
+	RetryOut     string         `json:"retry_outcome,omitempty"`
+	Rerun        string         `json:"rerun_after_finish_by,omitempty"`
+	Op           string         `json:"op"`
+	Outcome      string         `json:"outcome"`
+	Closer       string         `json:"closer"`
+	Attempt      int            `json:"attempt"`
+	ExpectedExec int            `json:"expected_executions"`
+	ObservedExec int            `json:"observed_executions"`
+	Deliveries   int            `json:"deliveries"`
+	Effects      map[string]int `json:"runtime_effects,omitempty"`
+	Problems     []string       `json:"problems,omitempty"`
 }
 
 // x12ProblemRecord is a failed check outside a cell.
@@ -74,13 +86,18 @@ type x12LoadRecord struct {
 
 // x12P4 is P4's measure.
 type x12P4 struct {
-	Requests   int      `json:"requests"`
-	Equal      int      `json:"equal"`
-	Late       []string `json:"late_mismatches,omitempty"`
-	Other      []string `json:"other_mismatches,omitempty"`
-	CodeDiffs  []string `json:"code_differences,omitempty"`
-	NotReplay  int      `json:"not_replayed_open"`
-	EqualShare float64  `json:"equal_share"`
+	Requests  int      `json:"requests"`
+	Equal     int      `json:"equal"`
+	Late      []string `json:"late_mismatches,omitempty"`
+	Other     []string `json:"other_mismatches,omitempty"`
+	CodeDiffs []string `json:"code_differences,omitempty"`
+	NotReplay int      `json:"not_replayed_open"`
+	// OpenUnexplained are open ops no retryable error explains.
+	OpenUnexplained []string `json:"open_unexplained,omitempty"`
+	// MailNotifyExcluded counts mail notifies, outside P4's share: no
+	// verb replays them.
+	MailNotifyExcluded int     `json:"mail_notify_excluded"`
+	EqualShare         float64 `json:"equal_share"`
 }
 
 // x12Latency is one R2 row.
@@ -97,14 +114,19 @@ type x12Latency struct {
 
 // x12Growth is R3.
 type x12Growth struct {
-	Recorded       int                `json:"recorded_requests"`
-	NewRows        int                `json:"new_op_rows"`
-	LogicalByKind  map[string]x12Size `json:"logical_bytes_by_kind"`
-	PhysicalBytes  int64              `json:"physical_bytes_delta"`
-	PhysicalPerOp  float64            `json:"physical_bytes_per_op"`
-	DailyOps       int                `json:"daily_ops_input,omitempty"`
-	DailyBytes     float64            `json:"daily_bytes,omitempty"`
-	DailyFormulaMD string             `json:"daily_formula"`
+	Recorded      int                `json:"recorded_requests"`
+	NewRows       int                `json:"new_op_rows"`
+	LogicalByKind map[string]x12Size `json:"logical_bytes_by_kind"`
+	// Rounds is each round's physical growth; PhysicalBytes the recorded
+	// rounds' sum, PhysicalOverOff that less each one's preceding off round,
+	// and PhysicalPerOp PhysicalOverOff over NewRows.
+	Rounds          []x12RoundGrowth `json:"rounds"`
+	PhysicalBytes   int64            `json:"physical_bytes_recorded_rounds"`
+	PhysicalOverOff int64            `json:"physical_bytes_over_off"`
+	PhysicalPerOp   float64          `json:"physical_bytes_per_op"`
+	DailyOps        int              `json:"daily_ops_input,omitempty"`
+	DailyBytes      float64          `json:"daily_bytes,omitempty"`
+	DailyFormulaMD  string           `json:"daily_formula"`
 }
 
 // x12Size is a size distribution.
@@ -135,7 +157,7 @@ func (r *x12Collector) addCell(cell *x12Cell) {
 	rec := x12CellRecord{
 		Tier: cell.tier, Backend: cell.backend, Mode: cell.mode, Cell: cell.spec.name(), Surface: cell.spec.verb.surface,
 		Original: cell.orig.String(), Op: cell.opID, Outcome: cell.finalOutcome, Closer: cell.closer,
-		Attempt: cell.op.Attempt, Executions: cell.executions, Deliveries: cell.deliveries, Effects: cell.effects,
+		Attempt: cell.op.Attempt, ExpectedExec: cell.expectedExec, ObservedExec: cell.observedExec, Deliveries: cell.deliveries, Effects: cell.effects,
 	}
 	if cell.origOut.state != "" {
 		rec.OrigOut = cell.origOut.state
@@ -189,7 +211,10 @@ type x12PassLine struct {
 
 // x12ReportDoc is the JSON report.
 type x12ReportDoc struct {
-	GCVersion string             `json:"gc_version"`
+	GCVersion string `json:"gc_version"`
+	// Result is "passed", or FAILED with the test binary's exit code: a
+	// failed run's pass lines are not evidence.
+	Result    string             `json:"result"`
 	Tier      string             `json:"tier"`
 	Backend   string             `json:"backend"`
 	Started   time.Time          `json:"started"`
@@ -225,26 +250,33 @@ func (r *x12Collector) passLines() []x12PassLine {
 		}
 	}
 	verdict := func(line string) string {
-		if len(offending[line]) == 0 {
-			return "pass"
+		switch {
+		case len(offending[line]) > 0:
+			return "FAIL"
+		case r.evals[line] == 0:
+			return "not run"
 		}
-		return "FAIL"
+		return "pass"
 	}
-	p4 := "not run"
-	p4Status := "not run"
+	measured := func(line string) string {
+		return fmt.Sprintf("%d offending of %d evaluated", len(offending[line]), r.evals[line])
+	}
+	p4 := measured("P4")
 	for _, l := range r.loads {
-		p4 = fmt.Sprintf("%s: %d/%d equal (%.4f), %d late, %d other", l.Backend, l.P4.Equal, l.P4.Requests, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other))
-		p4Status = verdict("P4")
+		p4 = fmt.Sprintf("%s: %d/%d equal (%.4f), %d late, %d other, %d open unexplained", l.Backend, l.P4.Equal, l.P4.Requests, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other), len(l.P4.OpenUnexplained))
 	}
+	p2 := fmt.Sprintf("%d offending; %d ops checked against finish_by, %d cells' immediate outcomes", len(offending["P2"]), r.evals["P2"], r.evals["P2 immediate"])
 	lines := []x12PassLine{
-		{Line: "P1", Wording: "require has 0 answered requests without an op", Threshold: "0", Measured: fmt.Sprint(len(offending["P1"])), Status: verdict("P1")},
-		{Line: "P2", Wording: "every op has exactly one outcome within finish_by + 60 s", Threshold: "0", Measured: fmt.Sprint(len(offending["P2"])), Status: verdict("P2")},
-		{Line: "P3", Wording: "duplicates only at K3 (and only after a retry)", Threshold: "0 outside API {K3, K5} with a retry", Measured: fmt.Sprint(len(offending["P3"])), Status: verdict("P3")},
-		{Line: "P4", Wording: "projections equal the client-visible results in >= 99.9% of fault-free requests", Threshold: ">= 0.999 and 0 non-late mismatches", Measured: p4, Status: p4Status},
-		{Line: "P5", Wording: "delivered text equal to the off text in every arm, adopted re-executions included (I11)", Threshold: "0", Measured: fmt.Sprint(len(offending["P5"])), Status: verdict("P5")},
-		{Line: "I4", Wording: "one op per key", Threshold: "0", Measured: fmt.Sprint(len(offending["I4"])), Status: verdict("I4")},
-		{Line: "I8", Wording: "an incapable store degrades as off in auto and refuses in require", Threshold: "0", Measured: fmt.Sprint(len(offending["I8"])), Status: verdict("I8")},
-		{Line: "harness", Wording: "every failpoint fired as armed", Threshold: "0", Measured: fmt.Sprint(len(offending["harness"])), Status: verdict("harness")},
+		{Line: "P1", Wording: "require has 0 answered requests without an op", Threshold: "0", Measured: measured("P1"), Status: verdict("P1")},
+		{Line: "P2", Wording: "every op has exactly one outcome within finish_by + 60 s", Threshold: "0", Measured: p2, Status: verdict("P2")},
+		{Line: "P3", Wording: "executions as expected, duplicates only at K3 (and only after a retry)", Threshold: "0 outside API {K3, K5} with a retry", Measured: measured("P3"), Status: verdict("P3")},
+		{Line: "P4", Wording: "projections equal the client-visible results in >= 99.9% of fault-free requests", Threshold: ">= 0.999, 0 non-late mismatches, 0 unexplained open ops", Measured: p4, Status: verdict("P4")},
+		{Line: "P5", Wording: "delivered text equal to the off text in every arm, adopted re-executions included (I11)", Threshold: "0", Measured: measured("P5"), Status: verdict("P5")},
+		{Line: "I4", Wording: "one op per key", Threshold: "0", Measured: measured("I4"), Status: verdict("I4")},
+		{Line: "I8", Wording: "an incapable store degrades as off in auto and refuses in require", Threshold: "0", Measured: measured("I8"), Status: verdict("I8")},
+		{Line: "R1", Wording: "every well-formed recorded-mode request records; each provoked cause lands in its class", Threshold: "0", Measured: measured("R1"), Status: verdict("R1")},
+		{Line: "R3", Wording: "the store gains one op row per recorded request", Threshold: "0", Measured: measured("R3"), Status: verdict("R3")},
+		{Line: "harness", Wording: "every failpoint fired as armed", Threshold: "0", Measured: measured("harness"), Status: verdict("harness")},
 	}
 	for i := range lines {
 		lines[i].Offending = offending[lines[i].Line]
@@ -252,8 +284,9 @@ func (r *x12Collector) passLines() []x12PassLine {
 	return lines
 }
 
-// writeX12Report writes the report when X12 recorded anything.
-func writeX12Report() {
+// writeX12Report writes the report when X12 recorded anything; code is the
+// test binary's exit code.
+func writeX12Report(code int) {
 	if x12Report.empty() {
 		return
 	}
@@ -265,7 +298,7 @@ func writeX12Report() {
 		tier, backend = "evidence", os.Getenv(x12BackendEnv)
 	}
 	doc := x12ReportDoc{
-		GCVersion: gcVersion(r.gcBin), Tier: tier, Backend: backend, Started: r.started,
+		GCVersion: gcVersion(r.gcBin), Result: x12Result(code), Tier: tier, Backend: backend, Started: r.started,
 		WallTime:  time.Since(r.started).Round(time.Second).String(),
 		PassLines: r.passLines(), Cells: r.cells, Loads: r.loads, Arms: r.arms, Problems: r.problems,
 	}
@@ -302,6 +335,14 @@ func writeX12Report() {
 	fmt.Print(md)
 }
 
+// x12Result is the report's result for the test binary's exit code.
+func x12Result(code int) string {
+	if code != 0 {
+		return fmt.Sprintf("FAILED: the test binary exited %d; no pass line of this run is evidence", code)
+	}
+	return "passed"
+}
+
 // gcVersion is bin's version line.
 func gcVersion(bin string) string {
 	if bin == "" {
@@ -318,6 +359,7 @@ func gcVersion(bin string) string {
 func renderX12Markdown(doc x12ReportDoc) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## X12 report (%s tier, %s)\n\n", doc.Tier, doc.Backend)
+	fmt.Fprintf(&b, "**Result: %s**\n\n", doc.Result)
 	fmt.Fprintf(&b, "gc: `%s`; started %s; wall time %s; %d cells\n\n", doc.GCVersion, doc.Started.UTC().Format(time.RFC3339), doc.WallTime, len(doc.Cells))
 	b.WriteString("| Line | Wording | Threshold | Measured | Status |\n|---|---|---|---|---|\n")
 	for _, l := range doc.PassLines {
@@ -334,7 +376,7 @@ func renderX12Markdown(doc x12ReportDoc) string {
 	}
 	for _, l := range doc.Loads {
 		fmt.Fprintf(&b, "\n### Fault-free load (%s)\n\n", l.Backend)
-		fmt.Fprintf(&b, "P4: %d requests, %d equal (%.4f); late mismatches %d; other %d; open ops not replayed %d\n\n", l.P4.Requests, l.P4.Equal, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other), l.P4.NotReplay)
+		fmt.Fprintf(&b, "P4: %d requests, %d equal (%.4f); late mismatches %d; other %d; open ops not replayed %d (%d unexplained); mail notifies excluded %d\n\n", l.P4.Requests, l.P4.Equal, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other), l.P4.NotReplay, len(l.P4.OpenUnexplained), l.P4.MailNotifyExcluded)
 		for _, d := range l.P4.CodeDiffs {
 			fmt.Fprintf(&b, "- code difference: %s\n", d)
 		}
@@ -349,7 +391,7 @@ func renderX12Markdown(doc x12ReportDoc) string {
 			fmt.Fprintf(&b, "| %s | %s | %d | %s | %s | %s | %s |\n", r.Mode, r.Path, r.N, r.P50, r.P95, r.P99, r.Max)
 		}
 		g := l.R3
-		fmt.Fprintf(&b, "\nR3 op-row growth: %d recorded requests, %d new op rows; physical %d bytes (%.0f per op); %s\n\n", g.Recorded, g.NewRows, g.PhysicalBytes, g.PhysicalPerOp, g.DailyFormulaMD)
+		fmt.Fprintf(&b, "\nR3 op-row growth: %d recorded requests, the store gained %d op rows; physical %d bytes over the recorded rounds, %d over their off rounds (%.0f per op); %s\n\n", g.Recorded, g.NewRows, g.PhysicalBytes, g.PhysicalOverOff, g.PhysicalPerOp, g.DailyFormulaMD)
 		b.WriteString("| Kind | n | mean logical bytes | p95 |\n|---|---|---|---|\n")
 		for _, k := range sortedKeys(g.LogicalByKind) {
 			s := g.LogicalByKind[k]
@@ -362,10 +404,10 @@ func renderX12Markdown(doc x12ReportDoc) string {
 			fmt.Fprintf(&b, "| %s | %s | %d | %d |\n", a.Backend, a.Mode, a.Requests, len(a.Problems))
 		}
 	}
-	b.WriteString("\n### Cells\n\n| Backend/mode | Cell | Original | Retry | Op outcome | Closer | Attempt | Executions | Deliveries | Effects |\n|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("\n### Cells\n\n| Backend/mode | Cell | Original | Retry | Op outcome | Closer | Attempt | Executions (expected/observed) | Deliveries | Effects |\n|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, c := range doc.Cells {
-		fmt.Fprintf(&b, "| %s/%s | %s | %s | %s | %s | %s | %d | %d | %d | %v |\n", c.Backend, c.Mode, c.Cell,
-			mdCell(c.Original), mdCell(c.Retry), c.Outcome, c.Closer, c.Attempt, c.Executions, c.Deliveries, c.Effects)
+		fmt.Fprintf(&b, "| %s/%s | %s | %s | %s | %s | %s | %d | %d/%d | %d | %v |\n", c.Backend, c.Mode, c.Cell,
+			mdCell(c.Original), mdCell(c.Retry), c.Outcome, c.Closer, c.Attempt, c.ExpectedExec, c.ObservedExec, c.Deliveries, c.Effects)
 	}
 	return b.String()
 }

@@ -42,9 +42,9 @@ import (
 const (
 	// opsFailpointEnv is gc's op recording failpoint variable.
 	opsFailpointEnv = "GC_OPS_FAILPOINT"
-	// x12EvidenceEnv selects the evidence tier; x12BackendEnv names its
-	// store arm; x12DailyOpsEnv is R3's input volume.
-	x12EvidenceEnv = "GC_X12_EVIDENCE"
+	// x12BackendEnv names the evidence tier's store arm (x12EvidenceEnv,
+	// x12_evidence_guard_test.go, selects the tier); x12DailyOpsEnv is R3's
+	// input volume.
 	x12BackendEnv  = "GC_X12_BACKEND"
 	x12DailyOpsEnv = "GC_X12_DAILY_OPS"
 	// x12PartEnv names an evidence variant's part (matrix or load), for the
@@ -61,8 +61,9 @@ const (
 	// x12RequestTimeout bounds one API call: on embedded Dolt a recorded
 	// wake that materializes a configured session took 75 s in the evidence
 	// run, and a client that gives up cancels the request it is waiting for
-	// (the materialized row closes). x12OutcomeTimeout bounds one outcome
-	// poll.
+	// and the materialized row closes. That product behaviour is ga-30h7qt;
+	// X12 waits it out rather than measuring it. x12OutcomeTimeout bounds
+	// one outcome poll.
 	x12RequestTimeout = 5 * time.Minute
 	x12OutcomeTimeout = 60 * time.Second
 	// x12EffectWait bounds how long a cell waits for the effects it expects
@@ -259,17 +260,29 @@ func generation(b beads.Bead) int {
 	return g
 }
 
-// waitRow polls session id until ok holds.
+// waitRow polls session id until ok holds, and fails the test when it does
+// not within timeout.
 func (c *x12City) waitRow(id, what string, timeout time.Duration, ok func(beads.Bead) bool) beads.Bead {
+	c.t.Helper()
+	row, reached := c.pollRow(id, timeout, ok)
+	if !reached {
+		c.t.Fatalf("session %s not %s after %s: status %s state %s gen %s", id, what, timeout, row.Status, row.Metadata["state"], row.Metadata["generation"])
+	}
+	return row
+}
+
+// pollRow polls session id until ok holds or timeout passes; it returns the
+// last row read and whether ok held.
+func (c *x12City) pollRow(id string, timeout time.Duration, ok func(beads.Bead) bool) (beads.Bead, bool) {
 	c.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		row := c.sessionRow(id)
 		if ok(row) {
-			return row
+			return row, true
 		}
 		if time.Now().After(deadline) {
-			c.t.Fatalf("session %s not %s after %s: status %s state %s gen %s", id, what, timeout, row.Status, row.Metadata["state"], row.Metadata["generation"])
+			return row, false
 		}
 		time.Sleep(c.pollGap())
 	}
@@ -410,6 +423,11 @@ type x12Answer struct {
 	opID, opStatus string
 	attempt        int
 	replayed       bool
+	// queued is a CLI message verb's JSON "queued" field, when it printed
+	// one.
+	queued *bool
+	// outcome is a CLI verb's JSON "outcome" field.
+	outcome string
 	// code is an error answer's code.
 	code    string
 	latency time.Duration
@@ -524,6 +542,8 @@ func (c *x12City) cliRun(extra []string, args ...string) x12Answer {
 			OpID     string `json:"op_id"`
 			Key      string `json:"key"`
 			Replayed bool   `json:"replayed"`
+			Queued   *bool  `json:"queued"`
+			Outcome  string `json:"outcome"`
 			Error    *struct {
 				Code string `json:"code"`
 			} `json:"error"`
@@ -535,6 +555,12 @@ func (c *x12City) cliRun(extra []string, args ...string) x12Answer {
 			a.opID = out.OpID
 		}
 		a.replayed = a.replayed || out.Replayed
+		if out.Queued != nil {
+			a.queued = out.Queued
+		}
+		if out.Outcome != "" {
+			a.outcome = out.Outcome
+		}
 		if out.Error != nil {
 			a.code = out.Error.Code
 		}
@@ -639,12 +665,13 @@ func deliveredClass(queued bool) string {
 	return classDelivered
 }
 
-// opClass is an op row's outcome class, for an async (message) op or not.
-func opClass(op opjournal.Op, async bool) string {
+// opClass is an op row's outcome class, for a message op (whose class
+// carries delivered or queued, rule 4 and the design's F5) or not.
+func opClass(op opjournal.Op, message bool) string {
 	arm, _ := op.Outcome.Effective()
 	switch arm {
 	case opjournal.ArmSucceeded:
-		if !async {
+		if !message {
 			return classSucceeded
 		}
 		if op.Outcome.Result.Via == "legacy.queued" {
@@ -653,7 +680,7 @@ func opClass(op opjournal.Op, async bool) string {
 		return classDelivered
 	case opjournal.ArmSkipped:
 		// A kill's or stop's skipped{not_needed} answers 200: succeeded.
-		if !async {
+		if !message {
 			return classSucceeded
 		}
 		return classFailed
@@ -815,7 +842,9 @@ func (c *x12City) assertNoOpIdentifier(rec func(line, format string, args ...any
 		}
 		return nil
 	})
-	for _, d := range c.deliveries() {
+	ds := c.deliveries()
+	x12Report.eval("P5", len(ds))
+	for _, d := range ds {
 		for _, id := range ids {
 			if id != "" && len(id) > 3 && strings.Contains(d.Text, id) {
 				rec("P5", "delivery %d carries identifier %q: %q", d.Seq, id, d.Text)
@@ -869,7 +898,9 @@ func x12Baselines(t *testing.T) map[string]x12Shape {
 }
 
 func learnBaselines(t *testing.T) map[string]x12Shape {
-	c := newX12City(t, armSQLite, "off", 2, false)
+	// Two on_demand sessions for the mail notify and spare, and two per
+	// surface for the lifecycle signatures.
+	c := newX12City(t, armSQLite, "off", 6, false)
 	c.start("")
 	w := c.worker()
 	out := map[string]x12Shape{}
@@ -923,7 +954,7 @@ func learnBaselines(t *testing.T) map[string]x12Shape {
 		out[shape] = sh
 	}
 	for _, v := range x12Verbs {
-		if v.shape == "" || v.shape == "cli-submit-local" || v.shape == "cli-mail-notify" {
+		if v.shape == "" || v.viaAPI || v.shape == "cli-submit-local" || v.shape == "cli-mail-notify" {
 			continue
 		}
 		v := v
@@ -947,12 +978,47 @@ func learnBaselines(t *testing.T) map[string]x12Shape {
 	}
 	time.Sleep(settleWindow)
 	out["api-stop"] = x12Shape{effects: effectCounts(c.invocations(), before.invocations, w.name)}
+	for _, surface := range []string{surfaceAPI, surfaceCLI} {
+		learnLifecycle(t, c, surface, out)
+	}
 	c.stop()
 	learn("cli-submit-local", w, false, func(payload string) x12Answer {
 		return c.send(verbByName("cli-submit-local"), w, "", payload, nil)
 	})
 	out[shapeReminderBatch] = learnReminderBatch(t, c, w)
 	return out
+}
+
+// learnLifecycle learns off's runtime-effect signature of each lifecycle
+// verb on surface, keyed lifecycleShape: on one running session suspend,
+// wake, reset and kill in turn, each waited into its transition, and close
+// on a second running one.
+func learnLifecycle(t *testing.T, c *x12City, surface string, out map[string]x12Shape) {
+	t.Helper()
+	verb := func(name string) x12Verb {
+		if surface == surfaceCLI {
+			return verbByName("cli-" + name)
+		}
+		return verbByName(name)
+	}
+	learn := func(s x12Session, name string) {
+		t.Helper()
+		v := verb(name)
+		before := c.offsets()
+		if a := c.send(v, s, "", "", nil); !a.ok() {
+			t.Fatalf("baseline %s: %s", lifecycleShape(v), a)
+		}
+		what, reached := c.lifecycleTransition(v, s)
+		c.waitRow(s.id, what, x12StateWait, reached)
+		time.Sleep(settleWindow)
+		out[lifecycleShape(v)] = x12Shape{effects: effectCounts(c.invocations(), before.invocations, s.name)}
+	}
+	s := c.materialize(false)
+	for _, name := range []string{"suspend", "wake", "reset", "kill"} {
+		learn(s, name)
+		s.gen = generation(c.sessionRow(s.id))
+	}
+	learn(c.materialize(false), "close")
 }
 
 // shapeReminderBatch is the framing of a batch of queued reminders, its
