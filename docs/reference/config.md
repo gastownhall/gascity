@@ -42,6 +42,7 @@ City is the top-level configuration for a Gas City instance.
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
+| `stalled_beads` | StalledBeadsConfig |  |  | StalledBeads configures the stalled in_progress bead alarm. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
 | `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
@@ -898,6 +899,7 @@ SessionConfig holds session provider settings.
 | `startup_timeout` | string |  | `60s` | StartupTimeout is how long to wait for each agent's Start() call before treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s". |
 | `progress_stall_timeout` | string |  |  | ProgressStallTimeout, when set, enables progress-aware session recycling: a desired, alive, claim-less session on a healthy provider whose last provider-reported activity is older than this duration is restarted fresh. Such a session has likely parked (e.g. its turn ended on a provider auth error) and will not self-recover. Set this above the longest legitimate alive-idle period for the city; values below 5m are clamped to 5m. Duration string (e.g. "30m"). Unset/zero disables it. Legacy only: deprecated and ignored under the v2 reconciler, whose work ladder replaces it. |
 | `claim_holder_stall_timeout` | string |  |  | ClaimHolderStallTimeout, when set, enables progress-aware recycling of a desired, alive session that holds in-progress work but has stopped making progress. Because recycling a claim-holder interrupts work, set this above the longest legitimate quiet period. Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero disables it. Legacy only: deprecated and ignored under the v2 reconciler, whose work ladder replaces it. |
+| `escalation_to` | string |  |  | EscalationTo is the mail address that receives one escalation per continuous stall episode (the stalled in_progress bead alarm). Optional: when empty the alarm is log-only and nothing is sent. It is never defaulted to a role. |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, tmux commands connect to a dedicated server: "tmux -L &lt;socket&gt;" normally, or "tmux -S &lt;path&gt;" with the path pinned from $TMUX when gc runs in a pane of that same server, so a pane whose TMUX_TMPDIR differs from the controller's still reaches the server hosting it. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
 | `program_status` | string |  | `off` | ProgramStatus is the city switch for OSC 7501 program status. "off" (the default) changes nothing. "shadow" arms capture on declared providers ([providers.&lt;p&gt;.program_status]) and compares readings without changing any decision. "on" lets valid readings decide. Enum: `off`, `shadow`, `on` |
@@ -911,6 +913,15 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StalledBeadsConfig
+
+StalledBeadsConfig configures the stalled in_progress bead alarm: how long an in_progress bead may sit without its updated_at advancing before it is stalled.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `thresholds` | map[string]string |  |  | Thresholds maps a priority label ("P0", "P1", ...) to the stall threshold for in_progress beads of that priority. Duration strings (e.g., "90m"). Entries override the built-in defaults of P0=2h, P1=6h, P2=24h and P3=72h. |
+| `fallback_threshold` | string |  | `24h` | FallbackThreshold is the stall threshold for a bead whose priority has no entry (unset, or P4 and below). Duration string. Defaults to "24h". |
 
 ## StorageBindingConfig
 

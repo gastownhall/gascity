@@ -1286,6 +1286,10 @@
           "$ref": "#/$defs/MaintenanceConfig",
           "description": "Maintenance configures periodic store-maintenance loops."
         },
+        "stalled_beads": {
+          "$ref": "#/$defs/StalledBeadsConfig",
+          "description": "StalledBeads configures the stalled in_progress bead alarm."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -3124,6 +3128,10 @@
           "type": "string",
           "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
+        "escalation_to": {
+          "type": "string",
+          "description": "EscalationTo is the mail address that receives one escalation per\ncontinuous stall episode (the stalled in_progress bead alarm). Optional:\nwhen empty the alarm is log-only and nothing is sent. It is never\ndefaulted to a role."
+        },
         "socket": {
           "type": "string",
           "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, tmux commands connect to a dedicated server: \"tmux -L\n\u003csocket\u003e\" normally, or \"tmux -S \u003cpath\u003e\" with the path pinned from\n$TMUX when gc runs in a pane of that same server, so a pane whose\nTMUX_TMPDIR differs from the controller's still reaches the server\nhosting it. When empty, defaults to the city name (workspace.name) —\ngiving every city its own tmux server automatically. Set explicitly\nto override."
@@ -3165,6 +3173,25 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
+    },
+    "StalledBeadsConfig": {
+      "properties": {
+        "thresholds": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Thresholds maps a priority label (\"P0\", \"P1\", ...) to the stall\nthreshold for in_progress beads of that priority. Duration strings\n(e.g., \"90m\"). Entries override the built-in defaults of P0=2h, P1=6h,\nP2=24h and P3=72h."
+        },
+        "fallback_threshold": {
+          "type": "string",
+          "description": "FallbackThreshold is the stall threshold for a bead whose priority has\nno entry (unset, or P4 and below). Duration string. Defaults to \"24h\".",
+          "default": "24h"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "StalledBeadsConfig configures the stalled in_progress bead alarm: how long an in_progress bead may sit without its updated_at advancing before it is stalled."
     },
     "StorageBindingConfig": {
       "properties": {

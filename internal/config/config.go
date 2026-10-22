@@ -296,6 +296,8 @@ type City struct {
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
+	// StalledBeads configures the stalled in_progress bead alarm.
+	StalledBeads StalledBeadsConfig `toml:"stalled_beads,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -1774,6 +1776,11 @@ type SessionConfig struct {
 	// deprecated and ignored under the v2 reconciler, whose work ladder
 	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
+	// EscalationTo is the mail address that receives one escalation per
+	// continuous stall episode (the stalled in_progress bead alarm). Optional:
+	// when empty the alarm is log-only and nothing is sent. It is never
+	// defaulted to a role.
+	EscalationTo string `toml:"escalation_to,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, tmux commands connect to a dedicated server: "tmux -L
 	// <socket>" normally, or "tmux -S <path>" with the path pinned from
@@ -1824,6 +1831,12 @@ func durationFloorOr(raw string, def, floor time.Duration) time.Duration {
 		return floor
 	}
 	return d
+}
+
+// EscalationRecipient returns the configured escalation address with
+// surrounding whitespace removed, or "" when unset (log-only mode).
+func (s *SessionConfig) EscalationRecipient() string {
+	return strings.TrimSpace(s.EscalationTo)
 }
 
 // SetupTimeoutDuration returns the setup timeout as a time.Duration.
@@ -2861,6 +2874,69 @@ func (d DoltMaintenance) IntervalOrDefault() time.Duration {
 // when unset or unparseable.
 func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 	return durationOr(d.GCTimeout, 10*time.Minute)
+}
+
+// StalledBeadsConfig configures the stalled in_progress bead alarm: how long
+// an in_progress bead may sit without its updated_at advancing before it is
+// stalled. The recipient of the alarm is [session].escalation_to.
+type StalledBeadsConfig struct {
+	// Thresholds maps a priority label ("P0", "P1", ...) to the stall
+	// threshold for in_progress beads of that priority. Duration strings
+	// (e.g., "90m"). Entries override the built-in defaults of P0=2h, P1=6h,
+	// P2=24h and P3=72h.
+	Thresholds map[string]string `toml:"thresholds,omitempty"`
+	// FallbackThreshold is the stall threshold for a bead whose priority has
+	// no entry (unset, or P4 and below). Duration string. Defaults to "24h".
+	FallbackThreshold string `toml:"fallback_threshold,omitempty" jsonschema:"default=24h"`
+}
+
+var stalledBeadPriorityKey = regexp.MustCompile(`^[Pp]([0-9]+)$`)
+
+// Overrides parses the configured thresholds into per-priority durations and
+// the fallback duration (0 when unset). An unknown priority label or a
+// duration that does not parse as positive is an error naming the offending
+// key; ValidateDurations reports the same errors at load time.
+func (c StalledBeadsConfig) Overrides() (map[int]time.Duration, time.Duration, error) {
+	parse := func(field, raw string) (time.Duration, error) {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("[stalled_beads] %s = %q is not a valid duration: %w", field, raw, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("[stalled_beads] %s = %q must be a positive duration", field, raw)
+		}
+		return d, nil
+	}
+	keys := make([]string, 0, len(c.Thresholds))
+	for k := range c.Thresholds {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	byPriority := make(map[int]time.Duration, len(keys))
+	for _, k := range keys {
+		m := stalledBeadPriorityKey.FindStringSubmatch(k)
+		if m == nil {
+			return nil, 0, fmt.Errorf("[stalled_beads] thresholds key %q is not a priority label such as \"P0\"", k)
+		}
+		priority, err := strconv.Atoi(m[1])
+		if err != nil {
+			return nil, 0, fmt.Errorf("[stalled_beads] thresholds key %q: %w", k, err)
+		}
+		d, err := parse("thresholds."+k, c.Thresholds[k])
+		if err != nil {
+			return nil, 0, err
+		}
+		byPriority[priority] = d
+	}
+	var fallback time.Duration
+	if c.FallbackThreshold != "" {
+		d, err := parse("fallback_threshold", c.FallbackThreshold)
+		if err != nil {
+			return nil, 0, err
+		}
+		fallback = d
+	}
+	return byPriority, fallback, nil
 }
 
 // DaemonConfig holds controller daemon settings.

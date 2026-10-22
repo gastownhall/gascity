@@ -1274,6 +1274,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("maintenance") {
 		base.Maintenance = fragment.Maintenance
 	}
+	if fragMeta.IsDefined("stalled_beads") {
+		base.StalledBeads = fragment.StalledBeads
+	}
 	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
 		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
 	}

@@ -1,12 +1,12 @@
-load("@rules_go//go:def.bzl", "go_test")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_test(
     name = "beadstall_test",
     srcs = [
-        "stalled_bead_red_stubs_test.go",
         "stalled_bead_red_test.go",
         "testenv_import_test.go",
     ],
+    embed = [":beadstall"],
     deps = [
         "//internal/beads",
         "//internal/fsys",
@@ -43,4 +43,12 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "beadstall",
+    srcs = ["stalled_bead.go"],
+    importpath = "github.com/gastownhall/gascity/internal/beadstall",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/beads"],
 )

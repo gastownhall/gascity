@@ -74,6 +74,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"rig", true},
 		{"startup-health-episode", true}, // bookkeeping record; never actionable Ready work (ga-o04bfr.1.1)
 		{"op", true},                     // conversation operation journal rows (internal/opjournal)
+		{"stalled-bead-episode", true},   // stall bookkeeping record (internal/beadstall)
 		{"task", false},
 		{"wisp", false},
 		{"", false},

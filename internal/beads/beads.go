@@ -829,6 +829,7 @@ var readyExcludeTypes = map[string]bool{
 	"rig":                    true, // rig identity beads
 	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
 	"op":                     true, // conversation operation journal op, fact and runtime rows; lanes execute them, never Ready (internal/opjournal)
+	"stalled-bead-episode":   true, // per-target-bead stall bookkeeping record, never actionable Ready work (internal/beadstall)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
