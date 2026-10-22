@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // --- DoltUnboundDatabasesCheck (#1979) ---
@@ -180,5 +183,80 @@ func TestDoltUnboundDatabasesCheck_SkipsWhenTargetsUnresolved(t *testing.T) {
 	}
 	if strings.Contains(r.Message, "pa") {
 		t.Errorf("message = %q, must not name an orphan from an unresolved inventory", r.Message)
+	}
+}
+
+// seedUnrecoverableState puts an unbound committed store (pa) in the data
+// dir and a preserved corrupt-aside entry (prod.20261022T010203Z) in the
+// pack state dir: exactly the state a skipped run must not name.
+func seedUnrecoverableState(t *testing.T, dir string) {
+	t.Helper()
+	writeCommittedDoltStore(t, dir, "pa")
+	aside := filepath.Join(dir, ".gc", "runtime", "packs", "dolt", "corrupt-aside", "prod.20261022T010203Z")
+	if err := os.MkdirAll(aside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestManagedDoltRecoveryChecks_SkipWithoutNamingAnyDatabase pins AC-7
+// (#1979): on a bd-owned proxied city, an external-endpoint city, or
+// GC_DOLT=skip, both recovery checks report OK as skipped and name no
+// database — even with an unbound store and a corrupt-aside entry on disk.
+func TestManagedDoltRecoveryChecks_SkipWithoutNamingAnyDatabase(t *testing.T) {
+	fs := fsys.OSFS{}
+	for _, tc := range []struct {
+		name string
+		skip bool
+		set  func(t *testing.T) string
+	}{
+		{name: "GC_DOLT=skip", skip: true, set: func(t *testing.T) string {
+			dir := setupManagedDoltCity(t)
+			seedUnrecoverableState(t, dir)
+			return dir
+		}},
+		{name: "external endpoint city", skip: false, set: func(t *testing.T) string {
+			dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginCityCanonical,
+				EndpointStatus: contract.EndpointStatusVerified,
+				DoltHost:       "db.example.com",
+				DoltPort:       "4411",
+			})
+			writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+			seedUnrecoverableState(t, dir)
+			return dir
+		}},
+		{name: "bd-owned proxied city", skip: false, set: func(t *testing.T) string {
+			dir := t.TempDir()
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				DoltMode:       "proxied-server",
+			})
+			writeDoctorProxiedMetadata(t, dir, "hq")
+			seedUnrecoverableState(t, dir)
+			return dir
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.set(t)
+			for _, check := range []Check{
+				NewDoltUnboundDatabasesCheck(dir, tc.skip),
+				NewDoltCorruptAsideCheck(dir, tc.skip),
+			} {
+				r := check.Run(&CheckContext{})
+				if r.Status != StatusOK {
+					t.Fatalf("%s: status = %d, want OK; msg = %s", check.Name(), r.Status, r.Message)
+				}
+				if !strings.Contains(r.Message, "skipped") {
+					t.Errorf("%s: message = %q, want skipped", check.Name(), r.Message)
+				}
+				for _, db := range []string{"pa", "hq", "prod"} {
+					if strings.Contains(r.Message, db) {
+						t.Errorf("%s: message = %q, must not name %s in a skipped city", check.Name(), r.Message, db)
+					}
+				}
+			}
+		})
 	}
 }

@@ -207,3 +207,79 @@ func backupURLNamesDatabase(url, db string) bool {
 	}
 	return normalizeDoltDatabaseName(last) == normalizeDoltDatabaseName(db)
 }
+
+// DoltCorruptAsideCheck warns while the dolt pack's state dir holds
+// corrupt-aside entries — stores start-time journal-corruption recovery
+// preserved under <runtime>/packs/dolt/corrupt-aside/<db>.<ts> and never
+// deletes. Each entry is postmortem evidence of a replaced store (or, after
+// a failed move-back, the only copy left); the warning clears when the
+// operator has confirmed the live database and removed the copy. Read-only
+// by design: the preserved store is the evidence.
+type DoltCorruptAsideCheck struct {
+	cityPath        string
+	skip            bool
+	applicableKnown bool
+	applicable      bool
+}
+
+// NewDoltCorruptAsideCheck creates a corrupt-aside evidence check.
+func NewDoltCorruptAsideCheck(cityPath string, skip bool) *DoltCorruptAsideCheck {
+	return &DoltCorruptAsideCheck{cityPath: cityPath, skip: skip}
+}
+
+// NewDoltCorruptAsideCheckForConfig creates a corrupt-aside check using
+// preloaded city config.
+func NewDoltCorruptAsideCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltCorruptAsideCheck {
+	return &DoltCorruptAsideCheck{
+		cityPath:        cityPath,
+		skip:            skip,
+		applicableKnown: true,
+		applicable:      ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+	}
+}
+
+func (c *DoltCorruptAsideCheck) managedApplicable() bool {
+	if c.applicableKnown {
+		return c.applicable
+	}
+	return managedLocalDoltChecksApplicable(c.cityPath)
+}
+
+// Name returns the check identifier.
+func (c *DoltCorruptAsideCheck) Name() string { return "dolt-corrupt-aside" }
+
+// Run reports the corrupt-aside entries preserved under the dolt pack's
+// state dir.
+func (c *DoltCorruptAsideCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.skip || !c.managedApplicable() {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
+		return r
+	}
+	entries, err := os.ReadDir(filepath.Join(doctorDoltPackStateDir(c.cityPath), "corrupt-aside"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("read corrupt-aside dir: %v", err)
+			return r
+		}
+		entries = nil
+	}
+	if len(entries) == 0 {
+		r.Status = StatusOK
+		r.Message = "no corrupt-aside stores preserved"
+		return r
+	}
+	r.Status = StatusWarning
+	r.Message = fmt.Sprintf("corrupt-aside holds %d preserved store(s) from start-time recovery", len(entries))
+	r.FixHint = "confirm the live database (gc dolt logs), then remove the aside copy — see examples/bd/dolt/docs/journal-corruption-recovery.md"
+	return r
+}
+
+// CanFix returns false. The preserved store is the evidence; only the
+// operator can decide the live database is confirmed and remove it.
+func (c *DoltCorruptAsideCheck) CanFix() bool { return false }
+
+// Fix is a no-op. See CanFix.
+func (c *DoltCorruptAsideCheck) Fix(_ *CheckContext) error { return nil }
