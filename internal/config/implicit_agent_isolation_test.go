@@ -190,3 +190,36 @@ func TestImplicitAgentIsolationWorktreePatchOverridesWorkDir(t *testing.T) {
 		t.Fatalf("patched work_dir = %q, want .gc/custom/{{.AgentBase}}", got)
 	}
 }
+
+// AC-5: an out-of-enum value fails Parse and composed loads.
+func TestImplicitAgentIsolationRejectsUnknownValue(t *testing.T) {
+	_, err := Parse([]byte("[workspace]\nimplicit_agent_isolation = \"bogus\"\n"))
+	assertIsolationError(t, err, `"bogus"`, "shared, worktree")
+
+	cityToml, _ := writeIsolationCity(t, isolationCity{isolation: "bogus", withCore: true, withScript: true})
+	_, _, err = LoadWithIncludes(fsys.OSFS{}, cityToml)
+	assertIsolationError(t, err, `"bogus"`, "shared, worktree")
+}
+
+// AC-5: worktree mode needs the core pack and its worktree-setup.sh.
+func TestImplicitAgentIsolationWorktreeRequiresCoreScript(t *testing.T) {
+	cityToml, _ := writeIsolationCity(t, isolationCity{isolation: "worktree"})
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, cityToml)
+	assertIsolationError(t, err, `"worktree"`, "worktree-setup.sh")
+
+	cityToml, coreDir := writeIsolationCity(t, isolationCity{isolation: "worktree", withCore: true})
+	_, _, err = LoadWithIncludes(fsys.OSFS{}, cityToml)
+	assertIsolationError(t, err, `"worktree"`, filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh"))
+}
+
+func assertIsolationError(t *testing.T, err error, wants ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("load succeeded, want a workspace.implicit_agent_isolation error")
+	}
+	for _, want := range append([]string{"workspace.implicit_agent_isolation"}, wants...) {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}

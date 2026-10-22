@@ -882,6 +882,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateOpsModes(root.Ops); err != nil {
 		return nil, nil, err
 	}
+	if err := validateImplicitAgentIsolation(root.Workspace.ImplicitAgentIsolation); err != nil {
+		return nil, nil, err
+	}
+	if err := validateImplicitAgentWorktreeSetup(root); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading

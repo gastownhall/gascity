@@ -5072,6 +5072,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateOpsModes(cfg.Ops); err != nil {
 		return nil, err
 	}
+	if err := validateImplicitAgentIsolation(cfg.Workspace.ImplicitAgentIsolation); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.

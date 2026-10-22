@@ -21,6 +21,7 @@ go_library(
         "fingerprint_ctime_windows.go",
         "github_pr_monitor.go",
         "implicit.go",
+        "implicit_agent_isolation.go",
         "launch_command.go",
         "legacy_detector.go",
         "legacy_v1_surfaces.go",
