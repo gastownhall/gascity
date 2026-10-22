@@ -195,12 +195,16 @@ var hookIdentityEnvKeys = []string{
 // work comes back when the rig is resumed. Searched anyway, its store would be
 // one every city-scoped seat fails to read for as long as the rig stays
 // suspended.
+//
+// A rig with federation = "rig" is not searched either: its store serves only
+// identities inside the rig's namespace, and a city-scoped agent's identity
+// never is, so nothing it could claim there is its own.
 func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
 	if cfg == nil || a == nil {
 		return stores
 	}
 	for i := range cfg.Rigs {
-		if suspendedRigs[cfg.Rigs[i].Name] {
+		if suspendedRigs[cfg.Rigs[i].Name] || cfg.Rigs[i].FederationGuarded() {
 			continue
 		}
 		stores = appendOneRigHookStore(stores, cityPath, cfg, a, cfg.Rigs[i].Name, identityOverrides)

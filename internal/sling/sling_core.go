@@ -94,6 +94,11 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 // and cross-rig guard. Returns a partially populated result.
 func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, error) {
 	a := opts.Target
+	// Before anything else, dry runs and --force included: a route into a
+	// guarded rig must name one of the rig's own agents.
+	if err := rigNamespaceRouteRefusal(deps, slingGuardBeadID(opts), a); err != nil {
+		return SlingResult{Target: a.QualifiedName()}, err
+	}
 	result := newTargetResult(opts, deps)
 
 	if shouldValidateExistingBead(opts) {
@@ -880,6 +885,13 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 	}
 	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
+	// The routing write itself, by whichever door (Router, custom
+	// sling_query, shell runner), is checked here too: every launch path
+	// reaches it, including those that skip preflight.
+	if err := rigNamespaceRouteRefusal(deps, beadID, a); err != nil {
+		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+		return result, err
+	}
 	if deps.Router != nil {
 		if err := validateBuiltInRouteStoreReachable(deps, beadID, a); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -2167,6 +2179,12 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return SlingResult{}, fmt.Errorf("%s %s has no open children", b.Type, b.ID)
 	}
 
+	// The rig namespace guard on the container, --force and dry runs
+	// included.
+	if err := rigNamespaceRouteRefusal(deps, b.ID, a); err != nil {
+		return SlingResult{}, err
+	}
+
 	// Cross-rig guard on container.
 	if !opts.Force && !opts.DryRun {
 		if err := CrossRigRouteError(b.ID, a, deps.Cfg); err != nil {
@@ -2256,6 +2274,15 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
+		}
+
+		if err := rigNamespaceRouteRefusal(deps, child.ID, a); err != nil {
+			childResult.fail(err)
+			batchResult.Children = append(batchResult.Children, childResult)
+			childErrors = append(childErrors, err)
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+			failed++
+			continue
 		}
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {

@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "graphroute",
-    srcs = ["graphroute.go"],
+    srcs = [
+        "graphroute.go",
+        "rig_namespace.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/graphroute",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -21,6 +24,7 @@ go_test(
     srcs = [
         "cook_rig_context_repro_test.go",
         "graphroute_test.go",
+        "rig_namespace_test.go",
         "session_stamp_test.go",
         "testenv_import_test.go",
         "zero_session_store_test.go",

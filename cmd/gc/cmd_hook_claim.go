@@ -396,6 +396,12 @@ type hookClaimOps struct {
 	// its result is written. Nil — the default — announces nothing; only
 	// claimHookWork installs it. Best-effort.
 	AnnounceBeadEvents func()
+	// RigGuard is the rig namespace guard (hook_rig_namespace.go): it drops
+	// Foreign candidates of a guarded rig and refuses every claim-cycle
+	// write whose actor that rig does not admit, before any bd process is
+	// spawned. Nil — every city with no federation = "rig" rig — checks
+	// nothing.
+	RigGuard *hookRigGuard
 }
 
 type (
@@ -597,6 +603,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
+	// Every tier below, adoption included, sees only the rows a guarded rig
+	// lets this city act on. The rows are in hand, so this costs no read.
+	candidates = ops.RigGuard.filterCandidates(candidates, stderr)
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
@@ -608,7 +617,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok && !ops.RigGuard.refuseClaim(bead, stderr, opts.Assignee) {
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
@@ -957,6 +966,11 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
+		// The promotion runs as the stored assignee and the re-stamp below
+		// moves it to the claim identity: a guarded rig must admit both.
+		if ops.RigGuard.refuseClaim(candidate, stderr, claimActor, opts.Assignee) {
+			continue
+		}
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
@@ -1109,16 +1123,22 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		reclaimedFrom := ""
-		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
-			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
-			// blocker is an existing (possibly stale) assignee gets a scoped,
-			// opt-in reclaim attempt before being skipped. Off by default
-			// (NFR4/NFR5): the flag check short-circuits before
-			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
-			// flag-off path is byte-for-byte unchanged.
-			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
-				continue
-			}
+		claimable := hookCandidateClaimable(candidate, opts.RouteTargets, now)
+		// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
+		// blocker is an existing (possibly stale) assignee gets a scoped,
+		// opt-in reclaim attempt before being skipped. Off by default
+		// (NFR4/NFR5): the flag check short-circuits before
+		// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
+		// flag-off path is byte-for-byte unchanged.
+		if !claimable && (!opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now)) {
+			continue
+		}
+		// Both the stale reclaim and the claim are writes: a guarded rig must
+		// admit the claim actor before either spawns bd.
+		if ops.RigGuard.refuseClaim(candidate, stderr, opts.Assignee) {
+			continue
+		}
+		if !claimable {
 			if ops.claimWindowSpent() {
 				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 			}
@@ -2237,7 +2257,15 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			stoppedSibling(sibling) {
 			continue
 		}
-		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
+		pin := pinAssignee
+		if ops.RigGuard != nil {
+			// A guarded rig takes a pin only to an identity it admits; with
+			// none, the sibling stays routed.
+			if pin = ops.RigGuard.continuationPin(sibling, opts); pin == "" {
+				continue
+			}
+		}
+		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pin); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
@@ -2533,7 +2561,7 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 // stamped only when absent, never touched again once set. Best-effort: a missing
 // repo, detached HEAD, absent session, or write error never blocks the claim.
 func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
-	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
+	patch := stripOwnerStamp(hookClaimIdentityPatch(bead, opts, ops, dir))
 	sessionID := hookClaimSessionID(opts.Env)
 	needsLifecycleIdentity := sessionID != "" && !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]))
 	if len(patch) == 0 {

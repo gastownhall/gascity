@@ -687,7 +687,9 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			return err
 		}
 	}
-	return nil
+	// A graph into a guarded rig's store may route only to the rig's own
+	// agents; every caller of the decoration is covered here.
+	return ValidateRigNamespaceRoutes(recipe.Steps, rootStoreRef, cfg)
 }
 
 // ApplyGraphRouting decorates a compiled recipe with routing metadata.
@@ -714,7 +716,7 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 			return nil
 		}
 		stampLegacyRecipeRouting(recipe, routedTo)
-		return nil
+		return ValidateRigNamespaceRoutes(recipe.Steps, storeRef, cfg)
 	}
 
 	// Resolve agent if not provided (order dispatch path).

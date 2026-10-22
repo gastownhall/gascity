@@ -110,16 +110,22 @@ type agentScriptExecutor struct {
 	runCommandInStore func(dir string, env []string, name string, args ...string) error
 	// resolveBeadStore returns the dir + env a bd write against beadID must use
 	// (ok=true) when the current runner must claim/update across stores; ok=false
-	// runs the write in the default (inherited) environment.
-	resolveBeadStore func(beadID string) (dir string, env []string, ok bool)
+	// runs the write in the default (inherited) environment. An error refuses
+	// the write outright (the rig namespace guard): no bd process runs.
+	resolveBeadStore func(beadID string) (dir string, env []string, ok bool, err error)
 }
 
 // runBDForBead runs a bd subprocess against beadID, redirecting it to the bead's
 // owning store when the runner is cross-store-eligible (vp-kvp stage iii write
-// half). Falls back to the default environment otherwise.
+// half). Falls back to the default environment otherwise. A refusal from
+// resolveBeadStore is returned without running bd and without a fallback.
 func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
-	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
-		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
+	if e.resolveBeadStore != nil {
+		dir, env, ok, err := e.resolveBeadStore(strings.TrimSpace(beadID))
+		if err != nil {
+			return err
+		}
+		if ok && e.runCommandInStore != nil {
 			return e.runCommandInStore(dir, env, "bd", args...)
 		}
 	}
@@ -303,7 +309,7 @@ func (e agentScriptExecutor) runAction(action agentScriptAction, ctx agentScript
 			if actor := agentScriptClaimActor(); actor != "" {
 				args = append(args, "--actor", actor)
 			}
-			return nil, e.runBDForBead(id, args...)
+			return nil, agentScriptBeadWriteError(name, id, e.runBDForBead(id, args...))
 		case "bd_update":
 			args, err := agentScriptBDUpdateArgs(arg, ctx)
 			if err != nil {
@@ -313,7 +319,7 @@ func (e agentScriptExecutor) runAction(action agentScriptAction, ctx agentScript
 			if len(args) >= 2 {
 				beadID = args[1]
 			}
-			return nil, e.runBDForBead(beadID, args...)
+			return nil, agentScriptBeadWriteError(name, beadID, e.runBDForBead(beadID, args...))
 		case "exit":
 			code, err := agentScriptIntArg(name, arg)
 			if err != nil {
@@ -820,6 +826,15 @@ func agentScriptHookExitIsNoWork(output, stderr string) bool {
 		}
 	}
 	return true
+}
+
+// agentScriptBeadWriteError names the action and bead on a rig namespace
+// refusal ("bd_claim <id>: rig ..."); any other error is returned as is.
+func agentScriptBeadWriteError(action, beadID string, err error) error {
+	if err == nil || !errors.Is(err, errRigNamespace) {
+		return err
+	}
+	return fmt.Errorf("%s %s: %w", action, beadID, err)
 }
 
 func agentScriptClaimActor() string {
