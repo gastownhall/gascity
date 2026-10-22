@@ -22,6 +22,7 @@ type implicitSlotGitOps interface {
 	WorktreeList() ([]git.Worktree, error)
 	WorktreeRemove(path string, force bool) error
 	BranchDeleteIfMerged(branch string) error
+	RevParseVerifyCommit(ref string) (string, error)
 }
 
 // newImplicitSlotGit is the git seam for slot provisioning; a var so tests
@@ -88,6 +89,13 @@ func ensureImplicitSlotWorktree(slot workdirutil.ImplicitSlot) error {
 	}
 	if reused {
 		return nil
+	}
+	// Fail closed before touching anything: a rig whose HEAD is unborn
+	// cannot seed a slot worktree, and discovering that only inside Ensure
+	// would already have cleared the stale registration and the empty slot
+	// directory — mutations this refusal promises not to make.
+	if _, err := newImplicitSlotGit(slot.RigRoot).RevParseVerifyCommit("HEAD"); err != nil {
+		return implicitSlotRefused(slot.Path, fmt.Errorf("rig HEAD is unborn; commit once before starting pool sessions: %w", err))
 	}
 	if err := clearStaleSlotRegistration(slot); err != nil {
 		return err

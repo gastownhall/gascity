@@ -458,3 +458,196 @@ func TestImplicitSlotRecreateFromEmptyDirectory(t *testing.T) {
 		t.Errorf("slot HEAD = %q, want a provisioned worktree on the slot branch", ref)
 	}
 }
+
+// TestImplicitSlotRefusesUnbornRigHeadWithoutChanges is AC-4's load-bearing
+// case: a rig whose HEAD is unborn cannot seed a slot worktree, and the
+// refusal must happen BEFORE the stale registration or an empty slot
+// directory is cleared — the failed start leaves every file, ref, and
+// registration exactly as it was, and the error names the slot path and the
+// implicit_isolation = "none" opt-out.
+func TestImplicitSlotRefusesUnbornRigHeadWithoutChanges(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, rigRoot := implicitSlotTestConfig(t, cityPath)
+
+	slot, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	if err != nil {
+		t.Fatalf("first resolve of app/claude-1: %v", err)
+	}
+	// Lose the slot directory but keep its registration, then make the
+	// rig's HEAD unborn by deleting its only branch.
+	if err := os.RemoveAll(slot); err != nil {
+		t.Fatalf("removing slot directory: %v", err)
+	}
+	implicitSlotGitOut(t, rigRoot, "update-ref", "-d", "refs/heads/main")
+
+	_, err = resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	if err == nil {
+		t.Fatal("resolving a slot against an unborn rig HEAD succeeded; want a refusal")
+	}
+	if !strings.Contains(err.Error(), slot) {
+		t.Errorf("refusal %q does not name the slot path %q", err.Error(), slot)
+	}
+	if !strings.Contains(err.Error(), `implicit_isolation = "none"`) {
+		t.Errorf("refusal %q does not name the none opt-out", err.Error())
+	}
+	// Nothing changed: the stale registration is still there.
+	stillRegistered := false
+	for _, line := range strings.Split(implicitSlotGitOut(t, rigRoot, "worktree", "list", "--porcelain"), "\n") {
+		if strings.HasPrefix(line, "worktree ") && strings.HasSuffix(line, filepath.Join("app", "claude-1")) {
+			stillRegistered = true
+		}
+	}
+	if !stillRegistered {
+		t.Error("refusal removed the slot's worktree registration; a failed start must modify nothing")
+	}
+}
+
+// assertImplicitSlotRefusal asserts a slot provisioning refusal names both
+// the slot path and the implicit_isolation = "none" opt-out.
+func assertImplicitSlotRefusal(t *testing.T, err error, slotPath string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("slot provisioning succeeded; want a refusal")
+	}
+	if !strings.Contains(err.Error(), slotPath) {
+		t.Errorf("refusal %q does not name the slot path %q", err.Error(), slotPath)
+	}
+	if !strings.Contains(err.Error(), `implicit_isolation = "none"`) {
+		t.Errorf("refusal %q does not name the none opt-out", err.Error())
+	}
+}
+
+// TestImplicitSlotRefusesDotGitDirectory is AC-4: a slot path holding a
+// plain .git directory — a standalone repository, not a worktree of the rig
+// — is not ours to repair; the start refuses and modifies nothing.
+func TestImplicitSlotRefusesDotGitDirectory(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, _ := implicitSlotTestConfig(t, cityPath)
+	slotPath := filepath.Join(cityPath, ".gc", "worktrees", "app", "claude-1")
+	if err := os.MkdirAll(filepath.Join(slotPath, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir slot .git: %v", err)
+	}
+
+	_, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	assertImplicitSlotRefusal(t, err, slotPath)
+
+	if info, statErr := os.Lstat(filepath.Join(slotPath, ".git")); statErr != nil || !info.IsDir() {
+		t.Errorf("slot .git altered by the refusal: %v (mode %s)", statErr, info.Mode())
+	}
+}
+
+// TestImplicitSlotRefusesNonEmptyPlainDirectory is AC-4: a slot directory
+// with content is not ours to replace; the start refuses and the content
+// survives untouched.
+func TestImplicitSlotRefusesNonEmptyPlainDirectory(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, _ := implicitSlotTestConfig(t, cityPath)
+	slotPath := filepath.Join(cityPath, ".gc", "worktrees", "app", "claude-1")
+	if err := os.MkdirAll(slotPath, 0o755); err != nil {
+		t.Fatalf("mkdir slot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(slotPath, "precious.txt"), []byte("not gc's\n"), 0o644); err != nil {
+		t.Fatalf("writing slot content: %v", err)
+	}
+
+	_, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	assertImplicitSlotRefusal(t, err, slotPath)
+
+	if data, readErr := os.ReadFile(filepath.Join(slotPath, "precious.txt")); readErr != nil || string(data) != "not gc's\n" {
+		t.Errorf("slot content altered by the refusal: %q (%v)", string(data), readErr)
+	}
+}
+
+// TestImplicitSlotRefusesForeignWorktree is AC-4: a slot path that is a
+// linked worktree of a DIFFERENT repository is not ours to repair; the start
+// refuses and the worktree is left exactly as it was.
+func TestImplicitSlotRefusesForeignWorktree(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, _ := implicitSlotTestConfig(t, cityPath)
+	slotPath := filepath.Join(cityPath, ".gc", "worktrees", "app", "claude-1")
+
+	other := t.TempDir()
+	implicitSlotGitOut(t, other, "init", "-b", "main")
+	implicitSlotGitOut(t, other, "config", "user.email", "test@example.com")
+	implicitSlotGitOut(t, other, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(other, "f"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("writing other-repo file: %v", err)
+	}
+	implicitSlotGitOut(t, other, "add", "f")
+	implicitSlotGitOut(t, other, "commit", "-m", "init")
+	implicitSlotGitOut(t, other, "worktree", "add", slotPath, "-b", "foreign")
+	pointerBefore, readErr := os.ReadFile(filepath.Join(slotPath, ".git"))
+	if readErr != nil {
+		t.Fatalf("reading slot .git pointer: %v", readErr)
+	}
+
+	_, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	assertImplicitSlotRefusal(t, err, slotPath)
+
+	pointerAfter, readErr := os.ReadFile(filepath.Join(slotPath, ".git"))
+	if readErr != nil || string(pointerAfter) != string(pointerBefore) {
+		t.Errorf("foreign worktree altered by the refusal: %q (%v)", string(pointerAfter), readErr)
+	}
+}
+
+// TestImplicitSlotRefusesLockedRegistration is AC-4: a slot whose directory
+// is gone but whose registration is locked is not ours to unregister; the
+// start refuses and the locked registration survives untouched.
+func TestImplicitSlotRefusesLockedRegistration(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, rigRoot := implicitSlotTestConfig(t, cityPath)
+
+	slot, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	if err != nil {
+		t.Fatalf("first resolve of app/claude-1: %v", err)
+	}
+	implicitSlotGitOut(t, rigRoot, "worktree", "lock", slot)
+	if err := os.RemoveAll(slot); err != nil {
+		t.Fatalf("removing slot directory: %v", err)
+	}
+
+	_, err = resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	assertImplicitSlotRefusal(t, err, slot)
+
+	stillRegistered := false
+	for _, line := range strings.Split(implicitSlotGitOut(t, rigRoot, "worktree", "list", "--porcelain"), "\n") {
+		if strings.HasPrefix(line, "worktree ") && strings.HasSuffix(line, filepath.Join("app", "claude-1")) {
+			stillRegistered = true
+		}
+	}
+	if !stillRegistered {
+		t.Error("refusal removed the LOCKED worktree registration; a failed start must modify nothing")
+	}
+}
+
+// TestImplicitSlotRefusesBranchCheckedOutElsewhere is AC-4: a slot branch
+// checked out in another worktree cannot be re-attached; the start refuses
+// and the other worktree — and the branch it holds — are untouched.
+func TestImplicitSlotRefusesBranchCheckedOutElsewhere(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, rigRoot := implicitSlotTestConfig(t, cityPath)
+
+	slot, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	if err != nil {
+		t.Fatalf("first resolve of app/claude-1: %v", err)
+	}
+	branch := implicitSlotBranchFor(slot)
+	if err := os.RemoveAll(slot); err != nil {
+		t.Fatalf("removing slot directory: %v", err)
+	}
+	// Drop the stale registration the way external cleanup would, freeing
+	// the branch — then a different worktree takes it.
+	implicitSlotGitOut(t, rigRoot, "worktree", "remove", "--force", slot)
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	implicitSlotGitOut(t, rigRoot, "worktree", "add", elsewhere, branch)
+
+	_, err = resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	assertImplicitSlotRefusal(t, err, slot)
+
+	if ref := implicitSlotGitOut(t, elsewhere, "symbolic-ref", "--quiet", "HEAD"); ref != "refs/heads/"+branch {
+		t.Errorf("other worktree moved off the slot branch: %q", ref)
+	}
+	// show-ref fails the helper on a missing ref, so reaching here proves
+	// the branch — and the other worktree's checkout of it — survived.
+	implicitSlotGitOut(t, rigRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+}
