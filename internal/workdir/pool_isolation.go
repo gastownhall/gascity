@@ -33,27 +33,43 @@ func ValidatePoolWorkDirIsolation(cityPath, cityName string, agents []config.Age
 			continue
 		}
 
-		firstName := a.QualifiedInstanceName(a.Name + "-1")
-		secondName := a.QualifiedInstanceName(a.Name + "-2")
-
-		firstPath, err := ResolveWorkDirPathStrict(cityPath, cityName, firstName, a, rigs)
+		firstPath, secondPath, err := PoolInstanceWorkDirs(cityPath, cityName, a, rigs)
 		if err != nil {
-			return fmt.Errorf("agent %q: resolving work_dir for pool instance %q: %w", a.QualifiedName(), firstName, err)
-		}
-		secondPath, err := ResolveWorkDirPathStrict(cityPath, cityName, secondName, a, rigs)
-		if err != nil {
-			return fmt.Errorf("agent %q: resolving work_dir for pool instance %q: %w", a.QualifiedName(), secondName, err)
+			return fmt.Errorf("agent %q: %w", a.QualifiedName(), err)
 		}
 
 		if firstPath == secondPath {
 			return fmt.Errorf(
 				"agent %q supports multiple concurrent sessions but work_dir does not vary per instance (instances %q and %q both resolve to %q); "+
 					"set work_dir to a template that includes {{.AgentBase}} (or another value that differs per instance) so concurrent sessions get isolated working directories",
-				a.QualifiedName(), firstName, secondName, firstPath,
+				a.QualifiedName(), a.QualifiedInstanceName(a.Name+"-1"), a.QualifiedInstanceName(a.Name+"-2"), firstPath,
 			)
 		}
 	}
 	return nil
+}
+
+// PoolInstanceWorkDirs resolves the working directories that two synthetic
+// pool instances ("-1" and "-2") of the agent would use, through the same
+// template-resolution path session startup uses (ResolveWorkDirPathStrict).
+// It fails closed: a work_dir template that errors on either probe is
+// reported as an error rather than ignored. Callers that only need the
+// per-instance paths (e.g. gc doctor's pool-workdir-isolation check probing
+// whether a pool shares one tree) use this without the explicit-pool gating
+// RequiresPoolWorkDirIsolationCheck applies.
+func PoolInstanceWorkDirs(cityPath, cityName string, a config.Agent, rigs []config.Rig) (first, second string, err error) {
+	firstName := a.QualifiedInstanceName(a.Name + "-1")
+	secondName := a.QualifiedInstanceName(a.Name + "-2")
+
+	first, err = ResolveWorkDirPathStrict(cityPath, cityName, firstName, a, rigs)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving work_dir for pool instance %q: %w", firstName, err)
+	}
+	second, err = ResolveWorkDirPathStrict(cityPath, cityName, secondName, a, rigs)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving work_dir for pool instance %q: %w", secondName, err)
+	}
+	return first, second, nil
 }
 
 // RequiresPoolWorkDirIsolationCheck reports whether the agent carries an
