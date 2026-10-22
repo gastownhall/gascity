@@ -194,11 +194,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
-	resolveWorkDir := resolveConfiguredWorkDir
+	var workDir string
 	if p.readOnly {
-		resolveWorkDir = resolveConfiguredWorkDirPath
+		workDir, err = resolveConfiguredWorkDirPath(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	} else {
+		workDir, err = resolveConfiguredWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs, p.sessionProviderName())
 	}
-	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}

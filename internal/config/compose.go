@@ -882,6 +882,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateOpsModes(root.Ops); err != nil {
 		return nil, nil, err
 	}
+	if err := validateImplicitIsolation(root.Workspace.ImplicitIsolation); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1549,6 +1552,11 @@ func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath strin
 			"session_template",
 			func() string { return base.Workspace.SessionTemplate },
 			func() { base.Workspace.SessionTemplate = fragment.Workspace.SessionTemplate },
+		},
+		{
+			"implicit_isolation",
+			func() string { return base.Workspace.ImplicitIsolation },
+			func() { base.Workspace.ImplicitIsolation = fragment.Workspace.ImplicitIsolation },
 		},
 	}
 	for _, f := range fields {

@@ -80,11 +80,11 @@ func TestImplicitRigPoolSlotProvisioning(t *testing.T) {
 	cfg, agent, rigRoot := implicitSlotTestConfig(t, cityPath)
 	rigHead := implicitSlotGitOut(t, rigRoot, "rev-parse", "HEAD")
 
-	first, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs)
+	first, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
 	if err != nil {
 		t.Fatalf("resolving app/claude-1: %v", err)
 	}
-	second, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-2", agent, cfg.Rigs)
+	second, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-2", agent, cfg.Rigs, "")
 	if err != nil {
 		t.Fatalf("resolving app/claude-2: %v", err)
 	}
@@ -158,5 +158,80 @@ func TestHookClaimIdentityPatchStampsPoolSlotCheckout(t *testing.T) {
 	}
 	if got := patch[beadmeta.WorkBranchMetadataKey]; got != branch {
 		t.Errorf("gc.work_branch = %q, want the slot branch %q", got, branch)
+	}
+}
+
+// implicitSlotNoneCity loads a city config with
+// workspace.implicit_isolation = "none", attaches the builtin claude
+// provider and a real git rig, and runs InjectImplicitAgents.
+func implicitSlotNoneCity(t *testing.T, cityPath string) (*config.City, string) {
+	t.Helper()
+	rigRoot := filepath.Join(cityPath, "rigs", "app")
+	if err := os.MkdirAll(filepath.Join(rigRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir rig .git: %v", err)
+	}
+	cfg, err := config.Parse([]byte("[workspace]\nname = \"city\"\nimplicit_isolation = \"none\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg.Providers = map[string]config.ProviderSpec{"claude": config.BuiltinProviderAlias("claude")}
+	cfg.Rigs = []config.Rig{{Name: "app", Path: rigRoot}}
+	config.InjectImplicitAgents(cfg)
+	return cfg, rigRoot
+}
+
+// TestImplicitIsolationNoneKeepsSharedRigRoot pins the opt-out: with
+// implicit_isolation = "none", a numbered pool instance resolves to the rig
+// root exactly as before, and nothing is created under .gc/worktrees.
+func TestImplicitIsolationNoneKeepsSharedRigRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, rigRoot := implicitSlotNoneCity(t, cityPath)
+
+	var agent *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Dir == "app" && cfg.Agents[i].Name == "claude" {
+			agent = &cfg.Agents[i]
+		}
+	}
+	if agent == nil {
+		t.Fatal("rig-scoped implicit claude agent not found after InjectImplicitAgents")
+	}
+
+	dir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, "app/claude-1")
+	if err != nil {
+		t.Fatalf("resolving app/claude-1 under mode none: %v", err)
+	}
+	if dir != rigRoot {
+		t.Errorf("app/claude-1 work dir = %q, want the rig root %q under mode none", dir, rigRoot)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "worktrees")); !os.IsNotExist(err) {
+		t.Errorf("mode none created something under .gc/worktrees: %v", err)
+	}
+}
+
+// TestImplicitSlotSkipsNonHostLocalProviders pins the runtime gate: a slot
+// worktree can only be provisioned on the machine the controller runs on, so
+// session providers that execute elsewhere — k8s, hybrid routing, ssh:, and
+// exec: transports, plus the fake/fail test runtimes — keep today's rig-root
+// resolution and create nothing.
+func TestImplicitSlotSkipsNonHostLocalProviders(t *testing.T) {
+	t.Setenv("GC_SESSION", "")
+	cityPath := t.TempDir()
+	cfg, agent, rigRoot := implicitSlotTestConfig(t, cityPath)
+
+	for _, provider := range []string{"k8s", "hybrid", "ssh:build.example.internal", "exec:/bin/true", "fake", "fail"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg.Session.Provider = provider
+			dir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, "app/claude-1")
+			if err != nil {
+				t.Fatalf("resolving app/claude-1 under provider %q: %v", provider, err)
+			}
+			if dir != rigRoot {
+				t.Errorf("provider %q: work dir = %q, want the rig root %q", provider, dir, rigRoot)
+			}
+			if _, err := os.Stat(filepath.Join(cityPath, ".gc", "worktrees", "app", "claude-1")); !os.IsNotExist(err) {
+				t.Errorf("provider %q created a slot worktree; remote runtimes must not get one", provider)
+			}
+		})
 	}
 }

@@ -392,3 +392,13 @@ func resolveTmuxAliasForAgentIn(cityPath, cityName string, rigs []config.Rig, ag
 	}
 	return resolved, nil
 }
+
+// sessionProviderName returns the effective session-runtime provider for
+// work-dir provisioning decisions: the city's [session] provider with the
+// GC_SESSION env override applied. Empty when no city is bound.
+func (p *agentBuildParams) sessionProviderName() string {
+	if p == nil || p.city == nil {
+		return effectiveProviderName("")
+	}
+	return effectiveProviderName(p.city.Session.Provider)
+}

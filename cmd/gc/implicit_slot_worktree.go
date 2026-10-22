@@ -22,6 +22,21 @@ func implicitSlotBranchName(slotPath string) string {
 	return fmt.Sprintf("gc-%s-%s", filepath.Base(clean), hex.EncodeToString(sum[:])[:12])
 }
 
+// hostLocalSessionProvider reports whether the session runtime executes on
+// the controller's own filesystem, where provisioning a host-side slot
+// worktree is possible and useful. Remote and container runtimes (k8s,
+// hybrid routing, ssh:, exec: transports) and the fake/fail test runtimes
+// get no worktree: creating one they cannot use would be pure noise. Fail
+// closed — an unrecognized provider name gets no worktree either.
+func hostLocalSessionProvider(provider string) bool {
+	switch provider {
+	case "", "tmux", "subprocess", "acp", "herdr", "t3bridge":
+		return true
+	default:
+		return false
+	}
+}
+
 // implicitSlotRefused wraps a slot-provisioning failure so the operator sees
 // the exact slot path and the escape hatch together: the session did not
 // start, nothing was modified, and [workspace] implicit_isolation = "none"

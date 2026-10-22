@@ -1580,8 +1580,16 @@ func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.A
 // A matched implicit pool slot (workdirutil.ImplicitSlotFor) is provisioned
 // as its own git worktree instead of a plain directory, so concurrent
 // numbered instances of a rig-scoped implicit agent stop sharing the rig
-// root's checkout.
-func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+// root's checkout. sessionProvider is the configured [session] provider
+// (GC_SESSION env override applied here); a non-host-local runtime cannot
+// use a host-side worktree, so its instances resolve — and create — exactly
+// what they did before isolation: the rig root.
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionProvider string) (string, error) {
+	if a != nil && !hostLocalSessionProvider(effectiveProviderName(sessionProvider)) {
+		unmarked := *a
+		unmarked.PoolSlotWorktrees = false
+		a = &unmarked
+	}
 	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
 	if err != nil {
 		return "", err

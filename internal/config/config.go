@@ -1328,6 +1328,13 @@ type Workspace struct {
 	// its own tz. Empty means the controller's process-local zone. Invalid
 	// names fail order discovery loudly rather than falling back silently.
 	Timezone string `toml:"timezone,omitempty"`
+	// ImplicitIsolation selects how numbered pool instances of rig-scoped
+	// implicit agents get working directories: "worktree" (default) gives
+	// each instance its own git worktree under
+	// <city>/.gc/worktrees/<rig>/<template>-<n>; "none" keeps every
+	// instance on the shared rig root, restoring the pre-isolation
+	// behavior. Validated at load time; see EffectiveImplicitIsolation.
+	ImplicitIsolation string `toml:"implicit_isolation,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Suspended is the deprecated pre-runtime-state city suspension
@@ -1412,6 +1419,31 @@ func (w *Workspace) SetLegacyDefaultRigIncludes(includes []string) {
 // legacy field).
 func (w *Workspace) EffectiveSuspendedOnStart() bool {
 	return w.Suspended || w.SuspendedOnStart
+}
+
+// Implicit pool isolation modes (Workspace.ImplicitIsolation).
+const (
+	// ImplicitIsolationWorktree provisions each numbered pool instance of a
+	// rig-scoped implicit agent its own git worktree. The default.
+	ImplicitIsolationWorktree = "worktree"
+	// ImplicitIsolationNone keeps implicit pool instances on the shared rig
+	// root, restoring the pre-isolation behavior.
+	ImplicitIsolationNone = "none"
+)
+
+// EffectiveImplicitIsolation returns the effective implicit pool isolation
+// mode: the configured value, or ImplicitIsolationWorktree when unset —
+// isolation is the default. Load validation rejects out-of-enum values, so
+// they never reach here from a loaded config, but callers that construct
+// Workspace in code may hold one; anything unrecognized reads as "none" so a
+// half-configured city fails closed instead of half-activating.
+func (w Workspace) EffectiveImplicitIsolation() string {
+	switch strings.TrimSpace(w.ImplicitIsolation) {
+	case "", ImplicitIsolationWorktree:
+		return ImplicitIsolationWorktree
+	default:
+		return ImplicitIsolationNone
+	}
 }
 
 // BeadsConfig holds bead store settings.
@@ -4081,7 +4113,10 @@ func InjectImplicitAgents(cfg *City) {
 		})
 	}
 
-	// Rig-scoped implicit agents.
+	// Rig-scoped implicit agents. Only the worktree isolation mode marks
+	// them: "none" (and anything unrecognized — fail closed) keeps every
+	// instance on the shared rig root.
+	slotWorktrees := cfg.Workspace.EffectiveImplicitIsolation() == ImplicitIsolationWorktree
 	for _, rig := range cfg.Rigs {
 		for _, name := range providers {
 			if existing[agentKey{rig.Name, name}] {
@@ -4094,7 +4129,7 @@ func InjectImplicitAgents(cfg *City) {
 				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
-				PoolSlotWorktrees:   true,
+				PoolSlotWorktrees:   slotWorktrees,
 			})
 		}
 	}
@@ -5037,6 +5072,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateOpsModes(cfg.Ops); err != nil {
 		return nil, err
 	}
+	if err := validateImplicitIsolation(cfg.Workspace.ImplicitIsolation); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -5062,6 +5100,24 @@ func validateBeadsModes(b BeadsConfig) error {
 		return err
 	}
 	return validateLedgerFeed(b.LedgerFeed)
+}
+
+// validateImplicitIsolation rejects an out-of-enum
+// workspace.implicit_isolation value at load time. The mode selects whether
+// numbered pool instances of rig-scoped implicit agents get isolated
+// worktrees, so a typo must not silently pick a mode — the operator would
+// either lose isolation while believing they have it, or vice versa. The
+// empty string (unset) is valid and defaults to worktree. Parse runs it on
+// its single layer and LoadWithIncludesOptions runs it again on the composed
+// root, because a fragment may supply the field.
+func validateImplicitIsolation(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if raw != ImplicitIsolationWorktree && raw != ImplicitIsolationNone {
+		return fmt.Errorf("workspace.implicit_isolation: invalid mode %q: want one of %s, %s", raw, ImplicitIsolationWorktree, ImplicitIsolationNone)
+	}
+	return nil
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes
