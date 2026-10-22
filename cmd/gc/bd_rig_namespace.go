@@ -161,6 +161,14 @@ func (c *bdRigNamespaceCheck) check(bdArgs []string) ([]string, string, bool) {
 	case "relate", "unrelate":
 		return bdArgs, "", false
 	}
+	// pflag reads "-reason" as -r with the attached value "eason", while the
+	// id scan reads it as --reason taking the next token: the next token
+	// would then be an id bd writes that the guard never checked. A write
+	// carrying a shorthand cluster or an attached shorthand value is
+	// refused as unreadable (no shipped form uses one); "-x=value" is fine.
+	if tok, ok := bdShorthandCluster(bdArgs); ok {
+		return nil, fmt.Sprintf("gc bd: refusing %s: cannot read %q exactly (a shorthand cluster or attached value), so rig %s (federation = \"rig\") cannot check what it writes; spell flags out (--flag value)\n", verb, tok, rigNamespaceLabel(c.ns)), true
+	}
 	if bdRigNamespaceHelpOn(verb, sub, rest) {
 		// cobra prints help and runs nothing.
 		return bdArgs, "", false
@@ -318,6 +326,25 @@ func bdRigNamespaceHelpOn(verb, sub string, rest []string) bool {
 	}
 	present, on, valid := bdflags.BoolFlagValue(args, value, "--help", "-h")
 	return present && on && valid
+}
+
+// bdShorthandCluster returns the first token of a write's argv that is a
+// single-dash token longer than "-x" and not "-x=value": a shorthand
+// cluster ("-fv") or an attached shorthand value ("-reason" is -r with
+// "eason"). Every token is examined, past a "--" too: a "--" may be a
+// flag's value, and refusing a positional that merely looks like one fails
+// closed.
+func bdShorthandCluster(args []string) (string, bool) {
+	for _, a := range args {
+		if len(a) <= 2 || a[0] != '-' || a[1] == '-' {
+			continue
+		}
+		if a[2] == '=' {
+			continue
+		}
+		return a, true
+	}
+	return "", false
 }
 
 // bdRigNamespaceFlagSet reports whether flag is given in an argv read the

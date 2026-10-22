@@ -143,3 +143,31 @@ func TestHookRigGuardDenyAllLegStaysDenyAll(t *testing.T) {
 		t.Fatalf("combined leg = %+v, want the deny-all with its own reason", got)
 	}
 }
+
+// pflag reads "-reason" as -r with the attached value "eason", so the next
+// token is a positional id bd writes; the id scan read it as a value.
+func TestBdRigNamespaceRefusesShorthandClusters(t *testing.T) {
+	c := brnCheck(t, "beta/crew.worker", brnOwned, brnForeign)
+	for _, args := range [][]string{
+		{"close", "bt-1", "-reason", "bt-2"},
+		{"update", "bt-1", "-description", "bt-2"},
+		{"update", "bt-1", "-assignee", "bt-2"},
+		{"reopen", "bt-1", "-reason", "bt-2"},
+		{"close", "bt-1", "--reason", "--", "-reason", "bt-2"},
+		{"delete", "bt-1", "-fv"},
+	} {
+		if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, "cannot read") {
+			t.Errorf("gc bd %v: refused=%v msg=%q; want an unreadable refusal", args, refused, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"close", "bt-1", "-r", "done"},
+		{"close", "bt-1", "-r=done"},
+		{"update", "bt-1", "-s", "in_progress"},
+		{"show", "-reason"}, // reads are not checked
+	} {
+		if _, msg, refused := c.check(args); refused {
+			t.Errorf("gc bd %v refused: %q", args, msg)
+		}
+	}
+}

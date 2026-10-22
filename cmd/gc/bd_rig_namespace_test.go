@@ -143,11 +143,11 @@ func TestBdRigNamespaceCreationStamp(t *testing.T) {
 	}
 
 	// A create is stamped: as a new --metadata right after the verb...
-	got, msg, refused := c.check([]string{"--actor", "beta/crew.worker", "create", "--title", "x", "--", "-not-a-flag"})
+	got, msg, refused := c.check([]string{"--actor", "beta/crew.worker", "create", "--title", "x", "--", "--not-a-flag"})
 	if refused {
 		t.Fatalf("create refused: %q", msg)
 	}
-	want := []string{"--actor", "beta/crew.worker", "create", "--metadata", `{"gc.owner_namespace":"beta/"}`, "--title", "x", "--", "-not-a-flag"}
+	want := []string{"--actor", "beta/crew.worker", "create", "--metadata", `{"gc.owner_namespace":"beta/"}`, "--title", "x", "--", "--not-a-flag"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("stamped argv = %q, want %q", got, want)
 	}
