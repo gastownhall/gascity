@@ -44,6 +44,16 @@ evidence from tests, source, an issue, or a commit.
   (`WithDeferredSubmitQueue`); no non-test session file touches the
   state.json nudge queue directly. Enforced by
   `TestSessionReachesTheNudgeQueueOnlyThroughDeferredSubmitQueue`.
+- The v2 stop request's keys (`stop_request_keys.go`) are read by cmd/gc's
+  `activeStop`, inside the reconciler, by cmd/gc's `v2SignaledUnacked`, for
+  legacy's rollback guard, and by `ReadStopRequest`, for the content gate,
+  whose one caller is the conversation lane's row read. `ReadStopRequest`
+  takes a reading: only a lane host whose controller latched legacy reads
+  residue (`StopRequestsIgnored`); every other reader reads live. A lane
+  host other than the controller's must obtain the controller's latched
+  mode. Enforced by `TestStopRequestKeysAreNewKeys`,
+  `TestSessionReadsTheStopRequestOnlyInReadStopRequest` and
+  `TestReadStopRequestAgreesWithActiveStop`.
 - Keep production CLI session creation and lifecycle operations on the
   `internal/worker/handle.go` boundary unless root `AGENTS.md` names an active
   exception.

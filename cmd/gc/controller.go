@@ -1603,7 +1603,7 @@ func runController(
 	cs.startBeadEventWatcher(ctx)
 	cs.startAutocloseSweep(ctx)
 	cs.startOpSweep(ctx)
-	cs.startConversationLaneHost(ctx)
+	cs.startConversationLaneHost(ctx, wiring.mode)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 

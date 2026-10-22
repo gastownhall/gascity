@@ -57,7 +57,7 @@ func newCLILaneCityOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt)
 		c.events = append(c.events, "ring")
 		return c.ringReply, c.ringErr
 	}
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	c.target = resolveNudgeTargetFromSessionInfo(f.dir, f.cfg, info)
 	return c
 }
@@ -208,7 +208,7 @@ func TestSessionNudgeListEmptyKeepsOJ5Path(t *testing.T) {
 
 func (c *cliLaneCity) targetInfo(t *testing.T) session.Info {
 	t.Helper()
-	_, info := c.view(t)
+	info := c.rowInfo(t)
 	return info
 }
 
@@ -348,6 +348,28 @@ func TestSessionNudgeLaneBusyIsQueued(t *testing.T) {
 	code, stdout, _ = c.nudge(nudgeDeliveryWaitIdle, "", true, cliLaneTestMessage+" again")
 	if got := cliOpJSON(t, []byte(stdout)); code != 0 || got["queued"] != true || got["outcome"] != "queued" {
 		t.Fatalf("JSON %v (code %d)", got, code)
+	}
+}
+
+// A session v2 asked to stop at its generation leaves the op queued for the
+// controller (V2-18): the CLI holds no latch, so its inline pass reads the
+// request live and defers the content to the lane host.
+func TestSessionNudgeLaneStopRequestedIsQueued(t *testing.T) {
+	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if len(c.nudges()) != 0 {
+		t.Fatalf("deliveries %+v into a session v2 asked to stop", c.nudges())
+	}
+	want := "Queued nudge for " + c.target.agentKey() + " in the conversation lane (the session cannot take input now: stop_requested; the controller delivers it once that clears)\n"
+	if stdout != want {
+		t.Fatalf("stdout %q, want %q", stdout, want)
+	}
+	op := c.only(t)
+	if op.Status != opjournal.StatusSubmitted || len(c.rings) != 1 || c.rings[0] != c.id+":"+op.ID {
+		t.Fatalf("op %s, rings %v; want submitted and one ring for it", op.Status, c.rings)
 	}
 }
 

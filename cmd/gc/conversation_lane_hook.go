@@ -346,7 +346,10 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 		p.notef("%v", err)
 		return hookLaneOutcome{}
 	}
-	view, info, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv)
+	// The hook holds no latch, so it reads the stop request live: a request
+	// it holds back waits for the controller's lane host, which reads by
+	// its latched mode.
+	view, row, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv, session.StopRequestsLive)
 	if err != nil {
 		p.notef("reading conversation %s: %v", p.conv, err)
 		return hookLaneOutcome{}
@@ -354,7 +357,7 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 	if absent {
 		p.notef("conversation %s has no session row on two reads; its open ops close as skipped{conversation_closed}", p.conv)
 	}
-	exec := &hookLaneExec{pass: p, info: info}
+	exec := &hookLaneExec{pass: p, info: row.info, stop: row.stop}
 	res, err := lane.Pass(ctx, view, exec)
 	if exec.refused != nil {
 		p.notef("conversation %s: %v; its notices stay out of the hook context and wait for the next drain or the lane host", p.conv, exec.refused)
@@ -432,6 +435,8 @@ func hookLaneRing(cityPath, conv string, out hookLaneOutcome, rows *journalRingQ
 type hookLaneExec struct {
 	pass hookLanePass
 	info session.Info
+	// stop is the row's stop request, read live with info.
+	stop session.StopRequest
 	// emitted and emitErr record the effect for the drain; refused is why
 	// the pass did not write: the deadline check's answer, or a text over
 	// the room.
@@ -471,7 +476,7 @@ func (e *hookLaneExec) Probe(_ context.Context, conv opjournal.ConversationView)
 		TurnLive:  opjournal.TriUnknown,
 		Caps:      hookLaneCaps(e.pass.leaseTTL, e.pass.room),
 	}
-	p.ContentBlock = session.ContentGate(e.info, true, e.pass.clk.Now(), session.GateContentAny)
+	p.ContentBlock = session.ContentGate(e.info, e.stop, true, e.pass.clk.Now(), session.GateContentAny)
 	if p.ContentBlock == "" && !hookLaneFenceMatches(e.pass.fence, conv) {
 		p.ContentBlock = laneContentBlockIncarnation
 	}

@@ -1079,7 +1079,7 @@ func TestLaneHostJournalsBusyThenDelivered(t *testing.T) {
 	st := l.f.laneStore(t)
 	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
 	var ready atomic.Bool
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneReadyExec{clk: l.f.clk, ready: &ready}
 	}
 	l.hh.start()
@@ -1126,7 +1126,7 @@ func TestLaneHostCreditsAnInterruptOpRunThroughTheExecutor(t *testing.T) {
 		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1, Turn: "t1"},
 	})
 	var ready atomic.Bool
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneReadyExec{clk: l.f.clk, ready: &ready}
 	}
 	l.hh.start()
@@ -1875,7 +1875,7 @@ func TestLaneHostKeepsTheDeliveredTurnPastAnOldEnd(t *testing.T) {
 	st := l.f.laneStore(t)
 	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
 	var ready atomic.Bool
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneReadyExec{clk: l.f.clk, ready: &ready}
 	}
 	l.hh.start()
@@ -2015,7 +2015,7 @@ func TestLaneHostExpectsATurnStartedDuringItsPass(t *testing.T) {
 	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
 	ready := new(atomic.Bool)
 	ready.Store(true)
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneSlowDeliverExec{laneReadyExec: laneReadyExec{clk: l.f.clk, ready: ready}, took: 2 * time.Second}
 	}
 	began := l.f.clk.Now()
@@ -2042,7 +2042,7 @@ func TestLaneHostKeepsTheDeliveredTurnPastALongPass(t *testing.T) {
 	ready := new(atomic.Bool)
 	ready.Store(true)
 	took := laneTurnExpectFor + 10*time.Second
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneSlowDeliverExec{laneReadyExec: laneReadyExec{clk: l.f.clk, ready: ready}, took: took}
 	}
 	began := l.f.clk.Now()

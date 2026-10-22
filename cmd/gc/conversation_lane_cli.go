@@ -41,6 +41,7 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The CLI inline pass's lane (DES-O1 §7.6).
@@ -203,7 +204,7 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 		return true, 1
 	}
 	n.st = st
-	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID)
+	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID, session.StopRequestsLive)
 	switch {
 	case err != nil:
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Errorf("reading session %s: %w", target.sessionID, err)), "", key)
@@ -308,7 +309,10 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		return opjournal.PassResult{}, err
 	}
 	armLaneFailpoints(lane, cliLaneHostName)
-	view, info, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID)
+	// The CLI holds no latch, so it reads the stop request live: a request
+	// it holds back waits for the controller's lane host, which reads by
+	// its latched mode.
+	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, session.StopRequestsLive)
 	if err != nil {
 		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", n.target.sessionID, err)
 	}
@@ -319,7 +323,7 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		sp:       n.sp,
 		lane:     n.st,
 		clk:      cliOpClock,
-	}, info)
+	}, row)
 	exec := &cliLaneExec{conversationLaneExec: live, ownsInput: live.target.sessionTransport() != "acp"}
 	res, err := lane.Pass(ctx, view, exec)
 	laneFailpointAfterPass(cliLaneHostName, res)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The API reaches the lane host the controller started: its kinds are the
@@ -27,7 +28,7 @@ func TestControllerStateExposesTheRunningLaneHost(t *testing.T) {
 	f.cfg.Ops.Authoritative = []string{"message"}
 	cs = &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := cs.startConversationLaneHost(ctx)
+	h := cs.startConversationLaneHost(ctx, reconcilerLegacy)
 	t.Cleanup(func() { cancel(); h.wg.Wait() })
 	if cs.laneHost.Load() != h {
 		t.Fatal("startConversationLaneHost installed no lane host for the API")
@@ -51,7 +52,7 @@ func TestControllerStateExposesTheRunningLaneHost(t *testing.T) {
 func TestControllerStateRefusedLaneHostExecutesNothing(t *testing.T) {
 	for _, state := range []string{laneHostStateRefused, laneHostStateOff, laneHostStateUnavailable} {
 		cs := &controllerState{}
-		h := newConversationLaneHost(cs, []string{"message"})
+		h := newConversationLaneHost(cs, []string{"message"}, session.StopRequestsLive)
 		h.state = state
 		cs.setConversationLaneHost(h)
 		if got := cs.ConversationLaneKinds(); got != nil {

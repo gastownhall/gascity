@@ -206,8 +206,8 @@ func TestHookLanePassJoinsTheTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, info := f.view(t)
-	rec := &hookLaneRecordingExec{hookLaneExec: &hookLaneExec{pass: h.pass(), info: info}}
+	view, row := f.view(t)
+	rec := &hookLaneRecordingExec{hookLaneExec: &hookLaneExec{pass: h.pass(), info: row.info, stop: row.stop}}
 	res, err := lane.Pass(context.Background(), view, rec)
 	if err != nil || res.Done != opjournal.DoneAccepted {
 		t.Fatalf("Pass = %+v, %v; want accepted", res, err)
@@ -508,15 +508,30 @@ func TestHookLanePassTokenlessRow(t *testing.T) {
 }
 
 // TestHookLanePassHonorsTheContentGate proves a row the content gate blocks
-// (draining) takes nothing in band.
+// takes nothing in band: a draining row, and a row v2 asked to stop at its
+// generation, which the hook, holding no latch, reads live (V2-18). Another
+// generation's request blocks nothing.
 func TestHookLanePassHonorsTheContentGate(t *testing.T) {
-	h := newHookLaneHarness(t, func(meta map[string]string) { meta["state"] = string(session.StateDraining) })
-	op := h.f.propose(t, h.st, h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
-	if out := h.run(t); out.emitted {
-		t.Fatalf("outcome = %+v; want nothing written into a draining session", out)
-	}
-	if cur := h.f.get(t, h.st, op.ID); cur.Attempt != 0 {
-		t.Fatalf("op attempt %d; want untouched", cur.Attempt)
+	for _, tc := range []struct {
+		name string
+		opt  laneFixtureOpt
+		emit bool
+	}{
+		{"draining", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }, false},
+		{"stop requested at the row's generation", laneStopRequestedAt(1), false},
+		{"stop request of another generation", laneStopRequestedAt(2), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookLaneHarness(t, tc.opt)
+			op := h.f.propose(t, h.st, h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
+			out := h.run(t)
+			if out.emitted != tc.emit {
+				t.Fatalf("outcome = %+v; want emitted %v", out, tc.emit)
+			}
+			if cur := h.f.get(t, h.st, op.ID); !tc.emit && cur.Attempt != 0 {
+				t.Fatalf("op attempt %d; want untouched", cur.Attempt)
+			}
+		})
 	}
 }
 
@@ -887,7 +902,7 @@ func (f *hookLaneDrainFixture) maybeDeliver(t *testing.T, op opjournal.Op) opjou
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, _, _, err := readConversationLaneView(sessionFrontDoor(f.sessions), f.sessionID)
+	view, _, _, err := readConversationLaneView(sessionFrontDoor(f.sessions), f.sessionID, session.StopRequestsLive)
 	if err != nil {
 		t.Fatal(err)
 	}
