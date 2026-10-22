@@ -3748,15 +3748,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
-					// Yield this tick so the kill and the next wake run
-					// on separate reconciler passes; the new start should
-					// not race the tmux alias release.
-					continue
+					// The new start must not race the old runtime's release
+					// of its name, so wake on this pass only once a fresh
+					// probe confirms the runtime is gone. Anything else (still
+					// running, a zombie, an unreadable probe) yields to a later
+					// pass. A yield keeps the seat down for a whole pass, which
+					// on a city with slow passes outruns startup_timeout and
+					// reports "reset stalled" before the wake runs.
+					stillRunning, stillAlive, probeErr := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
+					if probeErr != nil || stillRunning || stillAlive {
+						continue
+					}
+					running, alive = false, false
 				}
-				// Runtime was already dead — no kill happened, no alias
-				// release to wait on. Fall through so the wake decision
-				// can pick up the freshly cleared metadata and emit a
-				// start_candidate on this same tick. See #2345.
+				// The runtime is gone: it was already dead going in, or the
+				// kill above was confirmed. There is no name release to wait
+				// on, so fall through and let the wake decision pick up the
+				// freshly cleared metadata and emit a start_candidate on this
+				// same tick. See #2345.
 			}
 		}
 

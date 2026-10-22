@@ -463,35 +463,29 @@ func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *
 
 	env.reconcile([]beads.Bead{session})
 
-	if env.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q still running after restart-requested kill", sessionName)
+	// The kill is confirmed, so the cleared breaker admits the fresh start on
+	// the same pass.
+	if got := restartRequestFakeCallCount(env.sp, "Stop", sessionName); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (the restart-requested kill)", got)
 	}
-	if cb.IsOpen(identity, base.Add(time.Minute)) {
-		t.Fatalf("breaker still OPEN for %q after restart-requested kill", identity)
-	}
-	stopped, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("store.Get(%s): %v", session.ID, err)
-	}
-	if got := stopped.Metadata[sessionCircuitStateMetadata]; got != "" {
-		t.Fatalf("persisted circuit state = %q, want cleared", got)
-	}
-	if got := stopped.Metadata[sessionCircuitRestartsMetadata]; got != "" {
-		t.Fatalf("persisted restart history = %q, want cleared", got)
-	}
-	if got := stopped.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
-		t.Fatal("persisted reset generation is empty, want explicit reset generation")
-	}
-
-	env.stdout.Reset()
-	env.stderr.Reset()
-	env.reconcile([]beads.Bead{stopped})
-
 	if !env.sp.IsRunning(sessionName) {
 		t.Fatalf("session %q did not wake after explicit reset cleared the circuit breaker", sessionName)
 	}
 	if got := env.stderr.String(); strings.Contains(got, "CIRCUIT_OPEN") {
 		t.Fatalf("stderr = %q, want no circuit-open block after explicit reset", got)
+	}
+	if cb.IsOpen(identity, base.Add(time.Minute)) {
+		t.Fatalf("breaker still OPEN for %q after restart-requested kill", identity)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if state := got.Metadata[sessionCircuitStateMetadata]; state == "CIRCUIT_OPEN" {
+		t.Fatalf("persisted circuit state = %q, want the explicit reset to have closed it", state)
+	}
+	if gen := got.Metadata[sessionCircuitResetGenerationMetadata]; gen == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
 	}
 }
 
@@ -775,8 +769,10 @@ func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSe
 
 	env.reconcile([]beads.Bead{session})
 
-	if env.sp.IsRunning(sessionName) {
-		t.Fatalf("explicit reset should still stop pinned named session %q", sessionName)
+	// The explicit reset stops the pinned session, and the pin wakes its fresh
+	// conversation on the same pass once the stop is confirmed.
+	if got := restartRequestFakeCallCount(env.sp, "Stop", sessionName); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1: explicit reset should still stop pinned named session %q", got, sessionName)
 	}
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -788,8 +784,11 @@ func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSe
 	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
 		t.Fatalf("session_key = %q, want rotated after explicit reset", got.Metadata["session_key"])
 	}
-	if got.Metadata["continuation_reset_pending"] != "true" {
-		t.Fatalf("continuation_reset_pending = %q, want true until next start", got.Metadata["continuation_reset_pending"])
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("pinned session %q not restarted on the reset pass", sessionName)
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want consumed by the same-pass fresh start", got.Metadata["continuation_reset_pending"])
 	}
 }
 
@@ -872,8 +871,15 @@ func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *
 	// now landed, its explicit-reset escape hatch must actually stop the
 	// pinned session on the next reconcile pass.
 	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{got}, map[string]int{"mayor": 1}, dops)
-	if env.sp.IsRunning(sessionName) {
-		t.Fatalf("pinned session %q still running after reconcile; persisted restart should have let the reconciler stop it", sessionName)
+	if got := restartRequestFakeCallCount(env.sp, "Stop", sessionName); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1: persisted restart should have let the reconciler stop pinned session %q", got, sessionName)
+	}
+	restarted, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after reconcile: %v", session.ID, err)
+	}
+	if restarted.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want consumed by the fresh start", restarted.Metadata["continuation_reset_pending"])
 	}
 }
 
@@ -1011,4 +1017,132 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// newLiveNamedAlwaysResetScenario is a running mode = "always" named session
+// carrying exactly what `gc session reset` writes (Manager.RequestFreshRestart):
+// restart_requested and continuation_reset_pending, no reset_committed_at yet.
+func newLiveNamedAlwaysResetScenario(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	return env, session, sessionName
+}
+
+func restartRequestFakeCallCount(sp *runtime.Fake, method, name string) int {
+	n := 0
+	for _, call := range sp.Calls {
+		if call.Method == method && call.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconcileSessionBeads_RestartRequestLiveKillWakesSameTick is the
+// live-runtime counterpart of
+// TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick.
+// A `gc session reset` of a running seat must stop it and start the fresh
+// conversation on the same reconciler pass once the stop is confirmed. Yielding
+// to the next pass instead left the seat down for a whole tick: on a city whose
+// passes take minutes, every reset ran past startup_timeout and reported
+// "reset stalled" before the next pass reached the wake.
+func TestReconcileSessionBeads_RestartRequestLiveKillWakesSameTick(t *testing.T) {
+	env, session, sessionName := newLiveNamedAlwaysResetScenario(t)
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := restartRequestFakeCallCount(env.sp, "Stop", sessionName); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (the restart handoff's kill)", got)
+	}
+	if got := restartRequestFakeCallCount(env.sp, "Start", sessionName); got != 2 {
+		t.Fatalf("Start calls = %d, want 2 (the fixture's and the same-pass fresh start)", got)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after the reset pass; the confirmed kill must fall through to the wake", sessionName)
+	}
+	if got := env.stdout.String(); !strings.Contains(got, "Stopped restart-requested session") {
+		t.Fatalf("stdout = %q, want stop diagnostic", got)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want consumed by the same-pass fresh start", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] == "" {
+		t.Fatal("last_woke_at = empty, want timestamp from the same-pass wake")
+	}
+}
+
+// TestReconcileSessionBeads_RestartRequestYieldsWhenRuntimeSurvivesKill pins the
+// conservative arm of the same-pass wake: a stop that reports success while the
+// runtime is still there must not be followed by a start on the same name in
+// the same pass. The handoff is recorded and the wake waits for a later pass.
+func TestReconcileSessionBeads_RestartRequestYieldsWhenRuntimeSurvivesKill(t *testing.T) {
+	env, session, sessionName := newLiveNamedAlwaysResetScenario(t)
+	env.sp.StopLeavesRunning[sessionName] = true
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := restartRequestFakeCallCount(env.sp, "Stop", sessionName); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (the restart handoff's kill)", got)
+	}
+	if got := restartRequestFakeCallCount(env.sp, "Start", sessionName); got != 1 {
+		t.Fatalf("Start calls = %d, want only the fixture's: a surviving runtime must not be started over", got)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the handoff", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true until a later pass starts the fresh conversation", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["reset_committed_at"] == "" {
+		t.Fatal("reset_committed_at = empty, want the handoff recorded")
+	}
 }
