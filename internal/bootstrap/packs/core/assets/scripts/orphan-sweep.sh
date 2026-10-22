@@ -22,7 +22,8 @@
 # so they are counted per rig in the summary, not named and not declared as a
 # partial outcome. A local answer about a rig claim counts only when the JSON
 # echoes rig_namespace: an older gc rejects the flag, and a claim it could not
-# judge is protected.
+# judge is protected. A claim that only the federated read lists, and whose
+# id carries a guarded rig's bead prefix, is that rig's claim (Step 1d).
 #
 # Does NOT do worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
@@ -39,6 +40,8 @@ esac
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 # Where the recovery summary goes. Cities that staff a coordinator role (e.g.
 # the gastown pack's mayor) can point this at it; "human" is the reserved
@@ -226,6 +229,49 @@ IN_PROGRESS=$(jq -c -s 'add // []
     | reduce .[] as $b ({seen: {}, out: []};
     ($b.id // "") as $id
     | if $id != "" and .seen[$id] then . else .seen[$id] = true | .out += [$b] end) | .out' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
+
+# Step 1d: a claim only the federated read returned names no scope and keeps
+# the HQ tag. One whose id carries a guarded rig's bead prefix sits in that
+# rig's store (a wisp-plane row, or a rig whose scope read was skipped above),
+# so it takes the rig's tag: the gate is asked with --rig-namespace and the
+# release names the rig with --rig, as for the rig's scope-read rows. An older
+# gc rejects the flag and the claim is kept. When the tagging cannot finish,
+# the federated read's untagged rows are dropped this pass and their claims
+# kept, never judged as HQ claims. A row whose id holds a tab or line break is
+# left as it is: it is never released (Step 3).
+GUARDED_RIGS=""
+[ -z "$RIG_LIST" ] || GUARDED_RIGS="$(rig_namespace_guarded_rigs "$RIG_LIST")"
+if [ -n "$GUARDED_RIGS" ] && [ "$IN_PROGRESS" != "[]" ]; then
+    _tag_ok=1
+    _federated_ids=""
+    _rig_tags=""
+    _tagged=""
+    _federated_ids=$(jq -r '.[]
+        | select(type == "object" and ._gc_federated == true and ._gc_scope == "")
+        | (.id // "") | tostring | select(. != "" and (test("[\\t\\n\\r]") | not))' <<<"$IN_PROGRESS" 2>/dev/null) || _tag_ok=0
+    if [ "$_tag_ok" = 1 ] && [ -n "$_federated_ids" ]; then
+        while IFS= read -r _fid; do
+            [ -n "$_fid" ] || continue
+            _frig="$(rig_namespace_guarded_rig_for_bead "$RIG_LIST" "$_fid")" || { _tag_ok=0; break; }
+            [ -z "$_frig" ] || _rig_tags="${_rig_tags}${_fid}"$'\t'"${_frig}"$'\n'
+        done <<<"$_federated_ids"
+    fi
+    if [ "$_tag_ok" = 1 ] && [ -n "$_rig_tags" ]; then
+        if _tagged=$(jq -c --arg tags "$_rig_tags" '
+            ($tags | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries) as $rig
+            | map(if type == "object" and ._gc_federated == true and ._gc_scope == ""
+                     and ($rig[(.id // "") | tostring] // "") != ""
+                  then ._gc_scope = $rig[(.id // "") | tostring] else . end)' <<<"$IN_PROGRESS" 2>/dev/null) && [ -n "$_tagged" ]; then
+            IN_PROGRESS="$_tagged"
+        else
+            _tag_ok=0
+        fi
+    fi
+    if [ "$_tag_ok" != 1 ]; then
+        echo "orphan-sweep: could not tag the federated read's claims with their guarded rigs; those claims are kept this pass" >&2
+        IN_PROGRESS=$(jq -c 'map(select((type == "object" and ._gc_federated == true and ._gc_scope == "") | not))' <<<"$IN_PROGRESS" 2>/dev/null) || IN_PROGRESS="[]"
+    fi
+fi
 if [ "$IN_PROGRESS" = "[]" ]; then
     order_outcome_write
     exit 0
@@ -444,13 +490,25 @@ session_bead_shows_live_assignment() {
     return 1
 }
 
+# reset_orphan_if_current releases bead_id from expected_assignee in the store
+# the claim was listed from: scope is "" for HQ, else the rig. A rig claim's
+# release names the rig with --rig (gc bd takes it anywhere in argv), so the
+# release never runs in another
+# store: an assignee that is a pool session's bead id carries the city's
+# prefix, and a release resolved by its arguments alone could land in HQ,
+# find the bead absent and answer skipped.
 reset_orphan_if_current() {
     local bead_id="$1"
     local expected_assignee="$2"
+    local scope="${3:-}"
     local reset_output
     local reset_state
+    local -a scope_args=()
+    if [ -n "$scope" ]; then
+        scope_args=(--rig "$scope")
+    fi
 
-    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
+    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" ${scope_args[@]+"${scope_args[@]}"} 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
@@ -460,7 +518,7 @@ reset_orphan_if_current() {
             # --append-notes whole (notes have no representation in the class
             # store contract), while every store serves --set-metadata. The
             # value is text, so bd and the class store both keep a string.
-            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" ${scope_args[@]+"${scope_args[@]}"} >/dev/null 2>&1; then
                 echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
             fi
             return 0
@@ -833,7 +891,7 @@ while IFS=$'\t' read -r bead_id scope_tok assignee; do
             continue
         fi
     fi
-    if reset_orphan_if_current "$bead_id" "$assignee"; then
+    if reset_orphan_if_current "$bead_id" "$assignee" "$scope"; then
         ORPHANED=$((ORPHANED + 1))
     else
         reset_status=$?

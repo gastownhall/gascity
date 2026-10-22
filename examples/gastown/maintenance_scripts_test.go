@@ -1547,8 +1547,10 @@ exit 1
 	if !strings.Contains(log, "--rig project session list --json") {
 		t.Fatalf("rig-scoped session list was not queried:\n%s", log)
 	}
-	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session") {
-		t.Fatalf("rig orphan bead was not reset:\n%s", log)
+	// The release names the rig the claim was listed from, so it runs in
+	// that rig's store whatever its arguments' prefixes say.
+	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session --rig project") {
+		t.Fatalf("rig orphan bead was not reset in its rig:\n%s", log)
 	}
 	if !strings.Contains(log, "bd release-if-current ga-rig-closed-default-filtered project__worker-gc-closed") {
 		t.Fatalf("closed/default-filtered session assignee was not reset:\n%s", log)
@@ -1946,7 +1948,12 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			}
 			log := string(logData)
 			lines := nonEmptyLogLines(log)
+			// A rig orphan's release names the rig it was listed from; an HQ
+			// orphan's names none.
 			orphanUpdate := "bd release-if-current " + tt.orphanID + " " + tt.orphanAssignee
+			if tt.scope != "hq" {
+				orphanUpdate += " --rig " + tt.scope
+			}
 			if got := countExactLine(lines, orphanUpdate); got != 1 {
 				t.Fatalf("orphan update count = %d, want 1 for %q\n%s", got, orphanUpdate, orphanSweepFailureContext(out, gcLog))
 			}
@@ -2091,10 +2098,12 @@ if [ "$*" = "session list --json" ]; then
   fi
   exit 0
 fi
-if [ "$*" = "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE" ]; then
-  printf 'released\n'
-  exit 0
-fi
+case "$*" in
+  "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE"|"bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --rig "*)
+    printf 'released\n'
+    exit 0
+    ;;
+esac
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
   printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
   exit 0
@@ -2102,9 +2111,11 @@ fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
-if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
-  exit 0
-fi
+case "$*" in
+  "bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched"|"bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched --rig "*)
+    exit 0
+    ;;
+esac
 case "$*" in
   "mail send human "*) exit 0 ;;
 esac
@@ -12717,7 +12728,10 @@ fi
 // per line) that a split city's class binding owns: `bd update` of one refuses
 // --notes and --append-notes with exit 1, as gc bd's by-id door does, because
 // notes have no representation in the class store contract; every other update
-// exits 0.
+// exits 0. `rig list --json` gives "shared" the bead prefix "sh", and
+// federation "rig" when ORPHAN_SWEEP_GUARDED_RIGS lists it.
+// ORPHAN_SWEEP_RIG_SESSION_EXIT makes `gc --rig <rig> session list` exit with
+// that code, so the sweep skips the rig's scope read.
 const orphanSweepSharedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_ABSENT:-}" ]; then
@@ -12728,7 +12742,10 @@ if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_EXIT:-}" ]; then
   echo '{"schema_version":"1","ok":true,"verdict":"unknown","reason":"lookup_failed","detail":"session store unreachable","roster_source":"stub"}'
   exit "$ORPHAN_SWEEP_GATE_EXIT"
 fi
-` + orphanSweepGateStubArm + `if [ "$1" = "--rig" ]; then
+` + orphanSweepGateStubArm + `if [ "$1" = "--rig" ] && [ "$3" = "session" ] && [ -n "${ORPHAN_SWEEP_RIG_SESSION_EXIT:-}" ]; then
+  exit "$ORPHAN_SWEEP_RIG_SESSION_EXIT"
+fi
+if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
@@ -12748,7 +12765,11 @@ EOF
     ;;
   rig)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"rigs":[{"name":"hq","hq":true},{"name":"shared","hq":false}]}\n'
+      fed=""
+      if [ -n "${ORPHAN_SWEEP_GUARDED_RIGS:-}" ] && echo "$ORPHAN_SWEEP_GUARDED_RIGS" | grep -Fxq shared; then
+        fed=',"federation":"rig"'
+      fi
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"shared","hq":false,"prefix":"sh"%s}]}\n' "$fed"
       exit 0
     fi
     ;;
@@ -13137,6 +13158,75 @@ func TestOrphanSweepLeavesAnUnguardedRigUnchanged(t *testing.T) {
 	if strings.Contains(run.out, "guarded rig namespaces") {
 		t.Fatalf("an unguarded rig reported namespace keeps:\n%s", run.out)
 	}
+}
+
+// TestOrphanSweepTagsFederatedOnlyGuardedRigClaimsWithTheRig: a claim that
+// only the federated read (gc ready --status in_progress) lists names no
+// scope. When its id carries a guarded rig's prefix it is that rig's claim,
+// whether it is a wisp-plane row no scope read lists or the rig's scope read
+// was skipped: the gate is asked with --rig-namespace, a holder outside the
+// namespace is kept, a dead holder inside it is released with --rig, and a gc
+// without the flag keeps both. On an unguarded rig the claim keeps the HQ tag
+// as before.
+func TestOrphanSweepTagsFederatedOnlyGuardedRigClaimsWithTheRig(t *testing.T) {
+	rows := []orphanSweepGateRow{inProgress("sh-neighbor", "neighbor"), inProgress("sh-ghost", "shared/ghost")}
+	federated := orphanSweepGateJSON(t, rows)
+	for _, tc := range []struct {
+		name        string
+		shared      []orphanSweepGateRow
+		env         map[string]string
+		wantRelease bool
+	}{
+		{"wisp rows no scope read lists", nil, nil, true},
+		{"rig scope read skipped", rows, map[string]string{"ORPHAN_SWEEP_RIG_SESSION_EXIT": "1"}, true},
+		{"gc without --rig-namespace", nil, map[string]string{"ORPHAN_SWEEP_GATE_OLD": "1"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{
+				"ORPHAN_SWEEP_GUARDED_RIGS":         "shared",
+				"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": federated,
+			}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			run := runOrphanSweepGateFixture(t, nil, tc.shared, nil, nil, env)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if tc.env["ORPHAN_SWEEP_RIG_SESSION_EXIT"] != "" && strings.Contains(run.log, "bd list --rig shared ") {
+				t.Fatalf("fixture: the rig's scope read was not skipped\n%s", run.context())
+			}
+			for _, line := range nonEmptyLogLines(run.log) {
+				if strings.HasPrefix(line, "agent is-foreign ") && !strings.HasPrefix(line, "agent is-foreign --rig-namespace shared ") {
+					t.Fatalf("a guarded rig's claim was asked about without --rig-namespace shared: %q\n%s", line, run.context())
+				}
+			}
+			if run.released("sh-neighbor") {
+				t.Fatalf("a holder outside the guarded rig's namespace was released\n%s", run.context())
+			}
+			released := strings.Contains(run.log, "bd release-if-current sh-ghost shared/ghost --rig shared")
+			if released != tc.wantRelease {
+				t.Fatalf("dead in-namespace claim released with --rig shared = %v, want %v\n%s", released, tc.wantRelease, run.context())
+			}
+			if !tc.wantRelease && run.released("sh-ghost") {
+				t.Fatalf("a gc that cannot apply the namespace released a guarded rig's claim\n%s", run.context())
+			}
+			if tc.wantRelease && !strings.Contains(run.out, "kept 1 claims outside guarded rig namespaces (shared: 1)") {
+				t.Fatalf("output missing the namespace count:\n%s", run.out)
+			}
+		})
+	}
+	t.Run("unguarded rig keeps the HQ tag", func(t *testing.T) {
+		run := runOrphanSweepGateFixture(t, nil, nil, nil, nil, map[string]string{
+			"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, rows[:1]),
+		})
+		if run.err != nil {
+			t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+		}
+		if !strings.Contains(run.log, "agent is-foreign --json -- neighbor") || !strings.Contains(run.log, "bd release-if-current sh-neighbor neighbor\n") {
+			t.Fatalf("an unguarded rig's federated-only claim is no longer judged and released as HQ\n%s", run.context())
+		}
+	})
 }
 
 // orphanSweepGateRow is one in-progress work bead, or one session bead served

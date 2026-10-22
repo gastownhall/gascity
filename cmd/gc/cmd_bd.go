@@ -899,7 +899,9 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 
 // bdMutationWriteIDs extracts all positional bead IDs from a bd write-mutation
 // command (update, close, reopen, delete, heartbeat) and reports whether the
-// scan was unambiguous.
+// scan was unambiguous. For gc's own `release-if-current <issue-id>
+// <assignee>` the write id is the issue id alone: the assignee is an identity,
+// often a session bead id, and must never pick the store the release runs in.
 //
 // Returns:
 //   - ids: all positional (non-flag) tokens after the subcommand; may be empty.
@@ -927,6 +929,11 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	sub := args[0]
 	switch sub {
 	case "update", "close", "reopen", "delete", "heartbeat":
+	case "release-if-current":
+		if id, _, ok, err := parseBdReleaseIfCurrentArgs(args); ok && err == nil {
+			return []string{id}, true, false
+		}
+		return nil, true, true
 	default:
 		return nil, false, false
 	}
