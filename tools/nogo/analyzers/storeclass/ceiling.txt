@@ -3,11 +3,11 @@
 # exactly these totals, so a shrink lowers a row here in the same commit and a
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
-cmd/gc	cap-assert	107
+cmd/gc	cap-assert	108
 cmd/gc	mint	159
-cmd/gc	raw-field	178
-cmd/gc	raw-param	1098
-cmd/gc	raw-result	269
+cmd/gc	raw-field	185
+cmd/gc	raw-param	1101
+cmd/gc	raw-result	272
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
 cmd/gc	read-marker	31

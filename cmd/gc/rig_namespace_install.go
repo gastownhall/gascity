@@ -65,6 +65,18 @@ func unwrapRigNamespaceStore(store beads.Store) (beads.Store, *rigNamespace, boo
 	return g.inner, g.ns, true
 }
 
+// rigNamespaceProbeStore returns the store under store's rig namespace guard
+// (looking through the bead-policy layer), or store itself when it is not
+// guarded. It is for liveness probes only: callers must discard what they
+// read through it and never write through it.
+func rigNamespaceProbeStore(store beads.Store) beads.Store {
+	base, _, _ := unwrapBeadPolicyStore(store)
+	if inner, _, ok := unwrapRigNamespaceStore(base); ok {
+		return inner
+	}
+	return store
+}
+
 // rigNamespaceOfStore returns the namespace guarding store, looking under its
 // bead-policy layer, or nil when store is not guarded.
 func rigNamespaceOfStore(store beads.Store) *rigNamespace {
