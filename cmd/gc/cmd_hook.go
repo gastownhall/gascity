@@ -1006,6 +1006,9 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		}
 		storeOps := ops
 		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		// The rig namespace guard judges this leg's rows by the store they
+		// live in, not only by their id prefix.
+		storeOps.RigGuard = ops.RigGuard.forLeg(claimStore.rig, storeDir)
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
 			return res.code

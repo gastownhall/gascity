@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "bdargs.go",
         "bdflags.go",
+        "claim.go",
         "commands.go",
         "helptree.go",
         "inventory.go",
@@ -30,6 +31,7 @@ go_test(
     srcs = [
         "bdargs_test.go",
         "bdflags_test.go",
+        "claim_test.go",
         "commands_test.go",
         "freshness_test.go",
         "helptree_test.go",

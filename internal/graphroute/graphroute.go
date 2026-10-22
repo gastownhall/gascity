@@ -713,7 +713,9 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 	// order.
 	if !IsCompiledGraphWorkflow(recipe) {
 		if strings.TrimSpace(sourceBeadID) != "" {
-			return nil
+			// No routing is stamped, but the formula's own steps may declare
+			// an assignee or a route.
+			return ValidateRigNamespaceRoutes(recipe.Steps, storeRef, cfg)
 		}
 		stampLegacyRecipeRouting(recipe, routedTo)
 		return ValidateRigNamespaceRoutes(recipe.Steps, storeRef, cfg)
@@ -727,11 +729,11 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 			baseName = routedTo[i+1:]
 		}
 		if deps.Resolver == nil {
-			return nil
+			return ValidateRigNamespaceRoutes(recipe.Steps, storeRef, cfg)
 		}
 		resolved, ok := deps.Resolver.ResolveAgent(cfg, baseName, rigContext)
 		if !ok {
-			return nil
+			return ValidateRigNamespaceRoutes(recipe.Steps, storeRef, cfg)
 		}
 		a = &resolved
 	}

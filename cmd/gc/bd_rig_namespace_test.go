@@ -186,14 +186,14 @@ func TestBdRigNamespaceCreationStamp(t *testing.T) {
 }
 
 func TestNewBdRigNamespaceCheckOnlyForGuardedScope(t *testing.T) {
-	cfg := hrgCity()
-	if c := newBdRigNamespaceCheck(cfg, "/cities/b", "/rigs/alpha", nil); c != nil {
+	cfg := hrgCity(t)
+	if c := newBdRigNamespaceCheck(cfg, "/cities/b", hrgDir(cfg, "alpha"), nil); c != nil {
 		t.Fatal("an unguarded rig scope got a check")
 	}
 	if c := newBdRigNamespaceCheck(cfg, "/cities/b", "/cities/b", nil); c != nil {
 		t.Fatal("the city scope got a check")
 	}
-	c := newBdRigNamespaceCheck(cfg, "/cities/b", "/rigs/beta", nil)
+	c := newBdRigNamespaceCheck(cfg, "/cities/b", hrgDir(cfg, "beta"), nil)
 	if c == nil || c.ns.rigName() != "beta" {
 		t.Fatalf("guarded scope check = %+v", c)
 	}
@@ -204,7 +204,7 @@ func TestNewBdRigNamespaceCheckOnlyForGuardedScope(t *testing.T) {
 }
 
 func TestBdEffectiveActorFromEnv(t *testing.T) {
-	if got := bdEffectiveActorFromEnv(func(string) string { return "" }); got != "controller" {
+	if got := bdEffectiveActorFromEnv(func(string) string { return "" }); got != "" {
 		t.Fatalf("default actor = %q", got)
 	}
 	if got := bdEffectiveActorFromEnv(func(string) string { return " beta/x " }); got != "beta/x" {

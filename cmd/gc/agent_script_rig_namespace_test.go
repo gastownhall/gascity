@@ -13,13 +13,13 @@ import (
 
 func TestCrossStoreClaimDirRefusesUnadmittedActorOnGuardedRig(t *testing.T) {
 	res, _ := rnsCityBResolver(t)
-	cfg := hrgCity()
+	cfg := hrgCity(t)
 	cityAgent := &config.Agent{Name: "mayor", Scope: "city"}
 	rigAgent := &config.Agent{Name: "crew.worker", Dir: "beta"}
 
 	// A city-scoped agent is never inside the rig's namespace: refused,
 	// before any redirection is resolved.
-	_, ok, err := crossStoreClaimDir(cfg, cityAgent, "bt-1", "mayor", res)
+	_, ok, err := crossStoreClaimDir(cfg, cityAgent, "bt-1", "mayor", "", res)
 	if ok || !errors.Is(err, errRigNamespace) {
 		t.Fatalf("city agent: ok=%v err=%v, want a guard refusal", ok, err)
 	}
@@ -28,22 +28,22 @@ func TestCrossStoreClaimDirRefusesUnadmittedActorOnGuardedRig(t *testing.T) {
 	}
 	// A rig agent claiming under a short id is refused too (no redirect is
 	// involved, so this is not merely the cross-store path).
-	if _, _, err := crossStoreClaimDir(cfg, rigAgent, "bt-1", shortIDB, res); !errors.Is(err, errRigNamespace) {
+	if _, _, err := crossStoreClaimDir(cfg, rigAgent, "bt-1", shortIDB, "beta", res); !errors.Is(err, errRigNamespace) {
 		t.Fatalf("short-id actor: err=%v, want a guard refusal", err)
 	}
 	// An admitted actor proceeds: the rig's own agent, or one of the
 	// city's pool sessions; neither is redirected.
 	for _, actor := range []string{"beta/crew.worker", poolIDB} {
-		if _, ok, err := crossStoreClaimDir(cfg, rigAgent, "bt-1", actor, res); err != nil || ok {
+		if _, ok, err := crossStoreClaimDir(cfg, rigAgent, "bt-1", actor, "beta", res); err != nil || ok {
 			t.Fatalf("actor %q: ok=%v err=%v, want no redirect and no refusal", actor, ok, err)
 		}
 	}
 	// An ambiguous guarded prefix admits nobody.
-	if _, _, err := crossStoreClaimDir(cfg, rigAgent, "zz-1", "gamma/crew.worker", res); !errors.Is(err, errRigNamespace) {
+	if _, _, err := crossStoreClaimDir(cfg, rigAgent, "zz-1", "gamma/crew.worker", "beta", res); !errors.Is(err, errRigNamespace) {
 		t.Fatalf("ambiguous prefix: err=%v, want a guard refusal", err)
 	}
 	// An unguarded rig keeps the cross-store redirect.
-	if dir, ok, err := crossStoreClaimDir(cfg, cityAgent, "al-1", "mayor", res); err != nil || !ok || dir != "/rigs/alpha" {
+	if dir, ok, err := crossStoreClaimDir(cfg, cityAgent, "al-1", "mayor", "", res); err != nil || !ok || dir != hrgDir(cfg, "alpha") {
 		t.Fatalf("unguarded rig: dir=%q ok=%v err=%v", dir, ok, err)
 	}
 }
@@ -59,7 +59,7 @@ func TestAgentScriptBdClaimRefusalRunsNoBd(t *testing.T) {
 			ran++
 			return nil
 		},
-		resolveBeadStore: func(string) (string, []string, bool, error) {
+		resolveBeadStore: func(string, []string) (string, []string, bool, error) {
 			return "", nil, false, newRigNamespacePathError(`rig "beta" (federation = "rig") serves only beta/; claim actor "mayor" is outside it`)
 		},
 	}
@@ -87,7 +87,7 @@ func TestRunAgentScriptRefusalExitsOne(t *testing.T) {
 			t.Fatal("bd ran despite the refusal")
 			return nil
 		},
-		resolveBeadStore: func(string) (string, []string, bool, error) {
+		resolveBeadStore: func(string, []string) (string, []string, bool, error) {
 			return "", nil, false, newRigNamespacePathError("refused")
 		},
 	}

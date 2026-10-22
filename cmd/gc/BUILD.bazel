@@ -2022,6 +2022,7 @@ go_test(
         "rig_import_test.go",
         "rig_include_imports_test.go",
         "rig_inherited_endpoint_test.go",
+        "rig_namespace_claim_paths_test.go",
         "rig_namespace_guard_paths_test.go",
         "rig_namespace_guard_wiring_test.go",
         "rig_namespace_install_test.go",

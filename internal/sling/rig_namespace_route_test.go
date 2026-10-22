@@ -2,6 +2,7 @@ package sling
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -24,6 +25,7 @@ func rigNamespaceSlingFixture(t *testing.T, storeRef string) (SlingDeps, *fakeRu
 	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "bt-1", Title: "work", Type: "task", Status: "open"},
 		{ID: "al-1", Title: "work", Type: "task", Status: "open"},
+		{ID: "or-77", Title: "imported", Type: "task", Status: "open"},
 	}, nil)
 	deps.StoreRef = storeRef
 	return deps, runner
@@ -45,19 +47,24 @@ func TestSlingRefusesRouteOutsideGuardedRig(t *testing.T) {
 		{"dry run is refused too", "rig:beta", city, false, true},
 		{"custom sling_query", "rig:beta", custom, true, false},
 		{"bead prefix names the rig", "city:test", city, true, false},
+		{"store ref names the rig, prefix maps nowhere", "rig:beta", city, true, false},
 		{"another rig's agent", "rig:beta", otherRig, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			deps, runner := rigNamespaceSlingFixture(t, tc.storeRef)
-			_, err := DoSling(SlingOpts{Target: tc.target, BeadOrFormula: "bt-1", Force: tc.force, DryRun: tc.dryRun, NoConvoy: true, NoFormula: true}, deps, deps.Store)
+			beadID := "bt-1"
+			if strings.Contains(tc.name, "prefix maps nowhere") {
+				beadID = "or-77"
+			}
+			_, err := DoSling(SlingOpts{Target: tc.target, BeadOrFormula: beadID, Force: tc.force, DryRun: tc.dryRun, NoConvoy: true, NoFormula: true}, deps, deps.Store)
 			if !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
 				t.Fatalf("DoSling err = %v, want a rig namespace refusal", err)
 			}
 			if len(runner.calls) != 0 {
 				t.Fatalf("routing commands ran: %v", runner.calls)
 			}
-			b, _ := deps.Store.Get("bt-1")
+			b, _ := deps.Store.Get(beadID)
 			if len(b.Metadata) != 0 || b.Assignee != "" {
 				t.Fatalf("bead was written: %+v", b)
 			}
@@ -101,8 +108,13 @@ func TestSlingBatchRefusesRouteOutsideGuardedRig(t *testing.T) {
 		t.Fatal(err)
 	}
 	deps.Store = store
-	if _, err := DoSlingBatch(SlingOpts{Target: city, BeadOrFormula: "bt-c", Force: true, NoFormula: true}, deps, store); !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
+	result, err := DoSlingBatch(SlingOpts{Target: city, BeadOrFormula: "bt-c", Force: true, NoFormula: true}, deps, store)
+	if !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
 		t.Fatalf("container in a guarded rig: err = %v, want a refusal", err)
+	}
+	// Refused whole, at the container: no child was attempted.
+	if result.Failed != 0 || len(result.Children) != 0 {
+		t.Fatalf("container refusal attempted children: %+v", result)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("routing commands ran: %v", runner.calls)
@@ -118,9 +130,23 @@ func TestSlingBatchRefusesRouteOutsideGuardedRig(t *testing.T) {
 		t.Fatal(err)
 	}
 	deps.Store = store
-	result, _ := DoSlingBatch(SlingOpts{Target: city, BeadOrFormula: "hq-c", Force: true, NoFormula: true}, deps, store)
+	result, _ = DoSlingBatch(SlingOpts{Target: city, BeadOrFormula: "hq-c", Force: true, NoFormula: true}, deps, store)
 	if result.Routed != 0 || result.Failed != 1 {
 		t.Fatalf("routed %d failed %d, want 0 and 1 (%+v)", result.Routed, result.Failed, result.Children)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("routing commands ran: %v", runner.calls)
+	}
+}
+
+// finalizeInStore checks the routing write itself, for launch paths that
+// reach it without preflight's check of the same bead.
+func TestSlingFinalizeRefusesRouteOutsideGuardedRig(t *testing.T) {
+	deps, runner := rigNamespaceSlingFixture(t, "city:test")
+	city := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	_, err := finalizeInStore(SlingOpts{Target: city, NoConvoy: true}, deps, deps.Store, "bt-1", "bead", SlingResult{})
+	if !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
+		t.Fatalf("finalizeInStore err = %v, want a rig namespace refusal", err)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("routing commands ran: %v", runner.calls)

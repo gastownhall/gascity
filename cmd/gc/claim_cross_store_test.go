@@ -18,7 +18,7 @@ func TestCrossStoreClaimDirRedirectsCityAgentToBeadOwningRig(t *testing.T) {
 	}
 	cityAgent := &config.Agent{Name: "platform-architect", Scope: "city"}
 
-	dir, ok, _ := crossStoreClaimDir(cfg, cityAgent, "vw-123", "", nil)
+	dir, ok, _ := crossStoreClaimDir(cfg, cityAgent, "vw-123", "", "", nil)
 	if !ok {
 		t.Fatal("city-scoped agent claiming a rig-store bead must redirect to the rig store")
 	}
@@ -35,7 +35,7 @@ func TestCrossStoreClaimDirLeavesRigAgentUnchanged(t *testing.T) {
 	}
 	rigAgent := &config.Agent{Name: "reviewer", Dir: "voxist-web"}
 
-	if _, ok, _ := crossStoreClaimDir(cfg, rigAgent, "vw-123", "", nil); ok {
+	if _, ok, _ := crossStoreClaimDir(cfg, rigAgent, "vw-123", "", "", nil); ok {
 		t.Fatal("rig-scoped agent must be byte-for-byte unchanged (no claim redirect)")
 	}
 }
@@ -50,7 +50,7 @@ func TestCrossStoreClaimDirNoRedirectForCityOwnedBead(t *testing.T) {
 
 	// A bead whose prefix does not resolve to a configured rig (HQ/city-owned)
 	// stays in the agent's own store: no redirect.
-	if _, ok, _ := crossStoreClaimDir(cfg, cityAgent, "hq-9", "", nil); ok {
+	if _, ok, _ := crossStoreClaimDir(cfg, cityAgent, "hq-9", "", "", nil); ok {
 		t.Fatal("city-owned bead must not redirect")
 	}
 }
@@ -69,7 +69,7 @@ func TestRunBDForBeadRedirectsCrossStoreWrite(t *testing.T) {
 			inStoreArgs = append([]string{name}, args...)
 			return nil
 		},
-		resolveBeadStore: func(beadID string) (string, []string, bool, error) {
+		resolveBeadStore: func(beadID string, _ []string) (string, []string, bool, error) {
 			if beadID == "vw-1" {
 				return "/rigs/voxist-web", []string{"BEADS_DIR=/rigs/voxist-web/.beads"}, true, nil
 			}
@@ -102,11 +102,11 @@ func TestRunBDForBeadRedirectsCrossStoreWrite(t *testing.T) {
 
 func TestCrossStoreClaimDirNilCfgOrAgent(t *testing.T) {
 	rigAgent := &config.Agent{Name: "reviewer", Dir: "voxist-web"}
-	if _, ok, _ := crossStoreClaimDir(nil, rigAgent, "vw-1", "", nil); ok {
+	if _, ok, _ := crossStoreClaimDir(nil, rigAgent, "vw-1", "", "", nil); ok {
 		t.Fatal("nil cfg must not redirect")
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "voxist-web", Path: "/x", Prefix: "vw"}}}
-	if _, ok, _ := crossStoreClaimDir(cfg, nil, "vw-1", "", nil); ok {
+	if _, ok, _ := crossStoreClaimDir(cfg, nil, "vw-1", "", "", nil); ok {
 		t.Fatal("nil agent must not redirect")
 	}
 }

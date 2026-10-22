@@ -604,7 +604,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
 	// Every tier below, adoption included, sees only the rows a guarded rig
-	// lets this city act on. The rows are in hand, so this costs no read.
+	// lets this city act on, judged by the leg they were read from. The rows
+	// are in hand, so this costs no read.
+	ops.RigGuard = ops.RigGuard.boundTo(dir)
 	candidates = ops.RigGuard.filterCandidates(candidates, stderr)
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -622,7 +624,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
-		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		verdict, canonicalAssignee, canonical := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		// The canonical row, not the (possibly stale) query row, is what the
+		// stop gate and the re-stamp write against: a guarded rig must not
+		// find it Foreign, and must admit both its holder and this session.
+		if verdict == hookAdoptionOwned && ops.RigGuard.refuseClaim(canonical, stderr, canonicalAssignee, opts.Assignee) {
+			verdict = hookAdoptionRefused
+		}
 		// Holding a bead is no reason to resume it once its workflow stopped:
 		// the step a worker took before its root failed is exactly the one a
 		// re-poll would otherwise hand straight back. A stopped bead is closed
@@ -1433,26 +1441,30 @@ const (
 // store hiccup, the same trade the F-D probe makes for the same reason.
 //
 // On hookAdoptionOwned it also returns the canonical assignee spelling, which
-// may differ from the work query's (cached) row.
-func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string) {
+// may differ from the work query's (cached) row, and the canonical row itself
+// (its ID always set), which the rig namespace guard judges.
+func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string, beads.Bead) {
 	beadID := strings.TrimSpace(bead.ID)
 	if beadID == "" || ops.ReadWorkMeta == nil {
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, "", beads.Bead{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, "", beads.Bead{}
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
 			"gc hook --claim: refusing to re-serve %s: the canonical store records assignee=%q, not this session (%s)\n",
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
-		return hookAdoptionRefused, ""
+		return hookAdoptionRefused, "", beads.Bead{}
 	}
-	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+	if strings.TrimSpace(canonical.ID) == "" {
+		canonical.ID = beadID
+	}
+	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee), canonical
 }
 
 // restampHookAdoption rewrites an adopted bead's assignee from a legacy

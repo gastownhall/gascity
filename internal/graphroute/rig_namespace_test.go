@@ -131,3 +131,24 @@ func TestValidateRigNamespaceRoutes(t *testing.T) {
 		}
 	}
 }
+
+// The early returns that stamp no routing still validate what the formula's
+// steps declare.
+func TestApplyGraphRoutingEarlyReturnsValidateRigNamespace(t *testing.T) {
+	cfg := rigNamespaceGraphCity(true)
+	attached := &formula.Recipe{Name: "mol", Steps: []formula.RecipeStep{
+		{ID: "mol", IsRoot: true, Metadata: map[string]string{}},
+		{ID: "mol.s1", Assignee: "mayor", Metadata: map[string]string{}},
+	}}
+	if err := ApplyGraphRouting(attached, nil, "beta/crew.worker", nil, "bt-src", "", "", "rig:beta", beads.SessionStore{}, "city", cfg, Deps{}); !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
+		t.Errorf("attached legacy recipe: err = %v, want a refusal", err)
+	}
+	graph := rigNamespaceGraphRecipe("beta/crew.worker")
+	graph.Steps[1].Metadata[beadmeta.RoutedToMetadataKey] = "city-worker"
+	if err := ApplyGraphRouting(graph, nil, "beta/crew.worker", nil, "", "", "", "rig:beta", beads.SessionStore{}, "city", cfg, Deps{}); !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
+		t.Errorf("graph recipe with no resolver: err = %v, want a refusal", err)
+	}
+	if err := ApplyGraphRouting(graph, nil, "beta/nobody", nil, "", "", "", "rig:beta", beads.SessionStore{}, "city", cfg, Deps{Resolver: testAgentResolver{}}); !errors.Is(err, agentutil.ErrRigNamespaceRoute) {
+		t.Errorf("graph recipe whose agent does not resolve: err = %v, want a refusal", err)
+	}
+}

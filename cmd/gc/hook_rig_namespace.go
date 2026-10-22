@@ -17,37 +17,68 @@ import (
 // re-stamp, workflow-stop close or continuation pin is attempted (and no bd
 // process spawned for it) unless the actor is admitted by that rig.
 //
-// The namespace is resolved per bead id (rigNamespaceForBeadID): a prefix two
-// guarded rigs share gives a deny-all namespace. Session provenance comes
-// from a CLI resolver over this city's sessions store, opened through
-// cliSessionStore(cityStore, ...), never a rig store.
+// A row is judged by the leg it was read from (rigNamespaceForLeg): every
+// row on a guarded rig's leg by that rig, whatever its id prefix, and a
+// prefix that maps to a different guarded rig (or to two) admits nothing. On
+// a leg that is not a guarded rig's store, the prefix alone decides. Session
+// provenance comes from a CLI resolver over this city's sessions store,
+// opened as cliStores(cityPath, cityStore).Sessions(), never a rig store.
 //
 // A nil guard checks nothing; claimOps installs one only when the city has a
 // guarded rig, so an unguarded city runs byte-for-byte as before.
 type hookRigGuard struct {
+	cityPath string
 	cfg      *config.City
 	sessions ownSessionResolver
+	// legSet reports that forLeg bound the guard to one leg; leg is that
+	// leg's guarded namespace, nil when the leg is not a guarded rig's store.
+	legSet bool
+	leg    *rigNamespace
 }
 
 // newHookRigGuard returns the guard for a city, or nil when the city guards
 // no rig.
-func newHookRigGuard(cfg *config.City, sessions ownSessionResolver) *hookRigGuard {
+func newHookRigGuard(cityPath string, cfg *config.City, sessions ownSessionResolver) *hookRigGuard {
 	if !cityHasGuardedRig(cfg) {
 		return nil
 	}
-	return &hookRigGuard{cfg: cfg, sessions: sessions}
+	return &hookRigGuard{cityPath: cityPath, cfg: cfg, sessions: sessions}
 }
 
-// namespaceFor returns the guarded namespace beadID belongs to, or nil.
+// forLeg returns the guard bound to one leg of the claim's store fan-out:
+// the leg's rig when it names one (hookStore.rig), else the rig whose store
+// a bd command run in dir reads.
+func (g *hookRigGuard) forLeg(rigName, dir string) *hookRigGuard {
+	if g == nil {
+		return nil
+	}
+	bound := *g
+	bound.legSet = true
+	bound.leg = nil
+	if _, _, known := rigNamespaceForRigName(g.cfg, strings.TrimSpace(rigName), g.sessions); known {
+		bound.leg = guardedRigNamespaceForRigName(g.cfg, g.cityPath, rigName, g.sessions)
+		return &bound
+	}
+	bound.leg = guardedRigNamespaceForDir(g.cfg, g.cityPath, dir, g.sessions)
+	return &bound
+}
+
+// boundTo returns the guard bound to the leg at dir, keeping a binding
+// forLeg already made.
+func (g *hookRigGuard) boundTo(dir string) *hookRigGuard {
+	if g == nil || g.legSet {
+		return g
+	}
+	return g.forLeg("", dir)
+}
+
+// namespaceFor returns the guarded namespace a row with id beadID on this
+// guard's leg is judged by, or nil.
 func (g *hookRigGuard) namespaceFor(beadID string) *rigNamespace {
-	if g == nil || strings.TrimSpace(beadID) == "" {
+	if g == nil {
 		return nil
 	}
-	ns, guarded := rigNamespaceForBeadID(g.cfg, beadID, g.sessions)
-	if !guarded {
-		return nil
-	}
-	return ns
+	return rigNamespaceForLeg(g.leg, g.cfg, strings.TrimSpace(beadID), g.sessions)
 }
 
 // filterCandidates drops the candidates a guarded rig does not let this city

@@ -53,12 +53,6 @@ import (
 //     through after refusing an actor or a row outside the rig's namespace. It
 //     holds no candidate and decides no assignment; it only narrows a claim
 //     some worker pull path already chose.
-//   - bd_rig_namespace.go INSPECTS a claim; it cannot originate one. It is
-//     the rig namespace guard of the `gc bd` passthrough: it reads the argv a
-//     caller handed to `gc bd` and refuses `update --claim` (and `ready
-//     --claim`) on a federation = "rig" rig when the actor is outside the
-//     rig's namespace. It only ever removes claims; the claim, when allowed,
-//     is still the caller's own bd invocation.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
@@ -71,7 +65,6 @@ var claimCASAllowedFiles = map[string]bool{
 	"bead_policy_store.go":          true,
 	"hook_claim_bead_events.go":     true,
 	"rig_namespace_store_writes.go": true,
-	"bd_rig_namespace.go":           true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

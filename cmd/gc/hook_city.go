@@ -61,7 +61,7 @@ func (h *hookCity) rigGuard() *hookRigGuard {
 			}
 			return cliStores(h.path, cityStore).Sessions(), nil
 		})
-		h.guard = newHookRigGuard(h.cfg, sessions)
+		h.guard = newHookRigGuard(h.path, h.cfg, sessions)
 	})
 	return h.guard
 }

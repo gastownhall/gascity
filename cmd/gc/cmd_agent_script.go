@@ -112,7 +112,8 @@ type agentScriptExecutor struct {
 	// (ok=true) when the current runner must claim/update across stores; ok=false
 	// runs the write in the default (inherited) environment. An error refuses
 	// the write outright (the rig namespace guard): no bd process runs.
-	resolveBeadStore func(beadID string) (dir string, env []string, ok bool, err error)
+	// args is the bd argv the write would run, which the guard checks.
+	resolveBeadStore func(beadID string, args []string) (dir string, env []string, ok bool, err error)
 }
 
 // runBDForBead runs a bd subprocess against beadID, redirecting it to the bead's
@@ -121,7 +122,7 @@ type agentScriptExecutor struct {
 // resolveBeadStore is returned without running bd and without a fallback.
 func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
 	if e.resolveBeadStore != nil {
-		dir, env, ok, err := e.resolveBeadStore(strings.TrimSpace(beadID))
+		dir, env, ok, err := e.resolveBeadStore(strings.TrimSpace(beadID), args)
 		if err != nil {
 			return err
 		}

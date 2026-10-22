@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,32 +18,52 @@ import (
 
 // hrgCity is city B: rig "beta" (prefix "bt") is guarded, rig "alpha"
 // (prefix "al") is not, and rigs "gamma" and "delta" are both guarded with
-// the prefix "zz", which makes that prefix ambiguous.
-func hrgCity() *config.City {
+// the prefix "zz", which makes that prefix ambiguous. Each rig has a store
+// of its own on disk, as a guarded rig must.
+func hrgCity(t *testing.T) *config.City {
+	t.Helper()
+	root := t.TempDir()
+	dir := func(name string) string {
+		d := filepath.Join(root, "rigs", name)
+		if err := os.MkdirAll(filepath.Join(d, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
 	beta := rnsGuardedRig("beta")
 	beta.Prefix = "bt"
-	beta.Path = "/rigs/beta"
+	beta.Path = dir("beta")
 	gamma := rnsGuardedRig("gamma")
 	gamma.Prefix = "zz"
-	gamma.Path = "/rigs/gamma"
+	gamma.Path = dir("gamma")
 	delta := rnsGuardedRig("delta")
 	delta.Prefix = "zz"
-	delta.Path = "/rigs/delta"
+	delta.Path = dir("delta")
 	return &config.City{
 		Workspace: config.Workspace{Name: "b", Prefix: "hq"},
 		Rigs: []config.Rig{
 			beta,
-			{Name: "alpha", Prefix: "al", Path: "/rigs/alpha"},
+			{Name: "alpha", Prefix: "al", Path: dir("alpha")},
 			gamma,
 			delta,
 		},
 	}
 }
 
+// hrgDir is the store root of the fixture's rig called name.
+func hrgDir(cfg *config.City, name string) string {
+	for _, r := range cfg.Rigs {
+		if r.Name == name {
+			return r.Path
+		}
+	}
+	return ""
+}
+
 func hrgGuard(t *testing.T) *hookRigGuard {
 	t.Helper()
 	res, _ := rnsCityBResolver(t)
-	g := newHookRigGuard(hrgCity(), res)
+	g := newHookRigGuard("/cities/b", hrgCity(t), res)
 	if g == nil {
 		t.Fatal("newHookRigGuard returned nil for a city with a guarded rig")
 	}
@@ -128,7 +150,7 @@ func hrgOps(t *testing.T, w *hrgWrites, guard *hookRigGuard, rows []beads.Bead) 
 
 func TestNewHookRigGuardNilWithoutGuardedRig(t *testing.T) {
 	cfg := &config.City{Rigs: []config.Rig{{Name: "alpha", Prefix: "al"}}}
-	if g := newHookRigGuard(cfg, nil); g != nil {
+	if g := newHookRigGuard("/cities/b", cfg, nil); g != nil {
 		t.Fatal("a city with no guarded rig must get no guard (unchanged behavior)")
 	}
 	if newHookCity("/cities/b", cfg).rigGuard() != nil {
@@ -193,7 +215,7 @@ func TestHookClaimDropsForeignAssignedRowAndKeepsOwnPoolRow(t *testing.T) {
 	var w hrgWrites
 	ops := hrgOps(t, &w, g, rows)
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("query", "/rigs/beta", hookClaimOptions{
+	code := doHookClaim("query", hrgDir(g.cfg, "beta"), hookClaimOptions{
 		Assignee:           poolIDB,
 		SessionID:          poolIDB,
 		IdentityCandidates: []string{poolIDB, shortIDB},
@@ -251,7 +273,7 @@ func TestHookClaimRefusedActorSpawnsNoBd(t *testing.T) {
 			ops := hrgOps(t, &w, g, rows)
 			var stdout, stderr bytes.Buffer
 			tc.opts.JSON = true
-			doHookClaim("query", "/rigs/beta", tc.opts, ops, &stdout, &stderr)
+			doHookClaim("query", hrgDir(g.cfg, "beta"), tc.opts, ops, &stdout, &stderr)
 			if w.total() != 0 {
 				t.Fatalf("writes ran despite the refusal: %+v; stderr=%s", w, stderr.String())
 			}
@@ -301,7 +323,7 @@ func TestHookClaimAdmittedPoolActorClaims(t *testing.T) {
 	var w hrgWrites
 	ops := hrgOps(t, &w, g, rows)
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("query", "/rigs/beta", hookClaimOptions{
+	code := doHookClaim("query", hrgDir(g.cfg, "beta"), hookClaimOptions{
 		Assignee:     poolIDB,
 		RouteTargets: []string{"beta/crew.worker"},
 		JSON:         true,
@@ -352,11 +374,11 @@ func TestPreassignContinuationSkipsUnadmittedPin(t *testing.T) {
 		return siblings, nil
 	}
 	ops.WorkflowStore = nil
-	assigned, err := preassignHookContinuationGroup(bead, hookClaimOptions{SessionID: shortIDB, Assignee: "mayor", RouteTargets: []string{"beta/crew.worker"}}, ops, "/rigs/beta")
+	assigned, err := preassignHookContinuationGroup(bead, hookClaimOptions{SessionID: shortIDB, Assignee: "mayor", RouteTargets: []string{"beta/crew.worker"}}, ops, hrgDir(g.cfg, "beta"))
 	if err != nil || len(assigned) != 0 || len(w.assigns) != 0 {
 		t.Fatalf("assigned=%v assigns=%v err=%v, want no pin", assigned, w.assigns, err)
 	}
-	assigned, err = preassignHookContinuationGroup(bead, hookClaimOptions{SessionID: shortIDB, Assignee: "beta/crew.lead", RouteTargets: []string{"beta/crew.worker"}}, ops, "/rigs/beta")
+	assigned, err = preassignHookContinuationGroup(bead, hookClaimOptions{SessionID: shortIDB, Assignee: "beta/crew.lead", RouteTargets: []string{"beta/crew.worker"}}, ops, hrgDir(g.cfg, "beta"))
 	if err != nil || strings.Join(w.assigns, ",") != "bt-2=beta/crew.lead" {
 		t.Fatalf("assigned=%v assigns=%v err=%v, want the alias pin", assigned, w.assigns, err)
 	}

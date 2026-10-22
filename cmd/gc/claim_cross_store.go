@@ -25,26 +25,42 @@ import (
 // store-env edge lives in agentScriptCrossStoreBeadEnv.
 //
 // It returns an error, for every agent and before any redirection, when the
-// bead's prefix maps to a rig with federation = "rig" (or to two guarded rigs,
-// which admit nothing) and actor is not admitted by it: the write would run
-// as an identity outside the rig's namespace. sessions is this city's own
-// session resolver (nil admits no pool session id).
-func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor string, sessions ownSessionResolver) (string, bool, error) {
+// store the write lands in is a rig with federation = "rig" (or the bead's
+// prefix maps to a guarded rig) and actor is not admitted by it
+// (agentScriptWriteNamespace). runnerRig is the runner's own rig, whose
+// store an unredirected write lands in. sessions is this city's own session
+// resolver (nil admits no pool session id).
+func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor, runnerRig string, sessions ownSessionResolver) (string, bool, error) {
 	if cfg == nil {
 		return "", false, nil
 	}
 	beadID = strings.TrimSpace(beadID)
-	if ns, guarded := rigNamespaceForBeadID(cfg, beadID, sessions); guarded && !rigNamespacePinAdmitted(ns, actor) {
+	rigDir := ""
+	if agentIsCrossStoreEligible(agentCfg) {
+		rigDir = sling.RigDirForBead(cfg, beadID)
+	}
+	// Rig paths are absolute here (agentScriptCrossStoreBeadEnv resolves
+	// them), so no city path is needed to find the runner's store.
+	if ns := agentScriptWriteNamespace(cfg, "", beadID, rigDir != "", runnerRig, sessions); ns != nil && !rigNamespacePinAdmitted(ns, actor) {
 		return "", false, newRigNamespacePathError("rig %q (federation = \"rig\") serves only %s; claim actor %q is outside it%s", rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
 	}
-	if !agentIsCrossStoreEligible(agentCfg) {
-		return "", false, nil
-	}
-	rigDir := sling.RigDirForBead(cfg, beadID)
 	if rigDir == "" {
 		return "", false, nil
 	}
 	return rigDir, true, nil
+}
+
+// agentScriptWriteNamespace returns the guarded namespace an agent-script
+// write against beadID is judged by, or nil. A redirected write lands in the
+// store the bead's prefix names, so the prefix decides. An unredirected one
+// lands in the runner's own store, so the runner's rig is the leg and the
+// prefix only adds a deny (rigNamespaceForLeg).
+func agentScriptWriteNamespace(cfg *config.City, cityPath, beadID string, redirected bool, runnerRig string, sessions ownSessionResolver) *rigNamespace {
+	var leg *rigNamespace
+	if !redirected {
+		leg = guardedRigNamespaceForRigName(cfg, cityPath, runnerRig, sessions)
+	}
+	return rigNamespaceForLeg(leg, cfg, beadID, sessions)
 }
 
 // agentScriptCrossStoreBeadEnv is the impure edge wired into the agent-script
@@ -55,10 +71,12 @@ func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor 
 // to the default (inherited) environment, preserving rig-agent behavior.
 //
 // The rig namespace guard is not best-effort: once the city resolves, a write
-// against a bead of a guarded rig whose actor the rig does not admit is an
-// error, whether or not the redirection could be resolved, and so is a city
-// config that cannot be loaded to tell. No bd process runs for it.
-func agentScriptCrossStoreBeadEnv(beadID string) (string, []string, bool, error) {
+// that lands in a guarded rig's store is checked like `gc bd` checks it (the
+// actor, the row's class, the assignee, routes and the creation stamp; see
+// bdRigNamespaceCheck), whether or not the redirection could be resolved, and
+// a city config that cannot be loaded to tell is an error. No bd process runs
+// for a refused write.
+func agentScriptCrossStoreBeadEnv(beadID string, bdArgs []string) (string, []string, bool, error) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
 		return "", nil, false, nil
@@ -74,9 +92,15 @@ func agentScriptCrossStoreBeadEnv(beadID string) (string, []string, bool, error)
 	// Normalize relative rig paths to absolute so RigDirForBead returns a usable
 	// command dir, matching cmd_hook's resolveRigPaths call after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
+	return agentScriptBeadEnvForCity(cityPath, cfg, beadID, bdArgs)
+}
 
+// agentScriptBeadEnvForCity is agentScriptCrossStoreBeadEnv once the city
+// and its config are resolved.
+func agentScriptBeadEnvForCity(cityPath string, cfg *config.City, beadID string, bdArgs []string) (string, []string, bool, error) {
 	var sessions ownSessionResolver
-	if cityHasGuardedRig(cfg) {
+	guarded := cityHasGuardedRig(cfg)
+	if guarded {
 		sessions = newCityCLISessionResolver(cityPath, cfg, func() (beads.SessionStore, error) {
 			cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
 			if err != nil {
@@ -91,15 +115,63 @@ func agentScriptCrossStoreBeadEnv(beadID string) (string, []string, bool, error)
 			agentCfg = &a
 		}
 	}
-	rigDir, ok, err := crossStoreClaimDir(cfg, agentCfg, beadID, agentScriptClaimActor(), sessions)
-	if err != nil || !ok {
+	runnerRig := configuredRigName(cityPath, agentCfg, cfg.Rigs)
+	if runnerRig == "" && agentCfg == nil {
+		runnerRig = agentScriptRig()
+	}
+	rigDir, ok, err := crossStoreClaimDir(cfg, agentCfg, beadID, agentScriptClaimActor(), runnerRig, sessions)
+	if err != nil {
 		return "", nil, false, err
+	}
+	if guarded {
+		if ns := agentScriptWriteNamespace(cfg, cityPath, beadID, ok, runnerRig, sessions); ns != nil {
+			scope := rigDir
+			if !ok {
+				scope = rigRootForName(runnerRig, cfg.Rigs)
+			}
+			if err := agentScriptRigNamespaceCheck(ns, agentScriptRowReader(cityPath, cfg, scope), bdArgs); err != nil {
+				return "", nil, false, err
+			}
+		}
+	}
+	if !ok {
+		return "", nil, false, nil
 	}
 	overrides, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 	if err != nil {
 		return "", nil, false, nil
 	}
 	return rigDir, mergeRuntimeEnv(os.Environ(), overrides), true, nil
+}
+
+// agentScriptRowReader reads rows of the guarded rig's store at scope
+// through its bd front door. A scope it cannot name is an error, so the row
+// cannot be classified and the write is refused.
+func agentScriptRowReader(cityPath string, cfg *config.City, scope string) func(string) (beads.Bead, error) {
+	var reader beads.Store
+	return func(id string) (beads.Bead, error) {
+		if strings.TrimSpace(scope) == "" {
+			return beads.Bead{}, fmt.Errorf("no store for the guarded rig")
+		}
+		if reader == nil {
+			reader = bdWriteGuardStore(scope, cityPath, cfg)
+		}
+		return reader.Get(id)
+	}
+}
+
+// agentScriptRigNamespaceCheck runs the `gc bd` check over an agent-script
+// bd argv against a guarded rig's store, reading rows through get.
+func agentScriptRigNamespaceCheck(ns *rigNamespace, get func(string) (beads.Bead, error), bdArgs []string) error {
+	check := &bdRigNamespaceCheck{
+		ns:    ns,
+		actor: bdEffectiveActorFromEnv(os.Getenv),
+		get:   get,
+	}
+	if _, msg, refused := check.check(bdArgs); refused {
+		return newRigNamespacePathError("%s", strings.TrimPrefix(strings.TrimSuffix(msg, "\n"), "gc bd: "))
+	}
+	return nil
 }
 
 // agentScriptAgentName is the agent identity the runner's config is resolved
