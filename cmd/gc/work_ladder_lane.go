@@ -155,7 +155,7 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 	p := &ladderPass{l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore)}
 	off := workladder.Gate{Held: true, Reason: "work_ladder_off"}
 	for _, row := range raw {
-		if !ladderGoverns(cfg, row) {
+		if !ladderGoverns(p.cfg, row) {
 			continue
 		}
 		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
