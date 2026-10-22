@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -569,11 +571,12 @@ func TestForeignClaimGate_UnknownRigLegFallsBackToPrefix(t *testing.T) {
 }
 
 // TestReleaseOrphanedPoolAssignments_GuardedRigOwnPoolSessionFromSessionStore
-// runs the controller's path end to end: newPoolRigNamespaceGate's resolver
-// reads the city's sessions store, behind the bead-policy layer (which hides
-// the store's pool id prefix; the HQ prefix differs, so only the look-through
-// finds it). This city's own dead pool session's claim is released; another
-// city's pool session claim is kept.
+// runs the one-shot path end to end (no controller resolver registered):
+// newPoolRigNamespaceGate's resolver reads the sessions store the sweep was
+// handed, behind the bead-policy layer (which hides the store's pool id
+// prefix; the HQ prefix differs, so only the look-through finds it). This
+// city's own dead pool session's claim is released; another city's pool
+// session claim is kept.
 func TestReleaseOrphanedPoolAssignments_GuardedRigOwnPoolSessionFromSessionStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigStore := beads.NewMemStore()
@@ -595,5 +598,197 @@ func TestReleaseOrphanedPoolAssignments_GuardedRigOwnPoolSessionFromSessionStore
 	}
 	if !strings.Contains(logBuf.String(), "kept 1 claims outside guarded rig namespaces (repo: 1)") {
 		t.Fatalf("missing the namespace count for the other city's claim:\n%s", logBuf.String())
+	}
+}
+
+// TestPoolRigNamespaceGate_UsesTheCityControllerResolver: in a controller the
+// sweep judges a guarded rig's claims with the city's one resolver, the one
+// its controller state registered (rigNamespaceSessions), not a resolver of
+// its own per pass. The sessions store handed to the sweep holds no record;
+// only the registered resolver's store knows this city's pool session, so
+// its dead claim is released only because the shared resolver answered. A
+// second pass reuses the same resolver and its remembered answer.
+func TestPoolRigNamespaceGate_UsesTheCityControllerResolver(t *testing.T) {
+	cityPath := t.TempDir()
+	rigStore := beads.NewMemStore()
+	cfg := foreignIdentityTestCity(t)
+	cfg.Rigs[0].Federation = config.RigFederationRig
+	record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
+	record.Status = "closed"
+	registered := rnsNewCountingStore(record)
+
+	h := newRigNamespaceSessions(cityPath)
+	h.setSessionStore(beadstest.Sessions(registered), ownSessionIDPrefixes(cfg, beadstest.Sessions(registered)))
+	unregister := registerRigNamespaceSessions(cityPath, h)
+	defer unregister()
+	done := markRigNamespaceControllerProcess()
+	defer done()
+
+	empty := beads.SessionStore{Store: beads.NewMemStore()}
+	first := newPoolRigNamespaceGate(cfg, cityPath, empty, nil)
+	second := newPoolRigNamespaceGate(cfg, cityPath, empty, nil)
+	if first == nil || second == nil {
+		t.Fatal("a city with a guarded rig got no namespace gate")
+	}
+	if got, ok := first.sessions.(*rigNamespaceSessions); !ok || got != h {
+		t.Fatalf("gate resolver = %T %p, want the registered controller resolver %p", first.sessions, first.sessions, h)
+	}
+	if second.sessions != first.sessions {
+		t.Fatal("a second pass built its own resolver instead of reusing the city's")
+	}
+
+	sweep := func() {
+		own := seedForeignIdentityWork(t, rigStore, "held by this city's dead pool session", poolIDB)
+		foreign := seedForeignIdentityWork(t, rigStore, "held by another city's pool session", poolIDA)
+		released := releaseOrphanedPoolAssignments(beads.NewMemStore(), empty, cfg, cityPath, nil,
+			[]beads.Bead{own, foreign}, []beads.Store{rigStore, rigStore}, []string{"repo", "repo"},
+			map[string]beads.Store{"repo": rigStore}, nil, nil, nil)
+		if len(released) != 1 || released[0].ID != own.ID {
+			t.Fatalf("released = %v, want exactly [%s] (admitted by the registered resolver)", released, own.ID)
+		}
+	}
+	captureSweepLog(t)
+	sweep()
+	reads := registered.gets.Load() + registered.lists.Load()
+	if reads == 0 {
+		t.Fatal("the registered resolver's sessions store was never read")
+	}
+	sweep()
+	if again := registered.gets.Load() + registered.lists.Load(); again != reads {
+		t.Fatalf("the second pass read the sessions store again (%d reads, then %d); want the shared resolver's remembered answer", reads, again)
+	}
+}
+
+// TestPoolRigNamespaceGate_ControllerWithoutRegisteredResolverKeepsClaims: in
+// a controller process where the city has registered no resolver, the sweep
+// does not build one; it keeps every pool claim in a guarded rig and names it.
+func TestPoolRigNamespaceGate_ControllerWithoutRegisteredResolverKeepsClaims(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := foreignIdentityTestCity(t)
+	cfg.Rigs[0].Federation = config.RigFederationRig
+	record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
+	sessions := rnsNewCountingStore(record)
+	done := markRigNamespaceControllerProcess()
+	defer done()
+
+	g := newPoolRigNamespaceGate(cfg, cityPath, beads.SessionStore{Store: sessions}, nil)
+	if _, ok := g.sessions.(unavailableSessionResolver); !ok {
+		t.Fatalf("gate resolver = %T, want one that admits no session", g.sessions)
+	}
+	gate := newForeignClaimGate(cfg, beads.SessionStore{Store: sessions})
+	gate.namespaces = g
+	if !gate.claimMayStillBeHeld(poolIDB, "repo-1", "rig:repo", map[string]bool{}) {
+		t.Fatal("a pool claim was released with no controller resolver registered")
+	}
+	if gate.lookupErr == nil || gate.protected.claims() != 1 {
+		t.Fatalf("lookupErr = %v, protected = %d; want the claim kept and named", gate.lookupErr, gate.protected.claims())
+	}
+	if sessions.gets.Load()+sessions.lists.Load() != 0 {
+		t.Fatal("the sweep read the sessions store through a resolver of its own")
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ControllerSweepReleasesThroughTheGuardedStore
+// runs the controller's pool dead-assignee sweep over a guarded rig's store
+// as the controller opens it (policy, guard, and optionally the cache), with
+// the city's registered controller resolver. This city's dead pool session
+// claims, plain and in a continuation group, and a dead local pool slot are
+// released through the guard; another city's pool session claim and a claim
+// outside the namespace are kept and counted.
+func TestReleaseOrphanedPoolAssignments_ControllerSweepReleasesThroughTheGuardedStore(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		name := "uncached"
+		if cached {
+			name = "cached"
+		}
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := foreignIdentityTestCity(t)
+			cfg.Rigs[0].Federation = config.RigFederationRig
+			record := rnsSessionBead(poolIDB, "repo/worker", "worker-"+poolIDB)
+			record.Status = "closed"
+			registered := rnsNewCountingStore(record)
+
+			h := newRigNamespaceSessions(cityPath)
+			h.setSessionStore(beadstest.Sessions(registered), ownSessionIDPrefixes(cfg, beadstest.Sessions(registered)))
+			unregister := registerRigNamespaceSessions(cityPath, h)
+			defer unregister()
+			done := markRigNamespaceControllerProcess()
+			defer done()
+
+			ns, ok := newRigNamespace(cfg.Rigs[0], h)
+			if !ok {
+				t.Fatal("no namespace for the guarded rig")
+			}
+			engine := beads.NewMemStore()
+			guarded := guardRigStore(wrapStoreWithBeadPolicies(engine, cfg), ns)
+			if cached {
+				guarded = wrapWithCachingStoreFeed(context.Background(), guarded, nil, false, nil)
+			}
+			if rigNamespaceOfStore(guarded) == nil {
+				t.Fatalf("the store stack is not guarded: %T", guarded)
+			}
+
+			// Rows as bd wrote them, another city's included, straight into
+			// the engine.
+			seed := func(title, assignee string, extra map[string]string) beads.Bead {
+				t.Helper()
+				md := map[string]string{"gc.routed_to": "repo/worker"}
+				for k, v := range extra {
+					md[k] = v
+				}
+				work, err := engine.Create(beads.Bead{Title: title, Assignee: assignee, Metadata: md})
+				if err != nil {
+					t.Fatalf("create %q: %v", title, err)
+				}
+				inProgress := "in_progress"
+				if err := engine.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+					t.Fatalf("start %q: %v", title, err)
+				}
+				work, err = engine.Get(work.ID)
+				if err != nil {
+					t.Fatalf("get %q: %v", title, err)
+				}
+				return work
+			}
+			own := seed("this city's dead pool session", poolIDB, nil)
+			ownGroup := seed("this city's dead pool session, continuation group", poolIDB, map[string]string{"gc.continuation_group": "g1"})
+			otherPool := seed("another city's pool session", poolIDA, nil)
+			outside := seed("outside the namespace", "alpha/crew", nil)
+			slot := seed("dead local pool slot", "repo/worker-1", nil)
+			work := []beads.Bead{own, ownGroup, otherPool, outside, slot}
+			stores := make([]beads.Store, len(work))
+			refs := make([]string, len(work))
+			for i := range work {
+				stores[i], refs[i] = guarded, "repo"
+			}
+
+			logBuf := captureSweepLog(t)
+			released := releaseOrphanedPoolAssignments(beads.NewMemStore(), beads.SessionStore{Store: beads.NewMemStore()}, cfg, cityPath, nil,
+				work, stores, refs, map[string]beads.Store{"repo": guarded}, nil, nil, nil)
+			got := map[string]bool{}
+			for _, r := range released {
+				got[r.ID] = true
+			}
+			wantReleased := map[string]bool{own.ID: true, ownGroup.ID: true, slot.ID: true}
+			for _, wb := range work {
+				row, err := engine.Get(wb.ID)
+				if err != nil {
+					t.Fatalf("get %s: %v", wb.ID, err)
+				}
+				if wantReleased[wb.ID] {
+					if !got[wb.ID] || row.Status != "open" || row.Assignee != "" {
+						t.Errorf("%s (%s): released=%v status=%q assignee=%q; want released through the guard", wb.ID, wb.Title, got[wb.ID], row.Status, row.Assignee)
+					}
+					continue
+				}
+				if got[wb.ID] || row.Status != "in_progress" || row.Assignee != wb.Assignee {
+					t.Errorf("%s (%s): released=%v status=%q assignee=%q; want kept", wb.ID, wb.Title, got[wb.ID], row.Status, row.Assignee)
+				}
+			}
+			if !strings.Contains(logBuf.String(), "kept 2 claims outside guarded rig namespaces (repo: 2)") {
+				t.Errorf("missing the namespace count line:\n%s", logBuf.String())
+			}
+		})
 	}
 }

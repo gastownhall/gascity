@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -30,21 +31,50 @@ type poolRigNamespaceGate struct {
 }
 
 // newPoolRigNamespaceGate returns the gate for one sweep pass, or nil when no
-// rig of cfg is guarded. Its session resolver reads only this city's sessions
-// store, for this pass.
+// rig of cfg is guarded. Its session resolver is poolRigNamespaceSessions'.
 func newPoolRigNamespaceGate(cfg *config.City, cityPath string, sessionStore beads.SessionStore, keepLog *deadAssigneeKeepLog) *poolRigNamespaceGate {
 	if !cityHasGuardedRig(cfg) {
 		// Still report a change to zero when the last guarded rig is gone.
 		keepLog.logNamespaceKept("")
 		return nil
 	}
-	resolver := newControllerSessionResolver(cityPath, nil, func() (beads.SessionStore, error) {
+	return &poolRigNamespaceGate{cfg: cfg, sessions: poolRigNamespaceSessions(cfg, cityPath, sessionStore), keepLog: keepLog}
+}
+
+// poolRigNamespaceSessions returns the own-session resolver the sweep judges
+// a guarded rig's claims with:
+//
+//   - in a controller, the city's one resolver, registered when its
+//     controller state was built (rigNamespaceSessions): the same resolver,
+//     snapshot and remembered answers as the city's guarded rig stores, kept
+//     across passes, pointed at the sessions store on every reload, and
+//     reset by the controller's beginPass;
+//   - in a controller process where the city has registered none, a resolver
+//     that admits no session, so every pool claim in a guarded rig is kept and
+//     named, as the guarded stores refuse them;
+//   - outside a controller (the one-shot pass of gc start), a resolver over
+//     sessionStore, the city's sessions store, for this call.
+func poolRigNamespaceSessions(cfg *config.City, cityPath string, sessionStore beads.SessionStore) ownSessionResolver {
+	if h, controllerProcess := registeredRigNamespaceSessions(cityPath); h != nil {
+		return h
+	} else if controllerProcess {
+		return unavailableSessionResolver{err: fmt.Errorf("city %s: %w (its controller has not registered its resolver)", cityPath, errRigNamespaceSessionsUnavailable)}
+	}
+	return newControllerSessionResolver(cityPath, nil, func() (beads.SessionStore, error) {
 		if noSessionStore(sessionStore) {
 			return beads.SessionStore{}, fmt.Errorf("no session store")
 		}
 		return sessionStore, nil
 	}, ownSessionIDPrefixes(cfg, sessionStore)...)
-	return &poolRigNamespaceGate{cfg: cfg, sessions: resolver, keepLog: keepLog}
+}
+
+// registeredRigNamespaceSessions returns the controller resolver registered
+// for the city at cityPath (registerRigNamespaceSessions), or nil, and
+// whether this process runs a controller.
+func registeredRigNamespaceSessions(cityPath string) (*rigNamespaceSessions, bool) {
+	rigNamespaceResolvers.mu.Lock()
+	defer rigNamespaceResolvers.mu.Unlock()
+	return rigNamespaceResolvers.controllers[filepath.Clean(cityPath)], rigNamespaceResolvers.controllerProcess > 0
 }
 
 // namespaceFor returns the namespace guarding the claim's store: the rig its
