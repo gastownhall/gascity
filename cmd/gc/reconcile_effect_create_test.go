@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -410,17 +411,22 @@ func TestBootRefusesWithoutAtomicCloser(t *testing.T) {
 	}
 }
 
-// Kills over-refusal: maintainer-city's shape, a SQLite store with the
-// revision layout, bare or under the controller's CachingStore, and the
-// native-Dolt wrapper chain (the bead policy store over the CachingStore
-// over an atomic-close store, stamped auto) resolve both capabilities, read
-// by boot and by doctor alike.
+// Kills over-refusal: maintainer-city's shape (its sessions and graph
+// classes on a SQLite store with the revision layout), bare or under the
+// controller's CachingStore, and the native-Dolt wrapper chain (the bead
+// policy store over the CachingStore over an atomic-close store, stamped
+// auto) resolve every capability, list revisions included, read by boot and
+// by doctor alike. Each store holds a written row, so revision fidelity is
+// read off a real revision rather than passed on an empty sample.
 func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 	sqlite := stampedSQLite(t, gate.Auto)
 	atomic := fencingAtomicCloseStore(t)
-	chain := &beadPolicyStore{Store: beads.NewCachingStoreForTest(atomic, nil), cfg: workerCity(1)}
+	for _, s := range []beads.Store{sqlite, atomic} {
+		seedWrittenRow(t, s)
+	}
+	chain := &beadPolicyStore{Store: primedCacheOver(t, atomic), cfg: workerCity(1)}
 	for name, store := range map[string]beads.Store{
-		"sqlite": sqlite, "cached sqlite": beads.NewCachingStoreForTest(sqlite, nil), "policy over cache over atomic close": chain,
+		"sqlite": sqlite, "cached sqlite": primedCacheOver(t, sqlite), "policy over cache over atomic close": chain,
 	} {
 		for _, inspect := range []bool{false, true} {
 			if err := v2CapabilityRefusal(v2ClassStoreCapabilities(store, store, inspect)); err != nil {
@@ -430,12 +436,268 @@ func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 	}
 }
 
+// Kills a C0.7 that checks the conditional-writer interface alone, or names
+// the wrong fix: a store that fences but lists every row at revision 0 while
+// it reads live at a real one (BdStore's `bd list --json`, mc-3c8h5) is
+// refused, bare and under the controller's CachingStore, naming its list
+// revisions and a store whose list reads carry them as the fix, by boot and
+// by doctor alike (TestDoctorC07SkipsOnlyTheScanningRevisionRead).
+func TestBootRefusesARevisionZeroLister(t *testing.T) {
+	atomic := fencingAtomicCloseStore(t)
+	seedWrittenRow(t, atomic)
+	blind := listRevisionZeroStore{atomic}
+	for name, store := range map[string]beads.Store{"bare": blind, "cached": primedCacheOver(t, blind)} {
+		for _, inspect := range []bool{false, true} {
+			caps := v2ClassStoreCapabilities(store, store, inspect)
+			if !caps[0].Writer || !caps[0].Closer {
+				t.Fatalf("%s (inspect=%v): capabilities %+v, want a writer and a closer, so only list revisions refuse", name, inspect, caps)
+			}
+			refusal := v2CapabilityRefusal(caps)
+			if refusal == nil || !strings.Contains(refusal.Error(), "list revisions false (list reads carry no revision") ||
+				!strings.Contains(refusal.Error(), "a store whose list reads carry revisions") {
+				t.Errorf("%s (inspect=%v): C0.7 = %v, want a refusal naming the list revisions and a store whose list reads carry them", name, inspect, refusal)
+			}
+		}
+	}
+}
+
+// Kills a C0.7 refusal whose fix names a capability the refused stores
+// already have: each refusal names the fix for what they lack, one class's
+// store lacking a fence and the other's revisions in its list reads included.
+func TestC07RefusalNamesTheFixForWhatTheStoresLack(t *testing.T) {
+	capable := v2StoreCapability{Class: "sessions", Kind: "MemStore", Mode: gate.Auto, Writer: true, Closer: true, ListRevisions: true}
+	off := v2StoreCapability{Class: "sessions", Kind: "BdStore", Mode: gate.Off}
+	unfenced := v2StoreCapability{Class: "sessions", Kind: "BdStore", Mode: gate.Auto, Writer: true}
+	blind := v2StoreCapability{
+		Class: "graph", Kind: "MemStore", Mode: gate.Auto, Writer: true, Closer: true,
+		ListReason: "list reads carry no revision (gc-1 listed at 0, live at 3)",
+	}
+	for _, tc := range []struct {
+		name string
+		caps []v2StoreCapability
+		fix  string
+	}{
+		{"off", []v2StoreCapability{off, capable}, `set [beads] conditional_writes = "auto"`},
+		{"unfenced", []v2StoreCapability{unfenced, capable}, "put the class on a store that fences (SQLite or native Dolt)"},
+		{"blind", []v2StoreCapability{capable, blind}, "put the class on a store whose list reads carry revisions (SQLite or native Dolt)"},
+		{"unfenced and blind", []v2StoreCapability{unfenced, blind}, "put the class on a store that fences and whose list reads carry revisions (SQLite or native Dolt)"},
+	} {
+		refusal := v2CapabilityRefusal(tc.caps)
+		if refusal == nil || !strings.Contains(refusal.Error(), "v2 never writes blind: "+tc.fix+`, or set session_reconciler = "legacy"`) {
+			t.Errorf("%s: C0.7 = %v, want the fix %q", tc.name, refusal, tc.fix)
+		}
+	}
+	if refusal := v2CapabilityRefusal([]v2StoreCapability{capable, capable}); refusal != nil {
+		t.Errorf("C0.7 over capable stores = %v, want none", refusal)
+	}
+}
+
+// Kills a C0.7 that takes a revision read with nothing to decide on for a
+// verdict: over a store with no open or in-progress row (an empty city),
+// boot and doctor alike neither admit its list revisions nor refuse or
+// retry them, name them not decided, and let boot proceed.
+func TestC07UndecidedRevisionReadLetsBootProceed(t *testing.T) {
+	empty := fencingAtomicCloseStore(t)
+	for name, store := range map[string]beads.Store{"bare": empty, "cached": primedCacheOver(t, empty)} {
+		for _, inspect := range []bool{false, true} {
+			caps := v2ClassStoreCapabilities(store, store, inspect)
+			for _, c := range caps {
+				if !c.Writer || !c.Closer || c.ListRevisions || c.ListReason != "" || c.ListErr != nil ||
+					!strings.Contains(c.String(), "list revisions not decided (no open or in-progress row to sample)") {
+					t.Errorf("%s (inspect=%v): %s; want a writer and a closer, and the list revisions not decided", name, inspect, c)
+				}
+			}
+			if verdict := v2CapabilityVerdict(caps); verdict != nil {
+				t.Errorf("%s (inspect=%v): C0.7 = %v, want boot to proceed", name, inspect, verdict)
+			}
+		}
+	}
+}
+
+// Kills a doctor that reads revisions over native Dolt, cached or not (a
+// Live listing that walks the non-closed ledger, seconds at 80k rows), and
+// one that drops its pre-flight read where the read is cheap. Over a store
+// whose read walks the ledger, doctor lists nothing, refuses nothing and
+// names the skip, for both classes when they share the store; over any other
+// store it reads the revisions.
+func TestDoctorC07SkipsOnlyTheScanningRevisionRead(t *testing.T) {
+	inner := fencingAtomicCloseStore(t)
+	seedWrittenRow(t, inner)
+	bare := &c07ListStore{Store: listRevisionZeroStore{inner}}
+	if refusal := v2CapabilityRefusal(v2ClassStoreCapabilities(bare, bare, true)); refusal == nil {
+		t.Fatal("doctor over a cheap uncached store did not read the revisions")
+	}
+	prev := listRevisionCheckIsCheap
+	listRevisionCheckIsCheap = func(beads.Store) bool { return false }
+	t.Cleanup(func() { listRevisionCheckIsCheap = prev })
+	bare.lists.Store(0)
+	caps := v2ClassStoreCapabilities(bare, bare, true)
+	if n := bare.lists.Load(); n != 0 || v2CapabilityRefusal(caps) != nil {
+		t.Fatalf("doctor over a scanning store: %d lists, refusal %v; want neither", n, v2CapabilityRefusal(caps))
+	}
+	for _, c := range caps {
+		if c.ListRevisions || !strings.Contains(c.String(), "list revisions not read over native Dolt, whose listing walks the ledger") {
+			t.Errorf("doctor over a scanning store: %s; want the skip named", c)
+		}
+	}
+	if v2ClassStoreCapabilities(bare, bare, false); bare.lists.Load() == 0 {
+		t.Error("boot skipped the revision read too")
+	}
+}
+
+// uncomparableStore holds a slice, so == on it panics.
+type uncomparableStore struct {
+	beads.Store
+	_ []string
+}
+
+// Kills a store-identity check that panics: two class stores whose
+// comparable wrapper holds a store of an uncomparable type are not the same
+// store, and C0.7 reads each.
+func TestSameClassStoreNeverPanics(t *testing.T) {
+	mem := beads.NewMemStore()
+	wrapped := beads.SessionStore{Store: uncomparableStore{Store: mem}}
+	if sameClassStore(wrapped, wrapped) || sameClassStore(uncomparableStore{Store: mem}, uncomparableStore{Store: mem}) {
+		t.Fatal("uncomparable stores reported as one store")
+	}
+	if !sameClassStore(mem, mem) || sameClassStore(mem, beads.NewMemStore()) || sameClassStore(nil, mem) {
+		t.Fatal("store identity wrong for comparable stores")
+	}
+}
+
+// c07ListStore counts List calls, or fails them with err; conditional
+// writes resolve to the store it wraps.
+type c07ListStore struct {
+	beads.Store
+	lists atomic.Int32
+	err   error
+}
+
+func (s *c07ListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.lists.Add(1)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+func (s *c07ListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// Kills a C0.7 that refuses on a failed read, or reports it as a missing
+// capability, or a boot that names another step while it retries: a store
+// whose revision read fails is no refusal, names the read in its own error,
+// and boot retries it after its backoff rather than stopping, in the
+// capabilities boot state.
+func TestC07UnreadStoreIsRetriedNotRefused(t *testing.T) {
+	store := &c07ListStore{Store: fencingAtomicCloseStore(t), err: errors.New("dial tcp: connection refused")}
+	caps := v2ClassStoreCapabilities(store, store, false)
+	if refusal := v2CapabilityRefusal(caps); refusal != nil {
+		t.Fatalf("C0.7 refused a store it could not read: %v", refusal)
+	}
+	var unread *v2CapabilityUnreadError
+	verdict := v2CapabilityVerdict(caps)
+	if !errors.As(verdict, &unread) || strings.Contains(verdict.Error(), "refuses to boot") || !strings.Contains(verdict.Error(), "connection refused") {
+		t.Fatalf("verdict = %v, want a read failure of its own naming the cause", verdict)
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		stderr := &synchronizedBuffer{}
+		rt := newDefaultPlanner(stderr)
+		refusal := errors.New("refused on the retry")
+		calls, retryState := 0, ""
+		rt.host.capabilities = func() error {
+			calls++
+			if calls == 1 {
+				return verdict
+			}
+			retryState = rt.bootState()
+			return refusal
+		}
+		start := time.Now()
+		if err := rt.boot(context.Background()); !errors.Is(err, refusal) || calls != 2 {
+			t.Fatalf("boot = %v after %d C0.7 reads, want the read retried once and then the refusal", err, calls)
+		}
+		if waited := time.Since(start); waited < v2LaneBaseBackoff*9/10 || waited > v2LaneBaseBackoff*11/10 {
+			t.Errorf("boot retried the read after %s, want its first backoff (%s ±10%%)", waited, v2LaneBaseBackoff)
+		}
+		if retryState != plannerBootCapabilities || rt.bootState() != plannerBootCapabilities {
+			t.Errorf("boot state %q while C0.7 retried, %q once it refused; want %q for both", retryState, rt.bootState(), plannerBootCapabilities)
+		}
+		if !strings.Contains(stderr.String(), "C0.7 store read failed (retry in") {
+			t.Fatalf("stderr %q, want the retry reported", stderr.String())
+		}
+	})
+}
+
+// Kills a revision read that costs boot more than it decides: none for a
+// store that already lacks a closer, and one read's listings for a store
+// both classes share.
+func TestC07RevisionReadSkippedAndShared(t *testing.T) {
+	noCloser := &c07ListStore{Store: fencedMemStore(t)}
+	seedWrittenRow(t, noCloser.Store)
+	if caps := v2ClassStoreCapabilities(noCloser, noCloser, false); caps[0].Closer || v2CapabilityRefusal(caps) == nil {
+		t.Fatalf("capabilities %+v, want no closer and a refusal", caps)
+	}
+	if n := noCloser.lists.Load(); n != 0 {
+		t.Errorf("a store without a closer was listed %d times, want 0", n)
+	}
+	shared := &c07ListStore{Store: fencingAtomicCloseStore(t)}
+	seedWrittenRow(t, shared.Store)
+	if err := beads.CheckListRevisionFidelity(shared); err != nil {
+		t.Fatalf("revision read over the shared store: %v", err)
+	}
+	once := shared.lists.Swap(0)
+	caps := v2ClassStoreCapabilities(shared, shared, false)
+	if !caps[0].ListRevisions || !caps[1].ListRevisions {
+		t.Fatalf("capabilities %+v, want both classes' list revisions read", caps)
+	}
+	if n := shared.lists.Load(); n != once {
+		t.Errorf("a store both classes share was listed %d times, want %d (one revision read)", n, once)
+	}
+}
+
+// listRevisionZeroStore lists every row at revision 0 and keeps the real
+// revision on Get; conditional writes resolve to the store it wraps.
+type listRevisionZeroStore struct{ beads.Store }
+
+func (s listRevisionZeroStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(q)
+	for i := range rows {
+		rows[i].Revision = 0
+	}
+	return rows, err
+}
+
+func (s listRevisionZeroStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// seedWrittenRow creates a row on s and writes it once.
+func seedWrittenRow(t *testing.T, s beads.Store) {
+	t.Helper()
+	b, err := s.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(b.ID, beads.UpdateOpts{Assignee: stringPtr("worker")}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// primedCacheOver is the controller's CachingStore over backing, primed.
+func primedCacheOver(t *testing.T, backing beads.Store) *beads.CachingStore {
+	t.Helper()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return cache
+}
+
 // fencingAtomicCloseStore is a store C0.7 admits: an atomic-close MemStore
 // stamped auto.
 func fencingAtomicCloseStore(t *testing.T) beads.Store {
 	t.Helper()
 	store := beads.NewAtomicCloseMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return store
@@ -449,7 +711,7 @@ func TestDoctorC07ReadFiresNoDegradeEvent(t *testing.T) {
 	mem := beads.NewMemStore()
 	mem.DisableConditionalWrites = true
 	degraded := 0
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
 		t.Fatal(err)
 	}
 	caps := v2ClassStoreCapabilities(mem, mem, true)
@@ -471,7 +733,7 @@ func TestSessionReconcilerDoctorReportsC07(t *testing.T) {
 		name, mode string
 		want       doctor.CheckStatus
 	}{
-		{"legacy", "", doctor.StatusOK},
+		{"legacy", "legacy", doctor.StatusOK},
 		{"v2", "v2", doctor.StatusError},
 	} {
 		cfg := workerCity(1)

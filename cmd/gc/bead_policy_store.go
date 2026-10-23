@@ -274,6 +274,59 @@ func (s *beadPolicyStore) ReadyPreferCache(query beads.ReadyQuery) ([]beads.Bead
 	return beads.ReadyPreferCache(s.Store, expandPolicyReadyQuery(query))
 }
 
+// ReadyOrdered forwards a bounded ordered ready read (beads.OrderedReadyReader)
+// with the policy's expanded read tier, exactly as Ready does. Explicit for the
+// reason DeleteBatch is: the embedded Store interface does not promote optional
+// capabilities, and a silent wrapper would send every bounded read down the
+// whole-set path.
+func (s *beadPolicyStore) ReadyOrdered(query beads.ReadyQuery, order beads.ReadyOrder) ([]beads.Bead, bool, error) {
+	return beads.ReadyOrdered(s.Store, expandPolicyReadyQuery(query), order)
+}
+
+var (
+	_ beads.ChildrenBatchLister = (*beadPolicyStore)(nil)
+	_ beads.ChildrenBatchLister = (*beadPolicyGraphStore)(nil)
+)
+
+// ChildrenOfAny forwards the batched children read to the wrapped store, at
+// the tier this layer's own Children reads. Children widens a TierIssues read
+// to TierBoth, so the forwarded batch asks for both tiers too; otherwise a
+// wrapped bd store would answer the batch without the ephemeral children the
+// per-parent read returns. A wrapped store without the batch is read one
+// parent at a time through this layer's Children.
+//
+// Explicit for the reason DepListBatch above is: the embedded Store interface
+// does not promote optional capabilities, so a silent wrapper sends
+// molecule.ListSubtree back to one `bd list --parent` plus one `bd query` per
+// member. beadPolicyGraphStore embeds *beadPolicyStore, so it forwards through
+// this too.
+func (s *beadPolicyStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	batch, ok := s.Store.(beads.ChildrenBatchLister)
+	if !ok {
+		return beads.ChildrenOfAnyPerParent(s, parentIDs, opts...)
+	}
+	return batch.ChildrenOfAny(parentIDs, policyTierQueryOpts(opts)...)
+}
+
+// policyTierQueryOpts restates opts' tier as the policy layer reads it
+// (policyTierFromOpts), keeping every other option.
+func policyTierQueryOpts(opts []beads.QueryOpt) []beads.QueryOpt {
+	out := make([]beads.QueryOpt, 0, len(opts)+1)
+	for _, opt := range opts {
+		if opt == beads.WithBothTiers || opt == beads.WithEphemeral {
+			continue
+		}
+		out = append(out, opt)
+	}
+	switch policyTierFromOpts(opts) {
+	case beads.TierBoth:
+		out = append(out, beads.WithBothTiers)
+	case beads.TierWisps:
+		out = append(out, beads.WithEphemeral)
+	}
+	return out
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

@@ -79,7 +79,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	startSessionResetTestController(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{identity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionReset([]string{identity}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionReset = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -152,7 +152,7 @@ func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 1 {
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, false); code != 1 {
 		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if got := stdout.String(); got != "" {
@@ -645,7 +645,7 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionReset(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -777,7 +777,7 @@ func TestCmdSessionReset_ControllerClearFailureDoesNotQueueRestart(t *testing.T)
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"session-a"}, &stdout, &stderr); code != 1 {
+	if code := cmdSessionReset([]string{"session-a"}, "", &stdout, &stderr, false); code != 1 {
 		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `clearing session circuit breaker for "session-a": clear failed`) {
@@ -933,7 +933,7 @@ func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
 	startSessionResetTestController(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr, true); code != 0 {
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, true); code != 0 {
 		t.Fatalf("cmdSessionReset = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"mode":"rollback"`) {

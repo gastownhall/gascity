@@ -383,6 +383,7 @@ var stateWriters = map[string]string{
 	"internal/session/lifecycle_transition.go:QuarantinePatch":                "patch builder",
 	"internal/session/lifecycle_transition.go:ReactivatePatch":                "patch builder",
 	"internal/session/lifecycle_transition.go:RequestWakePatch":               "patch builder",
+	"internal/session/lifecycle_transition.go:RevertDrainAckStopPendingPatch": "patch builder (legacy drain-ack reverts its own stop-pending mark)",
 	"internal/session/lifecycle_transition.go:SleepPatch":                     "patch builder (gc session kill, idle sleep)",
 	"internal/session/manager.go:Manager.createBeadOnly":                      "create's initial metadata",
 	"internal/session/manager.go:Manager.createStarted":                       "create's initial metadata",

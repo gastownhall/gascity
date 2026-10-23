@@ -30,6 +30,7 @@ import (
 // interfaces, by name. TestOptionalInterfacesAreListed keeps it complete.
 var optionalInterfaces = map[string]reflect.Type{
 	"AttachmentObserverWithError":     reflect.TypeFor[runtime.AttachmentObserverWithError](),
+	"BackgroundWorkStopper":           reflect.TypeFor[runtime.BackgroundWorkStopper](),
 	"BackendListingProvider":          reflect.TypeFor[runtime.BackendListingProvider](),
 	"BackendsProvider":                reflect.TypeFor[runtime.BackendsProvider](),
 	"ConditionalProcessTableScanner":  reflect.TypeFor[runtime.ConditionalProcessTableScanner](),
@@ -38,6 +39,8 @@ var optionalInterfaces = map[string]reflect.Type{
 	"EnvironmentBatchProvider":        reflect.TypeFor[runtime.EnvironmentBatchProvider](),
 	"ExecProvider":                    reflect.TypeFor[runtime.ExecProvider](),
 	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
+	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
+	"FencedInteractionProvider":       reflect.TypeFor[runtime.FencedInteractionProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
@@ -51,6 +54,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"InventoryProvider":               reflect.TypeFor[runtime.InventoryProvider](),
 	"KeyedNudgeProvider":              reflect.TypeFor[runtime.KeyedNudgeProvider](),
 	"ListingAttestation":              reflect.TypeFor[runtime.ListingAttestation](),
+	"LocalTranscriptProvider":         reflect.TypeFor[runtime.LocalTranscriptProvider](),
 	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
 	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
@@ -63,10 +67,13 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SessionObjectKiller":             reflect.TypeFor[runtime.SessionObjectKiller](),
 	"SessionRosterProvider":           reflect.TypeFor[runtime.SessionRosterProvider](),
 	"SleepCapabilityProvider":         reflect.TypeFor[runtime.SleepCapabilityProvider](),
+	"SteerCapabilityProvider":         reflect.TypeFor[runtime.SteerCapabilityProvider](),
 	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
 	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),
 	"TurnInterruptCapabilityProvider": reflect.TypeFor[runtime.TurnInterruptCapabilityProvider](),
+	"TurnObservationProvider":         reflect.TypeFor[runtime.TurnObservationProvider](),
+	"TurnRunningProvider":             reflect.TypeFor[runtime.TurnRunningProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
 }
 
@@ -155,16 +162,30 @@ current-context: c
 		runtime.ProfileSubprocess: subprocess.NewSeamBacked(),
 		runtime.ProfileHerdr:      herdr.New("city", t.TempDir(), t.TempDir(), 0, 0),
 		runtime.ProfileK8s:        kube,
-		runtime.ProfileExec:       exec.NewSeamBacked("/bin/true"),
+		runtime.ProfileExec:       exec.NewSeamBacked(execConnectionPack(t)),
 		runtime.ProfileSSH:        ssh.NewSeamBacked(ep),
 		runtime.ProfileT3Bridge:   t3bridge.NewSeamBacked(),
 	}
 }
 
+// execConnectionPack is an exec pack that declares the exec connection and
+// input fencing (proc.exec, input-fence) alone, the tmux-in-a-box shape the
+// exec profile models, and answers every other op as /bin/true does.
+func execConnectionPack(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "pack")
+	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\",\"input-fence\"]}'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
-// sidecar, a transport, an idle-proof budget, a turn-interrupt mode), or no
+// sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
+// fencing, response fencing, local transcripts, a steer mode), or no
 // backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
@@ -190,7 +211,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -208,6 +229,18 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.TurnInterruptCapabilityProvider); ok {
 		out[5] = string(f.TurnInterruptMode("s"))
+	}
+	if f, ok := p.(runtime.FencedInputProvider); ok {
+		out[6] = string(f.InputFencing("s"))
+	}
+	if f, ok := p.(runtime.LocalTranscriptProvider); ok {
+		out[7] = strconv.FormatBool(f.LocalTranscripts())
+	}
+	if f, ok := p.(runtime.SteerCapabilityProvider); ok {
+		out[8] = string(f.SteerMode("s"))
+	}
+	if f, ok := p.(runtime.FencedInteractionProvider); ok {
+		out[9] = string(f.ResponseFencing("s"))
 	}
 	return strings.Join(out, " ")
 }
@@ -462,4 +495,57 @@ func TestFullFakeWaitTurnEndedSessionGoneEndsTheTurn(t *testing.T) {
 	if st, err := tf.WaitTurnEnded(t.Context(), "s", "t1", time.Hour); err != nil || st.Active() {
 		t.Fatalf("session gone mid-wait = %+v, %v; want no turn, nil", st, err)
 	}
+}
+
+// Kills a t3bridge profile whose turn capabilities differ from production's
+// static V1 row, or that a FullFake script can change: the row is a fixed
+// trait the profile answers itself.
+func TestT3BridgeProfileAnswersProductionsTurnCapabilities(t *testing.T) {
+	f := runtime.NewFake()
+	f.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"s": {{}}}
+	fake, ok := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}).(runtime.TurnObservationProvider)
+	if !ok {
+		t.Fatal("the t3bridge profile lacks TurnObservationProvider")
+	}
+	want := t3bridge.NewSeamBacked().(runtime.TurnObservationProvider).TurnCapabilities("s")
+	if want == (runtime.TurnCapabilities{}) {
+		t.Fatal("production t3bridge declares no turn capabilities")
+	}
+	if got := fake.TurnCapabilities("s"); got != want {
+		t.Fatalf("t3bridge profile TurnCapabilities = %+v, production declares %+v", got, want)
+	}
+}
+
+// A profiled tmux must reach the backend's background-work stop with its
+// caller's context, and pass its answer back.
+func TestTmuxProfileForwardsBackgroundWorkStop(t *testing.T) {
+	for _, result := range []error{nil, runtime.ErrInteractionUnsupported} {
+		b := &profileBackgroundStopSpy{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, result: result}
+		p := runtime.NewFakeProfile(runtime.ProfileTmux, b)
+		stopper, ok := p.(runtime.BackgroundWorkStopper)
+		if !ok {
+			t.Fatal("tmux profile lacks BackgroundWorkStopper")
+		}
+		ctx := t.Context()
+		if err := stopper.StopBackgroundWork(ctx, "session"); !errors.Is(err, result) {
+			t.Fatalf("StopBackgroundWork error = %v, want %v", err, result)
+		}
+		if b.calls != 1 || b.ctx != ctx || b.name != "session" {
+			t.Fatalf("StopBackgroundWork did not forward context and session: %+v", b)
+		}
+	}
+}
+
+type profileBackgroundStopSpy struct {
+	runtime.FullFake
+	ctx    context.Context
+	name   string
+	result error
+	calls  int
+}
+
+func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name string) error {
+	b.ctx, b.name = ctx, name
+	b.calls++
+	return b.result
 }

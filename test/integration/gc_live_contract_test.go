@@ -1026,6 +1026,9 @@ func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spe
 	if len(history.Entries) != 1 || history.Entries[0].BeadID == "" {
 		t.Fatalf("order history after gc order run = %+v, want exactly one run record for %q", history, scopedName)
 	}
+	if history.Entries[0].HasOutput {
+		t.Fatalf("order history after gc order run = %+v, want has_output false before any output is attached", history)
+	}
 	orderRunID := history.Entries[0].BeadID
 	t.Cleanup(func() {
 		if out, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "delete", "--force", orderRunID); err != nil {

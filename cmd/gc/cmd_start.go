@@ -684,6 +684,11 @@ func resolveStartDirRef(ref string) (string, error) {
 
 func requireBootstrappedCity(dir string) (string, error) {
 	ctx, err := resolveContextFromPath(dir)
+	if isControlPlaneDescriptorError(err) {
+		// The city is there; its descriptor is what is wrong, so gc init is
+		// not the remedy.
+		return "", err
+	}
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
@@ -694,6 +699,11 @@ func requireBootstrappedCity(dir string) (string, error) {
 	cityPath := ctx.CityPath
 	if !citylayout.HasRuntimeRoot(cityPath) {
 		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
+	}
+	// Starting or restarting a city constructs its controller, which a worker
+	// site's box never runs: the city is the remote controller's.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		return "", err
 	}
 	return cityPath, nil
 }
@@ -794,8 +804,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
 	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION, which no gc code
-	// sets.
+	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
+	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
 	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -806,7 +816,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// than run legacy session work under a v2 latch. Production never reaches
 	// it (A6, F11); --dry-run reconciles nothing.
 	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
-		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: the v2 session reconciler has no one-shot reconcile; run the controller (gc start --foreground) or set session_reconciler = \"legacy\"") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1816,7 +1826,11 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 }
 
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint
-// from its config. Returns nil if no extra fields are present.
+// from its config. Returns nil if no extra fields are present. Each key's
+// runtime.FingerprintExtraChangePolicy decides whether a change drains:
+// pool.min / pool.max are Ignore (allocation inputs, not session identity);
+// wake_mode is NextStart (it decides how the next wake resumes); depends_on
+// stays Restart.
 //
 // Note on pool.check omission: the default EffectiveScaleCheck string bakes
 // the agent's QualifiedName into the shell expression. Different code paths
@@ -1827,8 +1841,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 // oscillation drives config-drift drain on every live pool/named session
 // (minutes-into-work reaps — see gascity ga-00f). scale_check is a runtime
 // probe for demand, not a behavioral-identity field; changes to ScaleCheck
-// don't need to reap live sessions. pool.min / pool.max / depends_on /
-// wake_mode continue to contribute since those are genuinely identity.
+// don't need to reap live sessions.
 func buildFingerprintExtra(a *config.Agent) map[string]string {
 	m := make(map[string]string)
 	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {

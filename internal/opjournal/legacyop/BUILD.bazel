@@ -3,7 +3,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "legacyop",
     srcs = [
+        "check.go",
         "classify.go",
+        "crashpoint.go",
         "doc.go",
         "inflight.go",
         "legacyop.go",
@@ -24,7 +26,9 @@ go_library(
 go_test(
     name = "legacyop_test",
     srcs = [
+        "check_test.go",
         "classify_test.go",
+        "crashpoint_test.go",
         "inflight_test.go",
         "legacyop_test.go",
         "sweep_test.go",

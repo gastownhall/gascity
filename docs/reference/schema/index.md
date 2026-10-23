@@ -14,8 +14,11 @@ document:
 
 - <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/openapi.json" target="_blank" rel="noopener"><code>openapi.json</code></a>
 
-Use this file with Swagger UI, Stoplight, Postman, or client generators. To
-regenerate it from the live supervisor schema:
+Use this file with Swagger UI, Stoplight, Postman, or client generators. A
+running supervisor also serves the spec for its own version at `/openapi.json`
+and `/openapi.yaml` (3.0 downgrades at `/openapi-3.0.json` and
+`/openapi-3.0.yaml`), with an interactive reference page at `/docs`. To
+regenerate this file from the live supervisor schema:
 
 ```bash
 go run ./cmd/genspec

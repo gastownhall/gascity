@@ -55,8 +55,16 @@ const (
 	ReasonSessionGone         = "session_gone"
 	ReasonClosedExternally    = "closed_externally"
 	ReasonOther               = "other"
-	RefusedReasonPrefix       = "refused:"
+	// ReasonReplacementNotPrepared is a deliver-now unit's interrupt whose
+	// turn settled but whose session could not be prepared for the message
+	// (X11 D11): the replacement did not complete.
+	ReasonReplacementNotPrepared = "replacement_not_prepared"
+	RefusedReasonPrefix          = "refused:"
 )
+
+// MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and
+// still be the token every outcome reason must be.
+const MaxRefusedWhyLen = maxTokenLen - len(RefusedReasonPrefix)
 
 // Known skipped reasons.
 const (
@@ -72,7 +80,7 @@ const (
 var knownFailedReasons = []string{
 	ReasonExpiredBeforeStart, ReasonDeadlineInFlight, ReasonNoBoundary, ReasonProviderUnavailable,
 	ReasonAmbiguousDelivery, ReasonPoison, ReasonUnsupported, ReasonUnauthorized, ReasonCreateFailed,
-	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther,
+	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther, ReasonReplacementNotPrepared,
 }
 
 var knownSkippedReasons = []string{
@@ -253,8 +261,8 @@ type KillPolicy struct {
 }
 
 // Scope is an op's validity scope: the conversation, one context epoch, or
-// one session generation (with a turn for interrupt, an interaction for
-// respond).
+// one session generation (with a turn for interrupt, an interaction
+// occurrence for respond).
 type Scope struct {
 	Kind        ScopeKind
 	Epoch       int64
@@ -282,13 +290,55 @@ type Cancel struct {
 // Recorded reports whether a cancel was recorded.
 func (c Cancel) Recorded() bool { return c.By != "" }
 
-// Result is what a succeeded (or coalesced) op produced.
+// Result is what a succeeded (or coalesced) op produced. Delivery, TurnLink
+// and TurnBasis are the conversation lane's delivery record and turn link
+// (DES-O1 §4.8): set only on a succeeded lane op, and Turn is then the turn
+// CorrelateTurn linked. Turn without a link is legal: legacy and control ops
+// record a turn the runtime named.
 type Result struct {
 	Generation    int64
 	Turn          string
 	ContextEpoch  int64
 	Via           string
 	CoalescedInto string
+	Delivery      RecordedDelivery
+	TurnLink      LinkConfidence
+	TurnBasis     LinkBasis
+}
+
+// RecordedDelivery is the part of a DeliveryRecord stored on each op of one
+// delivery. The generation and epoch are Result's; the link mode is not
+// stored.
+type RecordedDelivery struct {
+	// Seq is the lane_seq of the delivery's head op.
+	Seq uint64
+	// At is the lane host's clock just before the effect's first input.
+	At time.Time
+	// Ack is the runtime's answer.
+	Ack AckKind
+	// MessageID and MessageAt are the runtime's id and creation stamp for
+	// the delivered message, when it reports them.
+	MessageID string
+	MessageAt time.Time
+}
+
+// IsZero reports whether no delivery is recorded.
+func (d RecordedDelivery) IsZero() bool {
+	return d.Seq == 0 && d.At.IsZero() && d.Ack == "" && d.MessageID == "" && d.MessageAt.IsZero()
+}
+
+// equal compares two delivery records, comparing times as instants.
+func (d RecordedDelivery) equal(o RecordedDelivery) bool {
+	return d.Seq == o.Seq && d.At.Equal(o.At) && d.Ack == o.Ack && d.MessageID == o.MessageID &&
+		d.MessageAt.Equal(o.MessageAt)
+}
+
+// Equal reports whether r and o are the same result, comparing times as
+// instants rather than by representation.
+func (r Result) Equal(o Result) bool {
+	return r.Generation == o.Generation && r.Turn == o.Turn && r.ContextEpoch == o.ContextEpoch &&
+		r.Via == o.Via && r.CoalescedInto == o.CoalescedInto && r.Delivery.equal(o.Delivery) &&
+		r.TurnLink == o.TurnLink && r.TurnBasis == o.TurnBasis
 }
 
 // Outcome is a closed op's single terminal outcome.
@@ -297,6 +347,13 @@ type Outcome struct {
 	Reason      string
 	Degradation string
 	Result      Result
+}
+
+// Equal reports whether o and other are the same outcome, comparing times as
+// instants.
+func (o Outcome) Equal(other Outcome) bool {
+	return o.Arm == other.Arm && o.Reason == other.Reason && o.Degradation == other.Degradation &&
+		o.Result.Equal(other.Result)
 }
 
 // Effective returns the arm and reason a reader acts on: a failed or skipped
@@ -389,6 +446,24 @@ type Op struct {
 	Cancel      Cancel
 	Outcome     Outcome
 	Transitions []Transition
+
+	// The conversation lane's bookkeeping (DES-O1 §4.1). Only lane ops of the
+	// conversation lane carry these; a legacy op carries none.
+	//
+	// RetryAt gates the op after a release; it does not move its order
+	// position. Take and close clear it.
+	RetryAt time.Time
+	// Failures counts failed attempts: executor errors and lease expiries.
+	// The op closes failed{poison} at MaxFailures.
+	Failures int
+	// MaybeDelivered is the number of the last attempt that may have reached
+	// the agent, 0 when none may have; it never exceeds Attempt.
+	MaybeDelivered int
+	// DeliveryKey is the runtime idempotency key of the batch the op was last
+	// taken in, <head op id>:<n>. It never appears in delivered text.
+	DeliveryKey string
+	// LastError is the last release or failure cause, <token>[: <text>].
+	LastError string
 
 	// Revision is the row's revision when it was read (or created), decoded
 	// from the bead and never encoded. An op returned by a write carries the

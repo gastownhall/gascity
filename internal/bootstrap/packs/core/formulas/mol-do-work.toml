@@ -143,9 +143,13 @@ prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
 fi
 ```
+This step bead is workflow infrastructure, not work: do not add `--notes` or
+`--append-notes` to it. On a city that keeps its coordination classes in a
+separate store, gc serves this update in process and refuses those flags
+because the step has no notes field. The work bead above carries the notes.
 
 If you get stuck or need clarification, check your inbox:
 ```bash
@@ -194,7 +198,7 @@ if [ -z "$DRAIN_BEAD_ID" ]; then
     exit 1
   fi
 fi
-gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged." || exit 1
+gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
 gc runtime drain-ack
 ```
 

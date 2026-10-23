@@ -1,6 +1,6 @@
 module github.com/gastownhall/gascity/tools/nogo
 
-go 1.26.9
+go 1.26.10
 
 require (
 	codeberg.org/polyfloyd/go-errorlint v1.9.0

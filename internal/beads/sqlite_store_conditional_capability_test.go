@@ -65,7 +65,7 @@ func TestSQLiteStoreCarriesConditionalWritesStamp(t *testing.T) {
 	for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
 		t.Run(string(mode), func(t *testing.T) {
 			store := openSQLiteLayoutForTest(t, true, false)
-			if err := StampOpenedStore(store, "SQLiteStore", mode, nil, nil); err != nil {
+			if err := StampOpenedStore(store, "SQLiteStore", mode, false, nil, nil); err != nil {
 				t.Fatalf("StampOpenedStore: %v", err)
 			}
 			writer, diag, err := ResolveConditionalWriter(store)
@@ -85,7 +85,7 @@ func TestCachingStoreOverSQLiteReportsConditionalWritesHonestly(t *testing.T) {
 	cachedOver := func(t *testing.T, revision bool, mode gate.Mode) *CachingStore {
 		t.Helper()
 		engine := openSQLiteLayoutForTest(t, revision, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", mode, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", mode, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		cache := NewCachingStoreForTest(engine, nil)
@@ -131,7 +131,7 @@ func TestCachingStoreOverSQLiteReportsConditionalWritesHonestly(t *testing.T) {
 func TestSQLiteStoreInspectionMirrorsTheProber(t *testing.T) {
 	for _, revision := range []bool{true, false} {
 		engine := openSQLiteLayoutForTest(t, revision, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		cache := NewCachingStoreForTest(engine, nil)
@@ -161,7 +161,7 @@ func TestResolveOnAClosedSQLiteStoreReportsClosed(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			engine := openSQLiteLayoutForTest(t, true, false)
 			degrades := 0
-			if err := StampOpenedStore(engine, "SQLiteStore", mode, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
+			if err := StampOpenedStore(engine, "SQLiteStore", mode, false, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
 				t.Fatalf("StampOpenedStore: %v", err)
 			}
 			cache := NewCachingStoreForTest(engine, nil)

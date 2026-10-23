@@ -61,6 +61,7 @@ go_test(
         "gate_test.go",
         "handler_test.go",
         "hybrid_test.go",
+        "main_test.go",
         "manual_test.go",
         "metadata_test.go",
         "reconcile_test.go",

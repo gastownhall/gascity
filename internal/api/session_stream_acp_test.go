@@ -28,7 +28,7 @@ func TestSessionStreamDeliversCompleteGrowingACPMessage(t *testing.T) {
 			srv := New(fs)
 			h := newTestCityHandlerWith(t, fs, srv)
 			srv.sessionLogSearchPaths = []string{t.TempDir()}
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 				Template:  "myrig/worker",
 				Title:     "Chat",

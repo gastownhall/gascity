@@ -23,6 +23,7 @@ var (
 		"AtomicConditionalCloserHandle": "reports a capability from an immutable layout field; the closer it returns guards every call",
 		"AtomicTx":                      "reports a constant capability",
 		"CachedReadExact":               "reports a constant capability",
+		"GuardedBatcherHandle":          "reports a capability from immutable layout fields; the batcher it returns guards every call",
 		"IDPrefix":                      "returns an immutable field",
 		"StoreHealthPath":               "returns an immutable field",
 	}

@@ -24,6 +24,7 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -164,7 +165,14 @@ func transportForRuntimeName(name string) string {
 // selection (mapping to the registry's seam-backed construction), but it is the
 // single place the Transport/Upstream axes will be honored as the de-conflation
 // completes.
+//
+// On a worker site it returns the guard provider, whatever the spec names: a
+// box never constructs a provider that can start, stop, type into or annotate
+// a runtime; the remote controller owns them (DES-CN D12).
 func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	if onWorkerSite(cityPath) {
+		return guard.New(), nil
+	}
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil {
 		return nil, err

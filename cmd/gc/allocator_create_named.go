@@ -325,8 +325,8 @@ func nameConfirmedFree(ctx context.Context, sp runtime.Provider, processNames []
 // reopenNamed reopens closed, the identity's closed canonical row, with
 // legacy's reopen batch in one write, conditional on the revision of a live
 // Get of the row under the identifier locks. The fenced read is a List, and a
-// store need not publish a revision on a List row (the native store's carry
-// none), so the reopen re-reads the row, as legacy's reopen does, and writes
+// store need not publish a revision on a List row (BdStore's carry none,
+// mc-3c8h5), so the reopen re-reads the row, as legacy's reopen does, and writes
 // only if it is still the identity's closed row for the plan's session name;
 // a row that moved on is no reopen. A store that resolves no conditional
 // writer refuses at the write, after the fence checks: legacy's

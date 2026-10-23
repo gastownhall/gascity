@@ -46,8 +46,14 @@ type NudgesSuite struct {
 // only the legacy file queue may set either field, and the cases that cover
 // them assert the declared behavior in both directions.
 type NudgeQueuePolicy struct {
-	// VerbsMaintain: every verb first runs the whole-queue recovery, so a
-	// read past retention ages a dead letter out.
+	// VerbsMaintain: Enqueue, ClaimDue, ClaimBatch, ListFor, ListForAgent,
+	// Lookup, Ack, ReleaseClaims and RecordFailure each first run the
+	// whole-queue recovery, so a listing past retention ages a dead letter
+	// out, and a lapsed lease is recovered inside whichever of them meets it
+	// and made due at that verb's clock: the caller's now for those that take
+	// one, the wall clock for Enqueue, Ack and ReleaseClaims. EnqueueDeferred,
+	// Rollback, WithdrawQueuedWaitNudges, DueKeys, Empty and Snapshot run no
+	// recovery under any policy.
 	VerbsMaintain bool
 	// ForgetsRetiredIDs: an acked id enqueued again before any sweep is
 	// queued again.
@@ -603,6 +609,63 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	// The verbs outside the recovery set leave a lapsed lease as they found
+	// it, under any declared policy: the whole-queue reads are read-only, and
+	// EnqueueDeferred, Rollback and WithdrawQueuedWaitNudges touch only the
+	// records they are given. A Lookup at the claim instant, where the lease
+	// still holds so even a queue whose reads maintain recovers nothing, tells
+	// the two apart: the untouched claim reads as in flight, and a recovered
+	// item as pending whenever it was made due.
+	r.Run("NonMaintainingVerbsLeaveALapsedLeaseAlone", func(r Runner) {
+		wall := time.Now().UTC()
+		claimedAt := wall.Add(-time.Hour)
+		bystander := func(id string) nudgequeue.Item {
+			item := nudgeItem(id, "", wall)
+			item.Agent = "alpha/bystander"
+			return item
+		}
+		verbs := []struct {
+			name string
+			run  func(storebinding.NudgeQueue) error
+		}{
+			{"EnqueueDeferred", func(q storebinding.NudgeQueue) error {
+				return q.EnqueueDeferred(bystander("n-deferred"))
+			}},
+			{"Rollback", func(q storebinding.NudgeQueue) error {
+				return q.Rollback(bystander("n-bystander"), "conformance rollback")
+			}},
+			{"WithdrawQueuedWaitNudges", func(q storebinding.NudgeQueue) error {
+				return q.WithdrawQueuedWaitNudges([]string{"n-bystander"})
+			}},
+			{"DueKeys", func(q storebinding.NudgeQueue) error { _, err := q.DueKeys(wall); return err }},
+			{"Empty", func(q storebinding.NudgeQueue) error { _, err := q.Empty(); return err }},
+			{"Snapshot", func(q storebinding.NudgeQueue) error { _, err := q.Snapshot(); return err }},
+		}
+		for _, verb := range verbs {
+			queue := mustQueue(r, suite)
+			for _, item := range []nudgequeue.Item{nudgeItem("n-lapsed", "", claimedAt), bystander("n-bystander")} {
+				if err := queue.Enqueue(item); err != nil {
+					r.Fatalf("%s: Enqueue(%s): %v", verb.name, item.ID, err)
+				}
+			}
+			claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, claimedAt)
+			if err != nil || len(claimed) != 1 || claimed[0].ID != "n-lapsed" {
+				r.Fatalf("%s: ClaimDue an hour ago = %v, %v; want n-lapsed", verb.name, nudgeIDs(claimed), err)
+			}
+			if err := verb.run(queue); err != nil {
+				r.Fatalf("%s: %v", verb.name, err)
+			}
+			buckets, err := queue.Lookup([]string{"n-lapsed"}, claimedAt)
+			if err != nil {
+				r.Fatalf("%s: Lookup: %v", verb.name, err)
+			}
+			if got := buckets["n-lapsed"]; got != nudgequeue.BucketInFlight {
+				r.Errorf("after %s n-lapsed reads %q at its claim, want %q: the verb recovered the lapsed lease",
+					verb.name, got, nudgequeue.BucketInFlight)
+			}
+		}
+	})
+
 	// The empty queue key addresses nobody: an empty key in a target's key set
 	// or as an agent name must not match an item whose agent is unset.
 	r.Run("EmptyQueueKeyMatchesNothing", func(r Runner) {
@@ -985,6 +1048,54 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	// A batch whose every member is backed off is not claimable, so a claim
+	// never asks the census whether it splits across sessions.
+	r.Run("ClaimBatchSkipsTheCensusForABackedOffBatch", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		if err := queue.Enqueue(nudgeItem("n-old", "session-old", now)); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		first, err := queue.ClaimBatch(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}, SessionID: "session-old"}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by session-old: %v", err)
+		}
+		key := assertOneBatch(r, "ClaimBatch by session-old", first, "n-old")
+		retry := now.Add(time.Hour)
+		if err := queue.ReleaseClaims([]string{"n-old"}, retry); err != nil {
+			r.Fatalf("ReleaseClaims: %v", err)
+		}
+		calls := 0
+		successor := storebinding.ClaimTarget{
+			QueueKeys: []string{ConformanceNudgeAgent},
+			SessionID: "session-new",
+			LiveFenceSessions: func() (map[string]struct{}, bool) {
+				calls++
+				return map[string]struct{}{"session-new": {}}, true
+			},
+		}
+		early, err := queue.ClaimBatch(successor, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch before the batch is due: %v", err)
+		}
+		if len(early) != 0 {
+			r.Fatalf("ClaimBatch before the batch is due = %v, want nothing", nudgeIDs(early))
+		}
+		if calls != 0 {
+			r.Errorf("a ClaimBatch with no due candidate asked the census %d times, want never", calls)
+		}
+		resumed, err := queue.ClaimBatch(successor, retry.Add(time.Second))
+		if err != nil {
+			r.Fatalf("ClaimBatch once the batch is due: %v", err)
+		}
+		if got := assertOneBatch(r, "ClaimBatch once the batch is due", resumed, "n-old"); got != key {
+			r.Fatalf("adopted batch key = %q, want the pinned %q", got, key)
+		}
+		if calls != 1 {
+			r.Errorf("one ClaimBatch with a due batch pinned elsewhere asked the census %d times, want exactly once", calls)
+		}
+	})
+
 	r.Run("ClaimBatchAdoptsASupersededSessionsBatch", func(r Runner) {
 		queue := mustQueue(r, suite)
 		now := time.Now().UTC()
@@ -1130,7 +1241,13 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 
 	r.Run("ReleaseClaimsLeavesALapsedLeaseAlone", func(r Runner) {
 		queue := mustQueue(r, suite)
-		now := time.Now().UTC()
+		// The case claims at an instant a minute behind the wall clock. A
+		// queue whose verbs maintain re-dues the lapsed lease inside
+		// ReleaseClaims at its own wall-clock reading, which then lands a
+		// minute after that instant rather than within the wall clock's
+		// resolution of it, so the case discriminates the same on every
+		// platform without depending on elapsed time.
+		now := time.Now().UTC().Add(-time.Minute)
 		claimedAt := now.Add(-time.Hour)
 		lapsed := nudgeItem("n-lapsed", "", claimedAt)
 		if err := queue.Enqueue(lapsed); err != nil {
@@ -1144,7 +1261,17 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		if err := queue.ReleaseClaims([]string{"n-lapsed"}, now.Add(10*time.Minute)); err != nil {
 			r.Fatalf("ReleaseClaims: %v", err)
 		}
-		claimed, err := queue.ClaimDue(target, now)
+		// A queue whose verbs maintain recovers the lapsed lease inside
+		// ReleaseClaims, against the wall clock, and the item is due from that
+		// instant; a claim at the earlier now would read it as not yet due.
+		// The second's margin absorbs a wall-clock step between the two
+		// readings (UTC drops the monotonic one) and stays far inside the
+		// ten-minute backoff this case guards against.
+		claimAt := now
+		if suite.Policy.VerbsMaintain {
+			claimAt = time.Now().UTC().Add(time.Second)
+		}
+		claimed, err := queue.ClaimDue(target, claimAt)
 		if err != nil {
 			r.Fatalf("ClaimDue after the release: %v", err)
 		}

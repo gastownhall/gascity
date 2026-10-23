@@ -63,6 +63,40 @@ func TestWrapWithCachingStoreStampsNotificationSource(t *testing.T) {
 	}
 }
 
+// TestSameValueWriteRecordsNoBeadUpdated pins the city-level effect of a
+// store that decides no-op writes itself: every write reaches the SQLite
+// store through the cache, a same-value one commits nothing there, and so
+// the city records no bead.updated for it. Before the store skipped them, a
+// no-op still moved updated_at and the revision, so each one recorded.
+func TestSameValueWriteRecordsNoBeadUpdated(t *testing.T) {
+	backing, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	ep := events.NewFake()
+	store := wrapWithCachingStore(context.Background(), backing, ep, true)
+	b, err := store.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "k", "v"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	title := "row"
+	for range 2 {
+		if err := store.SetMetadata(b.ID, "k", "v"); err != nil {
+			t.Fatalf("same-value SetMetadata: %v", err)
+		}
+		if err := store.Update(b.ID, beads.UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("same-value Update: %v", err)
+		}
+	}
+	want := []string{events.BeadCreated + "/" + cacheLocalActor, events.BeadUpdated + "/" + cacheLocalActor}
+	if got := beadEventsFor(ep, b.ID); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %v, want %v: a same-value write recorded an event", got, want)
+	}
+}
+
 // TestCacheChangeRecorderSuppressesRepeatedUpdates is the mc-zndi7.12 fix: a
 // bead.updated whose payload equals the last one emitted for the bead carries
 // nothing, and on bd cities it was 99% of the bus.
@@ -83,7 +117,13 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 	send(events.BeadDeleted, "gc-2", `{"id":"gc-2","v":2}`)
 	send(events.BeadUpdated, "gc-2", `{"id":"gc-2","v":2}`)
 	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`)
-	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`) // only updates are suppressed
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`)       // an identical create repeats nothing
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // a different one is recorded
+	send(events.BeadClosed, "gc-3", `{"id":"gc-3","v":2}`)
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // the close forgot it
+	send(events.BeadUpdated, "gc-4", `{"id":"gc-4"}`)
+	send(events.BeadCreated, "gc-4", `{"id":"gc-4"}`) // a create repeats only a create
+	send(events.BeadUpdated, "gc-4", `{"id":"gc-4"}`) // the same as the create
 
 	var got []string
 	for _, evt := range ep.Events {
@@ -99,10 +139,58 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 		`bead.deleted gc-2 {"id":"gc-2","v":2}`,
 		`bead.updated gc-2 {"id":"gc-2","v":2}`,
 		`bead.created gc-3 {"id":"gc-3"}`,
-		`bead.created gc-3 {"id":"gc-3"}`,
+		`bead.created gc-3 {"id":"gc-3","v":2}`,
+		`bead.closed gc-3 {"id":"gc-3","v":2}`,
+		`bead.created gc-3 {"id":"gc-3","v":2}`,
+		`bead.updated gc-4 {"id":"gc-4"}`,
+		`bead.created gc-4 {"id":"gc-4"}`,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("recorded:\n%v\nwant:\n%v", got, want)
+	}
+}
+
+// refreshingCreateStore refreshes the new row through the cache before its
+// Create returns: a journal feed's refresh landing between the backing create
+// and the cache's absorb.
+type refreshingCreateStore struct {
+	*beads.MemStore
+	cache *beads.CachingStore
+}
+
+func (s *refreshingCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.MemStore.Create(b)
+	if err == nil && s.cache != nil {
+		_, _ = s.cache.RefreshRow(created.ID)
+	}
+	return created, err
+}
+
+// TestCacheChangeRecorderRecordsOneCreateForARefreshRacingTheCreate is the
+// createWith race: a refresh installs the new row, and announces it, before
+// the create's absorb announces it again with the same payload. One
+// bead.created is recorded.
+func TestCacheChangeRecorderRecordsOneCreateForARefreshRacingTheCreate(t *testing.T) {
+	backing := &refreshingCreateStore{MemStore: beads.NewMemStore()}
+	ep := events.NewFake()
+	store := wrapWithCachingStore(context.Background(), backing, ep, true)
+	cache, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("wrapWithCachingStore returned %T, want *beads.CachingStore", store)
+	}
+	backing.cache = cache
+	created, err := cache.Create(beads.Bead{Title: "raced"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	creates := 0
+	for _, evt := range ep.Events {
+		if evt.Type == events.BeadCreated && evt.Subject == created.ID {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("recorded %d bead.created for %s, want 1 (events %v)", creates, created.ID, beadEventsFor(ep, created.ID))
 	}
 }
 

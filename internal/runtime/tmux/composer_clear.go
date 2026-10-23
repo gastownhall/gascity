@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -279,23 +281,104 @@ func (t *Tmux) isClaudeTarget(target string) bool {
 // runtime.ErrInputClearSkipped, and the nudge must not paste onto what is left
 // of the draft (#5192). When the input box cannot be read, and for other
 // providers, it sends the single Ctrl-U it always has.
-func (t *Tmux) clearInputBeforePaste(session, target string) error {
+func (t *Tmux) clearInputBeforePaste(ctx context.Context, session, target string) error {
 	if t.isClaudeTarget(target) {
 		in, ok, err := t.readInput(target)
 		if err == nil && ok {
-			return t.emptyInput(target, in, func() error { return t.noClientAttached(session) })
+			return t.emptyInput(ctx, target, in, func() error { return t.noClientAttached(session) })
 		}
 	}
-	if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
+	if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 		return err
 	}
 	time.Sleep(50 * time.Millisecond)
 	return nil
 }
 
+// clearHeldDraft empties target's composer of the message a nudge typed
+// before a running turn held its interrupting submit back for the whole
+// confirm window (see nudgeSession). The draft is gc's own, so it is cleared
+// with a client attached too. Codex's Ctrl-U deletes one line of a draft at a
+// time (the cursor's line, or the line break before an empty one), so it
+// presses Ctrl-U until the composer reads empty (see emptyComposer). mayType
+// runs before every press and stops the clear with its error.
+func (t *Tmux) clearHeldDraft(ctx context.Context, target string, mayType func() error) error {
+	read := func() ([]string, error) { return t.captureInputLines(target) }
+	press := func() error {
+		if err := mayType(); err != nil {
+			return err
+		}
+		_, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u")
+		return err
+	}
+	return emptyComposer(read, press, time.Sleep)
+}
+
+// emptyComposer presses Ctrl-U until the live composer in read's capture
+// reads empty (paneShowsDrainedComposer). After each press it waits for the
+// composer to redraw. It fails when no composer is on screen, when two
+// presses in a row leave the composer unchanged while it still holds text,
+// when the pane can no longer be read, when press fails, or after
+// inputMaxCtrlU presses.
+func emptyComposer(read func() ([]string, error), press func() error, sleep func(time.Duration)) error {
+	lines, err := read()
+	if err != nil {
+		return fmt.Errorf("reading the composer: %w", err)
+	}
+	stalled := 0
+	for presses := 0; !paneShowsDrainedComposer(lines); presses++ {
+		before, ok := liveComposerRows(lines)
+		if !ok {
+			return errors.New("no composer on screen to clear")
+		}
+		if presses >= inputMaxCtrlU || stalled >= inputStalledCtrlU {
+			return fmt.Errorf("composer still holds %q after %d Ctrl-U", firstNRunes(strings.Join(before, " "), 80), presses)
+		}
+		if err := press(); err != nil {
+			return fmt.Errorf("clearing the composer: %w", err)
+		}
+		changed := false
+		for waited := time.Duration(0); waited < inputRedrawWait; waited += inputRedrawPoll {
+			sleep(inputRedrawPoll)
+			if lines, err = read(); err != nil {
+				return fmt.Errorf("reading the composer while clearing it: %w", err)
+			}
+			if after, _ := liveComposerRows(lines); !slices.Equal(after, before) {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			stalled = 0
+		} else {
+			stalled++
+		}
+	}
+	return nil
+}
+
+// liveComposerRows returns lines from the live composer, the last row that
+// starts with a known family's composer prompt (stagedDraftMarkers), to the
+// end, and whether there is one. Rows above it are the transcript and the
+// turn's status, which redraw on their own while a turn runs.
+func liveComposerRows(lines []string) ([]string, bool) {
+	live := -1
+	for i, line := range lines {
+		for _, marker := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, marker.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	if live < 0 {
+		return nil, false
+	}
+	return lines[live:], true
+}
+
 // emptyInput clears in from target's input box. mayType, when set, runs
 // before every press and stops the clear with its error.
-func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) error {
+func (t *Tmux) emptyInput(ctx context.Context, target string, in claudeInput, mayType func() error) error {
 	read := func() (claudeInput, bool, error) { return t.readInput(target) }
 	press := func() error {
 		if mayType != nil {
@@ -304,7 +387,7 @@ func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) e
 			}
 		}
 		args := append([]string{"send-keys", "-t", paneTarget(target)}, inputClearKeys...)
-		_, err := t.run(args...)
+		_, err := t.runCtx(ctx, args...)
 		return err
 	}
 	return emptyClaudeInput(in, read, press, time.Sleep)
@@ -358,7 +441,7 @@ func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow tim
 			return fmt.Errorf("reading input box: %w", err)
 		}
 		if ok && !in.empty() {
-			return t.emptyInput(target, in, mayType)
+			return t.emptyInput(ctx, target, in, mayType)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

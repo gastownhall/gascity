@@ -81,3 +81,16 @@ func (s *Store) matchRecordedFact(want Fact, b beads.Bead) error {
 	}
 	return nil
 }
+
+// FactCreateItem returns the guarded-batch item that creates f, closed, at
+// its pinned id under prefix. A batch that carries it is refused whole when
+// the occurrence is already recorded (beads.ErrAlreadyExists), so the
+// writer re-reads the fact and drops the item when it records the same
+// occurrence.
+func FactCreateItem(prefix string, f Fact) (beads.GuardedItem, error) {
+	b, err := EncodeFact(prefix, f)
+	if err != nil {
+		return beads.GuardedItem{}, err
+	}
+	return beads.GuardedItem{Create: &b}, nil
+}

@@ -35,7 +35,7 @@ real_tmux=$(command -v tmux)
 export LC_ALL=C.UTF-8
 bt() { "$real_tmux" -u -S "$sock" "$@"; }
 case "$op" in
-  protocol) printf '%%s' '{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}' ;;
+  protocol) printf '%%s' '{"version":0,"capabilities":["proc.exec","input-fence","report-activity","report-attachment"]}' ;;
   start)
     cat > /dev/null
     mkdir -p "$box/bin"

@@ -74,7 +74,7 @@ func buildRunDisplayNode(group runNodeGroup, controlBadges []RunControlBadge, la
 	// make yields the non-nil empty slice the wire expects when there are no badges.
 	clampedBadges := make([]RunControlBadge, len(controlBadges))
 	for i, badge := range controlBadges {
-		badge.Status = clamp.apply(badge.Status)
+		badge.Status = clamp.applyTo(badge.ID, badge.Status)
 		clampedBadges[i] = badge
 	}
 
@@ -132,7 +132,7 @@ func buildExecutionInstance(semanticNodeID string, bead runSnapshotBead, index i
 	iteration, hasIteration := iterationFor(bead)
 	attempt, hasAttempt := attemptFor(bead)
 	recordedStatus := presentationStatus(bead)
-	status := clamp.apply(recordedStatus)
+	status := clamp.applyTo(bead.id, recordedStatus)
 	sessionLink, hasLink := runSessionLinkFor(bead, recordedStatus, ctx)
 
 	id := beadID

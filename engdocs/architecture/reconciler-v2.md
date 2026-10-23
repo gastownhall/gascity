@@ -28,7 +28,9 @@ This page also imports the A1-A17 guarantees into the repository
 
 `[daemon] session_reconciler` selects the reconciler. It accepts:
 
-- `legacy` (the default): the tick reconciler.
+- unset (the default): `v2` when the city can run it, else `legacy`
+  (mc-dpo2b; see [Admission](#admission)).
+- `legacy`: the tick reconciler.
 - `v2`: the keyed reconciler.
 - `off`, `auto` and `require`: the gc-enterprise spellings. They are
   deprecated aliases for `legacy`, and each one loads with a non-fatal
@@ -41,27 +43,106 @@ supervisor) call it before the controller socket starts. The latched mode
 never changes for the life of the process. When a reload finds a different
 value on disk, it warns once per transition ("pending restart") and keeps
 running the latched mode. An unknown value refuses to start the city.
-`runsV2()` is the single predicate every v2 branch reads.
+`runsV2()` is the single predicate every v2 branch reads. The controller's
+`identify` socket reply names the latched mode, and `gc runtime drain`,
+`drain-ack` (`gc hook`'s drain-ack among them) and `undrain` follow it
+(`cityRunsV2`), so a config edit cannot split them from the running
+reconciler before restart. A controller whose `identify` reply parses
+without the field predates it and the v2 default, so it is read as legacy
+unless the config sets `session_reconciler = "v2"`. When no `identify` reply
+parses (no controller runs, or only the `ping` fallback answers, as it does
+for a current controller that missed the identify deadline), they fall back
+to the config's resolution. `gc hook` asks only when it prints
+the drain-pending hint, so a claim makes no socket call.
 
 ### Admission
 
 Since the cutover (C9), a city that selects `v2` latches it from config
 alone, and its passes act. The latch still refuses v2 when the composed
-config enables a feature v2 defers (`v2LatchRefusals`: the identity
-circuit breaker, `depends_on`, `scale_check`, `max_session_age`, the stall
-timeouts, chat auto-suspend, an unadmitted runtime), and a city whose class
-stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
-remove the key to run legacy.
+config enables a feature v2 defers (`v2LatchRefusals`: `depends_on`,
+`max_session_age`, chat auto-suspend, an unadmitted runtime), and a city
+whose class stores fail C0.7 does not boot. An explicit `v2` that is
+refused never falls back to legacy: set `session_reconciler = "legacy"`.
+
+v2 accepts and ignores the identity circuit breaker and the two stall
+timeouts (`v2IgnoredSettings`, mc-ymynp): the work ladder replaces them,
+or, with `[daemon] work_ladder = "off"`, the backstops it replaced. The
+controller logs each one as deprecated at boot, and doctor warns. Legacy
+still honours them, and only a legacy controller refuses a wake for an open
+respawn circuit (`wakeWillNotStart`).
+
+An unset key resolves from config alone too (`resolveReconcilerMode`,
+`cmd/gc/reconcile_mode.go`, with `v2DefaultFallbacks` in
+`cmd/gc/reconcile_default.go`), so the latch, `gc start` and doctor agree.
+It is v2 unless `v2DefaultFallbacks` names a reason, and then legacy, with
+a boot warning and a doctor warning naming each reason:
+- a latch refusal, as above;
+- conditional writes resolved off (`[beads] conditional_writes = "off"`,
+  or `GC_BEADS_CONDITIONAL_WRITES=off`; unset means `auto`);
+- the sessions or graph class on a store that config does not show to be
+  one C0.7 admits. Only a `sqlite-beads` binding is. The `work` binding's
+  store is decided when it opens, so a class there falls back, and the
+  warning names the storage migration that moves it.
+
+Under the `conditional_writes` builtin default (`auto`, origin `builtin`),
+a store that cannot fence runs as off (`conditionalWritesDefaultAuto`): the
+open logs at debug, no `beads.conditional_writes.degraded` event is recorded,
+and the status block lists no incapable store. No released bd has
+`--if-revision`, so a loud default would warn on every command of every bd
+or exec city. An explicit `auto` or `require` stays loud.
+
+The boot census (unknown-state or duplicate named-claim rows) is store
+state, not config: it stays a hard boot refusal for an unset key resolved
+to v2, and `v2-session-migration` warns about it ahead of time.
+
+A custom `scale_check` is admitted (PAR-SC). The external-reads lane runs
+every custom check off the pass (`allocator_scalecheck_lane.go`), and the
+decide reads its latest result. Each time the lane reads its sources, it
+first judges whether the city is suspended. When it is, the lane runs no
+check, drops the result it holds and voids every run started before that
+pass, so after resume no result read before that suspension is served. A
+suspend and resume that both fall between two of these judgments are not
+seen: a result read before them is then served like any other, while it is
+under three patrols old. Across a config reload the lane serves the last
+result it published, less the templates whose check changed, until a run
+of the new config ends.
+
+A custom template is held (its rows are kept and nothing is created) when:
+- its own check failed, timed out or printed no non-negative integer
+  (trace cause `pool-scale-check-partial`);
+- the lane has no fresh result for it: no run yet, a failed or timed-out
+  run, a result three patrols old, or a carried result that lacks it
+  (`scale-check-source-unread`).
+
+A run may still count as unassigned a bead that a session claimed after
+the run started. So the decide subtracts, from each custom template's
+count, the template's work assignments first seen no earlier than that
+start (never below zero; trace cause `scale-check-stale-vs-claim`). An
+assignment belongs to the template its work routes to, or, for unrouted
+work, to the claimant's template. The assignment is stamped after the work
+read, so a run that starts during the read is not missed. This can only
+under-create, and a real backlog still scales up. A claim the check never
+counted, or every assignment on the first pass after a controller restart,
+is cut too, so while the cut lasts the template keeps its rows: creates
+follow the cut count, but no row is put to sleep or drained for it. A new
+claim wakes the lane, and a newer run's publish wakes the planner, so a cut
+lasts about one run.
 
 `gc doctor` has a `daemon-session-reconciler` check:
 
 | Value | Result |
 |---|---|
-| `legacy` or unset | OK |
+| `legacy` | OK |
+| unset, resolving to v2 | OK |
+| unset, falling back to legacy | WARN, naming each reason |
 | an alias | WARN |
 | `v2`, admissible | OK |
+| v2 (set or default) with a setting v2 ignores | WARN |
 | `v2`, refused by the latch or by C0.7 | ERROR |
 | an unknown value | ERROR |
+
+Its message names the resolved mode and why: set explicitly, the v2
+default, or the legacy fallback.
 
 ## Model: keys, queue, router
 
@@ -175,13 +256,21 @@ exactly as before. Under v2 it hands them to the router.
   `reconcileEnv` (config, provider, config revision). They never read
   `CityRuntime` fields, which a reload writes without a lock (F2).
   `TestV2RuntimeDoesNotReferenceCityRuntime` enforces this.
-- **Boot.** Boot runs the first resync pass synchronously. It retries a
-  failed sessions census, because a failed read is not an empty city. Then
-  it starts the workers and lanes, and reports ready once every boot key
-  has been reconciled once and the allocator has completed a pass. Boot is
-  idempotent (MAINT-005). While it waits, it records the queue at every
-  patrol interval (see [Observability](#observability)). A city with no
-  bead store latches `no-store` and never boots (MAINT-003).
+- **Boot.** Boot first reads the sessions and graph class stores (C0.7). A
+  store that cannot fence, or whose list reads drop the revision its live
+  reads carry (`beads.CheckListRevisionFidelity`), refuses the boot. A
+  store it could not read is retried with backoff, because a failed read is
+  no verdict on the store. A sample with no row able to decide (no open or
+  in-progress row, or legacy rows alone) is not decided: boot proceeds
+  without a verdict and records nothing, and only `gc doctor` names the
+  outcome, for a store it reads (it skips the read over native Dolt). Boot
+  runs the first resync pass synchronously. It retries a failed sessions
+  census, because a failed read is not an empty city. Then it starts the
+  workers and lanes, and reports ready once a pass has completed with the
+  boot gate open. Boot is idempotent (MAINT-005). While it waits, it
+  records the queue at every patrol interval (see
+  [Observability](#observability)). A city with no bead store latches
+  `no-store` and never boots (MAINT-003).
 - **Shutdown.** Shutdown cancels, closes admission, then joins the workers
   and lanes, bounded by the shutdown timeout and outside any lock.
 
@@ -264,7 +353,7 @@ Every other field is cumulative or current.
 
 | Fields | What |
 |---|---|
-| `boot` | What boot still waits on: `census`, `coverage` (a boot key not yet reconciled), `allocator` (no successful pass yet), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
+| `boot` | What boot still waits on: `capabilities` (C0.7's read of the class stores has not passed), `census` (the boot census has not passed), `gate` (no pass has completed with the boot gate open), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
 | `keys`, `depth_hot`, `depth_resync`, `processing`, `dirty`, `deferred`, `timers` | Queue state |
 | `oldest_hot_ms`, `oldest_resync_ms`, `longest_in_flight_ms` | The oldest queued key per lane, and the longest reconcile in flight |
 | `adds`, `dropped_adds` | Accepted adds by reason kind since the last record; adds refused after shutdown |

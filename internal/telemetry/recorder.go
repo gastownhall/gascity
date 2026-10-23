@@ -704,15 +704,19 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 }
 
 // RecordOpRecord counts one step of recording an operation-journal op
-// (gc.ops.record.total). kind is the op kind; surface is api, cli or
-// controller; stage is admit, close, adopt or sweep; result is recorded,
-// unrecorded, replayed, adopted, busy, key_reuse, refused, closed, left_open,
-// failed or late. unrecordedReason says why a request ran unrecorded or, in
-// require mode, was refused (store_unavailable, type_unregistered,
-// no_namespace, payload_too_large, invalid_key, invalid_request,
-// unmaterialized_target, no_generation, propose_error); it is empty for every
-// other result. Every value is a closed token, so the label set stays
-// bounded; no op id or key is ever a label.
+// (gc.ops.record.total). kind is the op kind, or empty for a controller op
+// sweeper pass that failed as a whole; surface is api, cli or controller;
+// stage is admit, close, adopt or sweep, or open for a sweeper pass that
+// could not open the op store; result is recorded, unrecorded, replayed,
+// adopted, busy, key_reuse, refused, closed, left_open, failed or late.
+// unrecordedReason says why a request ran unrecorded or, in require mode, was
+// refused (store_unavailable, type_unregistered, no_namespace,
+// payload_too_large, invalid_key, invalid_request, unmaterialized_target,
+// no_generation, unreadable_target, propose_error), or, for a sweeper pass
+// that failed as a whole, the failure's degrade class (store_error,
+// contention, conditional_writes_unsupported, type_unregistered,
+// no_namespace); it is empty for every other result. Every value is a closed
+// token, so the label set stays bounded; no op id or key is ever a label.
 func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecordedReason string) {
 	initInstruments()
 	inst.opsRecordTotal.Add(ctx, 1,

@@ -91,8 +91,14 @@ Reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
 ```toml
 # Direct
 provider        = "codex"
-option_defaults = { model = "gpt-5.5" }    # gpt-5.6-sol · gpt-5.6-terra · gpt-5.6-luna · gpt-5.5 · gpt-5.3-codex · o3 · o4-mini
+option_defaults = { model = "gpt-5.5" }    # any Codex model id; omit to use ~/.codex/config.toml
 ```
+
+With no `model` or `effort` set, `codex` runs on the model and reasoning
+effort from your own Codex configuration; Gas City passes no `--model` or
+`model_reasoning_effort` flag. Which models are available depends on how Codex
+is logged in (a ChatGPT-account login serves a different set than an API key),
+so pin a model only when you know the account can use it.
 
 ```toml
 # Custom endpoint (an OpenAI-compatible proxy / Azure OpenAI / vLLM)

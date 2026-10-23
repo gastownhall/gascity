@@ -469,7 +469,7 @@ func TestCreateSkipsUntrackedRuntimeFromOtherCityBeforeStart(t *testing.T) {
 			IsTracked: false,
 		}},
 	}
-	mgr := newTestManager(t, store, sp, WithCityPath("/tmp/this-city"))
+	mgr := newTestManager(t, store, sp) // a city of its own, not /tmp/other-city
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -645,7 +645,7 @@ func TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead(t *testing.T) 
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -688,7 +688,7 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
@@ -808,7 +808,9 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 // cleanup's error.
 func orphanCleanupPrecedes(lines []string, before int, idExpr string) bool {
 	needle := "m.killExistingOrphans(ctx, " + idExpr + ")"
-	const window = 10
+	// The start's incarnation mint (and its env) sits between the orphan
+	// kill and the Start (I-MINT), so the window spans it.
+	const window = 24
 	seen := 0
 	for i := before - 1; i >= 0 && seen < window; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -4256,6 +4258,11 @@ func TestSendClosedSessionReturnsErrSessionClosed(t *testing.T) {
 	}
 }
 
+// A Start's own failure is reported, not taken for a duplicate start, even
+// while the provider reads the name running: here a pane whose agent died (a
+// zombie), which a start replaces rather than converges on. (A runtime up
+// with its agent alive is converged on before any Start: I-MINT.) The
+// failed start withdraws its mint.
 func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	base := runtime.NewFake()
 	sp := &startOverrideProvider{Fake: base}
@@ -4272,11 +4279,17 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	if err := sp.Fake.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
+	base.Zombies[info.SessionName] = true
 	sp.startErr = errors.New("out of memory")
+	before, _ := store.Get(info.ID)
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp", ProcessNames: []string{"claude"}})
 	if err == nil || !strings.Contains(err.Error(), "out of memory") {
 		t.Fatalf("Send error = %v, want underlying non-duplicate start failure", err)
+	}
+	after, _ := store.Get(info.ID)
+	if after.Metadata["generation"] != before.Metadata["generation"] || after.Metadata["instance_token"] != before.Metadata["instance_token"] {
+		t.Fatalf("row after the failed start = gen %s token %s, want its incarnation (gen %s) kept", after.Metadata["generation"], after.Metadata["instance_token"], before.Metadata["generation"])
 	}
 }
 
@@ -5944,7 +5957,7 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	workDir := t.TempDir()
 	resume := ProviderResume{
@@ -6014,7 +6027,7 @@ func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			mgr := NewManagerWithOptions(store, runtime.NewFake())
+			mgr := newTestManager(t, store, runtime.NewFake())
 			workDir := t.TempDir()
 			opts := CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: tc.resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}
 			info, err := mgr.CreateSession(context.Background(), opts)
