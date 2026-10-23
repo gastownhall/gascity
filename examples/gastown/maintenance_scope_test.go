@@ -15,8 +15,10 @@ import (
 // scopeFixture is a city whose bead scopes are served by the fake `gc bd`
 // route (writeMaintenanceGCStub) over a `dolt` stub that plays the store.
 // The stub answers every query with an empty result unless the test passes
-// extra case arms. It refuses to answer when called outside the gc route
-// (GC_FAKE_SCOPE unset): the maintenance orders must never dial Dolt.
+// extra case arms, except the reaper's count of bd prune's candidates, which
+// is as many as the bd double prunes (BD_PRUNE_COUNT). It refuses to answer
+// when called outside the gc route (GC_FAKE_SCOPE unset): the maintenance
+// orders must never dial Dolt.
 type scopeFixture struct {
 	cityDir     string
 	binDir      string
@@ -54,6 +56,9 @@ fi
 printf '%s|%s\n' "$GC_FAKE_SCOPE" "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
 `+storeCases+`
+  *"session_prune_candidates"*)
+    printf 'COUNT(*)\n%s\n' "${BD_PRUNE_COUNT:-0}"
+    ;;
   *"COUNT("*)
     printf 'COUNT(*)\n0\n'
     ;;
@@ -100,12 +105,17 @@ func (f scopeFixture) read(t *testing.T, path string) string {
 	return string(data)
 }
 
-func (f scopeFixture) runReaper(t *testing.T) {
+// runReaper runs the reaper over the fixture and returns its output.
+func (f scopeFixture) runReaper(t *testing.T) string {
 	t.Helper()
-	runScript(t, coreScriptPath("reaper.sh"), f.env)
+	out, err := runScriptResult(t, coreScriptPath("reaper.sh"), f.env)
+	if err != nil {
+		t.Fatalf("reaper.sh failed: %v\n%s", err, out)
+	}
 	if direct := f.read(t, f.doltLog); strings.Contains(direct, "DIRECT DOLT CALL") {
 		t.Fatalf("reaper dialed Dolt directly instead of going through gc bd:\n%s", direct)
 	}
+	return string(out)
 }
 
 type scriptOutcome struct {
@@ -445,20 +455,114 @@ func TestReaperSessionPruneBackupGateReadsBdBackupStatus(t *testing.T) {
 	}
 }
 
+// TestReaperSessionPrunePatternGateRefusesUnsafePattern: a pattern outside the
+// allowed charset is refused before any SQL is built from it, and the refusal
+// is escalated whatever the backup state.
 func TestReaperSessionPrunePatternGateRefusesUnsafePattern(t *testing.T) {
-	f := sessionPruneFixture(t, "")
-	f.env["BD_BACKUP_STATUS_JSON"] = freshBackupStatusJSON(time.Hour, false)
-	f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = "gm-*' OR '1'='1"
-	f.runReaper(t)
+	cases := []struct {
+		name   string
+		backup string
+	}{
+		{"fresh backup", freshBackupStatusJSON(time.Hour, false)},
+		{"no backup", `{"backup":{},"dolt":{"configured":false}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sessionPruneFixture(t, "")
+			f.env["BD_BACKUP_STATUS_JSON"] = tc.backup
+			f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = "gm-*' OR '1'='1"
+			f.runReaper(t)
 
-	if strings.Contains(f.read(t, f.bdLog), "args=prune") {
-		t.Fatalf("an unsafe pattern must not reach bd prune:\n%s", f.read(t, f.bdLog))
+			if strings.Contains(f.read(t, f.bdLog), "args=prune") {
+				t.Fatalf("an unsafe pattern must not reach bd prune:\n%s", f.read(t, f.bdLog))
+			}
+			if strings.Contains(f.read(t, f.doltLog), "id LIKE") {
+				t.Fatalf("an unsafe pattern must not be spliced into SQL:\n%s", f.read(t, f.doltLog))
+			}
+			if !strings.Contains(f.read(t, f.gcLog), "outside the allowed pattern charset") {
+				t.Fatalf("pattern refusal was not escalated:\n%s", f.read(t, f.gcLog))
+			}
+		})
 	}
-	if strings.Contains(f.read(t, f.doltLog), "OR '1'='1") {
-		t.Fatalf("an unsafe pattern must not be spliced into SQL:\n%s", f.read(t, f.doltLog))
+}
+
+// TestReaperSessionPruneGatesOnlyAPruneThatWouldDelete: the backup gate
+// protects what bd prune would delete, so the reaper first counts bd prune's
+// own candidates (pattern, closed, past the retention age). With none, it
+// skips the prune without consulting the backup and without an anomaly, so a
+// city with no fresh backup of its city store is not escalated on every run
+// for a prune that would delete nothing (#6284). A count that cannot be
+// computed is reported and the gates decide as before.
+func TestReaperSessionPruneGatesOnlyAPruneThatWouldDelete(t *testing.T) {
+	noBackup := `{"backup":{},"dolt":{"configured":false}}`
+	staleBackup := freshBackupStatusJSON(48*time.Hour, false)
+	freshBackup := freshBackupStatusJSON(time.Hour, false)
+	countFails := `
+  *"session_prune_candidates"*)
+    printf 'table wisps does not exist\n' >&2
+    exit 1
+    ;;`
+	cases := []struct {
+		name       string
+		store      string
+		candidates string
+		backup     string
+		wantGate   bool
+		wantPrune  bool
+		wantAnoms  []string
+		wantSkip   string
+	}{
+		{name: "nothing to prune, no backup", candidates: "0", backup: noBackup},
+		{name: "nothing to prune, stale backup", candidates: "0", backup: staleBackup},
+		{
+			name: "candidates, stale backup", candidates: "2", backup: staleBackup, wantGate: true,
+			wantAnoms: []string{"bulk prune skipped: backup stale or absent"},
+			wantSkip:  "session prune skipped: no fresh backup",
+		},
+		{
+			name: "count fails, stale backup", store: countFails, candidates: "2", backup: staleBackup, wantGate: true,
+			wantAnoms: []string{"session prune candidate count failed", "bulk prune skipped: backup stale or absent"},
+			wantSkip:  "session prune skipped: no fresh backup",
+		},
+		{
+			name: "count fails, fresh backup", store: countFails, candidates: "2", backup: freshBackup, wantGate: true, wantPrune: true,
+			wantAnoms: []string{"session prune candidate count failed"},
+		},
 	}
-	if !strings.Contains(f.read(t, f.gcLog), "outside the allowed pattern charset") {
-		t.Fatalf("pattern refusal was not escalated:\n%s", f.read(t, f.gcLog))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScopeFixture(t, tc.store)
+			f.env["BD_PRUNE_COUNT"] = tc.candidates
+			f.env["BD_BACKUP_STATUS_JSON"] = tc.backup
+			runOut := f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			if gate := strings.Contains(bdLog, "args=backup status"); gate != tc.wantGate {
+				t.Fatalf("backup gate consulted = %v, want %v:\n%s", gate, tc.wantGate, bdLog)
+			}
+			if pruned := strings.Contains(bdLog, "args=prune "); pruned != tc.wantPrune {
+				t.Fatalf("prune ran = %v, want %v:\n%s", pruned, tc.wantPrune, bdLog)
+			}
+			gcLog := f.read(t, f.gcLog)
+			if escalated := strings.Contains(gcLog, "ESCALATION"); escalated != (len(tc.wantAnoms) > 0) {
+				t.Fatalf("escalated = %v, want anomalies %q:\n%s", escalated, tc.wantAnoms, gcLog)
+			}
+			for _, want := range tc.wantAnoms {
+				if !strings.Contains(gcLog, want) {
+					t.Fatalf("escalation missing %q:\n%s", want, gcLog)
+				}
+			}
+			out, declared := f.outcome(t)
+			if tc.wantSkip == "" && declared {
+				t.Fatalf("unexpected outcome declaration %+v", out)
+			}
+			if tc.wantSkip != "" && (!declared || !out.hasScope("city", tc.wantSkip)) {
+				t.Fatalf("outcome = %+v (declared %v), want city %q", out, declared, tc.wantSkip)
+			}
+			if !tc.wantGate && !strings.Contains(runOut, "nothing to prune") {
+				t.Fatalf("a skipped no-op prune is not reported in the run output:\n%s", runOut)
+			}
+		})
 	}
 }
 
