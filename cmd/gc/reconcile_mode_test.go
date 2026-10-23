@@ -152,6 +152,14 @@ func TestLatchAdmitsV2WithIgnoredSettings(t *testing.T) {
 			t.Errorf("boot warning %d = %q, want %s deprecated in favour of the work ladder", i, boot[i], key)
 		}
 	}
+	// With the work ladder off, the backstops pace work, not the ladder.
+	cfg.Daemon.WorkLadder = "off"
+	for _, w := range reconcilerBootWarnings(cfg, res) {
+		if strings.Contains(w, "work ladder replaces") || !strings.Contains(w, "backstops pace work instead") {
+			t.Errorf("boot warning under work_ladder = \"off\" = %q, want the backstops named", w)
+		}
+	}
+	cfg.Daemon.WorkLadder = ""
 	r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{})
 	if r.Status != doctor.StatusWarning {
 		t.Errorf("doctor status = %v (%s), want a warning", r.Status, r.Message)

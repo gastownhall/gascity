@@ -71,27 +71,27 @@ func TestResolveReconcilerModeTable(t *testing.T) {
 		{
 			name: "unset, no [storage]: the bd work binding", cfg: &config.City{},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`the sessions and graph class stores are on the "work" binding, a BdStore or native Dolt store, which preflight decides at open ([beads] provider "bd")`},
+			fallback: []string{`the sessions and graph class stores are on the "work" binding, and v2 needs them on a sqlite-beads binding: moving them there is a storage migration (configure [storage], then run gc storage migrate --from-work)`},
 		},
 		{
 			name: "unset, file store", cfg: &config.City{Beads: config.BeadsConfig{Provider: "file"}},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`on the "work" binding, a FileStore ([beads] provider "file")`},
+			fallback: []string{`on the "work" binding, and v2 needs them on a sqlite-beads binding`},
 		},
 		{
 			name: "unset, exec store", cfg: &config.City{Beads: config.BeadsConfig{Provider: "exec:/opt/bin/beads"}},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`on the "work" binding, an ExecStore ([beads] provider "exec:/opt/bin/beads")`},
+			fallback: []string{`on the "work" binding, and v2 needs them on a sqlite-beads binding`},
 		},
 		{
 			name: "unset, bd with native transport off", cfg: &config.City{Beads: config.BeadsConfig{NativeTransport: "off"}},
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`on the "work" binding, a BdStore ([beads] provider "bd")`},
+			fallback: []string{`on the "work" binding, and v2 needs them on a sqlite-beads binding`},
 		},
 		{
 			name: "unset, graph left on the work binding", cfg: v2DefaultCity(sqliteSessionsOnly),
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`the graph class store is on the "work" binding`},
+			fallback: []string{`the graph class store is on the "work" binding, and v2 needs it on a sqlite-beads binding: moving it there is a storage migration`},
 		},
 		{
 			name: "unset, binding kind config cannot classify",
@@ -99,7 +99,7 @@ func TestResolveReconcilerModeTable(t *testing.T) {
 				c.Storage.Bindings["infra"] = config.StorageBindingConfig{Provider: config.StorageProviderBeadsWorkspace, ConfigRef: "infra"}
 			}),
 			want: reconcilerLegacy, reason: reconcilerFallbackLegacy,
-			fallback: []string{`binding "infra" (provider "beads-workspace"), whose store kind config cannot classify`},
+			fallback: []string{`the sessions and graph class stores are on binding "infra" (provider "beads-workspace"), and v2 needs them on a sqlite-beads binding`},
 		},
 		{
 			name: "unset, undefined binding",
@@ -443,5 +443,28 @@ func TestDefaultV2CityPassesC07OnTheRoutesItOpens(t *testing.T) {
 		if !c.Writer || !c.Closer || c.Mode != gate.Auto {
 			t.Errorf("%s capability = %+v, want a fenced writer and closer stamped auto", c.Class, c)
 		}
+	}
+}
+
+// TestSupervisorReconcilerBootLogNamesTheCityOnce pins the supervisor's
+// reconciler boot log: each line names the city, an init retry with the same
+// lines logs nothing, and lines that change (a config edit) log again.
+func TestSupervisorReconcilerBootLogNamesTheCityOnce(t *testing.T) {
+	path := t.TempDir()
+	t.Cleanup(func() { supervisorReconcilerBootLogged.Delete(path) })
+	var stderr bytes.Buffer
+	lines := "warning: session reconciler: legacy (default fallback: x)\n"
+	logSupervisorReconcilerBoot(&stderr, path, "demo", lines)
+	if got, want := stderr.String(), "gc supervisor: city 'demo': warning: session reconciler: legacy (default fallback: x)\n"; got != want {
+		t.Fatalf("first log = %q, want %q", got, want)
+	}
+	stderr.Reset()
+	logSupervisorReconcilerBoot(&stderr, path, "demo", lines)
+	if stderr.Len() != 0 {
+		t.Fatalf("init retry logged %q again", stderr.String())
+	}
+	logSupervisorReconcilerBoot(&stderr, path, "demo", "session reconciler: v2 (default: session_reconciler is unset)\n")
+	if got := stderr.String(); got != "gc supervisor: city 'demo': session reconciler: v2 (default: session_reconciler is unset)\n" {
+		t.Fatalf("changed lines logged %q, want the new line naming the city", got)
 	}
 }

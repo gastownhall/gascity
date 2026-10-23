@@ -60,7 +60,7 @@ type OpsConfig struct {
 	// The API's submit and messages, gc session submit, mail --notify, sling
 	// --nudge and wait nudges keep their legacy delivery in this build. No
 	// request surface writes respond ops yet, so listing respond changes no
-	// request's delivery in this build. Under session_reconciler = "v2", do
+	// request's delivery in this build. Under the v2 session reconciler, do
 	// not list message yet (gc doctor warns).
 	// The city's controller, standalone or supervisor-hosted, runs the lane
 	// host that delivers lane ops, and gc doctor reports a listed kind as an

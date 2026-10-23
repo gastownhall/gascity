@@ -4084,7 +4084,7 @@ Signal a session to drain — wind down its current work gracefully.
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+"gc runtime undrain" to cancel. Under the v2 session reconciler it also
 marks the session row, so the agent's drain-ack stops the session even on a
 min_active_sessions floor.
 
@@ -4105,7 +4105,7 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-Under session_reconciler = "v2" the ack is first written to the session
+Under the v2 session reconciler the ack is first written to the session
 row, bound to its current incarnation. A session acking itself must
 carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
@@ -4212,7 +4212,7 @@ Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack and
+the v2 session reconciler it also clears the session row's drain-ack and
 its operator drain mark.
 
 ```

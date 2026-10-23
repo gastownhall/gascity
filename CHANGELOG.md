@@ -24,8 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[session] claim_holder_stall_timeout` are deprecated and ignored (the work
   ladder replaces them), with a boot and doctor warning; legacy still honours
   them. Unset conditional writes now take compare-and-swap wherever the store
-  supports it, under legacy too; set `conditional_writes = "off"` (or
-  `GC_BEADS_CONDITIONAL_WRITES=off`) to keep unconditional writes. The
+  supports it, under legacy too; a store that cannot (an exec store, or a bd
+  without `--if-revision`) runs as before, quietly, with no degraded event or
+  status warning. Set `conditional_writes = "off"` (or
+  `GC_BEADS_CONDITIONAL_WRITES=off`) to keep unconditional writes. The mode
+  stays boot-latched, and `gc runtime drain`, `drain-ack`, `undrain` and
+  `gc hook` now follow the running controller's mode until it restarts. The
   messages that said to remove `session_reconciler` to run legacy now say to
   set it to `"legacy"`.
 

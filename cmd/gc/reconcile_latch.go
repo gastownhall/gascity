@@ -70,7 +70,8 @@ func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []
 
 // v2IgnoredSettings lists the composed-config settings v2 accepts and ignores,
 // in a fixed order: the identity circuit breaker (PAR-BRK) and the two stall
-// recyclers (PAR-STALL-1, PAR-STALL-2), which the work ladder replaces. Legacy
+// recyclers (PAR-STALL-1, PAR-STALL-2), which the work ladder replaces, or,
+// under [daemon] work_ladder = "off", the v2 backstops it replaced. Legacy
 // keeps honouring them. Each entry is the deprecation the controller logs at
 // boot and doctor reports.
 func v2IgnoredSettings(cfg *config.City) []string {
@@ -84,9 +85,13 @@ func v2IgnoredSettings(cfg *config.City) []string {
 	if cfg.Session.ClaimHolderStallTimeoutDuration() > 0 {
 		keys = append(keys, "[session] claim_holder_stall_timeout")
 	}
+	replacement := "the work ladder replaces it"
+	if !cfg.Daemon.WorkLadderEnabled() {
+		replacement = `with [daemon] work_ladder = "off", v2's idle-claim, continuation and execution backstops pace work instead`
+	}
 	out := make([]string, len(keys))
 	for i, key := range keys {
-		out[i] = key + " is deprecated under v2 and ignored: the work ladder replaces it; remove it, or set session_reconciler = \"legacy\" to keep it"
+		out[i] = key + " is deprecated under v2 and ignored: " + replacement + "; remove it, or set session_reconciler = \"legacy\" to keep it"
 	}
 	return out
 }

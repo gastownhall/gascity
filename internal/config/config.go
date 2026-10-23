@@ -1576,9 +1576,9 @@ func (b BeadsConfig) NormalizedLedgerFeed() string {
 }
 
 // NormalizedNativeTransport returns the configured native-transport value,
-// mapping ONLY the empty string to the built-in default "auto" — unlike
-// ConditionalWrites/GuardedRelease, whose unset default is "off", this
-// switch's unset default is "auto" (today's eligibility-gated behavior).
+// mapping ONLY the empty string to the built-in default "auto" (today's
+// eligibility-gated behavior), as ConditionalWrites does; GuardedRelease's
+// unset default is "off".
 // Like the other two, an unknown non-empty value passes through verbatim
 // rather than collapsing to the default, because a typo must never silently
 // pick a mode: it is rejected upstream by validateNativeTransport on load.
@@ -2851,7 +2851,7 @@ type DaemonConfig struct {
 	// The gc-enterprise values "off", "auto" and "require" are deprecated
 	// aliases for "legacy". Boot-latched: a change applies at the next
 	// controller restart.
-	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=v2,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
 	// WorkLadder selects how the v2 reconciler paces outstanding work on pool
 	// seats. "on" (default) runs the work-progress ladder: nudges back off from
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
@@ -5076,7 +5076,7 @@ func validateBeadsModes(b BeadsConfig) error {
 // value at load time. This gate selects a correctness discipline: a typo like
 // "requre" silently meaning "off" would leave an operator believing the epoch
 // fence is enforced while every write runs unfenced, so the config fails to
-// load instead. The empty string (unset) is valid and defaults to off.
+// load instead. The empty string (unset) is valid and defaults to auto.
 func validateConditionalWrites(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil

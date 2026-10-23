@@ -2,10 +2,7 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
@@ -42,67 +39,49 @@ func v2DefaultConditionalWritesFallback(cfg *config.City, lookupEnv func(string)
 	cwOnly := &config.City{Beads: config.BeadsConfig{ConditionalWrites: cfg.Beads.ConditionalWrites}}
 	flags, err := rollout.Resolve(cwOnly, rollout.ResolveOptions{LookupEnv: lookupEnv})
 	if err != nil {
-		return fmt.Sprintf("[beads] conditional_writes does not resolve (%v), and v2 never writes blind (C0.7)", err)
+		return fmt.Sprintf("[beads] conditional_writes does not resolve (%v), and v2 needs conditional writes", err)
 	}
 	switch mode := flags.BeadsConditionalWrites(); {
 	case mode == rollout.Auto || mode == rollout.Require:
 		return ""
 	case flags.OriginOf(rollout.KeyBeadsConditionalWrites) == rollout.OriginEnv:
-		return fmt.Sprintf("GC_BEADS_CONDITIONAL_WRITES=%s turns conditional writes off, and v2 never writes blind (C0.7)", mode)
+		return fmt.Sprintf("GC_BEADS_CONDITIONAL_WRITES=%s turns conditional writes off, and v2 needs them", mode)
 	default:
-		return fmt.Sprintf("[beads] conditional_writes = %q turns conditional writes off, and v2 never writes blind (C0.7)", mode)
+		return fmt.Sprintf("[beads] conditional_writes = %q turns conditional writes off, and v2 needs them", mode)
 	}
 }
 
 // v2DefaultStoreKindFallbacks is the store-kind half of C0.7 read from config:
-// a fallback for each binding of the sessions and graph classes whose config
-// does not show a store that fences and whose list reads carry revisions.
-// Only a sqlite-beads binding does. The work binding's store is decided when
-// it opens (bd opens native Dolt only when preflight admits it), and a file,
-// exec or bd store is one C0.7 refuses, so a class on it falls back, as does
-// a binding whose provider config cannot classify.
+// a fallback for each binding of the sessions and graph classes that is not a
+// sqlite-beads binding, the one kind config shows to fence and to list with
+// revisions. The work binding's store is decided when it opens (bd opens
+// native Dolt only when preflight admits it), and a file, exec or bd store is
+// one C0.7 refuses, so a class there falls back, naming the storage migration
+// that moves it; so does a binding whose provider config cannot classify.
 func v2DefaultStoreKindFallbacks(cfg *config.City) []string {
 	storage := cfg.EffectiveStorage()
 	var out []string
 	sessions := storage.Classes.BindingFor(config.StorageClassSessions)
 	graph := storage.Classes.BindingFor(config.StorageClassGraph)
-	type classBinding struct{ classes, binding string }
-	stores := []classBinding{{"sessions and graph class stores are", sessions}}
+	type classBinding struct{ classes, them, binding string }
+	stores := []classBinding{{"sessions and graph class stores are", "them", sessions}}
 	if sessions != graph {
-		stores = []classBinding{{"sessions class store is", sessions}, {"graph class store is", graph}}
+		stores = []classBinding{{"sessions class store is", "it", sessions}, {"graph class store is", "it", graph}}
 	}
 	for _, c := range stores {
-		var kind string
+		var where, fix string
 		switch binding, ok := storage.Bindings[c.binding]; {
 		case c.binding == "" || c.binding == config.StorageWorkBinding:
-			kind = fmt.Sprintf("the %q binding, %s", config.StorageWorkBinding, v2WorkStoreKind(cfg))
+			where = fmt.Sprintf("the %q binding", config.StorageWorkBinding)
+			fix = fmt.Sprintf(": moving %s there is a storage migration (configure [storage], then run %s)", c.them, storageMigrationCommand)
 		case !ok:
-			kind = fmt.Sprintf("binding %q, which [storage.bindings] does not define", c.binding)
+			where = fmt.Sprintf("binding %q, which [storage.bindings] does not define", c.binding)
 		case binding.Provider == config.StorageProviderSQLiteBeads:
 			continue
 		default:
-			kind = fmt.Sprintf("binding %q (provider %q), whose store kind config cannot classify", c.binding, binding.Provider)
+			where = fmt.Sprintf("binding %q (provider %q)", c.binding, binding.Provider)
 		}
-		out = append(out, fmt.Sprintf("the %s on %s, and v2 needs a store that fences and whose list reads carry revisions (C0.7): a %s binding", c.classes, kind, config.StorageProviderSQLiteBeads))
+		out = append(out, fmt.Sprintf("the %s on %s, and v2 needs %s on a %s binding%s", c.classes, where, c.them, config.StorageProviderSQLiteBeads, fix))
 	}
 	return out
-}
-
-// v2WorkStoreKind describes the work binding's store as config shows it:
-// [beads] provider, which the factory opens (beads.OpenStoreAtForCity).
-func v2WorkStoreKind(cfg *config.City) string {
-	provider := strings.TrimSpace(cfg.Beads.Provider)
-	if provider == "" {
-		provider = "bd"
-	}
-	switch {
-	case provider == "file":
-		return fmt.Sprintf("a %s ([beads] provider %q)", beads.BeadsStoreNameFileStore, provider)
-	case !beads.ProviderConsultsNativeTransport(provider):
-		return fmt.Sprintf("an %s ([beads] provider %q)", beads.BeadsStoreNameExecStore, provider)
-	case !contract.ProviderUsesBDContract(provider) || cfg.Beads.NormalizedNativeTransport() == "off":
-		return fmt.Sprintf("a %s ([beads] provider %q)", beads.BeadsStoreNameBdStore, provider)
-	default:
-		return fmt.Sprintf("a %s or native Dolt store, which preflight decides at open ([beads] provider %q)", beads.BeadsStoreNameBdStore, provider)
-	}
 }

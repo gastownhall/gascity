@@ -59,9 +59,11 @@ whose class stores fail C0.7 does not boot. An explicit `v2` that is
 refused never falls back to legacy: set `session_reconciler = "legacy"`.
 
 v2 accepts and ignores the identity circuit breaker and the two stall
-timeouts (`v2IgnoredSettings`, mc-ymynp): the work ladder replaces them.
-The controller logs each one as deprecated at boot, and doctor warns.
-Legacy still honours them.
+timeouts (`v2IgnoredSettings`, mc-ymynp): the work ladder replaces them,
+or, with `[daemon] work_ladder = "off"`, the backstops it replaced. The
+controller logs each one as deprecated at boot, and doctor warns. Legacy
+still honours them, and only a legacy controller refuses a wake for an open
+respawn circuit (`wakeWillNotStart`).
 
 An unset key resolves from config alone too (`resolveReconcilerMode`,
 `cmd/gc/reconcile_mode.go`, with `v2DefaultFallbacks` in
@@ -73,7 +75,15 @@ a boot warning and a doctor warning naming each reason:
   or `GC_BEADS_CONDITIONAL_WRITES=off`; unset means `auto`);
 - the sessions or graph class on a store that config does not show to be
   one C0.7 admits. Only a `sqlite-beads` binding is. The `work` binding's
-  store is decided when it opens, so a class there falls back.
+  store is decided when it opens, so a class there falls back, and the
+  warning names the storage migration that moves it.
+
+Under the `conditional_writes` builtin default (`auto`, origin `builtin`),
+a store that cannot fence runs as off (`conditionalWritesDefaultAuto`): the
+open logs at debug, no `beads.conditional_writes.degraded` event is recorded,
+and the status block lists no incapable store. No released bd has
+`--if-revision`, so a loud default would warn on every command of every bd
+or exec city. An explicit `auto` or `require` stays loud.
 
 The boot census (unknown-state or duplicate named-claim rows) is store
 state, not config: it stays a hard boot refusal for an unset key resolved

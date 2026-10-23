@@ -181,8 +181,8 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
-	// StrictDrainAck reports that the city runs session_reconciler = "v2",
-	// under which a drain-ack is row-bound and can be refused.
+	// StrictDrainAck reports that the city runs the v2 session reconciler
+	// (cityRunsV2), under which a drain-ack is row-bound and can be refused.
 	StrictDrainAck bool
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
@@ -1881,7 +1881,7 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // and an adopted pane whose environment did not survive a restart acks as nobody
 // — which reads downstream as no acknowledgement at all. Naming the id lets the
 // agent run the form that resolves the target from the store instead. Under
-// session_reconciler = "v2" the line also names --operator for whoever acks
+// the v2 session reconciler the line also names --operator for whoever acks
 // from outside the session, since there a bare-id ack must prove its token.
 // A refused v2 ack is tolerated, as on the stale-session drain.
 //

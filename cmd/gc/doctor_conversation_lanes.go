@@ -33,7 +33,7 @@ type conversationLanesDoctorCheck struct {
 
 // laneMessageUnderV2Warning is the check's warning when message is listed
 // under the v2 reconciler (ga-f35wnp, V2-18).
-const laneMessageUnderV2Warning = `message is listed under session_reconciler = "v2": the content gate cannot see a stop v2 requests before its drain begins (V2-18), so content can start a turn in a session v2 is about to drain`
+const laneMessageUnderV2Warning = `message is listed under the v2 session reconciler: the content gate cannot see a stop v2 requests before its drain begins (V2-18), so content can start a turn in a session v2 is about to drain`
 
 func newConversationLanesDoctorCheck(cityPath string, cfg *config.City) *conversationLanesDoctorCheck {
 	return &conversationLanesDoctorCheck{

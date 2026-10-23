@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,13 +36,20 @@ type controllerWiring struct {
 // latch's boot warnings (reconcilerBootWarnings) once, here, the one latch
 // both controller entry points share.
 func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool), stderr io.Writer) (*controllerWiring, error) {
+	return newControllerWiringLoggingTo(cfg, lookupEnv, stderr, stderr)
+}
+
+// newControllerWiringLoggingTo is newControllerWiring with the boot lines on
+// bootLog, so the supervisor can name the city in them and log them once
+// across init retries (logSupervisorReconcilerBoot).
+func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (string, bool), stderr, bootLog io.Writer) (*controllerWiring, error) {
 	res, err := resolveReconcilerMode(cfg, lookupEnv)
 	if err != nil {
 		return nil, err
 	}
 	mode := res.Mode
 	for _, w := range reconcilerBootWarnings(cfg, res) {
-		fmt.Fprintf(stderr, "warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(bootLog, "warning: %s\n", w) //nolint:errcheck // best-effort log
 	}
 	w := &controllerWiring{
 		mode:                mode,
@@ -55,7 +64,7 @@ func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool)
 	if mode == reconcilerV2 {
 		w.v2 = newDefaultPlanner(stderr)
 		w.wake.planner, w.wake.waitDepClosed, w.wake.wakeReads = w.v2.planner, w.v2.waitDependencyClosed, w.v2.wakeReads
-		fmt.Fprintln(stderr, "session reconciler: "+res.String()) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(bootLog, "session reconciler: "+res.String()) //nolint:errcheck // best-effort log
 	}
 	return w, nil
 }
@@ -98,3 +107,22 @@ func v2SoftReloadUnavailable(intent reloadIntent, r *reloadControlReply) {
 }
 
 const v2SoftReloadUnavailableWarning = "soft reload: config drift acceptance is not available under a trace-only session_reconciler=v2; the config applied, and drifted sessions keep their accepted config hashes"
+
+// supervisorReconcilerBootLogged holds, per city path, the reconciler boot
+// lines the supervisor last logged for the city.
+var supervisorReconcilerBootLogged sync.Map
+
+// logSupervisorReconcilerBoot logs a supervisor-hosted city's reconciler boot
+// lines (newControllerWiringLoggingTo), each naming the city. An init retry
+// whose lines match the last ones logged for path logs nothing; a config edit
+// that changes them logs again.
+func logSupervisorReconcilerBoot(stderr io.Writer, path, cityName, lines string) {
+	if prev, ok := supervisorReconcilerBootLogged.Swap(path, lines); ok && prev == lines {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(lines, "\n"), "\n") {
+		if line != "" {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s\n", cityName, line) //nolint:errcheck // best-effort stderr
+		}
+	}
+}

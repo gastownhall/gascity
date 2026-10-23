@@ -35,9 +35,10 @@ const v2EffectsReal = true
 
 // reconcilerModeLookupEnv is the environment the composition edges (gc start,
 // the supervisor, doctor, the drain-ack CLI) latch with: the latch reads
-// GC_SESSION from it for its runtime refusals (v2SessionRuntimeName). Tests
-// replace it instead of setting the process environment; a test that does
-// MUST NOT call t.Parallel().
+// GC_SESSION from it for its runtime refusals (v2SessionRuntimeName), and an
+// unset key's resolution reads GC_BEADS_CONDITIONAL_WRITES
+// (v2DefaultConditionalWritesFallback). Tests replace it instead of setting
+// the process environment; a test that does MUST NOT call t.Parallel().
 var reconcilerModeLookupEnv = os.LookupEnv
 
 // reconcilerModeReason is why the latch resolved its mode.
