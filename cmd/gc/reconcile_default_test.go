@@ -359,7 +359,8 @@ func TestDoctorSessionReconcilerReportsTheResolution(t *testing.T) {
 func TestDoctorV2SessionMigrationWarnsAheadOfADefaultV2(t *testing.T) {
 	cfg := v2DefaultCity(func(c *config.City) {
 		chat := chatCity("always")
-		c.Workspace, c.Agents = chat.Workspace, append(chat.Agents, allocPoolAgent("worker", 3))
+		chat.Agents = append(chat.Agents, allocPoolAgent("worker", 3))
+		c.Workspace, c.Agents = chat.Workspace, chat.Agents
 	})
 	legs := func() []v2SessionLeg {
 		return []v2SessionLeg{{ref: "city", store: censusStore(poolRow("gc-a1", "worker", 1, "archived"))}}

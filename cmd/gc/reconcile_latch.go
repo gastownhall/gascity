@@ -72,7 +72,7 @@ func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []
 // in a fixed order: the identity circuit breaker (PAR-BRK) and the two stall
 // recyclers (PAR-STALL-1, PAR-STALL-2), which the work ladder replaces, or,
 // under [daemon] work_ladder = "off", the v2 backstops it replaced. Legacy
-// keeps honouring them. Each entry is the deprecation the controller logs at
+// keeps honoring them. Each entry is the deprecation the controller logs at
 // boot and doctor reports.
 func v2IgnoredSettings(cfg *config.City) []string {
 	var keys []string

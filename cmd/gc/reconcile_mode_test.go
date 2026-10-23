@@ -149,7 +149,7 @@ func TestLatchAdmitsV2WithIgnoredSettings(t *testing.T) {
 	}
 	for i, key := range keys {
 		if !strings.HasPrefix(boot[i], key+" is deprecated under v2 and ignored: the work ladder replaces it") {
-			t.Errorf("boot warning %d = %q, want %s deprecated in favour of the work ladder", i, boot[i], key)
+			t.Errorf("boot warning %d = %q, want %s deprecated in favor of the work ladder", i, boot[i], key)
 		}
 	}
 	// With the work ladder off, the backstops pace work, not the ladder.
@@ -176,7 +176,7 @@ func TestLatchAdmitsV2WithIgnoredSettings(t *testing.T) {
 		t.Fatalf("resolve(legacy, breaker, stalls) = %+v, %v; want legacy, nil", res, err)
 	}
 	if boot := reconcilerBootWarnings(cfg, res); len(boot) != 0 {
-		t.Errorf("legacy boot warnings = %q, want none: legacy honours these keys", boot)
+		t.Errorf("legacy boot warnings = %q, want none: legacy honors these keys", boot)
 	}
 	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK {
 		t.Errorf("legacy doctor = %v (%s), want OK", r.Status, r.Message)
