@@ -159,6 +159,11 @@ type reconcilerModeDrift struct {
 	reported  string                      // the on-disk value last reported; "" while in sync
 }
 
+// reconcilerDriftCLINote ends every pending-restart warning: the drain and
+// hook commands ask the running controller its mode (drainAckStrict), so they
+// keep to the running mode too.
+const reconcilerDriftCLINote = "until it restarts, gc runtime drain, drain-ack and undrain and gc hook keep to the mode it runs"
+
 // observe returns the pending-restart warning for a reload candidate, or ""
 // when the candidate resolves to the running mode or the same drift was
 // already reported. The warning says when the next controller start would
@@ -193,7 +198,7 @@ func (d *reconcilerModeDrift) observe(cfg *config.City) string {
 	if err != nil {
 		warning += "; the next controller start will refuse it: " + err.Error()
 	}
-	return warning
+	return warning + "; " + reconcilerDriftCLINote
 }
 
 // sessionReconcilerDoctorCheck reports the [daemon] session_reconciler choice.

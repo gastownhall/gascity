@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -830,6 +831,73 @@ func TestDrainAckStrictConfig(t *testing.T) {
 	}
 	if _, strict := drainAckCityMode(t.TempDir()); strict {
 		t.Error("a directory without city.toml is strict")
+	}
+}
+
+// TestDrainAckStrictConfigReadsTheProcessEnv pins that drain-ack resolves
+// the mode under reconcilerModeLookupEnv, as gc start latches it: a
+// GC_BEADS_CONDITIONAL_WRITES=off in the caller's environment turns a
+// default-v2 city legacy. Kills: resolving with a nil env.
+func TestDrainAckStrictConfigReadsTheProcessEnv(t *testing.T) {
+	original := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = original })
+	reconcilerModeLookupEnv = envOf(nil)
+	if !drainAckStrictConfig(v2DefaultCity(nil)) {
+		t.Fatal("drainAckStrictConfig(default-v2 city, empty env) = false, want true")
+	}
+	reconcilerModeLookupEnv = envOf(map[string]string{"GC_BEADS_CONDITIONAL_WRITES": "off"})
+	if drainAckStrictConfig(v2DefaultCity(nil)) {
+		t.Error("drainAckStrictConfig(default-v2 city, GC_BEADS_CONDITIONAL_WRITES=off) = true, want the legacy fallback")
+	}
+}
+
+// TestDrainAckStrictFollowsTheRunningController pins that the drain and hook
+// commands take the mode the running controller latched, which a config
+// edit cannot change until it restarts, and fall back to the config only
+// when no controller answers. Kills: re-resolving the on-disk config while a
+// controller runs, and an identify reply that misreports the latch.
+func TestDrainAckStrictFollowsTheRunningController(t *testing.T) {
+	original := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = original })
+	reconcilerModeLookupEnv = envOf(nil)
+	legacyCfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: config.SessionReconcilerLegacy}}
+	v2Cfg := v2DefaultCity(nil)
+
+	for _, tc := range []struct {
+		name string
+		wake *controllerWake
+		cfg  *config.City
+		want bool
+	}{
+		{name: "no controller: legacy config", cfg: legacyCfg, want: false},
+		{name: "no controller: default-v2 config", cfg: v2Cfg, want: true},
+		{name: "v2 controller over a legacy config", wake: &controllerWake{planner: &planner{}}, cfg: legacyCfg, want: true},
+		{name: "legacy controller over a default-v2 config", wake: newLegacyWake(nil, nil), cfg: v2Cfg, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if tc.wake != nil {
+				_, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, &atomic.Bool{}, nil, nil, tc.wake)
+				if err != nil {
+					t.Fatalf("startControllerSocket: %v", err)
+				}
+				t.Cleanup(func() {
+					lis.Close()                               //nolint:errcheck
+					os.Remove(controllerSocketPath(cityPath)) //nolint:errcheck
+				})
+				mode, ok := controllerLatchedReconcilerMode(cityPath)
+				if !ok || (mode == reconcilerV2) != tc.want {
+					t.Fatalf("controllerLatchedReconcilerMode = %v, %v; want the controller's latch", mode, ok)
+				}
+			} else if _, ok := controllerLatchedReconcilerMode(cityPath); ok {
+				t.Fatal("controllerLatchedReconcilerMode answered with no controller")
+			}
+			if got := drainAckStrict(cityPath, tc.cfg); got != tc.want {
+				t.Errorf("drainAckStrict = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

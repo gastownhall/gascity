@@ -37,6 +37,20 @@ type controllerWake struct {
 	lastLanded atomic.Pointer[time.Time] // the last routed enqueue reported landed
 }
 
+// latchedModeName names the session reconciler the controller latched, for
+// the identify reply: the wiring gives a v2 controller's wake its planner and
+// a legacy one's none (checkReconcilerWiring), so the wake carries the latch.
+// It is "" without a wake.
+func (w *controllerWake) latchedModeName() string {
+	switch {
+	case w == nil:
+		return ""
+	case w.planner != nil:
+		return reconcilerV2.String()
+	}
+	return reconcilerLegacy.String()
+}
+
 // routedLandedEvery bounds how often a routed enqueue reports that it landed.
 const routedLandedEvery = time.Second
 

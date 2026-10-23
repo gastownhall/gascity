@@ -249,7 +249,7 @@ func TestReconcilerDriftKeepsTheBootLatchAcrossReload(t *testing.T) {
 	}
 	got := d.observe(gap)
 	if !strings.HasPrefix(got, "pending restart: session_reconciler on disk is unset, which resolves to legacy (default fallback: ") ||
-		!strings.Contains(got, "agent depends_on on worker") || !strings.HasSuffix(got, "; this controller runs v2") {
+		!strings.Contains(got, "agent depends_on on worker") || !strings.HasSuffix(got, "; this controller runs v2; "+reconcilerDriftCLINote) {
 		t.Fatalf("default v2, candidate with depends_on: warning %q, want the pending fallback against the running v2", got)
 	}
 	if got := d.observe(gap); got != "" {
@@ -266,7 +266,7 @@ func TestReconcilerDriftKeepsTheBootLatchAcrossReload(t *testing.T) {
 	if got := d.observe(gap); got != "" {
 		t.Fatalf("fallback legacy, candidate still falls back: warned %q", got)
 	}
-	if got := d.observe(clean); got != "pending restart: session_reconciler on disk is unset, which resolves to v2 (default: session_reconciler is unset); this controller runs legacy" {
+	if got := d.observe(clean); got != "pending restart: session_reconciler on disk is unset, which resolves to v2 (default: session_reconciler is unset); this controller runs legacy; "+reconcilerDriftCLINote {
 		t.Errorf("fallback legacy, eligible candidate: warning %q", got)
 	}
 	if d.running != reconcilerLegacy {
@@ -378,5 +378,32 @@ func TestDoctorV2SessionMigrationWarnsAheadOfADefaultV2(t *testing.T) {
 	}
 	if last := r.Details[len(r.Details)-1]; !strings.HasPrefix(last, "session reconciler: legacy (default fallback: ") {
 		t.Errorf("last detail = %q, want the resolved mode and why", last)
+	}
+}
+
+// TestBuildDoctorChecksResolvesTheReconcilerUnderTheProcessEnv pins doctor's
+// production wiring: the daemon-session-reconciler check resolves under
+// reconcilerModeLookupEnv, as gc start latches, so a GC_BEADS_CONDITIONAL_WRITES
+// =off in the caller's environment reads as the legacy fallback. Kills:
+// registering the check with a nil env.
+func TestBuildDoctorChecksResolvesTheReconcilerUnderTheProcessEnv(t *testing.T) {
+	original := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = original })
+	reconcilerModeLookupEnv = envOf(map[string]string{"GC_BEADS_CONDITIONAL_WRITES": "off"})
+	cfg := v2DefaultCity(nil)
+	cfg.Workspace.Name = "demo"
+	checks := buildDoctorChecks(t.TempDir(), cfg, nil, buildDoctorChecksOpts{SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
+	var check *sessionReconcilerDoctorCheck
+	for _, c := range checks {
+		if rc, ok := c.(*sessionReconcilerDoctorCheck); ok {
+			check = rc
+		}
+	}
+	if check == nil {
+		t.Fatal("buildDoctorChecks registered no daemon-session-reconciler check")
+	}
+	check.capabilities, check.queryPass = nil, nil
+	if r := check.Run(nil); !strings.Contains(r.Message, "legacy (default fallback: ") || !strings.Contains(r.Message, "GC_BEADS_CONDITIONAL_WRITES=off") {
+		t.Errorf("message = %q, want the legacy fallback naming GC_BEADS_CONDITIONAL_WRITES=off", r.Message)
 	}
 }

@@ -1409,9 +1409,9 @@ func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
 const drainAckRefused = 2
 
 // drainAckCityMode reports whether the city at cityPath runs the v2 session
-// reconciler, the only reader of the row ack, and returns the config it read.
-// A path that is not a city, a config that does not load, or a mode the
-// controller would refuse to latch is legacy.
+// reconciler, the only reader of the row ack (drainAckStrict), and returns the
+// config it read. A path that is not a city or a config that does not load is
+// legacy.
 func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if strings.TrimSpace(cityPath) == "" {
 		return nil, false
@@ -1423,13 +1423,42 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if err != nil || cfg == nil {
 		return nil, false
 	}
-	return cfg, drainAckStrictConfig(cfg)
+	return cfg, drainAckStrict(cityPath, cfg)
 }
 
-// drainAckStrictConfig reports whether cfg latches the v2 reconciler.
+// drainAckStrict reports whether the city at cityPath runs the v2 reconciler:
+// the mode its running controller latched, when one answers, else the mode
+// cfg resolves to (drainAckStrictConfig), which the next controller start
+// latches. The running controller wins because the mode is boot-latched: a
+// config edit that resolves the other way only takes effect at restart, and
+// until then the drain marks and acks must be the ones the running
+// reconciler reads.
+func drainAckStrict(cityPath string, cfg *config.City) bool {
+	if mode, ok := controllerLatchedReconcilerMode(cityPath); ok {
+		return mode == reconcilerV2
+	}
+	return drainAckStrictConfig(cfg)
+}
+
+// drainAckStrictConfig reports whether cfg latches the v2 reconciler, as the
+// controller latches it; a mode it would refuse to latch is legacy.
 func drainAckStrictConfig(cfg *config.City) bool {
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv) // as the controller latches it
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	return err == nil && mode == reconcilerV2
+}
+
+// controllerLatchedReconcilerMode asks the city's running controller which
+// session reconciler it latched (probeControllerIdentity). ok is false when
+// no controller answers or it predates the field. A var so tests can stand in
+// a controller; tests that swap it MUST NOT call t.Parallel().
+var controllerLatchedReconcilerMode = func(cityPath string) (reconcilerMode, bool) {
+	switch probeControllerIdentity(cityPath).SessionReconciler {
+	case config.SessionReconcilerV2:
+		return reconcilerV2, true
+	case config.SessionReconcilerLegacy:
+		return reconcilerLegacy, true
+	}
+	return reconcilerLegacy, false
 }
 
 // checkDrainAckRowAt is the v2 ack's incarnation check (CONTRACT v5.7 D5),

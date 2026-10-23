@@ -43,7 +43,11 @@ supervisor) call it before the controller socket starts. The latched mode
 never changes for the life of the process. When a reload finds a different
 value on disk, it warns once per transition ("pending restart") and keeps
 running the latched mode. An unknown value refuses to start the city.
-`runsV2()` is the single predicate every v2 branch reads.
+`runsV2()` is the single predicate every v2 branch reads. The controller's
+`identify` socket reply names the latched mode, and `gc runtime drain`,
+`drain-ack`, `undrain` and `gc hook` follow it (`drainAckStrict`), falling
+back to the config's resolution only when no controller answers, so a
+config edit cannot split them from the running reconciler before restart.
 
 ### Admission
 
@@ -60,6 +64,7 @@ The controller logs each one as deprecated at boot, and doctor warns.
 Legacy still honours them.
 
 An unset key resolves from config alone too (`resolveReconcilerMode`,
+`cmd/gc/reconcile_mode.go`, with `v2DefaultFallbacks` in
 `cmd/gc/reconcile_default.go`), so the latch, `gc start` and doctor agree.
 It is v2 unless `v2DefaultFallbacks` names a reason, and then legacy, with
 a boot warning and a doctor warning naming each reason:

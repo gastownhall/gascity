@@ -94,6 +94,9 @@ func (m controllerHostingMode) known() bool {
 type controllerIdentityReply struct {
 	PID         int                   `json:"pid"`
 	HostingMode controllerHostingMode `json:"hosting_mode"`
+	// SessionReconciler is the session reconciler the controller latched at
+	// boot ("legacy" or "v2"); empty from a controller that predates it.
+	SessionReconciler string `json:"session_reconciler,omitempty"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -178,7 +181,8 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), "converge:{json}" (convergence
+// "identify" (typed process identity and the latched session reconciler),
+// "converge:{json}" (convergence
 // commands routed to event loop), "v2-pass" (the v2 planner's last pass,
 // for doctor), "ledger-feed" (the journal feeds' status, for doctor),
 // "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
@@ -217,7 +221,7 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, SessionReconciler: wake.latchedModeName()})
 		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
 			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
 			// non-blocking enqueue for event-driven wake, e.g. after sling
