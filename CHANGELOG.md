@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **An unset `[daemon] session_reconciler` now runs the v2 reconciler where
+  the city can run it, and `[beads] conditional_writes` now defaults to
+  `"auto"`.** With the key unset, the controller resolves v2 at boot from
+  config alone when no feature v2 lacks is configured (agent `depends_on` or
+  `max_session_age`, `[chat_sessions] idle_timeout`, a session provider other
+  than tmux, acp or subprocess), conditional writes resolve on, and the
+  sessions and graph classes sit on a `sqlite-beads` `[storage]` binding.
+  Otherwise it runs legacy, as before, and logs a warning naming each reason;
+  `gc doctor` (`daemon-session-reconciler`) reports the same. Set
+  `session_reconciler = "legacy"` to keep legacy and silence the warning.
+  An explicit `"v2"` still refuses to start over those features. Under v2,
+  `[daemon] session_circuit_breaker`, `[session] progress_stall_timeout` and
+  `[session] claim_holder_stall_timeout` are deprecated and ignored (the work
+  ladder replaces them), with a boot and doctor warning; legacy still honours
+  them. Unset conditional writes now take compare-and-swap wherever the store
+  supports it, under legacy too; set `conditional_writes = "off"` (or
+  `GC_BEADS_CONDITIONAL_WRITES=off`) to keep unconditional writes. The
+  messages that said to remove `session_reconciler` to run legacy now say to
+  set it to `"legacy"`.
+
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need

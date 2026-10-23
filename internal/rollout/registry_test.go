@@ -156,16 +156,16 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 	}
 	def := defaultFlags()
 
-	// beads.conditional_writes: Mode gate, default Off.
+	// beads.conditional_writes: Mode gate, default Auto (mc-dpo2b).
 	beads := byKey[keyBeadsConditionalWrites]
-	if beads.Default.Mode == nil || *beads.Default.Mode != Off {
-		t.Fatalf("beads Spec.Default = %v, want Off", beads.Default.Mode)
+	if beads.Default.Mode == nil || *beads.Default.Mode != Auto {
+		t.Fatalf("beads Spec.Default = %v, want Auto", beads.Default.Mode)
 	}
-	if def.BeadsConditionalWrites() != Off {
-		t.Errorf("defaultFlags beads = %q, want off", def.BeadsConditionalWrites())
+	if def.BeadsConditionalWrites() != Auto {
+		t.Errorf("defaultFlags beads = %q, want auto", def.BeadsConditionalWrites())
 	}
-	if got := (config.BeadsConfig{}).NormalizedConditionalWrites(); got != string(Off) {
-		t.Errorf("config accessor default = %q, want %q", got, Off)
+	if got := (config.BeadsConfig{}).NormalizedConditionalWrites(); got != string(Auto) {
+		t.Errorf("config accessor default = %q, want %q", got, Auto)
 	}
 
 	// beads.guarded_release: Mode gate, default Off.

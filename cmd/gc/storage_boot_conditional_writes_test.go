@@ -32,7 +32,7 @@ func TestOpenStorageRoutesStampsBindingWithResolvedMode(t *testing.T) {
 		stamped gate.Mode
 		fenced  bool
 	}{
-		{mode: "", stamped: gate.Off, fenced: false},
+		{mode: "", stamped: gate.Auto, fenced: true}, // unset means auto (mc-dpo2b)
 		{mode: "off", stamped: gate.Off, fenced: false},
 		{mode: "auto", stamped: gate.Auto, fenced: true},
 		{mode: "require", stamped: gate.Require, fenced: true},

@@ -1440,8 +1440,9 @@ type BeadsConfig struct {
 	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
 	// byte-identical), "auto" (compare-and-swap where the store is capable,
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
-	// defaults to "off". Any other value fails config load.
-	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// defaults to "auto". GC_BEADS_CONDITIONAL_WRITES overrides it. Any other
+	// value fails config load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// GuardedRelease selects the ownership-release discipline for work beads:
 	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
 	// release verbs where the bd binary is capable, loud degrade otherwise), or
@@ -1529,7 +1530,7 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 }
 
 // NormalizedConditionalWrites returns the configured conditional-writes value,
-// mapping ONLY the empty string to the built-in default "off". Unlike
+// mapping ONLY the empty string to the built-in default "auto". Unlike
 // NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
 // rather than collapsing to the default: it is rejected upstream (by
 // internal/rollout on resolve), because a typo must never silently mean "off".
@@ -1537,7 +1538,7 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 // config free of a rollout import (cycle).
 func (b BeadsConfig) NormalizedConditionalWrites() string {
 	if b.ConditionalWrites == "" {
-		return "off"
+		return "auto"
 	}
 	return b.ConditionalWrites
 }
@@ -1741,13 +1742,17 @@ type SessionConfig struct {
 	// Such a session has likely parked (e.g. its turn ended on a provider auth
 	// error) and will not self-recover. Set this above the longest legitimate
 	// alive-idle period for the city; values below 5m are clamped to 5m.
-	// Duration string (e.g. "30m"). Unset/zero disables it.
+	// Duration string (e.g. "30m"). Unset/zero disables it. Legacy only:
+	// deprecated and ignored under the v2 reconciler, whose work ladder
+	// replaces it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
 	// desired, alive session that holds in-progress work but has stopped making
 	// progress. Because recycling a claim-holder interrupts work, set this above
 	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
-	// Duration string (e.g. "20m"). Unset/zero disables it.
+	// Duration string (e.g. "20m"). Unset/zero disables it. Legacy only:
+	// deprecated and ignored under the v2 reconciler, whose work ladder
+	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
@@ -2743,7 +2748,9 @@ type DaemonConfig struct {
 	RestartWindow string `toml:"restart_window,omitempty" jsonschema:"default=1h"`
 	// SessionCircuitBreaker enables the named-session respawn circuit breaker.
 	// When enabled, the controller suppresses no-progress named-session respawns
-	// after the configured restart threshold is exceeded.
+	// after the configured restart threshold is exceeded. Legacy only:
+	// deprecated and ignored under the v2 reconciler, whose work ladder
+	// replaces it.
 	SessionCircuitBreaker bool `toml:"session_circuit_breaker,omitempty"`
 	// SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the
 	// named-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.
@@ -2832,13 +2839,19 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
-	// SessionReconciler selects the controller's session reconciler. "legacy"
-	// (default) runs the tick reconciler. "v2" is reserved for the keyed
-	// reconciler and is refused in this build: a controller configured with it
-	// does not start. The gc-enterprise values "off", "auto" and "require" are
-	// deprecated aliases for "legacy". Boot-latched: a change applies at the next
-	// controller restart. Leave it unset.
-	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=legacy,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
+	// SessionReconciler selects the controller's session reconciler. Unset
+	// (default) runs the keyed "v2" reconciler when the city can run it, and
+	// falls back to "legacy", the tick reconciler, with a warning naming why
+	// when it cannot: a feature v2 does not support yet (agent depends_on or
+	// max_session_age, [chat_sessions] idle_timeout, a session provider other
+	// than tmux, acp or subprocess), conditional writes turned off, or a
+	// sessions or graph class store that is not on a sqlite-beads binding.
+	// "v2" runs v2 or refuses to start: a controller configured with it and
+	// such a feature does not start. "legacy" always runs the tick reconciler.
+	// The gc-enterprise values "off", "auto" and "require" are deprecated
+	// aliases for "legacy". Boot-latched: a change applies at the next
+	// controller restart.
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=v2,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
 	// WorkLadder selects how the v2 reconciler paces outstanding work on pool
 	// seats. "on" (default) runs the work-progress ladder: nudges back off from
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
@@ -3083,12 +3096,16 @@ const (
 	SessionReconcilerV2     = "v2"
 )
 
-// SessionReconcilerMode returns the normalized mode ("legacy" or "v2"),
-// whether the spelling was a deprecated alias, and ok=false for an unknown
-// value. Parsing is case- and space-tolerant.
+// SessionReconcilerMode returns the normalized mode ("legacy" or "v2", or ""
+// when the key is unset), whether the spelling was a deprecated alias, and
+// ok=false for an unknown value. Parsing is case- and space-tolerant. An unset
+// key is resolved by the controller latch, from the whole config: v2 when the
+// city can run it, else legacy.
 func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(d.SessionReconciler)) {
-	case "", SessionReconcilerLegacy:
+	case "":
+		return "", false, true
+	case SessionReconcilerLegacy:
 		return SessionReconcilerLegacy, false, true
 	case SessionReconcilerV2:
 		return SessionReconcilerV2, false, true
@@ -3103,7 +3120,7 @@ func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
 // spelling of [daemon] session_reconciler. Matching it as a suffix keeps an
 // unknown value that quotes the marker from passing as an alias. Keep in sync
 // with IsSessionReconcilerAliasWarning.
-const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; remove the key, legacy is the default`
+const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; set session_reconciler = "legacy"`
 
 // sessionReconcilerWarnings returns the load warning for one config layer's
 // [daemon] session_reconciler: a non-fatal deprecation for an alias, and a
@@ -3117,7 +3134,7 @@ func sessionReconcilerWarnings(cfg *City, source string) []string {
 	_, alias, ok := cfg.Daemon.SessionReconcilerMode()
 	switch {
 	case !ok:
-		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, source, raw)}
+		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; set session_reconciler = "legacy" or "v2"`, source, raw)}
 	case alias:
 		return []string{fmt.Sprintf("%s: [daemon] session_reconciler = %q %s", source, raw, sessionReconcilerAliasMarker)}
 	}

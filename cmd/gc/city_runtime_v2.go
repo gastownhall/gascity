@@ -295,7 +295,7 @@ func v2CapabilityRefusal(caps []v2StoreCapability) error {
 	case blind:
 		fix = "put the class on a store whose list reads carry revisions (SQLite or native Dolt)"
 	}
-	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: %s, or remove session_reconciler to run legacy", strings.Join(parts, "; "), fix)
+	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: %s, or set session_reconciler = \"legacy\"", strings.Join(parts, "; "), fix)
 }
 
 // v2CapabilityUnreadError is C0.7 failing to read a class store's list

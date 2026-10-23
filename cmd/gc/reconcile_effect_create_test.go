@@ -483,7 +483,7 @@ func TestC07RefusalNamesTheFixForWhatTheStoresLack(t *testing.T) {
 		{"unfenced and blind", []v2StoreCapability{unfenced, blind}, "put the class on a store that fences and whose list reads carry revisions (SQLite or native Dolt)"},
 	} {
 		refusal := v2CapabilityRefusal(tc.caps)
-		if refusal == nil || !strings.Contains(refusal.Error(), "v2 never writes blind: "+tc.fix+", or remove") {
+		if refusal == nil || !strings.Contains(refusal.Error(), "v2 never writes blind: "+tc.fix+`, or set session_reconciler = "legacy"`) {
 			t.Errorf("%s: C0.7 = %v, want the fix %q", tc.name, refusal, tc.fix)
 		}
 	}
@@ -733,7 +733,7 @@ func TestSessionReconcilerDoctorReportsC07(t *testing.T) {
 		name, mode string
 		want       doctor.CheckStatus
 	}{
-		{"legacy", "", doctor.StatusOK},
+		{"legacy", "legacy", doctor.StatusOK},
 		{"v2", "v2", doctor.StatusError},
 	} {
 		cfg := workerCity(1)

@@ -19,12 +19,16 @@ func ptr[T any](v T) *T { return &v }
 // phantom Spec that leaks into a sibling's ForTest defaults.
 var specs = []Spec{
 	{
-		Key:            keyBeadsConditionalWrites,
-		Category:       InfraRollout,
-		ConfigPath:     "beads.conditional_writes",
-		EnvOverride:    envBeadsConditionalWrites,
-		EnvSemantics:   EnvOverrides,
-		Default:        Default{Mode: ptr(Off)},
+		Key:          keyBeadsConditionalWrites,
+		Category:     InfraRollout,
+		ConfigPath:   "beads.conditional_writes",
+		EnvOverride:  envBeadsConditionalWrites,
+		EnvSemantics: EnvOverrides,
+		// Auto by default (mc-dpo2b): every store takes CAS where it is
+		// capable and degrades loudly where it is not, ahead of the
+		// VersionAnchor graduation, so an unset session_reconciler can
+		// resolve to v2 (which never writes blind).
+		Default:        Default{Mode: ptr(Auto)},
 		Owner:          Owner{Bead: "ga-1ypn4t", GitHub: "@gastownhall/gascity-admin"},
 		Expires:        "2027-01-15",
 		VersionAnchor:  "BD_CONDITIONAL_WRITES_MIN_VERSION",

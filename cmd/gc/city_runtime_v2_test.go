@@ -686,7 +686,10 @@ func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
 		{name: "a deferred feature", env: noEnv, refused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v2 := &config.City{Workspace: config.Workspace{Name: "gate"}, Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: tc.refused}}
+			v2 := &config.City{Workspace: config.Workspace{Name: "gate"}, Daemon: config.DaemonConfig{SessionReconciler: "v2"}}
+			if tc.refused {
+				v2.Agents = []config.Agent{{Name: "worker", DependsOn: []string{"db"}}}
+			}
 			var stderr bytes.Buffer
 			w, err := newControllerWiring(v2, tc.env, &stderr)
 			if tc.refused {
@@ -707,7 +710,7 @@ func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
 			if w.v2.started {
 				t.Error("the wiring started the planner")
 			}
-			if !strings.Contains(stderr.String(), "session reconciler: v2\n") {
+			if !strings.Contains(stderr.String(), "session reconciler: v2 (set by [daemon] session_reconciler)\n") {
 				t.Errorf("stderr = %q, want the v2 banner", stderr.String())
 			}
 		})
@@ -1088,14 +1091,14 @@ func TestStartStandaloneRefusesV2OneShot(t *testing.T) {
 // it.
 func TestSessionReconcilerOverrideFeedsDoctorAndDrift(t *testing.T) {
 	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2"}}
-	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK || r.Message != "session reconciler: v2" {
+	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK || r.Message != "session reconciler: v2 (set by [daemon] session_reconciler)" {
 		t.Errorf("doctor for an admissible v2 = %v (%s), want OK v2", r.Status, r.Message)
 	}
 	d := reconcilerModeDrift{lookupEnv: noEnv}
 	if got := d.observe(cfg); !strings.HasPrefix(got, "pending restart: ") || strings.Contains(got, "will refuse it") {
 		t.Errorf("drift to an admissible v2 = %q, want pending restart without a refusal", got)
 	}
-	refused := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true}}
+	refused := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2"}, ChatSessions: config.ChatSessionsConfig{IdleTimeout: "30m"}}
 	if r := newSessionReconcilerDoctorCheck(refused, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError {
 		t.Errorf("doctor for a refused v2 = %v (%s), want an error", r.Status, r.Message)
 	}

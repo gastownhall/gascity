@@ -1088,7 +1088,8 @@
             "auto",
             "require"
           ],
-          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
+          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"auto\". GC_BEADS_CONDITIONAL_WRITES overrides it. Any other\nvalue fails config load.",
+          "default": "auto"
         },
         "guarded_release": {
           "type": "string",
@@ -1410,7 +1411,7 @@
         },
         "session_circuit_breaker": {
           "type": "boolean",
-          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded."
+          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
         "session_circuit_breaker_max_restarts": {
           "type": "integer",
@@ -1489,8 +1490,8 @@
             "auto",
             "require"
           ],
-          "description": "SessionReconciler selects the controller's session reconciler. \"legacy\"\n(default) runs the tick reconciler. \"v2\" is reserved for the keyed\nreconciler and is refused in this build: a controller configured with it\ndoes not start. The gc-enterprise values \"off\", \"auto\" and \"require\" are\ndeprecated aliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart. Leave it unset.",
-          "default": "legacy"
+          "description": "SessionReconciler selects the controller's session reconciler. Unset\n(default) runs the keyed \"v2\" reconciler when the city can run it, and\nfalls back to \"legacy\", the tick reconciler, with a warning naming why\nwhen it cannot: a feature v2 does not support yet (agent depends_on or\nmax_session_age, [chat_sessions] idle_timeout, a session provider other\nthan tmux, acp or subprocess), conditional writes turned off, or a\nsessions or graph class store that is not on a sqlite-beads binding.\n\"v2\" runs v2 or refuses to start: a controller configured with it and\nsuch a feature does not start. \"legacy\" always runs the tick reconciler.\nThe gc-enterprise values \"off\", \"auto\" and \"require\" are deprecated\naliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart.",
+          "default": "v2"
         },
         "work_ladder": {
           "type": "string",
@@ -3025,11 +3026,11 @@
         },
         "progress_stall_timeout": {
           "type": "string",
-          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
         "claim_holder_stall_timeout": {
           "type": "string",
-          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it."
+          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
         "socket": {
           "type": "string",

@@ -26,6 +26,19 @@ func TestResolvedConditionalWritesMode(t *testing.T) {
 			t.Fatalf("mode = %q, want unset", got)
 		}
 	})
+	t.Run("unset config value resolves auto", func(t *testing.T) {
+		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvedConditionalWritesMode(cfg); got != gate.Auto {
+			t.Fatalf("mode = %q, want auto (the default since mc-dpo2b)", got)
+		}
+		cfg.Beads.ConditionalWrites = "off"
+		if got := resolvedConditionalWritesMode(cfg); got != gate.Off {
+			t.Fatalf("explicit off: mode = %q, want off", got)
+		}
+	})
 	t.Run("resolved config value threads through", func(t *testing.T) {
 		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 		if err != nil {

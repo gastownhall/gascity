@@ -2155,7 +2155,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		rec            *events.Fake
 		stdout, stderr *lockedBuffer
 	}
-	start := func(t *testing.T, prefix string, refused bool, beforeRun func(dir string)) started {
+	start := func(t *testing.T, prefix string, mutate func(*config.City), beforeRun func(dir string)) started {
 		t.Helper()
 		dir := shortSocketTempDir(t, prefix)
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
@@ -2168,7 +2168,10 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		cfg := &config.City{
 			Workspace: config.Workspace{Name: "test"},
 			Beads:     config.BeadsConfig{Provider: "file"},
-			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2", SessionCircuitBreaker: refused},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2"},
+		}
+		if mutate != nil {
+			mutate(cfg)
 		}
 		buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
 		s := started{dir: dir, done: make(chan struct{}), code: new(int), rec: events.NewFake(), stdout: &lockedBuffer{}, stderr: &lockedBuffer{}}
@@ -2181,7 +2184,8 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 
 	t.Run("refused", func(t *testing.T) {
 		var sockPath string
-		s := start(t, "gc-latch-", true, func(dir string) { // a feature v2 defers: the latch refuses
+		deferred := func(c *config.City) { c.ChatSessions.IdleTimeout = "30m" }
+		s := start(t, "gc-latch-", deferred, func(dir string) { // a feature v2 defers: the latch refuses
 			sockPath = controllerSocketPath(dir)
 			if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 				t.Fatal(err)
@@ -2241,7 +2245,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		}
 		t.Cleanup(func() { openStoreFactoryForCity = restore })
 		wired := captureWiredControllerStates(t)
-		s := start(t, "gc-latch-v2-", false, nil)
+		s := start(t, "gc-latch-v2-", nil, nil)
 		t.Cleanup(func() {
 			tryStopController(s.dir, &bytes.Buffer{})
 			awaitClose(t, s.done, "controller to exit after stop")
@@ -2259,7 +2263,10 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 	t.Run("capability refused", func(t *testing.T) {
 		admitV2(t)
 		wired := captureWiredControllerStates(t)
-		s := start(t, "gc-latch-c07-", false, nil)
+		// The file store fences only with conditional writes on, and they
+		// default to auto (mc-dpo2b), so the refusal needs them off.
+		cwOff := func(c *config.City) { c.Beads.ConditionalWrites = "off" }
+		s := start(t, "gc-latch-c07-", cwOff, nil)
 		awaitWired(t, s, wired)
 		select {
 		case <-s.done:

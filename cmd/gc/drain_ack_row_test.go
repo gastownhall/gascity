@@ -368,7 +368,7 @@ func TestRuntimeDrainAckModeSwitch(t *testing.T) {
 		strict     bool
 	}{
 		{name: "legacy default"},
-		{name: "v2 refused by the latch", reconciler: "v2", extra: "session_circuit_breaker = true\n"},
+		{name: "v2 refused by the latch", reconciler: "v2", extra: "\n[chat_sessions]\nidle_timeout = \"30m\"\n"},
 		{name: "v2", reconciler: "v2", strict: true},
 	} {
 		for _, tc := range cases {
@@ -817,10 +817,16 @@ func TestDrainAckStrictConfig(t *testing.T) {
 	} {
 		cfg := &config.City{}
 		cfg.Daemon.SessionReconciler = tc.value
-		cfg.Daemon.SessionCircuitBreaker = tc.refused
+		if tc.refused {
+			cfg.ChatSessions.IdleTimeout = "30m"
+		}
 		if got := drainAckStrictConfig(cfg); got != tc.want {
 			t.Errorf("drainAckStrictConfig(%q, refused %v) = %v, want %v", tc.value, tc.refused, got, tc.want)
 		}
+	}
+	// An unset key that resolves to v2 (mc-dpo2b) is as strict as "v2".
+	if cfg := v2DefaultCity(nil); !drainAckStrictConfig(cfg) {
+		t.Error("drainAckStrictConfig(unset, resolving to v2) = false, want true")
 	}
 	if _, strict := drainAckCityMode(t.TempDir()); strict {
 		t.Error("a directory without city.toml is strict")

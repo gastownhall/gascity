@@ -30,11 +30,17 @@ type controllerWiring struct {
 
 // newControllerWiring latches the session reconciler and builds the wiring.
 // A refused mode is a start failure: the caller must not start the city.
-// lookupEnv carries the developer override (latchReconcilerMode).
+// lookupEnv carries the developer override (latchReconcilerMode). It logs the
+// latch's boot warnings (reconcilerBootWarnings) once, here, the one latch
+// both controller entry points share.
 func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool), stderr io.Writer) (*controllerWiring, error) {
-	mode, err := latchReconcilerMode(cfg, lookupEnv)
+	res, err := resolveReconcilerMode(cfg, lookupEnv)
 	if err != nil {
 		return nil, err
+	}
+	mode := res.Mode
+	for _, w := range reconcilerBootWarnings(cfg, res) {
+		fmt.Fprintf(stderr, "warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	w := &controllerWiring{
 		mode:                mode,
@@ -49,7 +55,7 @@ func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool)
 	if mode == reconcilerV2 {
 		w.v2 = newDefaultPlanner(stderr)
 		w.wake.planner, w.wake.waitDepClosed, w.wake.wakeReads = w.v2.planner, w.v2.waitDependencyClosed, w.v2.wakeReads
-		fmt.Fprintln(stderr, "session reconciler: v2") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "session reconciler: "+res.String()) //nolint:errcheck // best-effort stderr
 	}
 	return w, nil
 }
