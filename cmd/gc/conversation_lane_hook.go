@@ -316,6 +316,9 @@ type hookLanePass struct {
 	// accepted Done; the drain stamps it instead when legacy nudges rode
 	// along, after their ack.
 	stampDelivered bool
+	// stopReading is how the pass reads the row's stop request: by the mode
+	// the city's controller latched (controllerStopReading).
+	stopReading session.StopRequestReading
 }
 
 // hookLaneOutcome is what one in-band pass did to the hook's output.
@@ -346,10 +349,10 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 		p.notef("%v", err)
 		return hookLaneOutcome{}
 	}
-	// The hook holds no latch, so it reads the stop request live: a request
-	// it holds back waits for the controller's lane host, which reads by
-	// its latched mode.
-	view, row, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv, session.StopRequestsLive)
+	// The hook holds no latch, so it reads the stop request by the mode the
+	// controller latched: a request it holds back waits for the
+	// controller's lane host, which reads by the same mode.
+	view, row, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv, p.stopReading)
 	if err != nil {
 		p.notef("reading conversation %s: %v", p.conv, err)
 		return hookLaneOutcome{}
@@ -435,7 +438,8 @@ func hookLaneRing(cityPath, conv string, out hookLaneOutcome, rows *journalRingQ
 type hookLaneExec struct {
 	pass hookLanePass
 	info session.Info
-	// stop is the row's stop request, read live with info.
+	// stop is the row's stop request, read with info by the pass's
+	// stopReading.
 	stop session.StopRequest
 	// emitted and emitErr record the effect for the drain; refused is why
 	// the pass did not write: the deadline check's answer, or a text over
@@ -576,8 +580,10 @@ func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Write
 // With nothing due it costs the one keyed probe and writes nothing. The drain
 // rings the lane host itself (hookLaneRing) when it is done, and rings for
 // the journal rows the pass wrote then too: sessions' emitter defers them
-// (deferJournalRings).
-func hookDrainLane(sessions beads.Store, conv string, knownDue bool, payload []byte, legacy, room int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
+// (deferJournalRings). The pass reads the row's stop request by the mode
+// the controller of the city at cityPath latched (controllerStopReading),
+// asked only once the pass is due to run.
+func hookDrainLane(cityPath string, sessions beads.Store, conv string, knownDue bool, payload []byte, legacy, room int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
 	if !knownDue && !hookLaneDue(sessions, conv, stderr) {
 		return hookLaneOutcome{}
 	}
@@ -602,6 +608,7 @@ func hookDrainLane(sessions beads.Store, conv string, knownDue bool, payload []b
 		emit:           write,
 		recordTime:     hookLaneRecordTime,
 		stampDelivered: legacy == 0,
+		stopReading:    controllerStopReading(cityPath),
 	}.run(ctx)
 }
 

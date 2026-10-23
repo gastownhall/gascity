@@ -1812,6 +1812,7 @@ go_test(
         "reconcile_inflight_test.go",
         "reconcile_keys_test.go",
         "reconcile_latch_test.go",
+        "reconcile_mode_publish_test.go",
         "reconcile_mode_test.go",
         "reconcile_observe_identity_test.go",
         "reconcile_observe_v2_test.go",

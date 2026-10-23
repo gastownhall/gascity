@@ -52,6 +52,8 @@ func newCLILaneCityOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt)
 	t.Cleanup(func() { cliOpClock, cliOpLookupEnv, cliLaneRing = oldClock, oldLookup, oldRing })
 	cliOpClock = f.clk
 	cliOpLookupEnv = func(k string) (string, bool) { v, ok := c.env[k]; return v, ok }
+	// No controller answers by default: the mode is unknown.
+	setLaneControllerMode(t, reconcilerLegacy, false)
 	cliLaneRing = func(_, conv, opID string) (string, error) {
 		c.rings = append(c.rings, conv+":"+opID)
 		c.events = append(c.events, "ring")
@@ -352,10 +354,28 @@ func TestSessionNudgeLaneBusyIsQueued(t *testing.T) {
 }
 
 // A session v2 asked to stop at its generation leaves the op queued for the
-// controller (V2-18): the CLI holds no latch, so its inline pass reads the
-// request live and defers the content to the lane host.
+// controller (V2-18) while the controller's latched mode is v2 or unknown:
+// the CLI holds no latch, so its inline pass reads the request by the mode
+// the controller answers, live when none answers, and defers the content to
+// the lane host.
 func TestSessionNudgeLaneStopRequestedIsQueued(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		known bool
+	}{
+		{"latched v2", true},
+		{"mode unknown", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testSessionNudgeLaneStopRequestedIsQueued(t, tc.known)
+		})
+	}
+}
+
+func testSessionNudgeLaneStopRequestedIsQueued(t *testing.T, known bool) {
+	t.Helper()
 	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	setLaneControllerMode(t, reconcilerV2, known)
 	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
 	if code != 0 {
 		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
@@ -370,6 +390,27 @@ func TestSessionNudgeLaneStopRequestedIsQueued(t *testing.T) {
 	op := c.only(t)
 	if op.Status != opjournal.StatusSubmitted || len(c.rings) != 1 || c.rings[0] != c.id+":"+op.ID {
 		t.Fatalf("op %s, rings %v; want submitted and one ring for it", op.Status, c.rings)
+	}
+}
+
+// A controller that latched legacy, as after a rollback, makes the CLI read
+// a stale v2 stop request as residue at once (V2-18): the inline pass
+// delivers, as legacy will never carry the request out.
+func TestSessionNudgeLaneStopResidueUnderLatchedLegacyDelivers(t *testing.T) {
+	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	setLaneControllerMode(t, reconcilerLegacy, true)
+	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if nudges := c.nudges(); len(nudges) != 1 || nudges[0].Message != cliLaneTestMessage {
+		t.Fatalf("deliveries %+v, want the message verbatim once", nudges)
+	}
+	if op := c.only(t); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != laneViaLive {
+		t.Fatalf("op %+v, want succeeded via live", op)
+	}
+	if stdout != "Nudged "+c.target.agentKey()+"\n" {
+		t.Fatalf("stdout %q", stdout)
 	}
 }
 

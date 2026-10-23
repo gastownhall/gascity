@@ -42,8 +42,8 @@ const (
 	// GateContentDrainNotice is the drain protocol's notice: the reminder
 	// asking a draining session's agent to acknowledge its drain. Its
 	// audience is a row in drain, so it is the one content "stop_requested"
-	// and "draining" admit (I7's exemption). The caller classifies the op;
-	// nothing else may be passed as this.
+	// and "draining" admit (I7's exemption, permanent). The caller classifies
+	// the op; nothing else may be passed as this.
 	GateContentDrainNotice
 )
 
@@ -59,8 +59,11 @@ const (
 // I7 has one exemption (ga-iw4nv1): "stop_requested" and "draining", a
 // drain's two phases, do not hold GateContentDrainNotice, the drain
 // protocol's own notice to the row being drained, so whether the notice is
-// admitted does not depend on how the stop request was read. Every other
-// reason still holds it, in the same order, and both hold all other content.
+// admitted does not depend on how the stop request was read. The exemption
+// is permanent, not a transition allowance: the notice asks the agent being
+// drained to acknowledge its drain, so holding it from a stop-requested row
+// would hold the very request the drain waits on. Every other reason still
+// holds it, in the same order, and both hold all other content.
 func ContentGate(info Info, stop StopRequest, running bool, now time.Time, content GateContent) string {
 	state := State(strings.TrimSpace(info.MetadataState))
 	drainNotice := content == GateContentDrainNotice

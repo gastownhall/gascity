@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -300,4 +301,57 @@ func (c *sessionReconcilerDoctorCheck) reportCapabilities(r *doctor.CheckResult,
 		r.Status, r.Message = doctor.StatusError, refusal.Error()
 		r.FixHint = `see the message for the fix, or set session_reconciler = "legacy"`
 	}
+}
+
+// reconcilerModeCommand asks the controller socket for the session
+// reconciler it latched at boot (reconcilerModeReply). It is how a process
+// that holds no latch (the CLI's inline lane pass, the prompt hook) learns
+// the running mode: the latch lives only in the controller's process, and
+// the on-disk config may already name another mode (reconcilerModeDrift).
+const reconcilerModeCommand = "reconciler-mode"
+
+// reconcilerModeReply is the controller's answer to reconcilerModeCommand:
+// the latched mode's config spelling (reconcilerMode.String).
+type reconcilerModeReply struct {
+	SessionReconciler string `json:"session_reconciler"`
+}
+
+// reconcilerModeReplyFor is the reply of a controller whose wake is wake,
+// and false when it has none to answer from: the latched mode rides on the
+// wiring's wake (newControllerWiring).
+func reconcilerModeReplyFor(wake *controllerWake) (reconcilerModeReply, bool) {
+	if wake == nil {
+		return reconcilerModeReply{}, false
+	}
+	return reconcilerModeReply{SessionReconciler: wake.mode.String()}, true
+}
+
+// queryControllerReconcilerMode asks the city's controller for the mode it
+// latched. known is false when no controller answers, when one predates the
+// command (it closes the connection without a reply), or when the reply
+// names no mode this build knows: the caller must then assume nothing about
+// the running mode.
+func queryControllerReconcilerMode(cityPath string) (mode reconcilerMode, known bool) {
+	resp, err := sendControllerCommandWithTimeouts(cityPath, reconcilerModeCommand, 250*time.Millisecond, 250*time.Millisecond, time.Second)
+	if err != nil {
+		return reconcilerLegacy, false
+	}
+	return decodeReconcilerModeReply(resp)
+}
+
+// decodeReconcilerModeReply reads a controller's reply to
+// reconcilerModeCommand; known is false for a reply that is not one, or that
+// names no mode this build knows.
+func decodeReconcilerModeReply(resp []byte) (mode reconcilerMode, known bool) {
+	var reply reconcilerModeReply
+	if err := json.Unmarshal(resp, &reply); err != nil {
+		return reconcilerLegacy, false
+	}
+	switch reply.SessionReconciler {
+	case config.SessionReconcilerLegacy:
+		return reconcilerLegacy, true
+	case config.SessionReconcilerV2:
+		return reconcilerV2, true
+	}
+	return reconcilerLegacy, false
 }

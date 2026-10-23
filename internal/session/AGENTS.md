@@ -48,10 +48,14 @@ evidence from tests, source, an issue, or a commit.
   `activeStop`, inside the reconciler, by cmd/gc's `v2SignaledUnacked`, for
   legacy's rollback guard, and by `ReadStopRequest`, for the content gate,
   whose one caller is the conversation lane's row read. `ReadStopRequest`
-  takes a reading: only a lane host whose controller latched legacy reads
-  residue (`StopRequestsIgnored`); every other reader reads live. A lane
-  host other than the controller's must obtain the controller's latched
-  mode. Enforced by `TestStopRequestKeysAreNewKeys`,
+  takes the reading of the controller's latched mode: residue
+  (`StopRequestsIgnored`) under legacy, live under v2. The controller's lane
+  host reads its own latch; every reader outside the controller (the CLI's
+  inline pass, the prompt hook) asks the running controller
+  (`reconciler-mode` on the controller socket), never the on-disk config,
+  and reads live when the mode is unknown. The drain-protocol notice
+  (`GateContentDrainNotice`) is exempt from `stop_requested`, as from
+  `draining`, permanently. Enforced by `TestStopRequestKeysAreNewKeys`,
   `TestSessionReadsTheStopRequestOnlyInReadStopRequest` and
   `TestReadStopRequestAgreesWithActiveStop`.
 - Keep production CLI session creation and lifecycle operations on the

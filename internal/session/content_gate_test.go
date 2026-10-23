@@ -151,9 +151,10 @@ func TestContentGateAdmitsTheDrainNoticeIntoADrainingRow(t *testing.T) {
 
 // TestContentGateAdmitsTheDrainNoticeIntoAStopRequestedRow pins I7's
 // exemption on a drain's first phase (V2-18): the drain protocol's notice
-// passes "stop_requested" as it passes "draining", so its admission does not
-// depend on how the stop request was read; every later reason still holds
-// it, and every other content stays refused by the request.
+// passes "stop_requested" as it passes "draining", permanently, so its
+// admission does not depend on how the stop request was read; every later
+// reason still holds it, and every other content stays refused by the
+// request.
 func TestContentGateAdmitsTheDrainNoticeIntoAStopRequestedRow(t *testing.T) {
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	requested := Info{ID: "gc-1", MetadataState: string(StateActive), State: StateActive, Generation: "2"}

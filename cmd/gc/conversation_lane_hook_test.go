@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,9 +39,12 @@ type hookLaneHarness struct {
 	// deadline is the hook deadline the pass releases a refused batch by.
 	deadline time.Time
 	// room is the room the hook context has for the lane text.
-	room    int
-	emitErr error
-	emitted []string
+	room int
+	// stopReading is the pass's reading of the row's stop request; the zero
+	// value reads it live, as an unknown controller mode does.
+	stopReading session.StopRequestReading
+	emitErr     error
+	emitted     []string
 	// leases are the leases of the ops open when each output was written.
 	leases []opjournal.Lease
 	stderr bytes.Buffer
@@ -87,6 +91,7 @@ func (h *hookLaneHarness) pass() hookLanePass {
 			return err
 		},
 		stampDelivered: true,
+		stopReading:    h.stopReading,
 	}
 }
 
@@ -509,20 +514,26 @@ func TestHookLanePassTokenlessRow(t *testing.T) {
 
 // TestHookLanePassHonorsTheContentGate proves a row the content gate blocks
 // takes nothing in band: a draining row, and a row v2 asked to stop at its
-// generation, which the hook, holding no latch, reads live (V2-18). Another
-// generation's request blocks nothing.
+// generation, which the hook, holding no latch, reads by the controller's
+// latched mode, live under v2 or when the mode is unknown (V2-18). Another
+// generation's request blocks nothing, and neither does a request read as
+// residue, as a controller that latched legacy has the hook read it.
 func TestHookLanePassHonorsTheContentGate(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		opt  laneFixtureOpt
-		emit bool
+		name    string
+		opt     laneFixtureOpt
+		reading session.StopRequestReading
+		emit    bool
 	}{
-		{"draining", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }, false},
-		{"stop requested at the row's generation", laneStopRequestedAt(1), false},
-		{"stop request of another generation", laneStopRequestedAt(2), true},
+		{"draining", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }, session.StopRequestsLive, false},
+		{"draining, stop requests read as residue", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }, session.StopRequestsIgnored, false},
+		{"stop requested at the row's generation", laneStopRequestedAt(1), session.StopRequestsLive, false},
+		{"stop request of another generation", laneStopRequestedAt(2), session.StopRequestsLive, true},
+		{"stop request read as residue", laneStopRequestedAt(1), session.StopRequestsIgnored, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHookLaneHarness(t, tc.opt)
+			h.stopReading = tc.reading
 			op := h.f.propose(t, h.st, h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
 			out := h.run(t)
 			if out.emitted != tc.emit {
@@ -780,6 +791,8 @@ func newHookLaneDrainFixture(t *testing.T) *hookLaneDrainFixture {
 	t.Cleanup(func() { hookLanePoke = prevPoke })
 	prevStore := hookLaneSessionStore
 	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store { return f.sessions }
+	// No controller answers by default: the mode is unknown.
+	setLaneControllerMode(t, reconcilerLegacy, false)
 	t.Cleanup(func() { hookLaneSessionStore = prevStore })
 	f.st, err = opjournal.NewLaneStore(beads.SessionStore{Store: f.sessions}, clock.Real{})
 	if err != nil {
@@ -1255,6 +1268,62 @@ func TestHookLanePokeLeg(t *testing.T) {
 	t.Setenv(hookDeadlineEnv, "not a time")
 	if got := hookLanePokeLeg(now); got != 0 {
 		t.Fatalf("unparsable deadline: leg %s, want the doorbell skipped", got)
+	}
+}
+
+// TestNudgeDrainInjectLaneReadsStopRequestsByTheLatchedMode (V2-18) drives
+// the injecting drain over a row carrying v2's stop request at its
+// generation. The hook holds no latch, so it reads the request by the mode
+// the city's controller latched: a legacy controller, as after a rollback,
+// has it read the request as residue at once, so the notice reaches the
+// model; under v2, or with no controller answering, it honors the request
+// and leaves the notice for the controller's lane host.
+func TestNudgeDrainInjectLaneReadsStopRequestsByTheLatchedMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      reconcilerMode
+		known     bool
+		delivered bool
+	}{
+		{"latched legacy", reconcilerLegacy, true, true},
+		{"latched v2", reconcilerV2, true, false},
+		{"mode unknown", reconcilerLegacy, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookLaneDrainFixture(t)
+			row, err := f.sessions.Get(f.sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gen, err := strconv.ParseInt(row.Metadata["generation"], 10, 64)
+			if err != nil {
+				t.Fatalf("row generation %q: %v", row.Metadata["generation"], err)
+			}
+			for k, v := range stopBeginPatch(censusRow{Incarnation: gen}, drainIdle, laneT0) {
+				if err := f.sessions.SetMetadata(f.sessionID, k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setLaneControllerMode(t, tc.mode, tc.known)
+			op := f.propose(t, "mail arrived")
+			run := f.drain(t)
+			if run.code != 0 {
+				t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+			}
+			cur, err := f.st.Get(op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(run.stdout, "mail arrived"); got != tc.delivered {
+				t.Fatalf("hook output carries the notice: %v, want %v:\n%s", got, tc.delivered, run.stdout)
+			}
+			switch {
+			case tc.delivered && (cur.Outcome.Arm != opjournal.ArmSucceeded || cur.Outcome.Result.Via != laneViaHook):
+				t.Fatalf("op %s = %s %+v; want succeeded via hook", cur.ID, cur.Status, cur.Outcome)
+			case !tc.delivered && (cur.Status == opjournal.StatusClosed || cur.Attempt != 0):
+				t.Fatalf("op %s = %s attempt %d; want it left for the lane host", cur.ID, cur.Status, cur.Attempt)
+			}
+		})
 	}
 }
 

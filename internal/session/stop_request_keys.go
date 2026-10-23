@@ -15,8 +15,8 @@ import (
 // the reconciler's reader, and cmd/gc's v2SignaledUnacked, through the same
 // accessor, legacy's rollback guard's. ReadStopRequest is the content
 // gate's (V2-18): it reads the controller half's reason and incarnation,
-// writes nothing, and reads every request as residue for a lane host whose
-// controller latched legacy. Only the files TestStopRequestKeysAreNewKeys
+// writes nothing, and reads every request as residue under a controller that
+// latched legacy. Only the files TestStopRequestKeysAreNewKeys
 // admits call it. ClearStopRequestPatch is the clear that cmd/gc's residue
 // void writes. The operator's drain (OperatorDrainKey) is a third half:
 // `gc runtime drain` writes the row's generation there by CAS in a v2 city,
@@ -72,28 +72,28 @@ func ClearStopRequestPatch() MetadataPatch {
 // StopRequestReading is how a reader outside the v2 reconciler takes a row's
 // stop request (V2-18). The keys are new keys legacy ignores (CONTRACT v5
 // R1): a controller that latched legacy never carries a request out, so a
-// request a rolled-back v2 run left on a row is residue to it. Only a process
-// that latched the session reconciler knows which one runs.
+// request a rolled-back v2 run left on a row is residue to it. Only the
+// controller latches the session reconciler, so every reader takes the
+// reading of the controller's latched mode: its lane host from its own
+// latch, and a reader outside it (the CLI's inline pass, the prompt hook)
+// by asking the running controller, never from the on-disk config.
 type StopRequestReading uint8
 
 const (
 	// StopRequestsLive takes the controller half as v2's live request: the
-	// reading of a lane host whose controller latched v2, and of every reader
-	// that holds no latch (the CLI's inline pass, the prompt hook), which
-	// cannot tell a residue from a request. It is the zero value, and
-	// ReadStopRequest takes any reading but StopRequestsIgnored as it: a
-	// reader that names none never starts content into a session v2 may be
-	// stopping. A latchless reader only defers content to the controller's
-	// lane host, which reads by its latched mode; that holds while every
-	// conversation with lane ops is one the controller's host serves. A lane
-	// host other than the controller's must obtain the controller's latched
-	// mode rather than read live, or a rolled-back v2 run's residue holds its
-	// content until legacy restarts the session.
+	// reading under a controller that latched v2, and the fail-safe reading
+	// of a reader outside the controller that cannot learn the latched mode
+	// (no controller answers, or its answer names no known mode): an unknown
+	// mode honors the keys. It is the zero value, and ReadStopRequest takes
+	// any reading but StopRequestsIgnored as it: a reader that names none
+	// never starts content into a session v2 may be stopping. A reader
+	// outside the controller only defers that content to the controller's
+	// lane host, which reads by its latched mode.
 	StopRequestsLive StopRequestReading = iota
-	// StopRequestsIgnored takes it as residue: the reading of a lane host
-	// whose controller latched legacy, which ignores the keys, so a request a
+	// StopRequestsIgnored takes it as residue: the reading under a
+	// controller that latched legacy, which ignores the keys, so a request a
 	// rolled-back v2 run left never holds content to a session legacy keeps
-	// running.
+	// running, from the controller's lane host or from a reader outside it.
 	StopRequestsIgnored
 )
 

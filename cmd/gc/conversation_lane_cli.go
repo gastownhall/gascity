@@ -172,6 +172,9 @@ type cliLaneNudge struct {
 	stderr   io.Writer
 	// key is the op's client key, --key or minted.
 	key string
+	// stopReading is how the pass reads the row's stop request: by the mode
+	// the city's controller latched (controllerStopReading).
+	stopReading session.StopRequestReading
 }
 
 // refusal is the cliOp a lane nudge reports its refusals through, so its
@@ -204,7 +207,8 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 		return true, 1
 	}
 	n.st = st
-	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID, session.StopRequestsLive)
+	n.stopReading = controllerStopReading(target.cityPath)
+	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID, n.stopReading)
 	switch {
 	case err != nil:
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Errorf("reading session %s: %w", target.sessionID, err)), "", key)
@@ -309,10 +313,10 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		return opjournal.PassResult{}, err
 	}
 	armLaneFailpoints(lane, cliLaneHostName)
-	// The CLI holds no latch, so it reads the stop request live: a request
-	// it holds back waits for the controller's lane host, which reads by
-	// its latched mode.
-	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, session.StopRequestsLive)
+	// The CLI holds no latch, so it reads the stop request by the mode the
+	// controller latched: a request it holds back waits for the
+	// controller's lane host, which reads by the same mode.
+	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, n.stopReading)
 	if err != nil {
 		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", n.target.sessionID, err)
 	}

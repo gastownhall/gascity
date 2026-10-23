@@ -44,8 +44,9 @@ type laneRow struct {
 	stop session.StopRequest
 }
 
-// laneStopReading is how the lane host of a controller that latched mode
-// reads a row's stop request: as residue under legacy, which ignores the
+// laneStopReading is how a lane pass reads a row's stop request under the
+// mode a controller latched, its own lane host's or, asked over the socket,
+// a pass outside it (controllerStopReading): as residue under legacy, which ignores the
 // keys (CONTRACT v5 R1), so a request a rolled-back v2 run left never holds
 // content to a session legacy keeps running; as v2's live request otherwise.
 func laneStopReading(mode reconcilerMode) session.StopRequestReading {
@@ -53,6 +54,28 @@ func laneStopReading(mode reconcilerMode) session.StopRequestReading {
 		return session.StopRequestsIgnored
 	}
 	return session.StopRequestsLive
+}
+
+// laneControllerMode asks the city's controller for the session reconciler
+// it latched (queryControllerReconcilerMode). It is a mutable global test
+// seam; tests that swap it MUST NOT call t.Parallel().
+var laneControllerMode = queryControllerReconcilerMode
+
+// controllerStopReading is how a lane pass outside the controller (the CLI's
+// inline pass, the prompt hook's in-band pass) reads a row's stop request:
+// by the mode the city's controller latched, which it asks for, never by the
+// on-disk config. So after a rollback to legacy it reads a rolled-back v2
+// run's request as residue as soon as the legacy controller answers. When no
+// controller answers, or one that does names no mode this build knows, the
+// mode is unknown and it reads the request live: an unknown mode honors the
+// keys, deferring content to the controller's lane host rather than starting
+// it into a session v2 may be stopping.
+func controllerStopReading(cityPath string) session.StopRequestReading {
+	mode, known := laneControllerMode(cityPath)
+	if !known {
+		return session.StopRequestsLive
+	}
+	return laneStopReading(mode)
 }
 
 // readConversationLaneView reads conversation conv's session row live

@@ -824,7 +824,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		laneCity = target.cityPath
 		sessions := hookLaneSessionStore(target.cityPath, target.cfg, stderr)
 		laneRows = deferJournalRings(sessions)
-		return hookDrainLane(sessions, laneConv, laneDue, hookInput, legacy, hookLaneTextRoom(injectPrefix, out, wispExtra), func(laneText string) error {
+		return hookDrainLane(target.cityPath, sessions, laneConv, laneDue, hookInput, legacy, hookLaneTextRoom(injectPrefix, out, wispExtra), func(laneText string) error {
 			emittedHookContext = true
 			return writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+laneText+wispExtra)
 		}, stderr)
