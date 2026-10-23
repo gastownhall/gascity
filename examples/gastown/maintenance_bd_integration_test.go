@@ -350,6 +350,27 @@ func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]s
 	return ids
 }
 
+// seedSessionPruneCandidates adds two closed beads the reaper's session prune
+// selects with its default gm-* pattern, one in each table bd prune reads: a
+// durable issue and a no-history bead, which bd stores in the wisps table.
+// Both closed 100h ago: past a GC_REAPER_SESSION_PURGE_AGE of 48h, and inside
+// the 168h wisp purge age, so Step 3 leaves the no-history row to Step 6.
+func (c *bdTopologyCity) seedSessionPruneCandidates(t *testing.T, s bdTopologyScope) {
+	t.Helper()
+	c.bdIn(t, s, "create", "--silent", "--id", "gm-prd1", "--force", "-t", "task", "closed durable gm bead")
+	c.bdIn(t, s, "create", "--silent", "--id", "gm-pnh1", "--force", "--no-history", "-t", "task", "closed no-history gm bead")
+	c.bdIn(t, s, "close", "gm-prd1", "gm-pnh1", "--force", "--reason", "seed")
+	if got := c.sqlValue(t, s, "SELECT COUNT(*) FROM wisps WHERE id = 'gm-pnh1'"); got != "1" {
+		t.Fatalf("bd did not store the no-history bead in the wisps table (rows: %s)", got)
+	}
+	for _, table := range []string{"issues", "wisps"} {
+		c.bdIn(t, s, "sql", fmt.Sprintf("UPDATE %s SET closed_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 100 HOUR) WHERE id IN ('gm-prd1', 'gm-pnh1')", table))
+	}
+	if !s.proxied {
+		c.bdIn(t, s, "dolt", "commit", "-m", "seed session prune candidates")
+	}
+}
+
 func (c *bdTopologyCity) status(t *testing.T, s bdTopologyScope, id string) string {
 	t.Helper()
 	return c.sqlValue(t, s, fmt.Sprintf(
@@ -391,9 +412,18 @@ func TestMaintenanceOrdersOnRealBdTopologies(t *testing.T) {
 			for _, rig := range rigs {
 				seeds[rig.name] = c.seedScope(t, rig)
 			}
+			c.seedSessionPruneCandidates(t, city)
 
 			// Reaper.
-			out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"))
+			out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"), "GC_REAPER_SESSION_PURGE_AGE=48h")
+			// Step 6 counts the session prune's candidates through real bd
+			// before it checks the backup (#6284). The count finds the seeded
+			// candidates, so the backup gate decides; no backup has run yet,
+			// so it holds the prune.
+			if strings.Contains(out, "session prune: nothing to prune") ||
+				!(strings.Contains(outcome, "session prune skipped: no fresh backup") || strings.Contains(outcome, "session prune skipped: bd-backup-unsupported")) {
+				t.Errorf("reaper did not find the session prune's candidates through bd and hold the prune at its backup gate:\n%s\noutcome: %s", out, outcome)
+			}
 			for _, s := range append([]bdTopologyScope{city}, rigs...) {
 				ids := seeds[s.name]
 				if got := c.status(t, s, ids["child"]); got != "closed" {

@@ -260,6 +260,8 @@ func (CityLifecyclePayload) IsEventPayload() {}
 // (BeadCreated, BeadUpdated, BeadClosed, BeadDeleted). The payload carries a
 // full snapshot of the bead as of the event; it is emitted by bd hooks and the
 // beads CachingStore for local writes and reconcile-detected external changes.
+// A bead.deleted may carry only the bead id, when its emitter held no snapshot
+// of the deleted row.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }

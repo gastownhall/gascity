@@ -2605,8 +2605,10 @@ type DaemonConfig struct {
 	// disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
 	// WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives
-	// before being purged. Duration string (e.g., "24h", "7d"). Wisp GC is disabled
-	// unless both WispGCInterval and WispTTL are set.
+	// before being purged. Go duration string (e.g., "24h", or "168h" for seven
+	// days). Day units are not accepted: a value such as "7d" does not parse, so
+	// `gc start --foreground` refuses it and otherwise wisp GC stays disabled.
+	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispTTL string `toml:"wisp_ttl,omitempty"`
 	// DriftDrainTimeout is the maximum time to wait for an agent to acknowledge
 	// a drain signal during a config-drift restart. If the agent doesn't ack
@@ -3357,13 +3359,15 @@ type Agent struct {
 	SlingQuery string `toml:"sling_query,omitempty"`
 	// IdleTimeout is the maximum time an agent session can be inactive before
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
-	// Empty (default) disables idle checking.
+	// Empty (default) disables idle checking. Not applied to a [[named_session]]
+	// with mode = "always": the controller keeps that session running.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
 	// MaxSessionAge is the maximum wall-clock lifetime of a single runtime
 	// session before the controller preemptively restarts it. Duration string
 	// (e.g., "5h"). Empty (default) disables preemptive restarts. The restart
 	// is idle-gated: sessions with a pending interaction or an in-progress
-	// assigned work bead are left alone until they settle.
+	// assigned work bead are left alone until they settle. Not applied to a
+	// [[named_session]] with mode = "always".
 	//
 	// Motivation: provider SDKs that cache credentials at session start (e.g.,
 	// Claude Code via Bedrock) can wedge when the underlying token expires if

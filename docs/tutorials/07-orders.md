@@ -321,10 +321,28 @@ schedule = "0 6 * * *"
 ```
 
 Overrides match by order name and can change `enabled`, `trigger`, `interval`,
-`schedule`, `check`, `on`, `pool`, `timeout`, `idempotent`, and `env`. An
-override targeting a nonexistent order is an error, not a silent no-op — `gc
-order` commands fail; `gc start` logs the error and continues with the unmatched
-override skipped.
+`schedule`, `check`, `on`, `pool`, `timeout`, `check_timeout`, `idempotent`,
+and `env`. An override targeting a nonexistent order is an error, not a silent
+no-op — `gc order` commands fail; the orchestrator logs the error and skips
+that override and every override listed after it.
+
+An override without `rig` reaches only an order's city-level instance. A pack
+order that also runs once per rig needs `rig = "*"` to reach those instances.
+Because `"*"` matches the city-level instance too, it is the safe choice for an
+order a pack ships:
+
+```toml
+[[orders.overrides]]
+name = "orphan-sweep"
+rig = "*"
+interval = "10m"
+timeout = "5m"
+```
+
+To turn a pack's order off, use one mechanism: an override with
+`enabled = false`, or `[orders] skip`. Not both. `skip` removes the order
+before overrides apply, so an override that names a skipped order matches
+nothing and fails as described above.
 
 <Accordion title="Disambiguating overrides when an order exists both city-wide and per-rig">
 Many orders expand at scan time into one instance per rig (anything in a rig's

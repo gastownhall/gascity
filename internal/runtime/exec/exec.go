@@ -23,7 +23,8 @@ import (
 // name as its first argument, following the Git credential helper pattern.
 //
 // Exit codes: 0 = success, 1 = error (stderr has message), 2 = unknown
-// operation (treated as success for forward compatibility).
+// operation (treated as success for forward compatibility, except from ops
+// that cannot be unknown; see [Provider.runError]).
 type Provider struct {
 	script       string
 	timeout      time.Duration
@@ -66,8 +67,9 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 // optionally piping stdinData to its stdin. Returns the trimmed stdout
 // on success.
 //
-// Exit code 2 is treated as success (unknown operation — forward compatible).
-// Any other non-zero exit code returns an error wrapping stderr.
+// Exit code 2 is treated as success (unknown operation — forward compatible)
+// on every op but start and provision; see [Provider.runError]. Any other
+// non-zero exit code returns an error wrapping stderr.
 func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...string) (string, error) {
 	return p.runWithContext(context.Background(), dur, stdinData, args...)
 }
@@ -143,21 +145,39 @@ var startCollisionPhrases = []string{"already exists", "already running"}
 
 // runError maps an ordinary (non-cancellation) cmd.Run failure onto the
 // provider's contract: exit code 2 is an unknown operation treated as success
-// (forward compatible, nil error), a start-op name collision maps to
+// (forward compatible, nil error), except from ops that cannot be unknown,
+// where it is an ordinary failure: start (a pack that cannot start is not a
+// provider) and provision (it runs only for a pack that declared
+// proc.provision). A start-op name collision maps to
 // [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
 func (p *Provider) runError(runErr error, stderr string, args []string) error {
+	op := ""
+	if len(args) > 0 {
+		op = args[0]
+	}
 	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 && !exitTwoIsFailure(op) {
 		return nil
 	}
 	errMsg := strings.TrimSpace(stderr)
 	if errMsg == "" {
 		errMsg = runErr.Error()
 	}
-	if len(args) > 0 && args[0] == "start" && isStartCollision(errMsg) {
+	if op == "start" && isStartCollision(errMsg) {
 		return fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
 	}
 	return fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+}
+
+// exitTwoIsFailure reports whether op cannot be an unknown operation, so an
+// exit 2 from it is a failure rather than the forward-compatible no-op.
+func exitTwoIsFailure(op string) bool {
+	switch op {
+	case "start", "provision":
+		return true
+	default:
+		return false
+	}
 }
 
 // isStartCollision reports whether a failed start op's message says the name is

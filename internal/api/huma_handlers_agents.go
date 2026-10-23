@@ -72,6 +72,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
+	runtimeSessions := s.newAgentSessionResolver(ctx, cityName, sessTmpl)
 
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
@@ -87,13 +88,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				continue
 			}
 
-			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			// Liveness stays on IsRunning: it is already a cached,
 			// fleet-wide read that excludes pane_dead corpses, whereas
 			// roster membership comes from list-sessions, which still
 			// lists a session whose pane exited under remain-on-exit.
-			// The roster is an attributes source only.
-			running := sp.IsRunning(sessionName)
+			// The roster is an attributes source only. The name probed is
+			// the session the row runs under, which for a pool slot is not
+			// the name the slot derives (agentSessionResolver).
+			sessionName, running := runtimeSessions.resolve(a, ea.qualifiedName, sp.IsRunning)
 			var rosterEntry runtime.SessionRosterEntry
 			var haveRosterEntry bool
 			if rosterMap != nil {
@@ -133,7 +135,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			provider, displayName := resolveProviderInfo(ea.provider, cfg)
+			provider, displayName := agentProviderInfo(&a, cfg)
 
 			available := true
 			var unavailableReason string
@@ -223,8 +225,16 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		agents = []agentResponse{}
 	}
 
-	body := ListBody[agentResponse]{Items: agents, Total: len(agents)}
-	if cacheKey != "" {
+	partialErrors := runtimeSessions.partialErrors()
+	body := ListBody[agentResponse]{
+		Items:         agents,
+		Total:         len(agents),
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	}
+	// A partial list reflects a transient backend failure; don't serve it
+	// from cache once the backend recovers.
+	if cacheKey != "" && !body.Partial {
 		s.storeResponse(cacheKey, index, body)
 	}
 
@@ -236,20 +246,20 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 // humaHandleAgent is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{base} (unqualified form).
-func (s *Server) humaHandleAgent(_ context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.Name)
+func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.Name)
 }
 
 // humaHandleAgentQualified is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{dir}/{base} (qualified form).
-func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.QualifiedName())
+func (s *Server) humaHandleAgentQualified(ctx context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.QualifiedName())
 }
 
 // agentByName is the shared agent-get implementation. Both the qualified
 // and unqualified routes normalize to a single "name" string before
 // dispatching here.
-func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
+func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[agentResponse], error) {
 	if name == "" {
 		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
@@ -263,8 +273,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
-	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	sessionName, running := s.newAgentSessionResolver(ctx, cityName, cfg.Workspace.SessionTemplate).resolve(agentCfg, name, sp.IsRunning)
 	// Fold active graph-resident (wisp) work into the running signal so a
 	// graph-working agent reports running even when its named provider session
 	// is down. hasGraphWork is always false on a single-store city.
@@ -276,7 +285,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		suspended = true
 	}
 
-	provider, displayName := resolveProviderInfo(agentCfg.Provider, cfg)
+	provider, displayName := agentProviderInfo(&agentCfg, cfg)
 
 	available := true
 	var unavailableReason string
