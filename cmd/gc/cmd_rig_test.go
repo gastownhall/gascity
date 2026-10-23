@@ -1383,8 +1383,10 @@ func TestFinishDirectRigSuspensionOutcomes(t *testing.T) {
 		want       int
 		wantStderr string
 	}{
-		{name: "missing socket", err: fmt.Errorf("dial: %w", os.ErrNotExist), want: 0},
+		{name: "missing socket", err: controllerCommandError{op: "connecting to controller", err: fmt.Errorf("%w (is the controller running?)", &net.OpError{Op: "dial", Net: "unix", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ENOENT}}), unavailable: true}, want: 0},
 		{name: "stale socket", err: controllerCommandError{op: "connecting to controller", err: syscall.ECONNREFUSED, unavailable: true}, want: 0},
+		{name: "permission denied", err: controllerCommandError{op: "connecting to controller", err: syscall.EACCES, unavailable: true}, want: 1, wantStderr: "run gc reload"},
+		{name: "dial timeout", err: controllerCommandError{op: "connecting to controller", err: os.ErrDeadlineExceeded, unavailable: true}, want: 1, wantStderr: "run gc reload"},
 		{name: "unresponsive", err: controllerCommandError{op: "reading response", err: io.ErrUnexpectedEOF, unresponsive: true}, want: 1, wantStderr: "run gc reload"},
 		{name: "no change", reply: reloadControlReply{Outcome: reloadOutcomeNoChange}, want: 0},
 		{name: "busy", reply: reloadControlReply{Outcome: reloadOutcomeBusy}, want: 1},

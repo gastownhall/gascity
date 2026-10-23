@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -1022,9 +1023,9 @@ func finishDirectRigSuspension(cityPath, action string, code int, stderr io.Writ
 	// A running controller must finish reloading before new work can use the
 	// rig's refreshed store.
 	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
-	// No reachable controller (no socket, or a stale socket that refuses
+	// No controller listening (no socket, or a stale socket that refuses
 	// connections). A later controller start reads the saved state.
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errControllerUnavailable) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
 		return 0
 	}
 	if err == nil && reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
