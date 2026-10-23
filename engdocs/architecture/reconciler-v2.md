@@ -47,10 +47,12 @@ running the latched mode. An unknown value refuses to start the city.
 `identify` socket reply names the latched mode, and `gc runtime drain`,
 `drain-ack` (`gc hook`'s drain-ack among them) and `undrain` follow it
 (`cityRunsV2`), so a config edit cannot split them from the running
-reconciler before restart. A controller that answers without the field
-predates it and the v2 default, so it is read as legacy unless the config
-sets `session_reconciler = "v2"`; only when no controller answers do they
-fall back to the config's resolution. `gc hook` asks only when it prints
+reconciler before restart. A controller whose `identify` reply parses
+without the field predates it and the v2 default, so it is read as legacy
+unless the config sets `session_reconciler = "v2"`. When no `identify` reply
+parses (no controller runs, or only the `ping` fallback answers, as it does
+for a current controller that missed the identify deadline), they fall back
+to the config's resolution. `gc hook` asks only when it prints
 the drain-pending hint, so a claim makes no socket call.
 
 ### Admission

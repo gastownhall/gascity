@@ -757,6 +757,11 @@ resource = "subprocess"
 calls = 12
 
 [[count]]
+path = "cmd/gc/drain_ack_row_test.go"
+resource = "listener_helper"
+calls = 2
+
+[[count]]
 path = "cmd/gc/drift_client_test.go"
 resource = "http_test_server"
 calls = 4

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1025,36 +1024,6 @@ func TestDrainAckRowKeysAreInertToLegacy(t *testing.T) {
 	}
 }
 
-// serveIdentifyReply stands up a controller socket for cityPath that answers
-// every command with reply, as a controller of another build would.
-func serveIdentifyReply(t *testing.T, cityPath, reply string) {
-	t.Helper()
-	sockPath := controllerSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen %s: %v", sockPath, err)
-	}
-	t.Cleanup(func() {
-		lis.Close()         //nolint:errcheck
-		os.Remove(sockPath) //nolint:errcheck
-	})
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			buf := make([]byte, 256)
-			_, _ = conn.Read(buf)
-			_, _ = conn.Write([]byte(reply + "\n"))
-			conn.Close() //nolint:errcheck
-		}
-	}()
-}
-
 // TestCityRunsV2ReadsAPrePRControllerAsLegacy pins the upgrade window: a
 // controller whose identify reply carries no session_reconciler predates both
 // the field and the v2 default, so over an unset key it latched legacy, not
@@ -1065,7 +1034,7 @@ func TestCityRunsV2ReadsAPrePRControllerAsLegacy(t *testing.T) {
 	t.Cleanup(func() { reconcilerModeLookupEnv = original })
 	reconcilerModeLookupEnv = envOf(nil)
 	cityPath := t.TempDir()
-	serveIdentifyReply(t, cityPath, fmt.Sprintf(`{"pid":%d,"hosting_mode":"standalone"}`, os.Getpid()))
+	startFakeControllerSocket(t, cityPath, fmt.Sprintf(`{"pid":%d,"hosting_mode":"standalone"}`+"\n", os.Getpid()))
 
 	if cityRunsV2(cityPath, v2DefaultCity(nil)) {
 		t.Error("cityRunsV2(pre-PR controller, unset key resolving to v2) = true, want legacy: that controller latched legacy")
@@ -1073,6 +1042,51 @@ func TestCityRunsV2ReadsAPrePRControllerAsLegacy(t *testing.T) {
 	explicit := v2DefaultCity(func(c *config.City) { c.Daemon.SessionReconciler = config.SessionReconcilerV2 })
 	if !cityRunsV2(cityPath, explicit) {
 		t.Error("cityRunsV2(pre-PR controller, explicit v2) = false, want the config's v2")
+	}
+}
+
+// TestCityRunsV2FallsBackToConfigWhenOnlyPingAnswers pins that only an
+// identify reply that parsed can show a controller predates the mode field.
+// A current controller whose identify fails (a deadline missed under load, a
+// short read, a body that does not parse) still answers the ping fallback,
+// so a ping alone leaves the mode to the config, and a default-v2 city keeps
+// the row path its v2 reconciler reads. Kills promoting a ping PID into the
+// pre-PR legacy answer.
+func TestCityRunsV2FallsBackToConfigWhenOnlyPingAnswers(t *testing.T) {
+	original := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = original })
+	reconcilerModeLookupEnv = envOf(nil)
+	legacyCfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: config.SessionReconcilerLegacy}}
+	pid := os.Getpid()
+	for _, tc := range []struct {
+		name     string
+		identify string
+	}{
+		{name: "identify closes without a reply", identify: ""},
+		{name: "identify reply does not parse", identify: "unknown command\n"},
+		{name: "identify reply names no known hosting mode", identify: fmt.Sprintf(`{"pid":%d,"hosting_mode":"embedded"}`+"\n", pid)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			startFakeUnixSocket(t, controllerSocketPath(cityPath), func(line string) string {
+				if line == "ping" {
+					return fmt.Sprintf("%d\n", pid)
+				}
+				return tc.identify
+			})
+			if got := controllerAlive(cityPath); got != pid {
+				t.Fatalf("controllerAlive = %d, want the fake's ping PID %d: without it this test cannot tell the cases apart", got, pid)
+			}
+			if mode, ok := controllerLatchedReconcilerMode(cityPath, v2DefaultCity(nil)); ok {
+				t.Errorf("controllerLatchedReconcilerMode = %v, true from a ping alone; want no answer", mode)
+			}
+			if !cityRunsV2(cityPath, v2DefaultCity(nil)) {
+				t.Error("cityRunsV2(identify failed, ping answered, default-v2 config) = false, want the config's v2")
+			}
+			if cityRunsV2(cityPath, legacyCfg) {
+				t.Error("cityRunsV2(identify failed, ping answered, legacy config) = true, want the config's legacy")
+			}
+		})
 	}
 }
 

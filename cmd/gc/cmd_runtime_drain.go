@@ -1427,12 +1427,13 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 }
 
 // cityRunsV2 reports whether the city at cityPath runs the v2 reconciler:
-// the mode its running controller latched, when one answers, else the mode
-// cfg resolves to (drainAckStrictConfig), which the next controller start
-// latches; legacy with neither. The running controller wins because the mode
-// is boot-latched: a config edit that resolves the other way only takes
-// effect at restart, and until then the drain marks, acks and wake verdicts
-// must be the ones the running reconciler reads.
+// the mode its running controller latched, when its identify reply tells
+// (controllerLatchedReconcilerMode), else the mode cfg resolves to
+// (drainAckStrictConfig), which the next controller start latches; legacy
+// with neither. The running controller wins because the mode is
+// boot-latched: a config edit that resolves the other way only takes effect
+// at restart, and until then the drain marks, acks and wake verdicts must be
+// the ones the running reconciler reads.
 func cityRunsV2(cityPath string, cfg *config.City) bool {
 	if mode, ok := controllerLatchedReconcilerMode(cityPath, cfg); ok {
 		return mode == reconcilerV2
@@ -1449,11 +1450,14 @@ func drainAckStrictConfig(cfg *config.City) bool {
 
 // controllerLatchedReconcilerMode asks the city's running controller which
 // session reconciler it latched (probeControllerIdentity). ok is false when
-// no controller answers. A controller that answers without the mode predates
-// both the field and the v2 default, so with an unset key (or anything but
-// an explicit "v2") it latched legacy; under an explicit v2 the answer is
-// left to cfg's resolution. A var so tests can stand in a controller; tests
-// that swap it MUST NOT call t.Parallel().
+// no controller's identify reply parses: none runs, or only the ping fallback
+// answered, as a current controller that missed the identify deadline does
+// too, so a ping alone says nothing about the latch. A controller whose
+// identify parsed without the mode predates both the field and the v2
+// default, so with an unset key (or anything but an explicit "v2") it latched
+// legacy; under an explicit v2 the answer is left to cfg's resolution. A var
+// so tests can stand in a controller; tests that swap it MUST NOT call
+// t.Parallel().
 var controllerLatchedReconcilerMode = func(cityPath string, cfg *config.City) (reconcilerMode, bool) {
 	identity := probeControllerIdentity(cityPath)
 	switch identity.SessionReconciler {
@@ -1462,7 +1466,7 @@ var controllerLatchedReconcilerMode = func(cityPath string, cfg *config.City) (r
 	case config.SessionReconcilerLegacy:
 		return reconcilerLegacy, true
 	}
-	if identity.PID > 0 && cfg != nil {
+	if identity.HostingMode.known() && cfg != nil {
 		if mode, _, ok := cfg.Daemon.SessionReconcilerMode(); !ok || mode != config.SessionReconcilerV2 {
 			return reconcilerLegacy, true
 		}
