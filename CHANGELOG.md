@@ -478,7 +478,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found only for an exact provider and model match (ignoring case), so
   another spelling of the same model, such as a Bedrock model id, still needs
   its own `[[pricing]]` entry in `city.toml` or `pack.toml`; an existing
-  `[[pricing]]` entry still outranks the defaults (#6384, #7713).
+  `[[pricing]]` entry still outranks the defaults (#6384, #7713, backported
+  in #8213).
 - A gateway login reaches the Claude provider readiness probe.
 - `POST /v0/city/{city}/sling` routes and cooks formulas exactly like
   `gc sling`: a rig bead's default formula is cooked in the rig store, title
