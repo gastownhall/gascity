@@ -794,6 +794,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   box, which can add up to 2 s, and leaves the box alone when a client is
   attached. The exec, k8s, ssh and herdr runtimes do not look for the prompt
   yet. Thanks to Chris Sells (@csells) (#2892, #6832, backported in #8046).
+- **Go toolchain 1.26.10.** Go 1.26.10 fixes GO-2026-6809: `crypto/x509`
+  now refuses the eight compromised eMudhra intermediate CAs (EM DV/OV/EV TLS
+  CA - G3B/G3C and their Sectigo cross-signs) even where the host trust store
+  still lists them. The `go.mod` floor, the Bazel `go_sdk` and the
+  `contrib/k8s` Go build images move to 1.26.10, and the `gc-mcp-mail` image
+  takes certifi 2026.10.19 for the same distrust. Building from source now
+  needs Go 1.26.10 or newer (#8165).
 - **Go toolchain 1.26.9 and `golang.org/x/net` v0.60.0.** Go 1.26.9 fixes
   the 2026-10-08 standard library advisories GO-2026-6599, 6600, 6603, 6604,
   6605, 6607, 6608, 6609, 6610, 6611, 6612, 6613 and 6617 in `net/http`
