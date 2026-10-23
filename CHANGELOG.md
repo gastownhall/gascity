@@ -266,9 +266,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.gc/incidents/*.state` file. A pack that overrides `escalate.sh` now
   receives `--incident-key KEY --fingerprint F` on an alert and
   `--resolve-incident KEY` on a clean run: the override must accept or
-  ignore those flags and must send nothing for `--resolve-incident`, or it
-  loses the alert. See "Why a maintenance alert did not repeat" in
-  `docs/getting-started/troubleshooting.md` (#6363, backported in #8218).
+  ignore those flags and must send nothing for `--resolve-incident`. An
+  override written for 1.5.0, which rejects the flags as a usage error (exit
+  2, or an error that names the flag), keeps alerting: the order sends the
+  alert again without them, so it mails on every run, without
+  deduplication, and the order's output names the override as predating
+  incident keys. See "Why a maintenance alert did not repeat" in
+  `docs/getting-started/troubleshooting.md` (#6363 and #8231, backported
+  in #8218 and #8232).
 
 ### Added
 
@@ -667,7 +672,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incident state. A send cut off only after that report still counts as
   delivered. The backup order's missing-`flock` and offsite-publication
   alerts still mail on every run, and an `escalate.sh` override must accept
-  or ignore the new flags (#6363, backported in #8218).
+  or ignore the new flags. One that rejects them as a usage error, as one
+  written for 1.5.0 does, is sent the alert again without them, so it keeps
+  alerting, undeduplicated (#6363 and #8231, backported in #8218 and
+  #8232).
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run

@@ -52,6 +52,55 @@ resolve_escalate_script() {
 
 ESCALATE_SCRIPT="$(resolve_escalate_script)"
 
+# escalate_refused_incident_flags RC STDERR is true when an escalate.sh override
+# refused the incident flags as a usage error, as one written before them (the
+# 1.5.0 contract) does: with exit 2, the usage-error status (the 1.5.0
+# escalate.sh, argparse, Go's flag package), or with a message that names the
+# flag (getopt-style parsers exit 1). The core escalate.sh next to this script
+# takes the flags, so no failure of it is read as a refusal.
+escalate_refused_incident_flags() {
+    [ "$1" -ne 0 ] || return 1
+    if [ "$ESCALATE_SCRIPT" -ef "$SCRIPT_DIR/escalate.sh" ]; then
+        return 1
+    fi
+    [ "$1" -ne 2 ] || return 0
+    case "$2" in
+        *incident-key*|*--fingerprint*|*resolve-incident*) return 0 ;;
+    esac
+    return 1
+}
+
+# raise_incident KEY FINGERPRINT SUBJECT MESSAGE escalates MESSAGE as incident
+# KEY, which escalate.sh keeps quiet while FINGERPRINT is unchanged. An override
+# that refuses the incident flags is sent the alert again without them, so it
+# keeps alerting, undeduplicated, rather than losing the alert.
+raise_incident() {
+    local rc=0 err
+    # stdout passes through; stderr is held to tell a refusal from a failure.
+    { err=$("$ESCALATE_SCRIPT" --subject "$3" --message "$4" \
+        --incident-key "$1" --fingerprint "$2" 2>&1 >&3 3>&-); } 3>&1 || rc=$?
+    if ! escalate_refused_incident_flags "$rc" "$err"; then
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        return "$rc"
+    fi
+    echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --incident-key); sent the alert without them, so it is not deduplicated" >&2
+    "$ESCALATE_SCRIPT" --subject "$3" --message "$4"
+}
+
+# resolve_incident KEY tells escalate.sh that incident KEY cleared, so its next
+# occurrence alerts at once. An override that refuses the flag keeps no
+# incidents, so there is nothing to clear.
+resolve_incident() {
+    local rc=0 err
+    err=$("$ESCALATE_SCRIPT" --resolve-incident "$1" 2>&1 >/dev/null) || rc=$?
+    if escalate_refused_incident_flags "$rc" "$err"; then
+        echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --resolve-incident); its alerts are not deduplicated" >&2
+        return 0
+    fi
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    return "$rc"
+}
+
 maintenance_done() {
     local summary="$1"
     local target="${GC_MAINTENANCE_DONE_TARGET:-}"
@@ -1272,13 +1321,10 @@ order_outcome_write
 # clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
     ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
-    "$ESCALATE_SCRIPT" \
-        --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" \
-        --incident-key "reaper:anomalies" \
-        --fingerprint "$ANOMALY_FINGERPRINT" 2>/dev/null || true
+    raise_incident "reaper:anomalies" "$ANOMALY_FINGERPRINT" \
+        "ESCALATION: Reaper anomalies detected [MEDIUM]" "$ANOMALIES" || true
 else
-    "$ESCALATE_SCRIPT" --resolve-incident "reaper:anomalies" >/dev/null || true
+    resolve_incident "reaper:anomalies" || true
 fi
 
 SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
