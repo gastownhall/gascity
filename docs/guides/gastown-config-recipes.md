@@ -90,10 +90,33 @@ City-scoped agents such as `mayor`, `deacon`, and `boot` are easiest to tweak wi
 [[patches.agent]]
 name = "gastown.mayor"
 provider = "codex"
-idle_timeout = "2h"
 ```
 
 Use patches when the target is already a concrete city-scoped agent. Use `[[rigs.patches]]` when the target is a pack agent stamped per rig.
+
+`idle_timeout` and `max_session_age` have no effect on `mayor`, `deacon`,
+`boot`, or `witness`: the Gastown pack runs them as always-on named sessions
+(`mode = "always"`), and the orchestrator keeps those running.
+
+### Stop `boot` from restarting
+
+The Gastown pack's `boot` agent is the deacon's watchdog. It runs as an
+always-on named session that wakes fresh, checks the deacon, and exits, so the
+orchestrator keeps starting it again. An `idle_timeout` on it changes nothing.
+To stop it, suspend it:
+
+```toml
+# city.toml
+[[patches.agent]]
+name = "gastown.boot"
+suspended = true
+```
+
+While the city is running, `gc agent suspend gastown.boot` appends the same
+patch for you. Suspending `boot` turns off its deacon check. To turn it back
+on, delete the patch, or run `gc agent resume gastown.boot` while the city is
+running; with the patch already present, that rewrites `city.toml` and drops
+its comments.
 
 ### Add a named crew agent
 
@@ -201,6 +224,10 @@ name = "digest-generate"
 rig = "*"
 interval = "12h"
 ```
+
+Use `skip` or an override for a given order, not both: `skip` removes the
+order before overrides apply, so an override that names it matches nothing
+and fails.
 
 ## A Complete Gastown Example
 

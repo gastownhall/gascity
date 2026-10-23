@@ -289,6 +289,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tutorial 01's sample `city.toml` matches what `gc init` writes,** and it
   explains that `sha:<pinned commit>` on the `core` and `bd` imports names the
   copy of each pack bundled with `gc` (#7045).
+- **Config, exec-provider, agent, orders and API reference docs now match the
+  code.** The `wisp_ttl` example was `"7d"`, which does not parse (Go
+  durations have no day unit) and leaves wisp GC off; it is now `"168h"`.
+  `idle_timeout` and `max_session_age` say they do not apply to
+  `mode = "always"` named sessions, the Gastown recipes stop setting
+  `idle_timeout` on the always-on mayor and show how to suspend `boot`, and an
+  exec order's default `timeout` reads 300s, not 60s. The exec session
+  provider page lists every field `start` receives, the per-operation
+  deadlines, the `stop` after a failed start and what the session `env`
+  carries, and no longer calls `start` fire-and-forget, says gc sends the
+  startup `nudge` through the `nudge` operation, or says the start config
+  leaves out `ready_prompt_prefix` and `ready_delay_ms`. The agent guide covers
+  Claude's builtin `permission_mode = "unrestricted"` and `effort = "max"`
+  defaults and how to override them; the orders tutorial covers `rig = "*"`
+  and not pairing an override with `skip`; the API reference says what each
+  endpoint's agent count counts and that the supervisor serves its
+  spec at `/openapi.json`, `/openapi.yaml` and `/docs`; the events reference
+  says the `cache-reconcile` actor names the cache, not whoever closed the
+  bead; the one-controller rule in the hardened-city runbook now covers every
+  city and Kubernetes rollouts; and the `contrib/` scripts link to pages that
+  exist (#8212).
 
 ### Fixed
 

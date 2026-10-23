@@ -110,6 +110,13 @@ my-backend wait-ready "$created" || exit 1
 trap - EXIT TERM                           # startup succeeded; keep the session
 ```
 
+Each call has a deadline. `start` and `provision` get 120 seconds, `attach`
+none (it holds your terminal), and `watch-startup` runs only while gc clears
+startup dialogs. Every other operation gets 30 seconds, and a caller can
+cancel a call sooner. Two operations are stopped differently from the steps
+above: a canceled `exec` or `watch-startup` call is killed outright, with
+`SIGKILL` to the script process and no `SIGTERM` first.
+
 ## Operations
 
 | Operation | Invocation | Stdin | Stdout |
@@ -191,7 +198,7 @@ The handshake runs once per provider instance and is cached.
 
 ### Start Config (JSON on stdin)
 
-The `start` operation receives a JSON object on stdin:
+The `start` and `provision` operations receive a JSON object on stdin:
 
 ```json
 {
@@ -205,14 +212,98 @@ The `start` operation receives a JSON object on stdin:
 }
 ```
 
-All fields are optional (omitted when empty).
+Every field is optional and omitted when empty. The complete set:
+
+| Field | Contents |
+|-------|----------|
+| `work_dir` | The session's working directory, as a path on the orchestrator host |
+| `command` | The agent launch command |
+| `lifecycle` | `"one_shot"` for a command expected to exit after one turn |
+| `env` | The session's environment (see [Session environment](#session-environment)) |
+| `process_names` | The process names the agent runs as |
+| `nudge` | Text to type into the agent once it is ready |
+| `ready_prompt_prefix` | The prompt prefix that shows the agent is ready |
+| `ready_delay_ms` | A fixed delay to wait instead, when there is no prompt to watch for |
+| `pre_start` | Commands to run on the target before the session is created |
+| `session_setup` | Commands to run in the session after it is created |
+| `session_setup_script` | A script on the orchestrator host, run after `session_setup` |
+| `session_live` | Idempotent commands to run after `session_setup` |
+| `pack_overlay_dirs` | Pack overlay directories on the orchestrator host, copied into the work dir first |
+| `overlay_dir` | The agent's overlay directory on the orchestrator host, copied into the work dir last |
+| `copy_files` | `{"src", "rel_dst"}` entries: a file or directory on the orchestrator host to stage at `rel_dst` under the work dir (the work dir itself when `rel_dst` is absent) |
+
+On a fresh start the agent's startup prompt is not in the start config: gc
+renders it as a command-line argument (`prompt_mode = "arg"`, the default) or
+flag (`"flag"`), and the exec provider passes neither to the script, so the
+agent starts without it. gc puts the prompt at the front of `nudge` instead in
+three cases: with `prompt_mode = "none"`, on a start that resumes an existing
+conversation (any prompt mode), and for a prompt too large for a command line
+on a runtime whose `[runtimes.<name>]` entry sets
+`prompt_delivery = "nudge-fallback"`. A script should handle any non-empty
+`nudge`.
+
+### Session environment
+
+`env` is what gc wants set in the session, to apply over the box's own
+environment. For a configured agent's session it holds:
+
+- `PATH`, `HOME`, `USER`, `LOGNAME`, `TZ`, the locale and XDG directory
+  variables, and a few Claude Code and telemetry settings, from gc's own
+  environment.
+- Every non-empty `GC_*` variable in gc's environment except
+  `GC_CONTROLLER_TOKEN`.
+- Provider credentials from gc's environment: every variable whose name starts
+  with a provider prefix such as `ANTHROPIC_`, `OPENAI_`, `GEMINI_`, `GOOGLE_`,
+  `AZURE_` or `XAI_`, and a fixed list of AWS variables (`AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_PROFILE`
+  and others), not every `AWS_*` variable.
+- The city's `[workspace]` env, then the provider's, then the agent's, then
+  the session's own variables (`GC_AGENT`, `GC_ALIAS`, `GC_CITY`, `GC_DIR`,
+  `GC_SESSION_ID` and more), and last the agent's selected upstream's
+  variables and a few gc-owned settings, the empty `GC_CONTROLLER_TOKEN`
+  among them.
+
+An empty value means the variable must be unset. gc sends some keys empty on
+purpose, `GC_CONTROLLER_TOKEN` among them, so that a value inherited from its
+own environment does not reach the agent. The script itself runs with gc's
+environment, so a script that starts the agent as its own child must apply
+those empty values too.
+
+Provider credentials in the supervisor's environment therefore reach every
+session. `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` does not change that: it only
+keeps them out of the launchd plist or systemd unit that `gc` generates, and
+out of a `gc supervisor run` that `gc` forks. The bundled
+`contrib/session-scripts/gc-session-k8s` copies `env` into the pod spec as
+literal `env` values (it drops or rewrites a few `GC_*` keys), and Kubernetes
+gives a literal `env` entry precedence over the same key from `envFrom`, so a
+credential in the supervisor's environment overrides one you supply through
+`envFrom`.
 
 ### Startup Hints
 
 The JSON config contains fields that the tmux provider uses for multi-step
-startup orchestration. The exec provider itself is fire-and-forget — it
-calls `script start` and returns immediately. Scripts may handle these
-hints or ignore them:
+startup orchestration. The exec provider does not fire `start` and forget it.
+gc first runs `is-running` to learn whether a box already holds the name, then
+runs `start` and waits for it to exit. After a successful `start`, when the
+start config lists `process_names` or the provider declares a
+bypass-permissions dialog (a provider's `accept_startup_dialogs` setting
+overrides both), it dismisses known startup dialogs, such as workspace trust,
+through `watch-startup`, `peek` and `send-keys` (`peek` and `send-keys` go
+over `exec` when the runtime implements it) before it counts the session
+started.
+
+If `start` fails or times out, or the dialog step after it fails, gc runs
+`stop <name>` to tear down whatever the attempt created, then reports the
+start as failed. It skips that `stop` when the box belongs to a live session:
+when `is-running` printed `true` before the attempt, or when `start` exited
+non-zero on its own with stderr saying the name is taken (it contains
+`already exists` or `already running`). The stderr check does not apply to a
+`start` that gc canceled at its deadline. A runtime that declares both
+`proc.provision` and `proc.exec` gets `provision` in place of that
+`is-running` and `start`: no `stop` follows a failed `provision`, and one
+always follows a failed agent launch after it.
+
+Scripts may handle these hints or ignore them:
 
 - **`process_names`** — the tmux adapter polls for these process names to
   appear in the session's process tree (30s timeout) before considering the
@@ -225,9 +316,11 @@ hints or ignore them:
   a persistent post-start process for one-shot starts.
 
 - **`nudge`** — text that the tmux adapter types into the session after
-  the agent is ready. Scripts that support interactive input can handle
-  this in `start` (type the text after session creation) or leave it to
-  the separate `nudge` operation which gc calls after `start` returns.
+  the agent is ready. gc does not send it through the `nudge` operation
+  when `start` returns, so a script that wants the agent to receive it
+  types it in itself, in `start`, once the agent is ready. Later nudges,
+  such as `gc session nudge`, go through the `nudge` operation, or over
+  `exec` when the runtime implements it.
 
 - **`pre_start`** — array of shell commands to run on the target
   filesystem **before** the session is created. Used for directory
@@ -252,15 +345,15 @@ hints or ignore them:
 Fields that are **not** included in the JSON (gc-internal, not part of
 the exec protocol):
 
-- `ready_prompt_prefix` — prompt prefix for readiness detection (gc polls
-  via `peek` after `start` returns)
-- `ready_delay_ms` — fixed delay fallback (gc sleeps after `start` returns)
 - `emits_permission_warning` — bypass-permissions dialog handling
 - `fingerprint_extra` — config change detection metadata
 
-The distinction: readiness polling and delay are the *caller's*
-responsibility. Session setup commands are the *script's* responsibility
-— they run on the target filesystem, not the orchestrator.
+`ready_prompt_prefix` and `ready_delay_ms` are sent, but gc does not wait
+for the agent to show the prompt, or wait out the delay, before it counts
+the start done. A script that must reach a ready agent before it returns
+(to type `nudge`, say) waits itself; otherwise it may ignore them. Session setup
+commands are the *script's* responsibility — they run on the target
+filesystem, not the orchestrator.
 
 ### Conventions
 
@@ -306,6 +399,9 @@ esac
 Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
 state files (metadata, wrappers). If not set, scripts should use a
 reasonable default under `$TMPDIR` or `/tmp`.
+
+A script runs with gc's own environment. The session's environment arrives
+in the start config's `env` (see [Session environment](#session-environment)).
 
 ## Shipped Scripts
 

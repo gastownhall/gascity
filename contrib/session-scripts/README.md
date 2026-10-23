@@ -56,5 +56,7 @@ export GC_K8S_IMAGE=myregistry/gc-agent:latest
 gc start my-city
 ```
 
-See [docs/k8s-guide.md](../../docs/k8s-guide.md) for the full setup guide,
-K8s manifests, and agent Dockerfile.
+See [`contrib/k8s/`](../k8s/) for the K8s manifests, Dockerfiles and an
+example city, and [`gc-controller-k8s`](gc-controller-k8s) for deploying the
+controller as a pod. The native provider's settings are the `[session.k8s]`
+table in the [Config Reference](../../docs/reference/config.md#k8sconfig).

@@ -237,11 +237,11 @@
         },
         "idle_timeout": {
           "type": "string",
-          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking. Not applied to a [[named_session]]\nwith mode = \"always\": the controller keeps that session running."
         },
         "max_session_age": {
           "type": "string",
-          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle. Not applied to a\n[[named_session]] with mode = \"always\".\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
         },
         "max_session_age_jitter": {
           "type": "string",
@@ -1405,7 +1405,7 @@
         },
         "wisp_ttl": {
           "type": "string",
-          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Duration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled\nunless both WispGCInterval and WispTTL are set."
+          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Go duration string (e.g., \"24h\", or \"168h\" for seven\ndays). Day units are not accepted: a value such as \"7d\" does not parse, so\n`gc start --foreground` refuses it and otherwise wisp GC stays disabled.\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
         },
         "drift_drain_timeout": {
           "type": "string",
