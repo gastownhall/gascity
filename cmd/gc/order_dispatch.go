@@ -1819,7 +1819,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
-	childCtx, cancel := context.WithTimeout(ctx, timeout)
+	childCtx, cancel := withOrderTimeout(ctx, timeout)
 	defer cancel()
 
 	m.rec.Record(events.Event{
@@ -2032,7 +2032,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
-			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			execErrMsg = execenv.RedactText(orderRunErrorText(ctx, err), redactionEnv)
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
@@ -2379,7 +2379,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.orderFrontDoorFor(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
 		return
@@ -2412,7 +2412,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2502,7 +2502,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -4032,6 +4032,42 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 		return maxTimeout
 	}
 	return t
+}
+
+// orderTimeoutError is the cause an order run's deadline carries. It names the
+// run's effective timeout, so a run the timeout stopped can say it timed out
+// and after how long. It unwraps to context.DeadlineExceeded, so an errors.Is
+// check for a deadline still matches it.
+type orderTimeoutError struct {
+	timeout time.Duration
+}
+
+func (e orderTimeoutError) Error() string {
+	return fmt.Sprintf("order timeout of %s exceeded", e.timeout)
+}
+
+func (e orderTimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+// withOrderTimeout bounds an order run by its effective timeout, with an
+// orderTimeoutError naming that timeout as the deadline's cause.
+func withOrderTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, timeout, orderTimeoutError{timeout: timeout})
+}
+
+// orderRunErrorText returns the failure text for err, an error from work an
+// order run did under ctx. When the run's order timeout ended ctx, the timeout
+// leads the text: err alone reads "context deadline exceeded", or "signal:
+// killed" from a runner that reports the kill, and neither says the order timed
+// out. Any other end of ctx, such as a controller shutdown, leaves err's text
+// as it is.
+func orderRunErrorText(ctx context.Context, err error) string {
+	var timeout orderTimeoutError
+	if !errors.As(context.Cause(ctx), &timeout) || errors.Is(err, timeout) {
+		return err.Error()
+	}
+	return timeout.Error() + ": " + err.Error()
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in
