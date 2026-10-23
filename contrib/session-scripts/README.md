@@ -58,5 +58,11 @@ gc start my-city
 
 See [`contrib/k8s/`](../k8s/) for the K8s manifests, Dockerfiles and an
 example city, and [`gc-controller-k8s`](gc-controller-k8s) for deploying the
-controller as a pod. The native provider's settings are the `[session.k8s]`
-table in the [Config Reference](../../docs/reference/config.md#k8sconfig).
+controller as a pod. The native provider reads its settings only from
+`GC_K8S_*` environment variables in the controller's environment, not from
+a `[session.k8s]` table: `GC_K8S_NAMESPACE` (default `gc`), `GC_K8S_IMAGE`
+(required to start a session), `GC_K8S_CONTEXT`, `GC_K8S_SERVICE_ACCOUNT`,
+`GC_K8S_PREBAKED`, the resources `GC_K8S_CPU_REQUEST` (default `500m`),
+`GC_K8S_MEM_REQUEST` (`1Gi`), `GC_K8S_CPU_LIMIT` (`2`) and `GC_K8S_MEM_LIMIT`
+(`4Gi`), the JSON-valued `GC_K8S_NODE_SELECTOR`, `GC_K8S_TOLERATIONS` and
+`GC_K8S_AFFINITY`, and `GC_K8S_PRIORITY_CLASS_NAME`.
