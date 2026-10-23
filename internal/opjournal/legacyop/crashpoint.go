@@ -29,22 +29,23 @@ const (
 	// and the background retry's. A non-nil error from the hook fails that
 	// attempt as a store error would (K5's injection).
 	CrashPointClosing CrashPoint = "closing"
-	// CrashPointClosed (K4): the op's close landed; the surface has not
+	// CrashPointClosed (K4): Finish's close landed; the surface has not
 	// emitted its terminal event, written its answer or printed its output.
-	// A background close that lands reports it too.
+	// A close the background retry lands does not report it: Finish has
+	// returned by then, so the surface may have answered, which is past K4.
 	CrashPointClosed CrashPoint = "closed"
 )
 
 // CrashPointFunc is a recorder's crash-point hook. The recorder calls it on
 // the executing goroutine with the point and the op as the recorder holds it
-// (the closed op at CrashPointClosed when the close returned it). Its error
-// matters only at CrashPointClosing; at every other point it is ignored. It
-// may block (a test parks a request there) and must be safe for concurrent
-// use: one recorder serves many requests. A panic in the hook unwinds
-// through the recorder, which releases the request's in-flight entry on the
-// way; at Finish's points (CrashPointEffected, CrashPointClosing and
-// CrashPointClosed) a runtime.Goexit releases it too. In-process crash tests
-// that need the op held park instead of unwinding.
+// (the closed op at CrashPointClosed). Its error matters only at
+// CrashPointClosing; at every other point it is ignored. It may block (a test
+// parks a request there) and must be safe for concurrent use: one recorder
+// serves many requests. A panic in the hook unwinds through the recorder,
+// which releases the request's in-flight entry on the way; at the points
+// Finish and its background close retry report (CrashPointEffected,
+// CrashPointClosing and CrashPointClosed) a runtime.Goexit releases it too.
+// In-process crash tests that need the op held park instead of unwinding.
 type CrashPointFunc func(p CrashPoint, op opjournal.Op) error
 
 // Reach reports p for the admission's op to its recorder's hook. It does

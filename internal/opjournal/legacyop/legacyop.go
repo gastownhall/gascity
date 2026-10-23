@@ -498,14 +498,8 @@ func (a *Admission) Finish(res Result) Finished {
 	// done is already set, so the handler's recovery cannot Finish again: a
 	// panic or a runtime.Goexit below (the close's, or a crash-point
 	// hook's) releases the entry here and keeps unwinding.
-	returned := false
-	defer func() {
-		if !returned {
-			a.release()
-		}
-	}()
-	f := a.finish(res)
-	returned = true
+	var f Finished
+	a.releaseOnUnwind(func() { f = a.finish(res) })
 	return f
 }
 
@@ -589,16 +583,23 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 // releases the entry. When Done ends the retry before finish_by, the entry is
 // held until finish_by has passed: the request ran in this process and its
 // effect may have landed, so a same-key retry must find it in flight rather
-// than adopt it (DES-O0API I3, §12).
+// than adopt it (DES-O0API I3, §12). A close it lands reports no
+// CrashPointClosed: Finish has returned, so the surface may have answered.
 func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- struct{}) {
-	r := a.rec
 	defer close(done)
+	// The retry outlives Finish's unwind release: a panic or a
+	// runtime.Goexit in it (a crash-point hook's) releases the entry here.
+	a.releaseOnUnwind(func() { a.retryClose(outcome) })
+}
+
+// retryClose is closeInBackground's work.
+func (a *Admission) retryClose(outcome opjournal.Outcome) {
+	r := a.rec
 	gap := closeRetryGap
 	for !r.Clock.Now().After(a.Op.FinishBy) && r.wait(gap) {
 		err := r.closeOpened(a.Op, outcome)
 		switch {
 		case err == nil:
-			_ = r.crashPoint(CrashPointClosed, a.Op)
 			r.closeHealthy()
 			a.release()
 			r.count(a.Op.Kind, StageClose, ResultClosed, "")
@@ -652,6 +653,21 @@ func (a *Admission) release() {
 	if a.Entry != nil && a.rec.Inflight != nil {
 		a.rec.Inflight.Release(a.Op.ID, a.Entry)
 	}
+}
+
+// releaseOnUnwind runs f and releases the entry when f does not return: a
+// panic or a runtime.Goexit inside it releases the entry on its way through
+// and keeps unwinding. A release f made first is harmless: Release acts only
+// on the entry's own hold.
+func (a *Admission) releaseOnUnwind(f func()) {
+	returned := false
+	defer func() {
+		if !returned {
+			a.release()
+		}
+	}()
+	f()
+	returned = true
 }
 
 // wait sleeps d and reports whether to go on: false once Done has closed.

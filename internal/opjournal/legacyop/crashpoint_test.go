@@ -187,8 +187,9 @@ func TestCrashPointAdmittedOnAdoption(t *testing.T) {
 
 // An error from the hook at Closing fails that close attempt as a store error
 // would: the API degrades with store_error and retries in the background,
-// where each attempt hears Closing again, until the hook lets one through; the
-// CLI gives up and leaves the op open.
+// where each attempt hears Closing again, until the hook lets one through.
+// That landing reports no Closed: Finish has returned, so the surface may
+// have answered, which is past K4. The CLI gives up and leaves the op open.
 func TestCrashPointClosingFailsTheAttempt(t *testing.T) {
 	injected := errors.New("injected close failure")
 	t.Run("api", func(t *testing.T) {
@@ -219,7 +220,6 @@ func TestCrashPointClosingFailsTheAttempt(t *testing.T) {
 		for range closeRetries + 3 {
 			want = append(want, CrashPointClosing)
 		}
-		want = append(want, CrashPointClosed)
 		if got := log.points(); !slices.Equal(got, want) {
 			t.Fatalf("points %v, want %v", got, want)
 		}
@@ -424,5 +424,42 @@ func TestCrashPointHookThatUnwindsReleasesTheEntry(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A hook that ends the background close retry's goroutine (runtime.Goexit)
+// at one of its close attempts leaves the in-flight registry empty too: the
+// retry outlives Finish, so it releases the entry itself on the way out.
+func TestCrashPointHookThatUnwindsTheBackgroundCloseReleasesTheEntry(t *testing.T) {
+	e := newEnv(t)
+	r := apiRecorder(e, gate.Auto)
+	var closings atomic.Int32
+	r.CrashPoints = func(p CrashPoint, _ opjournal.Op) error {
+		if p != CrashPointClosing {
+			return nil
+		}
+		if closings.Add(1) <= closeRetries {
+			return errors.New("injected close failure")
+		}
+		goruntime.Goexit()
+		return nil
+	}
+	adm, err := r.Admit(msg("k1", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := adm.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)})
+	if f.Closed || f.Background == nil {
+		t.Fatalf("Finish = %+v, want a background close", f)
+	}
+	<-f.Background
+	if got := closings.Load(); got != closeRetries+1 {
+		t.Fatalf("close attempts %d, want %d: Finish's %d and the retry's first", got, closeRetries+1, closeRetries)
+	}
+	if r.Inflight.Len() != 0 {
+		t.Fatalf("registry %d after the hook ended the background close, want 0", r.Inflight.Len())
+	}
+	if got, _ := e.st.Get(adm.Op.ID); got.Status != opjournal.StatusSubmitted {
+		t.Fatalf("op %s, want it open: no close attempt ran", got.Status)
 	}
 }
