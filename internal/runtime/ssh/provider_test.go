@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -294,16 +295,16 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 	}
 }
 
-// warmSession answers a Relaunch's reads of the session as a box whose session
+// warmSession answers a Relaunch's read of the session as a box whose session
 // environment holds env (show-environment lines) and whose last launch recorded
 // keys, deferring every other call to next.
 func warmSession(env, keys string, next func([]string) ([]byte, int, error)) func([]string) ([]byte, int, error) {
 	return func(argv []string) ([]byte, int, error) {
 		switch {
+		case isTmux("show-environment")(argv) && slices.Contains(argv, "display-message"):
+			return []byte(env + launchEnvKeysOption + "=" + keys + "\n"), 0, nil
 		case isTmux("show-environment")(argv):
 			return []byte(env), 0, nil
-		case isTmux("show-options")(argv) && slices.Contains(argv, launchEnvKeysOption):
-			return []byte(keys + "\n"), 0, nil
 		case next != nil:
 			return next(argv)
 		}
@@ -350,7 +351,9 @@ func envCommands(f *fakeRunner) ([][]string, int) {
 // environment. So Relaunch brings it to what Start would set for cfg before it
 // respawns: a changed or new value is set, a key the last launch set that cfg
 // no longer names is unset, and the incarnation keys, unchanged values and
-// keys the last launch did not set are left alone.
+// keys the last launch did not set are left alone. The record is widened to
+// every key the relaunch may set before the first set, and written exactly
+// after the last.
 func TestProvider_RelaunchAppliesLaunchEnvToWarmSession(t *testing.T) {
 	// Argv-safe keys only, so every write is visible as argv here; secret
 	// values take the staged path (TestProvider_RelaunchAppliesSecretEnvThroughStagedFile).
@@ -368,6 +371,7 @@ func TestProvider_RelaunchAppliesLaunchEnvToWarmSession(t *testing.T) {
 	}
 	got, last := envCommands(f)
 	want := [][]string{
+		{"set-option", "-t", "=s:", launchEnvKeysOption, "GC_AGENT GC_ALIAS GC_CITY GC_RIG GC_RUNTIME_EPOCH GT_ROLE"},
 		{"set-environment", "-t", "=s", "GC_AGENT", "a"},
 		{"set-environment", "-t", "=s", "GC_ALIAS", ""},
 		{"set-environment", "-t", "=s", "GC_RIG", "v2"},
@@ -385,8 +389,9 @@ func TestProvider_RelaunchAppliesLaunchEnvToWarmSession(t *testing.T) {
 	}
 }
 
-// An unchanged environment costs no write: a relaunch that changes no env
-// value reads the session and respawns.
+// An unchanged environment costs one read and no write: a relaunch that
+// changes no env value reads the session env and its launch-key record in a
+// single call (each call is a remote exec) and respawns.
 func TestProvider_RelaunchUnchangedEnvWritesNothing(t *testing.T) {
 	f := &fakeRunner{respond: warmSession("GC_RIG=1\nGC_ALIAS=\n", "GC_ALIAS GC_RIG", nil)}
 	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_RIG": "1", "GC_ALIAS": ""}}
@@ -395,6 +400,16 @@ func TestProvider_RelaunchUnchangedEnvWritesNothing(t *testing.T) {
 	}
 	if got, _ := envCommands(f); len(got) != 0 {
 		t.Errorf("session env commands = %q, want none", got)
+	}
+	var reads [][]string
+	for _, c := range f.calls {
+		if isTmux("show-environment")(c) || isTmux("show-options")(c) || isTmux("display-message")(c) {
+			reads = append(reads, c)
+		}
+	}
+	wantRead := []string{"tmux", "show-environment", "-t", "=s", ";", "display-message", "-p", "-t", "=s:", launchEnvKeysOption + "=#{" + launchEnvKeysOption + "}"}
+	if len(reads) != 1 || !slices.Equal(reads[0], wantRead) {
+		t.Errorf("session env reads = %q, want the one call %q", reads, wantRead)
 	}
 	if firstCall(f, isTmux("respawn-pane")) == nil {
 		t.Error("respawn-pane was not issued")
@@ -471,6 +486,308 @@ func TestProvider_StartRecordsLaunchEnvKeys(t *testing.T) {
 	recorded := slices.IndexFunc(f.calls, func(c []string) bool { return slices.Equal(c, want) })
 	if created < 0 || recorded <= created {
 		t.Errorf("calls = %q, want new-session, then %q", f.calls, want)
+	}
+}
+
+// envBox is a fake box holding one tmux session's environment and launch-key
+// record, so a test can read back what a sequence of relaunches left there.
+// It answers show-environment, reads of the record (display-message of the
+// option, and show-options -qv), set-environment (set and -u), set-option of
+// the record, the staging script, and source-file of the staged tmux command
+// file, parsed from the staging script the way tmux would read it. A
+// ";"-separated invocation runs one command at a time and stops at the first
+// failure, as tmux does; a sourced file does the same. Every other call
+// succeeds with no output.
+//
+// Faults: failWrite fails the Nth write (1-based, counting every
+// set-environment and record set-option, run directly or from a staged file),
+// failEnvRead fails show-environment, and failRecordRead fails a read of the
+// record.
+type envBox struct {
+	f      *fakeRunner
+	env    map[string]string
+	record string
+	staged string // the last staging script
+
+	failWrite      int
+	writes         int
+	failEnvRead    bool
+	failRecordRead bool
+}
+
+// newEnvBox returns a fake runner answered by an envBox whose session holds env
+// and the launch-key record.
+func newEnvBox(env map[string]string, record string) (*fakeRunner, *envBox) {
+	f := &fakeRunner{}
+	box := &envBox{f: f, env: maps.Clone(env), record: record}
+	f.respond = box.respond
+	return f, box
+}
+
+func (b *envBox) respond(argv []string) ([]byte, int, error) {
+	if isStagingScript(argv) {
+		b.staged = string(b.f.stdins[len(b.f.stdins)-1])
+		return []byte(stagedDir + "\n"), 0, nil
+	}
+	if len(argv) == 0 || argv[0] != "tmux" {
+		return nil, 0, nil
+	}
+	var outs []string
+	for _, cmd := range tmuxCommands(argv) {
+		out, ok := b.apply(cmd)
+		if !ok {
+			return []byte(strings.Join(outs, "\n")), 1, nil
+		}
+		outs = append(outs, out)
+	}
+	return []byte(strings.Join(outs, "\n")), 0, nil
+}
+
+// apply runs one tmux command against the box; false is a failed command.
+func (b *envBox) apply(cmd []string) (string, bool) {
+	if len(cmd) == 0 {
+		return "", true
+	}
+	switch cmd[0] {
+	case "show-environment":
+		if b.failEnvRead {
+			return "", false
+		}
+		var lines []string
+		for _, k := range slices.Sorted(maps.Keys(b.env)) {
+			lines = append(lines, k+"="+b.env[k])
+		}
+		return strings.Join(lines, "\n"), true
+	case "display-message":
+		format := cmd[len(cmd)-1]
+		if !strings.Contains(format, "#{"+launchEnvKeysOption+"}") {
+			return "", true
+		}
+		if b.failRecordRead {
+			return "", false
+		}
+		return strings.ReplaceAll(format, "#{"+launchEnvKeysOption+"}", b.record), true
+	case "show-options":
+		if !slices.Contains(cmd, launchEnvKeysOption) {
+			return "", true
+		}
+		if b.failRecordRead {
+			return "", false
+		}
+		return b.record, true
+	case "set-environment":
+		if b.write() {
+			return "", false
+		}
+		if cmd[3] == "-u" {
+			delete(b.env, cmd[4])
+		} else {
+			b.env[cmd[3]] = cmd[4]
+		}
+	case "set-option":
+		if !slices.Contains(cmd, launchEnvKeysOption) {
+			return "", true
+		}
+		if b.write() {
+			return "", false
+		}
+		b.record = cmd[len(cmd)-1]
+	case "source-file":
+		for _, line := range strings.Split(b.staged, "\n") {
+			if !strings.HasPrefix(line, "'set-") {
+				continue
+			}
+			if _, ok := b.apply(parseTmuxCommandLine(line)); !ok {
+				return "", false
+			}
+		}
+	}
+	return "", true
+}
+
+// write counts one write and reports whether it is the one to fail.
+func (b *envBox) write() bool {
+	b.writes++
+	return b.writes == b.failWrite
+}
+
+// parseTmuxCommandLine splits a tmuxCommandLine line back into its argv.
+func parseTmuxCommandLine(line string) []string {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; c {
+		case '\'':
+			end := strings.IndexByte(line[i+1:], '\'')
+			cur.WriteString(line[i+1 : i+1+end])
+			i += end + 1
+			inWord = true
+		case '\\':
+			i++
+			cur.WriteByte(line[i])
+			inWord = true
+		case ' ':
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words
+}
+
+// boxWrites returns the calls that wrote to the box: the session env, the
+// launch-key record, a staged file or a sourced one.
+func boxWrites(f *fakeRunner) [][]string {
+	var out [][]string
+	for _, c := range f.calls {
+		if isStagingScript(c) || isTmux("source-file")(c) || isTmux("set-environment")(c) ||
+			(isTmux("set-option")(c) && slices.Contains(c, launchEnvKeysOption)) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// A relaunch whose read of the session env or of its launch-key record fails
+// writes nothing and does not respawn: the old agent keeps running in the box
+// exactly as it was, so the box stays relaunchable, and the error sends the
+// caller to its full-restart fallback. A retry once tmux answers converges.
+func TestProvider_RelaunchReadFailureLeavesBoxUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fault func(*envBox)
+	}{
+		{"session env unreadable", func(b *envBox) { b.failEnvRead = true }},
+		{"launch key record unreadable", func(b *envBox) { b.failRecordRead = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startEnv := map[string]string{"GC_RIG": "v1", "GT_ROLE": "x", "GC_DRAIN": "meta"}
+			f, box := newEnvBox(startEnv, "GC_RIG GT_ROLE")
+			tc.fault(box)
+			cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_RIG": "v2", "GC_AGENT": "new"}}
+
+			if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err == nil {
+				t.Fatal("Relaunch must fail when the session env cannot be read")
+			}
+			if w := boxWrites(f); len(w) != 0 {
+				t.Errorf("Relaunch wrote %q before failing; a failed read must leave the box untouched", w)
+			}
+			if firstCall(f, isTmux("respawn-pane")) != nil {
+				t.Error("respawn-pane ran after the read failed")
+			}
+			if !maps.Equal(box.env, startEnv) || box.record != "GC_RIG GT_ROLE" {
+				t.Errorf("box after the failed relaunch = %v, record %q; want it unchanged", box.env, box.record)
+			}
+
+			box.failEnvRead, box.failRecordRead = false, false
+			if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err != nil {
+				t.Fatalf("retry: Relaunch: %v", err)
+			}
+			if want := map[string]string{"GC_RIG": "v2", "GC_AGENT": "new", "GC_DRAIN": "meta"}; !maps.Equal(box.env, want) {
+				t.Errorf("session env after the retry = %v, want %v", box.env, want)
+			}
+			if want := "GC_AGENT GC_RIG"; box.record != want {
+				t.Errorf("%s after the retry = %q, want %q", launchEnvKeysOption, box.record, want)
+			}
+			if firstCall(f, isTmux("respawn-pane")) == nil {
+				t.Error("retry never ran respawn-pane")
+			}
+		})
+	}
+}
+
+// The session env writes of a relaunch are not atomic. Whichever one fails,
+// the relaunch returns before respawn-pane (the old agent keeps running), and
+// the next attempt converges on exactly what a fresh start would hold, with
+// the same config or with one changed again in between: a key the failed
+// attempt added must not outlive a config that drops it, so the record has to
+// name it before it is set. Both apply paths are covered: the ";"-chained argv
+// call, and the staged file a secret in the env sends them through.
+func TestProvider_RelaunchConvergesAfterHalfAppliedLaunchEnv(t *testing.T) {
+	const token = "sk-test-not-a-real-credential"
+	for _, path := range []struct {
+		name  string
+		extra map[string]string // in the session and in every config
+	}{
+		{"argv", nil},
+		{"staged", map[string]string{"ANTHROPIC_AUTH_TOKEN": token}},
+	} {
+		with := func(env map[string]string) map[string]string {
+			out := maps.Clone(env)
+			maps.Copy(out, path.extra)
+			return out
+		}
+		recordWith := func(keys ...string) string {
+			keys = append(keys, slices.Collect(maps.Keys(path.extra))...)
+			slices.Sort(keys)
+			return strings.Join(keys, " ")
+		}
+		startEnv := with(map[string]string{"GC_RIG": "v1", "GT_ROLE": "x", "GC_DRAIN": "meta"})
+		startRecord := recordWith("GC_RIG", "GT_ROLE")
+		first := with(map[string]string{"GC_AGENT": "a", "GC_ALIAS": "b", "GC_RIG": "v2"})
+		// Six writes: widen the record, set GC_AGENT, GC_ALIAS and GC_RIG,
+		// unset GT_ROLE, then write the exact record.
+		const writes = 6
+		for _, retry := range []struct {
+			name       string
+			env        map[string]string
+			wantEnv    map[string]string
+			wantRecord string
+		}{
+			{
+				"same config", first,
+				with(map[string]string{"GC_AGENT": "a", "GC_ALIAS": "b", "GC_RIG": "v2", "GC_DRAIN": "meta"}),
+				recordWith("GC_AGENT", "GC_ALIAS", "GC_RIG"),
+			},
+			{
+				"config dropped a key the failed attempt added",
+				with(map[string]string{"GC_ALIAS": "b", "GC_RIG": "v2"}),
+				with(map[string]string{"GC_ALIAS": "b", "GC_RIG": "v2", "GC_DRAIN": "meta"}),
+				recordWith("GC_ALIAS", "GC_RIG"),
+			},
+		} {
+			for n := 1; n <= writes; n++ {
+				t.Run(fmt.Sprintf("%s, %s, write %d fails", path.name, retry.name, n), func(t *testing.T) {
+					f, box := newEnvBox(startEnv, startRecord)
+					box.failWrite = n
+					err := providerWith(f).Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: first})
+					respawned := firstCall(f, isTmux("respawn-pane")) != nil
+					switch {
+					case n == writes && (err != nil || !respawned):
+						// The exact record is best-effort: the widened one it
+						// replaces only costs a later relaunch a spare unset.
+						t.Fatalf("a failed final record write must not fail the relaunch: err=%v respawned=%v", err, respawned)
+					case n < writes && err == nil:
+						t.Fatal("Relaunch must fail when a session env write fails")
+					case n < writes && respawned:
+						t.Fatal("respawn-pane ran after a session env write failed")
+					}
+
+					box.failWrite = 0
+					if err := providerWith(f).Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: retry.env}); err != nil {
+						t.Fatalf("retry: Relaunch: %v", err)
+					}
+					if !maps.Equal(box.env, retry.wantEnv) {
+						t.Errorf("session env after the retry = %v, want %v", box.env, retry.wantEnv)
+					}
+					if box.record != retry.wantRecord {
+						t.Errorf("%s after the retry = %q, want %q", launchEnvKeysOption, box.record, retry.wantRecord)
+					}
+					if path.extra != nil && firstCall(f, isTmux("source-file")) == nil {
+						t.Error("a secret in the env must send the writes through the staged file")
+					}
+				})
+			}
+		}
 	}
 }
 
