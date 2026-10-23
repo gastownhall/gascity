@@ -3020,6 +3020,36 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "test/conversationlane/x12_harness_test.go"
+resource = "fixed_sleep"
+calls = 9
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_incapable_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_load_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_matrix_test.go"
+resource = "fixed_sleep"
+calls = 7
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_report_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "test/conversationlane/x2_test.go"
 resource = "fixed_sleep"
 calls = 2

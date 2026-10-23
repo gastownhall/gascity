@@ -917,6 +917,8 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	go func() {
 		defer finish()
 		defer s.recoverMessageOp(adm, reqID, operation)
+		// K2 (X12): the 202 is on its way and the delivery has not started.
+		adm.Reach(legacyop.CrashPointAnswered)
 		deliver(d)
 	}()
 	return body, nil

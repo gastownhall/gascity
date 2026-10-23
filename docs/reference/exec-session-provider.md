@@ -74,17 +74,19 @@ No shell invocation — the script is exec'd directly.
 |------|---------|
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
-| 2 | Unknown operation (treated as success — forward compatible) |
+| 2 | Unknown operation (treated as success — forward compatible). From `start`, and from an operation the script declares, it is not success; see below. |
 | 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
 it as a no-op success. Scripts only need to implement the operations they
 care about. An operation a script declares in its
-[handshake](#protocol-handshake-protocol) cannot be unknown, so two declared
+[handshake](#protocol-handshake-protocol) cannot be unknown, so declared
 operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
-as the command's own exit code, and under `report-attachment`, `is-attached`
-reports it as a failure.
+as the command's own exit code, and under `proc.provision` and
+`report-attachment`, `provision` and `is-attached` report it as a failure.
+`start` cannot be unknown either, so its exit 2 (for example a helper's
+`grep` or `jq` exit status escaping a `set -e` script) is a failed start.
 
 ## Cancellation
 
