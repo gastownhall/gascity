@@ -4,8 +4,14 @@
 # to non-existent agents get reset to open/unassigned so they are routable
 # again. No worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
+#
+# The timeout is explicit and shorter than the interval because the cooldown
+# counts from a run's start, so a timeout at or above the interval (the 300s
+# exec default is equal to it) would let a timed-out sweep be followed at once
+# by the next. 4m leaves a minute of rest before the next run.
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"
 interval = "5m"
+timeout = "4m"
 exec = "$PACK_DIR/assets/scripts/orphan-sweep.sh"

@@ -463,6 +463,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current hold in `execution_claim_hold` as `<reason> <time>` (#5701).
 - The core `orphan-sweep` order no longer misses live sessions when the
   session list exceeds the pipe buffer (#6714, #6728).
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets
+  `timeout = "4m"`. A city whose sweep needs longer can raise it with
+  `[[orders.overrides]]`, `name = "orphan-sweep"` and a `timeout` (plus
+  `rig = "*"` if a rig's own pack also carries the order).
 - herdr agent starts retry when a fresh pane reports `agent_pane_busy` on a
   non-zero exit (#6637).
 - A nudge that races an ACP agent's exit is dropped with a stderr line instead
