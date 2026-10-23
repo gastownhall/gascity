@@ -141,6 +141,95 @@ func TestSweepReadMessagesBefore_ClosesAgedReadMailWithReason(t *testing.T) {
 	}
 }
 
+// TestSweepReadMessagesBefore_SkipsMessageUnreadAfterSnapshot is the
+// regression test for gastownhall/gascity#8201: the candidate List() above
+// can answer from the CachingStore's stale view. A message the user just
+// un-read inside the cache window — after the read:true snapshot was taken
+// but before the sweep reaches it — must not be closed on the strength of
+// that stale snapshot.
+func TestSweepReadMessagesBefore_SkipsMessageUnreadAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now
+	old := now.Add(-time.Minute)
+
+	seed := []beads.Bead{readMailSeed("unread-after-snapshot", old)}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	// Simulate the user un-reading the message inside the cache window: the
+	// live store now disagrees with the stale read snapshot List returns.
+	if err := underlying.Update("unread-after-snapshot", beads.UpdateOpts{
+		RemoveLabels: []string{"read"},
+		Metadata:     map[string]string{mail.ReadMetadataKey: "false"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mailStore := beads.MailStore{Store: store}
+	const reason = "mail gc-swept: test retention reason padded to length"
+	closed, closeErrs, listErr := SweepReadMessagesBefore(mailStore, cutoff, 0, reason)
+	if listErr != nil {
+		t.Fatalf("unexpected list error: %v", listErr)
+	}
+	if len(closeErrs) != 0 {
+		t.Fatalf("unexpected per-bead errors: %v", closeErrs)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 (message was un-read after the snapshot)", closed)
+	}
+	b, err := underlying.Get("unread-after-snapshot")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "open" {
+		t.Errorf("status = %q, want open (must not be swept)", b.Status)
+	}
+	if _, ok := b.Metadata["close_reason"]; ok {
+		t.Errorf("unexpectedly stamped close_reason")
+	}
+}
+
+// TestSweepReadMessagesBefore_SkipsMessageGoneAfterSnapshot asserts a
+// candidate that no longer exists live (deleted by a concurrent path between
+// the snapshot and this sweep) is skipped rather than erroring the whole
+// sweep, and does not consume the close limit.
+func TestSweepReadMessagesBefore_SkipsMessageGoneAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now
+	old := now.Add(-time.Minute)
+
+	seed := []beads.Bead{
+		readMailSeed("gone-after-snapshot", old),
+		readMailSeed("still-here", old),
+	}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	if err := underlying.MemStore.Delete("gone-after-snapshot"); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	mailStore := beads.MailStore{Store: store}
+	const reason = "mail gc-swept: test retention reason padded to length"
+	closed, closeErrs, listErr := SweepReadMessagesBefore(mailStore, cutoff, 1, reason)
+	if listErr != nil {
+		t.Fatalf("unexpected list error: %v", listErr)
+	}
+	if len(closeErrs) != 0 {
+		t.Fatalf("unexpected per-bead errors: %v", closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 (gone candidate must not consume the limit)", closed)
+	}
+	b, err := underlying.Get("still-here")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("still-here status = %q, want closed", b.Status)
+	}
+}
+
 func TestSweepReadMessagesBefore_LimitCapsCloses(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-time.Minute)
