@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **An exec session provider's `start` or `provision` that exits 2 now fails
+  the start.** Exit 2 meant "unknown operation, treat as success" on `start`
+  and `provision` too, so a `set -e` wrapper whose `grep` or `jq` exited 2 during `start`
+  counted as started and the half-created box was never cleaned up. Neither op
+  can be unknown, so exit 2 from them is now a failure, and a failed `start`
+  runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
+  `provision` on success. Exit 2 keeps meaning "unknown operation" for other
+  undeclared operations.
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
@@ -381,17 +389,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Order history reports `has_output` only for a run that recorded output,
-  and an order that runs out of time says so.** Order history
-  (`GET /v0/city/{cityName}/orders/history`) set `has_output` on every run
-  of an exec order, because exec orders capture output, so a run that
-  recorded nothing advertised output its history detail then served empty;
-  `capture_output` still describes the order. An order stopped by its
-  `timeout` (or the `[orders] max_timeout` cap) failed with a bare
-  `context deadline exceeded` or `signal: killed` in its `order.failed`
-  event, in the controller log for an exec order, and in `gc order run`'s
-  error; the message now leads with the timeout it ran out of, for example
-  `order timeout of 5m0s exceeded`.
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets `timeout = "4m"`,
+  which leaves at most two minutes after the 120s foreign-identity gate
+  budget, less the claim collection that precedes it. A city whose sweep
+  needs longer can raise it with `[[orders.overrides]]`,
+  `name = "orphan-sweep"` and a `timeout` (plus `rig = "*"` if a rig's own
+  pack also carries the order).
 
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
@@ -421,6 +428,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   city) or to restart to adopt a deliberate rebinding. Switching a city from
   a non-bd beads provider (such as `file`) to bd now also takes a restart; a
   reload refuses it. Rig scopes and boot are unchanged.
+
+- **Order history reports `has_output` only for a run that recorded output,
+  and an order that runs out of time says so.** Order history
+  (`GET /v0/city/{cityName}/orders/history`) set `has_output` on every run
+  of an exec order, because exec orders capture output, so a run that
+  recorded nothing advertised output its history detail then served empty;
+  `capture_output` still describes the order. An order stopped by its
+  `timeout` (or the `[orders] max_timeout` cap) failed with a bare
+  `context deadline exceeded` or `signal: killed` in its `order.failed`
+  event, in the controller log for an exec order, and in `gc order run`'s
+  error; the message now leads with the timeout it ran out of, for example
+  `order timeout of 5m0s exceeded`.
 
 - **Codex structured history keeps every turn's model and token usage.**
   Usage was read only from the rollout tail, so older turns (and older
@@ -475,7 +494,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records as an `order.skipped` event with one scope per identity; the run
   still exits 0, and a sweep that only protects sends no mail. The verb is
   asked at most once per distinct identity per sweep, within a gate budget of
-  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 4m
   timeout); past it, the remaining claimants are not asked, their claims are
   kept and named with a "gate budget … exhausted" reason, and the sweep says
   how many identities it did not ask. Where `timeout` is installed, an ask

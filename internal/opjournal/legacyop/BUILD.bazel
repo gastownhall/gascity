@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "check.go",
         "classify.go",
+        "crashpoint.go",
         "doc.go",
         "inflight.go",
         "legacyop.go",
@@ -27,6 +28,7 @@ go_test(
     srcs = [
         "check_test.go",
         "classify_test.go",
+        "crashpoint_test.go",
         "inflight_test.go",
         "legacyop_test.go",
         "sweep_test.go",

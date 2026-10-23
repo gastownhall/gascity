@@ -378,6 +378,9 @@ type serverOps struct {
 	// delivery goroutine owns the admission; tests inject a handler panic
 	// there.
 	afterAdmit func()
+	// crashPoints is the State's crash-point hook (OpsCrashPointsProvider)
+	// every recorder carries; nil in production.
+	crashPoints legacyop.CrashPointFunc
 
 	mu   sync.Mutex
 	st   *opjournal.Store
@@ -402,6 +405,9 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 		logf:     log.Printf,
 		recordOp: telemetry.RecordOpRecord,
 	}
+	if p, ok := s.state.(OpsCrashPointsProvider); ok {
+		o.crashPoints = p.OpsCrashPoints()
+	}
 	o.content = o.newRecorder(s, rollout.KeyOpsContent, s.bootFlags.OpsContent())
 	o.control = o.newRecorder(s, rollout.KeyOpsControl, s.bootFlags.OpsControl())
 	o.lifecycle = o.newRecorder(s, rollout.KeyOpsLifecycle, s.bootFlags.OpsLifecycle())
@@ -422,6 +428,8 @@ func (o *serverOps) newRecorder(s *Server, gateKey string, mode gate.Mode) *lega
 		Degraded: func(d legacyop.Degrade) { city.degraded.Report(gateKey, d) },
 		Healthy:  func(stage string) { o.healthyGate(gateKey, stage) },
 		Done:     city.done,
+
+		CrashPoints: o.crashPoints,
 	}
 }
 
