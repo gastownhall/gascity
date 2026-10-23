@@ -221,7 +221,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     409; delete the template instead (ga-l24lrx, #7076).
   - A config edit whose `[patches]` entry names a target missing from the
     merged config returns 400 instead of 500.
-  - Closed sessions report `state: "closed"` instead of an empty state.
+  - Closed sessions report `state: "closed"` instead of an empty state, on
+    `GET /session/{id}` and in the session list, which returns them for
+    `?state=closed` or `?state=all`.
   - Unset optional fields are omitted instead of sent as `null`: the map and
     struct fields of agent, rig and provider patches (`Env`,
     `OptionDefaults`, `Pool`, `ContextAdvisory`, `FormulaVars`), and the
@@ -497,6 +499,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run, `GET /v0/city/{city}/runs/{id}/steps` returned no steps, and the run
   list, `GET /runs/{id}` and the run census kept the run `pending` while its
   steps were claimed and closed.
+- **`GET /v0/city/{city}/sessions?state=closed` and `?state=all` list closed
+  sessions.** The session list read only open sessions, whatever the filter,
+  so a filter naming `closed` matched nothing. A filter that can match a
+  closed session (`all`, or a list naming `closed`) now reads closed sessions
+  too, reported with state `closed`; they come from the bead store rather than
+  the cache. The default and every other filter still read open sessions from
+  the cache. `gc session list --state closed` and `--state all` list them too
+  when the city's supervisor answers the command.
 - `GET /v0/city/{city}/agents` reflects a config change right away instead of
   serving a cached list keyed only on session state (ga-79peco).
 - **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt

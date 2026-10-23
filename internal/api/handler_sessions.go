@@ -253,7 +253,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), stateFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
