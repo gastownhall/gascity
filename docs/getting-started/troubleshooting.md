@@ -976,7 +976,12 @@ rm -f .gc/incidents/*.state
 A pack that overrides `escalate.sh` receives `--incident-key KEY
 --fingerprint F` on an alert and `--resolve-incident KEY` on a clean run. The
 override must accept or ignore those flags and must send nothing for
-`--resolve-incident`; an override that rejects them loses the alert.
+`--resolve-incident`. An override written before incident keys, which rejects
+the flags as a usage error (exit 2, or an error that names the flag), still
+alerts: the order sends the alert again without the flags, so it is mailed on
+every run instead of deduplicated. The order's output then names the override
+as one that predates incident keys; run the order by hand to see it, for
+example `gc order run reaper`.
 
 ## WSL (Windows Subsystem for Linux)
 

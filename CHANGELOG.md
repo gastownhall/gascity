@@ -284,6 +284,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
 
+- **An `escalate.sh` override written before incident keys keeps alerting,
+  without deduplication.** The `reaper` and `mol-dog-backup` orders now call
+  `escalate.sh` with `--incident-key KEY --fingerprint F` on an alert and
+  `--resolve-incident KEY` on a clean run. An override that rejects those
+  flags as a usage error (exit 2, or an error that names the flag), as one
+  written for gc 1.5.0 does, is sent the alert again without them: it still
+  mails on every run, and the order's output names it as predating incident
+  keys. To deduplicate, the override must handle the flags and send nothing
+  for `--resolve-incident`. The core `escalate.sh` takes the flags and is
+  never sent an alert a second time. See "Why a maintenance alert did not
+  repeat" in `docs/getting-started/troubleshooting.md` (#6363, #8231).
+
 ### Added
 
 - **`gc agent is-foreign <identity>` reports whether this city can vouch for
@@ -819,7 +831,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incident state. A send cut off only after that report still counts as
   delivered. The backup order's missing-`flock` and offsite-publication
   alerts still mail on every run, and an `escalate.sh` override must accept
-  or ignore the new flags.
+  or ignore the new flags. One that rejects them as a usage error, as one
+  written for 1.5.0 does, is sent the alert again without them, so it keeps
+  alerting, undeduplicated (#8231).
 
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which
