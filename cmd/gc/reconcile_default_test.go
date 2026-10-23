@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // v2DefaultCity is a city whose unset session_reconciler resolves to v2: the
@@ -405,5 +409,39 @@ func TestBuildDoctorChecksResolvesTheReconcilerUnderTheProcessEnv(t *testing.T) 
 	check.capabilities, check.queryPass = nil, nil
 	if r := check.Run(nil); !strings.Contains(r.Message, "legacy (default fallback: ") || !strings.Contains(r.Message, "GC_BEADS_CONDITIONAL_WRITES=off") {
 		t.Errorf("message = %q, want the legacy fallback naming GC_BEADS_CONDITIONAL_WRITES=off", r.Message)
+	}
+}
+
+// TestDefaultV2CityPassesC07OnTheRoutesItOpens is the end-to-end half of the
+// default: a city whose unset session_reconciler resolves to v2 opens its
+// storage routes as the controller does (the binding stamped by its
+// conditional_writes default, served through the controller cache), and C0.7
+// admits the sessions and graph class stores it resolves. Kills a resolver
+// that calls a city v2 whose opened stores C0.7 then refuses at boot.
+func TestDefaultV2CityPassesC07OnTheRoutesItOpens(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	if res, err := resolveReconcilerMode(cfg, noEnv); err != nil || res.Mode != reconcilerV2 || res.Reason != reconcilerDefaultV2 {
+		t.Fatalf("resolveReconcilerMode = %+v, %v; want the v2 default", res, err)
+	}
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan: %v", err)
+	}
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+	if err != nil {
+		t.Fatalf("openStorageRoutes: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	cached := routes.withControllerCache(context.Background(), nil)
+	work := beads.NewMemStore()
+	caps := v2ClassStoreCapabilities(resolveSessionStore(cached, work, cfg, root, nil), resolveGraphStore(cached, work, cfg, root, nil), false)
+	if err := v2CapabilityVerdict(caps); err != nil {
+		t.Fatalf("C0.7 refused the default-v2 city's opened routes: %v (capabilities %+v)", err, caps)
+	}
+	for _, c := range caps {
+		if !c.Writer || !c.Closer || c.Mode != gate.Auto {
+			t.Errorf("%s capability = %+v, want a fenced writer and closer stamped auto", c.Class, c)
+		}
 	}
 }
