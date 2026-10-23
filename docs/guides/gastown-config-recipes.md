@@ -112,11 +112,12 @@ name = "gastown.boot"
 suspended = true
 ```
 
-While the city is running, `gc agent suspend gastown.boot` appends the same
-patch for you. Suspending `boot` turns off its deacon check. To turn it back
-on, delete the patch, or run `gc agent resume gastown.boot` while the city is
-running; with the patch already present, that rewrites `city.toml` and drops
-its comments.
+Add the patch to `city.toml` yourself. `boot` is defined by the Gastown pack,
+so on a city the supervisor runs (no `[api]` port in `city.toml`),
+`gc agent suspend gastown.boot` does not write the patch: it exits with
+`agent "gastown.boot" is defined by a pack — use [[patches]] to override`.
+Suspending `boot` turns off its deacon check. To turn it back on, delete the
+patch.
 
 ### Add a named crew agent
 
