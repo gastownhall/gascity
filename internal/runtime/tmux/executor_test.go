@@ -640,9 +640,7 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
 			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
 		}, [][]string{
-			{"show-environment", "-t", "=gc-test-agent-pane"},
-			{"show-options", "-qv", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys"},
-			{"set-option", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys", ""},
+			{"show-environment", "-t", "=gc-test-agent-pane", ";", "display-message", "-p", "-t", "=gc-test-agent-pane:", "@gc_launch_env_keys=#{@gc_launch_env_keys}"},
 			adopt, lookup,
 			{"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"},
 			{"show-environment", "-t", "=gc-test-agent-pane"},
