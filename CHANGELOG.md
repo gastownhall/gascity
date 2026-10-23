@@ -146,6 +146,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fatal should resolve the reported runtime error and run `gc stop` again; on
   herdr, once you have confirmed the herdr server is not running, treat that
   exit as stopped (#6764).
+- **An exec session provider's `start` or `provision` that exits 2 now fails
+  the start.** Exit 2 meant "unknown operation, treat as success" on `start`
+  and `provision` too, so a `set -e` wrapper whose `grep` or `jq` exited 2 during `start`
+  counted as started and the half-created box was never cleaned up. Neither op
+  can be unknown, so exit 2 from them is now a failure, and a failed `start`
+  runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
+  `provision` on success. Exit 2 keeps meaning "unknown operation" for other
+  undeclared operations.
 - **A SQLite bead store holding wrapped ids refuses to mint until you run
   `gc storage repair-sequence`.** Older builds could wrap a SQLite store's id
   sequence past 9223372036854775807 into `<prefix>--<n>` ids and then re-issue

@@ -74,12 +74,15 @@ No shell invocation — the script is exec'd directly.
 |------|---------|
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
-| 2 | Unknown operation (treated as success — forward compatible) |
+| 2 | Unknown operation (treated as success — forward compatible). From `start` and `provision` it is a failure; see below. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
 it as a no-op success. Scripts only need to implement the operations they
-care about.
+care about. `start` and `provision` cannot be unknown: every script starts
+sessions, and `provision` runs only for a script that declares
+`proc.provision`. Their exit 2 (for example a helper's `grep` or `jq` exit
+status escaping a `set -e` script) is a failure.
 
 ## Cancellation
 
