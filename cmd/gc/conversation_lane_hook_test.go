@@ -1388,6 +1388,20 @@ func TestNudgeDrainInjectLaneAsksTheModeOnlyWhenDue(t *testing.T) {
 	}
 }
 
+// TestNudgeDrainInjectLaneAsksTheModeWithinTheHookDeadline (V2-18) proves
+// the drain bounds its ask for the controller's latched mode by the hook's
+// own deadline: with little time left, the leg is shorter than the
+// doorbell's full timeout, never the fixed constant.
+func TestNudgeDrainInjectLaneAsksTheModeWithinTheHookDeadline(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
+	f.propose(t, "mail arrived")
+	withShortHookDeadline(t, func() { f.drain(t) })
+	if len(asks.legs) != 1 || asks.legs[0] <= 0 || asks.legs[0] >= laneHookPokeTimeout {
+		t.Fatalf("mode asks %+v; want one leg in (0, %s), bounded by the hook deadline", asks, laneHookPokeTimeout)
+	}
+}
+
 // TestNudgeDrainInjectLaneRingsLast proves the drain rings the lane host
 // once, after a Done, and only once the legacy nudge it carried is acked and
 // the session stamped: the doorbell never spends the time those need.
@@ -1637,8 +1651,12 @@ func TestNudgeDrainInjectLaneRunsNoPassWithoutRoom(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	resetHookBudgetProcessState(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
 	op := f.propose(t, "mail arrived")
 	run := f.drain(t)
+	if len(asks.cities) != 0 {
+		t.Fatalf("a drain with no room asked the controller's mode %d times, want none: it asks only once the pass runs", len(asks.cities))
+	}
 	if strings.Contains(run.stdout, "mail arrived") || !strings.Contains(run.stdout, big) {
 		t.Fatalf("output carries the notice, or lost the legacy nudge:\n%.200s", run.stdout)
 	}

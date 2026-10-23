@@ -39,9 +39,17 @@ var stopRequestReaders = []string{"cmd/gc/conversation_lane_view.go"}
 // session.StopRequestReading value (StopRequestsLive, StopRequestsIgnored)
 // beside their definition: the one place that turns the controller's
 // latched mode into a reading (laneStopReading, controllerStopReading). Any
-// other caller takes its reading from there, so none can read the stop
-// request live, or as residue, by its own choice (V2-18 ruling 1).
+// other caller takes its reading from there; with laneModeChoosers below,
+// none can read the stop request live, or as residue, by its own choice
+// (V2-18 ruling 1).
 var stopReadingChoosers = []string{"cmd/gc/conversation_lane_view.go", "internal/session/stop_request_keys.go"}
+
+// laneModeChoosers are the production files that may name laneStopReading,
+// which turns a reconciler mode into a stop-request reading: its definition
+// beside controllerStopReading, which passes the mode the controller
+// answers, and the controller's lane host start, which passes its own latch.
+// Any other caller could hand it a mode of its own choosing.
+var laneModeChoosers = []string{"cmd/gc/conversation_lane_view.go", "cmd/gc/conversation_lane_host.go"}
 
 // Kills a legacy reader of the stop request's controller half (v5 R1's
 // rollback rule: legacy ignores the new keys): no production Go file under
@@ -51,7 +59,9 @@ var stopReadingChoosers = []string{"cmd/gc/conversation_lane_view.go", "internal
 // session.ReadStopRequest in code, and each listed file still does. And
 // kills a reader that picks its own reading: no production file but
 // stopReadingChoosers names StopRequestsLive or StopRequestsIgnored in code,
-// and each listed file still does.
+// and each listed file still does; nor one that picks the mode its reading
+// follows: no production file but laneModeChoosers names laneStopReading in
+// code, and each listed file still does.
 func TestStopRequestKeysAreNewKeys(t *testing.T) {
 	banned := []string{
 		session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey,
@@ -60,7 +70,7 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 	}
 	root := repoRootForLint(t)
 	scanned, owners := 0, 0
-	readers, choosers := map[string]bool{}, map[string]bool{}
+	readers, choosers, modeChoosers := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, dir := range []string{"cmd", "internal", "pkg"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
@@ -76,6 +86,9 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 			}
 			if strings.Contains(string(data), "StopRequests") && namesIdent(t, path, data, "StopRequestsLive", "StopRequestsIgnored") {
 				choosers[filepath.ToSlash(rel)] = true
+			}
+			if strings.Contains(string(data), "laneStopReading") && namesIdent(t, path, data, "laneStopReading") {
+				modeChoosers[filepath.ToSlash(rel)] = true
 			}
 			if slices.Contains(stopKeyOwners, filepath.ToSlash(rel)) {
 				owners++
@@ -117,6 +130,16 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 	for _, rel := range stopReadingChoosers {
 		if !choosers[rel] {
 			t.Errorf("%s is admitted in stopReadingChoosers but no longer names a stop-request reading; drop it from the list", rel)
+		}
+	}
+	for _, rel := range slices.Sorted(maps.Keys(modeChoosers)) {
+		if !slices.Contains(laneModeChoosers, rel) {
+			t.Errorf("%s names laneStopReading, choosing the mode a stop request is read by; take the reading from controllerStopReading instead (V2-18)", rel)
+		}
+	}
+	for _, rel := range laneModeChoosers {
+		if !modeChoosers[rel] {
+			t.Errorf("%s is admitted in laneModeChoosers but no longer names laneStopReading; drop it from the list", rel)
 		}
 	}
 }

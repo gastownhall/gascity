@@ -56,7 +56,8 @@ evidence from tests, source, an issue, or a commit.
   and reads live when the mode is unknown. Only cmd/gc's
   `conversation_lane_view.go` turns a mode into a reading
   (`laneStopReading`, `controllerStopReading`); no other caller names
-  `StopRequestsLive` or `StopRequestsIgnored`. The drain-protocol notice
+  `StopRequestsLive` or `StopRequestsIgnored`, and only the controller's
+  lane host start, with its own latch, calls `laneStopReading`. The drain-protocol notice
   (`GateContentDrainNotice`) is exempt from `stop_requested`, as from
   `draining`, permanently, for the conversation lane's executors (the
   controller's lane host and the CLI's inline pass), which report it as
