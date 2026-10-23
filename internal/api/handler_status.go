@@ -1081,7 +1081,6 @@ func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, c
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 		seenSessionNames[info.sessionName] = true

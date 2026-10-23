@@ -381,6 +381,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The control dispatcher reports no provider.** The SDK's control
+  dispatcher runs `gc convoy control --serve` and has no provider, but
+  `GET /v0/city/{city}/agents`, the agent read and the session endpoints
+  reported it under the workspace provider, marked it unavailable when that
+  provider's binary was not on `PATH`, and could fill in its session's model
+  and context from another agent's transcript in a shared work dir. It now
+  reports no provider, no provider binary gates its availability, and its
+  session reads no transcript. A Claude agent sharing its work dir is also no
+  longer denied model and context because the dispatcher counted as a second
+  Claude agent there.
+
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
