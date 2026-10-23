@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **An exec session provider's `start` or `provision` that exits 2 now fails
+  the start.** Exit 2 meant "unknown operation, treat as success" on `start`
+  and `provision` too, so a `set -e` wrapper whose `grep` or `jq` exited 2 during `start`
+  counted as started and the half-created box was never cleaned up. Neither op
+  can be unknown, so exit 2 from them is now a failure, and a failed `start`
+  runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
+  `provision` on success. Exit 2 keeps meaning "unknown operation" for other
+  undeclared operations.
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
@@ -381,25 +389,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`GET /v0/city/{city}/agents` reports a live bounded-pool worker as
-  running, and no provider for the control dispatcher.** The agent list, the
-  agent read and the rig counts probed a pool slot (`<pool>-1`) on a session
-  name derived from the slot, but the controller runs an unaliased pool
-  session under a name carrying its session bead id (`<template>-<beadID>`).
-  Every worker of a pool with `max_active_sessions` set read `stopped` while
-  `/sessions` showed it active, `?running=true` listed none of them, and a
-  rig's `running_count` left them out. When a slot's derived name is not
-  live, these endpoints now find the slot's session the way `/status` does
-  and probe that one. A session whose bead still says active but whose
-  runtime is gone still reads stopped, and a session store that cannot be
-  read makes the list partial. The SDK's control dispatcher, which runs
-  `gc convoy control --serve` and has no provider, was reported under the
-  workspace provider, marked unavailable when that provider's binary was not
-  on `PATH`, and could take its session's model and context from another
-  agent's transcript in a shared work dir. It now reports no provider, its
-  session reads no transcript, and a Claude agent sharing its work dir no
-  longer loses its model and context on its account. (#4703, thanks
-  @remuscazacu)
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets `timeout = "4m"`,
+  which leaves at most two minutes after the 120s foreign-identity gate
+  budget, less the claim collection that precedes it. A city whose sweep
+  needs longer can raise it with `[[orders.overrides]]`,
+  `name = "orphan-sweep"` and a `timeout` (plus `rig = "*"` if a rig's own
+  pack also carries the order).
 
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
@@ -439,6 +438,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   up; it now sends Escape (the prompt's own cancel key) when a prompt is on
   screen, never a numbered option. When it cannot read the pane it logs a
   warning and sends Ctrl-C as before. (thanks @csells)
+
+- **`GET /v0/city/{city}/agents` reports a live bounded-pool worker as
+  running, and no provider for the control dispatcher.** The agent list, the
+  agent read and the rig counts probed a pool slot (`<pool>-1`) on a session
+  name derived from the slot, but the controller runs an unaliased pool
+  session under a name carrying its session bead id (`<template>-<beadID>`).
+  Every worker of a pool with `max_active_sessions` set read `stopped` while
+  `/sessions` showed it active, `?running=true` listed none of them, and a
+  rig's `running_count` left them out. When a slot's derived name is not
+  live, these endpoints now find the slot's session the way `/status` does
+  and probe that one. A session whose bead still says active but whose
+  runtime is gone still reads stopped, and a session store that cannot be
+  read makes the list partial. The SDK's control dispatcher, which runs
+  `gc convoy control --serve` and has no provider, was reported under the
+  workspace provider, marked unavailable when that provider's binary was not
+  on `PATH`, and could take its session's model and context from another
+  agent's transcript in a shared work dir. It now reports no provider, its
+  session reads no transcript, and a Claude agent sharing its work dir no
+  longer loses its model and context on its account. (#4703, thanks
+  @remuscazacu)
 
 - **A Claude API failure now shows as a provider error in structured session
   history, not as an assistant reply.** Entries Claude flags with
@@ -483,7 +502,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records as an `order.skipped` event with one scope per identity; the run
   still exits 0, and a sweep that only protects sends no mail. The verb is
   asked at most once per distinct identity per sweep, within a gate budget of
-  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 4m
   timeout); past it, the remaining claimants are not asked, their claims are
   kept and named with a "gate budget … exhausted" reason, and the sweep says
   how many identities it did not ask. Where `timeout` is installed, an ask

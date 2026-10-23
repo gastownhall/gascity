@@ -2406,3 +2406,55 @@ func TestSessionControlOpsAdoptedKillOfAMovedSessionTouchesNothing(t *testing.T)
 		})
 	}
 }
+
+// An op a crash left open before its legacy effect ran (X12's K1: the row is
+// durable, nothing answered, nothing acted) is adopted by a same-key retry in
+// a new API process, and the adopted retry runs the legacy command: the
+// session is suspended, woken or reset, not only the op closed succeeded at
+// attempt 1.
+func TestSessionControlOpsAdoptedLifecycleCommandReExecutes(t *testing.T) {
+	for _, tc := range []struct {
+		path      string
+		kind      opjournal.Kind
+		policy    opjournal.Policy
+		suspended bool
+		acted     func(t *testing.T, stops int, md map[string]string)
+	}{
+		{"/suspend", opjournal.KindSuspend, opjournal.Policy{}, false, func(t *testing.T, stops int, md map[string]string) {
+			if md["state"] != "suspended" || stops != 1 {
+				t.Fatalf("state %q, %d Stop calls; want suspended by one Stop", md["state"], stops)
+			}
+		}},
+		{"/wake", opjournal.KindWake, opjournal.Policy{}, true, func(t *testing.T, _ int, md map[string]string) {
+			if md["state"] == "suspended" || md["wake_request"] != "explicit" || md["wake_requested_at"] == "" {
+				t.Fatalf("state %q wake_request %q at %q; want the explicit wake recorded", md["state"], md["wake_request"], md["wake_requested_at"])
+			}
+		}},
+		{"/reset", opjournal.KindRestart, resetSessionPolicy, false, func(t *testing.T, _ int, md map[string]string) {
+			if md["restart_requested"] != "true" || md["continuation_reset_pending"] != "true" {
+				t.Fatalf("restart_requested %q continuation_reset_pending %q; want the fresh restart requested", md["restart_requested"], md["continuation_reset_pending"])
+			}
+		}},
+	} {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", "auto")
+			info := e.session(t, "Adopted "+tc.path)
+			if tc.suspended {
+				wantStatus(t, "fixture suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
+			}
+			stops := e.fs.sp.CountCalls("Stop", info.SessionName)
+			op := e.seedSyncOp(t, info.ID, tc.kind, "k-1", opjournal.Scope{}, tc.policy, "", legacyop.ExecutorAPI, time.Now())
+			e.restart(t)
+			rec := e.post(t, "/session/"+info.ID+tc.path, "k-1", "")
+			wantStatus(t, "adopting retry", rec, http.StatusOK)
+			if a := decodeCommandAnswer(t, rec); a.Replayed {
+				t.Fatalf("adopting retry answered a replay: %+v", a)
+			}
+			got, err := e.opStore(t).Get(op.ID)
+			if err != nil || got.Status != opjournal.StatusClosed || got.Attempt != 1 || got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("adopted op = %+v, %v; want closed succeeded at attempt 1", got, err)
+			}
+			tc.acted(t, e.fs.sp.CountCalls("Stop", info.SessionName)-stops, metadataOf(t, e.store, info.ID))
+		})
+	}
+}

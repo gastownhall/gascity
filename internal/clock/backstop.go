@@ -75,7 +75,7 @@ const testHooksEnabled = "enabled"
 
 // TestHooksEnabled reports whether this binary was linked with test hooks:
 // the only binary that honors GC_TEST_BACKSTOP_SPEEDUP and cmd/gc's
-// GC_LANE_FAILPOINT.
+// GC_LANE_FAILPOINT and GC_OPS_FAILPOINT.
 func TestHooksEnabled() bool { return testHooks == testHooksEnabled }
 
 var announceOnce sync.Once
