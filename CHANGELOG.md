@@ -196,6 +196,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Update(status=closed)` now emits `bead.closed` instead of `bead.updated`,
   re-closing an already-closed bead no longer re-emits, and orders and
   autoclose now fire for closes made with `bd` or `gc bd` (#6860).
+- **`nudge-on-route` no longer retries a failed nudge on a repeated, unchanged
+  `bead.updated`.** The controller now drops a `bead.updated` that repeats the
+  last one recorded for the bead within 20 minutes (see Fixed). The order
+  nudges a routed bead's target once, and it used to retry a failed nudge each
+  time the unchanged bead was announced again; it now retries when the bead
+  changes, or when the unchanged bead is recorded again after 20 minutes.
+  Other orders and scripts that trigger on `bead.updated` likewise no longer
+  see those repeats (#7023).
 - **API session creates for a demand-only singleton are refused.** `POST
   /sessions` with `kind: "agent"` for a pool agent with
   `max_active_sessions = 1`, `min_active_sessions = 0` and no
@@ -435,6 +443,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-attached mid-connection, for example after the city stops and starts
   again: events already buffered for that city can be delivered again, and
   its seq in the composite SSE id can move back. Dedupe on city and seq.
+- **The controller no longer records an unchanged bead as a new
+  `bead.updated` event on every reconcile pass.** Its bead caches announced
+  rows whose state had not changed, so on a busy city most `bead.updated`
+  events were byte-identical repeats, and each one fed every event consumer,
+  from the controller's own cache and wake path to orders that trigger on
+  `bead.updated`. A cache now drops a `bead.updated` whose payload is
+  identical to the last create or update the event log acknowledged for that
+  bead within 20 minutes; after that an unchanged bead is recorded again.
+  Creates, closes and deletes are never dropped, and a close or delete resets
+  the bead. A failed append is logged and not remembered, so the next copy is
+  recorded. See Upgrading Notes for `nudge-on-route` (#7023).
 - **Concurrent `gc init` runs sharing a Dolt database no longer force a
   second initialization over an active migration,** and a verified-empty
   store is initialized with plain `bd init` instead of a forced reinit that

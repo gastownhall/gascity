@@ -296,21 +296,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
-		if recorder != nil {
-			recorder.Record(events.Event{
-				Type:             eventType,
-				Actor:            cacheReconcileActor,
-				Subject:          beadID,
-				RunID:            runID,
-				SessionID:        sessionID,
-				StepID:           stepID,
-				DependsOnStepIDs: dependsOnStepIDs,
-				Payload:          payload,
-			})
-		}
-	}
-	cs := beads.NewCachingStore(baseStore, onChange)
+	cs := beads.NewCachingStore(baseStore, cacheChangeRecorder(recorder))
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
