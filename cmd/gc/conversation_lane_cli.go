@@ -41,7 +41,6 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The CLI inline pass's lane (DES-O1 §7.6).
@@ -54,6 +53,9 @@ const (
 	cliLaneLeaseTTL = 30 * time.Second
 	// cliLaneRingTimeout bounds each leg of the CLI's ring.
 	cliLaneRingTimeout = time.Second
+	// cliReconcilerModeLeg bounds each leg of the inline pass's ask for the
+	// controller's latched session reconciler (controllerStopReading).
+	cliReconcilerModeLeg = 500 * time.Millisecond
 )
 
 // cliLaneExecutesMessage reports whether [ops] authoritative lists message.
@@ -172,9 +174,6 @@ type cliLaneNudge struct {
 	stderr   io.Writer
 	// key is the op's client key, --key or minted.
 	key string
-	// stopReading is how the pass reads the row's stop request: by the mode
-	// the city's controller latched (controllerStopReading).
-	stopReading session.StopRequestReading
 }
 
 // refusal is the cliOp a lane nudge reports its refusals through, so its
@@ -207,8 +206,7 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 		return true, 1
 	}
 	n.st = st
-	n.stopReading = controllerStopReading(target.cityPath)
-	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID, n.stopReading)
+	view, absent, err := readConversationLaneViewOnly(sessionFrontDoor(n.sessions), target.sessionID)
 	switch {
 	case err != nil:
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Errorf("reading session %s: %w", target.sessionID, err)), "", key)
@@ -314,11 +312,16 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 	}
 	armLaneFailpoints(lane, cliLaneHostName)
 	// The CLI holds no latch, so it reads the stop request by the mode the
-	// controller latched: a request it holds back waits for the
+	// controller latched, asked right before the row read so the answer is
+	// as fresh as the row: a request it holds back waits for the
 	// controller's lane host, which reads by the same mode.
-	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, n.stopReading)
+	reading, modeErr := controllerStopReading(n.target.cityPath, cliReconcilerModeLeg)
+	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, reading)
 	if err != nil {
 		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", n.target.sessionID, err)
+	}
+	if note := unknownModeStopNote(row, modeErr); note != "" {
+		n.warnf("%s", note)
 	}
 	live := newConversationLaneExec(laneExecDeps{
 		cityPath: n.target.cityPath,

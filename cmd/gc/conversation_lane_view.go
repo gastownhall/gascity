@@ -2,7 +2,9 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -63,19 +65,42 @@ var laneControllerMode = queryControllerReconcilerMode
 
 // controllerStopReading is how a lane pass outside the controller (the CLI's
 // inline pass, the prompt hook's in-band pass) reads a row's stop request:
-// by the mode the city's controller latched, which it asks for, never by the
-// on-disk config. So after a rollback to legacy it reads a rolled-back v2
-// run's request as residue as soon as the legacy controller answers. When no
-// controller answers, or one that does names no mode this build knows, the
-// mode is unknown and it reads the request live: an unknown mode honors the
-// keys, deferring content to the controller's lane host rather than starting
-// it into a session v2 may be stopping.
-func controllerStopReading(cityPath string) session.StopRequestReading {
-	mode, known := laneControllerMode(cityPath)
+// by the mode the city's controller latched, which it asks for with legs of
+// leg, never by the on-disk config. So after a rollback to legacy it reads a
+// rolled-back v2 run's request as residue as soon as the legacy controller
+// answers. When the mode is unknown (no controller answers, one that does
+// names no mode this build knows, or there is no time to ask) it reads the
+// request live and returns why the mode is unknown: an unknown mode honors
+// the keys, deferring content to the controller's lane host rather than
+// starting it into a session v2 may be stopping.
+func controllerStopReading(cityPath string, leg time.Duration) (session.StopRequestReading, error) {
+	mode, known, err := laneControllerMode(cityPath, leg)
 	if !known {
-		return session.StopRequestsLive
+		if err == nil {
+			err = errors.New("the controller named no session reconciler")
+		}
+		return session.StopRequestsLive, err
 	}
-	return laneStopReading(mode)
+	return laneStopReading(mode), nil
+}
+
+// unknownModeStopNote is the note a pass outside the controller gives when
+// row's stop request held content only because the controller's latched mode
+// was unknown (modeErr, controllerStopReading's error), and "" otherwise: a
+// known mode, or a row with no stop request standing, needs no note.
+func unknownModeStopNote(row laneRow, modeErr error) string {
+	if modeErr == nil || !row.stop.Requested() {
+		return ""
+	}
+	return fmt.Sprintf("the session's stop request is honored because the controller's session reconciler is unknown (%v)", modeErr)
+}
+
+// readConversationLaneViewOnly is readConversationLaneView for a caller that
+// needs the view alone: the view never depends on the stop request, so the
+// read asks the controller for no mode.
+func readConversationLaneViewOnly(front *session.Store, conv string) (view opjournal.ConversationView, absent bool, err error) {
+	view, _, absent, err = readConversationLaneView(front, conv, session.StopRequestsLive)
+	return view, absent, err
 }
 
 // readConversationLaneView reads conversation conv's session row live

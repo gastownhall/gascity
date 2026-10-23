@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -318,25 +319,57 @@ type reconcilerModeReply struct {
 
 // reconcilerModeReplyFor is the reply of a controller whose wake is wake,
 // and false when it has none to answer from: the latched mode rides on the
-// wiring's wake (newControllerWiring).
+// wiring's wake (newControllerWiring). It answers only a mode it can name
+// for certain: a wake with no mode this build knows, or one that carries a
+// v2 planner but names another mode, gets no reply, so the reader takes the
+// mode as unknown and honors the stop request's keys rather than reading a
+// v2 controller as legacy.
 func reconcilerModeReplyFor(wake *controllerWake) (reconcilerModeReply, bool) {
 	if wake == nil {
 		return reconcilerModeReply{}, false
 	}
-	return reconcilerModeReply{SessionReconciler: wake.mode.String()}, true
+	switch {
+	case wake.mode == reconcilerV2:
+		return reconcilerModeReply{SessionReconciler: config.SessionReconcilerV2}, true
+	case wake.mode == reconcilerLegacy && wake.planner == nil:
+		return reconcilerModeReply{SessionReconciler: config.SessionReconcilerLegacy}, true
+	}
+	return reconcilerModeReply{}, false
 }
 
+// reconcilerModeSend is the transport queryControllerReconcilerMode asks the
+// controller socket over: sendControllerCommandWithTimeouts. It is a mutable
+// global test seam, so a test can answer the verb as a controller would
+// without a listener; tests that swap it MUST NOT call t.Parallel().
+var reconcilerModeSend = sendControllerCommandWithTimeouts
+
+// errReconcilerModeNoTime is the unknown mode of a query given no time to
+// ask: the caller's deadline leaves none.
+var errReconcilerModeNoTime = errors.New("no time left to ask the controller")
+
 // queryControllerReconcilerMode asks the city's controller for the mode it
-// latched. known is false when no controller answers, when one predates the
-// command (it closes the connection without a reply), or when the reply
-// names no mode this build knows: the caller must then assume nothing about
-// the running mode.
-func queryControllerReconcilerMode(cityPath string) (mode reconcilerMode, known bool) {
-	resp, err := sendControllerCommandWithTimeouts(cityPath, reconcilerModeCommand, 250*time.Millisecond, 250*time.Millisecond, time.Second)
-	if err != nil {
-		return reconcilerLegacy, false
+// latched, each leg of the exchange (dial, write, read) bounded by leg.
+// known is false, with err saying why, when the query is given no time (leg
+// not positive) or the city is a worker site, where no controller socket
+// serves the box (both without dialing), when no controller answers, when
+// one predates the command (it closes the connection without a reply), or
+// when the reply names no mode this build knows: the caller must then assume
+// nothing about the running mode.
+func queryControllerReconcilerMode(cityPath string, leg time.Duration) (mode reconcilerMode, known bool, err error) {
+	if leg <= 0 {
+		return reconcilerLegacy, false, errReconcilerModeNoTime
 	}
-	return decodeReconcilerModeReply(resp)
+	if onWorkerSite(cityPath) {
+		return reconcilerLegacy, false, errWorkerSiteNoController
+	}
+	resp, err := reconcilerModeSend(cityPath, reconcilerModeCommand, leg, leg, leg)
+	if err != nil {
+		return reconcilerLegacy, false, err
+	}
+	if mode, known = decodeReconcilerModeReply(resp); !known {
+		return reconcilerLegacy, false, fmt.Errorf("the controller's reply %q names no session reconciler this build knows", resp)
+	}
+	return mode, true, nil
 }
 
 // decodeReconcilerModeReply reads a controller's reply to

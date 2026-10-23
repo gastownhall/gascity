@@ -28,17 +28,30 @@ var stopKeyOwners = []string{"internal/session/stop_request_keys.go", "internal/
 // stopRequestReaders are the production files that may call
 // session.ReadStopRequest, the content gate's reader of the stop request
 // (V2-18), each passing the reading its process may take: only the
-// conversation lane's row read (the lane host's latched mode's, else live).
-// The drain reminder's gate reads none: the drain notice passes a stop
-// request, so it asks with the zero StopRequest.
+// conversation lane's row read, by the controller's latched mode (its own
+// lane host's latch, or, for a pass outside the controller, the mode the
+// controller answers, live while it is unknown). The drain reminder's gate
+// reads none: the drain notice passes a stop request, so it asks with the
+// zero StopRequest.
 var stopRequestReaders = []string{"cmd/gc/conversation_lane_view.go"}
+
+// stopReadingChoosers are the production files that may name a
+// session.StopRequestReading value (StopRequestsLive, StopRequestsIgnored)
+// beside their definition: the one place that turns the controller's
+// latched mode into a reading (laneStopReading, controllerStopReading). Any
+// other caller takes its reading from there, so none can read the stop
+// request live, or as residue, by its own choice (V2-18 ruling 1).
+var stopReadingChoosers = []string{"cmd/gc/conversation_lane_view.go", "internal/session/stop_request_keys.go"}
 
 // Kills a legacy reader of the stop request's controller half (v5 R1's
 // rollback rule: legacy ignores the new keys): no production Go file under
 // cmd/, internal/ or pkg/ but stopKeyOwners spells a key of either half or
 // names its exported constant. And kills a third reader through the content
 // gate's (V2-18): no production file but stopRequestReaders references
-// session.ReadStopRequest in code, and each listed file still does.
+// session.ReadStopRequest in code, and each listed file still does. And
+// kills a reader that picks its own reading: no production file but
+// stopReadingChoosers names StopRequestsLive or StopRequestsIgnored in code,
+// and each listed file still does.
 func TestStopRequestKeysAreNewKeys(t *testing.T) {
 	banned := []string{
 		session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey,
@@ -47,7 +60,7 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 	}
 	root := repoRootForLint(t)
 	scanned, owners := 0, 0
-	readers := map[string]bool{}
+	readers, choosers := map[string]bool{}, map[string]bool{}
 	for _, dir := range []string{"cmd", "internal", "pkg"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
@@ -61,6 +74,9 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			if strings.Contains(string(data), "StopRequests") && namesIdent(t, path, data, "StopRequestsLive", "StopRequestsIgnored") {
+				choosers[filepath.ToSlash(rel)] = true
+			}
 			if slices.Contains(stopKeyOwners, filepath.ToSlash(rel)) {
 				owners++
 				return nil
@@ -71,7 +87,7 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 					t.Errorf("%s names the stop-request key %q", rel, k)
 				}
 			}
-			if strings.Contains(string(data), "ReadStopRequest") && referencesReadStopRequest(t, path, data) {
+			if strings.Contains(string(data), "ReadStopRequest") && namesIdent(t, path, data, "ReadStopRequest") {
 				readers[filepath.ToSlash(rel)] = true
 			}
 			return nil
@@ -93,13 +109,22 @@ func TestStopRequestKeysAreNewKeys(t *testing.T) {
 			t.Errorf("%s is admitted in stopRequestReaders but no longer calls session.ReadStopRequest; drop it from the list", rel)
 		}
 	}
+	for _, rel := range slices.Sorted(maps.Keys(choosers)) {
+		if !slices.Contains(stopReadingChoosers, rel) {
+			t.Errorf("%s names a stop-request reading (StopRequestsLive, StopRequestsIgnored); take it from controllerStopReading or laneStopReading instead (V2-18)", rel)
+		}
+	}
+	for _, rel := range stopReadingChoosers {
+		if !choosers[rel] {
+			t.Errorf("%s is admitted in stopReadingChoosers but no longer names a stop-request reading; drop it from the list", rel)
+		}
+	}
 }
 
-// referencesReadStopRequest reports whether src's code, comments aside,
-// names ReadStopRequest: session.ReadStopRequest (a selector's Sel) or a
-// bare call from another session file. A non-owner file never holds the
-// declaration, so any such identifier is a reference.
-func referencesReadStopRequest(t *testing.T, path string, src []byte) bool {
+// namesIdent reports whether src's code, comments aside, names one of names:
+// as a selector's Sel (session.ReadStopRequest), a bare reference from the
+// declaring package, or the declaration itself.
+func namesIdent(t *testing.T, path string, src []byte, names ...string) bool {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
 	if err != nil {
@@ -107,12 +132,25 @@ func referencesReadStopRequest(t *testing.T, path string, src []byte) bool {
 	}
 	found := false
 	ast.Inspect(f, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && id.Name == "ReadStopRequest" {
+		if id, ok := n.(*ast.Ident); ok && slices.Contains(names, id.Name) {
 			found = true
 		}
 		return !found
 	})
 	return found
+}
+
+// TestNamesIdentSkipsComments (V2-18) pins the guard's reading of a source:
+// a name in a comment is no reference, and one in code is.
+func TestNamesIdentSkipsComments(t *testing.T) {
+	commented := []byte("package main\n\n// session.StopRequestsLive is named here only.\nfunc f() {}\n")
+	coded := []byte("package main\n\nimport \"github.com/gastownhall/gascity/internal/session\"\n\nvar r = session.StopRequestsLive\n")
+	if namesIdent(t, "commented.go", commented, "StopRequestsLive") {
+		t.Fatal("a comment counted as a reference")
+	}
+	if !namesIdent(t, "coded.go", coded, "StopRequestsLive", "StopRequestsIgnored") {
+		t.Fatal("a reference in code was missed")
+	}
 }
 
 // stopKeyIndexers are the names of the functions in src whose bodies index

@@ -53,11 +53,20 @@ evidence from tests, source, an issue, or a commit.
   host reads its own latch; every reader outside the controller (the CLI's
   inline pass, the prompt hook) asks the running controller
   (`reconciler-mode` on the controller socket), never the on-disk config,
-  and reads live when the mode is unknown. The drain-protocol notice
+  and reads live when the mode is unknown. Only cmd/gc's
+  `conversation_lane_view.go` turns a mode into a reading
+  (`laneStopReading`, `controllerStopReading`); no other caller names
+  `StopRequestsLive` or `StopRequestsIgnored`. The drain-protocol notice
   (`GateContentDrainNotice`) is exempt from `stop_requested`, as from
-  `draining`, permanently. Enforced by `TestStopRequestKeysAreNewKeys`,
-  `TestSessionReadsTheStopRequestOnlyInReadStopRequest` and
-  `TestReadStopRequestAgreesWithActiveStop`.
+  `draining`, permanently, for the conversation lane's executors (the
+  controller's lane host and the CLI's inline pass), which report it as
+  `Probe.ContentAdmit`; the prompt hook's in-band pass admits no class, so
+  it holds the notice for the lane host. The single reader, the single
+  reading chooser and the key owners are guarded by
+  `TestStopRequestKeysAreNewKeys` and
+  `TestSessionReadsTheStopRequestOnlyInReadStopRequest`; the reader's rule
+  by `TestReadStopRequestAgreesWithActiveStop`; the published mode by
+  `TestQueryControllerReconcilerModeReadsTheControllersAnswer`.
 - Keep production CLI session creation and lifecycle operations on the
   `internal/worker/handle.go` boundary unless root `AGENTS.md` names an active
   exception.

@@ -91,7 +91,9 @@ func (h *hookLaneHarness) pass() hookLanePass {
 			return err
 		},
 		stampDelivered: true,
-		stopReading:    h.stopReading,
+		stopReading: func() (session.StopRequestReading, error) {
+			return h.stopReading, nil
+		},
 	}
 }
 
@@ -541,6 +543,38 @@ func TestHookLanePassHonorsTheContentGate(t *testing.T) {
 			}
 			if cur := h.f.get(t, h.st, op.ID); !tc.emit && cur.Attempt != 0 {
 				t.Fatalf("op attempt %d; want untouched", cur.Attempt)
+			}
+		})
+	}
+}
+
+// TestHookLanePassHoldsTheDrainNotice (V2-18) pins the scope of the drain
+// notice's exemption from draining and stop_requested: it is the lane
+// executors' (the controller's lane host and the CLI's inline pass), which
+// admit the notice's class. The hook admits no class, so a draining or
+// stop-requested row holds the notice in band too, and the controller's
+// lane host, which proposes it only when it can type into the session,
+// delivers it.
+func TestHookLanePassHoldsTheDrainNotice(t *testing.T) {
+	drainNotice := func(r *opjournal.Request) {
+		r.Producer = opjournal.Producer{Principal: laneDrainNoticeClass.Principal, Actor: opjournal.ActorController}
+		r.Policy.Message = opjournal.MessagePolicy{Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly}
+	}
+	for _, tc := range []struct {
+		name string
+		opt  laneFixtureOpt
+	}{
+		{"draining", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }},
+		{"stop requested at the row's generation", laneStopRequestedAt(1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookLaneHarness(t, tc.opt)
+			op := h.f.propose(t, h.st, h.f.msg("drain", opjournal.RoleNotice, "wrap up", drainNotice))
+			if out := h.run(t); out.emitted {
+				t.Fatalf("outcome = %+v; want the drain notice held", out)
+			}
+			if cur := h.f.get(t, h.st, op.ID); cur.Status != opjournal.StatusSubmitted || cur.Attempt != 0 {
+				t.Fatalf("op %s attempt %d; want it submitted and untouched", cur.Status, cur.Attempt)
 			}
 		})
 	}
@@ -1304,11 +1338,17 @@ func TestNudgeDrainInjectLaneReadsStopRequestsByTheLatchedMode(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			setLaneControllerMode(t, tc.mode, tc.known)
+			asks := setLaneControllerMode(t, tc.mode, tc.known)
 			op := f.propose(t, "mail arrived")
 			run := f.drain(t)
 			if run.code != 0 {
 				t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+			}
+			if !slices.Equal(asks.cities, []string{f.cityDir}) || !slices.Equal(asks.legs, []time.Duration{laneHookPokeTimeout}) {
+				t.Fatalf("mode asks %+v; want one for the city %s with the doorbell's leg %s", asks, f.cityDir, laneHookPokeTimeout)
+			}
+			if noted := strings.Contains(run.stderr, "stop request is honored because the controller's session reconciler is unknown"); noted == tc.known {
+				t.Fatalf("stderr %q: unknown-mode note %v, want %v", run.stderr, noted, !tc.known)
 			}
 			cur, err := f.st.Get(op.ID)
 			if err != nil {
@@ -1324,6 +1364,27 @@ func TestNudgeDrainInjectLaneReadsStopRequestsByTheLatchedMode(t *testing.T) {
 				t.Fatalf("op %s = %s attempt %d; want it left for the lane host", cur.ID, cur.Status, cur.Attempt)
 			}
 		})
+	}
+}
+
+// TestNudgeDrainInjectLaneAsksTheModeOnlyWhenDue (V2-18) proves the drain
+// asks the controller for its latched mode only once the in-band pass runs:
+// with nothing due it asks nothing.
+func TestNudgeDrainInjectLaneAsksTheModeOnlyWhenDue(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, false)
+	if run := f.drain(t); run.code != 0 {
+		t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+	}
+	if len(asks.cities) != 0 {
+		t.Fatalf("a drain with nothing due asked the controller's mode %d times, want none", len(asks.cities))
+	}
+	f.propose(t, "mail arrived")
+	if run := f.drain(t); run.code != 0 || !strings.Contains(run.stdout, "mail arrived") {
+		t.Fatalf("exit %d, stdout %q; stderr=%s", run.code, run.stdout, run.stderr)
+	}
+	if len(asks.cities) != 1 {
+		t.Fatalf("a drain with a notice due asked the controller's mode %d times, want once", len(asks.cities))
 	}
 }
 

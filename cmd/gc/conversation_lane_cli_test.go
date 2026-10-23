@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -223,8 +224,12 @@ func TestSessionNudgeLaneRoutesUnservedSessionsLegacy(t *testing.T) {
 		prevPoller := startNudgePoller
 		startNudgePoller = func(_, _, _ string) error { return nil }
 		t.Cleanup(func() { startNudgePoller = prevPoller })
+		asks := setLaneControllerMode(t, reconcilerLegacy, false)
 		if code, _, stderr := c.nudge(nudgeDeliveryQueue, "", false, cliLaneTestMessage); code != 0 {
 			t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+		}
+		if len(asks.cities) != 0 {
+			t.Fatalf("the legacy path asked the controller's mode %d times, want none", len(asks.cities))
 		}
 		for _, op := range c.ops(t) {
 			if op.Executor == opjournal.ExecutorLane {
@@ -361,24 +366,32 @@ func TestSessionNudgeLaneBusyIsQueued(t *testing.T) {
 func TestSessionNudgeLaneStopRequestedIsQueued(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
+		mode  reconcilerMode
 		known bool
 	}{
-		{"latched v2", true},
-		{"mode unknown", false},
+		{"latched v2", reconcilerV2, true},
+		// The real query answers an unknown mode as legacy, not known.
+		{"mode unknown", reconcilerLegacy, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			testSessionNudgeLaneStopRequestedIsQueued(t, tc.known)
+			testSessionNudgeLaneStopRequestedIsQueued(t, tc.mode, tc.known)
 		})
 	}
 }
 
-func testSessionNudgeLaneStopRequestedIsQueued(t *testing.T, known bool) {
+func testSessionNudgeLaneStopRequestedIsQueued(t *testing.T, mode reconcilerMode, known bool) {
 	t.Helper()
 	c := newCLILaneCity(t, laneStopRequestedAt(1))
-	setLaneControllerMode(t, reconcilerV2, known)
+	asks := setLaneControllerMode(t, mode, known)
 	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
 	if code != 0 {
 		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if !slices.Equal(asks.cities, []string{c.target.cityPath}) || !slices.Equal(asks.legs, []time.Duration{cliReconcilerModeLeg}) {
+		t.Fatalf("mode asks %+v; want one for the target's city %s with legs of %s", asks, c.target.cityPath, cliReconcilerModeLeg)
+	}
+	if noted := strings.Contains(stderr, "stop request is honored because the controller's session reconciler is unknown"); noted == known {
+		t.Fatalf("stderr %q: unknown-mode note %v, want %v", stderr, noted, !known)
 	}
 	if len(c.nudges()) != 0 {
 		t.Fatalf("deliveries %+v into a session v2 asked to stop", c.nudges())
@@ -398,10 +411,13 @@ func testSessionNudgeLaneStopRequestedIsQueued(t *testing.T, known bool) {
 // delivers, as legacy will never carry the request out.
 func TestSessionNudgeLaneStopResidueUnderLatchedLegacyDelivers(t *testing.T) {
 	c := newCLILaneCity(t, laneStopRequestedAt(1))
-	setLaneControllerMode(t, reconcilerLegacy, true)
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
 	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
 	if code != 0 {
 		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if !slices.Equal(asks.cities, []string{c.target.cityPath}) {
+		t.Fatalf("mode asks %v; want one for the target's city %s", asks.cities, c.target.cityPath)
 	}
 	if nudges := c.nudges(); len(nudges) != 1 || nudges[0].Message != cliLaneTestMessage {
 		t.Fatalf("deliveries %+v, want the message verbatim once", nudges)
@@ -414,13 +430,18 @@ func TestSessionNudgeLaneStopResidueUnderLatchedLegacyDelivers(t *testing.T) {
 	}
 }
 
-// Queue mode proposes and rings: no pass, no runtime call, no note.
+// Queue mode proposes and rings: no pass, no runtime call, no note, and no
+// ask for the controller's mode, which only a pass reads by.
 func TestSessionNudgeLaneQueueModeRunsNoPass(t *testing.T) {
 	c := newCLILaneCity(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, false)
 	calls := len(c.sp.Calls)
 	code, stdout, stderr := c.nudge(nudgeDeliveryQueue, "", false, cliLaneTestMessage)
 	if code != 0 {
 		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if len(asks.cities) != 0 {
+		t.Fatalf("queue mode asked the controller's mode %d times, want none", len(asks.cities))
 	}
 	if n := len(c.sp.Calls); n != calls {
 		t.Fatalf("queue mode made %d runtime calls: %+v", n-calls, c.sp.Calls[calls:])

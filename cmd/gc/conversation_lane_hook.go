@@ -316,9 +316,11 @@ type hookLanePass struct {
 	// accepted Done; the drain stamps it instead when legacy nudges rode
 	// along, after their ack.
 	stampDelivered bool
-	// stopReading is how the pass reads the row's stop request: by the mode
-	// the city's controller latched (controllerStopReading).
-	stopReading session.StopRequestReading
+	// stopReading asks how the pass reads the row's stop request: by the
+	// mode the city's controller latched (controllerStopReading), with the
+	// error that made the mode unknown. The pass asks right before its row
+	// read.
+	stopReading func() (session.StopRequestReading, error)
 }
 
 // hookLaneOutcome is what one in-band pass did to the hook's output.
@@ -350,12 +352,17 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 		return hookLaneOutcome{}
 	}
 	// The hook holds no latch, so it reads the stop request by the mode the
-	// controller latched: a request it holds back waits for the
+	// controller latched, asked right before the row read so the answer is
+	// as fresh as the row: a request it holds back waits for the
 	// controller's lane host, which reads by the same mode.
-	view, row, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv, p.stopReading)
+	reading, modeErr := p.stopReading()
+	view, row, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv, reading)
 	if err != nil {
 		p.notef("reading conversation %s: %v", p.conv, err)
 		return hookLaneOutcome{}
+	}
+	if note := unknownModeStopNote(row, modeErr); note != "" {
+		p.notef("conversation %s: %s", p.conv, note)
 	}
 	if absent {
 		p.notef("conversation %s has no session row on two reads; its open ops close as skipped{conversation_closed}", p.conv)
@@ -582,7 +589,10 @@ func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Write
 // the journal rows the pass wrote then too: sessions' emitter defers them
 // (deferJournalRings). The pass reads the row's stop request by the mode
 // the controller of the city at cityPath latched (controllerStopReading),
-// asked only once the pass is due to run.
+// asked only once the pass runs, right before its row read, with the
+// doorbell's legs (hookLanePokeLeg) so the ask spends no more of the hook
+// deadline than a ring does: a deadline that leaves no leg leaves the mode
+// unknown.
 func hookDrainLane(cityPath string, sessions beads.Store, conv string, knownDue bool, payload []byte, legacy, room int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
 	if !knownDue && !hookLaneDue(sessions, conv, stderr) {
 		return hookLaneOutcome{}
@@ -608,7 +618,9 @@ func hookDrainLane(cityPath string, sessions beads.Store, conv string, knownDue 
 		emit:           write,
 		recordTime:     hookLaneRecordTime,
 		stampDelivered: legacy == 0,
-		stopReading:    controllerStopReading(cityPath),
+		stopReading: func() (session.StopRequestReading, error) {
+			return controllerStopReading(cityPath, hookLanePokeLeg(time.Now()))
+		},
 	}.run(ctx)
 }
 

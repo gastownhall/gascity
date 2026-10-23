@@ -63,7 +63,11 @@ const (
 // is permanent, not a transition allowance: the notice asks the agent being
 // drained to acknowledge its drain, so holding it from a stop-requested row
 // would hold the very request the drain waits on. Every other reason still
-// holds it, in the same order, and both hold all other content.
+// holds it, in the same order, and both hold all other content. The
+// exemption reaches only a caller that asks with GateContentDrainNotice (the
+// conversation lane's executors, which report it as Probe.ContentAdmit); a
+// caller that asks with GateContentAny alone (the prompt hook's in-band
+// pass) holds the notice like any content.
 func ContentGate(info Info, stop StopRequest, running bool, now time.Time, content GateContent) string {
 	state := State(strings.TrimSpace(info.MetadataState))
 	drainNotice := content == GateContentDrainNotice
