@@ -196,6 +196,9 @@ func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
 		`count-objects -v`,
 		`pack.windowMemory=`,
 		`pack.threads=1`,
+		`--geometric=2`,
+		`maintenance.auto=false`,
+		`gc.auto=0`,
 		`nice -n 19`,
 		`ionice -t -c 3`,
 	} {
@@ -204,8 +207,12 @@ func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
 		}
 	}
 	calls := regexp.MustCompile(`\bmaintain_archive_repository\b(?:[^(]|$)`)
-	if got := len(calls.FindAllString(body, -1)); got < 3 {
-		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want at least three (before the export, after a HALT commit, after the push)", got)
+	if got := len(calls.FindAllString(body, -1)); got != 1 {
+		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want one (a helper that every exit after the export calls)", got)
+	}
+	exits := regexp.MustCompile(`\bmaintain_archive_or_exit\b(?:[^(]|$)`)
+	if got := len(exits.FindAllString(body, -1)); got != 5 {
+		t.Fatalf("jsonl-export.sh runs archive maintenance at %d exits, want five (normal, HALT, pending push, failed DB, no changes)", got)
 	}
 }
 

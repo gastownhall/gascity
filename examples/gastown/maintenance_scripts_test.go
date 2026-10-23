@@ -1,8 +1,11 @@
 package gastown_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -10248,6 +10252,7 @@ const archiveLimitOutOfReach = "1000000000"
 type archiveObjectStats struct {
 	looseObjects int
 	looseKB      int
+	packs        int
 	packKB       int
 }
 
@@ -10268,6 +10273,8 @@ func readArchiveObjectStats(t *testing.T, archiveRepo string) archiveObjectStats
 			stats.looseObjects = n
 		case "size":
 			stats.looseKB = n
+		case "packs":
+			stats.packs = n
 		case "size-pack":
 			stats.packKB = n
 		}
@@ -10406,8 +10413,8 @@ func (f archiveMaintenanceFixture) mail(t *testing.T) string {
 }
 
 // limitPackingToSnapshot places the loose-object limit one above the
-// archive's current count, so the check before the export stays under it and
-// only the run's snapshot commit reaches it.
+// archive's current count, so the archive is under it until the run's snapshot
+// commit reaches it and maintenance packs after the export.
 func (f archiveMaintenanceFixture) limitPackingToSnapshot(t *testing.T) {
 	t.Helper()
 	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = strconv.Itoa(readArchiveObjectStats(t, f.archiveRepo).looseObjects + 1)
@@ -10419,14 +10426,156 @@ func (f archiveMaintenanceFixture) headSubject(t *testing.T) string {
 	return runGitOut(t, f.archiveRepo, "log", "-1", "--format=%s")
 }
 
-func (f archiveMaintenanceFixture) failGitGC(t *testing.T) {
+func lookPathGit(t *testing.T) string {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatalf("LookPath(git): %v", err)
 	}
-	writeGitSubcommandFailureStub(t, f.binDir, realGit, "gc")
+	return realGit
 }
+
+func (f archiveMaintenanceFixture) failGitRepack(t *testing.T) {
+	t.Helper()
+	writeGitSubcommandFailureStub(t, f.binDir, lookPathGit(t), "repack")
+}
+
+// runSeparate is run with stdout and stderr kept apart.
+func (f archiveMaintenanceFixture) runSeparate(t *testing.T) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := exec.Command(coreScriptPath("jsonl-export.sh"))
+	cmd.Env = mergeTestEnv(f.env)
+	var so, se bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &so, &se
+	err = cmd.Run()
+	return so.String(), se.String(), err
+}
+
+// gcCalls is the log of every `gc` call the runs so far made.
+func (f archiveMaintenanceFixture) gcCalls(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(f.env["GC_CALL_LOG"])
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc call log): %v", err)
+	}
+	return string(data)
+}
+
+// startNewGCCallLog points the next run at an empty gc call log.
+func (f archiveMaintenanceFixture) startNewGCCallLog(t *testing.T) {
+	t.Helper()
+	f.env["GC_CALL_LOG"] = filepath.Join(t.TempDir(), "gc-calls.log")
+}
+
+// runKilledAtRepack runs the export with a git whose repack never returns.
+// The repack signals on fd 3 when it starts, and the run's process group is
+// then killed, so what the archive holds is what the export had done before
+// maintenance began. It returns the output captured up to the kill.
+func (f archiveMaintenanceFixture) runKilledAtRepack(t *testing.T) string {
+	t.Helper()
+	writeExecutable(t, filepath.Join(f.binDir, "git"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = repack ]; then
+        echo started >&3
+        exec sleep 3600
+    fi
+done
+exec '%s' "$@"
+`, lookPathGit(t)))
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	cmd := exec.Command(coreScriptPath("jsonl-export.sh"))
+	cmd.Env = mergeTestEnv(f.env)
+	cmd.ExtraFiles = []*os.File{pw}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting jsonl-export.sh: %v", err)
+	}
+	_ = pw.Close()
+	kill := func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// A run stuck before its repack ends at the deadline instead of hanging.
+	watchdog := time.AfterFunc(2*time.Minute, kill)
+	defer watchdog.Stop()
+	// The read returns when the repack signals, or at EOF when every holder
+	// of the pipe's write end has exited without reaching a repack.
+	started, _ := bufio.NewReader(pr).ReadString('\n')
+	_ = pr.Close()
+	kill()
+	_ = cmd.Wait()
+	if started == "" {
+		t.Fatalf("the export ended without starting a repack:\n%s", out.String())
+	}
+	return out.String()
+}
+
+// writeGitArgvLogStub installs a git that logs each call's arguments to
+// logFile, and any GIT_CONFIG_* variable that injects configuration, before it
+// runs the real git.
+func writeGitArgvLogStub(t *testing.T, binDir, realGit, logFile string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+printf 'ARGV %%s\n' "$*" >> '%s'
+env | grep -E '^GIT_CONFIG_(COUNT|KEY_|VALUE_|PARAMETERS)' | sed 's/^/ENV /' >> '%s'
+exec '%s' "$@"
+`, logFile, logFile, realGit))
+}
+
+// largestArchivePack is the path of the archive's biggest .pack file.
+func largestArchivePack(t *testing.T, archiveRepo string) string {
+	t.Helper()
+	packs, err := filepath.Glob(filepath.Join(archiveRepo, ".git", "objects", "pack", "pack-*.pack"))
+	if err != nil || len(packs) == 0 {
+		t.Fatalf("archive has no pack (glob err: %v)", err)
+	}
+	largest, largestSize := "", int64(-1)
+	for _, pack := range packs {
+		info, err := os.Stat(pack)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", pack, err)
+		}
+		if info.Size() > largestSize {
+			largest, largestSize = pack, info.Size()
+		}
+	}
+	return largest
+}
+
+func fileSHA256(t *testing.T, path string) [sha256.Size]byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return sha256.Sum256(data)
+}
+
+// seedLargePackAndBacklog packs the archive around a 512 KiB blob into one
+// large pack, then leaves three small commits loose on top. It returns the
+// large pack's path.
+func (f archiveMaintenanceFixture) seedLargePackAndBacklog(t *testing.T) string {
+	t.Helper()
+	commitArchiveBloat(t, f.archiveRepo, 512)
+	runGit(t, f.archiveRepo, "gc", "--quiet")
+	for i := 0; i < 3; i++ {
+		commitArchiveBloat(t, f.archiveRepo, 4)
+	}
+	return largestArchivePack(t, f.archiveRepo)
+}
+
+// exportOnce runs the export so the archive holds the fixture's data, and the
+// next run with the same data has nothing to export.
+func (f archiveMaintenanceFixture) exportOnce(t *testing.T) {
+	t.Helper()
+	if out, err := f.run(t); err != nil {
+		t.Fatalf("first export run failed: %v\n%s", err, out)
+	}
+}
+
+var archiveMaintenanceTelemetry = regexp.MustCompile(`jsonl-export: archive maintenance: mode=(\S+) wall=(\d+)s loose_before=(\d+) loose_after=(\d+) packs_before=(\d+) packs_after=(\d+) pack_kb_after=(\d+)`)
 
 func TestJsonlExportPacksArchiveWhenLooseObjectLimitReached(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 3, 5)
@@ -10463,11 +10612,10 @@ func TestJsonlExportPacksArchiveWhenLooseSizeLimitReached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
 	}
-	// Reaching the limit exactly packs in the pass before the export, which
-	// still sees only the seed's loose objects.
-	want := fmt.Sprintf("packing archive object database (loose_objects=%d, loose_kb=%d)", seed.looseObjects, seed.looseKB)
-	if !strings.Contains(out, want) {
-		t.Fatalf("expected the size limit to trigger packing before the export (%q):\n%s", want, out)
+	// The pass runs after the export, so it counts the snapshot's loose
+	// objects on top of the seed's.
+	if want := "packing archive object database (loose_objects="; !strings.Contains(out, want) {
+		t.Fatalf("expected the size limit to trigger packing (%q):\n%s", want, out)
 	}
 	loosePath := filepath.Join(f.archiveRepo, ".git", "objects", bloat[:2], bloat[2:])
 	if _, err := os.Stat(loosePath); !os.IsNotExist(err) {
@@ -10483,32 +10631,74 @@ func TestJsonlExportLeavesSmallArchiveLooseUnderDefaultLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
 	}
-	if strings.Contains(out, "packing archive object database") {
-		t.Fatalf("default limits must not pack a small archive:\n%s", out)
+	if strings.Contains(out, "packing archive object database") || strings.Contains(out, "archive maintenance:") {
+		t.Fatalf("default limits must not pack a small archive or report on it:\n%s", out)
 	}
 	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got == 0 {
 		t.Fatalf("small archive was packed under the default limits:\n%s", out)
 	}
 }
 
-func TestJsonlExportArchiveMaintenanceFailureStopsExport(t *testing.T) {
+// The export comes first: a failed archive repack still leaves the snapshot
+// committed, clean and pushed, reports the run's summary on stderr and fails
+// the run without telling the maintenance agent it finished.
+func TestJsonlExportCommitsAndPushesSnapshotBeforeArchiveMaintenanceFails(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 3, 5)
+	remoteRepo := f.addOrigin(t)
 	seedHead := f.head(t)
-	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = strconv.Itoa(readArchiveObjectStats(t, f.archiveRepo).looseObjects)
-	f.failGitGC(t)
+	f.limitPackingToSnapshot(t)
+	f.failGitRepack(t)
 
-	out, err := f.run(t)
-	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the run:\n%s", out)
+	stdout, stderr, err := f.runSeparate(t)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1 from the failed archive repack, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
-	if !strings.Contains(out, "archive object database maintenance failed") {
-		t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
+	if !strings.Contains(stderr, "archive object database maintenance failed") {
+		t.Fatalf("expected the maintenance failure diagnostic:\n%s", stderr)
 	}
-	if head := f.head(t); head != seedHead {
-		t.Fatalf("maintenance failure must stop the export before it commits: HEAD %s, want %s", head, seedHead)
+	if !regexp.MustCompile(`jsonl-export: jsonl — exported \d+/\d+, records: 5, push: ok; archive maintenance failed`).MatchString(stderr) {
+		t.Fatalf("expected the run summary with the maintenance failure on stderr:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "jsonl-export: jsonl — exported") {
+		t.Fatalf("the summary of a failed run belongs on stderr only:\n%s", stdout)
+	}
+	head := f.head(t)
+	if head == seedHead {
+		t.Fatalf("a failed archive repack must not hold back the snapshot commit:\n%s", stderr)
 	}
 	if status := runGitOut(t, f.archiveRepo, "status", "--short"); status != "" {
-		t.Fatalf("maintenance failure must stop the export before it writes snapshots:\n%s", status)
+		t.Fatalf("the snapshot must leave the archive clean:\n%s", status)
+	}
+	if got := f.originMain(t, remoteRepo); got != head {
+		t.Fatalf("origin main = %s, want the snapshot %s pushed:\n%s", got, head, stderr)
+	}
+	if calls := f.gcCalls(t); strings.Contains(calls, "MAINTENANCE_DONE") {
+		t.Fatalf("a failed run must not send MAINTENANCE_DONE:\n%s", calls)
+	}
+}
+
+// A repack that never returns costs the run its time, not the export: the
+// snapshot is committed, clean and pushed before the repack starts.
+func TestJsonlExportCommitsSnapshotBeforeRepackThatNeverReturns(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	remoteRepo := f.addOrigin(t)
+	seedHead := f.head(t)
+	f.limitPackingToSnapshot(t)
+
+	out := f.runKilledAtRepack(t)
+	head := f.head(t)
+	if head == seedHead {
+		t.Fatalf("expected the snapshot committed before the repack started:\n%s", out)
+	}
+	if status := runGitOut(t, f.archiveRepo, "status", "--short"); status != "" {
+		t.Fatalf("the snapshot must leave the archive clean:\n%s", status)
+	}
+	if got := f.originMain(t, remoteRepo); got != head {
+		t.Fatalf("origin main = %s, want the snapshot %s pushed before the repack:\n%s", got, head, out)
+	}
+	if calls := f.gcCalls(t); strings.Contains(calls, "MAINTENANCE_DONE") {
+		t.Fatalf("a killed run must not have sent MAINTENANCE_DONE:\n%s", calls)
 	}
 }
 
@@ -10518,7 +10708,7 @@ func TestJsonlExportHaltSendsSpikeAlertBeforeArchiveMaintenance(t *testing.T) {
 	// already sent.
 	f := newArchiveMaintenanceFixture(t, 100, 10)
 	f.limitPackingToSnapshot(t)
-	f.failGitGC(t)
+	f.failGitRepack(t)
 
 	out, err := f.run(t)
 	if err == nil {
@@ -10554,11 +10744,11 @@ func TestJsonlExportArchiveMaintenanceRefusesWithoutFreeSpace(t *testing.T) {
 	if strings.Contains(out, "packing archive object database") {
 		t.Fatalf("archive gc must not start without free space:\n%s", out)
 	}
-	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != seed.looseObjects {
-		t.Fatalf("loose objects = %d, want the untouched %d:\n%s", got, seed.looseObjects, out)
+	if got := readArchiveObjectStats(t, f.archiveRepo).packs; got != seed.packs {
+		t.Fatalf("packs = %d, want no pack written (%d):\n%s", got, seed.packs, out)
 	}
-	if head := f.head(t); head != seedHead {
-		t.Fatalf("free-space refusal must stop the export before it commits: HEAD %s, want %s", head, seedHead)
+	if head := f.head(t); head == seedHead {
+		t.Fatalf("free-space refusal comes after the export: HEAD %s must have advanced:\n%s", head, out)
 	}
 
 	// The check counts loose objects at full size, so the refusal names the
@@ -10600,60 +10790,94 @@ func TestJsonlExportArchiveMaintenancePacksWhenFreeSpaceUnreadable(t *testing.T)
 }
 
 // writeArchiveFreeSpaceDFStub replaces df with one that reports the queried
-// repository's current object size plus marginKB as free, so a test can place
-// the free-space floor exactly against the size the check sees.
-func writeArchiveFreeSpaceDFStub(t *testing.T, binDir string, marginKB int) {
+// repository's repack need plus marginKB as free, so a test can place the
+// free-space floor exactly against the need the check compares. The need of a
+// full repack is the loose and packed size; of a repack that keeps the largest
+// pack as is, that size less the largest .pack file (in whole KiB).
+func writeArchiveFreeSpaceDFStub(t *testing.T, binDir, need string, marginKB int) {
 	t.Helper()
+	if need != "full" && need != "non-largest" {
+		t.Fatalf("unknown repack need %q", need)
+	}
 	writeExecutable(t, filepath.Join(binDir, "df"), fmt.Sprintf(`#!/bin/sh
 for repo; do :; done
-archive_kb=$(git -C "$repo" count-objects -v | awk -F': ' '$1 == "size" || $1 == "size-pack" { kb += $2 } END { print kb }') || exit 1
+need_kb=$(git -C "$repo" count-objects -v | awk -F': ' '$1 == "size" || $1 == "size-pack" { kb += $2 } END { print kb }') || exit 1
+if [ %q = non-largest ]; then
+    largest=$(ls -S "$repo"/.git/objects/pack/pack-*.pack | head -n 1)
+    need_kb=$((need_kb - $(wc -c < "$largest") / 1024))
+fi
 echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
-echo "stub 0 0 $((archive_kb + %d)) 0%% /"
-`, marginKB))
+echo "stub 0 0 $((need_kb + %d)) 0%% /"
+`, need, marginKB))
 }
 
 func TestJsonlExportArchiveMaintenanceKeepsFreeSpaceFloor(t *testing.T) {
-	// Packing writes another copy of the archive, so it needs the archive's
-	// size plus GC_JSONL_GC_MIN_FREE_KB free.
+	// A full repack writes another copy of the archive and needs its size plus
+	// GC_JSONL_GC_MIN_FREE_KB free. Short of that, a repack that keeps the
+	// largest pack as is needs only the rest of the archive plus the floor.
+	// Short of both, the run refuses.
 	for _, tc := range []struct {
 		name     string
 		floor    string
+		need     string
 		marginKB int
-		wantPack bool
+		wantMode string // empty: the check refuses
 	}{
-		{"margin equal to the floor packs", "512", 512, true},
-		{"margin below the floor refuses", "512", 511, false},
-		{"floor with a leading zero is decimal", "0512", 511, false},
-		{"zero floor disables the check", "0", -1, true},
+		{"full need plus the floor repacks whole", "512", "full", 512, "geometric"},
+		{"below full need keeps the largest pack", "512", "full", 511, "geometric-keep-largest"},
+		{"non-largest need plus the floor keeps the largest pack", "512", "non-largest", 512, "geometric-keep-largest"},
+		{"one KiB below the non-largest need refuses", "512", "non-largest", 511, ""},
+		{"floor with a leading zero is decimal", "0512", "non-largest", 511, ""},
+		{"zero floor disables the check", "0", "non-largest", -1, "geometric"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newArchiveMaintenanceFixture(t, 3, 5)
-			// Pack the seed and commit loose objects on top, so the archive
-			// size the check counts has both a packed and a loose part.
-			runGit(t, f.archiveRepo, "gc", "--quiet")
-			commitArchiveBloat(t, f.archiveRepo, 4)
+			largestPack := f.seedLargePackAndBacklog(t)
+			largestSum := fileSHA256(t, largestPack)
 			seed := readArchiveObjectStats(t, f.archiveRepo)
-			if seed.packKB == 0 || seed.looseKB == 0 {
+			if seed.packs == 0 || seed.looseKB == 0 {
 				t.Fatalf("seed archive must hold both packed and loose objects, got %+v", seed)
 			}
 			seedHead := f.head(t)
+			argvLog := filepath.Join(t.TempDir(), "git-argv.log")
 			f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = strconv.Itoa(seed.looseObjects)
 			f.env["GC_JSONL_GC_MIN_FREE_KB"] = tc.floor
-			writeArchiveFreeSpaceDFStub(t, f.binDir, tc.marginKB)
+			writeArchiveFreeSpaceDFStub(t, f.binDir, tc.need, tc.marginKB)
+			writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
 
 			out, err := f.run(t)
-			packed := strings.Contains(out, "packing archive object database")
-			if tc.wantPack {
-				if err != nil || !packed {
-					t.Fatalf("expected packing with %d KiB beyond the archive free under a %s KiB floor (err=%v):\n%s", tc.marginKB, tc.floor, err, out)
+			if head := f.head(t); head == seedHead {
+				t.Fatalf("the export comes before the free-space check: HEAD %s must have advanced:\n%s", head, out)
+			}
+			if tc.wantMode == "" {
+				if err == nil || strings.Contains(out, "packing archive object database") || !strings.Contains(out, "set GC_JSONL_GC_MIN_FREE_KB=0") {
+					t.Fatalf("expected the check to refuse %d KiB beyond the %s need under a %s KiB floor (err=%v):\n%s", tc.marginKB, tc.need, tc.floor, err, out)
+				}
+				if got := readArchiveObjectStats(t, f.archiveRepo).packs; got != seed.packs {
+					t.Fatalf("packs = %d, want no pack written (%d):\n%s", got, seed.packs, out)
 				}
 				return
 			}
-			if err == nil || packed || !strings.Contains(out, "set GC_JSONL_GC_MIN_FREE_KB=0") {
-				t.Fatalf("expected the free-space check to refuse %d KiB beyond the archive under a %s KiB floor (err=%v):\n%s", tc.marginKB, tc.floor, err, out)
+			if err != nil {
+				t.Fatalf("expected packing with %d KiB beyond the %s need under a %s KiB floor: %v\n%s", tc.marginKB, tc.need, tc.floor, err, out)
 			}
-			if head := f.head(t); head != seedHead {
-				t.Fatalf("free-space refusal must stop the export before it commits: HEAD %s, want %s", head, seedHead)
+			if want := "mode=" + tc.wantMode + " "; !strings.Contains(out, want) {
+				t.Fatalf("expected %q in the maintenance report:\n%s", want, out)
+			}
+			argv, readErr := os.ReadFile(argvLog)
+			if readErr != nil {
+				t.Fatalf("ReadFile(git argv log): %v", readErr)
+			}
+			keep := "--keep-pack=" + filepath.Base(largestPack)
+			if tc.wantMode == "geometric-keep-largest" {
+				if !strings.Contains(string(argv), keep) {
+					t.Fatalf("expected the repack to pass %s:\n%s", keep, argv)
+				}
+				if fileSHA256(t, largestPack) != largestSum {
+					t.Fatalf("the kept pack %s was rewritten:\n%s", largestPack, out)
+				}
+			} else if strings.Contains(string(argv), "--keep-pack") {
+				t.Fatalf("a repack with room to spare must not keep a pack:\n%s", argv)
 			}
 		})
 	}
@@ -10699,7 +10923,7 @@ func TestJsonlExportPushesSnapshotWhenArchivePackingFails(t *testing.T) {
 	remoteRepo := f.addOrigin(t)
 	seedHead := f.head(t)
 	f.limitPackingToSnapshot(t)
-	f.failGitGC(t)
+	f.failGitRepack(t)
 
 	out, err := f.run(t)
 	if err == nil {
@@ -10753,7 +10977,7 @@ func TestJsonlExportPushesPendingSnapshotWhenArchiveCannotBePacked(t *testing.T)
 
 			writeMultiRecordDoltStub(t, f.binDir, 11)
 			f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
-			f.failGitGC(t)
+			f.failGitRepack(t)
 
 			out, err := f.run(t)
 			if err == nil {
@@ -10762,11 +10986,14 @@ func TestJsonlExportPushesPendingSnapshotWhenArchiveCannotBePacked(t *testing.T)
 			if !strings.Contains(out, "archive object database maintenance failed") {
 				t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
 			}
-			if head := f.head(t); head != haltHead {
-				t.Fatalf("archive HEAD = %s, want no new export on top of %s while the archive cannot be packed:\n%s", head, haltHead, out)
+			// The export runs before maintenance, so this run exports on top of
+			// the HALT snapshot and pushes both.
+			head := f.head(t)
+			if head == haltHead {
+				t.Fatalf("archive HEAD = %s, want a new export on top of the HALT snapshot:\n%s", head, out)
 			}
-			if got := f.originMain(t, remoteRepo); got != haltHead {
-				t.Fatalf("origin main = %s, want the pending snapshot %s pushed:\n%s", got, haltHead, out)
+			if got := f.originMain(t, remoteRepo); got != head {
+				t.Fatalf("origin main = %s, want both snapshots pushed (%s):\n%s", got, head, out)
 			}
 			if pending := f.state(t)["pending_archive_push"]; pending == true {
 				t.Fatalf("pending_archive_push must clear once the snapshot is pushed:\n%s", out)
@@ -10781,7 +11008,7 @@ func TestJsonlExportKeepsSpikeAlertWhileArchiveCannotBePacked(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 100, 10)
 	writeJsonlExportGCStubWithMailExitCode(t, f.binDir, 1)
 	f.limitPackingToSnapshot(t)
-	f.failGitGC(t)
+	f.failGitRepack(t)
 
 	out, err := f.run(t)
 	if err == nil {
@@ -10850,7 +11077,7 @@ func TestJsonlExportPacksArchiveWhenIoniceCannotRun(t *testing.T) {
 	}
 }
 
-// Where ionice works, git gc runs under it in the idle I/O class, with -t so
+// Where ionice works, git repack runs under it in the idle I/O class, with -t so
 // a class the host refuses does not stop git, and under nice.
 func TestJsonlExportPacksArchiveUnderIoniceAndNice(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 3, 5)
@@ -10873,11 +11100,247 @@ exec "$@"
 		t.Fatalf("ReadFile(ionice log): %v\n%s", err, out)
 	}
 	if want := "-t -c 3 nice -n 19 git -C " + f.archiveRepo + " "; !strings.Contains(string(calls), want) {
-		t.Fatalf("expected git gc to run as ionice %s...; ionice calls:\n%s", want, calls)
+		t.Fatalf("expected git repack to run as ionice %s...; ionice calls:\n%s", want, calls)
 	}
 	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {
 		t.Fatalf("loose objects after packing = %d, want 0:\n%s", got, out)
 	}
+}
+
+// A run with nothing to export still packs a backlog above the limit, after
+// pushing the snapshot an earlier run left unpushed. A failed repack fails the
+// run without MAINTENANCE_DONE, with the pending snapshot already pushed.
+func TestJsonlExportPacksBacklogWhenThereIsNothingToExport(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pendingPush bool
+		repackFails bool
+	}{
+		{"no changes", false, false},
+		{"no changes with repack failing", false, true},
+		{"pending push", true, false},
+		{"pending push with repack failing", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var f archiveMaintenanceFixture
+			var remoteRepo string
+			if tc.pendingPush {
+				// The first run halts on the spike: it commits locally and
+				// skips the push. The second run's data is unchanged.
+				f = newArchiveMaintenanceFixture(t, 100, 10)
+				remoteRepo = f.addOrigin(t)
+				f.exportOnce(t)
+			} else {
+				f = newArchiveMaintenanceFixture(t, 3, 5)
+				f.exportOnce(t)
+			}
+			f.seedLargePackAndBacklog(t)
+			// Any backlog commits sit on top of the unpushed snapshot.
+			headBefore := f.head(t)
+			wantPushed := headBefore
+			f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+			f.startNewGCCallLog(t)
+			if tc.repackFails {
+				f.failGitRepack(t)
+			}
+
+			out, err := f.run(t)
+			if f.head(t) != headBefore {
+				t.Fatalf("a run with nothing to export must not commit:\n%s", out)
+			}
+			if remoteRepo != "" {
+				if got := f.originMain(t, remoteRepo); got != wantPushed {
+					t.Fatalf("origin main = %s, want the pending snapshot %s pushed first:\n%s", got, wantPushed, out)
+				}
+			}
+			if tc.repackFails {
+				if err == nil || !strings.Contains(out, "archive object database maintenance failed") {
+					t.Fatalf("expected the failed repack to fail the run (err=%v):\n%s", err, out)
+				}
+				if strings.Contains(f.gcCalls(t), "MAINTENANCE_DONE") {
+					t.Fatalf("a failed run must not send MAINTENANCE_DONE:\n%s", f.gcCalls(t))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+			}
+			if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {
+				t.Fatalf("loose objects after packing = %d, want 0:\n%s", got, out)
+			}
+			if !strings.Contains(f.gcCalls(t), "MAINTENANCE_DONE") {
+				t.Fatalf("expected MAINTENANCE_DONE after a successful pass:\n%s", f.gcCalls(t))
+			}
+		})
+	}
+}
+
+// Maintenance leaves the archive's large pack alone and packs the loose
+// backlog beside it.
+func TestJsonlExportArchiveMaintenanceKeepsLargePackAsIs(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	f.exportOnce(t)
+	largestPack := f.seedLargePackAndBacklog(t)
+	largestSum := fileSHA256(t, largestPack)
+	headBefore := f.head(t)
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	if fileSHA256(t, largestPack) != largestSum {
+		t.Fatalf("the large pack %s was rewritten:\n%s", largestPack, out)
+	}
+	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {
+		t.Fatalf("loose objects after packing = %d, want 0:\n%s", got, out)
+	}
+	runGit(t, f.archiveRepo, "fsck")
+	if head := f.head(t); head != headBefore {
+		t.Fatalf("maintenance moved HEAD from %s to %s", headBefore, head)
+	}
+}
+
+// Packs too alike in size to form a geometric progression merge among
+// themselves; the large pack still stays as it is.
+func TestJsonlExportArchiveMaintenanceMergesSmallPacksBesideLargePack(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	f.exportOnce(t)
+	largestPack := f.seedLargePackAndBacklog(t)
+	for i := 0; i < 5; i++ {
+		runGit(t, f.archiveRepo, "repack", "-q", "-d")
+		commitArchiveBloat(t, f.archiveRepo, 4)
+	}
+	largestSum := fileSHA256(t, largestPack)
+	before := readArchiveObjectStats(t, f.archiveRepo)
+	headBefore := f.head(t)
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	if fileSHA256(t, largestPack) != largestSum {
+		t.Fatalf("the large pack %s was rewritten:\n%s", largestPack, out)
+	}
+	after := readArchiveObjectStats(t, f.archiveRepo)
+	if after.looseObjects != 0 || after.packs >= before.packs {
+		t.Fatalf("expected the loose backlog packed and the small packs merged: before %+v, after %+v\n%s", before, after, out)
+	}
+	runGit(t, f.archiveRepo, "fsck")
+	if head := f.head(t); head != headBefore {
+		t.Fatalf("maintenance moved HEAD from %s to %s", headBefore, head)
+	}
+}
+
+// The repack is a geometric one, run under the archive's own window-memory
+// and thread settings, and git's own maintenance stays out of the archive:
+// the snapshot commit turns it off for that call only.
+func TestJsonlExportArchiveRepackCommandAndGitAutoMaintenance(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	argvLog := filepath.Join(t.TempDir(), "git-argv.log")
+	writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
+	f.limitPackingToSnapshot(t)
+	f.env["GC_JSONL_GC_WINDOW_MEMORY"] = "64M"
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("ReadFile(git argv log): %v", err)
+	}
+	log := string(data)
+	if want := "ARGV -C " + f.archiveRepo + " -c pack.windowMemory=64M -c pack.threads=1 repack -d -l -q --geometric=2"; !strings.Contains(log, want+"\n") {
+		t.Fatalf("expected the repack %q in the git calls:\n%s", want, log)
+	}
+	if !strings.Contains(log, "ARGV -c maintenance.auto=false -c gc.auto=0 commit ") {
+		t.Fatalf("expected the snapshot commit to turn off git's own maintenance:\n%s", log)
+	}
+	if regexp.MustCompile(`(?m)^ARGV (.* )?gc( |$)`).MatchString(log) {
+		t.Fatalf("the archive must not run git gc:\n%s", log)
+	}
+	if strings.Contains(log, "ENV ") {
+		t.Fatalf("the script must not inject git configuration through GIT_CONFIG_*:\n%s", log)
+	}
+	if config := runGitOut(t, f.archiveRepo, "config", "--local", "--list"); strings.Contains(config, "maintenance") || strings.Contains(config, "gc.") {
+		t.Fatalf("the script must not write maintenance keys to the archive config:\n%s", config)
+	}
+}
+
+// A git without --geometric (before 2.32) fails the pass through the normal
+// failure path and names the version it needs.
+func TestJsonlExportArchiveMaintenanceNamesGitVersionWhenRepackRejectsGeometric(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	realGit := lookPathGit(t)
+	writeExecutable(t, filepath.Join(f.binDir, "git"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+    --geometric=*)
+        echo "error: unknown option geometric=2" >&2
+        exit 129
+        ;;
+    esac
+done
+exec '%s' "$@"
+`, realGit))
+	f.limitPackingToSnapshot(t)
+	seedHead := f.head(t)
+
+	out, err := f.run(t)
+	if err == nil {
+		t.Fatalf("expected a git without --geometric to fail the run:\n%s", out)
+	}
+	for _, want := range []string{"archive object database maintenance failed", "git 2.32"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in the failure:\n%s", want, out)
+		}
+	}
+	if f.head(t) == seedHead {
+		t.Fatalf("the snapshot must be committed before maintenance fails:\n%s", out)
+	}
+}
+
+// A pass that reaches the repack reports what it did; a failing pass reports
+// what it knew before it failed.
+func TestJsonlExportArchiveMaintenanceReportsTelemetry(t *testing.T) {
+	t.Run("working pass", func(t *testing.T) {
+		f := newArchiveMaintenanceFixture(t, 3, 5)
+		f.exportOnce(t)
+		f.seedLargePackAndBacklog(t)
+		before := readArchiveObjectStats(t, f.archiveRepo)
+		f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+
+		out, err := f.run(t)
+		if err != nil {
+			t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+		}
+		match := archiveMaintenanceTelemetry.FindStringSubmatch(out)
+		if match == nil {
+			t.Fatalf("expected the maintenance report line:\n%s", out)
+		}
+		after := readArchiveObjectStats(t, f.archiveRepo)
+		want := []string{"geometric", "", strconv.Itoa(before.looseObjects), "0", strconv.Itoa(before.packs), strconv.Itoa(after.packs), strconv.Itoa(after.packKB)}
+		for i, field := range []string{"mode", "wall", "loose_before", "loose_after", "packs_before", "packs_after", "pack_kb_after"} {
+			if field != "wall" && match[i+1] != want[i] {
+				t.Errorf("%s = %s, want %s\n%s", field, match[i+1], want[i], out)
+			}
+		}
+	})
+	t.Run("failing pass", func(t *testing.T) {
+		f := newArchiveMaintenanceFixture(t, 3, 5)
+		f.limitPackingToSnapshot(t)
+		f.failGitRepack(t)
+
+		out, err := f.run(t)
+		if err == nil {
+			t.Fatalf("expected the failed repack to fail the run:\n%s", out)
+		}
+		if !regexp.MustCompile(`jsonl-export: archive maintenance: mode=geometric wall=\d+s loose_before=\d+ .*status=failed`).MatchString(out) {
+			t.Fatalf("expected the failing pass to report its fields and status=failed:\n%s", out)
+		}
+	})
 }
 
 // gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
