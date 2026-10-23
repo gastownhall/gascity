@@ -430,6 +430,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `events.jsonl.lock` sidecar and reopens a replaced handle, sequence numbers
   stay monotonic across rotation, and watchers no longer hold a rotated file
   open. The on-disk format and archive names are unchanged (#7022).
+- **A run the controller deletes no longer stays `pending` in the run
+  census.** When the controller's wisp GC deleted a run whose rows its bead
+  cache did not hold (closed rows, a restarted controller, an evicted entry),
+  or the read just before a delete failed, no `bead.deleted` event was
+  recorded. The run view drops a run only on that event and replays the
+  retained event log on every restart, so the run stayed listed as `pending`,
+  and canceling it returned `run-not-found`. Every delete made through the
+  controller's bead cache now records `bead.deleted`, carrying just the bead
+  id when no copy of the row is at hand, and a bead listed twice in one batch
+  records it once. Deletes made outside the controller, such as a script's
+  `bd purge` or `gc bd delete`, are not covered, and runs stranded before this
+  fix stay listed (#5934).
 - The supervisor event stream includes cities started after the client
   connected (#6861). Delivery is at-least-once when a city's watcher is
   re-attached mid-connection, for example after the city stops and starts

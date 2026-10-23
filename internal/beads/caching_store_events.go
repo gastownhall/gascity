@@ -174,6 +174,13 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		b = verifiedClosedFresh
 		refreshedFromBacking = true
 	} else if !cached {
+		// A delete of a row this cache already tombstoned (the echo of its own
+		// delete, or a repeat) has nothing to install, so it reads nothing:
+		// on a bd backing the read is a subprocess per id, and a batch delete
+		// echoes one event per id it removed.
+		if eventType == "bead.deleted" && locallyDeleted {
+			return
+		}
 		if fresh, err := c.backing.Get(patch.ID); err == nil {
 			b = fresh
 			refreshedFromBacking = true
