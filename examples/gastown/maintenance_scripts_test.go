@@ -7421,7 +7421,9 @@ func initSeedArchive(t *testing.T, archiveRepo string, prevCount int) string {
 		{"config", "user.email", "test@example.invalid"},
 		{"config", "user.name", "test"},
 		{"add", "-A"},
-		{"commit", "-q", "-m", "seed"},
+		// Git 2.55 and newer start a detached maintenance run after a
+		// commit, which would repack a fixture's objects behind its tests.
+		{"-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-q", "-m", "seed"},
 	}
 	for _, args := range steps {
 		full := append([]string{"-C", archiveRepo}, args...)
@@ -10296,7 +10298,7 @@ func commitArchiveBloat(t *testing.T, archiveRepo string, sizeKB int) string {
 		t.Fatalf("WriteFile(bloat.bin): %v", err)
 	}
 	runGit(t, archiveRepo, "add", "bloat.bin")
-	runGit(t, archiveRepo, "commit", "-q", "-m", "bloat")
+	runGit(t, archiveRepo, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-q", "-m", "bloat")
 	return runGitOut(t, archiveRepo, "rev-parse", "HEAD:bloat.bin")
 }
 
@@ -10553,11 +10555,23 @@ func fileSHA256(t *testing.T, path string) [sha256.Size]byte {
 	return sha256.Sum256(data)
 }
 
-// seedLargePackAndBacklog packs the archive around a 512 KiB blob into one
-// large pack, then leaves three small commits loose on top. It returns the
-// large pack's path.
+// seedLargePackAndBacklog packs the archive around a 512 KiB blob and 300
+// small files into one large pack, then leaves three small commits loose on
+// top. A geometric repack weighs packs by object count, so the large pack
+// holds far more objects than the backlog adds. It returns the large pack's
+// path.
 func (f archiveMaintenanceFixture) seedLargePackAndBacklog(t *testing.T) string {
 	t.Helper()
+	filesDir := filepath.Join(f.archiveRepo, "files")
+	if err := os.MkdirAll(filesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filesDir, err)
+	}
+	for i := 0; i < 300; i++ {
+		if err := os.WriteFile(filepath.Join(filesDir, fmt.Sprintf("f%03d.txt", i)), []byte(fmt.Sprintf("file %d\n", i)), 0o644); err != nil {
+			t.Fatalf("WriteFile(file %d): %v", i, err)
+		}
+	}
+	runGit(t, f.archiveRepo, "add", "files")
 	commitArchiveBloat(t, f.archiveRepo, 512)
 	runGit(t, f.archiveRepo, "gc", "--quiet")
 	for i := 0; i < 3; i++ {
@@ -11242,6 +11256,7 @@ func TestJsonlExportArchiveRepackCommandAndGitAutoMaintenance(t *testing.T) {
 	writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
 	f.limitPackingToSnapshot(t)
 	f.env["GC_JSONL_GC_WINDOW_MEMORY"] = "64M"
+	configBefore := runGitOut(t, f.archiveRepo, "config", "--local", "--list")
 
 	out, err := f.run(t)
 	if err != nil {
@@ -11264,8 +11279,8 @@ func TestJsonlExportArchiveRepackCommandAndGitAutoMaintenance(t *testing.T) {
 	if strings.Contains(log, "ENV ") {
 		t.Fatalf("the script must not inject git configuration through GIT_CONFIG_*:\n%s", log)
 	}
-	if config := runGitOut(t, f.archiveRepo, "config", "--local", "--list"); strings.Contains(config, "maintenance") || strings.Contains(config, "gc.") {
-		t.Fatalf("the script must not write maintenance keys to the archive config:\n%s", config)
+	if config := runGitOut(t, f.archiveRepo, "config", "--local", "--list"); config != configBefore {
+		t.Fatalf("the script must not write to the archive config:\nbefore the run:\n%s\nafter:\n%s", configBefore, config)
 	}
 }
 
