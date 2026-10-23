@@ -250,7 +250,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--resolve-incident KEY` on a clean run: the override must accept or
   ignore those flags and must send nothing for `--resolve-incident`, or it
   loses the alert. See "Why a maintenance alert did not repeat" in
-  `docs/getting-started/troubleshooting.md` (#6363).
+  `docs/getting-started/troubleshooting.md` (#6363, backported in #8218).
 
 ### Added
 
@@ -496,7 +496,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incident state. A send cut off only after that report still counts as
   delivered. The backup order's missing-`flock` and offsite-publication
   alerts still mail on every run, and an `escalate.sh` override must accept
-  or ignore the new flags (#6363).
+  or ignore the new flags (#6363, backported in #8218).
 - herdr agent starts retry when a fresh pane reports `agent_pane_busy` on a
   non-zero exit (#6637).
 - A nudge that races an ACP agent's exit is dropped with a stderr line instead
