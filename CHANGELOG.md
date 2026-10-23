@@ -477,6 +477,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like a local one: it prints the failed children, `--json` reports
   `success: false`, and it exits 1. `gc sling --on` stays refused for a
   remote city.
+- **Order history reports `has_output` only for a run that recorded output,
+  and an order that runs out of time says so.** Order history
+  (`GET /v0/city/{city}/orders/history`) set `has_output` on every run of an
+  exec order, because exec orders capture output, so a run that recorded
+  nothing advertised output its history detail then served empty;
+  `capture_output` still describes the order. An order stopped by its
+  `timeout` (or the `[orders] max_timeout` cap) failed with a bare
+  `context deadline exceeded` or `signal: killed` in its `order.failed`
+  event, in the controller log for an exec order, and in `gc order run`'s
+  error; the message now leads with the timeout it ran out of, for example
+  `order timeout of 5m0s exceeded`.
 - A session can close a bead it claimed under its session bead id without
   `--force`; `gc bd close` runs bd as that id. Claims recorded under a session
   name or alias still need `--force` (#6324). The close's audit actor is the
