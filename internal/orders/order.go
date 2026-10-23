@@ -54,7 +54,7 @@ type Order struct {
 	// Pool is the target agent/pool for dispatching the wisp.
 	Pool string `toml:"pool,omitempty"`
 	// Timeout is the per-order timeout. Go duration string (e.g., "90s").
-	// Defaults to 60s for exec, 30s for formula.
+	// Defaults to 300s for exec, 30s for formula. [orders] max_timeout caps it.
 	Timeout string `toml:"timeout,omitempty"`
 	// CheckTimeout is the deadline for a condition trigger's `check` command
 	// (distinct from Timeout, which bounds the dispatched exec/formula). Go

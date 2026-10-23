@@ -62,23 +62,30 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	}
 	wantGit := input.Git
 
+	runtimeSessions := s.newAgentSessionResolver(ctx, cityName, cfg.Workspace.SessionTemplate)
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		resp := s.buildRigResponse(cfg, rig, sp, cityName, s.state.CityPath())
+		resp := s.buildRigResponse(cfg, rig, sp, runtimeSessions, cityName, s.state.CityPath())
 		if wantGit {
 			resp.Git = fetchGitStatus(rig.Path)
 		}
 		rigs = append(rigs, resp)
 	}
+	partialErrors := runtimeSessions.partialErrors()
 	return &ListOutput[rigResponse]{
 		Index:     s.latestIndex(),
 		CacheAgeS: cacheAgeSeconds(store),
-		Body:      ListBody[rigResponse]{Items: rigs, Total: len(rigs)},
+		Body: ListBody[rigResponse]{
+			Items:         rigs,
+			Total:         len(rigs),
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		},
 	}, nil
 }
 
 // humaHandleRigGet is the Huma-typed handler for GET /v0/rig/{name}.
-func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
+func (s *Server) humaHandleRigGet(ctx context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
 	name := input.Name
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -86,7 +93,9 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 
 	for _, rig := range cfg.Rigs {
 		if rig.Name == name {
-			resp := s.buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
+			cityName := s.state.CityName()
+			runtimeSessions := s.newAgentSessionResolver(ctx, cityName, cfg.Workspace.SessionTemplate)
+			resp := s.buildRigResponse(cfg, rig, sp, runtimeSessions, cityName, s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}

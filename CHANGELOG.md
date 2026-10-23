@@ -146,6 +146,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fatal should resolve the reported runtime error and run `gc stop` again; on
   herdr, once you have confirmed the herdr server is not running, treat that
   exit as stopped (#6764).
+- **An exec session provider's `start` or `provision` that exits 2 now fails
+  the start.** Exit 2 meant "unknown operation, treat as success" on `start`
+  and `provision` too, so a `set -e` wrapper whose `grep` or `jq` exited 2 during `start`
+  counted as started and the half-created box was never cleaned up. Neither op
+  can be unknown, so exit 2 from them is now a failure, and a failed `start`
+  runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
+  `provision` on success. Exit 2 keeps meaning "unknown operation" for other
+  undeclared operations.
 - **A SQLite bead store holding wrapped ids refuses to mint until you run
   `gc storage repair-sequence`.** Older builds could wrap a SQLite store's id
   sequence past 9223372036854775807 into `<prefix>--<n>` ids and then re-issue
@@ -221,7 +229,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     409; delete the template instead (ga-l24lrx, #7076).
   - A config edit whose `[patches]` entry names a target missing from the
     merged config returns 400 instead of 500.
-  - Closed sessions report `state: "closed"` instead of an empty state.
+  - Closed sessions report `state: "closed"` instead of an empty state, on
+    `GET /session/{id}` and in the session list, which returns them for
+    `?state=closed` or `?state=all`.
   - Unset optional fields are omitted instead of sent as `null`: the map and
     struct fields of agent, rig and provider patches (`Env`,
     `OptionDefaults`, `Pool`, `ContextAdvisory`, `FormulaVars`), and the
@@ -304,6 +314,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tutorial 01's sample `city.toml` matches what `gc init` writes,** and it
   explains that `sha:<pinned commit>` on the `core` and `bd` imports names the
   copy of each pack bundled with `gc` (#7045).
+- **Config, exec-provider, agent, orders and API reference docs now match the
+  code.** The `wisp_ttl` example was `"7d"`, which does not parse (Go
+  durations have no day unit) and leaves wisp GC off; it is now `"168h"`.
+  `idle_timeout` and `max_session_age` say they do not apply to
+  `mode = "always"` named sessions, the Gastown recipes stop setting
+  `idle_timeout` on the always-on mayor and show how to suspend `boot`, and an
+  exec order's default `timeout` reads 300s, not 60s. The exec session
+  provider page lists every field `start` receives, the per-operation
+  deadlines, the `stop` after a failed start and what the session `env`
+  carries, and no longer calls `start` fire-and-forget, says gc sends the
+  startup `nudge` through the `nudge` operation, or says the start config
+  leaves out `ready_prompt_prefix` and `ready_delay_ms`. The agent guide covers
+  Claude's builtin `permission_mode = "unrestricted"` and `effort = "max"`
+  defaults and how to override them; the orders tutorial covers `rig = "*"`
+  and not pairing an override with `skip`; the API reference says what each
+  endpoint's agent count counts and that the supervisor serves its
+  spec at `/openapi.json`, `/openapi.yaml` and `/docs`; the events reference
+  says the `cache-reconcile` actor names the cache, not whoever closed the
+  bead; the one-controller rule in the hardened-city runbook now covers every
+  city and Kubernetes rollouts; and the `contrib/` scripts link to pages that
+  exist (#8212).
 
 ### Fixed
 
@@ -401,6 +432,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a revision (a row not rewritten since its store began recording
   revisions) keeps the legacy status-and-assignee fence (#7384, backported in
   #7581).
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, a binding this city
+  imports only on another rig, or an agent, binding or namepool name since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  The dead-assignee sweep now keeps such a claim unless one of this city's
+  own session beads, open or closed, answers to the identity under its alias,
+  its configured named identity or its sole alias-history entry (looked up per
+  identity, at most once per pass), and logs one
+  `protected N foreign/unknown identities` summary per pass naming each
+  identity it kept and its claims. A namepool seat whose name was trimmed
+  therefore stays reapable after it closes; claims under the earlier aliases
+  of a seat renamed more than once are kept and named. The orphan-close
+  release of a confirmed orphaned session is unchanged. Only this Go sweep is
+  guarded: the core pack's `orphan-sweep.sh` order still releases a foreign
+  `<rig>/<name>` claim (#5955). Migration notes: a `<rig>/<name>` identity
+  moved to another city on the shared rig store keeps being released here
+  until this city's closed session records for it are purged or re-aliased.
+  The session record of a removed agent, binding or namepool name lasts until
+  closed session beads are purged, which happens only after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
+  ledger with `wisp_ttl` set, or after `GC_REAPER_SESSION_PURGE_AGE` (default
+  720h) in the city store when the reaper's `GC_REAPER_SESSION_BEAD_PATTERN`
+  (default `gm-*`) matches the city's session bead IDs or is set to `""`.
+  Anywhere else closed session beads are kept indefinitely. Once the record is
+  purged, the sweep protects the identity's outstanding claims, so release them
+  explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
+  retiring one, and watch the summary line for claims held back (#5959,
+  #7763, backported in #8210).
 - **Closed session rows no longer read as live.** On file-backed and SQLite
   stores, closing a session wrote its terminal metadata and its closed status
   as two writes, so a concurrent wake could leave a row `status=closed
@@ -445,6 +506,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `events.jsonl.lock` sidecar and reopens a replaced handle, sequence numbers
   stay monotonic across rotation, and watchers no longer hold a rotated file
   open. The on-disk format and archive names are unchanged (#7022).
+- **A run the controller deletes no longer stays `pending` in the run
+  census.** When the controller's wisp GC deleted a run whose rows its bead
+  cache did not hold (closed rows, a restarted controller, an evicted entry),
+  or the read just before a delete failed, no `bead.deleted` event was
+  recorded. The run view drops a run only on that event and replays the
+  retained event log on every restart, so the run stayed listed as `pending`,
+  and canceling it returned `run-not-found`. Every delete made through the
+  controller's bead cache now records `bead.deleted`, carrying just the bead
+  id when no copy of the row is at hand, and a bead listed twice in one batch
+  records it once. Deletes made outside the controller, such as a script's
+  `bd purge` or `gc bd delete`, are not covered, and runs stranded before this
+  fix stay listed (#5934).
 - The supervisor event stream includes cities started after the client
   connected (#6861). Delivery is at-least-once when a city's watcher is
   re-attached mid-connection, for example after the city stops and starts
@@ -476,6 +549,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and expires after 30 minutes,** so a supervisor restart mid-drain no longer
   silences it for the rest of the seat's life. The session bead records the
   current hold in `execution_claim_hold` as `<reason> <time>` (#5701).
+- **The reaper's session prune no longer escalates a stale or missing backup
+  when it has nothing to delete.** The pattern path
+  (`GC_REAPER_SESSION_BEAD_PATTERN`, default `gm-*`) checked the city store's
+  backup age before anything else, so a city without a fresh bd backup of its
+  city store raised a MEDIUM "Reaper anomalies detected" escalation ("bulk
+  prune skipped: backup stale or absent") for a prune that, in most cities,
+  would delete nothing. The reaper now first counts the prune's candidates
+  (closed beads that match the pattern and closed more than
+  `GC_REAPER_SESSION_PURGE_AGE` ago) and, when there are none, skips the
+  backup check and the prune without an anomaly. When there are candidates,
+  the backup-age and type-scope gates apply as before. A count that fails is
+  reported as its own anomaly (`session prune candidate count failed for
+  <db>`), and the gates still apply. An invalid pattern is now reported before
+  the backup is checked (#6284).
 - The core `orphan-sweep` order no longer misses live sessions when the
   session list exceeds the pipe buffer (#6714, #6728).
 - **Unchanged Dolt backup sync failures and reaper anomalies no longer mail
@@ -497,12 +584,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivered. The backup order's missing-`flock` and offsite-publication
   alerts still mail on every run, and an `escalate.sh` override must accept
   or ignore the new flags (#6363, backported in #8218).
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets
+  `timeout = "4m"`. A city whose sweep needs longer can raise it with
+  `[[orders.overrides]]`, `name = "orphan-sweep"` and a `timeout` (plus
+  `rig = "*"` if a rig's own pack also carries the order).
 - herdr agent starts retry when a fresh pane reports `agent_pane_busy` on a
   non-zero exit (#6637).
 - A nudge that races an ACP agent's exit is dropped with a stderr line instead
   of failing with `file already closed` (#6540).
 - Claude Code's feedback-survey dismissal no longer submits a stray `0` into
   the session (#6859, #7013).
+- **Cost estimates price the Claude 5 family and Claude Opus 5.5.** The
+  shipped default price table stopped at the Claude 4.x models, so every
+  invocation on `claude-opus-5`, `claude-opus-5-5`, `claude-sonnet-5`,
+  `claude-fable-5` or `claude-fable-5-1` was recorded unpriced and left out
+  of `gc costs`' `EST_USD`, which read $0 for a city running those models.
+  The table now carries Anthropic's list prices for all five. A price is
+  found only for an exact provider and model match (ignoring case), so
+  another spelling of the same model, such as a Bedrock model id, still needs
+  its own `[[pricing]]` entry in `city.toml` or `pack.toml`; an existing
+  `[[pricing]]` entry still outranks the defaults (#6384, #7713, backported
+  in #8213).
 - A gateway login reaches the Claude provider readiness probe.
 - `POST /v0/city/{city}/sling` routes and cooks formulas exactly like
   `gc sling`: a rig bead's default formula is cooked in the rig store, title
@@ -511,6 +617,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like a local one: it prints the failed children, `--json` reports
   `success: false`, and it exits 1. `gc sling --on` stays refused for a
   remote city.
+- **Order history reports `has_output` only for a run that recorded output,
+  and an order that runs out of time says so.** Order history
+  (`GET /v0/city/{city}/orders/history`) set `has_output` on every run of an
+  exec order, because exec orders capture output, so a run that recorded
+  nothing advertised output its history detail then served empty;
+  `capture_output` still describes the order. An order stopped by its
+  `timeout` (or the `[orders] max_timeout` cap) failed with a bare
+  `context deadline exceeded` or `signal: killed` in its `order.failed`
+  event, in the controller log for an exec order, and in `gc order run`'s
+  error; the message now leads with the timeout it ran out of, for example
+  `order timeout of 5m0s exceeded`.
 - A session can close a bead it claimed under its session bead id without
   `--force`; `gc bd close` runs bd as that id. Claims recorded under a session
   name or alias still need `--force` (#6324). The close's audit actor is the
@@ -525,8 +642,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent API mutation (ga-opn27h; backport of #7084).
 - `GET /v0/city/{city}/patches/...` returns the patches declared in
   `city.toml` instead of 404/empty after they were applied (ga-8hk1fe).
+- **The run API lists a formula-v1 run's steps and reports the run active once
+  a step starts.** Formula-v1 instantiation types each untyped or `task`-typed
+  non-root step `step`, and the run projection dropped that type. For a v1
+  run, `GET /v0/city/{city}/runs/{id}/steps` returned no steps, and the run
+  list, `GET /runs/{id}` and the run census kept the run `pending` while its
+  steps were claimed and closed.
+- **`GET /v0/city/{city}/sessions?state=closed` and `?state=all` list closed
+  sessions.** The session list read only open sessions, whatever the filter,
+  so a filter naming `closed` matched nothing. A filter that can match a
+  closed session (`all`, or a list naming `closed`) now reads closed sessions
+  too, reported with state `closed`; they come from the bead store rather than
+  the cache. The default and every other filter still read open sessions from
+  the cache. `gc session list --state closed` and `--state all` list them too
+  when the city's supervisor answers the command.
 - `GET /v0/city/{city}/agents` reflects a config change right away instead of
   serving a cached list keyed only on session state (ga-79peco).
+- **`GET /v0/city/{city}/agents` reports a live bounded-pool worker as
+  running, and no provider for the control dispatcher.** The agent list, the
+  agent read and the rig counts probed a pool slot (`<pool>-1`) on a session
+  name derived from the slot, but the controller runs an unaliased pool
+  session under a name carrying its session bead id (`<template>-<beadID>`).
+  Every worker of a pool with `max_active_sessions` set read `stopped` while
+  `/sessions` showed it active, `?running=true` listed none of them, and a
+  rig's `running_count` left them out. When a slot's derived name is not
+  live, these endpoints now find the slot's session the way `/status` does
+  and probe that one. A session whose bead still says active but whose
+  runtime is gone still reads stopped, and a session store that cannot be
+  read makes the list partial. The SDK's control dispatcher, which runs
+  `gc convoy control --serve` and has no provider, was reported under the
+  workspace provider, marked unavailable when that provider's binary was not
+  on `PATH`, and could take its session's model and context from another
+  agent's transcript in a shared work dir. It now reports no provider, its
+  session reads no transcript, and a Claude agent sharing its work dir no
+  longer loses its model and context on its account. (#4703, backport of
+  #8211; thanks @remuscazacu)
 - **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
   data directory when its `lsof` scan fails.** A scan that hit its 30-second
   deadline returned partial output with no error, so directories a running
@@ -607,10 +757,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a failure. Under `GC_REAPER_DRY_RUN`, the summary reports the prune
   preview as `sessions-pruned:N`, although nothing was pruned. Planned for
   1.5.2.
-- **Two cities sharing one rig store can release each other's live claims.**
-  Each city's pool orphan sweep judges a `<rig>/<name>` assignee by its own
-  sessions only, so it can reopen work the other city holds (#5959). The fix
-  is not in 1.5.1.
+- **Two cities sharing one rig store can still release each other's live
+  claims through the core `orphan-sweep` order.** The controller's pool
+  orphan sweep no longer does (#5959; see Fixed), but the order judges a
+  claimant by this city's own roster and sessions only, so it can reopen work
+  the other city holds (#5955). On a city that shares a rig store with
+  another city, skip the order (`[orders] skip = ["orphan-sweep"]`). Two
+  cities that import the same agent pack share one identity space, so neither
+  sweep protects a foreign claim whose assignee matches a local identity
+  byte for byte (ga-dk24ao).
 
 ## [1.5.0] - 2026-10-05
 

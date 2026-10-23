@@ -272,6 +272,8 @@ func releaseOrphanedPoolAssignments(
 	}
 
 	var released []releasedPoolAssignment
+	claimGate := newForeignClaimGate(cfg, sessionStore)
+	defer claimGate.log()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
@@ -306,6 +308,13 @@ func releaseOrphanedPoolAssignments(
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if assignee == "" {
+			// OUTSIDE the foreign-claim gate by construction: an empty assignee
+			// carries no identity to test, so this arm shares the stated
+			// residual with bare session names (see the package comment in
+			// pool_orphan_foreign_identity.go). The damage class the gate
+			// exists for — writing away another city's CLAIM — cannot occur
+			// here, since there is no claim identity to strip; what this arm
+			// touches is unassigned in_progress routing state only.
 			if wb.Status != "in_progress" {
 				continue
 			}
@@ -319,12 +328,20 @@ func releaseOrphanedPoolAssignments(
 			// Ordered ahead of the store-listing probe below deliberately: both
 			// are pure skip-gates with no mutation, so the released set is
 			// identical either way, but this one answers from the in-memory
-			// openSessionInfos snapshot while the next one issues a live
+			// openSessionInfos snapshot while that probe issues a live
 			// per-assignee store listing.
 			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
 				continue
 			}
-			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
+			// The liveness question, behind the foreign-claim gate:
+			// liveOpenSessionAssignmentExists answers from THIS city's stores
+			// only, so for an identity this city neither configures nor has a
+			// session record of, a missing session bead is unobservable rather
+			// than absent and the claim is protected instead of probed. The
+			// positive-evidence checks above can only ever SKIP a release, so
+			// running them first costs nothing and keeps the protected count
+			// reporting exactly the claims the gate saved.
+			if claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -410,7 +427,12 @@ func releaseOrphanedPoolAssignments(
 //
 // Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
 // including the live re-read in liveWorkAssignmentStillReleasable — the tick
-// snapshot names candidates but never by itself justifies a release.
+// snapshot names candidates but never by itself justifies a release. The one
+// exception is the foreign-claim gate, which this site does not consult: every
+// identifier it releases under is read off this city's own orphaned session
+// bead or derived from its roster for that bead, so it already carries the
+// provenance that gate looks for (see the package comment in
+// pool_orphan_foreign_identity.go).
 //
 // assignedWorkStores is the index-aligned snapshot of the legs the census read
 // assignedWorkBeads through, and it is how a binding-resident row is released at
