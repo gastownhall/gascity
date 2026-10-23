@@ -451,7 +451,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a same-named copy on the managed server with a warning; `--only-db` cannot
   reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
   too, with a warning naming the file. Rigs that inherit the city endpoint are
-  compacted as before (#7994, #7997).
+  compacted as before (#7994, #7997, backported in #8215).
 - **The Dolt compactor docs no longer claim it only rewrites history this
   city grew.** The `gc-compact-base` watermark is a position, not an author:
   a database several cities write to is flattened for all of them when the
@@ -461,7 +461,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database. "Shared and non-local databases" in
   `docs/troubleshooting/dolt-bloat-recovery.md` covers keeping a shared
   database out of `mol-dog-compactor` and a stop-everything `gc bd compact`
-  procedure (#7896, #7993).
+  procedure (#7896, #7993, backported in #8215).
 - **One agent on a harness that cannot receive MCP no longer fails the whole
   city's start.** gc skips that agent's MCP projection with a warning naming
   the harness and the fix; that agent's own session start still fails with the
