@@ -381,6 +381,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets `timeout = "4m"`,
+  which leaves at most two minutes after the 120s foreign-identity gate
+  budget, less the claim collection that precedes it. A city whose sweep
+  needs longer can raise it with `[[orders.overrides]]`,
+  `name = "orphan-sweep"` and a `timeout` (plus `rig = "*"` if a rig's own
+  pack also carries the order).
+
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
@@ -463,7 +474,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records as an `order.skipped` event with one scope per identity; the run
   still exits 0, and a sweep that only protects sends no mail. The verb is
   asked at most once per distinct identity per sweep, within a gate budget of
-  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 4m
   timeout); past it, the remaining claimants are not asked, their claims are
   kept and named with a "gate budget … exhausted" reason, and the sweep says
   how many identities it did not ask. Where `timeout` is installed, an ask
