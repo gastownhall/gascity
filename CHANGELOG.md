@@ -388,6 +388,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list, `GET /runs/{id}` and the run census kept the run `pending` while its
   steps were claimed and closed.
 
+- **`GET /v0/city/{city}/sessions?state=closed` and `?state=all` list closed
+  sessions.** The session list read only open sessions, whatever the filter,
+  so a filter naming `closed` matched nothing. A filter that can match a
+  closed session (`all`, or a list naming `closed`) now reads closed sessions
+  too, reported with state `closed`; they come from the bead store rather than
+  the cache. The default and every other filter still read open sessions from
+  the cache. `gc session list --state closed` and `--state all` list them too
+  when the city's supervisor answers the command.
+
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
