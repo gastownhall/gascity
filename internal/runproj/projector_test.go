@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -149,6 +150,59 @@ func TestProjectorFoldsRepeatedIdenticalUpdateIdempotently(t *testing.T) {
 	if p.LastSeq() != 6 {
 		t.Fatalf("lastSeq = %d, want 6", p.LastSeq())
 	}
+}
+
+// TestProjectorIDOnlyDeleteDropsRunFromCensus pins what a cache's delete
+// tombstone relies on (#5934): a bead.deleted whose payload is the bare bead
+// id — all a cache can announce for a row it holds no snapshot of — removes
+// the run root, so the census stops counting it as pending. The fold only
+// ever removes a row on bead.deleted, and ColdLoad replays the retained log on
+// every restart, so without the event the root reads pending forever.
+func TestProjectorIDOnlyDeleteDropsRunFromCensus(t *testing.T) {
+	root := beads.Bead{
+		ID: "gc-wisp-1", Title: "patrol", Type: "molecule", Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.KindMetadataKey:            beadmeta.KindRun,
+			beadmeta.FormulaMetadataKey:         "mol-patrol",
+		},
+	}
+	created, err := beads.EncodeBeadEventPayload(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tombstone, err := beads.EncodeBeadEventPayload(beads.Bead{ID: root.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewProjector()
+	p.Apply([]events.Event{{Seq: 1, Type: events.BeadCreated, Subject: root.ID, Payload: created}})
+	if got := projectedRunCensus(p); got.Pending != 1 {
+		t.Fatalf("precondition: census = %+v, want the run pending", got)
+	}
+
+	if !p.Apply([]events.Event{{Seq: 2, Type: events.BeadDeleted, Subject: root.ID, Payload: tombstone}}) {
+		t.Fatal("Apply reported no change for the id-only bead.deleted")
+	}
+
+	if got := projectedRunCensus(p); got != (CanonicalRunStatusCounts{}) {
+		t.Fatalf("census after the id-only bead.deleted = %+v, want no runs", got)
+	}
+	if got := idsOf(p.Beads()); len(got) != 0 {
+		t.Fatalf("folded beads = %v, want none", got)
+	}
+	if p.DecodeMisses() != 0 {
+		t.Fatalf("DecodeMisses = %d, want 0: an id-only payload decodes", p.DecodeMisses())
+	}
+}
+
+// projectedRunCensus classifies the folded runs as the run tailer and the
+// runs API do.
+func projectedRunCensus(p *Projector) CanonicalRunStatusCounts {
+	beadList := FilterRunBeads(p.Beads())
+	_, lanes := BuildRunSummaryWithAllLanes(beadList)
+	return CountCanonicalRunStatuses(beadList, lanes)
 }
 
 func idsOf(bl []beads.Bead) []string {
