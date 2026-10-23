@@ -12,7 +12,7 @@ import (
 
 // Exit 75 is a capacity refusal only from the start op, where it means "the
 // endpoint I launch against refused". On any other op it is an ordinary
-// failure, and exit 2 keeps its forward-compatible no-op meaning.
+// failure.
 func TestClassifyExecExit_TempFailOnlyForStartOp(t *testing.T) {
 	base := errors.New("exec provider /pack start worker: broker at capacity")
 
@@ -34,11 +34,14 @@ func TestClassifyExecExit_TempFailOnlyForStartOp(t *testing.T) {
 	if err := classifyExecExit("start", 1, "broker at capacity", base); runtime.IsProviderCapacity(err) || !errors.Is(err, base) {
 		t.Fatalf("start+1 = %v, want the plain adapter error", err)
 	}
-	if err := classifyExecExit("start", 2, "", base); err != nil {
-		t.Fatalf("start+2 = %v, want nil (unknown op stays forward compatible)", err)
+	if err := classifyExecExit("start", 2, "", base); !errors.Is(err, base) {
+		t.Fatalf("start+2 = %v, want the plain adapter error (start cannot be an unknown op)", err)
 	}
 	if err := classifyExecExit("start", 1, `session "worker" already exists`, base); !errors.Is(err, runtime.ErrSessionExists) {
 		t.Fatalf("start collision = %v, want ErrSessionExists", err)
+	}
+	if err := classifyExecExit("start", 2, `session "worker" already exists`, base); !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("start collision+2 = %v, want ErrSessionExists", err)
 	}
 }
 

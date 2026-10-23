@@ -175,6 +175,32 @@ func TestEveryRequirementIsGated(t *testing.T) {
 	}
 }
 
+// A pack that declares proc.provision cannot answer provision with exit 2:
+// the exec provider then fails the provision, so conformance must fail it too
+// rather than skip it as an optional op left unimplemented.
+func TestDeclaredProvisionExit2Fails(t *testing.T) {
+	bodies := goldenBodies()
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}'`
+	bodies["provision"] = `cat >/dev/null; exit 2`
+	report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res := resultFor(t, report, ReqProvisionBoxWithoutAgent); res.Status != StatusFail {
+		t.Errorf("declared provision exiting 2: status=%s detail=%q, want FAIL", res.Status, res.Detail)
+	}
+
+	delete(bodies, "provision")
+	bodies["protocol"] = `echo '{"version":0,"capabilities":[]}'`
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res := resultFor(t, report, ReqProvisionBoxWithoutAgent); res.Status != StatusSkip {
+		t.Errorf("undeclared provision exiting 2: status=%s detail=%q, want SKIP", res.Status, res.Detail)
+	}
+}
+
 func resultFor(t *testing.T, report Report, code Code) Result {
 	t.Helper()
 	for _, res := range report.Results {
