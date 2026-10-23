@@ -106,16 +106,19 @@ func v2SoftReloadUnavailable(intent reloadIntent, r *reloadControlReply) {
 	}
 }
 
-const v2SoftReloadUnavailableWarning = "soft reload: config drift acceptance is not available under a trace-only session_reconciler=v2; the config applied, and drifted sessions keep their accepted config hashes"
+const v2SoftReloadUnavailableWarning = "soft reload: config drift acceptance is not available under a trace-only v2 session reconciler; the config applied, and drifted sessions keep their accepted config hashes"
 
 // supervisorReconcilerBootLogged holds, per city path, the reconciler boot
-// lines the supervisor last logged for the city.
+// lines the supervisor logged for the city's current boot: set by its first
+// init attempt, kept across the init retries that follow a failure, and
+// forgotten once the city starts (forgetSupervisorReconcilerBoot), so the next
+// boot of the city logs them again.
 var supervisorReconcilerBootLogged sync.Map
 
 // logSupervisorReconcilerBoot logs a supervisor-hosted city's reconciler boot
 // lines (newControllerWiringLoggingTo), each naming the city. An init retry
-// whose lines match the last ones logged for path logs nothing; a config edit
-// that changes them logs again.
+// of the same boot whose lines match the last ones logged logs nothing; a
+// config edit that changes them logs again.
 func logSupervisorReconcilerBoot(stderr io.Writer, path, cityName, lines string) {
 	if prev, ok := supervisorReconcilerBootLogged.Swap(path, lines); ok && prev == lines {
 		return
@@ -125,4 +128,10 @@ func logSupervisorReconcilerBoot(stderr io.Writer, path, cityName, lines string)
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s\n", cityName, line) //nolint:errcheck // best-effort stderr
 		}
 	}
+}
+
+// forgetSupervisorReconcilerBoot ends the city's boot for the boot-log dedupe:
+// the city at path started, so its next start is a new boot.
+func forgetSupervisorReconcilerBoot(path string) {
+	supervisorReconcilerBootLogged.Delete(path)
 }

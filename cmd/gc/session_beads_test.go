@@ -1776,7 +1776,7 @@ func seedClosedNamedRefinery(t *testing.T, store beads.Store) (*config.City, str
 func TestReopenClosedConfiguredNamedSessionBeadFencesStatusAndMetadataInOneWrite(t *testing.T) {
 	store := newTxSpyStore()
 	cfg, sessionName, closed := seedClosedNamedRefinery(t, store)
-	if err := beads.StampOpenedStore(store.MemStore, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	store.directUpdate = 0
@@ -1807,7 +1807,7 @@ func TestReopenClosedConfiguredNamedSessionBeadFencesStatusAndMetadataInOneWrite
 func TestReopenClosedConfiguredNamedSessionBeadFailsWhenTheFencedWriteFails(t *testing.T) {
 	store := &failingReopenWriteStore{MemStore: beads.NewMemStore()}
 	cfg, sessionName, closed := seedClosedNamedRefinery(t, store)
-	if err := beads.StampOpenedStore(store.MemStore, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	if w, _, err := beads.ResolveConditionalWriter(store); w == nil || err != nil {

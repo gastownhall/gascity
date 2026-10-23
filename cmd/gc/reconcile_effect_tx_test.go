@@ -123,7 +123,7 @@ func newCloseTxKit(t *testing.T) *txKit {
 
 func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 	t.Helper()
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	cache := beads.NewCachingStoreForTest(backing, nil)
@@ -1016,7 +1016,7 @@ func (b racingBacking) Get(id string) (beads.Bead, error) {
 func TestTxRetriesAFencedRefresh(t *testing.T) {
 	k := newTxKit(t)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var cache *beads.CachingStore

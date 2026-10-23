@@ -697,7 +697,7 @@ func primedCacheOver(t *testing.T, backing beads.Store) *beads.CachingStore {
 func fencingAtomicCloseStore(t *testing.T) beads.Store {
 	t.Helper()
 	store := beads.NewAtomicCloseMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return store
@@ -711,7 +711,7 @@ func TestDoctorC07ReadFiresNoDegradeEvent(t *testing.T) {
 	mem := beads.NewMemStore()
 	mem.DisableConditionalWrites = true
 	degraded := 0
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
 		t.Fatal(err)
 	}
 	caps := v2ClassStoreCapabilities(mem, mem, true)

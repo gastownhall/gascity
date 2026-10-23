@@ -26,7 +26,7 @@ func stampedMem(t *testing.T, mode gate.Mode) (*beads.MemStore, string) {
 	t.Helper()
 	m := beads.NewMemStore()
 	if mode != gate.ModeUnset {
-		if err := beads.StampOpenedStore(m, "MemStore", mode, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(m, "MemStore", mode, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 	}
@@ -201,7 +201,7 @@ func stampedSQLite(t *testing.T, mode gate.Mode) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", mode, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", mode, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	return s

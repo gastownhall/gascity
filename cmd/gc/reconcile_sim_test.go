@@ -493,7 +493,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
 		m := beads.NewMemStoreFrom(0, rows, nil)
-		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time

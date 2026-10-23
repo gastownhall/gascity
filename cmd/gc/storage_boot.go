@@ -857,7 +857,7 @@ func openPlannedBindingEngine(plan *storebinding.StoragePlan, binding string, cf
 			onDegrade = conditionalWritesDegradedRecorder(rec, flags, storeID)
 		}
 		kind := conditionalWritesEventStoreKind(beads.InspectConditionalWrites(store).StoreKind)
-		if err := beads.StampOpenedStore(store, kind, flags.BeadsConditionalWrites(), onDegrade, slog.Default()); err != nil {
+		if err := beads.StampOpenedStore(store, kind, flags.BeadsConditionalWrites(), resolved && conditionalWritesDefaultAuto(flags), onDegrade, slog.Default()); err != nil {
 			return nil, nil, storebinding.PlannedBinding{}, errors.Join(fmt.Errorf("storage routing: binding %q: %w", binding, err), closer.Close())
 		}
 	}

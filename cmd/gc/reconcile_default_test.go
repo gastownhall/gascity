@@ -449,7 +449,8 @@ func TestDefaultV2CityPassesC07OnTheRoutesItOpens(t *testing.T) {
 
 // TestSupervisorReconcilerBootLogNamesTheCityOnce pins the supervisor's
 // reconciler boot log: each line names the city, an init retry with the same
-// lines logs nothing, and lines that change (a config edit) log again.
+// lines logs nothing, lines that change (a config edit) log again, and so
+// does the city's next boot once it has started.
 func TestSupervisorReconcilerBootLogNamesTheCityOnce(t *testing.T) {
 	path := t.TempDir()
 	t.Cleanup(func() { supervisorReconcilerBootLogged.Delete(path) })
@@ -467,5 +468,12 @@ func TestSupervisorReconcilerBootLogNamesTheCityOnce(t *testing.T) {
 	logSupervisorReconcilerBoot(&stderr, path, "demo", "session reconciler: v2 (default: session_reconciler is unset)\n")
 	if got := stderr.String(); got != "gc supervisor: city 'demo': session reconciler: v2 (default: session_reconciler is unset)\n" {
 		t.Fatalf("changed lines logged %q, want the new line naming the city", got)
+	}
+	// The city started; restarting it is a new boot, which logs again.
+	forgetSupervisorReconcilerBoot(path)
+	stderr.Reset()
+	logSupervisorReconcilerBoot(&stderr, path, "demo", "session reconciler: v2 (default: session_reconciler is unset)\n")
+	if stderr.Len() == 0 {
+		t.Fatal("a new boot of the city logged nothing")
 	}
 }

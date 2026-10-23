@@ -747,7 +747,7 @@ func TestReleaseWorkBead_DoesNotClobberReclaimedAssigneeOnTheConditionalPath(t *
 	if err := store.Update(stale.ID, beads.UpdateOpts{Assignee: &fresh}); err != nil {
 		t.Fatalf("re-claim: %v", err)
 	}
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 

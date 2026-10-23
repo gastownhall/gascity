@@ -2541,6 +2541,9 @@ func startOneCity(
 	// where an early panic deletes a non-existent entry, leaving a
 	// zombie after the post-launch insertion.
 	alreadyRunning := publishManagedCity(cr, path, mc)
+	if !alreadyRunning {
+		forgetSupervisorReconcilerBoot(path)
+	}
 	if alreadyRunning {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,

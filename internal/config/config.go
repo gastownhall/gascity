@@ -1440,8 +1440,10 @@ type BeadsConfig struct {
 	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
 	// byte-identical), "auto" (compare-and-swap where the store is capable,
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
-	// defaults to "auto". GC_BEADS_CONDITIONAL_WRITES overrides it. Any other
-	// value fails config load.
+	// defaults to "auto", except that a store that cannot fence (an exec
+	// store, or a bd without --if-revision) runs as "off" without a warning.
+	// GC_BEADS_CONDITIONAL_WRITES overrides it. Any other value fails config
+	// load.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// GuardedRelease selects the ownership-release discipline for work beads:
 	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded

@@ -794,7 +794,7 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 	t.Run("carrier lands the mode", func(t *testing.T) {
 		store := NewMemStore()
-		if err := StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+		if err := StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Require || defaulted {
@@ -804,7 +804,7 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 
 	t.Run("unset maps to off and marks the default", func(t *testing.T) {
 		store := NewMemStore()
-		if err := StampOpenedStore(store, "MemStore", gate.ModeUnset, nil, nil); err != nil {
+		if err := StampOpenedStore(store, "MemStore", gate.ModeUnset, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Off || !defaulted {
@@ -814,7 +814,7 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 
 	t.Run("require refuses a carrier-less store", func(t *testing.T) {
 		bare := &struct{ Store }{Store: NewMemStore()}
-		err := StampOpenedStore(bare, "EngineStore", gate.Require, nil, nil)
+		err := StampOpenedStore(bare, "EngineStore", gate.Require, false, nil, nil)
 		if !IsConditionalWritesRequired(err) {
 			t.Fatalf("err = %v, want the typed require refusal", err)
 		}
@@ -825,11 +825,11 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 
 	t.Run("a stamped store refuses a second stamp", func(t *testing.T) {
 		store := NewMemStore()
-		if err := StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+		if err := StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		for _, mode := range []gate.Mode{gate.ModeUnset, gate.Off, gate.Auto, gate.Require} {
-			if err := StampOpenedStore(store, "MemStore", mode, nil, nil); err == nil {
+			if err := StampOpenedStore(store, "MemStore", mode, false, nil, nil); err == nil {
 				t.Fatalf("re-stamping require with %q succeeded", mode)
 			}
 		}
@@ -838,10 +838,28 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 		}
 	})
 
+	t.Run("a defaulted auto is quiet and recorded", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		var degraded []ConditionalWritesDegrade
+		if err := StampOpenedStore(bare, "EngineStore", gate.Auto, true, func(d ConditionalWritesDegrade) { degraded = append(degraded, d) }, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if len(degraded) != 0 {
+			t.Fatalf("degrade notifications = %+v, want none for the builtin default", degraded)
+		}
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.Auto, true, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Auto || !defaulted {
+			t.Fatalf("stamp = (%q, %v), want (auto, true)", mode, defaulted)
+		}
+	})
+
 	t.Run("auto degrades a carrier-less store loudly", func(t *testing.T) {
 		bare := &struct{ Store }{Store: NewMemStore()}
 		var degraded []ConditionalWritesDegrade
-		if err := StampOpenedStore(bare, "EngineStore", gate.Auto, func(d ConditionalWritesDegrade) { degraded = append(degraded, d) }, nil); err != nil {
+		if err := StampOpenedStore(bare, "EngineStore", gate.Auto, false, func(d ConditionalWritesDegrade) { degraded = append(degraded, d) }, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		if len(degraded) != 1 || degraded[0].StoreKind != "EngineStore" || degraded[0].Mode != "auto" {

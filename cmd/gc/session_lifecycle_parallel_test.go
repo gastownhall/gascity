@@ -86,7 +86,7 @@ func startCommitWriteArms() map[string]func() (store beads.Store, arm func(*test
 			store := failingFencedMetadataStore{inner}
 			return store, func(t *testing.T) {
 				t.Helper()
-				if err := beads.StampOpenedStore(inner.MemStore, "MemStore", gate.Auto, nil, nil); err != nil {
+				if err := beads.StampOpenedStore(inner.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
 					t.Fatalf("stamp: %v", err)
 				}
 				if w, _, err := beads.ResolveConditionalWriter(store); w == nil || err != nil {
