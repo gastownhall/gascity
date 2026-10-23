@@ -390,7 +390,8 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 // timeout strictly shorter than its interval. The cooldown counts from a
 // run's start, so a timeout at or above the interval (the 300s exec default
 // equals the 5m interval) would let a timed-out sweep be followed at once by
-// the next.
+// the next. The timeout must still leave room after the script's 120s
+// foreign-identity gate budget.
 func TestOrphanSweepOrderTimeoutBelowInterval(t *testing.T) {
 	const file = "orphan-sweep.toml"
 	o := readOrder(t, file)
@@ -407,7 +408,12 @@ func TestOrphanSweepOrderTimeoutBelowInterval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("interval %q is not a valid duration: %v", o.Interval, err)
 	}
-	if timeout := o.TimeoutOrDefault(); timeout >= interval {
+	timeout := o.TimeoutOrDefault()
+	if timeout >= interval {
 		t.Errorf("timeout %s is not shorter than interval %s, so a timed-out sweep is followed at once by the next", timeout, interval)
+	}
+	const gateBudget = 120 * time.Second
+	if timeout <= gateBudget {
+		t.Errorf("timeout %s leaves no room after the %s gate budget for the reset work", timeout, gateBudget)
 	}
 }
