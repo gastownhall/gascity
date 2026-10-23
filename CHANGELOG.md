@@ -381,6 +381,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The reaper's session prune no longer escalates a stale or missing backup
+  when it has nothing to delete.** The pattern path
+  (`GC_REAPER_SESSION_BEAD_PATTERN`, default `gm-*`) checked the city store's
+  backup age before anything else, so a city without a fresh bd backup of its
+  city store raised a MEDIUM "Reaper anomalies detected" escalation ("bulk
+  prune skipped: backup stale or absent") for a prune that, in most cities,
+  would delete nothing. The reaper now first counts the prune's candidates
+  (closed beads that match the pattern and closed more than
+  `GC_REAPER_SESSION_PURGE_AGE` ago) and, when there are none, skips the
+  backup check and the prune without an anomaly. When there are candidates,
+  the backup-age and type-scope gates apply as before. A count that fails is
+  reported as its own anomaly (`session prune candidate count failed for
+  <db>`), and the gates still apply. An invalid pattern is now reported before
+  the backup is checked (#6284).
+
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
