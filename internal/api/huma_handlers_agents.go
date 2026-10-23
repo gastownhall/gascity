@@ -133,7 +133,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			provider, displayName := resolveProviderInfo(ea.provider, cfg)
+			provider, displayName := agentProviderInfo(&a, cfg)
 
 			available := true
 			var unavailableReason string
@@ -276,7 +276,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		suspended = true
 	}
 
-	provider, displayName := resolveProviderInfo(agentCfg.Provider, cfg)
+	provider, displayName := agentProviderInfo(&agentCfg, cfg)
 
 	available := true
 	var unavailableReason string

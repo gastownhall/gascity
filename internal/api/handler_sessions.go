@@ -89,10 +89,31 @@ func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponse
 	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
 }
 
+// sessionProviderInfo is resolveProviderInfo for a session: the provider it
+// recorded, else the workspace default. A control-dispatcher session records
+// none because its agent has none (agentProviderName), so it inherits none.
+func sessionProviderInfo(info session.Info, cfg *config.City) (provider, displayName string) {
+	if strings.TrimSpace(info.Provider) == "" && isControlDispatcherSession(info, cfg) {
+		return "", ""
+	}
+	return resolveProviderInfo(info.Provider, cfg)
+}
+
+// isControlDispatcherSession reports whether a session's template resolves to
+// the SDK's providerless control dispatcher
+// (config.IsDeterministicControlDispatcher).
+func isControlDispatcherSession(info session.Info, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	a, ok := findAgent(cfg, info.Template)
+	return ok && config.IsDeterministicControlDispatcher(&a)
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
-		provider, displayName = resolveProviderInfo(info.Provider, cfg)
+		provider, displayName = sessionProviderInfo(info, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
 	state := string(info.State)
@@ -686,6 +707,11 @@ func (s *Server) applySessionModelContext(resp *sessionResponse, info session.In
 	// Prefer session-key lookup to avoid cross-reading another session's transcript.
 	provider := info.Provider
 	if strings.TrimSpace(provider) == "" && cfg != nil {
+		if isControlDispatcherSession(info, cfg) {
+			// The control dispatcher runs no model, so it writes no
+			// transcript: one found in its work dir is another session's.
+			return
+		}
 		provider, _ = resolveProviderInfo(provider, cfg)
 	}
 	transcriptProvider := session.ProviderFamilyFromInfo(info, provider)

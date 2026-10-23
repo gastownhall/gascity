@@ -493,6 +493,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `city.toml` instead of 404/empty after they were applied (ga-8hk1fe).
 - `GET /v0/city/{city}/agents` reflects a config change right away instead of
   serving a cached list keyed only on session state (ga-79peco).
+- **The control dispatcher reports no provider.** The SDK's control
+  dispatcher runs `gc convoy control --serve` and has no provider, but
+  `GET /v0/city/{city}/agents`, the agent read and the session endpoints
+  reported it under the workspace provider, marked it unavailable when that
+  provider's binary was not on `PATH`, and could fill in its session's model
+  and context from another agent's transcript in a shared work dir. It now
+  reports no provider, no provider binary gates its availability, and its
+  session reads no transcript. A Claude agent sharing its work dir is also no
+  longer denied model and context because the dispatcher counted as a second
+  Claude agent there.
 - **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
   data directory when its `lsof` scan fails.** A scan that hit its 30-second
   deadline returned partial output with no error, so directories a running
