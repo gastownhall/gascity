@@ -45,9 +45,13 @@ value on disk, it warns once per transition ("pending restart") and keeps
 running the latched mode. An unknown value refuses to start the city.
 `runsV2()` is the single predicate every v2 branch reads. The controller's
 `identify` socket reply names the latched mode, and `gc runtime drain`,
-`drain-ack`, `undrain` and `gc hook` follow it (`cityRunsV2`), falling
-back to the config's resolution only when no controller answers, so a
-config edit cannot split them from the running reconciler before restart.
+`drain-ack` (`gc hook`'s drain-ack among them) and `undrain` follow it
+(`cityRunsV2`), so a config edit cannot split them from the running
+reconciler before restart. A controller that answers without the field
+predates it and the v2 default, so it is read as legacy unless the config
+sets `session_reconciler = "v2"`; only when no controller answers do they
+fall back to the config's resolution. `gc hook` asks only when it prints
+the drain-pending hint, so a claim makes no socket call.
 
 ### Admission
 

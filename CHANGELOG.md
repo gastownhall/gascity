@@ -22,16 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An explicit `"v2"` still refuses to start over those features. Under v2,
   `[daemon] session_circuit_breaker`, `[session] progress_stall_timeout` and
   `[session] claim_holder_stall_timeout` are deprecated and ignored (the work
-  ladder replaces them), with a boot and doctor warning; legacy still honours
+  ladder replaces them), with a boot and doctor warning; legacy still honors
   them. Unset conditional writes now take compare-and-swap wherever the store
   supports it, under legacy too; a store that cannot (an exec store, or a bd
   without `--if-revision`) runs as before, quietly, with no degraded event or
   status warning. Set `conditional_writes = "off"` (or
   `GC_BEADS_CONDITIONAL_WRITES=off`) to keep unconditional writes. The mode
-  stays boot-latched, and `gc runtime drain`, `drain-ack`, `undrain` and
-  `gc hook` now follow the running controller's mode until it restarts. The
-  messages that said to remove `session_reconciler` to run legacy now say to
-  set it to `"legacy"`.
+  stays boot-latched, and `gc runtime drain`, `drain-ack` (including
+  `gc hook`'s drain-ack) and `undrain` follow the running controller's mode
+  until it restarts. A controller started by an earlier gc does not report
+  its mode, so these commands treat it as legacy unless city.toml sets
+  `session_reconciler = "v2"`: restart the controller after upgrading gc to
+  pick up the new default. The messages that said to remove
+  `session_reconciler` to run legacy now say to set it to `"legacy"`.
+  Rolling back: after rolling back the gc binary, restart the controller, so
+  the controller and the CLI resolve the mode under the same build.
 
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the

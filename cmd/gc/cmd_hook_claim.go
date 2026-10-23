@@ -183,7 +183,9 @@ type hookClaimOptions struct {
 	JSON               bool
 	// StrictDrainAck reports that the city runs the v2 session reconciler
 	// (cityRunsV2), under which a drain-ack is row-bound and can be refused.
-	StrictDrainAck bool
+	// It only picks the drain-pending hint, so it is asked only when that
+	// hint prints: asking may probe the controller socket. Nil is legacy.
+	StrictDrainAck func() bool
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
 	// existing assignee. Off by default; wired from config.Agent.
@@ -1894,7 +1896,7 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 		return code
 	}
 	operatorHint := ""
-	if opts.StrictDrainAck {
+	if opts.StrictDrainAck != nil && opts.StrictDrainAck() {
 		operatorHint = " (an operator acking it from outside the session adds --operator)"
 	}
 	_, _ = fmt.Fprintf(stderr,

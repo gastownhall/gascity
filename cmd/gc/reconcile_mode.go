@@ -160,10 +160,10 @@ type reconcilerModeDrift struct {
 	reported  string                      // the on-disk value last reported; "" while in sync
 }
 
-// reconcilerDriftCLINote ends every pending-restart warning: the drain and
-// hook commands ask the running controller its mode (cityRunsV2), so they
-// keep to the running mode too.
-const reconcilerDriftCLINote = "until it restarts, gc runtime drain, drain-ack and undrain and gc hook keep to the mode it runs"
+// reconcilerDriftCLINote ends every pending-restart warning: the drain
+// commands ask the running controller its mode (cityRunsV2), so they keep to
+// the running mode too.
+const reconcilerDriftCLINote = "until it restarts, gc runtime drain, drain-ack and undrain (gc hook's drain-ack among them) keep to the mode it runs"
 
 // observe returns the pending-restart warning for a reload candidate, or ""
 // when the candidate resolves to the running mode or the same drift was
