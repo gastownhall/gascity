@@ -431,8 +431,8 @@ is_known_agent() {
 #
 # Each gate call opens the city's store (seconds on bd/Dolt), and foreign
 # claims are never released, so they are re-asked every sweep. The gate gets
-# GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, well under the 300s exec
-# order timeout) per sweep; once it is spent no identity is asked about, and
+# GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, well under the order's 4m
+# timeout) per sweep; once it is spent no identity is asked about, and
 # every claim whose holder was not asked is protected like one the gate could
 # not answer. Where timeout(1) exists, an ask still running when the budget
 # runs out is abandoned and its claim protected, so one store-open stuck

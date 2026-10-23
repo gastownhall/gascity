@@ -36,7 +36,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}

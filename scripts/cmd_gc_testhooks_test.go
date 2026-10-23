@@ -10,8 +10,8 @@ import (
 )
 
 // testHooksStamp is the link-time variable that turns gc's test-only hooks
-// on (internal/clock.testHooks; today GC_TEST_BACKSTOP_SPEEDUP and
-// GC_LANE_FAILPOINT).
+// on (internal/clock.testHooks; today GC_TEST_BACKSTOP_SPEEDUP,
+// GC_LANE_FAILPOINT and GC_OPS_FAILPOINT).
 const testHooksStamp = "internal/clock.testHooks"
 
 // TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp keeps gc's test hooks out

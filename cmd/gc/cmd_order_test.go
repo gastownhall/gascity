@@ -3230,6 +3230,10 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 	if !strings.Contains(stderr.String(), "exec failed") {
 		t.Fatalf("stderr = %q, want exec failure", stderr.String())
 	}
+	// The failure names the timeout that stopped the run, the capped one.
+	if !strings.Contains(stderr.String(), "order timeout of 50ms exceeded") {
+		t.Fatalf("stderr = %q, want the order timeout named", stderr.String())
+	}
 }
 
 func TestOrderRunExecTrackedLabelsEnvBuildFailure(t *testing.T) {

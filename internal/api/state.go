@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -328,6 +329,15 @@ type WebhookDispatchProvider interface {
 // Resolve-from-Config() fallback at Server construction (see newServer).
 type RolloutFlagsProvider interface {
 	RolloutFlags() rollout.Flags
+}
+
+// OpsCrashPointsProvider is an optional State capability: the crash-point
+// hook (legacyop.Recorder.CrashPoints) every op recorder of the State's
+// Servers carries. cmd/gc's controllerState answers its GC_OPS_FAILPOINT
+// hook, nil unless a test-hooks gc armed one. A State without it gives its
+// recorders none.
+type OpsCrashPointsProvider interface {
+	OpsCrashPoints() legacyop.CrashPointFunc
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()
