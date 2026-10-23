@@ -381,6 +381,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The run API lists a formula-v1 run's steps and reports the run active once
+  a step starts.** Formula-v1 instantiation types each untyped or `task`-typed
+  non-root step `step`, and the run projection dropped that type. For a v1
+  run, `GET /v0/city/{city}/runs/{id}/steps` returned no steps, and the run
+  list, `GET /runs/{id}` and the run census kept the run `pending` while its
+  steps were claimed and closed.
+
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
