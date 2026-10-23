@@ -261,7 +261,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `no_config`, `lookup_failed`) and its detail. `local` is not a liveness
   claim. Scripts and formulas that reap claims should ask it instead of
   re-deriving identity rules, and treat anything but exit 0 as "protect"
-  (#5955, #7895).
+  (#5955, #7895, backported in #8230).
 
 ### Changed
 
@@ -426,7 +426,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through its own session record. Migration notes: a person's claim, or a
   local agent's claim whose config and session records are both gone, is now
   kept and named every sweep instead of released; release it by hand with
-  `gc bd release-if-current <id> <assignee>` (#7895).
+  `gc bd release-if-current <id> <assignee>` (#7895, backported in #8230).
 - **The pool orphan sweep treats a claim it cannot observe as unobservable,
   not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
   city's config does not mint — another city's identity, a binding this city
