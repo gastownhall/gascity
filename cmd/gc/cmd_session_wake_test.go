@@ -932,7 +932,7 @@ func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
 	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
 	for _, mode := range []reconcilerMode{reconcilerLegacy, reconcilerV2} {
 		t.Run(mode.String(), func(t *testing.T) {
-			controllerLatchedReconcilerMode = func(string) (reconcilerMode, bool) { return mode, true }
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) { return mode, true }
 			store := beads.NewMemStore()
 			b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
 				"template": "worker", "session_name": "worker", "state": "asleep",

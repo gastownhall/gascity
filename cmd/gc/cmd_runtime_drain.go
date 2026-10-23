@@ -1434,7 +1434,7 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 // effect at restart, and until then the drain marks, acks and wake verdicts
 // must be the ones the running reconciler reads.
 func cityRunsV2(cityPath string, cfg *config.City) bool {
-	if mode, ok := controllerLatchedReconcilerMode(cityPath); ok {
+	if mode, ok := controllerLatchedReconcilerMode(cityPath, cfg); ok {
 		return mode == reconcilerV2
 	}
 	return cfg != nil && drainAckStrictConfig(cfg)
@@ -1449,14 +1449,23 @@ func drainAckStrictConfig(cfg *config.City) bool {
 
 // controllerLatchedReconcilerMode asks the city's running controller which
 // session reconciler it latched (probeControllerIdentity). ok is false when
-// no controller answers or it predates the field. A var so tests can stand in
-// a controller; tests that swap it MUST NOT call t.Parallel().
-var controllerLatchedReconcilerMode = func(cityPath string) (reconcilerMode, bool) {
-	switch probeControllerIdentity(cityPath).SessionReconciler {
+// no controller answers. A controller that answers without the mode predates
+// both the field and the v2 default, so with an unset key (or anything but
+// an explicit "v2") it latched legacy; under an explicit v2 the answer is
+// left to cfg's resolution. A var so tests can stand in a controller; tests
+// that swap it MUST NOT call t.Parallel().
+var controllerLatchedReconcilerMode = func(cityPath string, cfg *config.City) (reconcilerMode, bool) {
+	identity := probeControllerIdentity(cityPath)
+	switch identity.SessionReconciler {
 	case config.SessionReconcilerV2:
 		return reconcilerV2, true
 	case config.SessionReconcilerLegacy:
 		return reconcilerLegacy, true
+	}
+	if identity.PID > 0 && cfg != nil {
+		if mode, _, ok := cfg.Daemon.SessionReconcilerMode(); !ok || mode != config.SessionReconcilerV2 {
+			return reconcilerLegacy, true
+		}
 	}
 	return reconcilerLegacy, false
 }

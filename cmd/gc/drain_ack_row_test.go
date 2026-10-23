@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -887,11 +888,11 @@ func TestDrainAckStrictFollowsTheRunningController(t *testing.T) {
 					lis.Close()                               //nolint:errcheck
 					os.Remove(controllerSocketPath(cityPath)) //nolint:errcheck
 				})
-				mode, ok := controllerLatchedReconcilerMode(cityPath)
+				mode, ok := controllerLatchedReconcilerMode(cityPath, tc.cfg)
 				if !ok || (mode == reconcilerV2) != tc.want {
 					t.Fatalf("controllerLatchedReconcilerMode = %v, %v; want the controller's latch", mode, ok)
 				}
-			} else if _, ok := controllerLatchedReconcilerMode(cityPath); ok {
+			} else if _, ok := controllerLatchedReconcilerMode(cityPath, tc.cfg); ok {
 				t.Fatal("controllerLatchedReconcilerMode answered with no controller")
 			}
 			if got := cityRunsV2(cityPath, tc.cfg); got != tc.want {
@@ -924,7 +925,7 @@ func TestHookDrainAckToleranceCallSites(t *testing.T) {
 	}
 	pending := func(strict bool) drainFn {
 		return func(ack hookDrainAckFunc, stdout, stderr io.Writer) int {
-			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: strict}, hookClaimOps{DrainAck: ack}, "", stdout, stderr)
+			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: func() bool { return strict }}, hookClaimOps{DrainAck: ack}, "", stdout, stderr)
 		}
 	}
 	// claimsErrored reaches the same writeHookClaimDrain call as an idle store
@@ -1021,5 +1022,98 @@ func TestDrainAckRowKeysAreInertToLegacy(t *testing.T) {
 	woken := mustGetBead(t, store, row.ID)
 	if woken.Metadata[sessionpkg.DrainAckIncarnationKey] == woken.Metadata["generation"] {
 		t.Fatalf("after a legacy PreWake the leftover ack still names generation %q", woken.Metadata["generation"])
+	}
+}
+
+// serveIdentifyReply stands up a controller socket for cityPath that answers
+// every command with reply, as a controller of another build would.
+func serveIdentifyReply(t *testing.T, cityPath, reply string) {
+	t.Helper()
+	sockPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen %s: %v", sockPath, err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 256)
+			_, _ = conn.Read(buf)
+			_, _ = conn.Write([]byte(reply + "\n"))
+			conn.Close() //nolint:errcheck
+		}
+	}()
+}
+
+// TestCityRunsV2ReadsAPrePRControllerAsLegacy pins the upgrade window: a
+// controller whose identify reply carries no session_reconciler predates both
+// the field and the v2 default, so over an unset key it latched legacy, not
+// the v2 the new default would resolve. Only an explicit v2 is left to the
+// config. Kills reading such a controller as "no controller".
+func TestCityRunsV2ReadsAPrePRControllerAsLegacy(t *testing.T) {
+	original := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = original })
+	reconcilerModeLookupEnv = envOf(nil)
+	cityPath := t.TempDir()
+	serveIdentifyReply(t, cityPath, fmt.Sprintf(`{"pid":%d,"hosting_mode":"standalone"}`, os.Getpid()))
+
+	if cityRunsV2(cityPath, v2DefaultCity(nil)) {
+		t.Error("cityRunsV2(pre-PR controller, unset key resolving to v2) = true, want legacy: that controller latched legacy")
+	}
+	explicit := v2DefaultCity(func(c *config.City) { c.Daemon.SessionReconciler = config.SessionReconcilerV2 })
+	if !cityRunsV2(cityPath, explicit) {
+		t.Error("cityRunsV2(pre-PR controller, explicit v2) = false, want the config's v2")
+	}
+}
+
+// TestDrainAckCityModeFollowsTheRunningControllerOverCityTOML pins
+// drainAckCityMode end to end over a city.toml on disk: a v2 controller over
+// a session_reconciler = "legacy" file is strict, and a legacy controller
+// over a "v2" file is not. Kills drainAckCityMode resolving the file alone.
+func TestDrainAckCityModeFollowsTheRunningControllerOverCityTOML(t *testing.T) {
+	original := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = original })
+	reconcilerModeLookupEnv = envOf(nil)
+	for _, tc := range []struct {
+		onDisk string
+		wake   *controllerWake
+		want   bool
+	}{
+		{onDisk: "legacy", wake: &controllerWake{planner: &planner{}}, want: true},
+		{onDisk: "v2", wake: newLegacyWake(nil, nil), want: false},
+	} {
+		t.Run("on disk "+tc.onDisk, func(t *testing.T) {
+			cityPath := t.TempDir()
+			toml := "[workspace]\nname = \"test-city\"\n\n[daemon]\nsession_reconciler = \"" + tc.onDisk + "\"\n"
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, strict := drainAckCityMode(cityPath); strict == tc.want {
+				t.Fatalf("drainAckCityMode with no controller = %v; the file alone must resolve the other way for this test to mean anything", strict)
+			}
+			_, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, &atomic.Bool{}, nil, nil, tc.wake)
+			if err != nil {
+				t.Fatalf("startControllerSocket: %v", err)
+			}
+			t.Cleanup(func() {
+				lis.Close()                               //nolint:errcheck
+				os.Remove(controllerSocketPath(cityPath)) //nolint:errcheck
+			})
+			if _, strict := drainAckCityMode(cityPath); strict != tc.want {
+				t.Errorf("drainAckCityMode = %v, want the running controller's %v", strict, tc.want)
+			}
+		})
 	}
 }
