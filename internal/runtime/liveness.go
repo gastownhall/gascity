@@ -52,13 +52,29 @@ type LivenessObserver interface {
 // ServerDeathConfirmer is the optional provider capability that reports a
 // confirmed-dead runtime server: its socket is missing, or refuses on a stable
 // inode, and no listener is bound to its path, so no session of it can exist
-// and an empty listing is complete (v5 O1, F3). Only tmux implements it.
+// and an empty listing is complete (v5 O1, F3). Only tmux implements it; the
+// auto and hybrid composites forward it through [ServersConfirmedDead].
 //
 // Ask it only right after a ListRunning that failed for a missing server, and
 // use the verdict only for that pass: a server can start at any moment, so a
 // verdict carried across passes would read a live fleet as gone.
 type ServerDeathConfirmer interface {
 	ServerConfirmedDead() bool
+}
+
+// ServersConfirmedDead answers [ServerDeathConfirmer] for a composite: false
+// as soon as one backend that implements it does not confirm its server dead.
+// A composite has at most one tmux leaf in practice, so this forwards to it; a
+// composite with none answers true and so keeps the rule of a provider without
+// the capability. The inventory lane walks composites to their leaves and
+// never asks a composite.
+func ServersConfirmedDead(backends ...Provider) bool {
+	for _, b := range backends {
+		if confirmer, ok := b.(ServerDeathConfirmer); ok && !confirmer.ServerConfirmedDead() {
+			return false
+		}
+	}
+	return true
 }
 
 // LivenessObserverWithError is the optional provider capability for liveness

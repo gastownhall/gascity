@@ -5,25 +5,30 @@ go_library(
     srcs = [
         "dolt.go",
         "failure_artifacts.go",
+        "flock_linux.go",
         "git.go",
+        "loopback_port.go",
         "path.go",
         "timeout.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/testutil",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/pathutil"],
+    deps = [
+        "//internal/loopbackport",
+        "//internal/pathutil",
+    ],
 )
 
 go_test(
     name = "testutil_test",
     srcs = [
         "failure_artifacts_test.go",
+        "path_test.go",
         "testenv_import_test.go",
     ],
     embed = [":testutil"],
     deps = ["//internal/testenv"],
 )
-
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(

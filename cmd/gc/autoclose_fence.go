@@ -21,7 +21,10 @@ var errAutocloseRefused = errors.New("autoclose: conditional close refused")
 //   - Conditional writes resolved for the store (beads.conditional_writes auto
 //     or require on a capable store: SQLite with the revision layout,
 //     NativeDoltStore, MemStore, FileStore): the close is a CAS on the re-read
-//     revision, so a write landing in between refuses it. The reason commits
+//     revision, so a write landing in between refuses it. A re-read revision
+//     of 0 is a legacy row's real revision, not an absent one, and is CASed
+//     like any other: every capable store compares it exactly, so it never
+//     licenses an unconditional close. The reason commits
 //     with the close where the store has an atomic closer
 //     (CloseWithMetadataIfMatch); otherwise it is stamped after the close.
 //   - Otherwise (conditional writes off, the default on every city today;
@@ -49,7 +52,7 @@ func autocloseCloseIfStill(store beads.Store, id, reason string, still func(bead
 	if err != nil {
 		return false, err // require on an incapable store: never a blind close
 	}
-	if writer == nil || fresh.Revision == 0 {
+	if writer == nil {
 		return true, closeUnconditional()
 	}
 	if closer, ok := beads.AtomicConditionalCloserFor(store); ok {

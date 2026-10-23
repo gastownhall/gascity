@@ -322,19 +322,12 @@ func TestOpenStorageRoutesDoesNotRefuseSQLiteBeadsUnderNativeTransportOff(t *tes
 	}
 }
 
-// TestConditionalWritesStatusReportsTheBindingEngine proves gc status sees a
-// split city's binding engine. Without its row, require over a legacy binding
-// (no revision column, so every fenced session write refuses) reported active.
-func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
-	dir := t.TempDir()
-	opened, err := beads.OpenSQLiteStore(dir)
-	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
-	}
-	if err := opened.(interface{ CloseStore() error }).CloseStore(); err != nil {
-		t.Fatalf("CloseStore: %v", err)
-	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "beads.sqlite"))
+// rewriteToPreRevisionLayout rewrites the SQLite beads database at path to
+// the deployed pre-revision layout: no revision column, so the store refuses
+// every fenced write and applies no guarded batch.
+func rewriteToPreRevisionLayout(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("opening the database: %v", err)
 	}
@@ -355,6 +348,21 @@ func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("closing the database: %v", err)
 	}
+}
+
+// TestConditionalWritesStatusReportsTheBindingEngine proves gc status sees a
+// split city's binding engine. Without its row, require over a legacy binding
+// (no revision column, so every fenced session write refuses) reported active.
+func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	if err := opened.(interface{ CloseStore() error }).CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	rewriteToPreRevisionLayout(t, filepath.Join(dir, "beads.sqlite"))
 	legacy, err := beads.OpenSQLiteStore(dir)
 	if err != nil {
 		t.Fatalf("reopening the legacy layout: %v", err)

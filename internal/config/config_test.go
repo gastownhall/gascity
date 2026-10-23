@@ -1907,13 +1907,13 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Errorf("EffectiveWorkQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
 	}
 	for _, want := range []string{`.metadata`, `.[:1]`} {
@@ -1923,6 +1923,44 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
+	}
+}
+
+// TestEffectiveWorkQueryExcludesHumanLabeledRoutedWork: the routed (tier 3)
+// probe must hand bd's native human label to --exclude-label, so a bead parked
+// for a person is not served back to the agent it is routed to. The fake bd
+// plays the part of bd's own filter: it withholds the flagged row only when the
+// flag is present, and the clean row comes back either way, so a query that
+// stopped reaching the routed tier cannot pass this vacuously.
+func TestEffectiveWorkQueryExcludesHumanLabeledRoutedWork(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	bdScript := `#!/bin/sh
+set -eu
+case "$1" in
+  ready)
+    case "$*" in
+      *"gc.routed_to=hello-world/worker"*"--exclude-label human"*)
+        printf '[{"id":"ga-clean","metadata":{"gc.routed_to":"hello-world/worker"}}]'
+        ;;
+      *"gc.routed_to=hello-world/worker"*)
+        printf '[{"id":"ga-human-flagged","labels":["human"],"metadata":{"gc.routed_to":"hello-world/worker"}},{"id":"ga-clean","metadata":{"gc.routed_to":"hello-world/worker"}}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+	out := runEffectiveWorkQuery(t, a, nil, bdScript)
+	if strings.Contains(out, "ga-human-flagged") {
+		t.Fatalf("EffectiveWorkQuery() = %q, must withhold the human-labeled routed bead via --exclude-label human", out)
+	}
+	if !strings.Contains(out, "ga-clean") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want the unflagged routed bead served", out)
 	}
 }
 
@@ -1946,14 +1984,13 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 // contracts to this one. The served bytes stay pinned by the workquery
 // goldens.
 func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) {
-	blind := `"gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest`
 	mk := routedReadyTierCommand
 	for name, got := range map[string]string{
 		"default":   mk(QueryTopology{}),
 		"bd105":     mk(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}),
 		"federated": mk(QueryTopology{FederatedReady: true}),
 	} {
-		if strings.Contains(got, blind) {
+		if strings.Contains(got, "--sort") {
 			t.Errorf("%s: routed tier must serve the reader's canonical priority-first default order, not --sort oldest: %q", name, got)
 		}
 	}
@@ -1962,7 +1999,7 @@ func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) 
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
@@ -2005,6 +2042,45 @@ esac
 	demandOut := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, bdScript))
 	if demandOut == "0" {
 		t.Fatalf("EffectivePoolDemandQuery() = %q, want legacy ephemeral routed demand counted", demandOut)
+	}
+}
+
+// TestEffectiveWorkQueryLegacyEphemeralExcludesHumanLabeledRoutedWork: the
+// legacy ephemeral fallback filters in jq, because `bd query` has no
+// --exclude-label to lean on, so it must withhold a human-labeled wisp itself.
+// The unflagged wisp is the control: dropping both would not be exclusion.
+func TestEffectiveWorkQueryLegacyEphemeralExcludesHumanLabeledRoutedWork(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "foundations"}
+	bdScript := `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[]'
+    ;;
+  ready)
+    printf '[]'
+    ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=open"*)
+        printf '[{"id":"fo-human-wisp","issue_type":"task","status":"open","ephemeral":true,"created_at":"2026-05-01T00:00:00Z","labels":["human"],"metadata":{"gc.routed_to":"foundations/worker"}},{"id":"fo-clean-wisp","issue_type":"task","status":"open","ephemeral":true,"created_at":"2026-05-01T00:00:01Z","metadata":{"gc.routed_to":"foundations/worker"}}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+	out := runEffectiveWorkQuery(t, a, nil, bdScript)
+	if strings.Contains(out, "fo-human-wisp") {
+		t.Fatalf("EffectiveWorkQuery() = %q, legacy ephemeral fallback must exclude the human-labeled wisp", out)
+	}
+	if !strings.Contains(out, "fo-clean-wisp") {
+		t.Fatalf("EffectiveWorkQuery() = %q, legacy ephemeral fallback dropped the unflagged wisp too", out)
 	}
 }
 
@@ -2382,7 +2458,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeCanonicalSortAcrossReadyTiers(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
     printf '[{"id":"served-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
@@ -2431,7 +2507,7 @@ func TestEffectiveWorkQueryRoutedQueueRidesReaderPriorityOrder(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
     printf '[{"id":"newer-p0","priority":0,"created_at":"2026-05-21T06:09:30Z"},{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
     ;;
   *)
@@ -2513,7 +2589,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
 	wantPresent := []string{
 		// routed/pool tier still excludes epics (gc-udx guard)
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
+		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
 		`bd ready --assignee="$id" --json`,
@@ -2539,7 +2615,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
+		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json`,
 		`bd list --status in_progress --assignee="$cand" --json`,
 		`bd ready --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
@@ -2727,6 +2803,31 @@ esac
 `)
 	if strings.TrimSpace(out) != "2" {
 		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (routed_to demand)", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryDoesNotCountStructuralLatches(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	rows := `[
+{"id":"expanded","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}},
+{"id":"scope","metadata":{"gc.kind":"scope"}},
+{"id":"spec","metadata":{"gc.kind":"spec"}},
+{"id":"spaced","metadata":{"gc.kind":" workflow ","gc.workflow_expanded":" true "}},
+{"id":"root-only","metadata":{"gc.kind":"workflow"}},
+{"id":"worker"}
+]`
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), map[string]string{"DEMAND_ROWS": rows}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*) printf '%s\n' "$DEMAND_ROWS" ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("worker demand = %q, want 2 (worker and executable root-only workflow)", out)
 	}
 }
 
@@ -5706,7 +5807,73 @@ func TestMailConfigRetentionTTLDurationRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestMailConfigUnreadRetentionTTLDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "empty", raw: "", want: 0},
+		{name: "zero", raw: "0", want: 0},
+		{name: "hours", raw: "168h", want: 168 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (MailConfig{UnreadRetentionTTL: tt.raw}).UnreadRetentionTTLDuration()
+			if err != nil {
+				t.Fatalf("UnreadRetentionTTLDuration() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("UnreadRetentionTTLDuration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMailConfigUnreadRetentionTTLDurationRejectsInvalid(t *testing.T) {
+	for _, raw := range []string{"7d", "-1h"} {
+		_, err := (MailConfig{UnreadRetentionTTL: raw}).UnreadRetentionTTLDuration()
+		if err == nil {
+			t.Fatalf("UnreadRetentionTTLDuration(%q) succeeded, want error", raw)
+		}
+		if !strings.Contains(err.Error(), "[mail] unread_retention_ttl") || !strings.Contains(err.Error(), raw) {
+			t.Fatalf("UnreadRetentionTTLDuration(%q) error = %q, want field context and bad value", raw, err)
+		}
+	}
+}
+
+func TestMailConfigUnreadRetentionTTLParsesFromTOML(t *testing.T) {
+	cfg, err := Parse([]byte("[mail]\nunread_retention_ttl = \"168h\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Mail.UnreadRetentionTTL != "168h" {
+		t.Fatalf("Mail.UnreadRetentionTTL = %q, want 168h", cfg.Mail.UnreadRetentionTTL)
+	}
+	d, err := cfg.Mail.UnreadRetentionTTLDuration()
+	if err != nil || d != 168*time.Hour {
+		t.Fatalf("UnreadRetentionTTLDuration() = %v, %v; want 168h, nil", d, err)
+	}
+}
+
 // --- WispGC config tests ---
+
+// The work ladder is on unless [daemon] work_ladder says "off" (the
+// rollback to the three backstops), however it is spelled.
+func TestDaemonConfig_WorkLadderEnabled(t *testing.T) {
+	for raw, want := range map[string]bool{"": true, "on": true, "off": false, "OFF": false, "Off": false, "bogus": true} {
+		if got := (DaemonConfig{WorkLadder: raw}).WorkLadderEnabled(); got != want {
+			t.Errorf("work_ladder = %q: enabled %v, want %v", raw, got, want)
+		}
+	}
+	cfg, err := Parse([]byte("[workspace]\nname = \"c\"\n\n[daemon]\nwork_ladder = \"off\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.WorkLadderEnabled() {
+		t.Error(`[daemon] work_ladder = "off" parsed as enabled`)
+	}
+}
 
 func TestDaemonConfig_WispGCDisabledByDefault(t *testing.T) {
 	d := DaemonConfig{}

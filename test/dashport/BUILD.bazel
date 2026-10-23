@@ -1,3 +1,4 @@
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
@@ -18,6 +19,15 @@ go_test(
         "//internal/testenv",
         "//test/dashport/corpus",  # keep
     ],
+)
+
+# The seeded corpus the dashboard's Playwright render smoke serves through
+# //test/dashport/cmd/fakesupervisor (in the output tree, as rules_js wants
+# every data file of a js_test).
+copy_to_bin(
+    name = "corpus",
+    srcs = glob(["testdata/dashport/**"]),
+    visibility = ["//internal/api/dashboardspa/web/frontend:__pkg__"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

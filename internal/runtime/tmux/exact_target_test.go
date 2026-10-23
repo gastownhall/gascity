@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,12 +23,16 @@ var (
 )
 
 // scriptedTargetExecutor records argv and answers capture-pane from captures
-// (then capture), display-message with display, and everything else with "".
+// (then capture), display-message with display, an agent-pane list-panes
+// lookup with one unmarked row (pane @1.%1 for a target lookup, else
+// display; listPanes, when set, answers every list-panes by its format), and
+// everything else with "".
 type scriptedTargetExecutor struct {
-	calls    [][]string
-	captures []string
-	capture  string
-	display  string
+	calls     [][]string
+	captures  []string
+	capture   string
+	display   string
+	listPanes func(format string) string
 }
 
 func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
@@ -41,6 +46,19 @@ func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
 		}
 		return s.capture, nil
 	case slices.Contains(args, "display-message"):
+		return s.display, nil
+	case slices.Contains(args, "list-panes"):
+		format := args[len(args)-1]
+		if s.listPanes != nil {
+			return s.listPanes(format), nil
+		}
+		if strings.Contains(format, "#{window_id}.#{pane_id}") {
+			row, _ := fakeAgentPaneRow(args)
+			return row, nil
+		}
+		if strings.HasPrefix(format, agentPaneMarkerFormat+"\t") {
+			return "pane\t" + s.display, nil
+		}
 		return s.display, nil
 	}
 	return "", nil
@@ -72,6 +90,12 @@ func tmuxTargetArg(args []string) (string, bool) {
 	return args[i+1], true
 }
 
+// isFencedAgentPane reports whether target is an agentPaneTarget for name.
+func isFencedAgentPane(target, name string) bool {
+	rest, ok := strings.CutPrefix(target, "="+name+":@")
+	return ok && strings.Contains(rest, ".%")
+}
+
 // requireExactTargets fails on any session- or pane-kind command whose target
 // is not the exact form of name, and on any wanted subcommand that never ran.
 func requireExactTargets(t *testing.T, calls [][]string, name string, want ...string) {
@@ -88,9 +112,15 @@ func requireExactTargets(t *testing.T, calls [][]string, name string, want ...st
 			if target != "="+name {
 				t.Errorf("%s -t %q, want %q; argv=%q", sub, target, "="+name, call)
 			}
+		case sub == "respawn-pane" || sub == "clear-history":
+			// Agent-pane writes take the looked-up pane, fenced to the
+			// session and window it was found in.
+			if !isFencedAgentPane(target, name) {
+				t.Errorf("%s -t %q, want %q; argv=%q", sub, target, "="+name+":@<w>.%<p>", call)
+			}
 		case slices.Contains(exactPaneCommands, sub):
-			if target != "="+name+":" && target != "="+name+":^.0" {
-				t.Errorf("%s -t %q, want %q or %q; argv=%q", sub, target, "="+name+":", "="+name+":^.0", call)
+			if target != "="+name+":" && !isFencedAgentPane(target, name) {
+				t.Errorf("%s -t %q, want %q or %q; argv=%q", sub, target, "="+name+":", "="+name+":@<w>.%<p>", call)
 			}
 		default:
 			continue
@@ -122,8 +152,8 @@ func TestKillSessionTargetsExactSession(t *testing.T) {
 }
 
 // The tmux 3.4 answers for a vanished worker-1 beside a live worker-10: the
-// exact kill-plan probe expands to nothing and the exact kill-session cannot
-// find the session. Stop stays idempotent and never names a bare target.
+// exact kill-plan probe lists no pane and the exact kill-session cannot find
+// the session. Stop stays idempotent and never names a bare target.
 func TestStopOnVanishedSessionNeverTargetsByPrefix(t *testing.T) {
 	fe := &fakeExecutor{
 		outs: []string{"", ""},
@@ -135,7 +165,7 @@ func TestStopOnVanishedSessionNeverTargetsByPrefix(t *testing.T) {
 		t.Fatalf("Stop on a vanished session = %v, want nil", err)
 	}
 	want := [][]string{
-		{"-u", "display-message", "-t", "=worker-1:^.0", "-p", "#{pane_pid}\t#{pane_dead}"},
+		{"-u", "list-panes", "-s", "-t", "=worker-1:", "-F", agentPaneMarkerFormat + "\t#{pane_pid}\t#{pane_dead}"},
 		{"-u", "kill-session", "-t", "=worker-1"},
 	}
 	if len(fe.calls) != len(want) {
@@ -150,12 +180,12 @@ func TestStopOnVanishedSessionNeverTargetsByPrefix(t *testing.T) {
 
 func TestPaneTargetKeepsPaneIDsAndQualifiedTargets(t *testing.T) {
 	cases := []struct {
-		in, session, pane, primary string
+		in, session, pane string
 	}{
-		{"worker-1", "=worker-1", "=worker-1:", "=worker-1:^.0"},
-		{"%12", "%12", "%12", "%12"},
-		{"s:1.0", "s:1.0", "s:1.0", "s:1.0:^.0"},
-		{"=worker-1", "=worker-1", "=worker-1", "=worker-1:^.0"},
+		{"worker-1", "=worker-1", "=worker-1:"},
+		{"%12", "%12", "%12"},
+		{"s:1.0", "s:1.0", "s:1.0"},
+		{"=worker-1", "=worker-1", "=worker-1"},
 	}
 	for _, tc := range cases {
 		if got := sessionTarget(tc.in); got != tc.session {
@@ -163,9 +193,6 @@ func TestPaneTargetKeepsPaneIDsAndQualifiedTargets(t *testing.T) {
 		}
 		if got := paneTarget(tc.in); got != tc.pane {
 			t.Errorf("paneTarget(%q) = %q, want %q", tc.in, got, tc.pane)
-		}
-		if got := primaryPaneTarget(tc.in); got != tc.primary {
-			t.Errorf("primaryPaneTarget(%q) = %q, want %q", tc.in, got, tc.primary)
 		}
 	}
 }
@@ -259,19 +286,19 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 		{
 			"sendLiteralText",
 			scriptedTargetExecutor{},
-			func(tm *Tmux) { _ = tm.sendLiteralText("worker-1", "hi") },
+			func(tm *Tmux) { _ = tm.sendLiteralText(context.Background(), "worker-1", "hi") },
 			[]string{"send-keys"},
 		},
 		{
 			"pasteLiteralText",
 			scriptedTargetExecutor{},
-			func(tm *Tmux) { _ = tm.pasteLiteralText("worker-1", "hi") },
+			func(tm *Tmux) { _ = tm.pasteLiteralText(context.Background(), "worker-1", "hi") },
 			[]string{"paste-buffer"},
 		},
 		{
 			"sendNudgeSubmitSequence",
 			scriptedTargetExecutor{},
-			func(tm *Tmux) { _ = tm.sendNudgeSubmitSequence("worker-1", []string{"Enter"}) },
+			func(tm *Tmux) { _ = tm.sendNudgeSubmitSequence(context.Background(), "worker-1", []string{"Enter"}) },
 			[]string{"send-keys"},
 		},
 		{
@@ -289,7 +316,7 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 		{
 			"dismissMidSessionDialogBeforeNudge",
 			scriptedTargetExecutor{captures: []string{resumeDialogPane}},
-			func(tm *Tmux) { tm.dismissMidSessionDialogBeforeNudge("worker-1") },
+			func(tm *Tmux) { tm.dismissMidSessionDialogBeforeNudge(context.Background(), "worker-1") },
 			[]string{"capture-pane", "send-keys"},
 		},
 		{
@@ -350,18 +377,16 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 		run     func(*Tmux)
 		wantSub string
 	}{
-		{"GetPaneCommand", "claude", func(tm *Tmux) { _, _ = tm.GetPaneCommand("worker-1") }, "display-message"},
-		{"GetPaneID", "%1", func(tm *Tmux) { _, _ = tm.GetPaneID("worker-1") }, "display-message"},
-		{"GetPaneWorkDir", "/w", func(tm *Tmux) { _, _ = tm.GetPaneWorkDir("worker-1") }, "display-message"},
-		{"GetPanePID", "42", func(tm *Tmux) { _, _ = tm.GetPanePID("worker-1") }, "display-message"},
-		{"IsPaneDead", "0", func(tm *Tmux) { _, _ = tm.IsPaneDead("worker-1") }, "display-message"},
-		{"PaneDeadInfo", "0|", func(tm *Tmux) { _, _ = tm.PaneDeadInfo("worker-1") }, "display-message"},
+		{"GetPaneCommand", "claude", func(tm *Tmux) { _, _ = tm.GetPaneCommand("worker-1") }, "list-panes"},
+		{"GetPaneWorkDir", "/w", func(tm *Tmux) { _, _ = tm.GetPaneWorkDir("worker-1") }, "list-panes"},
+		{"GetPanePID", "42", func(tm *Tmux) { _, _ = tm.GetPanePID("worker-1") }, "list-panes"},
+		{"IsPaneDead", "0", func(tm *Tmux) { _, _ = tm.IsPaneDead("worker-1") }, "list-panes"},
+		{"PaneDeadInfo", "0|", func(tm *Tmux) { _, _ = tm.PaneDeadInfo("worker-1") }, "list-panes"},
 		{"IsSessionAttached", "1", func(tm *Tmux) { _ = tm.IsSessionAttached("worker-1") }, "display-message"},
 		{"GetSessionCreatedUnix", "1", func(tm *Tmux) { _, _ = tm.GetSessionCreatedUnix("worker-1") }, "display-message"},
-		{"FindAgentPane", "", func(tm *Tmux) { _, _ = tm.FindAgentPane("worker-1") }, "list-panes"},
+		{"agentInputTarget", "", func(tm *Tmux) { _, _ = tm.agentInputTarget("worker-1") }, "list-panes"},
 		{"CapturePane", "", func(tm *Tmux) { _, _ = tm.CapturePane("worker-1", 5) }, "capture-pane"},
-		{"RespawnPane", "", func(tm *Tmux) { _ = tm.RespawnPane("worker-1", "true") }, "respawn-pane"},
-		{"RespawnPaneWithWorkDir", "", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "respawn-pane"},
+		{"RespawnPaneWithWorkDir", "%1", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "respawn-pane"},
 		{"ClearHistory", "", func(tm *Tmux) { _ = tm.ClearHistory("worker-1") }, "clear-history"},
 	}
 	for _, tc := range cases {
@@ -370,6 +395,15 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 			tc.run(&Tmux{cfg: DefaultConfig(), exec: ex})
 			requireExactTargets(t, ex.calls, "worker-1", tc.wantSub)
 		})
+	}
+}
+
+// A fenced agent-pane target whose window vanished between the lookup and the
+// write is a missing session to every best-effort caller.
+func TestWrapErrorMapsMissingWindow(t *testing.T) {
+	err := wrapError(errors.New("exit status 1"), "can't find window: @4", []string{"send-keys"})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("wrapError(can't find window) = %v, want ErrSessionNotFound", err)
 	}
 }
 

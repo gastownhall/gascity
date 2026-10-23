@@ -10,11 +10,16 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
-// requireOasdiff returns the oasdiff binary. Local runs without it skip; the
-// spec-ci lane sets GC_REQUIRE_OASDIFF=1 so the gate's end-to-end proof can
-// never silently skip in CI.
+// requireOasdiff returns the oasdiff binary: under Bazel the pinned
+// release archive the target declares (GC_TEST_OASDIFF_BIN), else $OASDIFF
+// or oasdiff on PATH. Local runs without one skip; the Bazel target and
+// `make openapi-breaking-check-go` set GC_REQUIRE_OASDIFF=1 so the gate's
+// end-to-end proof can never silently skip in CI.
 func requireOasdiff(t *testing.T) string {
 	t.Helper()
+	if bin := bazeltest.DataPath(t, "GC_TEST_OASDIFF_BIN"); bin != "" {
+		return bin
+	}
 	bin, err := resolveOasdiff("")
 	if err != nil {
 		if os.Getenv("GC_REQUIRE_OASDIFF") == "1" {

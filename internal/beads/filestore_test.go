@@ -164,7 +164,7 @@ func TestFileStoreIDPrefixOnExistingStore(t *testing.T) {
 }
 
 func TestFileStore(t *testing.T) {
-	factory := func() beads.Store {
+	open := func(t *testing.T) beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")
 		s, err := beads.OpenFileStore(fsys.OSFS{}, path)
 		if err != nil {
@@ -172,12 +172,14 @@ func TestFileStore(t *testing.T) {
 		}
 		return s
 	}
+	factory := func() beads.Store { return open(t) }
 	beadstest.RunStoreTests(t, factory)
 	beadstest.RunSequentialIDTests(t, factory)
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
 	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseNotificationTests(t, open)
 	beadstest.RunCloseReasonAfterReopenTests(t, factory)
 	beadstest.RunFenceConformance(t, factory)
 }
@@ -2154,4 +2156,14 @@ func TestFileStoreRevisionContinuityAcrossDowngradeRewrite(t *testing.T) {
 	if again.Revision != reloaded.Revision {
 		t.Fatalf("re-seed not deterministic: %d then %d", reloaded.Revision, again.Revision)
 	}
+}
+
+func TestFileStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "FileStore", func(st *testing.T) beads.Store {
+		s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(st.TempDir(), "beads.json"))
+		if err != nil {
+			st.Fatal(err)
+		}
+		return s
+	})
 }

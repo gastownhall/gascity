@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
@@ -26,7 +28,7 @@ func validSessionObjectID(id string) bool {
 
 // ServerConfirmedDead reports whether this provider's tmux server is
 // confirmed dead: its socket is missing, or refuses connections on a stable
-// inode, and the kernel lists no listener bound to the socket path. The last
+// inode, and the kernel lists no socket bound to the socket path. The last
 // check refuses a live server whose socket file was unlinked, which the
 // socket check alone reads as dead. It implements
 // [runtime.ServerDeathConfirmer] for v2 only; legacy's serverConfirmedDead
@@ -43,28 +45,60 @@ func (p *Provider) ServerConfirmedDead() bool {
 	return err == nil && !listening
 }
 
-// unixPathListening reports whether the kernel lists a listening unix socket
-// bound to path (or to path under its resolved directory) in /proc/net/unix,
-// which keeps a bound path after the file is unlinked. Off Linux there is no
-// such table and it reports false; on Linux an unreadable table is an error.
+// unixPathListening reports whether the kernel lists a unix socket bound to
+// path (or to path under its resolved ancestors). Both tables keep a bound
+// path after the file is unlinked: /proc/net/unix on Linux, where it counts
+// only listeners, and lsof's bound addresses on macOS. Any other platform has
+// no table and errors, so its server is never confirmed dead.
 func unixPathListening(path string) (bool, error) {
-	table, err := os.ReadFile("/proc/net/unix")
-	if err != nil {
-		if goruntime.GOOS != "linux" && errors.Is(err, os.ErrNotExist) {
-			return false, nil
+	paths := unixSocketPathCandidates(path)
+	var listed func(path string) bool
+	switch goruntime.GOOS {
+	case "linux":
+		table, err := os.ReadFile("/proc/net/unix")
+		if err != nil {
+			return false, err
 		}
-		return false, err
-	}
-	paths := []string{path}
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-		paths = append(paths, filepath.Join(dir, filepath.Base(path)))
+		listed = func(path string) bool { return procNetUnixListening(string(table), path) }
+	case "darwin":
+		for _, candidate := range paths {
+			if !lsofPrintsVerbatim(candidate) {
+				return false, fmt.Errorf("socket path %q has bytes lsof escapes", candidate)
+			}
+		}
+		out, err := lsofUnixSockets()
+		if err != nil {
+			return false, err
+		}
+		listed = func(path string) bool { return lsofUnixBound(out, path) }
+	default:
+		return false, fmt.Errorf("no unix socket table on %s", goruntime.GOOS)
 	}
 	for _, candidate := range paths {
-		if procNetUnixListening(string(table), candidate) {
+		if listed(candidate) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// unixSocketPathCandidates returns path and the same path rejoined under its
+// longest existing ancestor with symlinks resolved. tmux binds its socket
+// under the resolved directory (/private/tmp for /tmp on macOS), and a
+// removed socket directory still has a resolvable parent.
+func unixSocketPathCandidates(path string) []string {
+	paths := []string{path}
+	dir, tail := filepath.Dir(path), filepath.Base(path)
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return append(paths, filepath.Join(resolved, tail))
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return paths
+		}
+		dir, tail = parent, filepath.Join(filepath.Base(dir), tail)
+	}
 }
 
 // procNetUnixListening reports whether a /proc/net/unix table ("Num RefCount
@@ -83,15 +117,72 @@ func procNetUnixListening(table, path string) bool {
 	return false
 }
 
+// lsofUnixSocketsTimeout bounds lsof's scan of every process it can read.
+const lsofUnixSocketsTimeout = 10 * time.Second
+
+// lsofUnixSockets returns lsof's field output ("n<name>" lines) for every
+// unix socket it can read: the caller's own processes, which include any
+// tmux server on the caller's sockets.
+func lsofUnixSockets() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), lsofUnixSocketsTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "lsof", "-w", "-U", "-Fn")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	return lsofAnswer(out, stderr.String(), err)
+}
+
+// lsofAnswer reads an lsof run. With no search argument lsof exits 0 even
+// when it selects nothing, so any failure, a timeout's kill included, is an
+// error.
+func lsofAnswer(out []byte, stderr string, err error) (string, error) {
+	if err != nil {
+		return "", fmt.Errorf("lsof -U: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return string(out), nil
+}
+
+// lsofPrintsVerbatim reports whether lsof prints path unchanged: it escapes
+// a backslash, control bytes and bytes from 0x80, so such a path would never
+// match its own listing.
+func lsofPrintsVerbatim(path string) bool {
+	for i := 0; i < len(path); i++ {
+		if c := path[i]; c == '\\' || c < 0x20 || c >= 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// lsofUnixBound reports whether lsof field output names a unix socket bound
+// to path. On macOS the name is the address the kernel holds for the socket,
+// not a file lookup: a server's listener and its accepted connections keep
+// it after the file is unlinked, while a client's socket names its peer
+// ("->0x...") instead.
+func lsofUnixBound(out, path string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if line == "n"+path {
+			return true
+		}
+	}
+	return false
+}
+
 // ObserveLivenessSince is ObserveLivenessWithError over a snapshot whose
 // fetch started at or after since, on the cache clock (v5 O1 "fresh for the
 // effect"). It reuses a new enough snapshot, refreshes otherwise, and never
-// invalidates the cache. A refresh that fails for a missing server answers
-// absent only when [Provider.ServerConfirmedDead] says so; any other failure
-// is unknown. A running session with exactly one live pane also reports that
-// pane's pid, for a zombie kill.
+// invalidates the cache. A name that a presence-only listing taken at or
+// after since does not hold reads absent without a refresh and its full-OS
+// process scan (StateCache.absentSince). A refresh that fails for a missing
+// server answers absent only when [Provider.ServerConfirmedDead] says so; any
+// other failure is unknown. A running session with exactly one live pane also
+// reports that pane's pid, for a zombie kill.
 func (p *Provider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
 	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	if p.cache.absentSince(name, since) {
 		return runtime.Liveness{}, nil
 	}
 	obs, ok := p.cache.observeSince(since)
@@ -109,22 +200,24 @@ func (p *Provider) ObserveLivenessSince(name string, processNames []string, sinc
 }
 
 // KillCorpseObject implements [runtime.SessionObjectKiller]: it kills
-// objectID only while that session was created at created, is named name and
-// has one window with one pane, and that pane is dead, checked by tmux in the
-// same command as the kill. #{pane_dead} reads only the active pane, so a
-// second pane, which may be live, refuses.
+// objectID only while that session was created at created, is named name,
+// has no client attached and has one window with one pane, and that pane is
+// dead, checked by tmux in the same command as the kill. #{pane_dead} reads
+// only the active pane, so a second pane, which may be live, refuses.
 func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
 	if err := validateSessionObject(name, objectID, created); err != nil {
 		return runtime.SessionObjectNotKilled, err
 	}
-	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}", created, name)
+	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_attached},0},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}}", created, name)
 	return p.killSessionObject(name, objectID, created, cond, runtime.SessionObjectLive)
 }
 
 // KillZombieObject implements [runtime.SessionObjectKiller]: it kills
-// objectID only while that session was created at created, is named name and
-// has one window with one live pane whose pid is panePID, checked by tmux in
-// the same command as the kill.
+// objectID only while that session was created at created, is named name,
+// has no client attached and has one window with one live pane whose pid is
+// panePID, checked by tmux in the same command as the kill. The caller's
+// attach check is an earlier read: a human who attaches after it must still
+// keep the session (J17).
 func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
 	if err := validateSessionObject(name, objectID, created); err != nil {
 		return runtime.SessionObjectNotKilled, err
@@ -132,7 +225,7 @@ func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (ru
 	if !decimalRe.MatchString(panePID) {
 		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: pane pid %q must be decimal", runtime.ErrInvalidSessionObject, panePID)
 	}
-	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{&&:#{!=:#{pane_dead},1},#{==:#{pane_pid},%s}}}}}}", created, name, panePID)
+	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_attached},0},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{&&:#{!=:#{pane_dead},1},#{==:#{pane_pid},%s}}}}}}}", created, name, panePID)
 	return p.killSessionObject(name, objectID, created, cond, runtime.SessionObjectChanged)
 }
 

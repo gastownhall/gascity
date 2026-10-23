@@ -11,6 +11,10 @@
 # TestRedactProgramKeepsEveryDecodedField fails when bep.go reads a field
 # this program drops.
 #
+# Of targetCompleted events only the validation aspect's failures are kept
+# (test:ci's --experimental_use_validation_aspect: a target whose nogo
+# validation failed while its tests passed); //... has one success per target.
+#
 # Input is read as raw lines (-R): a line that is not a JSON object (an
 # interrupted Bazel leaves a partial last event) becomes the JSON string
 # "unparsable BEP line", which the summary cannot decode either, so a bad
@@ -24,9 +28,15 @@ def testid: keep({label, run, shard, attempt, configuration: (.configuration | k
 
 try (
   fromjson
-  | select(.started or .testResult or .testSummary or .buildMetrics.actionSummary or .finished)
+  | select(.started or .testResult or .testSummary or .buildMetrics.actionSummary or .finished
+      or (.id.targetCompleted.aspect == "ValidateTarget" and .completed.success != true))
   | {
-      id: ({testResult: (.id.testResult | testid), testSummary: (.id.testSummary | testid)} | present),
+      id: ({
+        testResult: (.id.testResult | testid),
+        testSummary: (.id.testSummary | testid),
+        targetCompleted: (.id.targetCompleted | keep({label, aspect}))
+      } | present),
+      completed: (if .id.targetCompleted then (.completed // {} | keep({success})) else null end),
       started: (.started | keep({uuid, command, buildToolVersion, startTime})),
       testResult: (.testResult | keep({
         status,

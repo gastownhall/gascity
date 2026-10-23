@@ -123,9 +123,11 @@ Start with the parts you are already repeating.
 
 ## Turn repeated operations into pack commands
 
-A pack command is a directory under `commands/` holding a `command.toml`
-(its description and help) plus a script the orchestrator runs. The command
-surfaces as a top-level `gc` subcommand named after the directory:
+A pack command is a directory under `commands/` holding a `run.sh` script
+plus an optional `command.toml` (its description). The command surfaces under
+the name the city imports the pack as — a pack imported with
+`[imports.team]` gets `gc team <command>`; a city's own root pack uses its
+`[pack].name`:
 
 ```toml
 # commands/release-branches/command.toml
@@ -133,7 +135,7 @@ description = "Show me the active release branches"
 ```
 
 ```sh
-# commands/release-branches/run.sh — runs as: gc release-branches
+# commands/release-branches/run.sh — runs as: gc team release-branches
 set -e
 git for-each-ref --sort=-committerdate \
   --format='%(refname:short)' 'refs/remotes/origin/release/*'

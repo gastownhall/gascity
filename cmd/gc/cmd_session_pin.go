@@ -133,17 +133,13 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		}
 	}
 
-	value := ""
-	if pinned {
-		value = "true"
-	}
 	if !materializedForPin {
-		if err := sessionFrontDoor(sessStore).SetMarker(id, "pin_awake", value); err != nil {
+		if err := sessionFrontDoor(sessStore).SetPinAwake(id, pinned); err != nil {
 			fmt.Fprintf(stderr, "gc session %s: updating metadata: %v\n", action, err) //nolint:errcheck
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath, id)
+	pokeSessionPinController(cityErr, cityPath, id, "gc session "+action, stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -165,9 +161,13 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-func pokeSessionPinController(cityErr error, cityPath, sessionID string) {
+// pokeSessionPinController asks a managed city's controller to reconcile the
+// session after its pin changed. A failed poke is silent, since the pin is
+// recorded and the next reconcile reads it; on a worker site, where no poke
+// finds a controller, it prints the noteWorkerSitePoke notice.
+func pokeSessionPinController(cityErr error, cityPath, sessionID, command string, stderr io.Writer) {
 	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
 		return
 	}
-	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+	noteWorkerSitePoke(stderr, command, enqueueController(cityPath, reconcilekey.Session(sessionID)))
 }

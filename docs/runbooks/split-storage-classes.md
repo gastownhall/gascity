@@ -311,10 +311,15 @@ one ledger `bd` resolves from the working directory, and takes no selector that
 could reach the binding, so its answer is the work-class subset of the city's
 ready set and nothing distinguishes that from the whole of it.
 
-Use `gc ready` instead. It federates the city store, the rig stores and the
-binding, and exits non-zero naming the leg it could not read rather than
-returning a short array. Every worker's generated work query is already swapped
-onto it, so this affects operators and ad-hoc scripts, not the work loop.
+Use `gc ready` instead. It federates the city store, the binding and the store
+of every rig that is not suspended, and exits non-zero naming the leg it could
+not read rather than returning a short array. A rig suspended with
+`gc rig suspend`, or declared `suspended_on_start` and not resumed, is skipped
+just as the controller skips it: what its own store holds comes back on
+`gc rig resume`, and routed graph work in the binding stays visible throughout
+(see [`gc ready`](/reference/cli#gc-ready)). Every worker's generated work query
+is already swapped onto it, so this affects operators and ad-hoc scripts, not
+the work loop.
 
 `gc ready` is flag-compatible with the `bd ready` invocation that generated work
 query builds — **not** with all of `bd ready`. It takes `--assignee`,

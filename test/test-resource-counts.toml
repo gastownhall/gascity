@@ -1,0 +1,3338 @@
+# GENERATED FILE - DO NOT EDIT BY HAND.
+# Per-file counts for the P0.4 source resource census (owner: ga-cp3hwi).
+# Regenerate: GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
+version = 1
+
+[[count]]
+path = "cmd/gc-write-mint/e2e_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/api_state_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/api_state_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/bd_env_test.go"
+resource = "environment"
+calls = 68
+
+[[count]]
+path = "cmd/gc/bd_env_test.go"
+resource = "net_listen"
+calls = 8
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_test.go"
+resource = "environment"
+calls = 14
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_test.go"
+resource = "fixed_sleep"
+calls = 6
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_test.go"
+resource = "slow_process_gate"
+calls = 12
+medium = 1
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_test.go"
+resource = "subprocess"
+calls = 56
+medium = 8
+
+[[count]]
+path = "cmd/gc/beads_provider_ready_topology_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "cmd/gc/beads_provider_script_scope_lifecycle_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/beads_proxied_idle_timeout_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/beads_quiescence_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/build_desired_state_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/build_desired_state_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/capstone_e2e_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/capstone_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/charharness_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/city_registry_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/city_runtime_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "cmd/gc/city_runtime_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/city_status_snapshot_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/city_status_snapshot_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cityinit_impl_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_analyze_reliability_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_bd_test.go"
+resource = "environment"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_bd_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_beads_city_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_beads_city_test.go"
+resource = "slow_process_gate"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_beads_test.go"
+resource = "http_test_server"
+calls = 8
+
+[[count]]
+path = "cmd/gc/cmd_citystatus_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_citystatus_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_commands_test.go"
+resource = "cwd"
+calls = 64
+
+[[count]]
+path = "cmd/gc/cmd_commands_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_convoy_dispatch_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_convoy_dispatch_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_convoy_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_convoy_test.go"
+resource = "http_test_server"
+calls = 8
+
+[[count]]
+path = "cmd/gc/cmd_doctor_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_dolt_state_test.go"
+resource = "fixed_sleep"
+calls = 9
+
+[[count]]
+path = "cmd/gc/cmd_dolt_state_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_dolt_state_test.go"
+resource = "slow_process_gate"
+calls = 5
+
+[[count]]
+path = "cmd/gc/cmd_dolt_state_test.go"
+resource = "subprocess"
+calls = 6
+
+[[count]]
+path = "cmd/gc/cmd_event_emit_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_events_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_formula_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_handoff_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_handoff_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_hook_test.go"
+resource = "cwd"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_import_test.go"
+resource = "cwd"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_import_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_login_test.go"
+resource = "http_test_server"
+calls = 5
+
+[[count]]
+path = "cmd/gc/cmd_mail_test.go"
+resource = "environment"
+calls = 12
+
+[[count]]
+path = "cmd/gc/cmd_mail_test.go"
+resource = "http_test_server"
+calls = 16
+
+[[count]]
+path = "cmd/gc/cmd_maintenance_test.go"
+resource = "http_test_server"
+calls = 6
+
+[[count]]
+path = "cmd/gc/cmd_nudge_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_nudge_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_order_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_order_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_order_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_pack_commands_test.go"
+resource = "cwd"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_pack_release_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_prime_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_prompt_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_registry_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_registry_test.go"
+resource = "http_test_server"
+calls = 22
+
+[[count]]
+path = "cmd/gc/cmd_registry_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_registry_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_reload_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_reload_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_reload_test.go"
+resource = "listener_helper"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_reload_test.go"
+resource = "slow_process_gate"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_rig_endpoint_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_rig_endpoint_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_rig_test.go"
+resource = "http_test_server"
+calls = 5
+
+[[count]]
+path = "cmd/gc/cmd_rig_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_runtime_drain_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_session_logs_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_session_reset_test.go"
+resource = "listener_helper"
+calls = 5
+
+[[count]]
+path = "cmd/gc/cmd_session_reset_test.go"
+resource = "net_listen"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_session_test.go"
+resource = "http_test_server"
+calls = 5
+
+[[count]]
+path = "cmd/gc/cmd_session_test.go"
+resource = "net_listen"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_session_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_session_test.go"
+resource = "tmux"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_session_wake_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_sling_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_sling_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_sling_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_sling_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_start_drift_bench_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_start_drift_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_start_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "cmd/gc/cmd_status_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_stop_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_stop_test.go"
+resource = "listener_helper"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_stop_test.go"
+resource = "net_listen"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_stop_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_city_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_city_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_city_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_lifecycle_actor_test.go"
+resource = "environment"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_portcollision_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_portcollision_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_processgroup_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_sdnotify_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_sdnotify_test.go"
+resource = "listener_helper"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_sdnotify_test.go"
+resource = "net_listen_packet"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_started_event_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_started_event_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_status_json_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_test.go"
+resource = "cwd"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_test.go"
+resource = "listener_helper"
+calls = 11
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_test.go"
+resource = "net_listen"
+calls = 7
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/cmd_wait_partial_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_wait_test.go"
+resource = "http_test_server"
+calls = 6
+
+[[count]]
+path = "cmd/gc/cmd_wait_test.go"
+resource = "slow_process_gate"
+calls = 3
+
+[[count]]
+path = "cmd/gc/cmd_wait_test.go"
+resource = "subprocess"
+calls = 7
+
+[[count]]
+path = "cmd/gc/controller_test.go"
+resource = "fixed_sleep"
+calls = 14
+
+[[count]]
+path = "cmd/gc/controller_test.go"
+resource = "listener_helper"
+calls = 5
+
+[[count]]
+path = "cmd/gc/controller_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/controller_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/dolt_data_dir_lock_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_init_wait_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_lifecycle_race_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_lifecycle_race_test.go"
+resource = "slow_process_gate"
+calls = 3
+
+[[count]]
+path = "cmd/gc/dolt_lifecycle_race_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_preflight_cleanup_test.go"
+resource = "net_listen"
+calls = 4
+
+[[count]]
+path = "cmd/gc/dolt_preflight_cleanup_test.go"
+resource = "syscall_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_project_id_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_project_id_test.go"
+resource = "slow_process_gate"
+calls = 3
+
+[[count]]
+path = "cmd/gc/dolt_project_id_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_runtime_test_helpers_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_runtime_test_helpers_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_runtime_test_helpers_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_scope_watchdog_test.go"
+resource = "fixed_sleep"
+calls = 6
+
+[[count]]
+path = "cmd/gc/dolt_scope_watchdog_test.go"
+resource = "subprocess"
+calls = 5
+
+[[count]]
+path = "cmd/gc/dolt_standalone_conflict_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_standalone_conflict_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_start_address_in_use_retry_window_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_start_address_in_use_retry_window_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_start_address_in_use_retry_window_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_start_managed_test.go"
+resource = "fixed_sleep"
+calls = 9
+
+[[count]]
+path = "cmd/gc/dolt_start_managed_test.go"
+resource = "subprocess"
+calls = 12
+
+[[count]]
+path = "cmd/gc/drift_client_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "cmd/gc/drift_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/embed_builtin_packs_test.go"
+resource = "subprocess"
+calls = 5
+
+[[count]]
+path = "cmd/gc/fast_loop_helpers_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/fast_loop_helpers_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/fast_loop_helpers_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "cmd/gc/fast_loop_helpers_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_bind_host_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_force_reinit_guard_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_identity_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_journal_recovery_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_server_reachable_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/gitignore_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/hangbudget_helpers_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/hook_claim_sigpipe_unwind_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/hosted_beads_gateway_test.go"
+resource = "environment"
+calls = 3
+
+[[count]]
+path = "cmd/gc/init_provider_readiness_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/init_provider_readiness_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/jsonl_archive_doctor_check_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/live_submit_probe_test.go"
+resource = "fixed_sleep"
+calls = 5
+tagged = true
+
+[[count]]
+path = "cmd/gc/live_submit_probe_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "cmd/gc/main_test.go"
+resource = "cwd"
+calls = 62
+
+[[count]]
+path = "cmd/gc/main_test.go"
+resource = "environment"
+calls = 6
+medium = 5
+
+[[count]]
+path = "cmd/gc/main_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/main_test.go"
+resource = "tmux"
+calls = 1
+medium = 1
+
+[[count]]
+path = "cmd/gc/management_json_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/metrics_lifecycle_test.go"
+resource = "cwd"
+calls = 6
+
+[[count]]
+path = "cmd/gc/module_scan_nested_worktree_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/native_dolt_rebind_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/nudge_dispatcher_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/nudge_dispatcher_test.go"
+resource = "listener_helper"
+calls = 4
+
+[[count]]
+path = "cmd/gc/op_record_content_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "cmd/gc/op_record_verbs_matrix_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/order_dispatch_close_race_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/order_dispatch_gate_policy_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "cmd/gc/order_dispatch_gate_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/order_dispatch_test.go"
+resource = "environment"
+calls = 6
+
+[[count]]
+path = "cmd/gc/order_dispatch_test.go"
+resource = "fixed_sleep"
+calls = 5
+
+[[count]]
+path = "cmd/gc/order_dispatch_test.go"
+resource = "net_listen"
+calls = 6
+
+[[count]]
+path = "cmd/gc/order_dispatch_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/order_dynamic_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/order_dynamic_integration_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/path_helpers_test.go"
+resource = "fixed_sleep"
+calls = 5
+
+[[count]]
+path = "cmd/gc/path_helpers_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/path_helpers_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/phase2_real_transport_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "cmd/gc/pool_hook_processgroup_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/pool_test.go"
+resource = "slow_process_gate"
+calls = 3
+
+[[count]]
+path = "cmd/gc/pool_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/prime_prompt_budget_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/proc_environ_settled_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/productmetrics_child_env_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "cmd/gc/productmetrics_controls_process_testhook_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "cmd/gc/productmetrics_direct_child_env_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/productmetrics_private_process_testhook_test.go"
+resource = "subprocess"
+calls = 5
+tagged = true
+
+[[count]]
+path = "cmd/gc/productmetrics_service_child_env_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/provider_factory_e2c1_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/provider_factory_e2c2_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/provider_factory_e2c3_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/provider_store_resolution_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/ready_work_api_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/reconcile_effect_recycle_tmux_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/remote_client_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/rig_anywhere_test.go"
+resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/rig_remote_test.go"
+resource = "http_test_server"
+calls = 7
+
+[[count]]
+path = "cmd/gc/root_argv_test.go"
+resource = "cwd"
+calls = 6
+
+[[count]]
+path = "cmd/gc/runtime_lease_crossproc_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "cmd/gc/scoped_store_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/scoped_store_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/script_resolve_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/session_lifecycle_chaos_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/session_lifecycle_parallel_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/session_model_phase0_hook_spec_test.go"
+resource = "cwd"
+calls = 6
+
+[[count]]
+path = "cmd/gc/session_model_phase2_pin_spec_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/session_reconciler_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/session_sleep_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/sling_dashboard_link_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/sling_dashboard_link_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "cmd/gc/sling_dashboard_link_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/sling_remote_test.go"
+resource = "http_test_server"
+calls = 6
+
+[[count]]
+path = "cmd/gc/status_provider_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/supervisor_log_rotation_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/supervisor_log_rotation_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "cmd/gc/supervisor_systemd_delegate_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "cmd/gc/telemetry_lifecycle_metrics_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "cmd/gc/template_resolve_workdir_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/test_gc_binary_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/test_orphan_sweep_branches_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/test_orphan_sweep_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/testenv_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/tmux_leak_guard_check_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/tmux_leak_guard_check_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "cmd/gc/tmux_leak_guard_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/work_query_probe_test.go"
+resource = "environment"
+calls = 2
+
+[[count]]
+path = "cmd/gc/worker_handle_test.go"
+resource = "slow_process_gate"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/backup_order_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/backup_order_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/cleanup_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/compact_real_dolt_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "examples/bd/dolt/compact_real_dolt_test.go"
+resource = "subprocess"
+calls = 5
+tagged = true
+
+[[count]]
+path = "examples/bd/dolt/doctor_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/dog_exec_scripts_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/dog_exec_scripts_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "examples/bd/dolt/health_order_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/health_test.go"
+resource = "net_listen"
+calls = 10
+
+[[count]]
+path = "examples/bd/dolt/health_test.go"
+resource = "net_listen_config"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/health_test.go"
+resource = "subprocess"
+calls = 20
+
+[[count]]
+path = "examples/bd/dolt/logs_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/port_resolve_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/proxied_scope_test.go"
+resource = "subprocess"
+calls = 9
+
+[[count]]
+path = "examples/bd/dolt/pull_remote_selection_test.go"
+resource = "subprocess"
+calls = 11
+
+[[count]]
+path = "examples/bd/dolt/pull_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/recover_host_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/restart_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/runtime_bounded_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/sql_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/sql_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/stale_db_close_reason_real_bd_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "examples/bd/dolt/stale_db_formula_test.go"
+resource = "subprocess"
+calls = 11
+
+[[count]]
+path = "examples/bd/dolt/status_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/sync_ffclassify_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/bd/dolt/sync_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/sync_test.go"
+resource = "subprocess"
+calls = 28
+
+[[count]]
+path = "examples/gastown/bind_key_script_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/gastown/cycle_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "examples/gastown/dolt_orphan_sweep_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "examples/gastown/gastown_test.go"
+resource = "subprocess"
+calls = 11
+
+[[count]]
+path = "examples/gastown/maintenance_bd_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "examples/gastown/maintenance_bd_integration_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "examples/gastown/maintenance_installed_layout_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "examples/gastown/maintenance_scope_test.go"
+resource = "subprocess"
+calls = 6
+
+[[count]]
+path = "examples/gastown/maintenance_scripts_dolt_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "examples/gastown/maintenance_scripts_dolt_integration_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "examples/gastown/maintenance_scripts_test.go"
+resource = "subprocess"
+calls = 93
+
+[[count]]
+path = "examples/gastown/tmux_theme_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/api/apierr/emitted_codes_guard_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "internal/api/blocking_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/branch_resolver_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/api/client_extmsg_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "internal/api/client_remote_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "internal/api/client_sling_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "internal/api/client_test.go"
+resource = "http_test_server"
+calls = 66
+
+[[count]]
+path = "internal/api/client_waits_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/convoy_sql_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/api/dashboardbff/enrichment_cache_test.go"
+resource = "fixed_sleep"
+calls = 13
+
+[[count]]
+path = "internal/api/dashboardbff/enrichment_cache_test.go"
+resource = "http_test_server"
+calls = 14
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_grace_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_lazy_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_lazy_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_memo_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_memo_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_session_push_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_stream_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/dashboardbff/rundetail_stream_test.go"
+resource = "http_test_server"
+calls = 7
+
+[[count]]
+path = "internal/api/dashboardbff/rundetailtailer_test.go"
+resource = "http_test_server"
+calls = 3
+
+[[count]]
+path = "internal/api/dashboardbff/runtailer_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/api/dashboardbff/runtailer_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/api/dashboardbff/samplers_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/dashboardbff/wire_contract_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/genclient/genclient_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/api/genclient_roundtrip_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/api/grant_e2e_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/handler_agent_output_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/handler_events_test.go"
+resource = "fixed_sleep"
+calls = 5
+
+[[count]]
+path = "internal/api/handler_events_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/handler_mail_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/handler_orders_test.go"
+resource = "fixed_sleep"
+calls = 10
+
+[[count]]
+path = "internal/api/handler_sessions_test.go"
+resource = "fixed_sleep"
+calls = 8
+
+[[count]]
+path = "internal/api/handler_sessions_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/handler_status_scoped_store_test.go"
+resource = "fixed_sleep"
+calls = 5
+
+[[count]]
+path = "internal/api/handler_status_scoped_store_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "internal/api/handler_waits_partial_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/huma_handlers_supervisor_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/api/huma_handlers_work_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/idempotency_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/logwatcher_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/loopback_transport_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/openapi_response_validation_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/orders_feed_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/readauth_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "internal/api/rig_create_async_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/api/rig_create_client_test.go"
+resource = "http_test_server"
+calls = 16
+
+[[count]]
+path = "internal/api/rig_rollback_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/session_ops_test.go"
+resource = "fixed_sleep"
+calls = 7
+
+[[count]]
+path = "internal/api/session_ops_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "internal/api/session_stream_capability_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/supervisor_dashboard_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/supervisor_security_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/supervisor_security_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/supervisor_test.go"
+resource = "fixed_sleep"
+calls = 11
+
+[[count]]
+path = "internal/api/supervisor_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/api/writeauth_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/bdflags/freshness_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beadmeta/guard_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/beads/bdstore_conditional_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beads/bdstore_exec_internal_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "internal/beads/bdstore_exec_internal_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "internal/beads/caching_store_cadence_internal_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/beads/caching_store_internal_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/beads/caching_store_overlay_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/beads/caching_store_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/beads/contract/connection_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/beads/contract/connection_test.go"
+resource = "net_listen"
+calls = 3
+
+[[count]]
+path = "internal/beads/contract/connection_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/beads/exec/br_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beads/exec_timeout_linux_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beads/exec_timeout_linux_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/beads/native_dolt_store_claim_role_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/beads/native_dolt_store_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beads/native_dolt_store_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beads/native_dolt_store_reconnect_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "internal/beads/proxied_admission_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/beads/proxyendpoint/probe_session_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/beads/sqlite_store_sequence_floor_process_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/beads/updated_at_store_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/bootstrap/packs/core/escalate_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/cliauth/client_test.go"
+resource = "http_test_server"
+calls = 13
+
+[[count]]
+path = "internal/config/config_test.go"
+resource = "subprocess"
+calls = 3
+
+[[count]]
+path = "internal/config/pack_fetch_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/config/workquery_ephemeral_blocked_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/configedit/configedit_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/convergence/condition_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/credentialprovider/credentialprovider_process_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/docgen/schema_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/doctor/checks_beads_role_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/doctor/checks_custom_types_test.go"
+resource = "subprocess"
+calls = 4
+medium = 4
+
+[[count]]
+path = "internal/doctor/checks_formula_requirements_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/doctor/checks_rig_root_branch_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/doctor/checks_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/doctor/checks_test.go"
+resource = "net_listen"
+calls = 8
+
+[[count]]
+path = "internal/doctor/checks_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/events/events_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/events/recorder_shortwrite_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/execgrace/apply_unix_test.go"
+resource = "subprocess"
+calls = 8
+tagged = true
+
+[[count]]
+path = "internal/extmsg/http_adapter_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/formula/source_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/git/git_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/gitcred/autherror_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/githubmonitor/client_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/graphv2/invocation_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/graphv2/invocation_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/hooks/plugin_node_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "internal/mail/exec/mcp_conformance_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/mail/exec/mcp_live_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/mail/exec/mcp_live_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/orders/runtime_helpers_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/orders/trigger_exec_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/packregistry/catalog_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/packregistry/catalog_test.go"
+resource = "http_test_server"
+calls = 5
+
+[[count]]
+path = "internal/packregistry/content_hash_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/pidutil/cmdline_portable_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/pidutil/cmdline_portable_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/pidutil/pidutil_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/pidutil/pidutil_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "internal/processgroup/processgroup_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/control_unix_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/marker_protocol_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/spool_unix_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/spool_unix_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/storage_unix_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/storage_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/productmetrics/transport_test.go"
+resource = "http_test_server"
+calls = 9
+
+[[count]]
+path = "internal/runtime/acp/acp_test.go"
+resource = "fixed_sleep"
+calls = 5
+
+[[count]]
+path = "internal/runtime/acp/acp_test.go"
+resource = "net_listen"
+calls = 4
+
+[[count]]
+path = "internal/runtime/acp/conformance_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/acp/fence_test.go"
+resource = "fixed_sleep"
+calls = 6
+
+[[count]]
+path = "internal/runtime/acp/fence_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/acp/interrupt_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/dialog_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/exec/carrier_fence_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/exec/carrier_fence_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/exec/exec_fence_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/fake_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/herdr/activity_live_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "internal/runtime/herdr/activity_live_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "internal/runtime/herdr/activity_test.go"
+resource = "fixed_sleep"
+calls = 10
+
+[[count]]
+path = "internal/runtime/herdr/events_live_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/herdr/events_live_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/herdr/events_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "internal/runtime/herdr/events_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/runtime/herdr/kindpath_live_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/herdr/panebinding_live_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "internal/runtime/herdr/panebinding_provider_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/runtime/herdr/provider_live_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/runtime/herdr/staleserver_test.go"
+resource = "net_listen"
+calls = 2
+medium = 2
+
+[[count]]
+path = "internal/runtime/import_trust_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/k8s/beads_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/k8s/controller_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/k8s/provider_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/k8s/session_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/k8s/staging_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/proctable/kill_unix_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/kill_unix_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/supervisor_fork_orphan_repro_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/rppcheck/rppcheck_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/runtimecapability/runner_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "internal/runtime/ssh/session_env_file_integration_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "internal/runtime/ssh/ssh_localhost_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/subprocess/fence_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/runtime/subprocess/fence_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/subprocess/seams_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/subprocess/subprocess_test.go"
+resource = "fixed_sleep"
+calls = 10
+
+[[count]]
+path = "internal/runtime/subprocess/subprocess_test.go"
+resource = "net_listen"
+calls = 3
+
+[[count]]
+path = "internal/runtime/t3bridge/provider_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "internal/runtime/tmux/activity_poke_integration_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "internal/runtime/tmux/adapter_test.go"
+resource = "fixed_sleep"
+calls = 5
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/agent_slice_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/runtime/tmux/agent_slice_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/runtime/tmux/dialog_feedback_survey_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/dialog_feedback_survey_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/dialog_model_switch_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/dialog_model_switch_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/main_test.go"
+resource = "tmux"
+calls = 5
+medium = 5
+
+[[count]]
+path = "internal/runtime/tmux/nudge_clear_before_paste_integration_test.go"
+resource = "fixed_sleep"
+calls = 6
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/nudge_confirm_lag_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/nudge_poke_integration_test.go"
+resource = "fixed_sleep"
+calls = 6
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/nudge_submit_confirm_integration_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/nudge_submit_confirm_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/nudge_submit_key_sequence_integration_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/server_probe_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/tmux/session_env_file_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/startup_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/runtime/tmux/startup_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/tmux/state_cache_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "internal/runtime/tmux/tmux_test.go"
+resource = "fixed_sleep"
+calls = 31
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/tmux_test.go"
+resource = "subprocess"
+calls = 6
+tagged = true
+
+[[count]]
+path = "internal/sdnotify/sdnotify_test.go"
+resource = "net_listen_packet"
+calls = 2
+
+[[count]]
+path = "internal/session/list_all_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "internal/session/nocity_guard_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "internal/session/productmetrics_child_env_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/session/runtime_lease_crossproc_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "internal/session/sessiontest/nocity_unarmed_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "internal/session/submit_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/session/submit_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/sessionlog/mimocode_plugin_mirror_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/sling/sling_sweep_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/storebinding/census_sources_nested_worktree_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/storebinding/migration_guard_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/storebinding/sqlite/graph_fence_linux_test.go"
+resource = "subprocess"
+calls = 6
+tagged = true
+
+[[count]]
+path = "internal/storebinding/sqlite/legacy_hot_journal_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/storebinding/sqlite/sqlite_fence_process_linux_test.go"
+resource = "subprocess"
+calls = 44
+tagged = true
+
+[[count]]
+path = "internal/supervisor/maintenance_snapshot_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/supervisor/maintenance_snapshot_test.go"
+resource = "subprocess"
+calls = 3
+
+[[count]]
+path = "internal/suspensionstate/suspensionstate_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/testenv/lint_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/testenv/testenv_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "internal/warmup/warmup_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/webhookverify/jwt_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "internal/worker/adapters/zcode/adapter_test.go"
+resource = "fixed_sleep"
+calls = 14
+
+[[count]]
+path = "internal/worker/adapters/zcode/adapter_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/worker/fake/spec_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/worker/workertest/phase2_fake_worker_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/worker/workertest/phase2_fake_worker_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "internal/workrecord/gate_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "internal/workspacesvc/orphan_reap_test.go"
+resource = "fixed_sleep"
+calls = 5
+
+[[count]]
+path = "internal/workspacesvc/orphan_reap_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "internal/workspacesvc/proxy_process_test.go"
+resource = "fixed_sleep"
+calls = 7
+
+[[count]]
+path = "internal/workspacesvc/proxy_process_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "internal/workspacesvc/proxy_process_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "pkg/eventexport/exporter_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "pkg/eventexport/exporter_test.go"
+resource = "http_test_server"
+calls = 5
+
+[[count]]
+path = "scripts/add_testenv_import_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "scripts/bazel_fork_cache_test.go"
+resource = "http_test_server"
+calls = 1
+medium = 1
+
+[[count]]
+path = "scripts/bazel_fork_cache_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/bazel_fresh_merge_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "scripts/bazel_nightly_fresh_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "scripts/check_core_boundary_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/check_embedded_pins_test.go"
+resource = "subprocess"
+calls = 5
+
+[[count]]
+path = "scripts/check_split_topology_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/docker_session_protocol_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
+path = "scripts/go_module_fetch_test.go"
+resource = "subprocess"
+calls = 3
+medium = 3
+
+[[count]]
+path = "scripts/go_test_observable_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "scripts/gomod_replace_guard_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/harness_reap_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "scripts/harness_reap_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "scripts/makefile_cgo_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/makefile_install_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/precommit_contract_test.go"
+resource = "subprocess"
+calls = 11
+
+[[count]]
+path = "scripts/push_ownership_guard_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/rbe_worker_env_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/rebase_resolve_lib_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/shard_cgo_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "scripts/sign_darwin_local_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/test_go_test_shard_test.go"
+resource = "subprocess"
+calls = 3
+medium = 1
+
+[[count]]
+path = "scripts/test_integration_shard_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/test_slice_enroll_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "test/acceptance/beads_proxied_default_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/beads_proxied_default_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/acceptance/beads_proxied_idle_timeout_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/beads_proxied_native_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/acceptance/beads_proxied_native_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/beads_proxied_shared_server_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/beads_proxied_suspension_quiescence_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/gastown_smoke_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/helpers/recording_bd_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "test/acceptance/helpers/tool_home_test.go"
+resource = "subprocess"
+calls = 4
+
+[[count]]
+path = "test/acceptance/import_named_sessions_regression_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/init_lifecycle_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/pack_registry_live_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/rig_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/idle_bead_stability_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/idle_bead_stability_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/lifecycle_b_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/lifecycle_b_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/split_storage_migrated_formula_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/split_storage_migrated_formula_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_b/split_storage_migrated_formula_test.go"
+resource = "subprocess"
+calls = 6
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_c/fresh_install_spawn_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_c/tierc_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_c/tierc_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tier_c/tierc_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/acceptance/tutorial_goldens/harness_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/tutorial_goldens/harness_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/acceptance/tutorial_goldens/main_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/tutorial_goldens/main_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/tutorial_goldens/main_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/classification_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/classification_test.go"
+resource = "subprocess"
+calls = 10
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/main_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/worker_handle_city_helpers_test.go"
+resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/worker_handle_city_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/worker_inference_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/acceptance/worker_inference/worker_inference_test.go"
+resource = "subprocess"
+calls = 8
+tagged = true
+
+[[count]]
+path = "test/acceptance/worktree_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/containerhost/docker_session_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_harness_test.go"
+resource = "fixed_sleep"
+calls = 9
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_incapable_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_load_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_matrix_test.go"
+resource = "fixed_sleep"
+calls = 7
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x12_report_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x2_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x6_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x8_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/dashport/projection_test.go"
+resource = "listener_helper"
+calls = 11
+tagged = true
+
+[[count]]
+path = "test/integration/bdstore_batch_delete_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/bdstore_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/bdstore_test.go"
+resource = "subprocess"
+calls = 6
+tagged = true
+
+[[count]]
+path = "test/integration/dolt_config_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/dolt_config_test.go"
+resource = "subprocess"
+calls = 10
+tagged = true
+
+[[count]]
+path = "test/integration/dolt_managed_chaos_test.go"
+resource = "fixed_sleep"
+calls = 7
+tagged = true
+
+[[count]]
+path = "test/integration/dolt_managed_chaos_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/dolt_persistence_test.go"
+resource = "subprocess"
+calls = 7
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_comm_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_comm_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_events_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_helpers_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_helpers_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_lifecycle_test.go"
+resource = "fixed_sleep"
+calls = 6
+tagged = true
+
+[[count]]
+path = "test/integration/e2e_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_controller_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_helpers_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_helpers_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_multirig_test.go"
+resource = "fixed_sleep"
+calls = 6
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_pipeline_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_pipeline_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_reconciler_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_shutdown_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gastown_witness_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/gc_live_contract_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/graph_dispatch_harness_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/graph_dispatch_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
+path = "test/integration/helpers_test.go"
+resource = "fixed_sleep"
+calls = 5
+tagged = true
+
+[[count]]
+path = "test/integration/helpers_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/huma_binary_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/huma_binary_test.go"
+resource = "subprocess"
+calls = 7
+tagged = true
+
+[[count]]
+path = "test/integration/integration_test.go"
+resource = "fixed_sleep"
+calls = 6
+tagged = true
+
+[[count]]
+path = "test/integration/integration_test.go"
+resource = "subprocess"
+calls = 11
+tagged = true
+
+[[count]]
+path = "test/integration/mail_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/review_check_scripts_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/review_formula_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/integration/start_drift_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/start_drift_test.go"
+resource = "subprocess"
+calls = 8
+tagged = true
+
+[[count]]
+path = "test/integration/supervisor_unit_guard_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/tmuxtest/orphan_sweep_sigkill_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
+path = "test/tmuxtest/orphan_sweep_sigkill_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "test/tmuxtest/orphan_sweep_tmux_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "test/tmuxtest/orphan_sweep_tmux_test.go"
+resource = "tmux"
+calls = 2
+
+[[count]]
+path = "test/toolhome/toolhome_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "test/workflows/needs_lifecycle_test.go"
+resource = "subprocess"
+calls = 1

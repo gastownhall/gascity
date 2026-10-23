@@ -156,7 +156,14 @@ if grep -Fq -- "__testhook-record-help" "$tmpdir/metrics-help.txt"; then
 fi
 
 binary_bytes="$(wc -c < "$tmpdir/gc" | tr -d ' ')"
-if [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
+# Under `bazel coverage` (COVERAGE=1, COVERAGE_DIR set for every test) the
+# //cmd/gc this test receives is coverage-instrumented whenever the
+# instrumentation filter matches it (the nightly's `coverage //...` uses the
+# default "^//"), so its size says nothing about the shipped binary. Every
+# other check above still runs; only the size cap is skipped.
+if [ "${COVERAGE:-}" = "1" ] || [ -n "${COVERAGE_DIR:-}" ]; then
+	echo "native dependency guard: coverage build (COVERAGE_DIR set); skipping binary size cap ($binary_bytes bytes)"
+elif [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
 	echo "native dependency guard: gc binary is $binary_bytes bytes; max is $max_binary_bytes" >&2
 	exit 1
 fi

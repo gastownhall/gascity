@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,20 +67,94 @@ type OrderCheckListOutput struct {
 	Body OrderCheckListBody
 }
 
+// orderCheckResponseTTLFloor lets a non-fresh orders/check reuse a recently
+// built body after the time-bucket entry has rolled over, the same way
+// statusResponseTTLFloor does for /status. Var, not const, so tests can pin
+// the lookup order.
+var orderCheckResponseTTLFloor = 30 * time.Second
+
 // humaHandleOrderCheck is the Huma-typed handler for GET /v0/orders/check.
+//
+// The response cache is keyed on a TIME bucket rather than the event
+// sequence, and falls back to a TTL floor and then to stale-while-revalidate,
+// because this body is expensive to build and its readers poll on a fixed
+// interval. Building it costs one bead List per order per store — measured
+// 5.8-11.1s for a 23-order city and 14.2-22.4s for a 26-order one — while the
+// event sequence advanced about six times a minute on those same cities, so
+// an entry keyed on the index never survived to the next poll and every poll
+// paid the full rebuild. The SBF observability exporter reads this endpoint
+// once a minute with a 5s per-call timeout, and timed out on every scrape in
+// both cities; its collector marks a city down when any endpoint fails, so
+// the whole city read as unreachable while every other endpoint answered
+// normally.
+//
+// The three lookups are the /status recipe (ra-4u2eqc), for the same reason
+// it was adopted there: the bucket serves a burst of polls, the floor smooths
+// the bucket boundary, and the stale path keeps a fixed-interval poller off
+// the cold build entirely, refreshing behind it so the next poll is served a
+// body built without anyone waiting for it.
+//
+// Strict-freshness callers pass ?fresh=true and bypass all three, as before.
+// A non-fresh read may return a body built as long ago as the previous read,
+// so callers that need current due values should pass ?fresh=true.
+// A city holding a condition-triggered order is never cached at all: its
+// due-ness comes from running a subprocess, and a cached answer would report
+// a check that did not happen.
 func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput) (*OrderCheckListOutput, error) {
 	aa := s.state.Orders()
 
-	ep := s.state.EventProvider()
-
-	index := s.latestIndex()
 	cacheKey := cacheKeyFor("orders-check", input)
 	useResponseCache := !input.Fresh && !hasConditionOrder(aa)
 	if useResponseCache {
-		if body, ok := cachedResponseAs[OrderCheckListBody](s, cacheKey, index); ok {
+		bucket := responseCacheTimeBucket(time.Now())
+		if body, ok := cachedResponseAs[OrderCheckListBody](s, cacheKey, bucket); ok {
+			return &OrderCheckListOutput{Body: body}, nil
+		}
+		if body, ok := cachedResponseWithinAgeAs[OrderCheckListBody](s, cacheKey, orderCheckResponseTTLFloor); ok {
+			return &OrderCheckListOutput{Body: body}, nil
+		}
+		if body, _, ok := staleResponseAs[OrderCheckListBody](s, cacheKey); ok {
+			s.refreshOrderCheckResponseInBackground(cacheKey)
 			return &OrderCheckListOutput{Body: body}, nil
 		}
 	}
+
+	body := s.buildOrderCheckBody(input.Fresh)
+	if useResponseCache {
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), body)
+	}
+	return &OrderCheckListOutput{Body: body}, nil
+}
+
+// refreshOrderCheckResponseInBackground kicks a detached rebuild of the
+// orders/check body for cacheKey and stores it under the time bucket current
+// at completion, so the next poll is served a fresh body without any caller
+// paying the rebuild cost inline. Coalesced via beginResponseRefresh, and
+// always non-fresh: only the cached path reaches it.
+func (s *Server) refreshOrderCheckResponseInBackground(cacheKey string) {
+	if !s.beginResponseRefresh(cacheKey) {
+		return
+	}
+	s.runBackground(func(_ context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				// Best-effort, like the /status refresh: withRecovery does not
+				// cover detached goroutines, and the next poll rebuilds.
+				log.Printf("api: panic in background /orders/check refresh: %v\n%s", r, debug.Stack())
+			}
+		}()
+		defer s.endResponseRefresh(cacheKey)
+		body := s.buildOrderCheckBody(false)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), body)
+	})
+}
+
+// buildOrderCheckBody evaluates every order's trigger and builds the
+// orders/check response body. fresh bypasses the cached order-history reads
+// the evaluation is built on.
+func (s *Server) buildOrderCheckBody(fresh bool) OrderCheckListBody {
+	aa := s.state.Orders()
+	ep := s.state.EventProvider()
 
 	now := time.Now()
 	checks := make([]orderCheckResponse, 0, len(aa))
@@ -88,8 +163,11 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 		if err != nil {
 			storeInfos = nil
 		}
-		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
-		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
+		// The newest run record among a bounded window: a plain bead carrying
+		// the order's labels is no run (orders.IsRunRecord, the #7766 review).
+		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), orderCheckRunScan, time.Time{}, fresh)
+		history = newestRunRecord(history)
+		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, fresh)
 		cr := orderCheckResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),
@@ -115,12 +193,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 		checks = []orderCheckResponse{}
 	}
 
-	out := &OrderCheckListOutput{}
-	out.Body.Checks = checks
-	if useResponseCache {
-		s.storeResponse(cacheKey, index, out.Body)
-	}
-	return out, nil
+	return OrderCheckListBody{Checks: checks}
 }
 
 func hasConditionOrder(aa []orders.Order) bool {
@@ -132,7 +205,25 @@ func hasConditionOrder(aa []orders.Order) bool {
 	return false
 }
 
+// orderCheckRunScan is how many of an order's newest labeled beads the
+// check reads to find its newest run record.
+const orderCheckRunScan = 64
+
+// newestRunRecord is history (newest first) cut to its newest run record
+// (orders.IsRunRecord), or nothing.
+func newestRunRecord(history []orderHistoryStoreBead) []orderHistoryStoreBead {
+	for i, row := range history {
+		if orders.IsRunRecord(row.bead) {
+			return history[i : i+1]
+		}
+	}
+	return nil
+}
+
 func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
+	// history is the order's newest run record (newestRunRecord), or
+	// nothing: as in the dispatcher's cooldown and cursor, a plain bead
+	// carrying its labels moves neither (the #7766 review).
 	lastRunFn := func(string) (time.Time, error) {
 		if len(history) == 0 {
 			return time.Time{}, nil
@@ -606,15 +697,19 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	Body ordersFeedBody
 }, error,
 ) {
+	index := s.latestIndex()
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
 	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
+	// The key is the index captured before any state is read, and a hit
+	// needs an exact match, so a cached body reflects every change up to the
+	// current head. A key that can hit across index changes (the time bucket
+	// /status uses) would serve a body that misses later changes.
 	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {
 		return &struct {
 			Body ordersFeedBody

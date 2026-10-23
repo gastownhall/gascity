@@ -12,16 +12,20 @@ import (
 // sessionBeadFixture builds a persisted session bead with the given id, status,
 // and metadata, carrying the canonical type and label so the read seam
 // recognizes it.
+// sessionBeadFixture is a session bead with meta; a "__title" entry is its
+// title, not a metadata key.
 func sessionBeadFixture(id, status string, meta map[string]string) beads.Bead {
 	m := map[string]string{}
 	for k, v := range meta {
 		m[k] = v
 	}
+	title := m["__title"]
+	delete(m, "__title")
 	return beads.Bead{
 		ID:        id,
 		Type:      BeadType,
 		Status:    status,
-		Title:     m["__title"],
+		Title:     title,
 		Labels:    []string{LabelSession},
 		Metadata:  m,
 		CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
@@ -271,4 +275,23 @@ func has(ids []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestListByMetadataInfosTakesOnlySessionRows (architecture B): the
+// session-log workdir fallback's scan returns session rows only; a task
+// carrying the keys is no sibling session.
+func TestListByMetadataInfosTakesOnlySessionRows(t *testing.T) {
+	mem := beads.NewMemStore()
+	s := NewStore(beads.SessionStore{Store: mem})
+	row, err := mem.Create(beads.Bead{Title: "s", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"work_dir": "/w"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.Create(beads.Bead{Title: "forged", Type: "task", Metadata: map[string]string{"work_dir": "/w"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListByMetadataInfos(map[string]string{"work_dir": "/w"}, 0)
+	if err != nil || len(got) != 1 || got[0].ID != row.ID {
+		t.Fatalf("ListByMetadataInfos = %v (%v), want only %s", got, err, row.ID)
+	}
 }

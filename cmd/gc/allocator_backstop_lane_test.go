@@ -817,9 +817,15 @@ func TestExternalReadsDropsLateScaleCheckOfOlderConfig(t *testing.T) {
 		newCfg := &config.City{Agents: []config.Agent{{Name: "w", ScaleCheck: "check-new"}}}
 		var cfg atomic.Pointer[config.City]
 		cfg.Store(oldCfg)
-		lane := newExternalReadsLane(backstopTestInterval, func() (externalReadsEnv, error) {
+		var lane *externalReadsLane
+		var oldPublished atomic.Bool
+		lane = newExternalReadsLane(backstopTestInterval, func() (externalReadsEnv, error) {
 			return externalReadsEnv{CityName: "city", Cfg: cfg.Load()}, nil
-		}, nil, func(fn func(), _ string) bool { fn(); return false }, nil, io.Discard)
+		}, func() {
+			if _, ok := lane.recording().source(sourceKey{kind: sourceScaleCheck, cfg: oldCfg}); ok {
+				oldPublished.Store(true)
+			}
+		}, func(fn func(), _ string) bool { fn(); return false }, nil, io.Discard)
 		lane.steps = nil
 		lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
 		lane.runner = func(command, _ string, _ map[string]string) (string, error) {
@@ -852,6 +858,9 @@ func TestExternalReadsDropsLateScaleCheckOfOlderConfig(t *testing.T) {
 		}
 		if r := lane.recording().scaleCheck(time.Now()); keys != 1 || r == nil || r.Counts["w"] != 2 {
 			t.Errorf("after the old run ended: %d scale_check sources, result %+v; want only the new config's count 2", keys, r)
+		}
+		if oldPublished.Load() {
+			t.Error("a recording published the old config's scale_check source")
 		}
 		lane.mu.Lock()
 		_, kept := lane.results[sourceKey{kind: sourceScaleCheck, cfg: oldCfg}]
@@ -888,35 +897,13 @@ func TestExternalReadsSourceFreshForThreePatrols(t *testing.T) {
 	}
 }
 
-// Kills: a pass that ignores the reload barrier's or the FS gate's hold, and
-// a held pass that never runs once released. A held pass declines; the
-// release wakes the lane, which runs at once.
-func TestExternalReadsPassHeldByGate(t *testing.T) {
+// Kills: steps run on the lane goroutine (a slow step stalls the reads), and
+// a second run of a step while one is in flight. With a step blocked, passes
+// keep publishing at the patrol, and the step does not start again though its
+// interval is up.
+func TestExternalReadsStepRunsOffTheReadPath(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
-		lane.gate.hold("reload")
-		startBackstopLaneInBubble(t, lane)
-		if got := backstopSeq(lane); got != 0 {
-			t.Fatalf("held: %d passes, want none", got)
-		}
-		lane.gate.release("reload")
-		synctest.Wait()
-		if got := backstopSeq(lane); got != 1 {
-			t.Errorf("released: %d passes, want one at once", got)
-		}
-	})
-}
-
-// Kills: steps run on the lane goroutine (a slow step stalls the reads),
-// steps outside the gate (M6: waitIdle idle while a step writes), and a second
-// run of a step while one is in flight. With a step blocked, passes keep
-// publishing at the patrol, the step does not start again though its interval
-// is up, and waitIdle waits for it.
-func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
 		var runs atomic.Int64
 		release := make(chan struct{})
 		lane.steps = []*laneStep{{name: "slow", every: time.Second, run: func(context.Context, externalReadsEnv) {
@@ -928,24 +915,8 @@ func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
 		if seq, n := backstopSeq(lane), runs.Load(); seq != 4 || n != 1 {
 			t.Fatalf("with the step blocked: %d passes, %d step runs; want the patrol's 4 passes and one run", seq, n)
 		}
-		idle := make(chan error, 1)
-		go func() { idle <- lane.gate.waitIdle(context.Background()) }()
-		synctest.Wait()
-		select {
-		case <-idle:
-			t.Fatal("waitIdle reported idle while a step was running")
-		default:
-		}
 		close(release)
 		synctest.Wait()
-		select {
-		case err := <-idle:
-			if err != nil {
-				t.Fatalf("waitIdle = %v", err)
-			}
-		default:
-			t.Fatal("waitIdle still waiting after the step ended")
-		}
 	})
 }
 
@@ -1102,17 +1073,26 @@ func TestExternalReadsRestartKeepsReadsInFlightAndJoinWaits(t *testing.T) {
 
 // Kills: the lane's session-census source creeping back (B5, OPTION1
 // S4-1). The census reads the cache on every leg, so a lane over a non-exact
-// leg holding session rows reads only its demand and the scale_checks.
+// leg holding session rows reads only its demand and the scale_checks, and
+// the scale_checks only when the config has a custom one.
 func TestExternalReadsLaneHasNoSessionSource(t *testing.T) {
 	cache, _ := newDemandCache(t, false, backstopSessionBead(), routedDemandBead("gc-r1"))
-	env := externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: cache}
-	lane, _ := newTestBackstopLane(env)
-	var kinds []sourceKind
-	for _, src := range lane.sources(env) {
-		kinds = append(kinds, src.key.kind)
-	}
-	if want := []sourceKind{sourceDemand, sourceScaleCheck}; !slices.Equal(kinds, want) {
-		t.Fatalf("source kinds = %v, want %v", kinds, want)
+	for _, c := range []struct {
+		cfg  *config.City
+		want []sourceKind
+	}{
+		{scaleCheckLegCity(), []sourceKind{sourceDemand, sourceScaleCheck}},
+		{demandReadsTestConfig(), []sourceKind{sourceDemand}},
+	} {
+		env := externalReadsEnv{Cfg: c.cfg, CityStore: cache}
+		lane, _ := newTestBackstopLane(env)
+		var kinds []sourceKind
+		for _, src := range lane.sources(env) {
+			kinds = append(kinds, src.key.kind)
+		}
+		if !slices.Equal(kinds, c.want) {
+			t.Fatalf("source kinds = %v, want %v", kinds, c.want)
+		}
 	}
 }
 

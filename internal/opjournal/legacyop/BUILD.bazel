@@ -1,0 +1,83 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "legacyop",
+    srcs = [
+        "check.go",
+        "classify.go",
+        "crashpoint.go",
+        "doc.go",
+        "inflight.go",
+        "legacyop.go",
+        "sweep.go",
+        "telemetry.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/opjournal/legacyop",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/clock",
+        "//internal/opjournal",
+        "//internal/rollout/gate",
+        "//internal/telemetry",
+    ],
+)
+
+go_test(
+    name = "legacyop_test",
+    srcs = [
+        "check_test.go",
+        "classify_test.go",
+        "crashpoint_test.go",
+        "inflight_test.go",
+        "legacyop_test.go",
+        "sweep_test.go",
+        "telemetry_test.go",
+        "testenv_import_test.go",
+    ],
+    # TestImportBoundary parses the package's own sources.
+    data = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
+    embed = [":legacyop"],
+    deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/clock",
+        "//internal/opjournal",
+        "//internal/rollout/gate",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

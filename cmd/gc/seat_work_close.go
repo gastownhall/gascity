@@ -1,0 +1,141 @@
+package main
+
+// The close-time re-read (mc-3ixn3.16). The tick's SeatWork read is as fresh
+// as its read, so a claim assigned to a seat after it was invisible to the
+// tick's gates: the seat closed holding it, and an unrouted open claim was
+// stranded on the closed row for good. Before a close, the closing seat's
+// narrow identities are read again:
+//
+//   - live on the local legs (the SQLite binding, a native rig, the uncached
+//     work store of a standalone controller or a one-shot pass);
+//   - from the event-fed cache on a controller's work store and on a bd rig,
+//     which costs no I/O. A bd-backed store is never read live here: one with
+//     no cache leaves the tick's answer standing (mc-3ixn3.19/.20).
+//
+// A close a gate decided ("this seat holds nothing") is refused on a hit; a
+// close that releases the seat's work anyway (a corpse, a stranded repair)
+// releases what the re-read found too.
+
+import (
+	"errors"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+)
+
+// lateSeatWork re-reads the work scope's identities hold now, across legs:
+// rows in one of statuses, not session or mail beads, that keep (when set)
+// accepts.
+func lateSeatWork(legs WorkLegs, scope workScope, statuses []string, keep func(beads.Store, beads.Bead) (bool, error)) ([]seatWorkHit, error) {
+	if err := legs.unusable(); err != nil {
+		return nil, err
+	}
+	var hits []seatWorkHit
+	var errs error
+	legs.each(func(store beads.Store) {
+		list := closeTimeLister(store, legs.isWork(store))
+		for _, status := range statuses {
+			for _, id := range scope.scopeIDs() {
+				if id = strings.TrimSpace(id); id == "" || list == nil {
+					continue
+				}
+				items, err := list(beads.ListQuery{Assignee: id, Status: status, TierMode: beads.TierBoth})
+				errs = errors.Join(errs, err)
+				for _, b := range items {
+					if sessionpkg.IsSessionBeadOrRepairable(b) || beadmail.IsMessageBead(b) {
+						continue
+					}
+					if keep != nil {
+						ok, err := keep(store, b)
+						if errs = errors.Join(errs, err); !ok || err != nil {
+							continue
+						}
+					}
+					hits = append(hits, seatWorkHit{store: store, bead: b})
+				}
+			}
+		}
+	})
+	return hits, errs
+}
+
+// closeTimeLister reads one leg for the re-read:
+//   - the city work store from its event-fed cache when it has one (a
+//     controller's), which costs no I/O, and live when the cache declines
+//     the query, unless bd backs it;
+//   - any other local leg live: the SQLite binding, a native rig, and the
+//     uncached work store of a standalone controller or a one-shot pass;
+//   - a bd-backed leg from its cache, or not at all when it has none or the
+//     cache declines: the residual of mc-3ixn3.19/.20, where the tick's read
+//     stands alone.
+func closeTimeLister(store beads.Store, isWork bool) func(beads.ListQuery) ([]beads.Bead, error) {
+	type cachedLister interface {
+		CachedList(beads.ListQuery) ([]beads.Bead, bool)
+	}
+	cache, cached := storeLayer[cachedLister](store)
+	bd := storeBackedBy[*beads.BdStore](store)
+	live := func(q beads.ListQuery) ([]beads.Bead, error) {
+		q.Live = true
+		return store.List(q)
+	}
+	switch {
+	case cached && (isWork || bd):
+		return func(q beads.ListQuery) ([]beads.Bead, error) {
+			if items, ok := cache.CachedList(q); ok || bd {
+				return items, nil
+			}
+			return live(q)
+		}
+	case bd:
+		return nil
+	}
+	return live
+}
+
+// storeLayer finds the first layer of store, through the class, policy and
+// cache wrappers, that is a T.
+func storeLayer[T any](store beads.Store) (T, bool) {
+	for i := 0; store != nil && i < 8; i++ {
+		if t, ok := store.(T); ok {
+			return t, true
+		}
+		switch v := store.(type) {
+		case beads.SessionStore:
+			store = v.Store
+		case beads.WorkStore:
+			store = v.Store
+		case interface{ Backing() beads.Store }:
+			store = v.Backing()
+		case interface{ ConditionalWritesResolveTarget() beads.Store }:
+			store = v.ConditionalWritesResolveTarget()
+		default:
+			store = nil
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+func storeBackedBy[T any](store beads.Store) bool {
+	_, ok := storeLayer[T](store)
+	return ok
+}
+
+// appendUniqueSeatWork adds the rows of more that rows does not already hold.
+func appendUniqueSeatWork(rows, more []seatWorkHit) []seatWorkHit {
+	for _, m := range more {
+		dup := false
+		for _, r := range rows {
+			if r.store == m.store && r.bead.ID == m.bead.ID {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			rows = append(rows, m)
+		}
+	}
+	return rows
+}

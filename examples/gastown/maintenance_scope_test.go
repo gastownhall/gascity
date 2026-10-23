@@ -445,6 +445,36 @@ func TestReaperSessionPruneBackupGateReadsBdBackupStatus(t *testing.T) {
 	}
 }
 
+// TestReaperRaisesUnchangedAnomaliesAsOneIncident pins the reaper's incident
+// fingerprint: a stale backup that only grows older notifies once, a change of
+// state (no backup at all) notifies at once, and a clean run resolves the
+// incident so the next anomaly notifies again.
+func TestReaperRaisesUnchangedAnomaliesAsOneIncident(t *testing.T) {
+	f := sessionPruneFixture(t, "")
+	f.env["GC_ESCALATE_INCIDENT_DIR"] = filepath.Join(f.cityDir, ".gc", "incidents")
+	f.env["GC_ESCALATE_REMINDER_SECONDS"] = "86400"
+	const notified = "ESCALATION: Reaper anomalies detected"
+	noBackup := `{"backup":{},"dolt":{"configured":false}}`
+	steps := []struct {
+		name   string
+		status string
+		want   int
+	}{
+		{"stale backup", freshBackupStatusJSON(48*time.Hour, false), 1},
+		{"same backup, older", freshBackupStatusJSON(49*time.Hour, false), 1},
+		{"no backup at all", noBackup, 2},
+		{"fresh backup resolves", freshBackupStatusJSON(time.Hour, false), 2},
+		{"no backup again", noBackup, 3},
+	}
+	for _, s := range steps {
+		f.env["BD_BACKUP_STATUS_JSON"] = s.status
+		f.runReaper(t)
+		if got := strings.Count(f.read(t, f.gcLog), notified); got != s.want {
+			t.Fatalf("after %q: %d anomaly notifications, want %d:\n%s", s.name, got, s.want, f.read(t, f.gcLog))
+		}
+	}
+}
+
 func TestReaperSessionPrunePatternGateRefusesUnsafePattern(t *testing.T) {
 	f := sessionPruneFixture(t, "")
 	f.env["BD_BACKUP_STATUS_JSON"] = freshBackupStatusJSON(time.Hour, false)
@@ -659,7 +689,7 @@ func runGitIn(t *testing.T, dir string, args ...string) {
 // provider is not bd (file- or exec-backed): gc bd refuses the scope, and the
 // orders declare it skipped without escalating every cooldown.
 func TestMaintenanceOrdersSkipNonBdStoresQuietly(t *testing.T) {
-	for _, script := range []string{"reaper.sh", "jsonl-export.sh"} {
+	for _, script := range []string{"reaper.sh", "jsonl-export.sh", "cross-rig-deps.sh"} {
 		t.Run(script, func(t *testing.T) {
 			f := newScopeFixture(t, "")
 			f.env["FAKE_NOT_BD_SCOPES"] = "city"

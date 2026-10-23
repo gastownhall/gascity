@@ -3,7 +3,6 @@ package acceptancehelpers
 import (
 	"bytes"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -62,6 +61,10 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		// runner's real global config, which has no beads.role, so `gc doctor`
 		// failed its beads-role check on any host that had never opted in.
 		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+		// internal/testenv points this at a template whose config turns off git's
+		// detached auto-maintenance; the child carries it so the repos it creates
+		// with git init or git clone have that off too (ga-zoe1wr).
+		"GIT_TEMPLATE_DIR",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
@@ -308,18 +311,13 @@ func WriteSupervisorConfig(gcHome string) error {
 	return os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(cfg), 0o644)
 }
 
-// reservePort finds a free port using the listen-then-close pattern.
-// Known TOCTOU race: between Close() and the supervisor binding, another
-// process can claim the port. This matches the existing integration test
-// pattern (reserveLoopbackPort) and is an accepted risk.
+// reservePort returns a loopback port that, on Linux, no other
+// ReserveLoopbackPort caller in the network namespace is handed while this
+// test binary lives (testutil.ReserveLoopbackPort). A listen-then-close
+// reservation let concurrent shards on one rbe-west worker share a
+// supervisor port (ga-96smfk.45).
 func reservePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port, nil
+	return testutil.ReserveLoopbackPort()
 }
 
 // RunGC runs the gc binary with the given args in the given environment.
@@ -370,6 +368,34 @@ func ResolveGCPath(env *Env) (string, error) {
 		return "", fmt.Errorf("gc not found in PATH")
 	}
 	return gcPath, nil
+}
+
+// VerifyPathGC reports an error unless the gc that env's PATH finds is the
+// binary under test, the one RunGC runs. gc's exec orders and pack scripts run
+// bare `gc` through PATH: with no gc there they exit 127, and with another gc
+// first they run that one, while every RunGC call still runs the binary under
+// test.
+func VerifyPathGC(env *Env) error {
+	want, err := ResolveGCPath(env)
+	if err != nil {
+		return err
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		return fmt.Errorf("binary under test: %w", err)
+	}
+	got := findInPath(env.Get("PATH"), "gc")
+	if got == "" {
+		return fmt.Errorf("no gc on PATH, so exec orders cannot run the binary under test %s", want)
+	}
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		return fmt.Errorf("gc on PATH: %w", err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		return fmt.Errorf("the gc on PATH is %s, not the binary under test %s", got, want)
+	}
+	return nil
 }
 
 func findInPath(pathEnv, name string) string {

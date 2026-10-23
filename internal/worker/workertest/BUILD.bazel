@@ -12,6 +12,7 @@ go_library(
         "reporter.go",
         "results.go",
         "structured_conformance.go",
+        "turn_conformance.go",
     ],
     embedsrcs = [
         "testdata/phase2/catalog.json",
@@ -21,6 +22,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/pricing",
+        "//internal/runtime",
         "//internal/worker",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
@@ -29,11 +31,14 @@ go_library(
 go_test(
     name = "workertest_test",
     srcs = [
+        "actor_helpers_test.go",
         "catalog_phase2_data_test.go",
         "hangbudget_test.go",
+        "nocity_guard_test.go",
         "phase1_conformance_test.go",
         "phase2_conformance_test.go",
         "phase2_fake_worker_test.go",
+        "phase2_interaction_signal_bound_test.go",
         "phase2_result_helpers_test.go",
         "phase2_startup_bound_deadline_test.go",
         "phase2_transcript_helpers_test.go",
@@ -43,6 +48,7 @@ go_test(
         "structured_corpus_test.go",
         "telemetry_handle_conformance_test.go",
         "testenv_import_test.go",
+        "turn_conformance_test.go",
     ],
     data = glob(
         ["**"],

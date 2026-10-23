@@ -39,7 +39,7 @@ import sys
 # stays in root_extras.
 SOURCE_ROOTS = ("internal", "cmd", "pkg", "examples", "test", "scripts", "docs", "contrib", "tools/nogo")
 SKIP_TOPDIRS = {".claude", ".worktrees", ".git", "bazel-bin", "bazel-out",
-                "bazel-testlogs", "engdocs", "frontend",
+                "bazel-testlogs", "engdocs",
                 "third_party", "bin", ".gc", ".beads", "node_modules"}
 BLOCK_MARKER = "# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---"
 ROOT_BEGIN = "# --- repo trees (managed by tools/bazel/repo_tree.py) ---"

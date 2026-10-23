@@ -62,8 +62,10 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	// safe only because every call that supplies it is checked below.
 	const sharedBodyParam = "opts"
 
-	// Calls that must be handed a declining options value.
-	loadCalls := []string{"config.LoadWithIncludesOptions(", "loadPrematerializedCityConfig("}
+	// Calls that must be handed a declining options value. loadComposedCityConfig
+	// is config.LoadWithIncludesOptions behind the invocation memo, so the
+	// loaders' composed loads go through it.
+	loadCalls := []string{"config.LoadWithIncludesOptions(", "loadComposedCityConfig(", "loadPrematerializedCityConfig("}
 
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {

@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,59 @@ func SupportsIDLookup(provider string) bool {
 	default:
 		return true
 	}
+}
+
+// keyedFinders are the family-specific by-id lookups DiscoverKeyedPath
+// resolves a session key with. HasKeyedLookup reads the same table, so the
+// two cannot disagree about a family.
+var keyedFinders = map[string]func(searchPaths []string, workDir, sessionID string) string{
+	"auggie":      sessionlog.FindAuggieSessionFileByID,
+	"amp":         sessionlog.FindAmpSessionFileByID,
+	"copilot":     sessionlog.FindCopilotSessionFileByID,
+	"codex":       sessionlog.FindCodexSessionFileByIDNoWindow,
+	"cursor":      sessionlog.FindCursorSessionFileByID,
+	"grok":        sessionlog.FindGrokSessionFileByID,
+	"kiro":        sessionlog.FindKiroSessionFileByID,
+	"gemini":      sessionlog.FindGeminiSessionFileByID,
+	"kimi":        sessionlog.FindKimiSessionFileByID,
+	"pi":          sessionlog.FindPiSessionFileByID,
+	"antigravity": sessionlog.FindAntigravitySessionFileByID,
+	// The zcode mirror filename IS the provider session id, so an identity
+	// lookup is exact. It is not keyed by gc's session id, which is why
+	// SupportsIDLookup stays false: without an identity the family still
+	// discovers by cwd. Preferring the keyed hit removes the newest-wins
+	// ambiguity when several sessions share a work dir.
+	"zcode": sessionlog.FindZCodeSessionFileByID,
+	// The OpenCode mirror filename IS the provider session id (the bead's
+	// session_key), so the identity lookup is exact. SupportsIDLookup stays
+	// false for the same reason as zcode. Without the keyed hit, sessions
+	// sharing a work dir are indistinguishable and usage sweeps refuse them
+	// as ambiguous.
+	"opencode": func(searchPaths []string, _, sessionID string) string {
+		return sessionlog.FindOpenCodeSessionFileByID(searchPaths, sessionID)
+	},
+}
+
+// HasKeyedLookup reports whether DiscoverKeyedPath can resolve a transcript
+// of provider's family by a session key at all: a family-specific by-id
+// lookup, or the generic one SupportsIDLookup allows.
+func HasKeyedLookup(provider string) bool {
+	_, keyed := keyedFinders[sessionlog.ProviderFamily(provider)]
+	return keyed || SupportsIDLookup(provider)
+}
+
+// inexactKeyedLookupFamilies are the keyed-lookup families whose lookup can
+// return a file of another conversation than the key names: Gemini's returns
+// the newest of the project directory's chats that record the key, rather
+// than refusing a second one.
+var inexactKeyedLookupFamilies = []string{"gemini"}
+
+// HasExactKeyedLookup reports whether a session key finds exactly the
+// transcript of the conversation it names for provider's family: a keyed
+// lookup (HasKeyedLookup) whose match is that conversation's own file, so a
+// caller may attribute what it reads to the session.
+func HasExactKeyedLookup(provider string) bool {
+	return HasKeyedLookup(provider) && !slices.Contains(inexactKeyedLookupFamilies, sessionlog.ProviderFamily(provider))
 }
 
 // DiscoverPath resolves the best available transcript for a worker session.
@@ -39,36 +93,8 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	if strings.TrimSpace(gcSessionID) == "" {
 		return ""
 	}
-	switch sessionlog.ProviderFamily(provider) {
-	case "auggie":
-		return sessionlog.FindAuggieSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "amp":
-		return sessionlog.FindAmpSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "copilot":
-		return sessionlog.FindCopilotSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "codex":
-		return sessionlog.FindCodexSessionFileByIDNoWindow(searchPaths, workDir, gcSessionID)
-	case "cursor":
-		return sessionlog.FindCursorSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "grok":
-		return sessionlog.FindGrokSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "kiro":
-		return sessionlog.FindKiroSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "gemini":
-		return sessionlog.FindGeminiSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "kimi":
-		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "pi":
-		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
-	case "antigravity":
-		return sessionlog.FindAntigravitySessionFileByID(searchPaths, workDir, gcSessionID)
-	case "zcode":
-		// The zcode mirror filename IS the provider session id, so an identity
-		// lookup is exact. It is not keyed by gc's session id, which is why
-		// SupportsIDLookup stays false: without an identity the family still
-		// discovers by cwd. Preferring the keyed hit removes the newest-wins
-		// ambiguity when several sessions share a work dir.
-		return sessionlog.FindZCodeSessionFileByID(searchPaths, workDir, gcSessionID)
+	if find, ok := keyedFinders[sessionlog.ProviderFamily(provider)]; ok {
+		return find(searchPaths, workDir, gcSessionID)
 	}
 	if !SupportsIDLookup(provider) {
 		return ""
@@ -145,25 +171,25 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // and calls missing a session key or work dir, are also not probeable; callers
 // should leave such sessions' resume metadata untouched rather than guess. When
 // probeable is true, exists reports whether the keyed transcript file was
-// found. The per-provider readers reached through DiscoverKeyedPath merge their
-// own default roots on top of searchPaths, so known probeable providers each
-// probe their real on-disk location even when given only a partial configured
-// search root.
+// found. The kimi, pi, copilot, kiro and antigravity readers reached through
+// DiscoverKeyedPath merge their own default roots on top of searchPaths. The
+// claude reader searches searchPaths exactly as given, so a claude caller
+// must include its default root: an empty list finds nothing.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
-	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !ProviderHasKeyedTranscript(provider) {
 		return false, false
 	}
 	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
 }
 
-// providerHasKeyedTranscript reports whether the provider family can use keyed
+// ProviderHasKeyedTranscript reports whether the provider family can use keyed
 // transcript absence as a stale-resume signal. This is stricter than
 // SupportsIDLookup, which only answers whether transcript display lookup can
 // use a provider session id. Here we only claim a provider when its keyed
 // transcript absence is meaningful for resume-key invalidation, so the
 // stale-resume guard never clears a resume key for a provider whose restart
-// semantics we have not verified.
-func providerHasKeyedTranscript(provider string) bool {
+// semantics we have not verified. It is pure: it reads only the name.
+func ProviderHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
 	case "copilot", "kiro", "kimi", "pi", "antigravity":
 		return true

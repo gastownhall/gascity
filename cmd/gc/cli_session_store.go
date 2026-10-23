@@ -9,17 +9,19 @@ import (
 // cliSessionStore routes a generic CLI one-shot work store to the session
 // coordination-class store, so a [beads.classes.sessions] relocation reaches
 // one-shot commands the same way it reaches the running controller (which routes
-// through resolveSessionStore via CityRuntime.sessionsBeadStore). Identity to the
-// input store at the default single-store backend (resolveSessionStore returns
-// the store verbatim there), so wrapping is byte-identical until a session
-// relocation is configured.
+// through resolveSessionStore via CityRuntime.sessionsBeadStore). At the default
+// single-store backend it is the input store, wrapped for emission when that
+// store is a bead engine (see below).
 //
 // The recorder is nil, and passing one would change nothing: resolveSessionStore
 // ignores it. What makes a relocated one-shot write observable is the emit
 // target the funnel puts on the ROUTES (class_store_emit.go), which
-// cliStorageRoutes has already applied by the time this returns.
+// cliStorageRoutes has already applied by the time this returns. A session
+// class left in the city's own store gets the same emission here
+// (withMainStoreEmission), so a `gc session new` reaches the controller's cache
+// on a single-store city too.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
-	return resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
+	return withMainStoreEmission(resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil), cityPath)
 }
 
 // cliSessionFrontDoor builds the typed session write front door over the

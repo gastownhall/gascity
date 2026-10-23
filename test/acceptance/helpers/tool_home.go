@@ -71,7 +71,9 @@ func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
 // returns the bd it wrote, which is also what to hand gc as BD_BIN.
 //
 // dolt is a symlink. bd is toolhome's wrapper around bdPath, re-homed under the
-// Env's tool home, because gc forks bd with the Env's real HOME.
+// Env's tool home, because gc forks bd with the Env's real HOME. A failed
+// `bd init` also prints the scope's dolt logs to stderr (see
+// ParseBDInitDiagnostics), because gc rig add removes them on rollback.
 func LinkBeadsTooling(t *testing.T, env *Env, dir, bdPath, doltPath string) string {
 	t.Helper()
 	wrapper, err := InstallBeadsTooling(env, dir, bdPath, doltPath)
@@ -93,7 +95,7 @@ func InstallBeadsTooling(env *Env, dir, bdPath, doltPath string) (string, error)
 		}
 	}
 	wrapper := filepath.Join(dir, "bd")
-	if err := toolhome.WriteWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
+	if err := writeBDInitWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
 		return "", err
 	}
 	return wrapper, nil

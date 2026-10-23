@@ -59,10 +59,6 @@ type ciCriticalPathStep struct {
 
 const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
 
-const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
-
-const productMetricsTesthookExtraTestEnv = `OBSERVABLE_TIMING_FILE="$${OBSERVABLE_TIMING_FILE}" OBSERVABLE_SHARD_ID="$${OBSERVABLE_SHARD_ID}" OBSERVABLE_VARIANT="$${OBSERVABLE_VARIANT}" OBSERVABLE_RUNNER_LABEL="$${OBSERVABLE_RUNNER_LABEL}" OBSERVABLE_COMMIT_SHA="$${GITHUB_SHA}" OBSERVABLE_WORKFLOW="$${GITHUB_WORKFLOW}" OBSERVABLE_RUN_ID="$${GITHUB_RUN_ID}" OBSERVABLE_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" OBSERVABLE_JOB="$${GITHUB_JOB}" OBSERVABLE_RUNNER_NAME="$${RUNNER_NAME}" OBSERVABLE_RUNNER_OS="$${RUNNER_OS}" OBSERVABLE_RUNNER_ARCH="$${RUNNER_ARCH}"`
-
 func TestWorkerCorePhase2RunsUnderBazel(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
@@ -100,24 +96,15 @@ func TestWorkerCorePhase2RunsUnderBazel(t *testing.T) {
 	}
 }
 
-// cmdGCProcessForkOnly is the cmd-gc-process job's route: fork and
-// Dependabot PRs only, the PRs whose bazel run starts no integration-packages
-// lane.
-const cmdGCProcessForkOnly = "needs.changes.outputs.cmd_gc_process == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')"
-
-// Pushes and same-repo PRs run cmd/gc's process suite under Bazel only:
-// //cmd/gc:gc_test in //test:integration_packages (tools/bazel/integration_suite.py
-// lists it), which bazel.yml's gating integration-packages lane runs under
-// --config=integration (GC_FAST_UNIT=0).
-// The go-test job remains for the fork and Dependabot PRs that lane skips.
+// cmd/gc's process suite runs under Bazel only, for every PR, fork ones
+// included: //cmd/gc:gc_test in //test:integration_packages
+// (tools/bazel/integration_suite.py lists it), which bazel.yml's gating
+// integration-packages lane runs under --config=integration
+// (GC_FAST_UNIT=0). No go-test cmd-gc-process job remains (ga-96smfk.50).
 func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
 	root := repoRoot(t)
-	job, ok := readCriticalPathWorkflow(t, "ci.yml").Jobs["cmd-gc-process"]
-	if !ok {
-		t.Fatal("CI workflow has no cmd-gc-process job")
-	}
-	if job.If != cmdGCProcessForkOnly {
-		t.Errorf("cmd-gc-process if = %q, want fork/Dependabot PRs only %q", job.If, cmdGCProcessForkOnly)
+	if _, ok := readCriticalPathWorkflow(t, "ci.yml").Jobs["cmd-gc-process"]; ok {
+		t.Error("CI workflow has a cmd-gc-process go-test job again; bazel.yml's integration-packages lane runs that suite for every PR")
 	}
 	bazelrc, err := os.ReadFile(filepath.Join(root, ".bazelrc"))
 	if err != nil {
@@ -130,142 +117,15 @@ func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"`) {
-		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration")
+	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration-packages --keep_going //test:integration_packages`) {
+		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration-packages")
+	}
+	if !regexp.MustCompile(`(?m)^test:integration-packages --config=integration$`).Match(bazelrc) {
+		t.Error(".bazelrc test:integration-packages does not include --config=integration; the lane would skip the process suite")
 	}
 }
 
-func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
-	job, ok := wf.Jobs["cmd-gc-process"]
-	if !ok {
-		t.Fatal("CI workflow has no cmd-gc-process job")
-	}
-
-	wantShards := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
-	if !slices.Equal(job.Strategy.Matrix.Shard, wantShards) {
-		t.Fatalf("cmd-gc-process shards = %v, want %v", job.Strategy.Matrix.Shard, wantShards)
-	}
-	if !slices.Equal(job.Strategy.Matrix.Keys, []string{"shard"}) {
-		t.Fatalf("cmd-gc-process matrix keys = %v, want only shard", job.Strategy.Matrix.Keys)
-	}
-	if job.ContinueOnError {
-		t.Fatal("cmd-gc-process job must surface failures")
-	}
-	if job.RunsOn != cmdGCProcessRunner {
-		t.Errorf("cmd-gc-process runs-on = %q, want recorded runner %q", job.RunsOn, cmdGCProcessRunner)
-	}
-	if job.Strategy.FailFast == nil || *job.Strategy.FailFast {
-		t.Fatal("cmd-gc-process strategy must explicitly disable fail-fast so all shard timings complete")
-	}
-
-	var runIndices, uploadIndices []int
-	for i := range job.Steps {
-		step := &job.Steps[i]
-		if strings.Contains(step.Run, "test-cmd-gc-process-shard") {
-			runIndices = append(runIndices, i)
-		}
-		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
-			uploadIndices = append(uploadIndices, i)
-		}
-	}
-	if len(runIndices) != 1 {
-		t.Fatalf("cmd-gc-process process-shard step indices = %v, want exactly one", runIndices)
-	}
-	// Two uploads: the advisory timing artifact on every run, and the proxy
-	// child's logs only when the shard fails. The second exists because bd's
-	// proxied-server failure names a log file the test temp dir takes with it,
-	// so without it a red shard carries no evidence at all.
-	if len(uploadIndices) != 2 {
-		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly two", uploadIndices)
-	}
-	runIndex := runIndices[0]
-	diagnosticsIndex, uploadIndex := uploadIndices[0], uploadIndices[1]
-	if diagnosticsIndex <= runIndex {
-		t.Fatalf("cmd-gc-process diagnostics upload step %d must follow process-shard step %d", diagnosticsIndex, runIndex)
-	}
-	if uploadIndex <= runIndex {
-		t.Fatalf("cmd-gc-process timing upload step %d must follow process-shard step %d", uploadIndex, runIndex)
-	}
-	runStep := &job.Steps[runIndex]
-	diagnosticsStep := &job.Steps[diagnosticsIndex]
-	uploadStep := &job.Steps[uploadIndex]
-	if diagnosticsStep.Name != "Upload cmd/gc process failure diagnostics" {
-		t.Errorf("cmd-gc-process diagnostics upload step name = %q", diagnosticsStep.Name)
-	}
-	if diagnosticsStep.If != "${{ failure() }}" {
-		t.Errorf("cmd-gc-process diagnostics upload condition = %q, want failure()", diagnosticsStep.If)
-	}
-	if want := "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12"; diagnosticsStep.With["path"] != want {
-		t.Errorf("cmd-gc-process diagnostics upload path = %q, want %q", diagnosticsStep.With["path"], want)
-	}
-	if runStep.Name != "Run cmd/gc process shard" {
-		t.Errorf("cmd-gc-process execution step name = %q", runStep.Name)
-	}
-	if runStep.If != "" {
-		t.Errorf("cmd-gc-process execution condition = %q, want unconditional product execution", runStep.If)
-	}
-	if runStep.ContinueOnError {
-		t.Error("cmd-gc-process execution step must surface product failures")
-	}
-	if uploadStep.Name != "Upload cmd/gc process timing" {
-		t.Errorf("cmd-gc-process timing upload step name = %q", uploadStep.Name)
-	}
-
-	wantEnv := map[string]string{
-		"GO_TEST_TIMING_FILE":    "${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json",
-		"GO_TEST_TIMING_NAME":    "cmd-gc-process-${{ matrix.shard }}-of-12",
-		"GO_TEST_TIMING_VARIANT": "linux-default",
-		"GO_TEST_RUNNER_LABEL":   cmdGCProcessRunner,
-		// Named here so the collector directory the shard advertises and the
-		// directory the diagnostics upload reads can never drift apart.
-		"GC_TEST_FAILURE_ARTIFACT_DIR": "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12",
-		"EXTRA_TEST_ENV":               cmdGCProcessExtraTestEnv,
-	}
-	if len(runStep.Env) != len(wantEnv) {
-		t.Errorf("cmd-gc-process timing env = %v, want exactly %v", runStep.Env, wantEnv)
-	}
-	for name, want := range wantEnv {
-		if got := runStep.Env[name]; got != want {
-			t.Errorf("cmd-gc-process %s = %q, want %q", name, got, want)
-		}
-	}
-
-	wantRun := `make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"`
-	if got := strings.TrimSpace(runStep.Run); got != wantRun {
-		t.Errorf("cmd-gc-process run command:\n%s\nwant:\n%s", got, wantRun)
-	}
-	if strings.Contains(runStep.Run, "CPU_COUNT") {
-		t.Error("cmd-gc-process must let the timing collector discover CPU count instead of configuring it")
-	}
-
-	const pinnedUploadArtifactV4 = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-	if uploadStep.Uses != pinnedUploadArtifactV4 {
-		t.Errorf("cmd-gc-process timing upload action = %q, want pinned v4 %q", uploadStep.Uses, pinnedUploadArtifactV4)
-	}
-	if uploadStep.If != "${{ always() }}" {
-		t.Errorf("cmd-gc-process timing upload condition = %q, want always()", uploadStep.If)
-	}
-	if uploadStep.ContinueOnError {
-		t.Error("cmd-gc-process timing upload must surface publication failures")
-	}
-	wantUpload := map[string]string{
-		"name":              "timing-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}",
-		"path":              "${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json",
-		"if-no-files-found": "warn",
-		"retention-days":    "7",
-	}
-	if len(uploadStep.With) != len(wantUpload) {
-		t.Errorf("cmd-gc-process timing upload settings = %v, want exactly %v", uploadStep.With, wantUpload)
-	}
-	for name, want := range wantUpload {
-		if got := uploadStep.With[name]; got != want {
-			t.Errorf("cmd-gc-process timing upload %s = %q, want %q", name, got, want)
-		}
-	}
-}
-
-func TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable(t *testing.T) {
+func TestProductMetricsTesthookProfileIsFocusedAndRequired(t *testing.T) {
 	root := repoRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
 	if err != nil {
@@ -304,67 +164,33 @@ func TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable(t *testing.
 		t.Errorf("local productmetrics-testhook helper references = %d, want definition plus cmd-gc-process and full", got)
 	}
 
+	// CI runs the profile under Bazel only (bazel.yml's unit lane, fork PRs
+	// included): gc_test built with the tag, selecting exactly the Makefile's
+	// owners.
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	job, ok := wf.Jobs["cmd-gc-productmetrics-testhook"]
-	if !ok {
-		t.Fatal("CI workflow has no cmd-gc-productmetrics-testhook job")
-	}
-	const cmdGCProcessRoute = "needs.changes.outputs.cmd_gc_process == 'true'"
-	if job.RunsOn != cmdGCProcessRunner || job.If != cmdGCProcessRoute {
-		t.Errorf("tagged job runner/route = (%q, %q), want (%q, %q)", job.RunsOn, job.If, cmdGCProcessRunner, cmdGCProcessRoute)
-	}
-	if !slices.Equal(job.Needs, []string{"runner-policy", "changes"}) {
-		t.Errorf("tagged job needs = %v", job.Needs)
-	}
-	var runStep, uploadStep *ciCriticalPathStep
-	var setupGo, setupJQ bool
-	for i := range job.Steps {
-		step := &job.Steps[i]
-		if strings.Contains(step.Uses, "setup-gascity-ubuntu") {
-			t.Error("focused tagged job must not install the full runtime/provider stack")
-		}
-		if strings.Contains(step.Uses, "actions/setup-go@") {
-			setupGo = true
-		}
-		if strings.TrimSpace(step.Run) == "command -v jq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq)" {
-			setupJQ = true
-		}
-		if strings.Contains(step.Run, "make test-productmetrics-testhook") {
-			runStep = step
-		}
-		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
-			uploadStep = step
+	for name, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, "test-productmetrics-testhook") {
+				t.Errorf("ci.yml job %s runs %q; the tagged profile is //cmd/gc:gc_productmetrics_testhook_test", name, strings.TrimSpace(step.Run))
+			}
 		}
 	}
-	if !setupGo || !setupJQ || runStep == nil || uploadStep == nil {
-		t.Fatalf("tagged job Go/jq/run/upload = (%t, %t, %v, %v)", setupGo, setupJQ, runStep != nil, uploadStep != nil)
+	build, err := os.ReadFile(filepath.Join(root, "cmd", "gc", "BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	wantEnv := map[string]string{
-		"OBSERVABLE_TIMING_FILE":  "${{ runner.temp }}/cmd-gc-productmetrics-testhook.json",
-		"OBSERVABLE_SHARD_ID":     "cmd-gc-productmetrics-testhook",
-		"OBSERVABLE_VARIANT":      "linux-productmetrics-testhook",
-		"OBSERVABLE_RUNNER_LABEL": cmdGCProcessRunner,
-		"EXTRA_TEST_ENV":          productMetricsTesthookExtraTestEnv,
+	rule := regexp.MustCompile(`(?ms)^go_variant_test\(\n    name = "gc_productmetrics_testhook_test",\n.*?^\)`).FindString(string(build))
+	for _, want := range []string{
+		`test = ":gc_test",`,
+		`gotags = ["productmetrics_testhook"],`,
+		`args = ["-test.run=^(` + owners + `)$$"],`,
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("gc_productmetrics_testhook_test lacks %s:\n%s", want, rule)
+		}
 	}
-	if !maps.Equal(runStep.Env, wantEnv) {
-		t.Errorf("tagged run env = %v, want %v", runStep.Env, wantEnv)
-	}
-	if strings.TrimSpace(runStep.Run) != `make test-productmetrics-testhook EXTRA_TEST_ENV="$EXTRA_TEST_ENV"` {
-		t.Errorf("tagged run command = %q", runStep.Run)
-	}
-	if uploadStep.If != "${{ always() }}" || uploadStep.With["path"] != wantEnv["OBSERVABLE_TIMING_FILE"] {
-		t.Errorf("tagged timing upload = if %q with %v", uploadStep.If, uploadStep.With)
-	}
-	required := wf.Jobs["ci-required"]
-	if !slices.Contains(required.Needs, "cmd-gc-productmetrics-testhook") {
-		t.Errorf("ci-required needs = %v, want tagged profile", required.Needs)
-	}
-	var permitsSkip bool
-	for _, step := range required.Steps {
-		permitsSkip = permitsSkip || (strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"cmd-gc-productmetrics-testhook"`))
-	}
-	if !permitsSkip {
-		t.Error("ci-required must allow the path-gated tagged profile to skip")
+	if strings.Contains(rule, "manual") {
+		t.Errorf("gc_productmetrics_testhook_test must run in //...:\n%s", rule)
 	}
 
 	macJob := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cmd-gc-process"]
@@ -446,26 +272,8 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
-	for _, jobName := range []string{"cmd-gc-process", "cmd-gc-productmetrics-testhook", "integration-shards", "docker-session"} {
-		job, ok := wf.Jobs[jobName]
-		if !ok {
-			t.Errorf("CI workflow has no %s job", jobName)
-			continue
-		}
-		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "make install-tools") {
-				t.Errorf("%s step %q installs lint/codegen tools already owned by preflight", jobName, step.Name)
-			}
-		}
-	}
-
 	for _, jobName := range []string{
-		"preflight-acceptance",
-		"contract-acceptance-current",
 		"contract-radar-bd-head",
-		"cmd-gc-process",
-		"cmd-gc-productmetrics-testhook",
-		"integration-shards",
 	} {
 		job := wf.Jobs[jobName]
 		for _, step := range job.Steps {
@@ -482,12 +290,13 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
+	// The prev/current bd contract cells run under Bazel
+	// (scripts/bd_contract_pins_test.go); the advisory bd main HEAD radar is
+	// the one contract job left in ci.yml.
 	providerSetupMarker := map[string]string{
-		"contract-acceptance-previous": "install-bd-archive.sh",
-		"contract-acceptance-current":  "go -C \"$src\" build",
-		"contract-radar-bd-head":       "go -C \"$src\" build",
+		"contract-radar-bd-head": "go -C \"$src\" build",
 	}
-	for _, jobName := range []string{"contract-acceptance-previous", "contract-acceptance-current", "contract-radar-bd-head"} {
+	for _, jobName := range []string{"contract-radar-bd-head"} {
 		job := wf.Jobs[jobName]
 		var hasSetupGo bool
 		providerSetupIndex := -1
@@ -522,47 +331,18 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 		}
 	}
 
-	var previousBDInstalled bool
-	for _, step := range wf.Jobs["contract-acceptance-previous"].Steps {
-		if strings.Contains(step.Run, "install-bd-archive.sh") && strings.Contains(step.Run, "BD_PREV_VERSION") {
-			previousBDInstalled = true
+	// Tier A runs under Bazel only: bazel.yml's acceptance lane
+	// (//test/acceptance:acceptance_test and :acceptance_solo_tests) and its
+	// untagged helpers in the unit lane.
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, "test-acceptance") {
+				t.Errorf("ci.yml %s step %q runs %q; Tier A is bazel.yml's acceptance lane", jobName, step.Name, strings.TrimSpace(step.Run))
+			}
 		}
-	}
-	if !previousBDInstalled {
-		t.Error("previous-bd contract job must install the deps.env minimum-supported bd so CLI contract tests cannot silently skip")
-	}
-
-	var tierAHasSetupGo, tierARunsBroadSuite bool
-	for _, step := range wf.Jobs["preflight-acceptance"].Steps {
-		if strings.Contains(step.Uses, "actions/setup-go") {
-			tierAHasSetupGo = true
-		}
-		if strings.TrimSpace(step.Run) == "make test-acceptance-go" {
-			tierARunsBroadSuite = true
-		}
-		if strings.Contains(step.Uses, "setup-gascity-ubuntu") {
-			t.Errorf("Tier A uses full-stack setup %q despite selecting controlled providers", step.Uses)
-		}
-		if strings.Contains(step.Run, "install-bd-archive.sh") {
-			t.Errorf("Tier A step %q installs bd even though external CLI contracts have a focused parallel job", step.Name)
-		}
-		if strings.Contains(step.Run, "test-bd-cli-contract") {
-			t.Errorf("Tier A step %q repeats the focused external bd contract", step.Name)
-		}
-	}
-	if !tierAHasSetupGo {
-		t.Error("Tier A must install the pinned Go toolchain")
-	}
-	if !tierARunsBroadSuite {
-		t.Error("Tier A must run the broad hermetic acceptance suite")
 	}
 
 	check := wf.Jobs["check"]
-	for _, need := range []string{"contract-acceptance-previous", "contract-acceptance-current"} {
-		if !slices.Contains(check.Needs, need) {
-			t.Errorf("Check needs = %v, want required bd contract %q", check.Needs, need)
-		}
-	}
 	if slices.Contains(check.Needs, "contract-radar-bd-head") {
 		t.Errorf("Check needs = %v: bd main HEAD radar must remain advisory", check.Needs)
 	}
@@ -874,29 +654,6 @@ func TestMacRegressionHeaderCommentDescribesCentralizedGate(t *testing.T) {
 	}
 }
 
-func TestStaticChecksUseOnlyTheGoToolchain(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
-	job := wf.Jobs["preflight-static"]
-	var hasSetupGo bool
-	for _, step := range job.Steps {
-		if strings.Contains(step.Uses, "actions/setup-go") {
-			hasSetupGo = true
-			if step.With["go-version-file"] != "go.mod" {
-				t.Errorf("static checks setup-go version file = %q, want go.mod", step.With["go-version-file"])
-			}
-		}
-		if strings.Contains(step.Uses, "setup-gascity-ubuntu") || strings.Contains(step.Uses, "actions/setup-node") {
-			t.Errorf("static checks use unnecessary full-stack dependency setup %q", step.Uses)
-		}
-		if strings.Contains(step.Run, "make install-tools") {
-			t.Errorf("static checks step %q installs oapi-codegen even though generated-artifact CI owns it", step.Name)
-		}
-	}
-	if !hasSetupGo {
-		t.Error("static checks must install the pinned Go toolchain")
-	}
-}
-
 // TestLintAndVetRunAsNogoInBazel pins where lint and vet gate: nogo
 // (//tools/nogo) validates every Go compile in bazel.yml's lanes, so no ci.yml
 // job runs golangci-lint or go vet a second time.
@@ -922,107 +679,82 @@ func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
 	}
 }
 
-func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T) {
+// TestCheckAndCIRequiredFanInTheGatingJobs: the main ruleset requires
+// "Check" and branch protection (and the hotfix/release ruleset) "CI /
+// required". With every suite under Bazel, both fan in exactly the jobs
+// rbe-west cannot run, allowing only the path-gated ones to skip.
+func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	if got := wf.Jobs["check"].Name; got != "Check" {
-		t.Errorf("historical branch-protection job name = %q, want Check", got)
-	}
-	job := wf.Jobs["ci-preflight"]
-	if slices.Contains(job.Needs, "check") {
-		t.Errorf("ci-preflight needs = %v: historical Check fan-in adds a serialized job", job.Needs)
-	}
-	for _, need := range []string{
-		"runner-policy",
-		"changes",
-		"preflight-static",
-		"preflight-acceptance",
-		"preflight-generated",
-		"contract-acceptance-previous",
-		"contract-acceptance-current",
-		"release-config",
-		"dashboard",
+	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate"}
+	for jobName, want := range map[string]struct {
+		name  string
+		needs []string
+	}{
+		"check":       {"Check", gating},
+		"ci-required": {"CI / required", append([]string{"check"}, gating...)},
 	} {
-		if !slices.Contains(job.Needs, need) {
-			t.Errorf("ci-preflight needs = %v, want direct dependency %q", job.Needs, need)
+		job, ok := wf.Jobs[jobName]
+		if !ok {
+			t.Errorf("ci.yml has no %s job", jobName)
+			continue
 		}
-	}
-	var permitsCurrentContractSkip bool
-	for _, step := range job.Steps {
-		if strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"contract-acceptance-current"`) {
-			permitsCurrentContractSkip = true
+		if job.Name != want.name {
+			t.Errorf("ci.yml %s name = %q, want the required check name %q", jobName, job.Name, want.name)
 		}
-	}
-	if !permitsCurrentContractSkip {
-		t.Error("ci-preflight must allow the path-gated current-bd contract to skip")
-	}
-	if !slices.Contains(wf.Jobs["ci-required"].Needs, "ci-preflight") {
-		t.Errorf("ci-required needs = %v, want ci-preflight aggregate", wf.Jobs["ci-required"].Needs)
+		if got, wantNeeds := slices.Sorted(slices.Values(job.Needs)), slices.Sorted(slices.Values(want.needs)); !slices.Equal(got, wantNeeds) {
+			t.Errorf("ci.yml %s needs = %v, want %v", jobName, got, wantNeeds)
+		}
+		if job.If != "${{ always() }}" {
+			t.Errorf("ci.yml %s if = %q, want ${{ always() }} so a failed or skipped dependency is evaluated, never skipped into a pass", jobName, job.If)
+		}
+		var allowsPathGatedSkips bool
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, `allow_skipped = {"credential-provider-windows", "pack-gate"}`) {
+				allowsPathGatedSkips = true
+			}
+		}
+		if !allowsPathGatedSkips {
+			t.Errorf("ci.yml %s must allow exactly the path-gated credential-provider-windows and pack-gate to skip", jobName)
+		}
 	}
 }
 
-func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
+// TestCIWorkflowRunsNoBazelCoveredSuite: every build and test of this tree
+// runs under Bazel (bazel.yml's lanes, bazel-nightly.yml). ci.yml keeps
+// only the jobs rbe-west cannot run -- the Windows credential-provider
+// tests (no Windows workers) and the live upstream probes -- plus routing
+// and the two required fan-ins. A new job here needs a reason it cannot be
+// a Bazel target.
+func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	shards := wf.Jobs["integration-shards"]
-	// bazel.yml's gating integration-packages and integration-smoke lanes run
-	// the packages-*, bdstore and rest-smoke tests for every PR; the Go rows
-	// remain only for fork and Dependabot PRs (ga-96smfk.50).
-	if !strings.Contains(shards.If, "github.event.pull_request.head.repo.fork == true") || !strings.Contains(shards.If, "dependabot[bot]") {
-		t.Errorf("integration-shards if = %q, want fork and Dependabot PRs only", shards.If)
+	want := []string{
+		"runner-policy", "changes", // routing
+		"credential-provider-windows",                     // no Windows workers
+		"pack-gate", "mcp-mail", "contract-radar-bd-head", // live upstream probes
+		"check", "ci-required", // required fan-ins
 	}
-	var cmdGCRows, restSmokeRows []string
-	for _, entry := range shards.Strategy.Matrix.Include {
-		if strings.Contains(entry.Command, "rest-full") {
-			t.Errorf("PR integration shard %q runs rest-full; Makefile assigns that suite to nightly/RC and targeted validation", entry.ShardName)
-		}
-		if strings.Contains(entry.Command, "packages-cmd-gc-") {
-			cmdGCRows = append(cmdGCRows, entry.Command)
-		}
-		if strings.Contains(entry.Command, "rest-smoke-") {
-			restSmokeRows = append(restSmokeRows, entry.Command)
-		}
+	got := slices.Sorted(maps.Keys(wf.Jobs))
+	if !slices.Equal(got, slices.Sorted(slices.Values(want))) {
+		t.Errorf("ci.yml jobs = %v, want %v", got, slices.Sorted(slices.Values(want)))
 	}
-	if want := []string{"./scripts/test-integration-shard packages-cmd-gc-integration"}; !slices.Equal(cmdGCRows, want) {
-		t.Errorf("PR cmd/gc integration rows = %v, want one focused integration-only row %v", cmdGCRows, want)
-	}
-	if want := []string{
-		"./scripts/test-integration-shard rest-smoke-1-of-2",
-		"./scripts/test-integration-shard rest-smoke-2-of-2",
-	}; !slices.Equal(restSmokeRows, want) {
-		t.Errorf("PR REST smoke rows = %v, want %v", restSmokeRows, want)
-	}
-
-	full, ok := wf.Jobs["integration-rest-full"]
-	if !ok {
-		t.Fatal("CI workflow must retain rest-full as a post-merge safety net")
-	}
-	if !strings.Contains(full.If, "github.event_name == 'push'") {
-		t.Errorf("integration-rest-full condition = %q, want push-only coverage", full.If)
-	}
-	if want := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}; !slices.Equal(full.Strategy.Matrix.Shard, want) {
-		t.Errorf("integration-rest-full shards = %v, want %v", full.Strategy.Matrix.Shard, want)
-	}
-	var runsFullREST bool
-	for _, step := range full.Steps {
-		if strings.Contains(step.Run, "test-integration-shard rest-full-") {
-			runsFullREST = true
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			for _, covered := range []string{
+				"test-acceptance",        // bazel.yml acceptance lane
+				"test-cover",             // bazel-nightly.yml coverage -> Codecov
+				"test-integration-shard", // integration-packages/-smoke lanes, nightly integration
+				"openapi-breaking",       // //cmd/openapi-breaking:openapi-breaking_test
+				"goreleaser",             // //:goreleaser_check_test
+			} {
+				if strings.Contains(step.Run, covered) || strings.Contains(step.Uses, covered) {
+					t.Errorf("ci.yml %s step %q runs %q, which Bazel covers", jobName, step.Name, covered)
+				}
+			}
 		}
 	}
-	if !runsFullREST {
-		t.Error("integration-rest-full must execute the sharded full REST suite")
-	}
-
-	aggregator := wf.Jobs["ci-integration"]
-	if !slices.Contains(aggregator.Needs, "integration-rest-full") {
-		t.Errorf("ci-integration needs = %v, want post-merge REST coverage included in the aggregate", aggregator.Needs)
-	}
-	var permitsPRSkip bool
-	for _, step := range aggregator.Steps {
-		if strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"integration-rest-full"`) {
-			permitsPRSkip = true
-		}
-	}
-	if !permitsPRSkip {
-		t.Error("ci-integration must treat the push-only REST job as an expected skip on pull requests")
+	runner := wf.Jobs["credential-provider-windows"].RunsOn
+	if runner != "${{ needs.runner-policy.outputs.runner_windows }}" {
+		t.Errorf("credential-provider-windows runs-on = %q, want runner_policy.py's Blacksmith Windows runner", runner)
 	}
 }
 

@@ -39,6 +39,8 @@ const (
 // ordinal, so a scenario lets the preflight answer and hangs the one under test.
 type postStartProvider struct {
 	*runtime.Fake
+	// city is the one city every attempt on this provider starts in.
+	city string
 	// startErr is what Start returns once the runtime exists and carries its
 	// identity: the shape of a start that failed late.
 	startErr error
@@ -198,15 +200,64 @@ func postStartBeadItem(t *testing.T, clk clock.Clock, workDir string) (beads.Sto
 	return store, bead, before, postStartItem(sessiontest.SeedBead(t, bead), workDir)
 }
 
+// committedManualPostStartItem creates a committed manual conversation's
+// session (SESSION-LIFE-MANUAL-LOSS) in a fresh store and returns the prepared
+// resume of it.
+func committedManualPostStartItem(t *testing.T, clk clock.Clock, workDir string) (beads.Store, beads.Bead, preparedStart) {
+	t.Helper()
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "asleep",
+			"session_origin":      "manual",
+			"provider":            "claude",
+			"transport":           "tmux",
+			"command":             "claude",
+			"work_dir":            workDir,
+			"generation":          "1",
+			"instance_token":      "tok-worker",
+			"session_key":         "resume-key",
+			"resume_flag":         "--resume",
+			"resume_style":        "flag",
+			"started_config_hash": "keep-hash",
+			"last_woke_at":        clk.Now().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	item := postStartItem(sessiontest.SeedBead(t, bead), workDir)
+	item.resumed = true
+	return store, bead, item
+}
+
 // runPostStartAttempt runs one start attempt on its own goroutine and fails the
 // test if it has not returned within postStartWatchdog of fake time. It returns
 // the result and the fake time the attempt took.
 func runPostStartAttempt(ctx context.Context, t *testing.T, item preparedStart, sp *postStartProvider, store beads.Store, startupTimeout time.Duration) (startResult, time.Duration) {
 	t.Helper()
+	return runPostStartAttemptWith(ctx, t, item, sp, store, startupTimeout, immediateStartStabilityWaiter)
+}
+
+// runPostStartAttemptWith is runPostStartAttempt with stability as the
+// attempt's stability waiter.
+func runPostStartAttemptWith(ctx context.Context, t *testing.T, item preparedStart, sp *postStartProvider, store beads.Store, startupTimeout time.Duration, stability startStabilityWaiter) (startResult, time.Duration) {
+	t.Helper()
+	if sp.city == "" {
+		sp.city = t.TempDir()
+	}
+	item, release := leasedStart(t, sp.city, item)
+	defer release()
 	done := make(chan startResult, 1)
 	begin := time.Now()
 	go func() {
-		done <- runPreparedStartCandidate(ctx, item, "", sp, store, nil, startupTimeout, immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
+		done <- runPreparedStartCandidate(ctx, item, sp.city, sp, store, nil, startupTimeout, stability, immediateSessionStaleKeyDetectionWaiter, nil)
 	}()
 	select {
 	case result := <-done:
@@ -496,6 +547,55 @@ func TestRunPreparedStartCandidateFailureHelpersShareOneBudget(t *testing.T) {
 	})
 }
 
+// The pane read of a resume the post-stability liveness check finds dead
+// (postStartDeathPane) shares the post-start bound, but that check has already
+// answered: a read that does not answer reads empty, the start fails on the
+// death instead of deferring, and the death counts toward the resume backstop
+// even though the unread pane holds the provider's refusal.
+func TestRunPreparedStartCandidateBoundsTheDeadResumePaneRead(t *testing.T) {
+	workDir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
+		store, bead, item := committedManualPostStartItem(t, clk, workDir)
+		sp := newPostStartProvider()
+		sp.SetPeekOutput("worker", "> claude --resume resume-key\nNo conversation found with session ID: resume-key")
+		sp.hangPeek.Store(true)
+		defer sp.release()
+		// The resume exits after Start: the liveness check finds it gone.
+		exited := func(_ context.Context, name string) bool { return sp.Stop(name) == nil }
+
+		result, elapsed := runPostStartAttemptWith(context.Background(), t, item, sp, store, postStartTimeout, exited)
+
+		if got := sp.hangs.Load(); got != 1 {
+			t.Fatalf("%d provider calls hung, want exactly the dead resume's pane read: the scenario no longer reaches it", got)
+		}
+		if elapsed > postStartBound {
+			t.Fatalf("the attempt took %v, want it back within the %v bound", elapsed, postStartBound)
+		}
+		if !result.diedDuringStartup || result.outcome != TraceOutcomeProviderError || result.err == nil || errors.Is(result.err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("result = (died=%v, outcome=%q, err=%v), want the death reported as a provider error: the liveness check answered, so the start does not defer", result.diedDuringStartup, result.outcome, result.err)
+		}
+		if result.diedPane != "" {
+			t.Fatalf("dead pane = %q, want empty: a pane read that does not answer reads empty", result.diedPane)
+		}
+
+		rec := events.NewFake()
+		commitStartFailure(result, sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, nil)
+		got := mustGetBead(t, store, bead.ID)
+		if got.Metadata["session_key"] != "resume-key" || got.Metadata["wake_attempts"] != "1" || got.Metadata["resume_failures"] != "1" {
+			t.Fatalf("session_key=%q wake_attempts=%q resume_failures=%q, want the conversation kept and the death counted once toward the resume backstop", got.Metadata["session_key"], got.Metadata["wake_attempts"], got.Metadata["resume_failures"])
+		}
+		if n := resumeFailedEvents(t, rec.Events); n != 0 {
+			t.Fatalf("recorded %d resume-failed resets, want none: the refusal was never read", n)
+		}
+
+		// The abandoned read returns late. Nothing is waiting for it.
+		settled := mustGetBead(t, store, bead.ID)
+		releaseAndSettle(t, sp)
+		requireBeadUnchanged(t, store, settled)
+	})
+}
+
 // A wedged session is retried every reconcile tick. Without a cap each tick
 // would abandon one more provider call; the contract is at most one per session.
 func TestRunPreparedStartCandidateLeavesOneAbandonedObservationPerSession(t *testing.T) {
@@ -574,6 +674,7 @@ func TestObserveSessionBoundedLimitsOutstandingObservationsPerCity(t *testing.T)
 // The async start goroutine holds its asyncStartLimiter slot until the commit
 // finishes, so a start that waits forever on a provider call holds it forever.
 func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t *testing.T) {
+	testCity := t.TempDir()
 	workDir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
@@ -586,6 +687,8 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 		if !ok {
 			t.Fatalf("reserve async start slot: %s", reason)
 		}
+		item, releaseLease := leasedStart(t, testCity, item)
+		defer releaseLease()
 		var released, finished atomic.Int64
 		finishedC := make(chan struct{})
 		rec := events.NewFake()
@@ -604,7 +707,7 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 					close(finishedC)
 				},
 			}},
-			"", sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
+			testCity, sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
 			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
 		)
 		select {

@@ -105,7 +105,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 .PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
 
@@ -354,6 +354,8 @@ lint:
 	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) //...
 
 ## lint-changed: run nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|tracked|worktree)
+# testdata paths are dropped with sed, not a case statement: macOS /bin/sh
+# (bash 3.2) cannot parse a case pattern's ')' inside $(...).
 lint-changed:
 	@case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
@@ -378,9 +380,8 @@ lint-changed:
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	selected="$$(printf '%s\n' "$$files" | sed '/^$$/d' | while IFS= read -r file; do \
+	selected="$$(printf '%s\n' "$$files" | sed -e '/^$$/d' -e '/^testdata\//d' -e '/\/testdata\//d' | while IFS= read -r file; do \
 		dir="$$(dirname "$$file")"; \
-		case "$$dir/" in testdata/*|*/testdata/*) continue ;; esac; \
 		if [ ! -f "$$dir/BUILD.bazel" ]; then echo "missing $$dir"; \
 		elif [ "$$dir" = "." ]; then echo "//:all"; \
 		else echo "//$$dir:all"; fi; \
@@ -437,6 +438,13 @@ fmt: $(GOLANGCI_LINT)
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
+##
+## The pane shell is pinned to /bin/sh rather than forwarded. A test that opens
+## a tmux or herdr pane runs that shell in it, and the invoking user's zsh under
+## a fresh HOME (a release gate, CI) opens its new-user wizard, which swallows
+## the typed text (ga-yghhjf). The nested env -i blocks in
+## scripts/test-local-parallel, scripts/test-go-test-shard and
+## scripts/test-integration-shard mirror the pin (see scripts/AGENTS.md).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -447,7 +455,7 @@ TEST_ENV = env -i \
 	HOME="$$HOME" \
 	USER="$$USER" \
 	LOGNAME="$$LOGNAME" \
-	SHELL="$$SHELL" \
+	SHELL=/bin/sh \
 	GIT_CONFIG_NOSYSTEM=1 \
 	GIT_CONFIG_GLOBAL="$$(scripts/test-gitconfig-path)" \
 	LANG="$$LANG" \
@@ -726,15 +734,15 @@ test-bd-cli-contract-home-isolation:
 		-run '^TestRunBDIsolatesHOMEFromSharedServerConfig$$' ./test/acceptance
 
 ## test-bd-conditional-release-contract: run the ReleaseIfCurrent CAS contract
-## against the bd on PATH. It was split from test-bd-cli-contract because it was
-## the one bd contract the installable default could not run -- deps.env
-## BD_VERSION predated `--if-assignee`/`--if-status`, so the row only had a home
-## on the source-built BD_CURRENT_REF cell. That is no longer true as of
-## BD_VERSION=v1.3.0, which carries the flags, so the row now runs on every
-## cell rather than skipping on most. Kept separate anyway: it is the only
-## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
-## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
-## skip into a failure, so a cell cannot pass while proving nothing.
+## against the bd on PATH. It is separate from test-bd-cli-contract because it
+## is the only contract that needs a real CAS-capable bd. Every pinned bd
+## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
+## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.1):
+## strictly in //internal/beads:bd_conditional_release_contract_test, and in
+## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
+## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
+## failure, so a cell cannot pass while proving nothing.
 ##
 ## The existence preflight closes the other way this cell can pass having proven
 ## nothing: a `-run` selector that matches no test is not an error to `go test`
@@ -1015,10 +1023,23 @@ install-oasdiff:
 	fi
 
 ## openapi-breaking-check: fail when internal/api/openapi.json breaks clients of
-## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main).
+## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main):
+## //cmd/openapi-breaking:openapi-breaking_test with that commit's spec as
+## GC_OPENAPI_BREAKING_BASE_SPEC, as bazel.yml's unit lane runs it on PRs.
 ## Waive intentional breaks in internal/api/openapi-breaking.toml.
 .PHONY: openapi-breaking-check
-openapi-breaking-check: install-oasdiff
+openapi-breaking-check: bazel-tmpdir
+	@base="$${OPENAPI_BREAKING_BASE:-$$(git merge-base HEAD origin/main)}" || exit 1; \
+	spec="$$(mktemp "$${TMPDIR:-/tmp}/openapi-base.XXXXXX")" || exit 1; \
+	trap 'rm -f "$$spec"' EXIT; \
+	git show "$$base:internal/api/openapi.json" > "$$spec" || exit 1; \
+	echo "openapi-breaking-check: base $$base"; \
+	GC_OPENAPI_BREAKING_BASE_SPEC="$$spec" $(BAZEL_TEST) //cmd/openapi-breaking:openapi-breaking_test
+
+## openapi-breaking-check-go: the same gate with plain go test / go run and the
+## Makefile's OASDIFF_VERSION.
+.PHONY: openapi-breaking-check-go
+openapi-breaking-check-go: install-oasdiff
 	GC_REQUIRE_OASDIFF=1 OASDIFF=$(OASDIFF) go test -count=1 ./cmd/openapi-breaking
 	OASDIFF=$(OASDIFF) go run ./cmd/openapi-breaking
 
@@ -1055,17 +1076,17 @@ test-mail-wisp-insert:
 test-mcp-mail:
 	$(TEST_ENV) GC_TEST_MCP_MAIL=1 go test ./internal/mail/exec/ -run TestMCPMailConformanceLive -v -count=1
 
-## test-openclaw-bridge: install + run the contrib/openclaw-bridge Node test suite
+## test-openclaw-bridge: run the contrib/openclaw-bridge Node test suite (rules_js)
 test-openclaw-bridge:
-	cd contrib/openclaw-bridge && npm ci --no-audit --no-fund && npm test
+	$(BAZEL_TEST) //contrib/openclaw-bridge/...
 
-## test-docker: run Docker session provider integration tests
-test-docker: check-docker
-	./scripts/test-docker-session
+## test-docker: run the Docker session adapter against the emulated container host
+test-docker:
+	$(BAZEL_TEST) --config=integration --test_filter='^TestDockerSession' //test/containerhost:containerhost_test
 
-## test-k8s: run K8s session provider conformance tests
+## test-k8s: run the K8s session adapter against the emulated container host's pod API
 test-k8s:
-	$(TEST_ENV) go test -tags integration ./test/integration/ -run TestK8sSessionConformance -v -count=1
+	$(BAZEL_TEST) --config=integration --test_filter='^TestK8sSession' //test/containerhost:containerhost_test
 
 ## setup: install tools and git hooks
 ## .githooks is the single core.hooksPath owner; its hooks chain every
@@ -1107,22 +1128,55 @@ diagrams-excalidraw:
 docs-dev:
 	./mint.sh dev
 
-## dashboard-build: compile the SPA bundle and sync it into the embedded dist/
+# Dashboard SPA (internal/api/dashboardspa/web). Bazel builds and tests it
+# hermetically (rules_js: pinned Node.js, npm packages from pnpm-lock.yaml),
+# which is what CI gates on; the *-npm twins drive the same steps through a
+# local npm install for dev servers and offline work.
+DASHBOARD_WEB := internal/api/dashboardspa/web
+DASHBOARD_BAZEL_TARGETS := //internal/api/dashboardspa/... //internal/api/dashboardbff/...
+
+## dashboard-build: build the SPA bundle with Bazel and sync it into the committed dist/ (a Node-less `go build` embeds that copy)
 dashboard-build:
-	cd internal/api/dashboardspa/web && npm ci --silent && npm run build && rm -rf ../dist && cp -rf frontend/dist ../dist
+	$(BAZEL) build $(BAZEL_FLAGS) --remote_download_outputs=toplevel //internal/api/dashboardspa:dist
+	rm -rf internal/api/dashboardspa/dist
+	cp -rfL bazel-bin/internal/api/dashboardspa/dist internal/api/dashboardspa/dist
+	chmod -R a-x,u+w,a+rX internal/api/dashboardspa/dist
+
+## dashboard-build-npm: the same bundle through a local npm install
+dashboard-build-npm:
+	cd $(DASHBOARD_WEB) && npm ci --silent && npm run build && rm -rf ../dist && cp -rf frontend/dist ../dist
+
+## dashboard-generate-client: regenerate the typed API client from internal/api/openapi.json (openapi-ts under Bazel)
+dashboard-generate-client:
+	$(BAZEL) build $(BAZEL_FLAGS) --remote_download_outputs=toplevel //$(DASHBOARD_WEB):gc_supervisor_client
+	rm -rf $(DASHBOARD_WEB)/shared/src/generated/gc-supervisor-client
+	cp -rfL bazel-bin/$(DASHBOARD_WEB)/gc-supervisor-client $(DASHBOARD_WEB)/shared/src/generated/gc-supervisor-client
+	chmod -R a-x,u+w,a+rX $(DASHBOARD_WEB)/shared/src/generated/gc-supervisor-client
+
+## dashboard-lock: re-derive pnpm-lock.yaml (what Bazel installs) from package-lock.json after an npm dependency change
+dashboard-lock:
+	$(BAZEL) run $(BAZEL_FLAGS) -- @pnpm//:pnpm --dir "$(CURDIR)/$(DASHBOARD_WEB)" import
 
 ## dashboard-dev: Vite dev server (HMR) for SPA iteration
 dashboard-dev:
-	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend dev
+	cd $(DASHBOARD_WEB) && npm run --workspace gas-city-dashboard-frontend dev
 
-## dashboard-check: typecheck (src + test + e2e specs) + build the SPA, then go test the embedded handler + BFF
-dashboard-check: dashboard-build
-	cd internal/api/dashboardspa/web && npm run typecheck && npm run --workspace gas-city-dashboard-frontend typecheck:test
-	cd internal/api/dashboardspa/web && npm run --workspace gas-city-dashboard-frontend typecheck:e2e
+## dashboard-check: rebuild the committed dist/ (dashboard-build), then what CI
+## gates on, under Bazel: typecheck (src + test + e2e specs, shared), vitest,
+## the SPA build, the committed dist/, generated API client and pnpm-lock.yaml
+## in sync, and the Go tests of the embedded handler + BFF
+dashboard-check: dashboard-build bazel-tmpdir
+	$(BAZEL_TEST) $(DASHBOARD_BAZEL_TARGETS)
+
+## dashboard-check-npm: the same checks through a local npm install and go test
+dashboard-check-npm: dashboard-build-npm
+	cd $(DASHBOARD_WEB) && npm run typecheck && npm run --workspace gas-city-dashboard-frontend typecheck:test
+	cd $(DASHBOARD_WEB) && npm run --workspace gas-city-dashboard-frontend typecheck:e2e
+	cd $(DASHBOARD_WEB) && npm run --workspace gas-city-dashboard-frontend test
 	$(TEST_ENV) go test ./internal/api/dashboardspa/... ./internal/api/dashboardbff/...
 
 ## dashboard-smoke: serve the built SPA bundle via Vite preview and verify it responds
-dashboard-smoke: dashboard-build
+dashboard-smoke: dashboard-build-npm
 	@PORT=$$(python3 -c 'import socket; sock = socket.socket(); sock.bind(("127.0.0.1", 0)); print(sock.getsockname()[1]); sock.close()'); \
 	LOG=$$(mktemp); \
 	( cd internal/api/dashboardspa/web/frontend && exec npm run preview -- --host 127.0.0.1 --strictPort --port $$PORT >"$$LOG" 2>&1 ) & \
@@ -1152,7 +1206,7 @@ dashboard-e2e-go:
 ## installs Chromium, and runs the render specs, which assert each view renders
 ## its seeded content with no React error boundary and no client-error POST. The
 ## Go webServer in playwright.config.ts launches the seeded fakesupervisor.
-dashboard-e2e-play: dashboard-build
+dashboard-e2e-play: dashboard-build-npm
 	cd test/dashport/cmd/fakesupervisor && go build -tags integration -o fakesupervisor .
 	cd internal/api/dashboardspa/web && npm ci --silent
 	cd internal/api/dashboardspa/web/frontend && npm run test:e2e:install
@@ -1162,22 +1216,8 @@ dashboard-e2e-play: dashboard-build
 ## test (Layer A) and the Playwright browser render smoke (Layer B).
 dashboard-e2e: dashboard-e2e-go dashboard-e2e-play
 
-## dashboard-ci: regenerate the typed API client + rebuild the SPA bundle, and
-## fail if the generated gc-supervisor-client or the embedded dist/ is stale.
-## Used by CI to enforce that the dashboard's generated client (from
-## internal/api/openapi.json via openapi-ts.config.ts) and dist/ match sources.
+## dashboard-ci: alias of dashboard-check (its drift checks are Bazel diff tests now)
 dashboard-ci: dashboard-check
-	cd internal/api/dashboardspa/web && npm run generate:client
-	@if ! git diff --quiet -- internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client; then \
-		echo "ERROR: dashboard API client is stale — run 'npm run generate:client' in internal/api/dashboardspa/web and commit." >&2; \
-		git --no-pager diff --stat -- internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client; \
-		exit 1; \
-	fi
-	@if ! git diff --quiet -- internal/api/dashboardspa/dist; then \
-		echo "ERROR: internal/api/dashboardspa/dist/ is stale — run 'make dashboard-build' and commit." >&2; \
-		git --no-pager diff --stat -- internal/api/dashboardspa/dist; \
-		exit 1; \
-	fi
 
 ## spec-ci: regenerate the OpenAPI spec + generated Go client, fail on drift,
 ## then run the OpenAPI breaking-change gate (openapi-breaking-check).
@@ -1251,8 +1291,10 @@ help:
 ## integration lane's package suite (//test:integration_packages). Run after
 ## adding packages.
 .PHONY: bazel-sync
+# BAZEL_SYNC_FLAGS: CI passes --config=remote-exec, so gazelle and its Go
+# stdlib come from rbe-west's cache instead of 64 local compiles.
 bazel-sync:
-	bazel run //:gazelle
+	bazel run $(BAZEL_SYNC_FLAGS) //:gazelle
 	python3 tools/bazel/repo_tree.py
 	python3 tools/bazel/hermetic_tags.py
 	python3 tools/bazel/integration_suite.py

@@ -276,9 +276,9 @@ func TestConfigFingerprintEmptyConfig(t *testing.T) {
 
 func TestConfigFingerprintExtraChangesHash(t *testing.T) {
 	a := Config{Command: "claude"}
-	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "5"}}
+	b := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "db"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("FingerprintExtra should change the hash")
+		t.Error("a Restart-policy FingerprintExtra key should change the hash")
 	}
 }
 
@@ -295,10 +295,10 @@ func TestConfigFingerprintExtraDeterministic(t *testing.T) {
 }
 
 func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
-	a := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "3"}}
-	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "10"}}
+	a := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "db"}}
+	b := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "cache"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("different FingerprintExtra values should produce different hashes")
+		t.Error("different Restart-policy FingerprintExtra values should produce different hashes")
 	}
 }
 
@@ -938,7 +938,7 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v7 prefix (future mismatched version)", "v7:" + bareHex, true},
+		{"v8 prefix (future mismatched version)", "v8:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},

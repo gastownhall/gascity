@@ -54,8 +54,9 @@ type poolSessionCreateIdentity struct {
 	// allocator mints it at plan time: it is the create's ledger marker.
 	InstanceToken string
 	// BeforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none).
-	BeforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write, which then never happens.
+	BeforeWrite func(rowID string) error
 }
 
 // poolCreateWriteError marks a create error from the row write itself, or
@@ -408,7 +409,9 @@ func createPoolSessionBeadWithIdentifiers(
 		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
 	}
 	if identity.BeforeWrite != nil {
-		identity.BeforeWrite(explicitID)
+		if err := identity.BeforeWrite(explicitID); err != nil {
+			return sessionpkg.Info{}, err
+		}
 	}
 	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
 	// The session_name is already final in meta, so there is no second write.
@@ -426,7 +429,7 @@ func createPoolSessionBeadWithIdentifiers(
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
-				closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
+				closeSeat(store, nil, info, closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeRollback}, now, io.Discard)
 				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID, landed: true}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
@@ -443,7 +446,7 @@ func createPoolSessionBeadWithIdentifiers(
 // generations, so what keeps a slot at ONE unconfirmed generation is that a
 // fresh row may not be minted while an OPEN pool row of the same template and
 // identity is still an unconfirmed create — pending-create, or failed-create
-// whose runtime teardown has not been confirmed (releaseBeadScopedPoolRuntime
+// whose runtime teardown has not been confirmed (releaseRowOwnedRuntime
 // holds such a row open). This is the guarantee #5372 got from the
 // identity-derived name collision (ga-vcjr9), keyed on the identity instead of
 // the runtime name. Identities compare in their tmux-safe encoding, the same

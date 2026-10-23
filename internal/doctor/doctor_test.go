@@ -349,6 +349,25 @@ func TestDoctor_FixHint(t *testing.T) {
 	}
 }
 
+// TestPrintResultIndentsMultiLineFixHint keeps every line of a multi-line
+// hint under its "hint:" label.
+func TestPrintResultIndentsMultiLineFixHint(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, &CheckResult{
+		Name:    "hint-check",
+		Status:  StatusWarning,
+		Message: "problem",
+		FixHint: "Fix, either:\n  - one\n  - two",
+	}, false)
+
+	want := "      hint: Fix, either:\n" +
+		"              - one\n" +
+		"              - two\n"
+	if !strings.HasSuffix(buf.String(), want) {
+		t.Errorf("printResult output =\n%s\nwant it to end with\n%s", buf.String(), want)
+	}
+}
+
 // detailCheck returns a result with Details for verbose testing.
 type detailCheck struct{}
 
@@ -1054,3 +1073,107 @@ func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
 }
 
 func (panickingFixCheck) WarmupEligible() bool { return false }
+
+// eventCheck records the order of its Run and Fix calls into a shared log.
+type eventCheck struct {
+	mockCheck
+	log *[]string
+}
+
+func (e *eventCheck) Run(ctx *CheckContext) *CheckResult {
+	*e.log = append(*e.log, "run "+e.name)
+	return e.mockCheck.Run(ctx)
+}
+
+func (e *eventCheck) Fix(ctx *CheckContext) error {
+	*e.log = append(*e.log, "fix "+e.name)
+	return e.mockCheck.Fix(ctx)
+}
+
+// BeforeFix must run before every remediation and before the re-run that
+// verifies it, and never on a run without --fix, so a caller sharing reads
+// across one run never answers a fix or its verification from pre-fix data.
+func TestDoctorBeforeFixPrecedesFixAndVerify(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		t.Run(fmt.Sprintf("timeout=%s", timeout), func(t *testing.T) {
+			var log []string
+			d := &Doctor{CheckTimeout: timeout, BeforeFix: func() { log = append(log, "before-fix") }}
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "ok", status: StatusOK, canFix: true}, log: &log})
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "broken", status: StatusError, canFix: true}, log: &log})
+
+			d.Run(&CheckContext{}, io.Discard, false)
+			if want := "run ok,run broken"; strings.Join(log, ",") != want {
+				t.Fatalf("without --fix: events = %v, want %s", log, want)
+			}
+
+			log = nil
+			report := d.Run(&CheckContext{}, io.Discard, true)
+			want := "run ok,run broken,before-fix,fix broken,before-fix,run broken"
+			if got := strings.Join(log, ","); got != want {
+				t.Fatalf("with --fix: events = %s, want %s", got, want)
+			}
+			if report.Fixed != 1 {
+				t.Fatalf("Fixed = %d, want 1", report.Fixed)
+			}
+		})
+	}
+}
+
+// abandonObservingCheck blocks until the runner signals abandonment through
+// CheckContext.Done, then records what Canceled reported.
+type abandonObservingCheck struct {
+	sawCancel chan bool
+}
+
+func (c *abandonObservingCheck) Name() string { return "abandon-observer" }
+func (c *abandonObservingCheck) Run(ctx *CheckContext) *CheckResult {
+	if ctx.Canceled() {
+		c.sawCancel <- false // canceled before the timeout fired: wrong
+		return &CheckResult{Name: c.Name(), Status: StatusOK}
+	}
+	select {
+	case <-ctx.Done:
+		c.sawCancel <- ctx.Canceled()
+	case <-time.After(5 * time.Second):
+		c.sawCancel <- false
+	}
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *abandonObservingCheck) CanFix() bool              { return false }
+func (c *abandonObservingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *abandonObservingCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutSignalsAbandonedCheck: when the runner abandons a check at
+// the per-check timeout it closes CheckContext.Done, so a check that issues
+// many store calls can stop issuing them instead of running on unobserved.
+func TestRunCheckTimeoutSignalsAbandonedCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &abandonObservingCheck{sawCancel: make(chan bool, 1)}
+	d.Register(check)
+
+	report := d.Run(&CheckContext{}, io.Discard, false)
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("report = %+v, want the check to time out", report)
+	}
+	select {
+	case canceled := <-check.sawCancel:
+		if !canceled {
+			t.Fatal("abandoned check did not observe cancellation through CheckContext.Done/Canceled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned check never observed CheckContext.Done closing")
+	}
+	d.Wait()
+}
+
+// TestCheckContextCanceledNilSafe: an unbounded run leaves Done nil, and a nil
+// context is never canceled.
+func TestCheckContextCanceledNilSafe(t *testing.T) {
+	var nilCtx *CheckContext
+	if nilCtx.Canceled() {
+		t.Fatal("nil CheckContext reported canceled")
+	}
+	if (&CheckContext{}).Canceled() {
+		t.Fatal("CheckContext without Done reported canceled")
+	}
+}

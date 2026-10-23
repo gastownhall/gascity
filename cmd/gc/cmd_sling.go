@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"math/rand"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1012,7 +1011,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		// so printing it verbatim duplicates every child line. Summarize
 		// instead when we have per-child detail.
 		if len(result.Children) > 0 {
-			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt) //nolint:errcheck
+			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt+result.NotOpenCt) //nolint:errcheck
 		} else {
 			fmt.Fprintln(stderr, err) //nolint:errcheck
 		}
@@ -1184,16 +1183,23 @@ func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.C
 	if conflictErr == nil {
 		return
 	}
+	printSourceWorkflowConflictLines(stderr, conflictErr.SourceBeadID, conflictErr.WorkflowIDs,
+		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef))
+}
+
+// printSourceWorkflowConflictLines prints what gc sling shows for a source
+// workflow conflict: the blocking workflows, then the cleanup command.
+func printSourceWorkflowConflictLines(stderr io.Writer, sourceBeadID string, workflowIDs []string, cleanup string) {
 	_, _ = fmt.Fprintf(
 		stderr,
 		"gc sling: source bead %s already has live workflow(s): %s\n",
-		conflictErr.SourceBeadID,
-		strings.Join(conflictErr.WorkflowIDs, ","),
+		sourceBeadID,
+		strings.Join(workflowIDs, ","),
 	)
 	_, _ = fmt.Fprintf(
 		stderr,
 		"gc sling: use --force to override, or %s to clean up\n",
-		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef),
+		cleanup,
 	)
 }
 
@@ -1573,7 +1579,9 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		// No running config session — poke controller for immediate wake.
 		// Key-less (allocator): the wake is template demand, not a session.
 		if err := pokeController(cityPath); err != nil {
-			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			if !noteWorkerSitePoke(stderr, "gc sling", err) {
+				fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			}
 		} else {
 			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		}
@@ -1611,8 +1619,12 @@ func resolvePoolNudgeMember(cfg *config.City, pool *config.Agent, qualifiedInsta
 // pokeController sends a "poke" command to the controller socket to
 // trigger an immediate reconciler tick. If the per-city controller
 // socket doesn't exist (supervisor model), falls back to sending
-// "reload" to the supervisor socket.
+// "reload" to the supervisor socket. On a worker site it returns
+// errWorkerSiteNoController without trying either.
 func pokeController(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	_, err := sendControllerCommand(cityPath, "poke")
 	if err == nil {
 		return nil
@@ -1623,8 +1635,12 @@ func pokeController(cityPath string) error {
 
 // reloadControllerConfig asks the controller to reload config immediately.
 // If the per-city controller socket doesn't exist (supervisor model), falls
-// back to sending "reload" to the supervisor socket.
+// back to sending "reload" to the supervisor socket. On a worker site it
+// returns errWorkerSiteNoController without trying either.
 func reloadControllerConfig(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	_, err := sendControllerCommand(cityPath, "reload")
 	if err == nil {
 		return nil
@@ -1639,9 +1655,12 @@ func reloadControllerConfig(cityPath string) error {
 // commands like `gc sling` after the workflow has already been created. It
 // must not wait for the full supervisor reconcile to finish, or the caller can
 // block for minutes even though the wake was already queued.
+//
+// It dials through dialGCSocket, so on a worker site it returns
+// errWorkerSiteNoController (wrapped) without dialing.
 func pokeSupervisor() error {
 	sockPath := supervisorSocketPath()
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := dialGCSocket(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor: %w", err)
 	}
@@ -1665,8 +1684,24 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 	})
 }
 
+// deliverSlingNudge nudges a running target, or queues the nudge for an asleep
+// one and pokes the controller to wake it. On a worker site it queues nothing,
+// since the box's nudge queue is a local file the remote controller never
+// reads, and records the session's wake instead (requestWorkerSiteNudgeWake);
+// its notice says whether it recorded one.
 func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
+	if onWorkerSite(target.cityPath) {
+		outcome, err := requestWorkerSiteNudgeWake(target, store)
+		fmt.Fprintf(stderr, "gc sling: %s\n", workerSiteNudgeNotice(outcome)) //nolint:errcheck // best-effort
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "warning: bead routed but wake failed: %v\n", err) //nolint:errcheck // best-effort
+		case outcome == session.WakeRecorded:
+			fmt.Fprintf(stdout, "Session %q is asleep — recorded a wake for the remote controller\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+		}
+		return
+	}
 	// Session observation/handle and the last-nudge-delivered stamp route to the
 	// session coordination-class store (derived from the target's cfg+cityPath); the
 	// queued-nudge enqueue below stays on the passed store (nudges class). Identity
@@ -1679,7 +1714,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	if running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
-			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 				Text:     msg,
 				Delivery: worker.NudgeDeliveryWaitIdle,
 				Source:   "sling",

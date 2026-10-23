@@ -27,7 +27,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.1 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.3.0 minimum; 1.3.1 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -252,9 +252,9 @@ your machine. Nothing you build is uploaded.
 | Docs | `make check-docs` |
 | Added packages, files, or imports | `make bazel-sync`, then commit the result |
 
-Plain `go test ./...` still works for a quick check of one package, but it
-is not what CI runs and skips the lint, formatting, and generated-file
-checks. See
+Plain `go test ./...` still works for a human's quick check of one package
+(agents run tests only with `bazel test`), but it is not what CI runs and
+skips the lint, formatting, and generated-file checks. See
 [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 for the full contributor workflow and the
 [Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)

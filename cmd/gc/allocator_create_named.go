@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -17,7 +18,7 @@ import (
 // The named-canonical create kind (P3-6b; POOL-042, the sync create arm): a
 // configured named session with no canonical row gets its closed canonical
 // row reopened, or a fresh row, with legacy's metadata (AM7). The effect runs
-// on the create executor and settles like a pool create, with these
+// on the session executor and settles like a pool create, with these
 // differences:
 //
 //   - it resolves the template read-only, serialized (AM-N3), and resolution
@@ -27,7 +28,9 @@ import (
 //     (AM-N1);
 //   - inside the lock it reads the sessions store live once (the identity's
 //     rows, alias and session-name availability) and writes once: a reopen
-//     conditional on the revision it read (AM-N4), or a create;
+//     conditional on the revision it read (AM-N4), or a create, each after a
+//     last check of its context (an effect abandoned at its deadline never
+//     writes); a store with no conditional writer refuses the reopen (v5 C2);
 //   - a reopen reports the row it retargets in its settlement (AM-N2) and
 //     keeps the row's instance_token and generation;
 //   - the row's state comes from the plan, decided from the observation cache
@@ -54,7 +57,7 @@ type namedCreatePlan struct {
 var templateResolveMu sync.Mutex
 
 // createNamed is a named plan's effect, from the spec check to the write.
-func (x *createEffects) createNamed(pass *createPass, p createPlan, prog *createProgress) (session.Info, error) {
+func (x *createEffects) createNamed(ctx context.Context, pass *createPass, p createPlan, prog *createProgress) (session.Info, error) {
 	plan, cfg := p.Named, pass.cfg
 	prog.stage = createStageStalePlan
 	spec, ok := findNamedSessionSpec(cfg, x.host.cityName, plan.Identity)
@@ -76,26 +79,33 @@ func (x *createEffects) createNamed(pass *createPass, p createPlan, prog *create
 	err = x.host.withLocks(x.host.cityPath, []string{plan.Identity, plan.SessionName}, func() error {
 		prog.stage = createStageFence
 		var err error
-		info, err = x.writeNamed(pass, p, tp, prog)
+		info, err = x.writeNamed(ctx, pass, p, tp, prog)
 		return err
 	})
 	if err == nil && plan.AdoptLive {
-		x.adoptLiveIdentity(pass, p, info)
+		x.adoptLiveIdentity(ctx, pass, p, info)
 	}
 	return info, err
 }
 
 // adoptLiveIdentity gives an AdoptLive row and the runtime it adopted one
-// identity (LL5, v5 O2), after the identifier locks are released. A runtime
-// that names another session is left alone, and so is the row: its token
-// belongs to that session. Otherwise the row records the runtime's own
-// GC_INSTANCE_TOKEN by CAS (recordRowToken), a runtime with no token getting
-// a minted one, and only then is the runtime stamped (stampAdoptedRuntime)
+// identity (LL5, v5 O2), after the identifier locks are released. Only a
+// runtime that adoptableIdentity accepts on a fresh read, and that a fresh
+// read after it confirms present, is stamped; any other is left alone, and
+// so is the row: a token under a session ID belongs to that session. The
+// row records the runtime's own GC_INSTANCE_TOKEN by CAS (recordRowToken),
+// a runtime with no token getting a minted one, and only then is the
+// runtime stamped (stampAdoptedRuntime)
 // with the epoch the row holds: a lost CAS leaves the runtime with no session
 // ID and a token that is not the row's, which the comparator reads as
-// Unknown. A failure or a panic is logged and leaves the landed create
-// landed.
-func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, written session.Info) {
+// Unknown. All of it runs under the runtime's lease (I-LEASE), its record
+// lasting the effect's remaining deadline + 60s, waited for up to
+// adoptLiveLeaseWait (the create holds no other lock here), with the reads
+// and the stamp bounded by its SafeUntil. A failure a later read may clear
+// (the name still busy, a lost CAS, presence unconfirmed) is tried again, up
+// to adoptLiveAttempts. A failure or a panic is logged and leaves the
+// landed create landed.
+func (x *createEffects) adoptLiveIdentity(ctx context.Context, pass *createPass, p createPlan, written session.Info) {
 	defer func() {
 		if r := recover(); r != nil {
 			x.logf("allocator: named session %q adopted as %s, identity stamp panicked: %v\n", p.Named.Identity, written.ID, r)
@@ -104,31 +114,77 @@ func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, writte
 	if pass.sp == nil {
 		return
 	}
-	if err := adoptLiveStamp(pass.sp, pass.store, p.Named.SessionName, written); err != nil {
+	var err error
+	for attempt := 1; ; attempt++ {
+		err = adoptLiveStamp(ctx, pass.sp, pass.store, x.host.cityPath, p.Named.SessionName, written)
+		if err == nil || !errors.Is(err, errStampRetriable) || attempt == adoptLiveAttempts || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(adoptLiveRetryDelay):
+		}
+	}
+	if err != nil {
 		x.logf("allocator: named session %q adopted as %s, identity not stamped: %v\n", p.Named.Identity, written.ID, err)
 	}
 }
 
-func adoptLiveStamp(sp runtime.Provider, store beads.Store, name string, written session.Info) error {
-	sid, err := sp.GetMeta(name, "GC_SESSION_ID")
-	if err != nil {
-		return fmt.Errorf("reading GC_SESSION_ID: %w", err)
+// The AdoptLive stamp's bounds: its wait for a busy name, its attempts, and
+// the pause between them.
+const (
+	adoptLiveLeaseWait  = 10 * time.Second
+	adoptLiveAttempts   = 3
+	adoptLiveRetryDelay = 250 * time.Millisecond
+)
+
+// errStampRetriable marks an AdoptLive stamp failure a later read may clear.
+var errStampRetriable = errors.New("retriable")
+
+func adoptLiveStamp(ctx context.Context, sp runtime.Provider, store beads.Store, cityPath, name string, written session.Info) error {
+	lease, release, err := waitRuntimeLease(ctx, store, cityPath, name, written.ID, session.RuntimeLeaseTTL(effectBudget(ctx)), adoptLiveLeaseWait)
+	switch {
+	case errors.Is(err, session.ErrRuntimeLeaseBusy):
+		return fmt.Errorf("the runtime's lease: %w: %w", errStampRetriable, err)
+	case err != nil:
+		return fmt.Errorf("the runtime's lease: %w", err)
 	}
-	if sid = strings.TrimSpace(sid); sid != "" && sid != written.ID {
-		return fmt.Errorf("the runtime names session %s", sid)
+	defer release()
+	if lease.Epoch() > 0 {
+		// Under the record, the lease bounds the rest, not the effect's
+		// deadline: a token recorded on the row is stamped on the runtime.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), lease.SafeUntil())
+		defer cancel()
 	}
-	token, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-	if err != nil {
-		return fmt.Errorf("reading GC_INSTANCE_TOKEN: %w", err)
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if !known {
+		return errors.New("the runtime's backend is unknown")
 	}
-	token, minted := strings.TrimSpace(token), ""
+	rt := readRuntimeIdentity(ctx, leaf, name)
+	if !adoptableIdentity(rt) {
+		return fmt.Errorf("the runtime's identity is not adoptable (%s)", compareIdentity(written, rt))
+	}
+	// Liveness first: a token read off a runtime that is gone (acp's leftover
+	// sidecar) proves nothing, so presence is re-confirmed after the read.
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, time.Now(), fenceProbeTimeout)
+	if status != runtime.ObservationComplete || err != nil || !live.Present() {
+		return fmt.Errorf("%w: the runtime is not confirmed present after its identity read", errStampRetriable)
+	}
+	token, minted := strings.TrimSpace(rt.Token), ""
 	if token == "" {
 		minted = session.NewInstanceToken()
 		token = minted
 	}
-	generation, err := recordRowToken(store, written, token)
-	if err != nil {
+	generation, err := recordRowToken(store, lease, written, token)
+	var lost *beads.PreconditionFailedError
+	switch {
+	case errors.As(err, &lost):
+		return fmt.Errorf("%w: %w", errStampRetriable, err)
+	case err != nil:
 		return err
+	case ctx.Err() != nil: // past the lease's SafeUntil (with no record, the effect's deadline)
+		return fmt.Errorf("stamping the runtime: %w", context.Cause(ctx))
 	}
 	return stampAdoptedRuntime(sp, name, written.ID, generation, minted)
 }
@@ -138,9 +194,10 @@ const rowTokenAttempts = 3
 
 // recordRowToken writes token as the written row's instance_token by CAS at
 // the revision a live read sees, retrying a lost CAS while the premise holds:
-// the row is open, at the generation the create wrote, and carries the token
-// the create wrote. It never writes blind. It returns the row's generation.
-func recordRowToken(store beads.Store, written session.Info, token string) (string, error) {
+// the row is open, at the generation the create wrote, carries the token the
+// create wrote, and holds lease's record. It never writes blind. It returns
+// the row's generation.
+func recordRowToken(store beads.Store, lease *session.RuntimeLease, written session.Info, token string) (string, error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	switch {
 	case err != nil:
@@ -158,6 +215,8 @@ func recordRowToken(store beads.Store, written session.Info, token string) (stri
 		switch {
 		case row.Status == "closed" || generation != written.Generation:
 			return "", errors.New("recording instance_token: the row moved on after the create")
+		case !lease.HoldsMeta(row.Metadata):
+			return "", errors.New("recording instance_token: the row no longer holds the runtime's lease")
 		case current == token:
 			return generation, nil
 		case current != written.InstanceToken:
@@ -196,7 +255,7 @@ func (x *createEffects) resolveNamed(cfg *config.City, spec namedSessionSpec, pl
 // read covers the sessions store alone, by invariant: configured named rows
 // live only in the sessions store, and C11 refuses duplicates on other legs
 // at boot. A partial or failed read of it fails the create closed.
-func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplateParams, prog *createProgress) (session.Info, error) {
+func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p createPlan, tp TemplateParams, prog *createProgress) (session.Info, error) {
 	plan, cfg, store := p.Named, pass.cfg, pass.store
 	now := x.host.now().UTC()
 	live := liveFenceStore{Store: store, live: beads.HandlesFor(store).Live}
@@ -205,7 +264,12 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 		return session.Info{}, err
 	}
 	if closed, ok := session.ClosedNamedSessionBeadIn(rows, plan.SessionName); ok {
-		return reopenNamed(store, live, cfg, p, closed, now, prog)
+		if !plan.AdoptLive {
+			if err := nameConfirmedFree(ctx, pass.sp, tp.Hints.ProcessNames, plan.SessionName, now, x.host.now, prog); err != nil {
+				return session.Info{}, err
+			}
+		}
+		return reopenNamed(ctx, store, live, cfg, p, closed, now, prog)
 	}
 	if err := session.EnsureAliasAvailableWithConfigForOwner(live, cfg, plan.Identity, "", plan.Identity); err != nil {
 		return session.Info{}, fmt.Errorf("alias %q for %s unavailable: %w", plan.Identity, plan.Identity, err)
@@ -220,23 +284,67 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 	liveHash := runtime.LiveFingerprint(templateParamsToConfig(tp))
 	meta := syncCreateMetadata(tp, plan.SessionName, plan.Identity, liveHash, state, p.Token, 0, now)
 	meta["alias"] = plan.Identity
-	prog.writing = true
+	if err := prog.beginWrite(ctx); err != nil {
+		return session.Info{}, err
+	}
 	info, err := sessionFrontDoor(store).CreateSessionInfo(session.CreateSpec{Title: plan.Identity, AgentName: plan.Identity, Metadata: meta})
 	if err != nil {
 		return session.Info{}, poolCreateWriteError{err: fmt.Errorf("creating named session %q: %w", plan.Identity, err)}
 	}
-	return info, nil
+	return info, prog.afterWrite(ctx, info.ID)
+}
+
+// nameConfirmedFree is a reopen's fresh runtime read of name (readRuntime,
+// the effects' standard read, with the template's process names), under the
+// identifier locks the reopen holds: a plan read the name free from an
+// observation the inventory's lag can leave behind a runtime started since,
+// and a reopen writes the row stopped. Only a read that finds the name
+// absent, or dead (a corpse or a zombie, as the plan's are), lets it write;
+// a live runtime or a read that cannot tell refuses redecided, and a pass
+// after the backoff adopts it or decides again. A context that ends before
+// or during the read is an abandoned no-write.
+func nameConfirmedFree(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time, now func() time.Time, prog *createProgress) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errCreateAbandoned, err) // nothing written, as at the write's begin
+	}
+	rt, cause := readRuntime(ctx, sp, processNames, name, since, now)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errCreateAbandoned, err)
+	}
+	switch {
+	case cause != "":
+		prog.stage = createStageRedecided
+		return fmt.Errorf("named session %q: the name's runtime read: %s", name, cause)
+	case rt.Class == rtAbsent || rt.Class == rtCorpse || rt.Class == rtZombie:
+		return nil
+	}
+	prog.stage = createStageRedecided
+	return fmt.Errorf("named session %q: the name's runtime is not confirmed free (class %d)", name, rt.Class)
 }
 
 // reopenNamed reopens closed, the identity's closed canonical row, with
-// legacy's reopen batch in one write: conditional on the revision the
-// fenced read saw where the store resolves a conditional writer, else
-// legacy's transaction (last writer wins, design §4a N3). The settlement
-// names the row whatever the outcome; settle reads a refused write (a lost
-// fence, a writer that cannot fence) as no write.
-func reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
+// legacy's reopen batch in one write, conditional on the revision of a live
+// Get of the row under the identifier locks. The fenced read is a List, and a
+// store need not publish a revision on a List row (BdStore's carry none,
+// mc-3c8h5), so the reopen re-reads the row, as legacy's reopen does, and writes
+// only if it is still the identity's closed row for the plan's session name;
+// a row that moved on is no reopen. A store that resolves no conditional
+// writer refuses at the write, after the fence checks: legacy's
+// last-writer-wins transaction is never a v2 write (v5 C2, R3). The
+// settlement names the row whatever the outcome; settle reads a refused
+// write (a lost fence, a writer that cannot fence) as no write.
+func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
 	plan := p.Named
 	prog.retarget = closed.ID
+	current, err := live.Get(closed.ID)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("re-reading configured named session %q row %s: %w", plan.Identity, closed.ID, err)
+	}
+	if _, still := session.ClosedNamedSessionBeadIn([]beads.Bead{current}, plan.SessionName); !still {
+		return session.Info{}, fmt.Errorf("configured named session %q: row %s is no longer its closed row for session %q (status %q)",
+			plan.Identity, closed.ID, plan.SessionName, current.Status)
+	}
+	closed = current
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, err)
@@ -245,24 +353,26 @@ func reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p create
 	if plan.AdoptLive {
 		state = string(session.StateActive)
 	}
-	batch := reopenNamedSessionBatch(state, closed.Metadata["sleep_reason"], now)
+	batch := reopenNamedSessionBatch(closed, state, now)
 	maps.Copy(batch, startupKickoffReopenMetadata(plan.BoundStepID, now))
 	open := "open"
 	opts := beads.UpdateOpts{Status: &open, Metadata: batch}
 	reopened, err := reopenClosedConfiguredNamedSessionBeadLocked(live, cfg, plan.Identity, plan.SessionName, closed, batch, func() error {
-		prog.writing, prog.rowID = true, closed.ID
-		if writer != nil {
-			return writer.UpdateIfMatch(closed.ID, closed.Revision, opts)
+		if writer == nil {
+			prog.stage = createStageNoWriter
+			return errNoConditionalWriter
 		}
-		return store.Tx("gc: reopen configured named session "+closed.ID, func(tx beads.Tx) error {
-			return tx.Update(closed.ID, opts)
-		})
+		if err := prog.beginWrite(ctx); err != nil {
+			return err
+		}
+		prog.rowID = closed.ID
+		return writer.UpdateIfMatch(closed.ID, closed.Revision, opts)
 	})
 	var written reopenWriteError
 	switch {
 	case err == nil:
-		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, nil
-	case !errors.As(err, &written):
+		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, prog.afterWrite(ctx, reopened.ID)
+	case !errors.As(err, &written) || errors.Is(err, errCreateAbandoned) || errors.Is(err, errNoConditionalWriter):
 		return session.Info{}, err
 	}
 	return session.Info{}, poolCreateWriteError{err: err, rowID: closed.ID}

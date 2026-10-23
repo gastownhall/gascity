@@ -400,6 +400,22 @@ func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bo
 	return sessionpkg.Info{}, false
 }
 
+// FindInfoBySessionName returns the session.Info of the open session whose
+// runtime name is name.
+func (s *sessionBeadSnapshot) FindInfoBySessionName(name string) (sessionpkg.Info, bool) {
+	if s == nil || strings.TrimSpace(name) == "" {
+		return sessionpkg.Info{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, info := range s.openInfos {
+		if strings.TrimSpace(info.SessionName) == name {
+			return info, true
+		}
+	}
+	return sessionpkg.Info{}, false
+}
+
 // FindInfoByNamedIdentity returns the session.Info of the open session whose
 // configured named identity matches (trimmed Info.ConfiguredNamedIdentity).
 func (s *sessionBeadSnapshot) FindInfoByNamedIdentity(identity string) (sessionpkg.Info, bool) {

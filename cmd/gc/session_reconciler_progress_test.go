@@ -19,7 +19,7 @@ type assignedWorkListErrorStore struct {
 }
 
 func (s *assignedWorkListErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Assignee != "" && (query.Status == "open" || query.Status == "in_progress") {
+	if query.Status == "open" || query.Status == "in_progress" {
 		return nil, s.err
 	}
 	return s.Store.List(query)
@@ -43,7 +43,7 @@ func (s *sessionObservationGetErrorStore) Get(id string) (beads.Bead, error) {
 func newProgressStallTestEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
 
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{
@@ -429,7 +429,7 @@ func TestReconcileSessionBeads_ClaimHolderStallDoesNotRestartIntoRedProvider(t *
 }
 
 func TestReconcileSessionBeads_ClaimHolderStallKeepsPoolClaimForFreshWorker(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{
@@ -558,6 +558,76 @@ func TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker(t *testing
 	}
 	if strings.Contains(env.stderr.String(), "progress-stalled") {
 		t.Fatalf("stderr = %q, want no progress-stalled diagnostic", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_ProgressStallExemptsPinnedNamedSession pins the
+// exemption for an operator-pinned named session. The restart-request guard
+// never lets the recycler stop one, so requesting a restart for it every tick
+// only mints a marker the same tick clears again.
+func TestReconcileSessionBeads_ProgressStallExemptsPinnedNamedSession(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.setSessionMetadata(&session, map[string]string{"pin_awake": "true"})
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was recycled; a pinned named session must be exempt", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want empty for exempt pinned session", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	for _, diagnostic := range []string{"progress-stalled", "skipping abrupt restart-requested kill"} {
+		if strings.Contains(env.stderr.String(), diagnostic) {
+			t.Fatalf("stderr = %q, want no %q diagnostic", env.stderr.String(), diagnostic)
+		}
+	}
+}
+
+// TestReconcileSessionBeads_ProgressStallDoesNotHidePinnedConfigDrift guards the
+// drift observability a pinned named session is owed. Its config drift is
+// deferred, never applied, so the recorded deferral is the only sign that a
+// restart is pending. An idle pinned session is stalled on every tick: if the
+// recycler still requested a restart for it, the pinned guard would end the
+// tick before the config-drift gate and the deferral would never be recorded.
+func TestReconcileSessionBeads_ProgressStallDoesNotHidePinnedConfigDrift(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	priorStartedConfigHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
+	if currentHash := runtime.CoreFingerprint(templateParamsToConfig(env.desiredState[sessionName])); priorStartedConfigHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", priorStartedConfigHash, currentHash)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"pin_awake":           "true",
+		"started_config_hash": priorStartedConfigHash,
+	})
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("pinned named session %q was stopped", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["started_config_hash"] != priorStartedConfigHash {
+		t.Fatalf("started_config_hash = %q, want preserved while pinned drift is deferred", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" {
+		t.Fatal("config_drift_deferred_at = empty, want pinned deferral recorded for a stalled session")
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		t.Fatal("config_drift_deferred_key = empty, want pinned deferral recorded for a stalled session")
+	}
+	if !strings.Contains(env.stderr.String(), "config-drift "+sessionName) {
+		t.Fatalf("stderr = %q, want config-drift diagnostic for the stalled pinned session", env.stderr.String())
 	}
 }
 
