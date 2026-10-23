@@ -638,12 +638,13 @@ func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 	}
 }
 
-// Kills: any v2 construction under legacy. A legacy wiring, even with the
-// developer override set, builds no planner, prints no banner, and a legacy
-// city runtime installs no inventory hook.
+// Kills: any v2 construction under legacy. An explicit legacy wiring builds
+// no planner and prints nothing (an unset key's fallback warning is pinned by
+// the wiring-log test), and a legacy city runtime installs no inventory hook.
 func TestLegacyRuntimeConstructsNoV2State(t *testing.T) {
 	var stderr bytes.Buffer
-	w, err := newControllerWiring(&config.City{}, noEnv, &stderr)
+	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: config.SessionReconcilerLegacy}}
+	w, err := newControllerWiring(cfg, noEnv, &stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}

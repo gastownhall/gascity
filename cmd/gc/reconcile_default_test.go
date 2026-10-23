@@ -206,6 +206,14 @@ func TestControllerWiringLogsTheResolution(t *testing.T) {
 	}
 
 	stderr.Reset()
+	if w, err = newControllerWiring(&config.City{}, noEnv, &stderr); err != nil || w.mode != reconcilerLegacy {
+		t.Fatalf("wiring(empty config) = %+v, %v; want the legacy fallback", w, err)
+	}
+	if got := stderr.String(); strings.Count(got, "warning: session reconciler: legacy (default fallback: ") != 1 {
+		t.Errorf("stderr = %q, want one fallback warning for an empty config", got)
+	}
+
+	stderr.Reset()
 	cfg = v2DefaultCity(func(c *config.City) { c.Session.ProgressStallTimeout = "30m" })
 	w, err = newControllerWiring(cfg, noEnv, &stderr)
 	if err != nil || w.mode != reconcilerV2 || w.v2 == nil {
