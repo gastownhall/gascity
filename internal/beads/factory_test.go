@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -847,6 +848,49 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 			t.Fatalf("degrade notifications = %+v, want exactly one auto degrade naming the store", degraded)
 		}
 	})
+}
+
+// TestOpenStoreAtForCityDefaultedAutoIsQuietOnACarrierlessStore pins
+// ConditionalWritesDefaulted: a builtin-default auto on a store that cannot
+// carry the mode is treated as off (no WARN, no degrade), while the same open
+// with an operator's auto degrades loudly. A carrier records the default.
+func TestOpenStoreAtForCityDefaultedAutoIsQuietOnACarrierlessStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	for _, defaulted := range []bool{true, false} {
+		t.Run(fmt.Sprintf("defaulted=%v", defaulted), func(t *testing.T) {
+			var logs bytes.Buffer
+			var degraded []ConditionalWritesDegrade
+			_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+				ScopeRoot:                   "/city",
+				Provider:                    "file",
+				Logger:                      slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})),
+				ConditionalWrites:           gate.Auto,
+				ConditionalWritesDefaulted:  defaulted,
+				OnConditionalWritesDegraded: func(d ConditionalWritesDegrade) { degraded = append(degraded, d) },
+				OpenFileStore:               func() (Store, error) { return &struct{ Store }{Store: NewMemStore()}, nil },
+			})
+			if err != nil {
+				t.Fatalf("OpenStoreAtForCity: %v", err)
+			}
+			loud := strings.Contains(logs.String(), "conditional_writes degraded at open") || len(degraded) > 0
+			if loud == defaulted {
+				t.Fatalf("loud = %v (logs %q, degrades %+v), want %v", loud, logs.String(), degraded, !defaulted)
+			}
+		})
+	}
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:                  "/city",
+		Provider:                   "file",
+		ConditionalWrites:          gate.Auto,
+		ConditionalWritesDefaulted: true,
+		OpenFileStore:              func() (Store, error) { return NewMemStore(), nil },
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if mode, defaulted := result.Store.(conditionalWritesModeCarrier).conditionalWritesMode(); mode != gate.Auto || !defaulted {
+		t.Fatalf("stamp = (%q, %v), want (auto, true)", mode, defaulted)
+	}
 }
 
 // TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd pins that a caller

@@ -61,6 +61,10 @@ func (cs *controllerState) ConditionalWritesStatus() *api.StatusConditionalWrite
 		stores["binding/"+cs.storageRoutes.binding] = store
 	}
 
+	// Under the builtin default a store that cannot fence runs as off
+	// (conditionalWritesDefaultAuto): it gets no row and degrades nothing,
+	// so a city whose stores all lack fencing reads off.
+	quiet := conditionalWritesDefaultAuto(flags)
 	incapable := false
 	ids := make([]string, 0, len(stores))
 	for id := range stores {
@@ -73,6 +77,9 @@ func (cs *controllerState) ConditionalWritesStatus() *api.StatusConditionalWrite
 			continue
 		}
 		insp := beads.InspectConditionalWrites(store)
+		if quiet && (!insp.Capable || insp.Mode == rollout.ModeUnset) {
+			continue
+		}
 		out.Stores = append(out.Stores, api.StatusConditionalWriteStoreVerdict{
 			StoreID: id,
 			Kind:    conditionalWritesEventStoreKind(insp.StoreKind),
@@ -89,6 +96,8 @@ func (cs *controllerState) ConditionalWritesStatus() *api.StatusConditionalWrite
 	// Severity order: a store refusing or silently degrading writes matters
 	// more than a pending config edit — the drift still shows in Notices.
 	switch {
+	case quiet && len(out.Stores) == 0:
+		out.Effective = "off"
 	case incapable && mode == rollout.Require:
 		out.Effective = "fail_closed"
 	case incapable:

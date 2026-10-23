@@ -431,6 +431,20 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		}
 	})
 
+	t.Run("the builtin default lists no incapable store", func(t *testing.T) {
+		cs := &controllerState{rolloutFlags: rollout.ForTest()}
+		cs.cityBeadStore = disableFencing(t, openStamped(t, gate.Auto))
+		got := cs.ConditionalWritesStatus()
+		if got.Mode != "auto" || got.Origin != "builtin" || got.Effective != "off" || len(got.Stores) != 0 {
+			t.Fatalf("block = %+v, want auto/builtin, effective off, no store rows", got)
+		}
+		cs.beadStores = map[string]beads.Store{"good": openStamped(t, gate.Auto)}
+		got = cs.ConditionalWritesStatus()
+		if got.Effective != "active" || len(got.Stores) != 1 || got.Stores[0].StoreID != "rig/good" {
+			t.Fatalf("block = %+v, want active with the one capable store", got)
+		}
+	})
+
 	t.Run("all capable is active; drift downgrades to pending_restart", func(t *testing.T) {
 		cs := &controllerState{
 			rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Auto)),
