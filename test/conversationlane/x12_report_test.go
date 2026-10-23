@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -45,6 +46,12 @@ func (r *x12Collector) eval(line string, n int) {
 	defer r.mu.Unlock()
 	r.evals[line] += n
 }
+
+// x12P5Identifiers is the eval line of P5's identifier scan: every
+// delivery a city saw, scanned for op identifiers. It is counted apart from
+// "P5", the deliveries compared with off's text, so a delivery both checks
+// see is not counted twice.
+const x12P5Identifiers = "P5 identifiers"
 
 // x12CellRecord is one matrix cell in the report.
 type x12CellRecord struct {
@@ -254,7 +261,7 @@ func (r *x12Collector) passLines() []x12PassLine {
 		switch {
 		case len(offending[line]) > 0:
 			return "FAIL"
-		case r.evals[line] == 0:
+		case r.evals[line] == 0 && (line != "P5" || r.evals[x12P5Identifiers] == 0):
 			return "not run"
 		}
 		return "pass"
@@ -266,13 +273,14 @@ func (r *x12Collector) passLines() []x12PassLine {
 	for _, l := range r.loads {
 		p4 = fmt.Sprintf("%s: %d/%d equal (%.4f), %d late, %d other, %d open unexplained", l.Backend, l.P4.Equal, l.P4.Requests, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other), len(l.P4.OpenUnexplained))
 	}
+	p5 := fmt.Sprintf("%d offending; %d deliveries compared with off's text, %d scanned for identifiers", len(offending["P5"]), r.evals["P5"], r.evals[x12P5Identifiers])
 	p2 := fmt.Sprintf("%d offending; %d ops checked against finish_by, %d cells' immediate outcomes", len(offending["P2"]), r.evals["P2"], r.evals["P2 immediate"])
 	lines := []x12PassLine{
 		{Line: "P1", Wording: "require has 0 answered requests without an op", Threshold: "0", Measured: measured("P1"), Status: verdict("P1")},
 		{Line: "P2", Wording: "every op has exactly one outcome within finish_by + 60 s", Threshold: "0", Measured: p2, Status: verdict("P2")},
 		{Line: "P3", Wording: "executions as expected, duplicates only at K3 (and only after a retry)", Threshold: "0 outside API {K3, K5} with a retry", Measured: measured("P3"), Status: verdict("P3")},
 		{Line: "P4", Wording: "projections equal the client-visible results in >= 99.9% of fault-free requests", Threshold: ">= 0.999, 0 non-late mismatches, 0 unexplained open ops", Measured: p4, Status: verdict("P4")},
-		{Line: "P5", Wording: "delivered text equal to the off text in every arm, adopted re-executions included (I11)", Threshold: "0", Measured: measured("P5"), Status: verdict("P5")},
+		{Line: "P5", Wording: "delivered text equal to the off text in every arm, adopted re-executions included (I11)", Threshold: "0", Measured: p5, Status: verdict("P5")},
 		{Line: "I4", Wording: "one op per key", Threshold: "0", Measured: measured("I4"), Status: verdict("I4")},
 		{Line: "I8", Wording: "an incapable store degrades as off in auto and refuses in require", Threshold: "0", Measured: measured("I8"), Status: verdict("I8")},
 		{Line: "R1", Wording: "every well-formed recorded-mode request records; each provoked cause lands in its class", Threshold: "0", Measured: measured("R1"), Status: verdict("R1")},
@@ -355,7 +363,7 @@ func gcVersion(bin string) string {
 	if bin == "" {
 		return "unknown: no X12 city ran"
 	}
-	version := "unknown"
+	var version string
 	if out, err := exec.Command(bin, "version", "--long").CombinedOutput(); err != nil {
 		version = "unknown: " + err.Error()
 	} else {
@@ -445,4 +453,50 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestX12PassLineP5CountsEachCheckOnce pins P5's measured counts: the text
+// comparison and the identifier scan each count a delivery once, under their
+// own figure, and either alone makes the line run.
+func TestX12PassLineP5CountsEachCheckOnce(t *testing.T) {
+	p5 := func(r *x12Collector) x12PassLine {
+		for _, l := range r.passLines() {
+			if l.Line == "P5" {
+				return l
+			}
+		}
+		t.Fatal("no P5 pass line")
+		return x12PassLine{}
+	}
+	both := &x12Collector{evals: map[string]int{}}
+	both.eval("P5", 92)
+	both.eval(x12P5Identifiers, 92)
+	if got, want := p5(both).Measured, "0 offending; 92 deliveries compared with off's text, 92 scanned for identifiers"; got != want {
+		t.Errorf("P5 measured %q, want %q", got, want)
+	}
+	if got := p5(both).Status; got != "pass" {
+		t.Errorf("P5 status %q, want pass", got)
+	}
+	scanOnly := &x12Collector{evals: map[string]int{}}
+	scanOnly.eval(x12P5Identifiers, 4)
+	if got := p5(scanOnly).Status; got != "pass" {
+		t.Errorf("P5 status with only the identifier scan %q, want pass", got)
+	}
+	if got := p5(&x12Collector{evals: map[string]int{}}).Status; got != "not run" {
+		t.Errorf("P5 status with nothing evaluated %q, want not run", got)
+	}
+}
+
+// TestX12LifecycleWaitIsBoundedInTheGatingTier pins the P3 lifecycle wait:
+// the gating tier fails a missing execution at x12EffectWait; only the
+// evidence tier waits x12StateWait.
+func TestX12LifecycleWaitIsBoundedInTheGatingTier(t *testing.T) {
+	t.Setenv(x12EvidenceEnv, "")
+	if got := x12LifecycleWait(); got != x12EffectWait {
+		t.Errorf("gating tier lifecycle wait %s, want %s", got, x12EffectWait)
+	}
+	t.Setenv(x12EvidenceEnv, "1")
+	if got := x12LifecycleWait(); got != x12StateWait {
+		t.Errorf("evidence tier lifecycle wait %s, want %s", got, x12StateWait)
+	}
 }

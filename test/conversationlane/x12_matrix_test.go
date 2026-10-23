@@ -501,8 +501,9 @@ func (c *x12City) checkOriginalAnswer(cell *x12Cell) {
 		// gc session submit through an API that dies. At K1, before it
 		// answers, the local fallback finds the API's op open and exits 0
 		// "accepted" without delivering: only a --key rerun or the sweeper
-		// settles the op. At K2 the CLI holds the 202 and loses the outcome
-		// stream it waits on: it exits 1 naming the key to rerun with.
+		// settles the op. That is pinned as it is; the risk it carries is
+		// ga-qd9p6v item 3(a). At K2 the CLI holds the 202 and loses the
+		// outcome stream it waits on: it exits 1 naming the key to rerun with.
 		switch {
 		case point == "k1" && (!cell.orig.ok() || cell.orig.outcome != "accepted" || cell.orig.opID != cell.opID):
 			cell.fail("P2", "k1: the CLI answered %s (outcome %q, op %q), want exit 0 \"accepted\" naming op %s", cell.orig, cell.orig.outcome, cell.orig.opID, cell.opID)
@@ -810,11 +811,22 @@ func (c *x12City) lifecycleTransition(v x12Verb, s x12Session) (string, func(bea
 	case "reset":
 		return "restarted", func(b beads.Bead) bool { return generation(b) > s.gen && c.rowRunning(b) }
 	case "kill":
-		return "killed", func(b beads.Bead) bool { return !(c.rowRunning(b) && generation(b) == s.gen) }
+		return "killed", func(b beads.Bead) bool { return !c.rowRunning(b) || generation(b) != s.gen }
 	case "close":
 		return "closed", func(b beads.Bead) bool { return b.Status == "closed" }
 	}
 	return "", nil
+}
+
+// x12LifecycleWait bounds a lifecycle cell's wait for its session's state
+// change. The evidence tier waits as long as a load does (embedded Dolt is
+// slow); the gating tier runs on SQLite, where a missing execution must fail
+// at x12EffectWait instead of holding the test action to its timeout.
+func x12LifecycleWait() time.Duration {
+	if x12Evidence() {
+		return x12StateWait
+	}
+	return x12EffectWait
 }
 
 // checkLifecycleEffects is checkEffects for a lifecycle verb: no expected
@@ -840,7 +852,7 @@ func (c *x12City) checkLifecycleEffects(cell *x12Cell, baselines map[string]x12S
 	}
 	what, reached := c.lifecycleTransition(v, cell.sess)
 	if exp > 0 {
-		if row, ok := c.pollRow(cell.sess.id, x12StateWait, reached); !ok {
+		if row, ok := c.pollRow(cell.sess.id, x12LifecycleWait(), reached); !ok {
 			cell.fail("P3", "%d executions expected, but the session never got %s: status %s state %s generation %s",
 				exp, what, row.Status, row.Metadata["state"], row.Metadata["generation"])
 		}
@@ -921,7 +933,7 @@ func (c *x12City) finalChecks(cells []*x12Cell, rec func(line, format string, ar
 		}
 		cell.op, cell.closer, cell.finalOutcome = op, by, outcomeText(op)
 		s := cell.spec
-		orphan := s.point != "k4" && !(s.verb.recorder() == surfaceAPI && s.retry)
+		orphan := s.point != "k4" && (s.verb.recorder() != surfaceAPI || !s.retry)
 		if !orphan {
 			continue
 		}
@@ -929,7 +941,7 @@ func (c *x12City) finalChecks(cells []*x12Cell, rec func(line, format string, ar
 		if arm != opjournal.ArmFailed || reason != opjournal.ReasonDeadlineInFlight || op.Attempt != 0 {
 			rec("P2", "%s: op %s closed %s at attempt %d, want failed{deadline_in_flight} at attempt 0", s.name(), op.ID, outcomeText(op), op.Attempt)
 		}
-		if by != closerSweep && !(s.verb.recorder() == surfaceCLI && by == closerCLI) {
+		if by != closerSweep && (s.verb.recorder() != surfaceCLI || by != closerCLI) {
 			rec("P2", "%s: op %s closed by %q, want the sweeper", s.name(), op.ID, by)
 		}
 	}

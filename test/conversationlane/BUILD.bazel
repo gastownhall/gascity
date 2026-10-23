@@ -22,11 +22,11 @@ go_test(
         "inline_pass_test.go",
         "main_test.go",
         "testenv_import_test.go",
+        "x12_evidence_guard_test.go",
         "x12_harness_test.go",
         "x12_incapable_test.go",
         "x12_load_test.go",
         "x12_matrix_test.go",
-        "x12_evidence_guard_test.go",
         "x12_report_test.go",
         "x2_test.go",
         "x6_test.go",
@@ -62,7 +62,8 @@ go_test(
 # X12's evidence (DES-O0API §15 OJ-8, G-X12), per backend in two parts: the
 # matrix part runs every kill-matrix cell at production timing and waits out
 # each op's finish_by (P1-P3, P5) and, on Dolt, the incapable-store arm; the
-# load part runs the six-round fault-free load (P4, R1-R3). Each writes
+# load part runs the fault-free load, six rounds on SQLite and three on
+# embedded Dolt (P4, R1-R3). Each writes
 # x12-report-<backend>-<part>.{json,md} to its undeclared outputs. Manual,
 # outside the integration lane's suite, and local (tagged so: a part runs
 # from 30 minutes on SQLite to well over an hour on embedded Dolt, past the

@@ -61,7 +61,7 @@ const (
 	// x12RequestTimeout bounds one API call: on embedded Dolt a recorded
 	// wake that materializes a configured session took 75 s in the evidence
 	// run, and a client that gives up cancels the request it is waiting for
-	// and the materialized row closes. That product behaviour is ga-30h7qt;
+	// and the materialized row closes. That product behavior is ga-30h7qt;
 	// X12 waits it out rather than measuring it. x12OutcomeTimeout bounds
 	// one outcome poll.
 	x12RequestTimeout = 5 * time.Minute
@@ -843,7 +843,7 @@ func (c *x12City) assertNoOpIdentifier(rec func(line, format string, args ...any
 		return nil
 	})
 	ds := c.deliveries()
-	x12Report.eval("P5", len(ds))
+	x12Report.eval(x12P5Identifiers, len(ds))
 	for _, d := range ds {
 		for _, id := range ids {
 			if id != "" && len(id) > 3 && strings.Contains(d.Text, id) {

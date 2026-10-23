@@ -233,15 +233,20 @@ The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
 manual variants, a matrix part and a load part per backend: the matrix part
 runs every kill-matrix cell at production timing, waits out each op's
 `finish_by` and, on embedded Dolt, runs the incapable-store arm; the load
-part runs the six-round fault-free load. Each writes
+part runs the fault-free load (six rounds on SQLite, three on embedded
+Dolt). Each writes
 `x12-report-<backend>-<part>.{json,md}` to the test's undeclared outputs.
 A part takes from 30 minutes to well over an hour, past the remote
 executor's action timeout, so run them locally:
 
 ```bash
 bazel test --config=ci --config=integration --strategy=TestRunner=local \
-  --test_timeout=7200 //test/conversationlane:x12_evidence
+  --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+  //test/conversationlane:x12_evidence
 ```
+
+`GC_X12_SOURCE` names the source revision in the report; the test-hooks gc
+is not stamped.
 
 Add `--local_test_jobs=1` when the load's latency (R2) should be measured
 with nothing running beside it.
