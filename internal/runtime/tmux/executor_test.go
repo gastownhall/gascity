@@ -1729,12 +1729,17 @@ func TestRespawnAgentConvergesAfterHalfAppliedLaunchEnv(t *testing.T) {
 		wantEnv    map[string]string
 		wantRecord string
 	}{
-		{"same config", first,
+		{
+			"same config", first,
 			map[string]string{"CUSTOM_ADDED_A": "a", "CUSTOM_ADDED_B": "b", "CUSTOM_CHANGED": "v2", "GC_DRAIN": "meta"},
-			"CUSTOM_ADDED_A CUSTOM_ADDED_B CUSTOM_CHANGED"},
-		{"config dropped a key the failed attempt added", map[string]string{"CUSTOM_ADDED_B": "b", "CUSTOM_CHANGED": "v2"},
+			"CUSTOM_ADDED_A CUSTOM_ADDED_B CUSTOM_CHANGED",
+		},
+		{
+			"config dropped a key the failed attempt added",
+			map[string]string{"CUSTOM_ADDED_B": "b", "CUSTOM_CHANGED": "v2"},
 			map[string]string{"CUSTOM_ADDED_B": "b", "CUSTOM_CHANGED": "v2", "GC_DRAIN": "meta"},
-			"CUSTOM_ADDED_B CUSTOM_CHANGED"},
+			"CUSTOM_ADDED_B CUSTOM_CHANGED",
+		},
 	} {
 		for n := 1; n <= writes; n++ {
 			t.Run(fmt.Sprintf("%s, write %d fails", retry.name, n), func(t *testing.T) {
