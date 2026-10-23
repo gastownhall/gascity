@@ -1409,7 +1409,7 @@ func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
 const drainAckRefused = 2
 
 // drainAckCityMode reports whether the city at cityPath runs the v2 session
-// reconciler, the only reader of the row ack (drainAckStrict), and returns the
+// reconciler, the only reader of the row ack (cityRunsV2), and returns the
 // config it read. A path that is not a city or a config that does not load is
 // legacy.
 func drainAckCityMode(cityPath string) (*config.City, bool) {
@@ -1423,21 +1423,21 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if err != nil || cfg == nil {
 		return nil, false
 	}
-	return cfg, drainAckStrict(cityPath, cfg)
+	return cfg, cityRunsV2(cityPath, cfg)
 }
 
-// drainAckStrict reports whether the city at cityPath runs the v2 reconciler:
+// cityRunsV2 reports whether the city at cityPath runs the v2 reconciler:
 // the mode its running controller latched, when one answers, else the mode
 // cfg resolves to (drainAckStrictConfig), which the next controller start
-// latches. The running controller wins because the mode is boot-latched: a
-// config edit that resolves the other way only takes effect at restart, and
-// until then the drain marks and acks must be the ones the running
-// reconciler reads.
-func drainAckStrict(cityPath string, cfg *config.City) bool {
+// latches; legacy with neither. The running controller wins because the mode
+// is boot-latched: a config edit that resolves the other way only takes
+// effect at restart, and until then the drain marks, acks and wake verdicts
+// must be the ones the running reconciler reads.
+func cityRunsV2(cityPath string, cfg *config.City) bool {
 	if mode, ok := controllerLatchedReconcilerMode(cityPath); ok {
 		return mode == reconcilerV2
 	}
-	return drainAckStrictConfig(cfg)
+	return cfg != nil && drainAckStrictConfig(cfg)
 }
 
 // drainAckStrictConfig reports whether cfg latches the v2 reconciler, as the

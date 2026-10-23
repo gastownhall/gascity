@@ -160,7 +160,7 @@ type reconcilerModeDrift struct {
 }
 
 // reconcilerDriftCLINote ends every pending-restart warning: the drain and
-// hook commands ask the running controller its mode (drainAckStrict), so they
+// hook commands ask the running controller its mode (cityRunsV2), so they
 // keep to the running mode too.
 const reconcilerDriftCLINote = "until it restarts, gc runtime drain, drain-ack and undrain and gc hook keep to the mode it runs"
 

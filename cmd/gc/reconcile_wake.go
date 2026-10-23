@@ -45,11 +45,15 @@ func (w *controllerWake) latchedModeName() string {
 	switch {
 	case w == nil:
 		return ""
-	case w.planner != nil:
+	case w.runsV2():
 		return reconcilerV2.String()
 	}
 	return reconcilerLegacy.String()
 }
+
+// runsV2 reports that the wake routes to a v2 planner: its controller latched
+// v2 (checkReconcilerWiring).
+func (w *controllerWake) runsV2() bool { return w != nil && w.planner != nil }
 
 // routedLandedEvery bounds how often a routed enqueue reports that it landed.
 const routedLandedEvery = time.Second

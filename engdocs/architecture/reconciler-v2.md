@@ -45,7 +45,7 @@ value on disk, it warns once per transition ("pending restart") and keeps
 running the latched mode. An unknown value refuses to start the city.
 `runsV2()` is the single predicate every v2 branch reads. The controller's
 `identify` socket reply names the latched mode, and `gc runtime drain`,
-`drain-ack`, `undrain` and `gc hook` follow it (`drainAckStrict`), falling
+`drain-ack`, `undrain` and `gc hook` follow it (`cityRunsV2`), falling
 back to the config's resolution only when no controller answers, so a
 config edit cannot split them from the running reconciler before restart.
 

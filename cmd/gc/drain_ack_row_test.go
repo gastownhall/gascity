@@ -894,8 +894,8 @@ func TestDrainAckStrictFollowsTheRunningController(t *testing.T) {
 			} else if _, ok := controllerLatchedReconcilerMode(cityPath); ok {
 				t.Fatal("controllerLatchedReconcilerMode answered with no controller")
 			}
-			if got := drainAckStrict(cityPath, tc.cfg); got != tc.want {
-				t.Errorf("drainAckStrict = %v, want %v", got, tc.want)
+			if got := cityRunsV2(cityPath, tc.cfg); got != tc.want {
+				t.Errorf("cityRunsV2 = %v, want %v", got, tc.want)
 			}
 		})
 	}
