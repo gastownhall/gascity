@@ -203,7 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time the unchanged bead was announced again; it now retries when the bead
   changes, or when the unchanged bead is recorded again after 20 minutes.
   Other orders and scripts that trigger on `bead.updated` likewise no longer
-  see those repeats (#7023).
+  see those repeats (#7023, backported in #8228).
 - **API session creates for a demand-only singleton are refused.** `POST
   /sessions` with `kind: "agent"` for a pool agent with
   `max_active_sessions = 1`, `min_active_sessions = 0` and no
@@ -453,7 +453,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bead within 20 minutes; after that an unchanged bead is recorded again.
   Creates, closes and deletes are never dropped, and a close or delete resets
   the bead. A failed append is logged and not remembered, so the next copy is
-  recorded. See Upgrading Notes for `nudge-on-route` (#7023).
+  recorded. See Upgrading Notes for `nudge-on-route` (#7023, backported in
+  #8228).
 - **Concurrent `gc init` runs sharing a Dolt database no longer force a
   second initialization over an active migration,** and a verified-empty
   store is initialized with plain `bd init` instead of a forced reinit that
