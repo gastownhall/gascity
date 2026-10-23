@@ -430,6 +430,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`jsonl-export` no longer stops every export when the archive's loose-object
+  backlog is too large to pack within the order's timeout (#6573).** The run
+  now exports, commits and pushes first, then packs the archive, so a pack
+  that fails or times out can no longer hold back snapshots. The pass is an
+  incremental `git repack --geometric=2` (Git 2.32 or newer) that packs the
+  backlog and leaves a large existing pack untouched, instead of a `git gc`
+  that rewrote the whole archive. It also runs on the "no changes" and
+  pending-push exits, keeps the largest pack when free space is short, stops
+  Git's own auto-maintenance from running during the archive commit, and
+  prints a one-line `archive maintenance:` summary. Geometric packing
+  postpones the full rewrite; run `git gc` on the archive by hand when
+  `packs_after` or `pack_kb_after` keeps growing. See the troubleshooting
+  guide's "Archive object maintenance".
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run

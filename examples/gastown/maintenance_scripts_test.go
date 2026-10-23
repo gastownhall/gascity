@@ -6810,10 +6810,16 @@ func runScriptResult(t *testing.T, script string, env map[string]string) ([]byte
 // working directory.
 func runScriptResultInDir(t *testing.T, dir, script string, env map[string]string) ([]byte, error) {
 	t.Helper()
+	return scriptCmd(dir, script, env).CombinedOutput()
+}
+
+// scriptCmd is the command that runs script from dir (an empty dir keeps the
+// test's working directory) with env merged over the test environment.
+func scriptCmd(dir, script string, env map[string]string) *exec.Cmd {
 	cmd := exec.Command(script)
 	cmd.Dir = dir
 	cmd.Env = mergeTestEnv(env)
-	return cmd.CombinedOutput()
+	return cmd
 }
 
 func runReaperCloseFixture(t *testing.T, fixture string) (doltLog string, gcLog string) {
@@ -10445,8 +10451,7 @@ func (f archiveMaintenanceFixture) failGitRepack(t *testing.T) {
 // runSeparate is run with stdout and stderr kept apart.
 func (f archiveMaintenanceFixture) runSeparate(t *testing.T) (stdout, stderr string, err error) {
 	t.Helper()
-	cmd := exec.Command(coreScriptPath("jsonl-export.sh"))
-	cmd.Env = mergeTestEnv(f.env)
+	cmd := scriptCmd("", coreScriptPath("jsonl-export.sh"), f.env)
 	var so, se bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &so, &se
 	err = cmd.Run()
@@ -10488,8 +10493,7 @@ exec '%s' "$@"
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	cmd := exec.Command(coreScriptPath("jsonl-export.sh"))
-	cmd.Env = mergeTestEnv(f.env)
+	cmd := scriptCmd("", coreScriptPath("jsonl-export.sh"), f.env)
 	cmd.ExtraFiles = []*os.File{pw}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var out bytes.Buffer
