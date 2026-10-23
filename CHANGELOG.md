@@ -415,7 +415,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   purged, the sweep protects the identity's outstanding claims, so release them
   explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
   retiring one, and watch the summary line for claims held back (#5959,
-  #7763).
+  #7763, backported in #8210).
 - **Closed session rows no longer read as live.** On file-backed and SQLite
   stores, closing a session wrote its terminal metadata and its closed status
   as two writes, so a concurrent wake could leave a row `status=closed
