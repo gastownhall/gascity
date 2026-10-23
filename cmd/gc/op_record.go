@@ -275,6 +275,8 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		// The CLI prints its own one-line warning per stage (warnDegrade) and
 		// reports a late or unrecordable close itself (finish).
 		Logger: slog.New(slog.DiscardHandler),
+
+		CrashPoints: opsFailpointState.hook(legacyop.SurfaceCLI),
 	}
 	return op
 }

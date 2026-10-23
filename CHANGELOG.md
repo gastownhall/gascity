@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **An exec session provider's `start` or `provision` that exits 2 now fails
+  the start.** Exit 2 meant "unknown operation, treat as success" on `start`
+  and `provision` too, so a `set -e` wrapper whose `grep` or `jq` exited 2 during `start`
+  counted as started and the half-created box was never cleaned up. Neither op
+  can be unknown, so exit 2 from them is now a failure, and a failed `start`
+  runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
+  `provision` on success. Exit 2 keeps meaning "unknown operation" for other
+  undeclared operations.
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
@@ -381,6 +389,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets `timeout = "4m"`,
+  which leaves at most two minutes after the 120s foreign-identity gate
+  budget, less the claim collection that precedes it. A city whose sweep
+  needs longer can raise it with `[[orders.overrides]]`,
+  `name = "orphan-sweep"` and a `timeout` (plus `rig = "*"` if a rig's own
+  pack also carries the order).
+
 - **The reaper's session prune no longer escalates a stale or missing backup
   when it has nothing to delete.** The pattern path
   (`GC_REAPER_SESSION_BEAD_PATTERN`, default `gm-*`) checked the city store's
@@ -478,7 +497,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records as an `order.skipped` event with one scope per identity; the run
   still exits 0, and a sweep that only protects sends no mail. The verb is
   asked at most once per distinct identity per sweep, within a gate budget of
-  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 4m
   timeout); past it, the remaining claimants are not asked, their claims are
   kept and named with a "gate budget … exhausted" reason, and the sweep says
   how many identities it did not ask. Where `timeout` is installed, an ask
