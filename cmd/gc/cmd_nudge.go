@@ -2979,10 +2979,18 @@ func nextQueuedDeliveryGroup(items []queuedNudge) (group, later []queuedNudge) {
 // rekeyQueuedNudgesAfterFailedBookkeeping).
 func deferQueuedNudgesToLaterPass(cityPath string, items []queuedNudge) error {
 	ids := queuedNudgeIDs(items)
-	if err := openNudgeQueue(cityPath, beads.NudgesStore{}).Repin.RepinClaims(ids, newQueuedNudgeBatchID()); err != nil {
+	if err := repinQueuedNudgeClaims(cityPath, ids, newQueuedNudgeBatchID()); err != nil {
 		return errors.Join(fmt.Errorf("moving queued items to a later delivery: %w", err), releaseQueuedNudgeClaims(cityPath, ids))
 	}
 	return releaseQueuedNudgeClaims(cityPath, ids)
+}
+
+// repinQueuedNudgeClaims moves the caller's in-flight claims onto delivery key
+// batch, all or nothing, retrying a busy queue lock (retryNudgeBookkeeping).
+func repinQueuedNudgeClaims(cityPath string, ids []string, batch string) error {
+	return retryNudgeBookkeeping(func() error {
+		return openNudgeQueue(cityPath, beads.NudgesStore{}).Repin.RepinClaims(ids, batch)
+	})
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {
@@ -3116,7 +3124,7 @@ func rekeyQueuedNudgesAfterFailedBookkeeping(cityPath string, items []queuedNudg
 		return items, bookkeepErr
 	}
 	batch := newQueuedNudgeBatchID()
-	if err := openNudgeQueue(cityPath, beads.NudgesStore{}).Repin.RepinClaims(queuedNudgeIDs(items), batch); err != nil {
+	if err := repinQueuedNudgeClaims(cityPath, queuedNudgeIDs(items), batch); err != nil {
 		relErr := releaseQueuedNudgeClaims(cityPath, queuedNudgeIDs(items))
 		return nil, errors.Join(bookkeepErr, fmt.Errorf("moving the delivery onto a new key: %w", err), relErr)
 	}
@@ -3341,8 +3349,12 @@ func ackQueuedNudges(cityPath string, ids []string) error {
 	return ackQueuedNudgesWithOutcome(cityPath, ids, "injected", "", "provider-nudge-return")
 }
 
+// ackQueuedNudgesWithOutcome retires ids with outcome, retrying a busy queue
+// lock (retryNudgeBookkeeping): the caller delivered them under its claim.
 func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, commitBoundary string) error {
-	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Ack(ids, outcome, reason, commitBoundary)
+	return retryNudgeBookkeeping(func() error {
+		return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Ack(ids, outcome, reason, commitBoundary)
+	})
 }
 
 // queuedNudgeReleaseAfter reports whether a delivery error leaves the nudges
@@ -3384,9 +3396,12 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 }
 
 // releaseQueuedNudgeClaimsUntil returns claimed nudges to pending. A non-zero
-// deliverAfter keeps them from being claimed again before then.
+// deliverAfter keeps them from being claimed again before then. A busy queue
+// lock is retried (retryNudgeBookkeeping).
 func releaseQueuedNudgeClaimsUntil(cityPath string, ids []string, deliverAfter time.Time) error {
-	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ReleaseClaims(ids, deliverAfter)
+	return retryNudgeBookkeeping(func() error {
+		return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ReleaseClaims(ids, deliverAfter)
+	})
 }
 
 func recordQueuedNudgeFailure(cityPath string, ids []string, cause error, now time.Time) error {
@@ -3402,9 +3417,15 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.NudgesStore,
 // and returns the ones it dead-lettered, which is not the set the caller asked
 // for: an item acked since the caller last read the queue is gone by the time
 // the write takes the lock. doNudgeDrop reports per-ID outcomes from it for
-// exactly that reason.
+// exactly that reason. A busy queue lock is retried (retryNudgeBookkeeping).
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
-	return openNudgeQueue(cityPath, store).Queue.RecordFailure(ids, cause, now)
+	var deadLettered []queuedNudge
+	err := retryNudgeBookkeeping(func() error {
+		var err error
+		deadLettered, err = openNudgeQueue(cityPath, store).Queue.RecordFailure(ids, cause, now)
+		return err
+	})
+	return deadLettered, err
 }
 
 // rollbackQueuedNudge dead-letters item after the action that queued it (a

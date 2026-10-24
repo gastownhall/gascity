@@ -71,6 +71,10 @@ type recorderInstruments struct {
 	// Histograms — Phase 2 (1)
 	poolCheckDurationHist metric.Float64Histogram
 
+	// Nudge queue lock instrumentation
+	nudgeQueueLockWaitHist metric.Float64Histogram
+	nudgeQueueLockHoldHist metric.Float64Histogram
+
 	// HTTP API request instrumentation
 	httpRequestTotal    metric.Int64Counter
 	httpRequestDuration metric.Float64Histogram
@@ -174,6 +178,16 @@ func initInstruments() {
 		// Histograms — Phase 2
 		inst.poolCheckDurationHist, _ = m.Float64Histogram("gc.pool.check.duration_ms",
 			metric.WithDescription("Pool scale_check command latency in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+
+		// Nudge queue lock
+		inst.nudgeQueueLockWaitHist, _ = m.Float64Histogram("gc.nudge_queue.lock.wait_ms",
+			metric.WithDescription("Time a nudge queue verb waited for the queue lock, in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+		inst.nudgeQueueLockHoldHist, _ = m.Float64Histogram("gc.nudge_queue.lock.hold_ms",
+			metric.WithDescription("Time a nudge queue verb held the queue lock, in milliseconds"),
 			metric.WithUnit("ms"),
 		)
 
@@ -634,6 +648,19 @@ func RecordPoolCheck(ctx context.Context, agent string, durationMs float64, desi
 		attribute.String("status", status),
 		errKV(err),
 	)
+}
+
+// RecordNudgeQueueLock records one acquisition of the nudge queue's lock: the
+// verb that took it, its outcome ("ok", "error", "busy"), and how long it
+// waited for and held the lock.
+func RecordNudgeQueueLock(ctx context.Context, verb, outcome string, waitMs, holdMs float64) {
+	initInstruments()
+	attrs := metric.WithAttributes(
+		attribute.String("verb", verb),
+		attribute.String("outcome", outcome),
+	)
+	inst.nudgeQueueLockWaitHist.Record(ctx, waitMs, attrs)
+	inst.nudgeQueueLockHoldHist.Record(ctx, holdMs, attrs)
 }
 
 // RecordMailOp records a mail operation (metrics + log event).

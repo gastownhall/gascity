@@ -219,7 +219,51 @@ func (e lockTimeoutError) Is(target error) bool { return target == ErrQueueBusy 
 // that must keep cycling other work under contention -- can call
 // withStateBounded directly instead.
 func WithState(cityPath string, fn func(*State) error) error {
-	return withStateBounded(cityPath, time.Duration(lockWaitTimeout.Load()), fn)
+	return WithStateFor(cityPath, "", fn)
+}
+
+// WithStateFor is WithState naming the verb that holds the lock, for the lock
+// observer (SetLockObserver).
+func WithStateFor(cityPath, verb string, fn func(*State) error) error {
+	return withStateBounded(cityPath, verb, time.Duration(lockWaitTimeout.Load()), fn)
+}
+
+// The outcomes a LockSample reports.
+const (
+	// LockOutcomeOK is a hold whose callback and write succeeded.
+	LockOutcomeOK = "ok"
+	// LockOutcomeError is a hold (or a lock attempt) that failed.
+	LockOutcomeError = "error"
+	// LockOutcomeBusy is a wait that ran out its budget (ErrQueueBusy).
+	LockOutcomeBusy = "busy"
+)
+
+// LockSample describes one acquisition of the queue lock: the verb that took
+// it, how long it waited, how long it held it, and how it ended.
+type LockSample struct {
+	Verb    string
+	Outcome string
+	Wait    time.Duration
+	Hold    time.Duration
+}
+
+var lockObserver atomic.Pointer[func(LockSample)]
+
+// SetLockObserver installs fn to receive a LockSample for every acquisition
+// of the queue lock in this process, or removes the observer when fn is nil.
+// fn runs after the lock is released.
+func SetLockObserver(fn func(LockSample)) {
+	if fn == nil {
+		lockObserver.Store(nil)
+		return
+	}
+	lockObserver.Store(&fn)
+}
+
+func observeLock(sample LockSample) {
+	if fn := lockObserver.Load(); fn != nil {
+		(*fn)(sample)
+	}
 }
 
 // nudgeQueueLockPollInterval is how often withStateBounded retries a
@@ -238,12 +282,26 @@ const nudgeQueueLockPollInterval = 10 * time.Millisecond
 // the in-memory State and returns, with no bead-store call, store open,
 // config load, census, socket or subprocess (ga-fsp5w9). A hold whose fn
 // leaves the state's bytes unchanged writes nothing.
-func withStateBounded(cityPath string, waitTimeout time.Duration, fn func(*State) error) error {
+func withStateBounded(cityPath, verb string, waitTimeout time.Duration, fn func(*State) error) (err error) {
+	start := time.Now()
 	unlock, err := lockState(cityPath, waitTimeout)
 	if err != nil {
+		outcome := LockOutcomeError
+		if errors.Is(err, ErrQueueBusy) {
+			outcome = LockOutcomeBusy
+		}
+		observeLock(LockSample{Verb: verb, Outcome: outcome, Wait: time.Since(start)})
 		return err
 	}
-	defer unlock()
+	locked := time.Now()
+	defer func() {
+		unlock()
+		outcome := LockOutcomeOK
+		if err != nil {
+			outcome = LockOutcomeError
+		}
+		observeLock(LockSample{Verb: verb, Outcome: outcome, Wait: locked.Sub(start), Hold: time.Since(locked)})
+	}()
 
 	state, before, err := loadStateBytes(cityPath)
 	if err != nil {
@@ -276,14 +334,19 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, fn func(*State
 // reset anything it captures (claimed items, buckets) at its start. A dry run
 // that fails falls through to the locked run, whose error is the answer.
 func UpdateIfChanged(cityPath string, fn func(*State) error) error {
-	return updateIfChangedBounded(cityPath, time.Duration(lockWaitTimeout.Load()), fn)
+	return UpdateIfChangedFor(cityPath, "", fn)
 }
 
-func updateIfChangedBounded(cityPath string, waitTimeout time.Duration, fn func(*State) error) error {
+// UpdateIfChangedFor is UpdateIfChanged naming the verb, for the lock observer.
+func UpdateIfChangedFor(cityPath, verb string, fn func(*State) error) error {
+	return updateIfChangedBounded(cityPath, verb, time.Duration(lockWaitTimeout.Load()), fn)
+}
+
+func updateIfChangedBounded(cityPath, verb string, waitTimeout time.Duration, fn func(*State) error) error {
 	if changed, err := DryRun(cityPath, fn); err == nil && !changed {
 		return nil
 	}
-	return withStateBounded(cityPath, waitTimeout, fn)
+	return withStateBounded(cityPath, verb, waitTimeout, fn)
 }
 
 // DryRun runs fn on a lock-free snapshot of the queue (a whole committed

@@ -186,7 +186,7 @@ func confirmNudgeShadowDebts(cityPath string, payments []nudgeDebtPayment, now t
 	if len(payments) == 0 {
 		return nil
 	}
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	return withNudgeQueueState(cityPath, "confirm_debts", func(state *nudgeQueueState) error {
 		applyNudgeDebtPayments(state, payments, now)
 		return nil
 	})

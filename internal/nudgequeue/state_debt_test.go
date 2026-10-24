@@ -98,7 +98,7 @@ func TestUpdateIfChangedTakesNoLockForANoOp(t *testing.T) {
 	calls := 0
 	var seen []string
 	start := time.Now()
-	err := updateIfChangedBounded(cityPath, time.Second, func(state *State) error {
+	err := updateIfChangedBounded(cityPath, "test", time.Second, func(state *State) error {
 		calls++
 		seen = seen[:0]
 		for _, item := range state.Pending {
@@ -131,14 +131,14 @@ func TestUpdateIfChangedLocksAndPersistsAChange(t *testing.T) {
 	}
 
 	release := holdQueueLockForTest(t, cityPath)
-	err := updateIfChangedBounded(cityPath, 50*time.Millisecond, add)
+	err := updateIfChangedBounded(cityPath, "test", 50*time.Millisecond, add)
 	release()
 	if !errors.Is(err, ErrQueueBusy) {
 		t.Fatalf("a change under a held lock: err = %v, want ErrQueueBusy", err)
 	}
 
 	runs := 0
-	if err := updateIfChangedBounded(cityPath, time.Second, func(state *State) error {
+	if err := updateIfChangedBounded(cityPath, "test", time.Second, func(state *State) error {
 		runs++
 		return add(state)
 	}); err != nil {
@@ -164,5 +164,32 @@ func TestUpdateIfChangedNoOpOnAMissingFileCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(StatePath(cityPath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat state.json = %v, want absent", err)
+	}
+}
+
+// The lock observer sees every acquisition: its verb, a busy wait, and a hold.
+func TestLockObserverReportsVerbOutcomeAndTimes(t *testing.T) {
+	cityPath := t.TempDir()
+	var samples []LockSample
+	SetLockObserver(func(s LockSample) { samples = append(samples, s) })
+	t.Cleanup(func() { SetLockObserver(nil) })
+
+	if err := WithStateFor(cityPath, "seed", func(state *State) error {
+		state.Pending = append(state.Pending, Item{ID: "n-1"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release := holdQueueLockForTest(t, cityPath)
+	_ = withStateBounded(cityPath, "blocked", 30*time.Millisecond, func(*State) error { return nil })
+	release()
+	if len(samples) != 2 {
+		t.Fatalf("samples = %+v, want two", samples)
+	}
+	if s := samples[0]; s.Verb != "seed" || s.Outcome != LockOutcomeOK {
+		t.Fatalf("first sample = %+v", s)
+	}
+	if s := samples[1]; s.Verb != "blocked" || s.Outcome != LockOutcomeBusy || s.Wait < 30*time.Millisecond || s.Hold != 0 {
+		t.Fatalf("busy sample = %+v", s)
 	}
 }

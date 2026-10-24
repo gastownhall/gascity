@@ -90,7 +90,7 @@ func TestWithStateBounded_TimesOutInsteadOfBlockingForever(t *testing.T) {
 	var called bool
 	var mu sync.Mutex
 	go func() {
-		done <- withStateBounded(cityPath, waitTimeout, func(_ *State) error {
+		done <- withStateBounded(cityPath, "test", waitTimeout, func(_ *State) error {
 			mu.Lock()
 			called = true
 			mu.Unlock()
@@ -127,7 +127,7 @@ func TestWithStateBounded_TimeoutIsErrQueueBusy(t *testing.T) {
 	release := holdQueueLockForTest(t, cityPath)
 	defer release()
 
-	err := withStateBounded(cityPath, 50*time.Millisecond, func(_ *State) error {
+	err := withStateBounded(cityPath, "test", 50*time.Millisecond, func(_ *State) error {
 		t.Error("fn ran without the lock")
 		return nil
 	})

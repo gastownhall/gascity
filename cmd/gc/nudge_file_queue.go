@@ -31,7 +31,7 @@ func pinQueuedNudgeClaims(cityPath string, ids []string, batch string) error {
 	for _, id := range ids {
 		want[id] = true
 	}
-	return updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	return updateNudgeQueueState(cityPath, "repin", func(state *nudgeQueueState) error {
 		pinned := 0
 		for i := range state.InFlight {
 			if want[state.InFlight[i].ID] {
@@ -246,7 +246,7 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch,
 	if nudgeClaimAfterDryRun != nil {
 		nudgeClaimAfterDryRun()
 	}
-	if err := withNudgeQueueState(cityPath, r.run); err != nil {
+	if err := withNudgeQueueState(cityPath, "claim", r.run); err != nil {
 		return nil, err
 	}
 	settleNudgeShadowDebts(cityPath, beads.NudgesStore{}, r.ledger.taken, nudgeEnqueueMaintenanceBudget, now)
@@ -376,7 +376,7 @@ func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now
 func listQueuedNudgesMatching(cityPath string, now time.Time, clk clock.Clock, matches func(agent string) bool) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	ledger := newNudgeShadowLedger(now)
 	var pending, inFlight, dead []queuedNudge
-	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, "list", func(state *nudgeQueueState) error {
 		ledger.reset()
 		pending, inFlight, dead = nil, nil, nil
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clk)
@@ -438,7 +438,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	}
 	now := clk.Now()
 	ledger := newNudgeShadowLedger(now)
-	err = updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err = updateNudgeQueueState(cityPath, "enqueue", func(state *nudgeQueueState) error {
 		ledger.reset()
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		maintainNudgeQueue(state, ledger, now, deadline, clk)
@@ -586,7 +586,7 @@ func recordNudgeDispatchSkips(cityPath string, counts map[string]int64) error {
 	if len(counts) == 0 {
 		return nil
 	}
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	return withNudgeQueueState(cityPath, "record_skips", func(state *nudgeQueueState) error {
 		if state.DispatchSkips == nil {
 			state.DispatchSkips = make(map[string]int64, len(counts))
 		}
@@ -670,7 +670,7 @@ func runNudgeQueueMaintenanceSweepWithStore(cityPath string, store beads.NudgesS
 		return nil
 	}
 	ledger := newNudgeShadowLedger(now)
-	if err := nudgequeue.UpdateIfChanged(cityPath, func(state *nudgeQueueState) error {
+	if err := updateNudgeQueueState(cityPath, "maintain", func(state *nudgeQueueState) error {
 		ledger.reset()
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeMaintenanceSweepBudget), clock.Real{})
 		// The controller also pays the debts other payers left: a crash, a
@@ -818,16 +818,18 @@ func sortQueuedNudges(state *nudgeQueueState) {
 	nudgequeue.SortState(state)
 }
 
-func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {
-	return nudgequeue.WithState(cityPath, fn)
+// withNudgeQueueState runs fn under the queue lock; verb names the holder for
+// the lock telemetry (observeNudgeQueueLock).
+func withNudgeQueueState(cityPath, verb string, fn func(*nudgeQueueState) error) error {
+	return nudgequeue.WithStateFor(cityPath, verb, fn)
 }
 
 // updateNudgeQueueState is withNudgeQueueState for a verb that is often a
 // no-op: fn runs first on a lock-free snapshot, and the lock is taken only when
 // that run changes the state (nudgequeue.UpdateIfChanged). fn must be pure and
 // reset what it captures at its start.
-func updateNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {
-	return nudgequeue.UpdateIfChanged(cityPath, fn)
+func updateNudgeQueueState(cityPath, verb string, fn func(*nudgeQueueState) error) error {
+	return nudgequeue.UpdateIfChangedFor(cityPath, verb, fn)
 }
 
 // fileLookupQueuedNudges reports the bucket each of the given IDs is in; an ID
@@ -842,7 +844,7 @@ func fileLookupQueuedNudges(cityPath string, ids []string, now time.Time) (map[s
 	}
 	ledger := newNudgeShadowLedger(now)
 	var buckets map[string]nudgequeue.Bucket
-	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, "lookup", func(state *nudgeQueueState) error {
 		ledger.reset()
 		buckets = make(map[string]nudgequeue.Bucket, len(ids))
 		maintainNudgeQueue(state, ledger, now, noMaintenanceDeadline(), clock.Real{})
@@ -882,7 +884,7 @@ func fileRollbackQueuedNudge(cityPath string, store beads.NudgesStore, item queu
 	now := time.Now()
 	found := false
 	ledger := newNudgeShadowLedger(now)
-	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, "rollback", func(state *nudgeQueueState) error {
 		ledger.reset()
 		found = false
 		removed := []queuedNudge(nil)
@@ -925,7 +927,7 @@ func fileAckQueuedNudges(cityPath string, ids []string, outcome, reason, commitB
 	}
 	now := time.Now()
 	ledger := newNudgeShadowLedger(now)
-	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, "ack", func(state *nudgeQueueState) error {
 		ledger.reset()
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		retire := func(item queuedNudge) {
@@ -975,7 +977,7 @@ func fileReleaseQueuedNudgeClaims(cityPath string, ids []string, deliverAfter ti
 	}
 	now := time.Now()
 	ledger := newNudgeShadowLedger(now)
-	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, "release", func(state *nudgeQueueState) error {
 		ledger.reset()
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		var released []queuedNudge
@@ -1026,7 +1028,7 @@ func fileRecordQueuedNudgeFailure(cityPath string, store beads.NudgesStore, ids 
 	}
 	ledger := newNudgeShadowLedger(now)
 	var deadLettered []queuedNudge
-	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, "record_failure", func(state *nudgeQueueState) error {
 		ledger.reset()
 		deadLettered = nil
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
@@ -1310,7 +1312,7 @@ func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) 
 		want[nudgeMigrationKeyOf(item)] = true
 	}
 	removed := make(map[nudgeMigrationKey]bool, len(items))
-	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+	err := withNudgeQueueState(q.cityPath, "remove_migrated", func(state *nudgeQueueState) error {
 		for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
 			for _, item := range bucket {
 				if want[nudgeMigrationKeyOf(item)] && nudgeLeaseHeld(item, now) {
@@ -1399,7 +1401,7 @@ func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) (nudgeImportSki
 	}
 	var skips nudgeImportSkips
 	var imported map[nudgeMigrationKey]bool
-	err = withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+	err = withNudgeQueueState(q.cityPath, "import_migrated", func(state *nudgeQueueState) error {
 		importing, lockedSkips := planNudgeImport(state, items)
 		imported = make(map[nudgeMigrationKey]bool, len(importing))
 		for _, item := range importing {

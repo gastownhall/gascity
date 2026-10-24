@@ -19,7 +19,7 @@ func deadBacklogID(i int) string {
 func seedDeadBacklog(t *testing.T, cityPath string, now time.Time, n int) map[string]string {
 	t.Helper()
 	buckets := make(map[string]string, n)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for i := 0; i < n; i++ {
 			id := deadBacklogID(i)
 			buckets[id] = "dead"

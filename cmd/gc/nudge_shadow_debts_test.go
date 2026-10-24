@@ -272,7 +272,7 @@ func TestPaidDeadLettersCostNoStoreCalls(t *testing.T) {
 		item.Shadow = &nudgequeue.ShadowDebt{State: "failed", Reason: "boom", At: item.DeadAt, Paid: true}
 		dead = append(dead, item)
 	}
-	if err := withNudgeQueueState(h.city, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.city, "test", func(state *nudgeQueueState) error {
 		state.Dead = dead
 		return nil
 	}); err != nil {

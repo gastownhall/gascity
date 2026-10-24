@@ -87,7 +87,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 	t.Helper()
 	now = now.UTC()
 	buckets := make(map[string]string, deadCount+4)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for i := 0; i < 2; i++ {
 			id := fmt.Sprintf("nudge-pending-preserve-%d", i)
 			buckets[id] = "pending"
@@ -144,7 +144,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 func nudgeQueueBucketsByID(t *testing.T, cityPath string) map[string]string {
 	t.Helper()
 	buckets := make(map[string]string)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for _, item := range state.Pending {
 			buckets[item.ID] = "pending"
 		}

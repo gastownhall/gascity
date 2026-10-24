@@ -5352,7 +5352,7 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 
 	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (its
 	// failed debt was paid when it was dead-lettered), recent kept.
-	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+	err := withNudgeQueueState(dir, "test", func(state *nudgeQueueState) error {
 		pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
 		return nil
 	})
@@ -5380,7 +5380,7 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 	dir := t.TempDir()
 	now := time.Now()
 
-	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+	err := withNudgeQueueState(dir, "test", func(state *nudgeQueueState) error {
 		state.Dead = append(state.Dead,
 			queuedNudge{ID: "n-old", Agent: "worker", Source: "session", Message: "old", DeadAt: now.Add(-3 * time.Hour)},
 			queuedNudge{ID: "n-recent", Agent: "worker", Source: "session", Message: "recent", DeadAt: now.Add(-30 * time.Minute)},
@@ -5393,7 +5393,7 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 		t.Fatalf("seed dead items: %v", err)
 	}
 
-	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+	err = withNudgeQueueState(dir, "test", func(state *nudgeQueueState) error {
 		pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
 		return nil
 	})
@@ -6754,7 +6754,7 @@ func TestCmdNudgeDrainInjectFallsBackToTargetResolution(t *testing.T) {
 			name: "queued nudge for another session",
 			setup: func(t *testing.T, cityDir string) {
 				t.Helper()
-				if err := withNudgeQueueState(cityDir, func(state *nudgeQueueState) error {
+				if err := withNudgeQueueState(cityDir, "test", func(state *nudgeQueueState) error {
 					state.Pending = []queuedNudge{{ID: "nudge-other", Agent: "other"}}
 					return nil
 				}); err != nil {
@@ -6766,7 +6766,7 @@ func TestCmdNudgeDrainInjectFallsBackToTargetResolution(t *testing.T) {
 			name: "dead-lettered nudge",
 			setup: func(t *testing.T, cityDir string) {
 				t.Helper()
-				if err := withNudgeQueueState(cityDir, func(state *nudgeQueueState) error {
+				if err := withNudgeQueueState(cityDir, "test", func(state *nudgeQueueState) error {
 					state.Dead = []queuedNudge{{ID: "nudge-dead", Agent: "worker"}}
 					return nil
 				}); err != nil {
