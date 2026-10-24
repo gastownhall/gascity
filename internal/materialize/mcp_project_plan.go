@@ -37,6 +37,9 @@ type MCPProjectionPlan struct {
 	// it.
 	Adopt       bool
 	SnapshotDir string
+	// Refused is set instead when Apply would not adopt the target (see
+	// MCPAdoptionRefusedError); Action is then MCPPlanNone.
+	Refused *MCPAdoptionRefusedError
 }
 
 // Plan reports what Apply would do to the target. It reads the filesystem
@@ -46,6 +49,17 @@ func (p MCPProjection) Plan(fs fsys.FS) (MCPProjectionPlan, error) {
 	plan := MCPProjectionPlan{Provider: p.Provider, Target: p.Target, Servers: len(p.Servers), Action: MCPPlanNone}
 	if err := p.validateProviderContract(); err != nil {
 		return plan, err
+	}
+	if len(p.Servers) == 0 && !p.isManaged(fs) {
+		return plan, nil
+	}
+	refused, err := p.adoptionConflict(fs)
+	if err != nil {
+		return plan, err
+	}
+	if refused != nil {
+		plan.Refused = refused
+		return plan, nil
 	}
 	if err := ensureNotSymlink(fs, p); err != nil {
 		return plan, err

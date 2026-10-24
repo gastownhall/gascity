@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,13 +19,15 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
-var managedMCPGitignoreEntries = []string{
-	".mcp.json",
-	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
-	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
-	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
-	"opencode.json",
-	"mimocode.json",
+// mcpGitignoreEntry is the .gitignore entry, relative to the projection's
+// root, for the target gc writes: gc ignores the files it projects, which may
+// hold expanded secrets, and nothing else.
+func mcpGitignoreEntry(p materialize.MCPProjection) string {
+	rel, err := filepath.Rel(p.Root, p.Target)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 type mcpTargetSpec struct {
@@ -158,11 +161,13 @@ func appendProjectMCPPreStart(prestart []string, agentName, identity, workDir st
 	return append(prestart, cmd)
 }
 
-func ensureMCPGitignoreBestEffort(root string, stderr io.Writer) {
-	if strings.TrimSpace(root) == "" {
+// ensureMCPGitignoreBestEffort adds entries, the .gitignore entries of the
+// MCP targets gc projected under root, to root's .gitignore.
+func ensureMCPGitignoreBestEffort(root string, entries []string, stderr io.Writer) {
+	if strings.TrimSpace(root) == "" || len(entries) == 0 {
 		return
 	}
-	if err := ensureGitignoreEntries(fsys.OSFS{}, root, managedMCPGitignoreEntries); err != nil && stderr != nil {
+	if err := ensureGitignoreEntries(fsys.OSFS{}, root, entries); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc: warning: updating %s/.gitignore for MCP: %v\n", root, err) //nolint:errcheck // best-effort stderr
 	}
 }
@@ -261,19 +266,99 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 		return err
 	}
 	desired := make(map[string]bool, len(targets)) // provider+root keys we still own
+	// .gitignore entries for the targets projected so far, by root; written
+	// on every way out, so a later target's failure does not leave a
+	// projected file unignored.
+	gitignore := make(map[string][]string)
+	defer func() {
+		for _, root := range sortedMapKeys(gitignore) {
+			ensureMCPGitignoreBestEffort(root, gitignore[root], stderr)
+		}
+	}()
 	for _, target := range targets {
-		if err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+		err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr)
+		var refused *materialize.MCPAdoptionRefusedError
+		if errors.As(err, &refused) {
+			// The file holds content gc does not manage. gc leaves it as it
+			// is, and the agents that read it start without gc's servers.
+			warnMCPAdoptionRefused(cityPath, target.Agents, target.Projection, refused, stderr)
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
 		}
 		desired[managedKey(target.Projection.Provider, target.Root)] = true
 		if len(target.Projection.Servers) > 0 {
-			ensureMCPGitignoreBestEffort(target.Root, stderr)
+			gitignore[target.Root] = append(gitignore[target.Root], mcpGitignoreEntry(target.Projection))
 		}
 	}
 	if err := cleanupOrphanStage1Targets(cityPath, cfg, desired, stderr); err != nil {
 		return err
 	}
 	return nil
+}
+
+// mcpAdoptionRefusalWarned remembers which refused adoptions have been
+// reported, keyed by city and message, so a supervisor that runs stage 1, or
+// resolves a stage-2 agent, again warns once per process.
+var mcpAdoptionRefusalWarned sync.Map
+
+// warnMCPAdoptionRefused reports a target gc will not adopt: who starts
+// without which of gc's servers, why, and what to do about it. It warns once
+// per process for each city and message.
+func warnMCPAdoptionRefused(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, stderr io.Writer) {
+	if stderr == nil {
+		return
+	}
+	message := describeMCPAdoptionRefused(agents, projection, refused)
+	if _, seen := mcpAdoptionRefusalWarned.LoadOrStore(filepath.Clean(cityPath)+"\x00"+message, true); seen {
+		return
+	}
+	fmt.Fprintf(stderr, "gc: warning: %s\n", message) //nolint:errcheck // best-effort stderr
+}
+
+// warnStage2MCPAdoptionRefusal reports, once per process, a stage-2 target
+// the session's project-mcp pre-start will leave alone. The pre-start warns
+// too, but a runtime discards a pre-start's output when it succeeds, so this
+// is the warning the controller log shows. It reads the target and writes
+// nothing; a target that cannot be read is the pre-start's to report.
+func warnStage2MCPAdoptionRefusal(cityPath, identity string, projection materialize.MCPProjection, fs fsys.FS, stderr io.Writer) {
+	if stderr == nil || fs == nil {
+		return
+	}
+	refused, err := projection.AdoptionRefusal(fs)
+	if err != nil || refused == nil {
+		return
+	}
+	warnMCPAdoptionRefused(cityPath, []string{identity}, projection, refused, stderr)
+}
+
+// describeMCPAdoptionRefused renders a refused adoption for a warning:
+// `agent "a" starts without gc's MCP server "s": not adopting <target>:
+// <reason>; <remedy>`.
+func describeMCPAdoptionRefused(agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError) string {
+	quoted := make([]string, len(agents))
+	for i, agent := range agents {
+		quoted[i] = strconv.Quote(agent)
+	}
+	who := "agent " + strings.Join(quoted, ", ") + " starts"
+	if len(quoted) > 1 {
+		who = "agents " + strings.Join(quoted, ", ") + " start"
+	}
+	return fmt.Sprintf("%s without %s: %v; %s", who, describeGCMCPServers(projection), refused, refused.Remedy())
+}
+
+// describeGCMCPServers renders `gc's MCP server "a"` or `gc's MCP servers
+// "a", "b"`.
+func describeGCMCPServers(projection materialize.MCPProjection) string {
+	servers := make([]string, len(projection.Servers))
+	for i, server := range projection.Servers {
+		servers[i] = strconv.Quote(server.Name)
+	}
+	if len(servers) == 1 {
+		return "gc's MCP server " + servers[0]
+	}
+	return "gc's MCP servers " + strings.Join(servers, ", ")
 }
 
 // managedKey combines provider and scope-root into the key used by stage-1

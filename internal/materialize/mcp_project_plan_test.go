@@ -12,7 +12,8 @@ import (
 )
 
 // treeSnapshot maps every path under root to its content ("<dir>" for
-// directories), so a test can assert nothing was written.
+// directories, "-> <target>" for symlinks, which it does not follow), so a
+// test can assert nothing was written.
 func treeSnapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -21,6 +22,14 @@ func treeSnapshot(t *testing.T, root string) map[string]string {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			out[rel] = "-> " + target
+			return nil
+		}
 		if d.IsDir() {
 			out[rel] = "<dir>"
 			return nil
@@ -38,9 +47,22 @@ func treeSnapshot(t *testing.T, root string) map[string]string {
 	return out
 }
 
-// existingProviderConfig is a hand-written provider-native file holding the
-// user's own MCP server and, where the format allows, other settings.
+// existingProviderConfig is a hand-written provider-native file defining the
+// "notes" server the tests project, the same way, and, where the format
+// allows, other settings: gc adopts it without dropping anything it does not
+// manage, and rewrites it in its own format.
 var existingProviderConfig = map[string]string{
+	MCPProviderClaude:   `{"mcpServers":{"notes":{"command":"uvx"}}}`,
+	MCPProviderCodex:    "model = \"o3\"\n\n[mcp_servers.notes]\ncommand = \"uvx\"\n",
+	MCPProviderGemini:   `{"theme":"dark","mcpServers":{"notes":{"command":"uvx"}}}`,
+	MCPProviderOpenCode: `{"theme":"dark","mcp":{"notes":{"type":"local","command":["uvx"]}}}`,
+	MCPProviderMimoCode: `{"theme":"dark","mcp":{"notes":{"type":"local","command":["uvx"]}}}`,
+	MCPProviderCursor:   `{"theme":"dark","mcpServers":{"notes":{"command":"uvx"}}}`,
+}
+
+// teamProviderConfig is a hand-written provider-native file holding a server
+// of the user's own, "team", which no catalog projects.
+var teamProviderConfig = map[string]string{
 	MCPProviderClaude:   `{"mcpServers":{"team":{"command":"team-mcp"}}}`,
 	MCPProviderCodex:    "model = \"o3\"\n\n[mcp_servers.team]\ncommand = \"team-mcp\"\n",
 	MCPProviderGemini:   `{"theme":"dark","mcpServers":{"team":{"command":"team-mcp"}}}`,

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "mcp.go",
         "mcp_project.go",
+        "mcp_project_adopt.go",
         "mcp_project_lock.go",
         "mcp_project_plan.go",
         "mcp_project_safety.go",
@@ -31,6 +32,7 @@ go_library(
 go_test(
     name = "materialize_test",
     srcs = [
+        "mcp_project_adopt_test.go",
         "mcp_project_plan_test.go",
         "mcp_project_test.go",
         "mcp_test.go",
