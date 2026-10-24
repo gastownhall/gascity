@@ -2032,6 +2032,22 @@ func supervisorSystemdServiceName() string {
 // supervisorPortInUseMessage) instead of falsely claiming "without restart".
 // Real macOS duplicate-instance suppression is a different mechanism and is
 // tracked separately: gc-s53wv.
+//
+// ProcessType is Interactive: without it launchd defaults to Standard, which
+// CPU/I-O-throttles the supervisor and everything it spawns (the Dolt
+// server, the tmux server, every agent pane) relative to the user's own
+// foreground work — Adaptive would leave it at background priority instead,
+// since gc raises no XPC activity for launchd to follow (gascity#8015).
+//
+// ExitTimeOut covers a preserve-mode stop of every city the supervisor
+// manages: managedCityForcedStopTimeout defaults to 25s per city and
+// supervisor shutdown stops cities one at a time, not in parallel, so one
+// slow city can push the grace period well past launchd's unset-key default
+// of 5s. 60 is a fixed, conservative ceiling rather than a derived one:
+// buildSupervisorServiceData runs before any city config loads, so there is
+// no single [daemon] shutdown_timeout to read from at install time, and 60s
+// is also the largest value this template's own author observed launchd
+// actually honor on darwin before capping a larger request (gascity#8015).
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2046,6 +2062,10 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>
