@@ -1,7 +1,11 @@
 package core
 
 import (
+	"encoding/json"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -119,22 +123,148 @@ func TestCascadeNudgeRoutesCrossRig(t *testing.T) {
 	}
 }
 
-// TestNudgeOnRouteResolvesPoolMembers guards the pool-base fan-out: a
-// multi-session pool routes to the pool BASE (sling's NormalizePoolRouteTarget
-// collapses slot -> base), which is the members' template, not a session name
-// `gc session nudge` can resolve. The script must therefore enumerate pool
-// members by template before nudging — a naive `gc session nudge "$routed_to"`
-// silently no-ops for exactly the warm-idle pool workers this order targets.
-func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
+// TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop guards against waking
+// every member of a routed pool. The controller binds pool demand to one
+// eligible slot and its bounded idle-claim backstop wakes that slot if the
+// normal claim does not land; the event order must not nudge busy siblings.
+// Direct named-session and explicit-slot routes still need the order's nudge.
+func TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop(t *testing.T) {
 	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
 	if err != nil {
 		t.Fatalf("reading nudge-on-route.sh: %v", err)
 	}
 	body := string(data)
-	for _, want := range []string{"gc session list", "--template"} {
+	for _, want := range []string{
+		"gc session list",
+		"--template",
+		"native idle-claim backstop",
+		`if [ "$_member_count" -gt 1 ]`,
+		`gc session nudge "$_members"`,
+		`gc session nudge "$_target"`,
+	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("nudge-on-route.sh must resolve pool members; missing %q", want)
+			t.Errorf("nudge-on-route.sh must defer pool routes and preserve direct nudges; missing %q", want)
 		}
+	}
+	if strings.Contains(body, `gc session nudge "$_m"`) {
+		t.Error("nudge-on-route.sh must not nudge every active pool member")
+	}
+}
+
+// nudgeOnRouteEnvKeys are the settings that would point nudge-on-route.sh at
+// a live session's city, state, or trace file. The test supplies its own.
+var nudgeOnRouteEnvKeys = map[string]struct{}{
+	"GC_CITY":                     {},
+	"GC_CITY_RUNTIME_DIR":         {},
+	"GC_PACK_STATE_DIR":           {},
+	"GC_BD_TRACE_JSON":            {},
+	"GC_NUDGE_ON_ROUTE_LOOKBACK":  {},
+	"GC_NUDGE_ON_ROUTE_RETENTION": {},
+	"GC_NUDGE_ON_ROUTE_MESSAGE":   {},
+	"GC_STUB_NUDGE_FAIL":          {},
+}
+
+// TestNudgeOnRouteScriptBranches runs nudge-on-route.sh against a fake gc for
+// each member count of the routed target. A pool base with several active
+// members is left to the controller's idle-claim backstop but still recorded
+// as handled; a single member is nudged by name; a target with no members is
+// nudged directly; and a failed nudge stays unrecorded so the next run retries.
+func TestNudgeOnRouteScriptBranches(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; nudge-on-route.sh requires it")
+	}
+	const event = `{"seq":1,"type":"bead.updated","payload":{"id":"ga-1","metadata":{"gc.routed_to":"rig/worker"}}}`
+	const stateKey = "ga-1|rig/worker"
+	cases := []struct {
+		name       string
+		sessions   string
+		failNudge  bool
+		wantNudges []string
+		wantState  bool
+	}{
+		{
+			name:      "pool with several members defers to backstop",
+			sessions:  `{"sessions":[{"name":"worker-1"},{"name":"worker-2"},{"name":"worker-3"}]}`,
+			wantState: true,
+		},
+		{
+			name:       "single member is nudged by name",
+			sessions:   `{"sessions":[{"name":"worker-1"}]}`,
+			wantNudges: []string{"worker-1"},
+			wantState:  true,
+		},
+		{
+			name:       "no members nudges the target directly",
+			sessions:   `{"sessions":[]}`,
+			wantNudges: []string{"rig/worker"},
+			wantState:  true,
+		},
+		{
+			name:       "failed direct nudge is retried next run",
+			sessions:   `{"sessions":[]}`,
+			failNudge:  true,
+			wantNudges: []string{"rig/worker"},
+			wantState:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			sessionsPath := filepath.Join(dir, "sessions.json")
+			if err := os.WriteFile(eventsPath, []byte(event+"\n"), 0o644); err != nil {
+				t.Fatalf("write events: %v", err)
+			}
+			if err := os.WriteFile(sessionsPath, []byte(tc.sessions+"\n"), 0o644); err != nil {
+				t.Fatalf("write sessions: %v", err)
+			}
+			binDir, logPath := fakeGCBin(t, `case "$1 $2" in
+"events --type") cat '`+eventsPath+`' ;;
+"session list") cat '`+sessionsPath+`' ;;
+"session nudge") [ "${GC_STUB_NUDGE_FAIL:-}" = 1 ] && exit 1 ;;
+esac
+exit 0
+`)
+			stateDir := filepath.Join(dir, "state")
+			env := []string{"GC_PACK_STATE_DIR=" + stateDir}
+			if tc.failNudge {
+				env = append(env, "GC_STUB_NUDGE_FAIL=1")
+			}
+			out, err := runPackScript(t, "assets/scripts/nudge-on-route.sh", binDir, nudgeOnRouteEnvKeys, env)
+			if err != nil {
+				t.Fatalf("nudge-on-route.sh failed: %v\n%s", err, out)
+			}
+
+			logged, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read gc log: %v", err)
+			}
+			var nudged []string
+			for _, line := range strings.Split(string(logged), "\n") {
+				if rest, ok := strings.CutPrefix(line, "gc session nudge "); ok {
+					target, _, _ := strings.Cut(rest, " ")
+					nudged = append(nudged, target)
+				}
+			}
+			if strings.Join(nudged, ",") != strings.Join(tc.wantNudges, ",") {
+				t.Fatalf("nudged %q, want %q; gc calls:\n%s", nudged, tc.wantNudges, logged)
+			}
+
+			stateData, err := os.ReadFile(filepath.Join(stateDir, "nudge-on-route-state.json"))
+			if err != nil {
+				t.Fatalf("read state file: %v", err)
+			}
+			var state map[string]string
+			if err := json.Unmarshal(stateData, &state); err != nil {
+				t.Fatalf("decode state file %q: %v", stateData, err)
+			}
+			if _, got := state[stateKey]; got != tc.wantState {
+				t.Fatalf("state has %q = %v, want %v; state: %s", stateKey, got, tc.wantState, stateData)
+			}
+		})
 	}
 }
 

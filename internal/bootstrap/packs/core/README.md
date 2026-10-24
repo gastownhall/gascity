@@ -44,14 +44,23 @@ carries a non-empty `metadata.gc.routed_to`, nudges that target with
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
 pool-routed bead's `routed_to` is the members' `template`, not a name
-`gc session nudge` can resolve. The script handles both: it enumerates the
-pool's active members via `gc session list --template <routed_to>` and nudges
-each, falling back to a direct `gc session nudge <routed_to>` when the target
-has no members (a single-session agent or an explicit slot). Without this,
-nudges to a pool base silently no-op — defeating the warm-idle pool wake this
-order exists to provide.
+`gc session nudge` can resolve. The script counts the target's active members
+via `gc session list --template <routed_to>` and acts on the count:
 
-**Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
+- **More than one active member (a pool base):** this order sends no nudge.
+  The controller binds the routed work to one eligible slot, and its bounded
+  idle-claim backstop (`nudgeStalledPoolClaims`: 90s grace, 3m backoff, at
+  most 3 attempts) wakes that slot if it does not claim the work on its own.
+  Nudging every member would also wake busy siblings that cannot claim it.
+  A warm-idle pool member can therefore take up to about 90s to wake, rather
+  than waking immediately.
+- **Exactly one active member:** that member is nudged once.
+- **No members (a named session or an explicit slot):** the target itself is
+  nudged directly.
+
+**Idempotence.** A `(bead, routed_to)` pair is handled at most once: either
+nudged, or — for a pool route deferred to the backstop — recorded as handled
+without a nudge. A failed nudge is not recorded, so the next run retries it. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
 state's last-seen timestamp is refreshed on every sighting and the pair is
 never pruned-then-renudged while the routing is live.
