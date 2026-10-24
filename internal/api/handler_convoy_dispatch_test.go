@@ -1686,3 +1686,92 @@ func TestWorkflowGetSkipsMetadataListSweepWhenIDResolvesDirectly(t *testing.T) {
 		t.Fatalf("gc.workflow_id metadata List ran %d time(s); want 0 once Get resolved the id directly", listCalls)
 	}
 }
+
+func createGraphWorkflowRoot(t *testing.T, store beads.Store, scopeKind, scopeRef string) beads.Bead {
+	t.Helper()
+	root, err := store.Create(beads.Bead{
+		Title: "Graph workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                     "workflow",
+			"gc.formula_contract":         "graph.v2",
+			beadmeta.ScopeKindMetadataKey: scopeKind,
+			beadmeta.ScopeRefMetadataKey:  scopeRef,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	return root
+}
+
+// The graph binding is the only store that mints graph-namespace ids, so when
+// it holds the root no other store can, and the snapshot reads no work store:
+// on a city of proxied-local rigs every such Get was a bd call per rig.
+func TestWorkflowGetReadsGraphNamespaceRootFromTheBindingOnly(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	// Each work store counts its point reads; on a proxied-local rig a Get
+	// miss is a bd subprocess that restarts the rig's retired proxy and Dolt.
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	alpha := &getCountingStore{Store: beads.NewMemStore()}
+	beta := &getCountingStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = city
+	graph := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	root := createGraphWorkflowRoot(t, graph, "rig", "alpha")
+	if !strings.HasPrefix(root.ID, "gcg-") {
+		t.Fatalf("graph root id = %q, want the gcg namespace", root.ID)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if snapshot.ScopeKind != "rig" || snapshot.ScopeRef != "alpha" {
+		t.Fatalf("scope = %s:%s, want rig:alpha", snapshot.ScopeKind, snapshot.ScopeRef)
+	}
+	if n := city.gets.Load() + alpha.gets.Load() + beta.gets.Load(); n != 0 {
+		t.Fatalf("work stores were read %d time(s) for a root the graph binding holds; want 0", n)
+	}
+}
+
+// When the graph binding does not hold a graph-namespace id (a bead left in a
+// work store by an earlier topology), the snapshot still sweeps every store.
+func TestWorkflowGetSweepsWorkStoresWhenTheBindingMissesAGraphNamespaceID(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	state.graphBeadStore = &beads.MemStore{IDPrefix: "gcg"}
+	legacy := &beads.MemStore{IDPrefix: "gcg"}
+	state.stores = map[string]beads.Store{"alpha": legacy}
+	root := createGraphWorkflowRoot(t, legacy, "rig", "alpha")
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the work store: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID || snapshot.ResolvedRootStore != "rig:alpha" {
+		t.Fatalf("snapshot root %q in %q, want %q in rig:alpha", snapshot.RootBeadID, snapshot.ResolvedRootStore, root.ID)
+	}
+}
