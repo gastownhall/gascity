@@ -51,11 +51,12 @@ const (
 // that; the anti-entropy scan; a ledger-feed poke). So it lands up to one
 // re-probe period after the boundary, by where the stream ended within the
 // cycle, which host speed moves. On rbe-west (2026-10-24, 3-4 runs at each
-// of 380-400 notices) its notices waited 0-0.2 s or 1.7-1.9 s longer than
-// the rest's longest wait, in about half the runs each. They may wait one
-// re-probe period, plus a second for that pass, longer than the rest; with
-// the rest at x6SteadyMax that allows up to 10 s. A re-probe timed to the
-// predicted boundary (ga-ylpbsy.51.6) would let the p99 cover them again.
+// of 380-400 notices) its notices waited up to 0.5 s or 1.5-1.9 s longer
+// than the rest's longest wait, in about half the runs each. They may wait
+// one re-probe period, plus a second for that pass, longer than the rest;
+// with the rest at x6SteadyMax that allows up to 10 s. A re-probe timed to
+// the predicted boundary (ga-ylpbsy.51.6) would let the p99 cover them
+// again.
 const x6DrainOver = 2*time.Second + time.Second
 
 // x6MinGap is the least spacing of two injections: the quiescence window,
