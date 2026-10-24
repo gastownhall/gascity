@@ -227,8 +227,9 @@ func dropRecordField(kv []string, key string) []string {
 // Only a re-pin whose manifest moved in its go line alone gets a window, of
 // exactly 2 h for beads and 1 h more of service; an image change, a dolt
 // change, a pin that does not hash its manifest, or no main before the push
-// gets "previous none" with the reason. A push that did not move the pin is
-// a usage error: worker-env-notify-beads.yml calls it only on a move.
+// gets "previous none" with the reason. A push that did not move the pin
+// gets no record and exit 2: the grace job, which also runs when repin
+// could not fetch main before the push, then publishes nothing.
 func TestWorkerEnvGraceRecord(t *testing.T) {
 	g := newGraceRepo(t)
 	m0 := graceManifest("1.26.9", "2.1.8", "2.39")
@@ -314,8 +315,8 @@ func TestWorkerEnvGraceRecord(t *testing.T) {
 		t.Errorf("record for an image with many new packages: %v %v\n%s", err, r.fields, out)
 	}
 
-	if _, out, err := record("c5", "same"); exitCode(err) != 2 || !strings.Contains(out, "did not move") {
-		t.Errorf("record for a push that did not move the pin: exit %d, want 2 (usage)\n%s", exitCode(err), out)
+	if _, out, err := record("c5", "same"); exitCode(err) != 2 || !strings.Contains(out, "did not move") || strings.Contains(out, "version 1") {
+		t.Errorf("record for a push that did not move the pin: exit %d, want 2 and no record\n%s", exitCode(err), out)
 	}
 }
 
@@ -555,7 +556,8 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 // (the branch is the history of windows), only while main still pins the
 // record's pin (a later re-pin's job, or a re-run of an older one, must not
 // put an older record back), not again when the branch already has it, and
-// never a malformed one; a refused push is retried. fetch prints the
+// never a malformed one; a refused push, or a read GitHub fails, is
+// retried. fetch prints the
 // branch's record, nothing (and success) when there is no branch, and fails
 // when the repository cannot be reached.
 func TestWorkerEnvGracePublishAndFetch(t *testing.T) {
@@ -660,6 +662,30 @@ func TestWorkerEnvGracePublishAndFetch(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(sleeps); strings.TrimSpace(string(b)) != "5" {
 		t.Errorf("pauses between attempts %q, want one of 5 s", b)
+	}
+
+	// A read GitHub fails once (the fetch of main, a 502) is retried as a
+	// refused push is, after a pause: one hiccup does not cost the window.
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := t.TempDir()
+	writeExecutable(t, filepath.Join(failing, "git"), graceFailingGit)
+	once := filepath.Join(t.TempDir(), "failed-once")
+	hiccupSleeps := filepath.Join(t.TempDir(), "sleeps")
+	fourth := graceRecordText("version", "1", "pin", sha256Pin(m2), "sha", g.sha["c2"], "previous", "none", "reason", "an image change, published after a hiccup")
+	rec := filepath.Join(t.TempDir(), "record.txt")
+	writeTestFile(t, rec, fourth)
+	out, stderr, err := g.run(g.dir, []string{
+		"PATH=" + failing + string(os.PathListSeparator) + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"SLEEP_LOG=" + hiccupSleeps, "REAL_GIT=" + realGit, "GIT_FAIL_ARG=+refs/heads/main:refs/main", "GIT_FAIL_ONCE=" + once,
+	}, "publish", rec)
+	if _, injected := os.Stat(once); err != nil || injected != nil || g.git(g.github, "show", tip()+":"+rbeGraceFile)+"\n" != fourth {
+		t.Errorf("publish after one failed fetch of main: %v (failure injected: %v)\n%s%s", err, injected == nil, out, stderr)
+	}
+	if b, _ := os.ReadFile(hiccupSleeps); strings.TrimSpace(string(b)) != "5" {
+		t.Errorf("pauses after a failed read %q, want one of 5 s", b)
 	}
 }
 
@@ -901,20 +927,23 @@ func TestRBEWorkerLegacyGraceStep(t *testing.T) {
 }
 
 // TestWorkerEnvNotifyBeadsGraceJob pins worker-env-notify-beads.yml's grace
-// job: on the push that moves main's pin (after repin, like dispatch), it
-// writes the record for main before the push (repin's before output) and
-// main now, and publishes it with GITHUB_TOKEN's contents: write, its only
-// grant. It reads no secret and names no environment; the token reaches the
-// publish step alone, after the checkout (which keeps no credential); one
-// record at a time, never canceling one that is publishing.
+// job: on the push that moves main's pin (after repin, like dispatch), or
+// one whose main before the push repin could not fetch, it writes the
+// record for main before the push (repin's before output, never the parent
+// repin compared with instead) and main now, and publishes it with
+// GITHUB_TOKEN's contents: write, its only grant. It reads no secret and
+// names no environment; the token reaches the publish step alone, after the
+// checkout (which keeps no credential); one record at a time, never
+// canceling one that is publishing.
 func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 	wf := loadNotifyBeads(t, notifyBeadsWorkflow)
 	grace, ok := wf.Jobs["grace"]
 	if !ok {
 		t.Fatalf("%s has no grace job", notifyBeadsWorkflow)
 	}
-	if grace.Needs != "repin" || grace.If != "needs.repin.outputs.moved == 'true'" || grace.RunsOn != "ubuntu-latest" || grace.Environment != nil {
-		t.Errorf("grace needs %v if %q runs-on %q environment %v; want repin, the moved pin, ubuntu-latest, none", grace.Needs, grace.If, grace.RunsOn, grace.Environment)
+	if grace.Needs != "repin" || grace.If != "needs.repin.outputs.moved == 'true' || needs.repin.outputs.unfetched == 'true'" ||
+		grace.RunsOn != "ubuntu-latest" || grace.Environment != nil {
+		t.Errorf("grace needs %v if %q runs-on %q environment %v; want repin, a moved pin or an unfetched before, ubuntu-latest, none", grace.Needs, grace.If, grace.RunsOn, grace.Environment)
 	}
 	if want := map[string]string{"contents": "write"}; !reflect.DeepEqual(grace.Permissions, want) {
 		t.Errorf("grace permissions %v, want %v alone", grace.Permissions, want)
@@ -943,39 +972,68 @@ func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 		strings.TrimSpace(publish.Run) != rbeWorkerEnvGrace+` publish "$RUNNER_TEMP/worker-env-grace.txt"` {
 		t.Errorf("publish step env %v run %q, want GH_TOKEN alone and the publish command", publish.Env, publish.Run)
 	}
+	if publish.If != "steps.record.outputs.publish == 'true'" {
+		t.Errorf("publish step if %q, want it to run only when the record step wrote a record", publish.If)
+	}
 
-	// Run the record and publish steps: a Go re-pin publishes a window, an
-	// image change and a push with no main before it publish none.
+	// Run the job as GitHub does on a push from before to head: repin's step
+	// in a checkout of head and its parent, grace's if on its outputs, the
+	// record step in a checkout of head alone (it fetches main before the
+	// push itself), then the publish step if the record step says so. Each
+	// case first makes head the "GitHub" main: publish checks that main
+	// still pins the record's pin.
+	//
+	// The record is for main before the push, never the parent repin
+	// compares with when it cannot fetch that (hiccup: GitHub fails repin's
+	// fetches of before alone; an unknown before fails every fetch). For a
+	// merge-queue group of an image change (c2) and a Go re-pin (c3), the
+	// parent would give c3 a window for c2's pin, which beads never had. For
+	// a group whose last commit (c1-docs) follows its Go re-pin (c1), the
+	// parent pins c1-docs' host, so repin finds no move, yet main before the
+	// group (c0) gives a window. When main before the push cannot be read,
+	// the job fails and publishes nothing (re-run it); when it pins head's
+	// host, the job publishes nothing and passes.
 	g := newGraceRepo(t)
 	m0 := graceManifest("1.26.9", "2.1.8", "2.39")
+	m1 := graceManifest("1.26.10", "2.1.8", "2.39")
 	g.commit("c0", m0, "", "1.26.9")
-	g.commit("c1", graceManifest("1.26.10", "2.1.8", "2.39"), "", "1.26.10")
-	g.commit("c2", graceManifest("1.26.10", "2.1.8", "2.41"), "", "1.26.10")
-	// Each case pushes its head as the "GitHub" main (publish checks main
-	// still pins the record's pin), checks it out as actions/checkout does
-	// (depth 1: the record step fetches main before the push itself) and
-	// runs both steps. A main before the push that cannot be fetched (repin
-	// fetched it moments ago, so GitHub hiccupped) fails the job before
-	// anything is published, instead of publishing a record with no window.
+	g.commit("c1", m1, "", "1.26.10")                                        // Go re-pin
+	g.commit("c1-docs", m1, "", "1.26.10")                                   // the pin did not move
+	g.commit("c2", graceManifest("1.26.10", "2.1.8", "2.41"), "", "1.26.10") // image: libc6
+	g.commit("c3", graceManifest("1.26.11", "2.1.8", "2.41"), "", "1.26.11") // Go re-pin
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repin := notifyBeadsStep(t, wf, "repin", "pin")
+	const zero = "0000000000000000000000000000000000000000"
+	unknown := strings.Repeat("e", 40)
 	for _, tc := range []struct {
 		name, before, head string
-		previous           string
-		fails              bool
+		hiccup             bool
+		runs               bool   // the grace job runs
+		previous           string // the record it publishes ("": none)
+		fails              bool   // it fails, publishing nothing
 	}{
-		{name: "Go re-pin", before: g.sha["c0"], head: g.sha["c1"], previous: sha256Pin(m0)},
-		{name: "image change", before: g.sha["c1"], head: g.sha["c2"], previous: "none"},
-		{name: "no main before the push", before: "", head: g.sha["c1"], previous: "none"},
-		{name: "main before the push not fetchable", before: strings.Repeat("e", 40), head: g.sha["c1"], fails: true},
+		{name: "Go re-pin", before: g.sha["c0"], head: g.sha["c1"], runs: true, previous: sha256Pin(m0)},
+		{name: "image change", before: g.sha["c1-docs"], head: g.sha["c2"], runs: true, previous: "none"},
+		{name: "no main before the push", before: zero, head: g.sha["c1"], runs: true, previous: "none"},
+		{name: "pin did not move", before: g.sha["c1"], head: g.sha["c1-docs"]},
+		{name: "image change then Go re-pin", before: g.sha["c1-docs"], head: g.sha["c3"], runs: true, previous: "none"},
+		{name: "image change then Go re-pin, repin cannot fetch before", before: g.sha["c1-docs"], head: g.sha["c3"], hiccup: true, runs: true, previous: "none"},
+		{name: "image change then Go re-pin, before not fetchable", before: unknown, head: g.sha["c3"], runs: true, fails: true},
+		{name: "Go re-pin then docs", before: g.sha["c0"], head: g.sha["c1-docs"], runs: true, previous: sha256Pin(m0)},
+		{name: "Go re-pin then docs, repin cannot fetch before", before: g.sha["c0"], head: g.sha["c1-docs"], hiccup: true, runs: true, previous: sha256Pin(m0)},
+		{name: "Go re-pin then docs, before not fetchable", before: unknown, head: g.sha["c1-docs"], runs: true, fails: true},
+		{name: "pin did not move, repin cannot fetch before", before: g.sha["c1"], head: g.sha["c1-docs"], hiccup: true, runs: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g.git(g.dir, "push", "-q", "--force", g.github, tc.head+":refs/heads/main")
-			tipBefore := ""
-			if refs := g.git(g.github, "for-each-ref", "--format=%(objectname)", "refs/heads/"+rbeGraceBranch); refs != "" {
-				tipBefore = refs
+			branch := func() string {
+				return g.git(g.github, "for-each-ref", "--format=%(objectname)", "refs/heads/"+rbeGraceBranch)
 			}
+			tipBefore := branch()
 			dir := t.TempDir()
-			co := filepath.Join(dir, "checkout")
-			runNotifyBeadsFixture(t, dir, graceCheckoutDepth1, g.dir, co, tc.head)
 			runner := map[string]string{}
 			for _, kv := range g.env {
 				k, v, _ := strings.Cut(kv, "=")
@@ -987,11 +1045,41 @@ func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 			runner["SLEEP_LOG"] = filepath.Join(dir, "sleeps")
 			runner["RUNNER_TEMP"] = dir
 			runner["GITHUB_STEP_SUMMARY"] = filepath.Join(dir, "summary")
-			ctx := map[string]string{"needs.repin.outputs.before": tc.before, "github.token": "ghs_never-sent-to-file-urls"}
-			out, err := runWorkflowStepScript(t, co, record.Run, notifyBeadsEnv(t, wf, record, ctx, runner))
+
+			repinCo := filepath.Join(dir, "repin")
+			runNotifyBeadsFixture(t, dir, notifyBeadsCheckout, g.dir, repinCo, tc.head)
+			repinRunner := map[string]string{"GITHUB_OUTPUT": filepath.Join(dir, "repin-output")}
+			for k, v := range runner {
+				repinRunner[k] = v
+			}
+			if tc.hiccup {
+				hiccup := t.TempDir()
+				writeExecutable(t, filepath.Join(hiccup, "git"), graceFailingGit)
+				repinRunner["PATH"] = hiccup + string(os.PathListSeparator) + runner["PATH"]
+				repinRunner["REAL_GIT"] = realGit
+				repinRunner["GIT_FAIL_ARG"] = tc.before
+			}
+			out, err := runWorkflowStepScript(t, repinCo, repin.Run, notifyBeadsEnv(t, wf, repin, map[string]string{"github.event.before": tc.before}, repinRunner))
+			if err != nil {
+				t.Fatalf("repin step: %v\n%s", err, out)
+			}
+			ctx := map[string]string{"github.token": "ghs_never-sent-to-file-urls"}
+			for _, k := range []string{"moved", "pin", "sha", "before", "unfetched"} {
+				ctx["needs.repin.outputs."+k], _ = readStepOutput(t, repinRunner["GITHUB_OUTPUT"], k)
+			}
+			if runs := evalGHIf(t, grace.If, ctx); runs != tc.runs {
+				t.Fatalf("grace runs %v after repin's outputs %v, want %v\n%s", runs, ctx, tc.runs, out)
+			}
+			if !tc.runs {
+				return
+			}
+
+			co := filepath.Join(dir, "checkout")
+			runNotifyBeadsFixture(t, dir, graceCheckoutDepth1, g.dir, co, tc.head)
+			runner["GITHUB_OUTPUT"] = filepath.Join(dir, "record-output")
+			out, err = runWorkflowStepScript(t, co, record.Run, notifyBeadsEnv(t, wf, record, ctx, runner))
 			if tc.fails {
-				tipAfter := g.git(g.github, "for-each-ref", "--format=%(objectname)", "refs/heads/"+rbeGraceBranch)
-				if err == nil || !strings.Contains(out, "nothing published") || tipAfter != tipBefore {
+				if tipAfter := branch(); err == nil || !strings.Contains(out, "nothing published") || tipAfter != tipBefore {
 					t.Errorf("record step: %v, branch %s (was %s); want a failure and nothing published\n%s", err, tipAfter, tipBefore, out)
 				}
 				return
@@ -999,12 +1087,23 @@ func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 			if err != nil {
 				t.Fatalf("record step: %v\n%s", err, out)
 			}
+			ctx["steps.record.outputs.publish"], _ = readStepOutput(t, runner["GITHUB_OUTPUT"], "publish")
+			if publishes := evalGHIf(t, publish.If, ctx); publishes != (tc.previous != "") {
+				t.Fatalf("publish step runs %v (record step's publish %q), want %v\n%s", publishes, ctx["steps.record.outputs.publish"], tc.previous != "", out)
+			}
+			if tc.previous == "" {
+				if tipAfter := branch(); tipAfter != tipBefore || !strings.Contains(out, "nothing to publish") {
+					t.Errorf("record step for a pin main before the push already had: branch %s (was %s); want nothing published, and why\n%s", tipAfter, tipBefore, out)
+				}
+				return
+			}
 			if out, err := runWorkflowStepScript(t, co, publish.Run, notifyBeadsEnv(t, wf, publish, ctx, runner)); err != nil {
 				t.Fatalf("publish step: %v\n%s", err, out)
 			}
-			got := parseGraceRecord(t, g.git(g.github, "show", "refs/heads/"+rbeGraceBranch+":"+rbeGraceFile)+"\n")
-			if got.fields["previous"] != tc.previous || got.fields["sha"] != tc.head {
-				t.Errorf("published record %v, want previous %s for %s", got.fields, tc.previous, tc.head)
+			published := g.git(g.github, "show", "refs/heads/"+rbeGraceBranch+":"+rbeGraceFile) + "\n"
+			got := parseGraceRecord(t, published)
+			if got.fields["previous"] != tc.previous || got.fields["sha"] != tc.head || published != readFile(t, dir, "worker-env-grace.txt") {
+				t.Errorf("published record %v, want this run's record, previous %s for %s", got.fields, tc.previous, tc.head)
 			}
 			if summary := readFile(t, dir, "summary"); !strings.Contains(summary, "previous "+tc.previous) {
 				t.Errorf("step summary does not show the record:\n%s", summary)
@@ -1012,6 +1111,23 @@ func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 		})
 	}
 }
+
+// graceFailingGit stands in for git on PATH and fails as GitHub does when it
+// hiccups: a run with the argument $GIT_FAIL_ARG fails as a 502 would, every
+// time, or with GIT_FAIL_ONCE only the first time (it creates that file);
+// every other run is $REAL_GIT's.
+const graceFailingGit = `#!/bin/sh
+for arg in "$@"; do
+	[ "$arg" = "$GIT_FAIL_ARG" ] || continue
+	if [ -n "${GIT_FAIL_ONCE:-}" ]; then
+		[ ! -e "$GIT_FAIL_ONCE" ] || break
+		: >"$GIT_FAIL_ONCE"
+	fi
+	echo "fatal: unable to access 'https://github.com/gastownhall/gascity.git/': The requested URL returned error: 502" >&2
+	exit 128
+done
+exec "$REAL_GIT" "$@"
+`
 
 // graceCheckoutDepth1 checks HEAD out of ORIGIN into DIR as the grace job's
 // actions/checkout does: that commit alone (fetch-depth 1), from a remote

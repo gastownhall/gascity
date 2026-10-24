@@ -912,10 +912,13 @@ accepted near the end), and beads keeps building until its sync PR lands:
    `serve-until` (`until` + 1 h). Any other re-pin (an image release, a dolt
    or measurement change, a manifest that does not hash to its pin) gets
    `previous none` and a reason: the old host cannot be rebuilt, so beads
-   waits for its sync PR as before. `publish` writes only a record for the
-   pin main has when it runs, and not one the branch already has, so a
-   re-run, or two re-pins in a row, never puts an older record back. The
-   branch's history is the history of windows.
+   waits for its sync PR as before. The previous pin is that of main before
+   the push (`github.event.before`), never of the pushed commit's parent: in
+   a merge-queue group the two differ. If main before the push cannot be
+   fetched, the job fails and publishes nothing (re-run it). `publish`
+   writes only a record for the pin main has when it runs, and not one the
+   branch already has, so a re-run, or two re-pins in a row, never puts an
+   older record back. The branch's history is the history of windows.
 2. rbe-west's OSS pool scaler reads the record and, while the window is
    open, dispatches `rbe-worker-legacy.yml`: a floor of previous-pin workers
    until `until`, and more while a queue persists that no registered

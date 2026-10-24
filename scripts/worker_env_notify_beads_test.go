@@ -349,8 +349,9 @@ func TestWorkerEnvNotifyBeadsTriggers(t *testing.T) {
 // TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould evaluates each job's `if`:
 // repin runs on gastownhall/gascity alone (not on a fork's main), dispatch
 // and grace (the rbe-west grace record, tools/rbe/worker-env-grace) only
-// after repin found a moved pin, comment on same-repo PRs of
-// gastownhall/gascity.
+// after repin found a moved pin, grace also after repin could not fetch
+// main before the push (it compared with the parent, which can hide a
+// re-pin), comment on same-repo PRs of gastownhall/gascity.
 func TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould(t *testing.T) {
 	push := loadNotifyBeads(t, notifyBeadsWorkflow)
 	pr := loadNotifyBeads(t, notifyBeadsPRWorkflow)
@@ -375,21 +376,23 @@ func TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould(t *testing.T) {
 		fork    = "someone/gascity"
 	)
 	for _, tc := range []struct {
-		name            string
-		ctx             map[string]string
-		repin, dispatch bool
+		name                   string
+		ctx                    map[string]string
+		repin, dispatch, grace bool
 	}{
-		{name: "push, pin moved", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "true"}, repin: true, dispatch: true},
-		{name: "push, pin unchanged", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "false"}, repin: true},
-		{name: "push to a fork's main", ctx: map[string]string{"github.repository": fork, "needs.repin.outputs.moved": "true"}},
+		{name: "push, pin moved", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "true", "needs.repin.outputs.unfetched": "false"}, repin: true, dispatch: true, grace: true},
+		{name: "push, pin unchanged", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "false", "needs.repin.outputs.unfetched": "false"}, repin: true},
+		{name: "push, pin moved from the parent's, before not fetched", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "true", "needs.repin.outputs.unfetched": "true"}, repin: true, dispatch: true, grace: true},
+		{name: "push, pin unchanged from the parent's, before not fetched", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "false", "needs.repin.outputs.unfetched": "true"}, repin: true, grace: true},
+		{name: "push to a fork's main", ctx: map[string]string{"github.repository": fork, "needs.repin.outputs.moved": "true", "needs.repin.outputs.unfetched": "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := evalGHIf(t, repin.If, tc.ctx)
 			// dispatch and grace need repin: a skipped repin skips them.
 			d := r && evalGHIf(t, dispatch.If, tc.ctx)
 			g := r && evalGHIf(t, grace.If, tc.ctx)
-			if r != tc.repin || d != tc.dispatch || g != tc.dispatch {
-				t.Errorf("runs repin %v, dispatch %v, grace %v; want %v, %v, %v", r, d, g, tc.repin, tc.dispatch, tc.dispatch)
+			if r != tc.repin || d != tc.dispatch || g != tc.grace {
+				t.Errorf("runs repin %v, dispatch %v, grace %v; want %v, %v, %v", r, d, g, tc.repin, tc.dispatch, tc.grace)
 			}
 		})
 	}
@@ -545,13 +548,13 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 	if want := map[string]string{"contents": "read"}; !reflect.DeepEqual(repin.Permissions, want) {
 		t.Errorf("repin permissions %v, want %v", repin.Permissions, want)
 	}
-	for _, k := range []string{"moved", "pin", "sha", "before"} {
+	for _, k := range []string{"moved", "pin", "sha", "before", "unfetched"} {
 		if want := "${{ steps.pin.outputs." + k + " }}"; repin.Outputs[k] != want {
 			t.Errorf("repin output %s = %q, want %q", k, repin.Outputs[k], want)
 		}
 	}
-	if len(repin.Outputs) != 4 {
-		t.Errorf("repin outputs %v, want moved, pin, sha, before", repin.Outputs)
+	if len(repin.Outputs) != 5 {
+		t.Errorf("repin outputs %v, want moved, pin, sha, before, unfetched", repin.Outputs)
 	}
 	if len(repin.Steps) != 2 || !strings.HasPrefix(repin.Steps[0].Uses, "actions/checkout@") || repin.Steps[1].Uses != "" {
 		t.Fatalf("repin steps %+v, want a checkout and one inline script", repin.Steps)
@@ -642,7 +645,8 @@ func runNotifyBeadsFixture(t *testing.T, dir, script string, args ...string) {
 // push of several commits (a merge-queue group) counts, and one moved back
 // within the push does not. A push with no usable before (a new branch's
 // all-zero one, none at all, or one it cannot fetch) compares with the
-// commit's parent; a first commit compares with no pin.
+// commit's parent; a first commit compares with no pin. Its before output
+// is the push's own before, for the grace record, never that parent.
 func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 	root := repoRoot(t)
 	wf := loadNotifyBeads(t, notifyBeadsWorkflow)
@@ -679,26 +683,28 @@ func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 	const zero = "0000000000000000000000000000000000000000"
 	unknown := strings.Repeat("e", 40)
 
-	// compared: the main commit the pin was compared with, repin's before
-	// output (the grace record's previous host): the push's before, else
-	// the pushed commit's parent, else none.
+	// mainBefore: repin's before output, main before the push for the grace
+	// record: the push's own before when it names a commit, fetched or not,
+	// else none; never the parent the pin is compared with in its stead.
+	// warn: repin could not fetch that before, so it compared with the
+	// parent, warned and says unfetched=true (moved is a guess then).
 	for _, tc := range []struct {
 		name, before, head string
 		moved              string
 		pin                string
-		compared           string
+		mainBefore         string
 		fail, warn         bool
 	}{
-		{name: "comment only", before: sha["a"], head: sha["a-docs"], moved: "false", pin: pinA, compared: sha["a"]},
-		{name: "re-pin", before: sha["a-docs"], head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"]},
-		{name: "re-pin before the last commit of the push", before: sha["a-docs"], head: sha["b-again"], moved: "true", pin: pinB, compared: sha["a-docs"]},
-		{name: "moved and moved back within the push", before: sha["a-docs"], head: sha["a-back"], moved: "false", pin: pinA, compared: sha["a-docs"]},
-		{name: "new branch, parent pins another host", before: zero, head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"]},
-		{name: "new branch, parent pins the same host", before: zero, head: sha["b-again"], moved: "false", pin: pinB, compared: sha["b"]},
-		{name: "no before", before: "", head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"]},
-		{name: "before not fetchable, parent pins the same host", before: unknown, head: sha["b-again"], moved: "false", pin: pinB, compared: sha["b"], warn: true},
-		{name: "before not fetchable, parent pins another host", before: unknown, head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"], warn: true},
-		{name: "first commit", before: zero, head: sha["a"], moved: "true", pin: pinA, compared: ""},
+		{name: "comment only", before: sha["a"], head: sha["a-docs"], moved: "false", pin: pinA, mainBefore: sha["a"]},
+		{name: "re-pin", before: sha["a-docs"], head: sha["b"], moved: "true", pin: pinB, mainBefore: sha["a-docs"]},
+		{name: "re-pin before the last commit of the push", before: sha["a-docs"], head: sha["b-again"], moved: "true", pin: pinB, mainBefore: sha["a-docs"]},
+		{name: "moved and moved back within the push", before: sha["a-docs"], head: sha["a-back"], moved: "false", pin: pinA, mainBefore: sha["a-docs"]},
+		{name: "new branch, parent pins another host", before: zero, head: sha["b"], moved: "true", pin: pinB},
+		{name: "new branch, parent pins the same host", before: zero, head: sha["b-again"], moved: "false", pin: pinB},
+		{name: "no before", before: "", head: sha["b"], moved: "true", pin: pinB},
+		{name: "before not fetchable, parent pins the same host", before: unknown, head: sha["b-again"], moved: "false", pin: pinB, mainBefore: unknown, warn: true},
+		{name: "before not fetchable, parent pins another host", before: unknown, head: sha["b"], moved: "true", pin: pinB, mainBefore: unknown, warn: true},
+		{name: "first commit", before: zero, head: sha["a"], moved: "true", pin: pinA},
 		{name: "pin removed", before: sha["a-back"], head: sha["none"], fail: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -731,9 +737,12 @@ func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 			}
 			pin, _ := readStepOutput(t, output, "pin")
 			head, _ := readStepOutput(t, output, "sha")
-			compared, found := readStepOutput(t, output, "before")
-			if moved != tc.moved || pin != tc.pin || head != tc.head || compared != tc.compared || !found {
-				t.Errorf("moved %q pin %q sha %q before %q (written %v), want %q %q %q %q\n%s", moved, pin, head, compared, found, tc.moved, tc.pin, tc.head, tc.compared, out)
+			mainBefore, found := readStepOutput(t, output, "before")
+			if moved != tc.moved || pin != tc.pin || head != tc.head || mainBefore != tc.mainBefore || !found {
+				t.Errorf("moved %q pin %q sha %q before %q (written %v), want %q %q %q %q\n%s", moved, pin, head, mainBefore, found, tc.moved, tc.pin, tc.head, tc.mainBefore, out)
+			}
+			if unfetched, _ := readStepOutput(t, output, "unfetched"); unfetched != strconv.FormatBool(tc.warn) {
+				t.Errorf("unfetched %q, want %v\n%s", unfetched, tc.warn, out)
 			}
 			if warned := strings.Contains(out, "::warning"); warned != tc.warn {
 				t.Errorf("::warning printed %v, want %v\n%s", warned, tc.warn, out)

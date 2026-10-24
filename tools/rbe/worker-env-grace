@@ -28,15 +28,18 @@
 #                             window starts at AFTER's commit time (a merge
 #                             queue's commit is made minutes before it
 #                             lands), at most NOW, so writing it again later
-#                             gives the same record. worker-env-notify-beads.yml's
-#                             grace job.
+#                             gives the same record. If BEFORE pins AFTER's
+#                             host, there is no record: exit 2.
+#                             worker-env-notify-beads.yml's grace job.
 #   publish RECORD            Commit RECORD as worker-env-grace.txt to
 #                             refs/heads/rbe/worker-env-grace, on top of the
 #                             branch's last record, while main still pins the
 #                             record's pin: a record that a later re-pin
 #                             superseded, or one the branch already has, is
 #                             not published (a re-run, two re-pins in a row).
-#                             GH_TOKEN; the grace job.
+#                             A failed read or a refused push is tried
+#                             again, three tries in all. GH_TOKEN; the grace
+#                             job.
 #   fetch                     Print the published record; nothing, and
 #                             success, if there is none. rbe-worker-legacy.yml.
 #   host RECORD DIR [NOW]     Check RECORD against this checkout and, inside
@@ -344,7 +347,7 @@ cmd_fetch() {
 }
 
 cmd_publish() {
-	local record=${1:?usage: worker-env-grace publish RECORD} url tip main_pin repo=$tmp/publish blob tree commit subject attempt
+	local record=${1:?usage: worker-env-grace publish RECORD} url tip main_pin repo=$tmp/publish blob tree commit subject attempt why=''
 	parse_record "$record" || die "not publishing a malformed record"
 	url=$(remote)
 	github_auth "$url"
@@ -359,19 +362,36 @@ cmd_publish() {
 	blob=$(git -C "$repo" hash-object -w "$record")
 	tree=$(printf '100644 blob %s\t%s\n' "$blob" "$FILE" | git -C "$repo" mktree)
 	for attempt in 1 2 3; do
+		# A failed read (GitHub's hiccup) or a refused push (the branch moved)
+		# is tried again: one alone must not cost the window.
+		if [ -n "$why" ]; then
+			echo "worker-env-grace: $why; trying again" >&2
+			sleep $(((attempt - 1) * 5))
+		fi
 		# Only main's current pin gets a record: two re-pins in a row, or a
 		# re-run of an older push's job, must not put back an older one.
-		rgit -C "$repo" fetch -q --no-tags --depth=1 --filter=blob:none origin "+refs/heads/main:refs/main" ||
-			die "cannot read main from $url"
+		if ! rgit -C "$repo" fetch -q --no-tags --depth=1 --filter=blob:none origin "+refs/heads/main:refs/main"; then
+			why="cannot read main from $url"
+			continue
+		fi
 		# The blob arrives on demand (the fetch above left blobs out).
-		main_pin=$(rgit -C "$repo" show "refs/main:platforms/BUILD.bazel" | pin_of /dev/stdin) || die "cannot read main's pin"
+		if ! main_pin=$(rgit -C "$repo" show "refs/main:platforms/BUILD.bazel" | pin_of /dev/stdin); then
+			why="cannot read main's pin"
+			continue
+		fi
 		if [ "$main_pin" != "$r_pin" ]; then
 			echo "worker-env-grace: main pins $main_pin now, not this record's $r_pin; a later push publishes its own record. Not publishing."
 			return 0
 		fi
-		tip=$(branch_tip "$url") || die "cannot read $url"
+		if ! tip=$(branch_tip "$url"); then
+			why="cannot read $url"
+			continue
+		fi
 		if [ -n "$tip" ]; then
-			rgit -C "$repo" fetch -q --no-tags --depth=1 origin "+refs/heads/$BRANCH:refs/grace" || die "cannot fetch $BRANCH from $url"
+			if ! rgit -C "$repo" fetch -q --no-tags --depth=1 origin "+refs/heads/$BRANCH:refs/grace"; then
+				why="cannot fetch $BRANCH from $url"
+				continue
+			fi
 			tip=$(git -C "$repo" rev-parse refs/grace)
 			if [ "$(git -C "$repo" rev-parse "refs/grace:$FILE" 2>/dev/null)" = "$blob" ]; then
 				echo "worker-env-grace: $BRANCH already has this record ($tip)"
@@ -388,9 +408,9 @@ cmd_publish() {
 			echo "worker-env-grace: published $commit on $BRANCH: ${subject#rbe worker-env grace: }"
 			return 0
 		fi
-		[ "$attempt" = 3 ] || sleep $((attempt * 5))
+		why="the push was refused (the branch moved, or GitHub refused it)"
 	done
-	die "could not publish on $BRANCH (it kept moving, or the push was refused)"
+	die "could not publish on $BRANCH: $why"
 }
 
 # no_window WHY: this run has nothing to serve: say so, serve=false, exit 3.
