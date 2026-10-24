@@ -154,7 +154,7 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("acp start for %q: %w", name, err)
 	}
 	lock, err := p.lockLifecycle(name, true)
 	if err != nil {

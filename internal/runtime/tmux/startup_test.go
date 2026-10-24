@@ -52,7 +52,8 @@ type fakeStartOps struct {
 	createErrs []error
 	createIdx  int
 
-	respawnErr error
+	respawnErr  error
+	respawnHook func()
 
 	isSessionRunningResult     *bool
 	isRuntimeRunningResult     bool
@@ -60,6 +61,7 @@ type fakeStartOps struct {
 	waitCommandErr             error
 	acceptStartupDialogsErr    error
 	waitReadyErr               error
+	createSessionHook          func()
 	waitCommandHook            func()
 	acceptStartupDialogsHook   func()
 	waitReadyHook              func()
@@ -102,6 +104,9 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 		command: command,
 		env:     env,
 	})
+	if f.createSessionHook != nil {
+		f.createSessionHook()
+	}
 	if f.createIdx < len(f.createErrs) {
 		err := f.createErrs[f.createIdx]
 		f.createIdx++
@@ -118,6 +123,9 @@ func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[strin
 		command: command,
 		env:     env,
 	})
+	if f.respawnHook != nil {
+		f.respawnHook()
+	}
 	return f.respawnErr
 }
 
@@ -3684,4 +3692,236 @@ func TestDoStartSession_WarnsWhenTrustDialogLeftUnconfirmed(t *testing.T) {
 	if !strings.Contains(warnings.String(), `"gc-city-mayor"`) {
 		t.Fatalf("warning %q does not name the session", warnings.String())
 	}
+}
+
+// expiringCtx is a context whose deadline passes exactly when expire is
+// called, so a test can end it inside a chosen startup step without racing a
+// timer.
+type expiringCtx struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newExpiringCtx() *expiringCtx {
+	return &expiringCtx{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *expiringCtx) expire() { c.once.Do(func() { close(c.done) }) }
+
+func (c *expiringCtx) Done() <-chan struct{} { return c.done }
+
+func (c *expiringCtx) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// stageDeadlineConfig enables every startup step that can observe an expired
+// context.
+func stageDeadlineConfig() runtime.Config {
+	return runtime.Config{
+		WorkDir:                "/proj",
+		Command:                "agent-cli",
+		ProcessNames:           []string{"agent-cli"},
+		ReadyPromptPrefix:      "> ",
+		ReadyDelayMs:           5000,
+		EmitsPermissionWarning: true,
+		PreStart:               []string{"prep"},
+		SessionSetup:           []string{"setup"},
+		Nudge:                  "hello",
+		SessionLive:            []string{"live"},
+	}
+}
+
+// stageDeadlineCase arms ops (and the context) so the deadline passes in one
+// startup step, and names the error that step must return.
+type stageDeadlineCase struct {
+	name string
+	arm  func(ops *fakeStartOps, expire func())
+	// want is the full error text; empty means the start succeeds.
+	want string
+}
+
+// expireOnCall returns a hook that expires the context on its nth call.
+func expireOnCall(n int, expire func()) func() {
+	calls := 0
+	return func() {
+		calls++
+		if calls == n {
+			expire()
+		}
+	}
+}
+
+func expireOnSetupCommand(cmd string, expire func()) func(string) {
+	return func(got string) {
+		if got == cmd {
+			expire()
+		}
+	}
+}
+
+func runStageDeadlineCases(t *testing.T, start func(ctx context.Context, ops startOps) error, cases []stageDeadlineCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newExpiringCtx()
+			ops := &fakeStartOps{}
+			tc.arm(ops, ctx.expire)
+			err := start(ctx, ops)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("err = nil, want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("err = %q, want %q", err.Error(), tc.want)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("errors.Is(%v, context.DeadlineExceeded) = false", err)
+			}
+		})
+	}
+}
+
+// TestDoStartSession_DeadlineErrorNamesStage pins that a start whose context
+// expires names the step that was running, so a deadline_exceeded start
+// failure says where the time went. Readiness and the post-readiness dialog
+// pass still succeed while the session is alive.
+func TestDoStartSession_DeadlineErrorNamesStage(t *testing.T) {
+	const deadline = ": context deadline exceeded"
+	runStageDeadlineCases(t, func(ctx context.Context, ops startOps) error {
+		return doStartSession(ctx, ops, "s", stageDeadlineConfig(), DefaultConfig().SetupTimeout)
+	}, []stageDeadlineCase{
+		{
+			name: "entry",
+			arm:  func(_ *fakeStartOps, expire func()) { expire() },
+			want: `tmux start for "s"` + deadline,
+		},
+		{
+			name: "pre_start",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.runSetupCommandHook = expireOnSetupCommand("prep", expire)
+			},
+			want: "running pre_start" + deadline,
+		},
+		{
+			name: "session creation",
+			arm:  func(ops *fakeStartOps, expire func()) { ops.createSessionHook = expire },
+			want: "creating session" + deadline,
+		},
+		{
+			name: "agent command wait",
+			arm:  func(ops *fakeStartOps, expire func()) { ops.waitCommandHook = expire },
+			want: "waiting for agent command" + deadline,
+		},
+		{
+			name: "startup dialogs",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.acceptStartupDialogsHook = expireOnCall(1, expire)
+			},
+			want: "accepting startup dialogs" + deadline,
+		},
+		{
+			name: "readiness with session gone",
+			arm:  func(ops *fakeStartOps, expire func()) { ops.waitReadyHook = expire },
+			want: "waiting for readiness" + deadline,
+		},
+		{
+			name: "readiness with session alive",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.waitReadyHook = expire
+			},
+		},
+		{
+			name: "post-readiness dialogs with session gone",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.acceptStartupDialogsHook = expireOnCall(2, expire)
+			},
+			want: "accepting startup dialogs after readiness" + deadline,
+		},
+		{
+			name: "post-readiness dialogs with session alive",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.acceptStartupDialogsHook = expireOnCall(2, expire)
+			},
+		},
+		{
+			name: "session verification",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.hasSessionHook = expire
+			},
+			want: "verifying session" + deadline,
+		},
+		{
+			name: "session_setup",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.runSetupCommandHook = expireOnSetupCommand("setup", expire)
+			},
+			want: "running session_setup" + deadline,
+		},
+		{
+			name: "startup nudge",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.sendKeysHook = expire
+			},
+			want: "sending startup nudge" + deadline,
+		},
+	})
+}
+
+// TestDoRelaunchSession_DeadlineErrorNamesStage is the relaunch twin of
+// TestDoStartSession_DeadlineErrorNamesStage: the relaunch-only steps carry
+// the relaunch prefix, and the shared launch tail names its own steps.
+func TestDoRelaunchSession_DeadlineErrorNamesStage(t *testing.T) {
+	const deadline = ": context deadline exceeded"
+	runStageDeadlineCases(t, func(ctx context.Context, ops startOps) error {
+		return doRelaunchSession(ctx, ops, "s", stageDeadlineConfig(), DefaultConfig().SetupTimeout)
+	}, []stageDeadlineCase{
+		{
+			name: "entry",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				expire()
+			},
+			want: `relaunch for "s"` + deadline,
+		},
+		{
+			name: "pre_start",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.runSetupCommandHook = expireOnSetupCommand("prep", expire)
+			},
+			want: "relaunch: running pre_start" + deadline,
+		},
+		{
+			name: "agent respawn",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.respawnHook = expire
+			},
+			want: `relaunch: respawning agent in session "s"` + deadline,
+		},
+		{
+			name: "agent command wait",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.waitCommandHook = expire
+			},
+			want: "waiting for agent command" + deadline,
+		},
+	})
 }

@@ -925,3 +925,69 @@ func TestPathCheckBinary(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderSessionCreateTransportBuiltinGolden pins every builtin's
+// default transport and template launch command to the values recorded
+// before ACPOmittedArgs existed, so the omitted-args transport rule moves
+// only city-declared wrappers, never a builtin.
+func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
+	golden := map[string]struct{ transport, launch string }{
+		"amp":         {"", "amp --dangerously-allow-all --no-ide"},
+		"antigravity": {"", "agy --dangerously-skip-permissions"},
+		"auggie":      {"", "auggie --allow-indexing"},
+		"cerebras":    {"acp", "opencode acp --model cerebras/gpt-oss-120b"},
+		"claude":      {"", "claude --dangerously-skip-permissions --effort max"},
+		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox"},
+		"copilot":     {"", "copilot --yolo"},
+		"cursor":      {"", "cursor-agent -f --trust"},
+		"gemini":      {"", "gemini --approval-mode yolo"},
+		"grok":        {"", "grok --permission-mode bypassPermissions --model grok-composer-2.5-fast"},
+		"groq":        {"acp", "opencode acp --model groq/openai/gpt-oss-120b"},
+		"kimi":        {"acp", "kimi --yolo --no-thinking acp"},
+		"kiro":        {"", "kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},
+		"mimocode":    {"", "mimo --never-ask"},
+		"omp":         {"", "omp --hook .omp/hooks/gc-hook.ts"},
+		"opencode":    {"acp", "opencode acp"},
+		"pi":          {"", "pi -e .pi/extensions/gc-hooks.js"},
+		"zcode":       {"", "zcode-repl"},
+	}
+	providers := BuiltinProviders()
+	if len(providers) != len(golden) {
+		t.Fatalf("BuiltinProviders() has %d providers, golden table has %d; record the new builtin's transport and launch", len(providers), len(golden))
+	}
+	cfg := &City{Providers: providers}
+	if err := BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+	for name := range providers {
+		want, ok := golden[name]
+		if !ok {
+			t.Errorf("builtin %q missing from golden table", name)
+			continue
+		}
+		resolved, err := ResolveProvider(&Agent{Name: "worker", Provider: name}, nil, providers, func(s string) (string, error) { return s, nil })
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", name, err)
+		}
+		cached, ok := ResolvedProviderCached(cfg, name)
+		if !ok {
+			t.Fatalf("ResolvedProviderCached(%q) missing", name)
+		}
+		for path, rp := range map[string]*ResolvedProvider{"ResolveProvider": resolved, "ResolvedProviderCached": &cached} {
+			if len(rp.ACPOmittedArgs) != 0 {
+				t.Errorf("%s(%q).ACPOmittedArgs = %q, want empty", path, name, rp.ACPOmittedArgs)
+			}
+		}
+		transport := resolved.ProviderSessionCreateTransport()
+		if transport != want.transport {
+			t.Errorf("%q: ProviderSessionCreateTransport() = %q, want %q", name, transport, want.transport)
+		}
+		launch, err := ProviderTemplateCommand(resolved, transport, nil, providers)
+		if err != nil {
+			t.Fatalf("ProviderTemplateCommand(%q): %v", name, err)
+		}
+		if launch != want.launch {
+			t.Errorf("%q: template launch = %q, want %q", name, launch, want.launch)
+		}
+	}
+}

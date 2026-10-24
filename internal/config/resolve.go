@@ -80,7 +80,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	}
 
 	// Step 3: look up the ProviderSpec.
-	spec, err := lookupProvider(name, cityProviders, lookPath)
+	spec, omittedACPArgs, err := lookupProviderLayers(name, cityProviders, lookPath)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +94,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	// of the raw Name. See engdocs/design/provider-inheritance.md
 	// §Kind / provider-family propagation.
 	resolved.BuiltinAncestor = BuiltinFamily(name, cityProviders)
+	resolved.ACPOmittedArgs = omittedACPArgs
 	mergeAgentOverrides(resolved, agent)
 	if agent.ResumeCommand == "" {
 		completeResolvedProviderResumeCommand(resolved)
@@ -110,6 +111,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	if agent.StartCommand == "" && ws != nil && ws.StartCommand != "" {
 		resolved.Command = ws.StartCommand
 		resolved.Args = nil
+		resolved.ACPOmittedArgs = nil
 		resolved.OptionsSchema = nil
 		resolved.EffectiveDefaults = nil
 	}
@@ -162,12 +164,20 @@ func ResolveInstallHooks(agent *Agent, ws *Workspace) []string {
 // lets custom provider tiers (e.g. [providers.fast] command = "copilot")
 // inherit PromptMode, PromptFlag, ReadyPromptPrefix, etc.
 func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, error) {
+	spec, _, err := lookupProviderLayers(name, cityProviders, lookPath)
+	return spec, err
+}
+
+// lookupProviderLayers is lookupProvider that also reports the args the
+// merged provider's ACP launch omits (ResolvedProvider.ACPOmittedArgs),
+// computed from the schema-normalized layers the merge composes.
+func lookupProviderLayers(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, []string, error) {
 	// City-level providers take precedence.
 	if cityProviders != nil {
 		if spec, ok := cityProviders[name]; ok {
 			if spec.Command != "" {
 				if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+					return nil, nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 				}
 			}
 			// Phase 2+: if the spec has explicit Base declared,
@@ -179,19 +189,19 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			if spec.Base != nil {
 				if strings.TrimSpace(*spec.Base) == "" {
 					standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
-					return &standalone, nil
+					return &standalone, nil, nil
 				}
 				resolved, err := resolveProviderChain(name, spec, cityProviders, false)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				merged := resolvedChainToSpec(resolved, spec)
 				if merged.Command != "" {
 					if _, err := lookPath(merged.pathCheckBinary()); err != nil {
-						return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, merged.pathCheckBinary())
+						return nil, nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, merged.pathCheckBinary())
 					}
 				}
-				return &merged, nil
+				return &merged, resolved.ACPOmittedArgs, nil
 			}
 			// Phase A legacy: layer city overrides on top of the built-in
 			// if the provider name or command matches a known builtin.
@@ -200,16 +210,16 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
-				return &merged, nil
+				return &merged, acpOmittedArgs([]ProviderSpec{child, base}), nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
-				return &merged, nil
+				return &merged, acpOmittedArgs([]ProviderSpec{child, base}), nil
 			}
 			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
-			return &standalone, nil
+			return &standalone, nil, nil
 		}
 	}
 
@@ -217,12 +227,12 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	builtins := BuiltinProviders()
 	if spec, ok := builtins[name]; ok {
 		if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-			return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+			return nil, nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 		}
-		return &spec, nil
+		return &spec, nil, nil
 	}
 
-	return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
+	return nil, nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
 }
 
 // MergeProviderOverBuiltin layers city-level provider fields over a built-in

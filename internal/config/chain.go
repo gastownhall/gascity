@@ -94,6 +94,7 @@ func resolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	resolvedPtr.BuiltinAncestor = ancestor
 	resolvedPtr.Chain = ctx.chain
 	resolvedPtr.Provenance = buildProviderProvenance(ctx, customProviders)
+	resolvedPtr.ACPOmittedArgs = acpOmittedArgs(ctx.chainSpecs)
 	// Kind is the legacy field; mirror BuiltinAncestor for backward compat.
 	if ancestor != "" {
 		resolvedPtr.Kind = ancestor

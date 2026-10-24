@@ -1310,3 +1310,26 @@ func containsArgPair(args []string, pair []string) bool {
 	}
 	return false
 }
+
+func TestFormatACPOmittedArgs(t *testing.T) {
+	got := FormatACPOmittedArgs("rig/worker", "opencode-local", "opencode acp", []string{"-m", "acme/model x"})
+	for _, want := range []string{
+		"WARNING:",
+		`agent "rig/worker"`,
+		`provider "opencode-local"`,
+		`"opencode acp"`,
+		`-m 'acme/model x'`,
+		"acp_args",
+		`session = "tmux"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("FormatACPOmittedArgs() = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("FormatACPOmittedArgs() = %q, want a single line", got)
+	}
+	if blank := FormatACPOmittedArgs(" ", "", "opencode acp", []string{"-m"}); !strings.Contains(blank, `agent "(unknown)"`) || !strings.Contains(blank, `provider "(unknown)"`) {
+		t.Errorf("FormatACPOmittedArgs() with blank names = %q, want (unknown) placeholders", blank)
+	}
+}

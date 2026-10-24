@@ -324,6 +324,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	if err != nil {
 		return startOutcome{prepErr: err, undo: in.undo, relaunched: in.relaunched, tp: in.tp}, nil
 	}
+	// The launch is the prepared template, which keeps a session recorded on
+	// ACP on its ACP launch (templateParamsForSession): route by it.
+	in.tp = prepared.candidate.tp
 	name := strings.TrimSpace(in.row.SessionName)
 	if router, ok := c.start.sp.(interface{ RouteACP(string) }); ok && in.tp.IsACP {
 		router.RouteACP(name)

@@ -842,6 +842,21 @@ func (rp *ResolvedProvider) UnhonoredOptionPins() []UnhonoredOptionPin {
 	return pins
 }
 
+// FormatACPOmittedArgs names the agent, provider, effective ACP launch, and
+// the declared args that launch drops, with both remedies, so an ACP session
+// cannot silently start without them.
+func FormatACPOmittedArgs(agentName, providerName, acpLaunch string, dropped []string) string {
+	agent := strings.TrimSpace(agentName)
+	if agent == "" {
+		agent = "(unknown)"
+	}
+	provider := strings.TrimSpace(providerName)
+	if provider == "" {
+		provider = "(unknown)"
+	}
+	return fmt.Sprintf("WARNING: agent %q: provider %q ACP launch %q omits args %s; set acp_args on a provider wrapper to choose the ACP launch args, or use the CLI transport (session = \"tmux\", or remove session = \"acp\")", agent, provider, acpLaunch, shellquote.Join(dropped))
+}
+
 // FormatUnhonoredOptionPin names the agent, rejected value, and valid set so
 // a stale enum cannot unpin a session without a loud startup warning.
 func FormatUnhonoredOptionPin(agentName, providerName string, pin UnhonoredOptionPin) string {
