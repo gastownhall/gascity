@@ -18,10 +18,14 @@ import (
 )
 
 func TestStartDryRunLeavesARigsCommittedMCPConfigAlone(t *testing.T) {
+	// The rig and the pack the city imports outlive the city: their temp
+	// dirs are made first, so their cleanups run after the city's gc stop,
+	// which loads the city's config.
+	rigDir := filepath.Join(helpers.TempDir(t), "frontend")
+	packDir := filepath.Join(helpers.TempDir(t), "notes")
 	c := helpers.NewCity(t, testEnv)
 	c.InitNoStart("claude")
 
-	rigDir := filepath.Join(helpers.TempDir(t), "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}
@@ -36,7 +40,6 @@ func TestStartDryRunLeavesARigsCommittedMCPConfigAlone(t *testing.T) {
 
 	// A pack that provides an MCP server, imported at city level: every
 	// agent in the city and its rigs gets it.
-	packDir := filepath.Join(helpers.TempDir(t), "notes")
 	if err := os.MkdirAll(filepath.Join(packDir, "mcp"), 0o755); err != nil {
 		t.Fatalf("creating pack: %v", err)
 	}
