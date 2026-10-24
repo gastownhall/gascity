@@ -452,13 +452,13 @@ func (s *Step) normalizeCheckAlias(hasCheck bool, rawCheck interface{}, hasRalph
 
 	switch {
 	case hasCheck:
-		spec, err := decodePublicCheckSpec(rawCheck)
+		spec, err := decodePublicCheckSpec(rawCheck, true)
 		if err != nil {
 			return err
 		}
 		s.Ralph = spec
 	case hasRalph:
-		if err := validatePublicCheckSpecShape(rawRalph); err != nil {
+		if err := validatePublicCheckSpecShape(rawRalph, false); err != nil {
 			return err
 		}
 	}
@@ -531,13 +531,13 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 	var ralph *RalphSpec
 	switch {
 	case hasCheck:
-		spec, err := decodePublicCheckSpec(a.Check)
+		spec, err := decodePublicCheckSpec(a.Check, true)
 		if err != nil {
 			return Step{}, err
 		}
 		ralph = spec
 	case hasRalph:
-		spec, err := decodePublicCheckSpec(a.Ralph)
+		spec, err := decodePublicCheckSpec(a.Ralph, false)
 		if err != nil {
 			return Step{}, err
 		}
@@ -603,8 +603,8 @@ func (a *loopTOMLAlias) toLoopSpec() (*LoopSpec, error) {
 	}, nil
 }
 
-func decodePublicCheckSpec(raw interface{}) (*RalphSpec, error) {
-	if err := validatePublicCheckSpecShape(raw); err != nil {
+func decodePublicCheckSpec(raw interface{}, rejectUnknown bool) (*RalphSpec, error) {
+	if err := validatePublicCheckSpecShape(raw, rejectUnknown); err != nil {
 		return nil, err
 	}
 
@@ -623,7 +623,7 @@ func decodePublicCheckSpec(raw interface{}) (*RalphSpec, error) {
 	return &spec, nil
 }
 
-func validatePublicCheckSpecShape(raw interface{}) error {
+func validatePublicCheckSpecShape(raw interface{}, rejectUnknown bool) error {
 	if raw == nil {
 		return nil
 	}
@@ -646,20 +646,22 @@ func validatePublicCheckSpecShape(raw interface{}) error {
 		case "max_attempts":
 			continue
 		case "check":
-			if err := validatePublicCheckBodyShape(value); err != nil {
+			if err := validatePublicCheckBodyShape(value, rejectUnknown); err != nil {
 				return err
 			}
 		case "exec", "inference":
 			return fmt.Errorf("step.check: unsupported key %q (expected max_attempts or check)", key)
 		default:
-			continue
+			if rejectUnknown {
+				return fmt.Errorf("step.check: unsupported key %q (expected max_attempts or check)", key)
+			}
 		}
 	}
 
 	return nil
 }
 
-func validatePublicCheckBodyShape(raw json.RawMessage) error {
+func validatePublicCheckBodyShape(raw json.RawMessage, rejectUnknown bool) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
@@ -671,10 +673,14 @@ func validatePublicCheckBodyShape(raw json.RawMessage) error {
 
 	for key := range body {
 		switch key {
+		case "mode", "path", "timeout":
+			continue
 		case "exec", "inference":
 			return fmt.Errorf("step.check.check: unsupported key %q (expected mode, path, or timeout)", key)
 		default:
-			continue
+			if rejectUnknown {
+				return fmt.Errorf("step.check.check: unsupported key %q (expected mode, path, or timeout)", key)
+			}
 		}
 	}
 
