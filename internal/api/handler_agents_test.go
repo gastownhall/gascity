@@ -16,8 +16,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type partialAgentSessionLister struct {
@@ -1870,6 +1872,97 @@ func TestLiveActiveBeadBatchesIdentitiesAndPreservesPrecedence(t *testing.T) {
 	}
 	if len(a.queries) != 1 || len(z.queries) != 0 {
 		t.Fatalf("rig filter queried a=%d z=%d times", len(a.queries), len(z.queries))
+	}
+}
+
+// newSuspendedRigActiveBeadState builds a city with two rigs, "a" running and
+// "z" suspended by runtime state, each behind a store that records its
+// active-work reads. The suspended rig holds the session's own work, which
+// would win the lookup if the rig were read.
+func newSuspendedRigActiveBeadState(t *testing.T) (*fakeState, *activeBeadQueryStore, *activeBeadQueryStore, string) {
+	t.Helper()
+	state := newFakeState(t)
+	a := &activeBeadQueryStore{Store: &beads.MemStore{IDPrefix: "a"}}
+	z := &activeBeadQueryStore{Store: &beads.MemStore{IDPrefix: "z"}}
+	state.stores = map[string]beads.Store{"a": a, "z": z}
+	state.cfg.Rigs = []config.Rig{{Name: "a", Path: "/tmp/a"}, {Name: "z", Path: "/tmp/z"}}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "z", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended(z): %v", err)
+	}
+	alias := addActiveWork(t, a, "alias")
+	addActiveWork(t, z, "session-id")
+	a.queries, z.queries = nil, nil
+	return state, a, z, alias
+}
+
+// A suspended rig runs no cache (rigStoreBackgroundRefresh), so every read of
+// its store goes to bd, and a bd read restarts the rig's retired proxy and
+// Dolt. The active-bead lookup runs once per session row, so on a city with
+// suspended rigs it woke every one of them per row. Like statusWorkCounts, it
+// leaves a suspended rig untouched; its work is not reported as active.
+func TestActiveBeadLookupSkipsSuspendedRigs(t *testing.T) {
+	state, a, z, alias := newSuspendedRigActiveBeadState(t)
+	srv := New(state)
+	identities := []string{"session-id", "runtime-name", "alias", "template"}
+
+	if got := srv.findActiveBeadForAssignees("", identities...); got != alias {
+		t.Fatalf("cached lookup = %q, want running rig's %q", got, alias)
+	}
+	if len(z.queries) != 0 {
+		t.Errorf("cached lookup read suspended rig z %d time(s), want 0", len(z.queries))
+	}
+	if len(a.queries) == 0 {
+		t.Error("cached lookup did not read running rig a")
+	}
+
+	a.queries = nil
+	if got := srv.findLiveActiveBeadForAssignees("", identities...); got != alias {
+		t.Fatalf("live lookup = %q, want running rig's %q", got, alias)
+	}
+	if len(z.queries) != 0 {
+		t.Errorf("live lookup read suspended rig z %d time(s), want 0", len(z.queries))
+	}
+	if len(a.queries) != 1 {
+		t.Errorf("live lookup read running rig a %d time(s), want 1", len(a.queries))
+	}
+
+	if got := srv.findActiveBeadForAssignees("z", identities...); got != "" {
+		t.Fatalf("rig-scoped lookup on suspended rig = %q, want none", got)
+	}
+	if got := srv.findLiveActiveBeadForAssignees("z", identities...); got != "" {
+		t.Fatalf("rig-scoped live lookup on suspended rig = %q, want none", got)
+	}
+	if len(z.queries) != 0 {
+		t.Errorf("rig-scoped lookups read suspended rig z %d time(s), want 0", len(z.queries))
+	}
+}
+
+// The skip follows EFFECTIVE suspension, the same rule the controller uses to
+// decide a rig gets no cache: a rig suspended on start with no runtime
+// override is cold, and an explicit resume makes it a running rig again.
+func TestActiveBeadLookupFollowsEffectiveRigSuspension(t *testing.T) {
+	state, _, z, _ := newSuspendedRigActiveBeadState(t)
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "z", nil); err != nil {
+		t.Fatalf("clear z override: %v", err)
+	}
+	state.cfg.Rigs[1].SuspendedOnStart = true
+	srv := New(state)
+
+	srv.findActiveBeadForAssignees("", "session-id")
+	if len(z.queries) != 0 {
+		t.Fatalf("lookup read suspended-on-start rig z %d time(s), want 0", len(z.queries))
+	}
+
+	resumed := false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "z", &resumed); err != nil {
+		t.Fatalf("resume z: %v", err)
+	}
+	if got := srv.findActiveBeadForAssignees("", "session-id"); got == "" || !strings.HasPrefix(got, "z") {
+		t.Fatalf("lookup after resume = %q, want z's session work", got)
+	}
+	if len(z.queries) == 0 {
+		t.Fatal("lookup did not read resumed rig z")
 	}
 }
 

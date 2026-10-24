@@ -12,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -397,6 +399,22 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // through findLiveActiveBeadInStores.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
+	// Drop cache-cold rigs by name before sortedRigNames deduplicates shared
+	// stores, so a store shared with a running rig is still read under that
+	// rig's name.
+	cold := s.activeWorkColdRigs()
+	if cold[rig] {
+		return ""
+	}
+	if len(cold) > 0 {
+		warm := make(map[string]beads.Store, len(stores))
+		for name, store := range stores {
+			if !cold[name] {
+				warm[name] = store
+			}
+		}
+		stores = warm
+	}
 	var rigNames []string
 	if rig != "" {
 		if _, ok := stores[rig]; ok {
@@ -446,6 +464,25 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	return ""
+}
+
+// activeWorkColdRigs returns the rigs the active-work lookup leaves alone:
+// the cache-cold ones (cacheColdRigNames). The lookup runs once per session
+// or agent row, so reading a suspended rig would restart its retired proxy
+// and Dolt for every row; like statusWorkCounts, it leaves the rig untouched,
+// and that rig's work is not reported as active.
+func (s *Server) activeWorkColdRigs() map[string]bool {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	if err != nil {
+		// Load returns the zero state, so rigs suspended on start are
+		// still left alone; only runtime overrides are unknown.
+		log.Printf("api: reading suspension state for active-work lookup: %v", err)
+	}
+	return cacheColdRigNames(cfg.Rigs, st)
 }
 
 // findLiveActiveBeadInStores makes one live List call per store for all
