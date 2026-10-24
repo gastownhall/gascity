@@ -117,6 +117,29 @@ func TestStatusProviderLivenessTimeoutPreservesObservationUncertainty(t *testing
 	}
 }
 
+// TestStatusProbeInsideSnapshotBudgetIsObserved pins that a runtime probe
+// finishing inside one snapshot fetch is reported. The old 50ms per-call
+// timer treated that in-flight refresh as not-running, and gc rig status
+// then painted the fleet unknown.
+func TestStatusProbeInsideSnapshotBudgetIsObserved(t *testing.T) {
+	base := newStatusProbeProvider()
+	base.running.Store(true)
+	const probe = 80 * time.Millisecond
+	base.delay.Store(int64(probe))
+	wrapped := newBoundedStatusProvider(base)
+
+	start := time.Now()
+	if !wrapped.IsRunning("worker") {
+		t.Fatal("IsRunning false; a probe inside one snapshot fetch was treated as not running")
+	}
+	if time.Since(start) < probe/2 {
+		t.Fatal("IsRunning returned before the probe finished")
+	}
+	if statusProviderPartial(wrapped) {
+		t.Fatal("statusProviderPartial = true after a probe that answered")
+	}
+}
+
 func TestStatusProviderTimeoutMarksPartial(t *testing.T) {
 	origTimeout := statusProviderCallTimeout
 	origWarn := statusProviderTimeoutWarning
