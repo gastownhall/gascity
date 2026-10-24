@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -236,6 +239,243 @@ func TestStage2MCPRefusalWarningsIgnoreGCsOwnRewrites(t *testing.T) {
 	want := `gc: warning: agent "worker" starts without gc's MCP server "notes": not adopting ` + target
 	if got := strings.Count(stderr.String(), want); got != 1 {
 		t.Fatalf("warned %d times over 4 ticks of overlay rewrites, want once:\n%s", got, stderr.String())
+	}
+}
+
+// returnsPromptlyCmd runs fn and fails the test if it has not returned within
+// five seconds. A reader stuck opening fifo is released by opening fifo for
+// writing, so a regression fails the test instead of hanging it.
+func returnsPromptlyCmd(t *testing.T, fifo string, fn func()) {
+	t.Helper()
+	const limit = 5 * time.Second
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+		return
+	case <-time.After(limit):
+	}
+	// Release each blocked reader in turn: a non-blocking writer open lets
+	// one waiting open return, and its read then sees end of file.
+	release := time.NewTicker(20 * time.Millisecond)
+	defer release.Stop()
+	deadline := time.After(30 * time.Second)
+	for {
+		if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = w.Close()
+		}
+		select {
+		case <-done:
+			t.Fatalf("blocked on the named pipe %s for more than %s (released by opening it for writing)", fifo, limit)
+		case <-deadline:
+			t.Fatalf("still blocked on the named pipe %s", fifo)
+		case <-release.C:
+		}
+	}
+}
+
+// noReadFS passes every call to the real filesystem but never reads the
+// guarded paths: it records the attempt and fails it, so a regression fails
+// the test instead of reading /dev/zero or a huge file.
+type noReadFS struct {
+	fsys.OSFS
+	guarded map[string]bool
+	mu      sync.Mutex
+	reads   []string
+}
+
+func (g *noReadFS) ReadFile(name string) ([]byte, error) {
+	if g.guarded[filepath.Clean(name)] {
+		g.mu.Lock()
+		g.reads = append(g.reads, name)
+		g.mu.Unlock()
+		return nil, errors.New("guarded path read: " + name)
+	}
+	return g.OSFS.ReadFile(name)
+}
+
+// A provider file that is a symlink is refused without reading what it
+// points at: a repository can commit .mcp.json -> /dev/zero, which never
+// ends, or a link to a named pipe, which blocks. Stage 1 returns at once and
+// warns once.
+func TestRunStage1MCPProjectionNeverReadsThroughASymlinkedTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	fifo := filepath.Join(t.TempDir(), "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	target := filepath.Join(cityPath, ".mcp.json")
+	if err := os.Symlink(fifo, target); err != nil {
+		t.Fatal(err)
+	}
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude"),
+		Agents:     []config.Agent{{Name: "mayor", Scope: "city", Provider: "claude"}},
+	}
+	var stderr bytes.Buffer
+	for tick := 0; tick < 3; tick++ {
+		var err error
+		returnsPromptlyCmd(t, fifo, func() { err = runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr) })
+		if err != nil {
+			t.Fatalf("tick %d: runStage1MCPProjection: %v", tick, err)
+		}
+	}
+	if got := strings.Count(stderr.String(), target+" is a symlink"); got != 1 {
+		t.Fatalf("symlink refusal warned %d times over 3 ticks, want once:\n%s", got, stderr.String())
+	}
+}
+
+// A symlink refusal does not depend on what the link points at. When only
+// the file behind the link changes, the warning is not repeated, since gc
+// does not read through the link to notice.
+func TestRunStage1MCPProjectionSymlinkRefusalIgnoresTheLinkedFilesContent(t *testing.T) {
+	cityPath := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(outside, []byte(teamMCPJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(cityPath, ".mcp.json")
+	if err := os.Symlink(outside, target); err != nil {
+		t.Fatal(err)
+	}
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude"),
+		Agents:     []config.Agent{{Name: "mayor", Scope: "city", Provider: "claude"}},
+	}
+	var stderr bytes.Buffer
+	for tick := 0; tick < 4; tick++ {
+		if err := os.WriteFile(outside, []byte(strings.Repeat(" ", tick)+teamMCPJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
+			t.Fatalf("tick %d: runStage1MCPProjection: %v", tick, err)
+		}
+	}
+	if got := strings.Count(stderr.String(), target+" is a symlink"); got != 1 {
+		t.Fatalf("symlink refusal warned %d times while only the linked file changed, want once:\n%s", got, stderr.String())
+	}
+}
+
+// Stage 2 the same: resolveTemplate, run for every agent on every tick,
+// neither reads through a work dir's symlinked .mcp.json (here to /dev/zero,
+// behind a guard that fails instead of reading it) nor reads an oversized
+// one, and warns once each.
+func TestResolveTemplateNeverReadsThroughASymlinkOrAnOversizedTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	linked := filepath.Join(cityPath, ".gc", "worktrees", "linked", ".mcp.json")
+	oversized := filepath.Join(cityPath, ".gc", "worktrees", "oversized", ".mcp.json")
+	for _, path := range []string{linked, oversized} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("/dev/zero", linked); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(64 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	guard := &noReadFS{guarded: map[string]bool{linked: true, oversized: true, "/dev/zero": true}}
+	cityCfg := &config.City{
+		Workspace:  config.Workspace{Provider: "claude"},
+		Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+	}
+	var stderr bytes.Buffer
+	params := &agentBuildParams{
+		city:            cityCfg,
+		cityName:        "city",
+		cityPath:        cityPath,
+		workspace:       &cityCfg.Workspace,
+		providers:       cityCfg.Providers,
+		lookPath:        stubLookPath,
+		fs:              guard,
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          &stderr,
+		sessionProvider: "tmux",
+	}
+	agents := []*config.Agent{
+		{Name: "linked", Scope: "city", Provider: "claude", WorkDir: ".gc/worktrees/linked"},
+		{Name: "oversized", Scope: "city", Provider: "claude", WorkDir: ".gc/worktrees/oversized"},
+	}
+	for tick := 0; tick < 3; tick++ {
+		for _, agent := range agents {
+			if _, err := resolveTemplate(params, agent, agent.QualifiedName(), nil); err != nil {
+				t.Fatalf("tick %d: resolveTemplate(%s): %v", tick, agent.Name, err)
+			}
+		}
+	}
+	if len(guard.reads) != 0 {
+		t.Fatalf("gc read through a symlink or an oversized file: %v", guard.reads)
+	}
+	for _, want := range []string{linked + " is a symlink", "67108864 bytes, more than the 4194304 gc reads"} {
+		if got := strings.Count(stderr.String(), want); got != 1 {
+			t.Fatalf("%q warned %d times over 3 ticks, want once:\n%s", want, got, stderr.String())
+		}
+	}
+}
+
+// mcpTargetStamp hashes a regular file of at most the cap; anything else it
+// stamps by type or size, unread.
+func TestMCPTargetStampReadsOnlyRegularFilesUpToTheCap(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(regular, []byte(`{"theme":"dark"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if stamp := mcpTargetStamp(fsys.OSFS{}, regular); !strings.HasPrefix(stamp, "sha256:") {
+		t.Fatalf("stamp(regular) = %q", stamp)
+	}
+	fifo := filepath.Join(dir, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	var stamp string
+	returnsPromptlyCmd(t, fifo, func() { stamp = mcpTargetStamp(fsys.OSFS{}, fifo) })
+	if !strings.HasPrefix(stamp, "type:p") {
+		t.Fatalf("stamp(named pipe) = %q", stamp)
+	}
+	big := filepath.Join(dir, "big.json")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	guard := &noReadFS{guarded: map[string]bool{big: true}}
+	if stamp := mcpTargetStamp(guard, big); stamp != "size:1073741824" || len(guard.reads) != 0 {
+		t.Fatalf("stamp(1 GiB) = %q, reads %v; want a size stamp, unread", stamp, guard.reads)
 	}
 }
 

@@ -344,8 +344,9 @@ Adoption and migration rules:
   out (Claude's and Cursor's `"type": "stdio"`, the `enabled = true` of
   Codex, OpenCode and MiMo Code; Claude's `streamable-http` is its alias for
   `http`). A file gc cannot read or parse, and a symlinked target or provider
-  directory, are in the same case. A server the file defines as the
-  projection does is not in the way.
+  directory, are in the same case, as is a target that is not a regular
+  file (a named pipe, a device) or is larger than 4 MiB, which gc does not
+  read. A server the file defines as the projection does is not in the way.
 - Gas City then does not adopt the target. It writes no snapshot, marker, or
   `.gitignore` entry there; a refusal found only under the target lock (the
   file changed after the unlocked check) leaves the lock file, as any apply
@@ -467,6 +468,14 @@ Rules:
   manages is a hard error; one it does not manage is left alone, as a
   refused adoption, when there are servers to project, and ignored when
   there are none
+- gc reads a provider file, or an adoption snapshot, only when it is a
+  regular file of at most 4 MiB (`materialize.MaxMCPFileSize`), opened
+  without following a link and without blocking, and checked after it is
+  opened. A named pipe or a device (`/dev/zero`, which a repository can
+  commit a link to) can neither block a pass nor exhaust memory: an
+  unmanaged one is refused, unread; a snapshot is skipped; the refusal
+  warning's dedupe stamps a symlink by the link and anything else that is
+  not a small regular file by its type or size
 - `.gitignore` updates are best-effort and local-only. They name the files gc
   projects at that root, anchored to it (`/.mcp.json`,
   `/.gemini/settings.json`, `/.codex/config.toml`, and so on), not files it

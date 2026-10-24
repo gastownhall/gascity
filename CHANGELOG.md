@@ -9,18 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Restart agent sessions after upgrading gc so their `gc nudge poll`
-  sidecars run the new binary.** The file nudge queue's lock now covers only
-  its `state.json`: shadow-bead writes run after the lock is released, as
-  debts recorded in the queue (`retired` items and per-item `shadow`
-  records) that the verb, or later the controller, pays. A sidecar started by
-  an earlier gc keeps doing bead-store I/O while it holds the lock, so it can
-  still time out other queue users on a slow store, and every queue rewrite it
-  makes drops the `retired` and `shadow` records, leaving those shadow beads
-  for the stale-shadow sweep instead of their own outcome. Restarting the
-  sessions (or the city) replaces the sidecars; nothing else needs to change.
-  `gc nudge status --json` output is unchanged.
-
 - **gc no longer takes over a provider-native MCP file that holds servers
   its catalog does not define.** Such a file (a `.mcp.json`,
   `.codex/config.toml`, `.gemini/settings.json`, `.cursor/mcp.json`,
@@ -30,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalog and an unparseable `.mcp.json`. Such a file is now left as it is,
   with a warning, and the agents that read it start without gc's servers.
   So are a file gc cannot read, a symlinked one, and another provider's file
-  gc cannot parse, which used to fail the start instead. To let gc manage
-  the file, define the servers you still need in an `mcp/` catalog that
-  reaches every agent reading it, and remove the file's own entries. Files
-  gc already manages are unaffected.
+  gc cannot parse, which used to fail the start instead, and a file that is
+  not a regular file (a named pipe, a device) or is larger than 4 MiB, which
+  gc no longer reads at all. To let gc manage the file, define the servers
+  you still need in an `mcp/` catalog that reaches every agent reading it,
+  and remove the file's own entries. Files gc already manages are
+  unaffected.
   - This includes the work dirs of pool and worktree sessions: sessions in
     a checkout of a repository that commits its own `.mcp.json` (or another
     provider file with servers of its own) now start without gc's servers.
@@ -53,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     deeper in the repository is no longer ignored. Entries an earlier gc
     wrote stay as they are and count as present, so an existing
     `.gitignore` does not change.
+
+- **Restart agent sessions after upgrading gc so their `gc nudge poll`
+  sidecars run the new binary.** The file nudge queue's lock now covers only
+  its `state.json`: shadow-bead writes run after the lock is released, as
+  debts recorded in the queue (`retired` items and per-item `shadow`
+  records) that the verb, or later the controller, pays. A sidecar started by
+  an earlier gc keeps doing bead-store I/O while it holds the lock, so it can
+  still time out other queue users on a slow store, and every queue rewrite it
+  makes drops the `retired` and `shadow` records, leaving those shadow beads
+  for the stale-shadow sweep instead of their own outcome. Restarting the
+  sessions (or the city) replaces the sidecars; nothing else needs to change.
+  `gc nudge status --json` output is unchanged.
 
 - **An unset `[daemon] session_reconciler` now runs the v2 reconciler where
   the city can run it, and `[beads] conditional_writes` now defaults to

@@ -472,7 +472,9 @@ gc's. To see where this applies:
   shows it once per agent, and again if the file's content changes or the
   file comes back after gc saw it gone.
 
-gc also leaves alone a file it cannot read or parse, and a symlinked one.
+gc also leaves alone a file it cannot read or parse, a symlinked one, and
+one that is not a regular file (a named pipe, a device) or is larger than
+4 MiB, which it does not read at all.
 
 To give those agents gc's servers too, define the file's servers you still
 need in an `mcp/` catalog that reaches every agent reading the file, one

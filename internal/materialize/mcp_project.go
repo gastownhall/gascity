@@ -223,8 +223,10 @@ type mcpTargetContent struct {
 	exists bool
 }
 
+// readMCPTarget reads a target that is a regular file of at most
+// MaxMCPFileSize bytes (readRegularFile).
 func readMCPTarget(fs fsys.FS, path string) (mcpTargetContent, error) {
-	data, err := fs.ReadFile(path)
+	data, err := readRegularFile(fs, path)
 	if err != nil {
 		if errorsIsNotExist(err) {
 			return mcpTargetContent{}, nil

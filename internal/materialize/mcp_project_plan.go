@@ -70,9 +70,9 @@ func (p MCPProjection) Plan(fs fsys.FS) (MCPProjectionPlan, error) {
 	if change.noop {
 		return plan, nil
 	}
-	existing, err := fs.ReadFile(p.Target)
-	exists := err == nil
-	if err != nil && !errorsIsNotExist(err) {
+	current, err := readMCPTarget(fs, p.Target)
+	exists, existing := current.exists, current.data
+	if err != nil {
 		// Only a target gc manages gets here: Apply overwrites a Claude
 		// target it cannot read (gc owns the whole file), and the other
 		// providers failed in targetChange above. The target is there and

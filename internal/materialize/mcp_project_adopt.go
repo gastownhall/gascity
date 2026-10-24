@@ -40,7 +40,9 @@ type MCPAdoptionRefusedError struct {
 	// for Claude's whole-file target, every key besides its servers, and
 	// for any provider, an MCP key whose value is not a table of servers.
 	Keys []string
-	// ReadErr is set instead when gc cannot read the file.
+	// ReadErr is set instead when gc cannot read the file, or will not: it
+	// is not a regular file (*NotRegularFileError), or it is larger than
+	// MaxMCPFileSize (*FileTooLargeError).
 	ReadErr error
 	// ParseErr is set instead when gc cannot parse the file.
 	ParseErr error
@@ -72,6 +74,14 @@ func (e *MCPAdoptionRefusedError) Remedy() string {
 	case e.Symlink != "":
 		return "to let gc manage it, replace the symlink with a regular file or directory"
 	case e.ReadErr != nil:
+		var notRegular *NotRegularFileError
+		var tooLarge *FileTooLargeError
+		switch {
+		case errors.As(e.ReadErr, &notRegular):
+			return "to let gc manage it, replace it with a regular file or remove it"
+		case errors.As(e.ReadErr, &tooLarge):
+			return fmt.Sprintf("to let gc manage it, make it at most %d bytes or remove it", tooLarge.Limit)
+		}
 		return "to let gc manage it, make it a readable file or remove it"
 	case e.ParseErr != nil && e.Provider == MCPProviderCodex:
 		return "to let gc manage it, fix its TOML or remove it"
@@ -307,7 +317,10 @@ func (p MCPProjection) adoptionConflict(fs fsys.FS) (*MCPAdoptionRefusedError, e
 	if link != "" {
 		return &MCPAdoptionRefusedError{Provider: p.Provider, Target: p.Target, Symlink: link}, nil
 	}
-	data, err := fs.ReadFile(p.Target)
+	// A target that is not a regular file of a sane size (a named pipe, a
+	// device, a directory) is refused unread: reading one can block or
+	// never end.
+	data, err := readRegularFile(fs, p.Target)
 	if err != nil {
 		if errorsIsNotExist(err) {
 			return nil, nil
@@ -450,7 +463,8 @@ func isEmptyMCPValue(v any) bool {
 // catalog has not taken over since. Their definitions survive only in the
 // adoption snapshots under the returned directory. A server the catalog now
 // defines under the same name is not listed. It reads the snapshots and
-// writes nothing; a snapshot gc cannot parse is skipped.
+// writes nothing; a snapshot gc cannot parse, or that is not a regular file
+// of at most MaxMCPFileSize bytes, is skipped.
 func (p MCPProjection) DroppedAtAdoption(fs fsys.FS) ([]string, string, error) {
 	dir := p.adoptionSnapshotDir()
 	if !p.isManaged(fs) {
@@ -472,8 +486,17 @@ func (p MCPProjection) DroppedAtAdoption(fs fsys.FS) ([]string, string, error) {
 		if entry.IsDir() {
 			continue
 		}
-		data, err := fs.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
+		// gc writes snapshots as regular files; anything else in the
+		// directory, such as a symlink to a named pipe or a device, is
+		// skipped unread, as is a snapshot that has since been removed.
+		data, err := readRegularFile(fs, filepath.Join(dir, entry.Name()))
+		var notRegular *NotRegularFileError
+		var tooLarge *FileTooLargeError
+		switch {
+		case err == nil:
+		case errorsIsNotExist(err), errors.As(err, &notRegular), errors.As(err, &tooLarge):
+			continue
+		default:
 			return nil, dir, fmt.Errorf("reading adoption snapshot %s: %w", filepath.Join(dir, entry.Name()), err)
 		}
 		doc, err := parseMCPDocument(p.Provider, data)

@@ -327,10 +327,10 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 // reported once, and again when it comes back:
 //
 //   - byTarget maps a city and target (mcpRefusalTargetKey) to each refusal
-//     message reported for it, with a hash of the target's content then
-//     (mcpTargetStamp). Agents that share a target are named in messages of
-//     their own, so keying on the message keeps them from evicting each
-//     other's entry.
+//     message reported for it, with a stamp of the target's content then
+//     (mcpTargetStamp; for a symlink refusal, the link alone). Agents that
+//     share a target are named in messages of their own, so keying on the
+//     message keeps them from evicting each other's entry.
 //   - A message is reported again when the target's content changes: a team
 //     edits the file, or a session's work dir is checked out with other
 //     content. The content, not the modification time, is what counts, so
@@ -349,15 +349,26 @@ func mcpRefusalTargetKey(cityPath, target string) string {
 	return filepath.Clean(cityPath) + "\x00" + filepath.Clean(target)
 }
 
-// mcpTargetStamp identifies the target's current content by its SHA-256;
-// "" when it cannot be read.
+// mcpTargetStamp identifies the target's current content: the SHA-256 of a
+// regular file of at most materialize.MaxMCPFileSize bytes. It never reads
+// anything else (a symlink, a named pipe, a device, a larger file), since
+// reading one can block or never end; such a target is stamped by its type
+// or its size instead. "" when it cannot be inspected.
 func mcpTargetStamp(fs fsys.FS, target string) string {
-	data, err := fs.ReadFile(target)
-	if err != nil {
+	data, err := materialize.ReadMCPFile(fs, target)
+	var notRegular *materialize.NotRegularFileError
+	var tooLarge *materialize.FileTooLargeError
+	switch {
+	case err == nil:
+		sum := sha256.Sum256(data)
+		return "sha256:" + hex.EncodeToString(sum[:])
+	case errors.As(err, &notRegular):
+		return "type:" + notRegular.Mode.Type().String()
+	case errors.As(err, &tooLarge):
+		return fmt.Sprintf("size:%d", tooLarge.Size)
+	default:
 		return ""
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 // warnMCPAdoptionRefused reports a target gc will not adopt: who starts
@@ -370,7 +381,12 @@ func warnMCPAdoptionRefused(cityPath string, agents []string, projection materia
 	}
 	message := describeMCPAdoptionRefused(agents, projection, refused)
 	key := mcpRefusalTargetKey(cityPath, projection.Target)
-	stamp := mcpTargetStamp(fs, projection.Target)
+	// A symlink refusal does not depend on what the link points at, and gc
+	// never reads through a link.
+	stamp := "symlink:" + refused.Symlink
+	if refused.Symlink == "" {
+		stamp = mcpTargetStamp(fs, projection.Target)
+	}
 	mcpAdoptionRefusals.Lock()
 	reported := mcpAdoptionRefusals.byTarget[key]
 	if previous, seen := reported[message]; seen && previous == stamp {
