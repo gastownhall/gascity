@@ -180,6 +180,7 @@ go_test(
         "import_named_sessions_regression_test.go",
         "init_lifecycle_test.go",
         "integration_selfhost_ux_test.go",
+        "mcp_adoption_test.go",
         "migration_regression_test.go",
         "nudge_service_test.go",
         "order_commands_test.go",
