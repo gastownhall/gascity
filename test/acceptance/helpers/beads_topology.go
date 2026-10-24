@@ -1,7 +1,9 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -345,8 +347,11 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatalf("create provisioning workspace: %v", err)
 	}
-	cmd := e.provisionCommand(env, bdPath, workspace, prefix)
+	cmd, ctx := e.provisionCommand(t, env, bdPath, workspace, prefix)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("provision beads database %q on %s exceeded %s:\n%s", e.Database, e.Addr(), acceptanceToolCommandTimeout, out)
+		}
 		t.Fatalf("provision beads database %q on %s: %v\n%s", e.Database, e.Addr(), err, out)
 	}
 	data, err := os.ReadFile(filepath.Join(workspace, ".beads", "metadata.json"))
@@ -372,14 +377,14 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 // shared-server mode (a user-level `dolt.shared-server: true`) ignores the
 // explicit --server-host/--server-port and starts the host-wide server under
 // ~/.beads/shared-server with whatever dolt is on PATH — here, this run's.
-func (e *ExternalDolt) provisionCommand(env *Env, bdPath, workspace, prefix string) *exec.Cmd {
-	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
+func (e *ExternalDolt) provisionCommand(t *testing.T, env *Env, bdPath, workspace, prefix string) (*exec.Cmd, context.Context) {
+	cmd, ctx := boundedToolCommand(t, acceptanceToolCommandTimeout, bdPath, "init", "--server",
 		"--server-host", e.Host, "--server-port", e.Port,
 		"--database", e.Database, "-p", prefix,
 		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
 	cmd.Dir = workspace
 	cmd.Env = env.Clone().With("BEADS_DIR", filepath.Join(workspace, ".beads")).ToolList()
-	return cmd
+	return cmd, ctx
 }
 
 // BeadsTopologies returns the matrix in the order AC-M lists it.
@@ -643,15 +648,25 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 	if bdPath == "" {
 		MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--proxied-server") {
-		MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
-	}
-	doltPath, err = exec.LookPath("dolt")
+	requireProxiedServerSupport(t, t, bdPath, acceptanceToolCommandTimeout)
+	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		MissingTooling(t, "dolt is not installed")
 	}
 	return bdPath, doltPath
+}
+
+func requireProxiedServerSupport(t *testing.T, report skipOrFailer, bdPath string, timeout time.Duration) {
+	t.Helper()
+	cmd, ctx := toolCommand(t, timeout, bdPath, "init", "--help")
+	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		report.Fatalf("bd at %s: init --help exceeded %s:\n%s", bdPath, timeout, out)
+		return
+	}
+	if err != nil || !strings.Contains(string(out), "--proxied-server") {
+		skipOrFail(report, EnvRequireTooling, fmt.Sprintf("bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath))
+	}
 }
 
 var bdVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
