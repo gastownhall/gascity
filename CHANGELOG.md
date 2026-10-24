@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **An agent now starts without a shared MCP server its provider cannot
+  receive.** A server from the city's `mcp/` directory, a pack, or an
+  import reaches every agent in its scope. An agent whose provider cannot
+  receive it (an HTTP server for a `cursor` agent, any server for an agent
+  on a harness without MCP support, such as `copilot`) now starts without
+  it, with a warning. This changes #6661 for agents whose servers all come
+  from shared layers: such a `copilot` agent used to fail every session
+  start, and now starts without MCP. A server in the agent's own
+  `agents/<name>/mcp/` directory still keeps that agent from starting.
+  `gc doctor` (`mcp-config`) and `gc mcp list --agent <name>` ("Not
+  projected") show which agents start without which servers.
+
+- **An agent whose provider does not resolve no longer stops a city's MCP
+  projection.** With MCP servers in scope, an agent whose provider is not
+  installed, is not in the provider catalog (a typo), or is not set at all
+  failed `gc start` and the supervisor's city start for the whole city.
+  Stage 1 now skips that agent with a warning (`agent "x" cannot start:
+  ...`) and projects the rest of the city, which is how a city without MCP
+  servers already behaves. The agent's own session start still fails, and
+  `gc doctor` still reports it as an error. After installing a missing
+  provider, restart the city (`gc restart`).
+
 - **An unset `[daemon] session_reconciler` now runs the v2 reconciler where
   the city can run it, and `[beads] conditional_writes` now defaults to
   `"auto"`.** With the key unset, the controller resolves v2 at boot from
@@ -429,6 +451,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **An MCP server one agent's provider cannot receive no longer stops the
+  city.** Servers from the city's `mcp/` directory, a rig pack, or an import
+  reach every agent in that scope. When one agent's provider could not
+  receive one of them, such as an HTTP server for a `cursor` agent (whose MCP
+  config carries only stdio servers), `gc start` and the supervisor failed the
+  whole city with `cursor MCP projection does not support http server`, and an
+  agent on a harness without MCP support, such as `copilot`, never started.
+  Gas City now leaves such a server out of that agent's MCP config, starts
+  the agent without it, and warns once, naming the agents, the servers and
+  the reason. A server in the agent's own `agents/<name>/mcp/` directory is
+  still an error for that agent, which does not start, while the rest of the
+  city does. Agents whose sessions use ACP receive every server in-band, as
+  `gc session new` already gave them. `gc mcp list` lists skipped servers
+  under "Not projected" (`skipped` in `--json`) instead of as projected, and
+  `gc doctor`, `gc config show` and `gc import add` warn about skipped
+  servers and agents that cannot start.
+
+- **A config reload now projects MCP config.** Stage-1 MCP projection ran
+  only when a city started, so a server added or changed in a running city
+  drained the agents it reached and restarted them against their old
+  scope-root config. It now also runs on every applied config reload,
+  before that tick's restarts.
+
+- **An agent whose provider does not resolve no longer stops the city when
+  MCP servers are in scope.** Every provider a city declares has an implicit
+  agent, and that agent inherits the city's MCP servers. When one declared
+  provider's binary was missing, such as one `gc init` wrote to `city.toml`
+  that was never installed, `gc start` and the supervisor failed the whole
+  city with `agent "codex": provider not found in PATH`; so did an agent
+  whose provider is not in the catalog or not set. Stage 1 now skips that
+  agent with a warning and projects the rest of the city; the agent's own
+  session start still reports the provider. Stage-1 warnings now name their
+  city, and name an implicit agent with its provider.
 
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
