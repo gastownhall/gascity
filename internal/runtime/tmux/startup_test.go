@@ -1053,6 +1053,31 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
 
+	// An auth-dead pane cannot recover in-process: unlike an unconfirmed
+	// submit, this must fail the start rather than warn, so the session never
+	// comes up reported active on an account that cannot answer. It is not
+	// retried either — every resend would die on the same banner — and it
+	// leaves no unconfirmed-nudge artifact, because the start itself fails.
+	t.Run("auth failure is fatal and never retried", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitAuthFailed, "test"),
+		}
+
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "startup prompt",
+		}
+
+		err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if !errors.Is(err, ErrNudgeSubmitAuthFailed) {
+			t.Fatalf("doStartSession = %v, want an ErrNudgeSubmitAuthFailed chain", err)
+		}
+
+		callsByMethod(t, ops, "sendKeys", 1)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 0)
+	})
+
 	// A startup turn (prompt_mode = "arg") that outlasts the ladder holds
 	// every attempt's interrupting submit, so the nudge was never delivered.
 	// The busy pane is that turn, not the nudge landing: the start must not

@@ -327,6 +327,15 @@ var (
 	// wraps ErrNudgeSubmitUnconfirmed, so callers that retry an unconfirmed
 	// submit retry this one too, and none reports it delivered.
 	ErrNudgeSubmitLost = fmt.Errorf("%w: the provider ended the turn before it recorded the message", ErrNudgeSubmitUnconfirmed)
+	// ErrNudgeSubmitAuthFailed indicates the submit reached the pane, but the
+	// pane shows a provider auth banner. Unlike ErrNudgeSubmitUnconfirmed this
+	// is NOT retryable -- every resend dies on the same banner, and requeueing
+	// burns bounded attempts against an account that cannot recover
+	// in-process. It deliberately wraps neither ErrNudgeSubmitUnconfirmed nor
+	// a runtime delivery sentinel, so no retry ladder picks it up and the
+	// startup nudge fails the start instead of warning. The session needs
+	// re-auth and a restart.
+	ErrNudgeSubmitAuthFailed = errors.New("nudge: submit Enter delivered to tmux but pane shows a provider auth failure")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -6213,6 +6222,12 @@ func paneContainsBusyIndicator(lines []string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// paneContainsAuthFailure reports whether the pane shows a provider
+// authentication banner that no retry can clear.
+func paneContainsAuthFailure(_ []string) bool {
 	return false
 }
 
