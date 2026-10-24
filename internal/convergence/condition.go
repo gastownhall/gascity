@@ -570,12 +570,17 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 				Truncated: truncated,
 			}
 		}
-		// Non-exit error (e.g., script not found, permission denied).
+		// Non-exit error: cmd.Run's Start step failed before the process
+		// existed (e.g., script not found, permission denied, chdir into a
+		// removed working directory). There is no exit code because nothing
+		// ran; mark it FailedStart so callers don't treat it as a
+		// re-runnable infra blip.
 		return GateResult{
-			Outcome:   GateError,
-			Stderr:    err.Error(),
-			Duration:  duration,
-			Truncated: truncated,
+			Outcome:     GateError,
+			Stderr:      err.Error(),
+			Duration:    duration,
+			Truncated:   truncated,
+			FailedStart: true,
 		}
 	}
 

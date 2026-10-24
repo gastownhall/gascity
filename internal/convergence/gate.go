@@ -30,6 +30,13 @@ type GateResult struct {
 	Stderr     string        // captured stderr (truncated to MaxOutputBytes)
 	Duration   time.Duration // wall-clock execution time
 	Truncated  bool          // true if stdout or stderr was truncated
+	// FailedStart is true for an Outcome=GateError result where the process
+	// itself never launched (cmd.Run's Start step failed: bad working
+	// directory, missing interpreter, permission denied, and similar). This
+	// is a config/environment problem the script's own exit status never
+	// gets to speak to, not a transport/store blip — formula-spec-v2 §3.1
+	// says it is not held open for a free re-run; it spends the attempt.
+	FailedStart bool
 }
 
 // GateManualResult returns a GateResult for manual mode (no script execution).

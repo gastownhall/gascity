@@ -322,7 +322,14 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	// Direct ralph controls run their check here rather than through
 	// processRalphCheck. Apply the same bounded infrastructure budget: a check
 	// that produced no verdict must not consume a substantive iteration.
-	if checkResult.Outcome == convergence.GateError || checkResult.Outcome == convergence.GateTimeout {
+	//
+	// FailedStart is excluded: the process never launched (e.g. chdir into a
+	// removed gc.work_dir), which is a config/environment problem the check's
+	// own exit status never gets to speak to, not a transport/store blip.
+	// formula-spec-v2 §3.1 says that is not held open for a free re-run — it
+	// spends the attempt and falls through to the normal continue/exhaust path
+	// below (gastownhall/gascity#7377).
+	if (checkResult.Outcome == convergence.GateError && !checkResult.FailedStart) || checkResult.Outcome == convergence.GateTimeout {
 		infraRetries, _ := strconv.Atoi(reloaded.Metadata[beadmeta.CheckInfraRetryMetadataKey])
 		if infraRetries < maxCheckInfraRetries {
 			if err := store.SetMetadata(bead.ID, beadmeta.CheckInfraRetryMetadataKey, strconv.Itoa(infraRetries+1)); err != nil {
