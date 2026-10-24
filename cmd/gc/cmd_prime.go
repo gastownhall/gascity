@@ -88,6 +88,8 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute (e.g. an undefined
+    template function)
 
 Without --strict, a prompt_template that cannot be read is reported on
 stderr and the default prompt is output.
@@ -435,7 +437,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		}
 		// renderPrompt returns "" both when the template file cannot be read
 		// and when a valid template legitimately renders empty. Readability is
-		// the strict precondition, so check it before hook side effects.
+		// a strict precondition, so check it before hook side effects.
 		for _, a := range resolvedAgents {
 			if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 				continue
@@ -445,6 +447,19 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			}
 			if _, fErr := os.ReadFile(promptTemplateSourcePath(cityPath, a.PromptTemplate)); fErr != nil {
 				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
+				return 1, nil
+			}
+			// A file that reads fine can still fail to parse or execute (an
+			// undefined template function, a bad range expression, ...): the
+			// render falls back to the raw template text either way, so
+			// without this check a broken template would silently pass
+			// --strict and exit 0 (ga-q8wgom.8149). Render it the same way
+			// the main loop below renders it for real output, so this check
+			// can never pass something that then fails for real; the error
+			// itself is already reported on stderr by renderPromptWithMeta,
+			// in the exact "gc: prompt template ...: ..." shape this issue
+			// expects.
+			if renderResult := renderStrictAgentPromptTemplate(cityPath, cityName, &a, cfg, stderr); renderResult.RenderErr != nil {
 				return 1, nil
 			}
 		}
@@ -562,6 +577,28 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
+}
+
+// renderStrictAgentPromptTemplate renders agent a's own prompt_template with
+// the same inputs the main render path below builds for it, so the --strict
+// precondition check can detect a parse/execute error before any hook side
+// effects fire. Callers only need RenderResult.RenderErr; the rendered text
+// itself is discarded here and rendered again (identically) by the main
+// path once preconditions pass.
+func renderStrictAgentPromptTemplate(cityPath, cityName string, a *config.Agent, cfg *config.City, stderr io.Writer) PromptRenderResult {
+	ctx := buildPrimeContextFor(cityPath, cityName, a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
+	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &cfg.Workspace, cfg.Providers)
+	ctx.InstructionsFile = instructionsFileForAgent(a, &cfg.Workspace, cfg.Providers)
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		a.InjectFragments,
+		a.AppendFragments,
+		a.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	packDirs := cfg.PackDirsForRig(ctx.RigName)
+	return renderPromptWithMeta(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
+		packDirs, fragments, nil)
 }
 
 func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {

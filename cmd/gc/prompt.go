@@ -91,6 +91,12 @@ type PromptRenderResult struct {
 	Text    string
 	Version string
 	SHA     string
+	// RenderErr is the template parse or execute error that produced a
+	// fallback Text (the raw, unrendered body), nil otherwise. It is
+	// deliberately not set when the file cannot be read or Text is a
+	// legitimate empty render — those are reported by the caller instead
+	// (see --strict's precondition check in cmd_prime.go).
+	RenderErr error
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -200,9 +206,10 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		return PromptRenderResult{
-			Text:    body,
-			Version: fm.Version,
-			SHA:     promptmeta.SHA(body),
+			Text:      body,
+			Version:   fm.Version,
+			SHA:       promptmeta.SHA(body),
+			RenderErr: err,
 		}
 	}
 
@@ -211,9 +218,10 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	if err := tmpl.Execute(&buf, td); err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		return PromptRenderResult{
-			Text:    body,
-			Version: fm.Version,
-			SHA:     promptmeta.SHA(body),
+			Text:      body,
+			Version:   fm.Version,
+			SHA:       promptmeta.SHA(body),
+			RenderErr: err,
 		}
 	}
 

@@ -421,6 +421,90 @@ path = "./rigs/bravo"
 	}
 }
 
+func TestDoPrimeStrictFailsOnPromptTemplateParseError(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	// {{base_branch}} is not a registered template function (gascity#8149):
+	// a readable-but-malformed prompt_template like this must fail --strict
+	// instead of silently falling back to the raw text and exiting 0.
+	const rawTemplate = "You are the {{base_branch}} agent.\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte(rawTemplate), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+	if code != 1 {
+		t.Fatalf("doPrimeWithMode(--strict) = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "prompt template") || !strings.Contains(stderr.String(), "base_branch") {
+		t.Fatalf("stderr = %q, want a prompt template error mentioning base_branch", stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no prompt output on a --strict failure", stdout.String())
+	}
+}
+
+func TestDoPrimeNonStrictFallsBackOnPromptTemplateParseError(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const rawTemplate = "You are the {{base_branch}} agent.\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte(rawTemplate), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	// Without --strict, the existing graceful-fallback contract (unchanged
+	// by gascity#8149's fix) must still hold: warn on stderr, emit the raw
+	// template text, exit 0.
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(non-strict) = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != rawTemplate {
+		t.Fatalf("stdout = %q, want raw fallback template text %q", stdout.String(), rawTemplate)
+	}
+	if !strings.Contains(stderr.String(), "base_branch") {
+		t.Fatalf("stderr = %q, want a warning mentioning base_branch even without --strict", stderr.String())
+	}
+}
+
 func TestBuildPrimeContextPrefersGCAliasOverGCAgent(t *testing.T) {
 	// When GC_AGENT is a session bead ID, buildPrimeContext should prefer
 	// GC_ALIAS for AgentName so the prompt doesn't contain a bead ID.

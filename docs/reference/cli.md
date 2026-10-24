@@ -3487,6 +3487,8 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute (e.g. an undefined
+    template function)
 
 Without --strict, a prompt_template that cannot be read is reported on
 stderr and the default prompt is output.
