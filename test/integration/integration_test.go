@@ -107,6 +107,14 @@ func TestMain(m *testing.M) {
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
 		select {}
 	}
+	// Tie every process this run spawns (bd's detached db-proxy-child, the
+	// dolt sql-server behind it, supervisors, agents) to this binary's
+	// lifetime. A `go test -timeout` panic or a gate's SIGKILL skips
+	// t.Cleanup and every defer below; the reaper's watchdog does not.
+	// In the watchdog re-exec this call never returns.
+	if err := dolttest.ArmOwnerReaper(); err != nil {
+		panic("integration: arming owner reaper: " + err.Error())
+	}
 
 	// Every env this suite builds starts from os.Environ(); drop the shell's
 	// XDG base directories and BEADS_*/BD_* first so only explicit values reach
@@ -126,6 +134,11 @@ func TestMain(m *testing.M) {
 		panic("integration: creating temp dir: " + err.Error())
 	}
 	defer os.RemoveAll(tmpDir)
+	// The built gc and pinned bd binaries alone run to ~400MB; a killed run
+	// never reaches the defer above, so the owner watchdog removes it too.
+	if err := dolttest.RemoveOnOwnerExit(tmpDir); err != nil {
+		panic("integration: " + err.Error())
+	}
 
 	// Create the tmux socket root under /tmp rather than $TMPDIR.
 	// On macOS, $TMPDIR is ~80 chars (/private/var/folders/…/T/); nesting
