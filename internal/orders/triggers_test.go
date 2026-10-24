@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
 	_ "time/tzdata"
+
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -460,6 +465,113 @@ func TestCheckTriggerConditionFailureMentioningTimedOutIsNotTimeout(t *testing.T
 	}
 }
 
+// deadlineSignal is a parent context that reports context.DeadlineExceeded
+// when fire is called. checkCondition wraps its parent in
+// context.WithTimeout, and a parent cancellation with that error becomes
+// the derived context's Err — the same signal a check_timeout timer
+// produces. Deadline stays unset until fire so WithTimeout does not adopt
+// an already-due parent deadline at construction.
+type deadlineSignal struct {
+	done chan struct{}
+	mu   sync.Mutex
+	err  error
+	once sync.Once
+}
+
+func newDeadlineSignal() *deadlineSignal {
+	return &deadlineSignal{done: make(chan struct{})}
+}
+
+func (d *deadlineSignal) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (d *deadlineSignal) Done() <-chan struct{} { return d.done }
+
+func (d *deadlineSignal) Err() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
+}
+
+func (d *deadlineSignal) Value(key any) any {
+	return context.Background().Value(key)
+}
+
+func (d *deadlineSignal) fire() {
+	d.once.Do(func() {
+		d.mu.Lock()
+		d.err = context.DeadlineExceeded
+		d.mu.Unlock()
+		close(d.done)
+	})
+}
+
+// TestDeadlineSignalCancelsDerivedTimeout locks the parent-error
+// propagation the process-group test relies on. A Go change that stops
+// forwarding parent.Err() onto a WithTimeout child would otherwise turn
+// that test into a 10s hang.
+func TestDeadlineSignalCancelsDerivedTimeout(t *testing.T) {
+	parent := newDeadlineSignal()
+	ctx, cancel := context.WithTimeout(parent, time.Hour)
+	defer cancel()
+
+	parent.fire()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("derived context was not canceled when the parent deadline fired")
+	}
+	if err := ctx.Err(); err != context.DeadlineExceeded {
+		t.Fatalf("ctx.Err() = %v, want DeadlineExceeded", err)
+	}
+}
+
+// waitForHeartbeatBeforeDeadline waits until path is non-empty. The wake is
+// an fsnotify event on the parent directory; the budget is only the give-up
+// deadline. It does not use processgrouptest.WaitForFileSize: that helper's
+// failure text is the load flake this test is fixing, and its 2s budget is
+// shorter than a stalled scheduler on a full gate.
+func waitForHeartbeatBeforeDeadline(t *testing.T, path string, budget time.Duration) int64 {
+	t.Helper()
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("watch heartbeat directory for %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+	dir := filepath.Dir(path)
+	if err := watcher.Add(dir); err != nil {
+		t.Fatalf("watch heartbeat directory %s: %v", dir, err)
+	}
+
+	// Stat before blocking, then again after every event. A write that lands
+	// between Add and the first receive, or an event whose path does not
+	// match byte-for-byte, still becomes visible on the next stat.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	for {
+		info, err := os.Stat(path)
+		if err == nil && info.Size() > 0 {
+			return info.Size()
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat heartbeat file %s: %v", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("heartbeat file %s was still empty after %s; the deadline was not armed", path, budget)
+		case _, ok := <-watcher.Events:
+			if !ok {
+				t.Fatalf("heartbeat watch for %s closed before the file grew", path)
+			}
+		case watchErr, ok := <-watcher.Errors:
+			if !ok {
+				t.Fatalf("heartbeat watch for %s closed before the file grew", path)
+			}
+			t.Fatalf("watch heartbeat file %s: %v", path, watchErr)
+		}
+	}
+}
+
 func TestCheckTriggerConditionKillsProcessGroupOnTimeout(t *testing.T) {
 	processgrouptest.RequireRealProcessSignals(t)
 
@@ -470,24 +582,53 @@ func TestCheckTriggerConditionKillsProcessGroupOnTimeout(t *testing.T) {
 	oldSignalGrace := conditionCheckSignalGrace
 	conditionCheckSignalGrace = 100 * time.Millisecond
 	t.Cleanup(func() { conditionCheckSignalGrace = oldSignalGrace })
+
+	// The deadline has to be armed after the descendant has written.
+	// checkCondition starts context.WithTimeout before exec, so a short
+	// ConditionTimeout is a startup budget. Under load that budget expires
+	// first, the group is reaped, and the timeout is reported correctly —
+	// then WaitForFileSize fails on a heartbeat that will never grow. A 1ms
+	// deadline fails that way on every run. Arming DeadlineExceeded on the
+	// parent only after the first byte orders the two events this assertion
+	// needs: the writer was alive, then the timeout path stopped it.
+	// ConditionTimeout stays a backstop for a writer that never starts; it
+	// is not the kill under test.
+	parent := newDeadlineSignal()
+	t.Cleanup(parent.fire)
 	a := Order{
 		Name:    "check",
 		Trigger: "condition",
 		Check:   fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & wait", childPIDPath, heartbeatPath),
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
-	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
-		ConditionDir:     dir,
-		ConditionTimeout: 100 * time.Millisecond,
-	})
+	done := make(chan TriggerResult, 1)
+	go func() {
+		done <- CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+			ConditionCtx:     parent,
+			ConditionDir:     dir,
+			ConditionTimeout: 30 * time.Second,
+		})
+	}()
+
+	size := waitForHeartbeatBeforeDeadline(t, heartbeatPath, 15*time.Second)
+	parent.fire()
+
+	var result TriggerResult
+	select {
+	case result = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("check did not return within 10s of arming the deadline")
+	}
 	if result.Due {
 		t.Fatalf("Due = true, want false after condition timeout")
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true after armed deadline; reason = %q", result.Reason)
 	}
 	if !strings.Contains(result.Reason, "timed out") {
 		t.Fatalf("Reason = %q, want timeout", result.Reason)
 	}
 
-	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
 	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
 }
 
@@ -509,7 +650,10 @@ func TestCheckTriggerConditionKillsProcessGroupAfterWaitDelay(t *testing.T) {
 	a := Order{
 		Name:    "check",
 		Trigger: "condition",
-		Check:   fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' &", childPIDPath, heartbeatPath),
+		// Exit only after the heartbeat exists. WaitDelay runs from that
+		// exit; exiting immediately made the 100ms delay a startup budget
+		// and reaped the writer before its first byte.
+		Check: fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & while [ ! -s %q ]; do sleep 0.05; done", childPIDPath, heartbeatPath, heartbeatPath),
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
