@@ -154,9 +154,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
 		"gitpython>=3.1.62",
-		"aiohttp>=3.14.3",
+		"aiohttp>=3.14.4",
 		"anyio>=4.14.2",
-		"pillow>=12.3.0",
+		"pillow>=13.0.0",
+		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
 		"litellm>=1.89.7",
@@ -178,10 +179,11 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
 		"gitpython==3.1.62 \\",
-		"aiohttp==3.14.3 \\",
+		"aiohttp==3.14.4 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
-		"pillow==12.3.0 \\",
+		"pillow==13.0.0 \\",
+		"mcp==1.30.0 \\",
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
