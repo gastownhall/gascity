@@ -1,6 +1,7 @@
 package materialize
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -97,6 +98,206 @@ func TestBuildMCPProjectionTargetsAndStableHash(t *testing.T) {
 	}
 	if got, want := cursor.Target, filepath.Join("/work", ".cursor", "mcp.json"); got != want {
 		t.Fatalf("cursor target = %q, want %q", got, want)
+	}
+
+	antigravity, err := BuildMCPProjection(MCPProviderAntigravity, "/work", nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(antigravity): %v", err)
+	}
+	if got, want := antigravity.Target, filepath.Join("/work", ".agents", "mcp_config.json"); got != want {
+		t.Fatalf("antigravity target = %q, want %q", got, want)
+	}
+}
+
+func TestApplyMCPProjectionAntigravityWritesWorkspaceConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userConfig := filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userBytes := []byte(`{"mcpServers":{"notes":{"command":"user-owned"}}}` + "\n")
+	if err := os.WriteFile(userConfig, userBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	proj, err := BuildMCPProjection(MCPProviderAntigravity, dir, []MCPServer{
+		{
+			Name:      "notes",
+			Transport: MCPTransportStdio,
+			Command:   "uvx",
+			Args:      []string{"notes-mcp"},
+			Env:       map[string]string{"TOKEN": "secret"},
+		},
+		{
+			Name:      "remote",
+			Transport: MCPTransportHTTP,
+			URL:       "https://mcp.example.com/mcp",
+			Headers:   map[string]string{"Authorization": "Bearer x"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	if err := proj.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	target := filepath.Join(dir, ".agents", "mcp_config.json")
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(.agents/mcp_config.json): %v", err)
+	}
+	var doc struct {
+		MCPServers map[string]map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal .agents/mcp_config.json: %v", err)
+	}
+	wantStdio := map[string]any{
+		"command": "uvx",
+		"args":    []any{"notes-mcp"},
+		"env":     map[string]any{"TOKEN": "secret"},
+	}
+	if !reflect.DeepEqual(doc.MCPServers["notes"], wantStdio) {
+		t.Fatalf("stdio server = %#v, want %#v", doc.MCPServers["notes"], wantStdio)
+	}
+	// agy's own `agy mcp add` writes serverUrl + headers for an HTTP server;
+	// every agy release reads serverUrl, newer ones also accept url.
+	wantHTTP := map[string]any{
+		"serverUrl": "https://mcp.example.com/mcp",
+		"headers":   map[string]any{"Authorization": "Bearer x"},
+	}
+	if !reflect.DeepEqual(doc.MCPServers["remote"], wantHTTP) {
+		t.Fatalf("http server = %#v, want %#v", doc.MCPServers["remote"], wantHTTP)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf(".agents/mcp_config.json perms = %o, want 600", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-managed", "antigravity.json")); err != nil {
+		t.Fatalf("managed marker missing: %v", err)
+	}
+	got, err := os.ReadFile(userConfig)
+	if err != nil {
+		t.Fatalf("ReadFile(user config): %v", err)
+	}
+	if !reflect.DeepEqual(got, userBytes) {
+		t.Fatalf("projection must never touch the user-level ~/.gemini/config/mcp_config.json\n got: %q\nwant: %q", got, userBytes)
+	}
+
+	empty, err := BuildMCPProjection(MCPProviderAntigravity, dir, nil)
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(empty): %v", err)
+	}
+	if err := empty.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply(empty): %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf(".agents/mcp_config.json should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-managed", "antigravity.json")); !os.IsNotExist(err) {
+		t.Fatalf("managed marker should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents")); err != nil {
+		t.Fatalf(".agents/ holds other workspace customizations and must survive cleanup: %v", err)
+	}
+}
+
+func TestApplyMCPProjectionAntigravityRejectsLegacySSE(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, ".agents", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+	if err := os.WriteFile(target, existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	proj, err := BuildMCPProjection(MCPProviderAntigravity, dir, []MCPServer{
+		{Name: "legacy", Transport: MCPTransportSSE, URL: "https://mcp.example.com/sse"},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	err = proj.Apply(fsys.OSFS{})
+	if err == nil {
+		t.Fatal("expected Antigravity SSE rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "Antigravity supports only stdio and Streamable HTTP") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(target): %v", err)
+	}
+	if !reflect.DeepEqual(data, existing) {
+		t.Fatalf("target should not be rewritten on validation failure\n got: %q\nwant: %q", data, existing)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-adopted", "antigravity")); !os.IsNotExist(err) {
+		t.Fatalf("validation failure must not create adoption snapshot, stat err = %v", err)
+	}
+}
+
+func TestApplyMCPProjectionAntigravityPreservesNonMCPKeysAndAdopts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, ".agents", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{
+  "comment": "keep me",
+  "mcpServers": {
+    "stale": {
+      "command": "old"
+    }
+  }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	proj, err := BuildMCPProjection(MCPProviderAntigravity, dir, []MCPServer{
+		{Name: "alpha", Transport: MCPTransportStdio, Command: "uvx", Args: []string{"pkg"}},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	var stderr bytes.Buffer
+	if err := proj.ApplyWithStderr(fsys.OSFS{}, &stderr); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got := doc["comment"]; got != "keep me" {
+		t.Fatalf("comment = %v, want keep me", got)
+	}
+	servers, ok := doc["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers missing or wrong type: %+v", doc["mcpServers"])
+	}
+	if _, ok := servers["stale"]; ok {
+		t.Fatalf("stale server should be replaced by the managed catalog: %+v", servers)
+	}
+	if _, ok := servers["alpha"]; !ok {
+		t.Fatalf("alpha server missing: %+v", servers)
+	}
+	snapshots, err := os.ReadDir(filepath.Join(dir, ".gc", "mcp-adopted", "antigravity"))
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("expected one adoption snapshot, got %d (err %v)", len(snapshots), err)
 	}
 }
 

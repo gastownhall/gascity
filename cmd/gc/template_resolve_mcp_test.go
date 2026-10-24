@@ -25,7 +25,7 @@ args = ["notes-mcp"]
 
 	cityCfg := &config.City{
 		Workspace:  config.Workspace{Provider: "gemini"},
-		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}, "cursor": {Command: "echo", PromptMode: "none"}, "copilot": {Command: "echo", PromptMode: "none"}},
+		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}, "cursor": {Command: "echo", PromptMode: "none"}, "copilot": {Command: "echo", PromptMode: "none"}, "antigravity": {Command: "echo", PromptMode: "none"}},
 		PackMCPDir: filepath.Join(cityPath, "mcp"),
 	}
 
@@ -140,6 +140,17 @@ args = ["notes-mcp"]
 		}
 		if tp.FPExtra["mcp:cursor"] == "" {
 			t.Fatalf("expected cursor mcp fingerprint entry, got %+v", tp.FPExtra)
+		}
+	})
+
+	t.Run("antigravity provider accepts mcp", func(t *testing.T) {
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "antigravity"}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if tp.FPExtra["mcp:antigravity"] == "" {
+			t.Fatalf("expected antigravity mcp fingerprint entry, got %+v", tp.FPExtra)
 		}
 	})
 
