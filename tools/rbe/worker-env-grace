@@ -54,10 +54,10 @@
 #                             pin this main's manifest does not roll back to,
 #                             fails too. rbe-worker-legacy.yml.
 #
-# The record, worker-env-grace.txt: printable ASCII and newlines only; one
-# "key value" per line (one space; the value is the rest of the line). Empty
-# lines and lines that start with "#" are for people; any other line is a
-# key, each at most once, no other key:
+# The record, worker-env-grace.txt: at most 64 KiB of printable ASCII and
+# newlines; one "key value" per line (one space; the value is the rest of the
+# line). Empty lines and lines that start with "#" are for people; any other
+# line is a key, each at most once, no other key:
 #   version 1
 #   pin sha256:<hex>          main's pin after the push
 #   sha <commit>              main after the push
@@ -230,9 +230,13 @@ cmd_record() {
 parse_record() {
 	local line key value seen=' '
 	r_version='' r_pin='' r_sha='' r_previous='' r_go='' r_since='' r_until='' r_serve='' r_reason=''
-	# Printable ASCII and newlines, comments included: no carriage return,
-	# escape or other byte that a log of it could act on (the scaler and
-	# beads refuse the same).
+	# At most 64 KiB (a record is about 600 bytes), printable ASCII and
+	# newlines, comments included: no carriage return, escape or other byte
+	# that a log of it could act on. The scaler and beads refuse the same.
+	if [ "$(wc -c <"$1")" -gt 65536 ]; then
+		echo "worker-env-grace: record is over 64 KiB" >&2
+		return 1
+	fi
 	# -a: GNU grep would read a NUL as a line break and pass it.
 	if grep -a -q '[^[:print:]]' "$1"; then
 		echo "worker-env-grace: record has a byte that is not printable ASCII" >&2

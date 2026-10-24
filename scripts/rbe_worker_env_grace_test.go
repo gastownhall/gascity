@@ -536,6 +536,7 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 		"CRLF":           strings.ReplaceAll(graceRecordText(open...), "\n", "\r\n"),
 		"lone CR":        graceRecordText(open...) + "# a comment\r::warning title=injected::x\n",
 		"NUL":            graceRecordText(open...) + "# a\x00b\n",
+		"over 64 KiB":    graceRecordText(open...) + strings.Repeat("# padding\n", 6600),
 		"NUL in a value": strings.Replace(graceRecordText(open...), "version 1\n", "version 1\x00\n", 1),
 		"blank line":     graceRecordText(open...) + "   \n",
 	} {
