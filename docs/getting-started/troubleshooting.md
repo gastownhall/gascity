@@ -513,6 +513,37 @@ it names under `.gc/mcp-adopted/`. To hand such a file back, stop the city
 keeps for it, `.gc/mcp-managed/<provider>.json` at the same root; gc then
 leaves it alone. Deleting the snapshots clears the report.
 
+## An Agent Starts Without an MCP Server
+
+`gc start` or the supervisor log prints a warning like this one:
+
+```text
+gc: warning: agent "editor" starts without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
+```
+
+MCP servers from the city's `mcp/` directory, a rig pack, or an import apply
+to every agent in that scope. When an agent's provider cannot receive one of
+them, Gas City leaves that server out of the agent's MCP config and starts the
+agent without it. Every other agent starts as usual.
+
+| Provider family | Receives |
+|---|---|
+| `claude`, `codex`, `gemini`, `opencode`, `mimocode` | stdio and HTTP servers |
+| `cursor` | stdio servers only |
+| any other provider, such as `copilot` | no MCP servers |
+
+`gc mcp list --agent <name>` lists the skipped servers under **Not
+projected**. `gc doctor`, `gc config show --validate`, and `gc import add`
+report the same warning, so you can see it before the city starts.
+
+If the agent does not need the server, nothing needs to change. If it does,
+switch the agent to a provider that can receive it.
+
+A server in an agent's own `agents/<name>/mcp/` directory is meant for that
+agent alone. If the agent's provider cannot receive it, that agent does not
+start and its session start reports why; the rest of the city still starts,
+and `gc config show --validate` reports it as an error.
+
 ## `gc version` Prints Unexpected Output
 
 If `gc version` prints git progress lines (`Enumerating objects...`) instead

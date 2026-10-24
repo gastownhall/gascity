@@ -410,6 +410,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An MCP server one agent's provider cannot receive no longer stops the
+  city.** Servers from the city's `mcp/` directory, a rig pack, or an import
+  reach every agent in that scope. When one agent's provider could not
+  receive one of them, such as an HTTP server for a `cursor` agent (whose MCP
+  config carries only stdio servers), `gc start` and the supervisor failed the
+  whole city with `cursor MCP projection does not support http server`, and an
+  agent on a harness without MCP support, such as `copilot`, never started.
+  Gas City now leaves such a server out of that agent's MCP config, starts
+  the agent without it, and warns once, naming the agents, the servers and
+  the reason. A server in the agent's own `agents/<name>/mcp/` directory is
+  still an error for that agent, which does not start, while the rest of the
+  city does. `gc mcp list` lists skipped servers under "Not projected"
+  (`skipped` in `--json`) instead of as projected, `gc doctor` and
+  `gc import add` warn about them, and `gc config show --validate` warns
+  about shared servers and fails on a server in an agent's own `mcp/`
+  directory that its provider cannot receive.
+
 - **gc no longer replaces a project's own MCP servers.** With any MCP server
   in scope, gc took over each provider-native MCP file it projected into:
   at the city root and every rig root when the city started, and in an

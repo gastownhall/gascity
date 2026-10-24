@@ -1063,3 +1063,46 @@ func markMCPManaged(t *testing.T, dir, provider string) {
 		t.Fatal(err)
 	}
 }
+
+func TestMCPProjectionSupportsTransport(t *testing.T) {
+	type row struct {
+		stdio, http, sse bool
+	}
+	want := map[string]row{
+		MCPProviderClaude:   {stdio: true, http: true},
+		MCPProviderCodex:    {stdio: true, http: true},
+		MCPProviderGemini:   {stdio: true, http: true},
+		MCPProviderOpenCode: {stdio: true, http: true},
+		MCPProviderMimoCode: {stdio: true, http: true},
+		MCPProviderCursor:   {stdio: true},
+		"copilot":           {},
+		"":                  {},
+	}
+	for provider, w := range want {
+		got := row{
+			stdio: MCPProjectionSupportsTransport(provider, MCPTransportStdio),
+			http:  MCPProjectionSupportsTransport(provider, MCPTransportHTTP),
+			sse:   MCPProjectionSupportsTransport(provider, MCPTransportSSE),
+		}
+		if got != w {
+			t.Errorf("MCPProjectionSupportsTransport(%q) = %+v, want %+v", provider, got, w)
+		}
+	}
+}
+
+// Apply never writes a server the provider cannot express, even when a
+// caller skips the capability check.
+func TestApplyMCPProjectionRejectsTransportTheProviderCannotExpress(t *testing.T) {
+	dir := t.TempDir()
+	proj, err := BuildMCPProjection(MCPProviderClaude, dir, []MCPServer{{Name: "events", Transport: MCPTransportSSE, URL: "https://example.test/sse"}})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	err = proj.Apply(fsys.OSFS{})
+	if err == nil || !strings.Contains(err.Error(), `claude MCP projection does not support sse server "events"`) {
+		t.Fatalf("Apply() error = %v, want unsupported transport", err)
+	}
+	if _, statErr := os.Stat(proj.Target); !os.IsNotExist(statErr) {
+		t.Fatalf("target written despite the rejection, stat err = %v", statErr)
+	}
+}

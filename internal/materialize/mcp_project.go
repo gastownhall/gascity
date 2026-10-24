@@ -378,20 +378,39 @@ func (p MCPProjection) normalizedBytes() []byte {
 	return data
 }
 
-func (p MCPProjection) validateProviderContract() error {
-	if p.Provider != MCPProviderCursor {
-		return nil
+// MCPProjectionSupportsTransport reports whether providerKind's native MCP
+// config can carry a server of the given transport. Every projection carries
+// stdio servers. Cursor's is stdio-only: its HTTP/SSE mcpServers wire
+// contract is not verified. No projection renders SSE. An unknown provider
+// supports nothing.
+//
+// Callers that build an agent's projection consult this first and leave out
+// what the provider cannot receive; Apply rejects anything that slips
+// through instead of writing a config block the provider would ignore.
+func MCPProjectionSupportsTransport(providerKind string, transport MCPTransport) bool {
+	switch providerKind {
+	case MCPProviderClaude, MCPProviderCodex, MCPProviderGemini, MCPProviderOpenCode, MCPProviderMimoCode:
+		return transport == MCPTransportStdio || transport == MCPTransportHTTP
+	case MCPProviderCursor:
+		return transport == MCPTransportStdio
+	default:
+		return false
 	}
+}
+
+func (p MCPProjection) validateProviderContract() error {
 	for _, server := range p.Servers {
-		switch server.Transport {
-		case MCPTransportStdio:
-		case MCPTransportHTTP, MCPTransportSSE:
+		if MCPProjectionSupportsTransport(p.Provider, server.Transport) {
+			continue
+		}
+		if p.Provider == MCPProviderCursor {
 			return fmt.Errorf(
 				"cursor MCP projection does not support %s server %q: Cursor's HTTP/SSE mcpServers wire contract is not verified",
 				server.Transport,
 				server.Name,
 			)
 		}
+		return fmt.Errorf("%s MCP projection does not support %s server %q", p.Provider, server.Transport, server.Name)
 	}
 	return nil
 }

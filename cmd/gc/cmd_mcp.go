@@ -45,8 +45,13 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "Show projected MCP servers",
-		Long:  "Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.",
-		Args:  cobra.NoArgs,
+		Long: `Show the precedence-resolved MCP servers that Gas City would project into the
+provider-native config for one agent or session target.
+
+Servers from a shared layer (the city or rig pack, or an import) that the
+target's provider cannot receive are listed separately under "Not projected",
+with the reason: the agent starts without them.`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			agentName = strings.TrimSpace(agentName)
 			sessionID = strings.TrimSpace(sessionID)
@@ -126,6 +131,20 @@ type projectedMCPJSON struct {
 	Projection    projectedMCPTargetJSON   `json:"projection"`
 	Servers       []projectedMCPServerJSON `json:"servers"`
 	Shadows       []projectedMCPShadowJSON `json:"shadows,omitempty"`
+	// Skipped lists shared-layer servers this target's provider cannot
+	// receive; the agent starts without them.
+	Skipped []projectedMCPSkippedJSON `json:"skipped,omitempty"`
+}
+
+type projectedMCPSkippedJSON struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	Command   string `json:"command,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Source    string `json:"source"`
+	Layer     string `json:"layer,omitempty"`
+	Origin    string `json:"origin,omitempty"`
+	Reason    string `json:"reason"`
 }
 
 type projectedMCPQueryJSON struct {
@@ -222,6 +241,19 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 			LoserFile:  displayMCPSourcePath(cityPath, shadow.LoserFile),
 		})
 	}
+	var skipped []projectedMCPSkippedJSON
+	for _, skip := range view.Skipped {
+		skipped = append(skipped, projectedMCPSkippedJSON{
+			Name:      skip.Server.Name,
+			Transport: string(skip.Server.Transport),
+			Command:   skip.Server.Command,
+			URL:       skip.Server.URL,
+			Source:    displayMCPSourcePath(cityPath, skip.Server.SourceFile),
+			Layer:     skip.Server.Layer,
+			Origin:    skip.Server.Origin,
+			Reason:    skip.Reason,
+		})
+	}
 	var notAdopted *projectedMCPNotAdoptedJSON
 	if refused != nil {
 		notAdopted = &projectedMCPNotAdoptedJSON{
@@ -243,6 +275,7 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 		SchemaVersion: "1",
 		OK:            true,
 		CityPath:      cityPath,
+		Skipped:       skipped,
 		Query: projectedMCPQueryJSON{
 			Agent:   agentName,
 			Session: sessionID,
@@ -263,8 +296,14 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 }
 
 func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProjection, refused *materialize.MCPAdoptionRefusedError) {
-	fmt.Fprintf(w, "Provider: %s\n", view.Projection.Provider) //nolint:errcheck // best-effort
-	fmt.Fprintf(w, "Target: %s\n", view.Projection.Target)     //nolint:errcheck // best-effort
+	provider, target := view.Projection.Provider, view.Projection.Target
+	if provider == "" && strings.TrimSpace(view.ProviderKind) != "" {
+		// A harness gc cannot write an MCP config for has no target.
+		provider = view.ProviderKind
+		target = "(none: this harness cannot receive MCP)"
+	}
+	fmt.Fprintf(w, "Provider: %s\n", provider) //nolint:errcheck // best-effort
+	fmt.Fprintf(w, "Target: %s\n", target)     //nolint:errcheck // best-effort
 	if view.WorkDir != "" {
 		fmt.Fprintf(w, "Workdir: %s\n", view.WorkDir) //nolint:errcheck // best-effort
 	}
@@ -273,29 +312,51 @@ func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProject
 	}
 	if len(view.Catalog.Servers) == 0 {
 		fmt.Fprintln(w, "No projected MCP servers.") //nolint:errcheck // best-effort
+	} else {
+		fmt.Fprintln(w) //nolint:errcheck // best-effort
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tTRANSPORT\tCOMMAND/URL\tSOURCE\tENV\tHEADERS") //nolint:errcheck // best-effort
+		for _, server := range view.Catalog.Servers {
+			_, _ = fmt.Fprintf(
+				tw,
+				"%s\t%s\t%s\t%s\t%s\t%s\n",
+				server.Name,
+				server.Transport,
+				mcpCommandOrURL(server),
+				displayMCPSourcePath(cityPath, server.SourceFile),
+				formatMCPKeyNames(server.Env),
+				formatMCPKeyNames(server.Headers),
+			)
+		}
+		_ = tw.Flush()
+		if refused != nil {
+			fmt.Fprintf(w, "\nNot delivered: gc leaves %s as it is, so the agent starts without these servers: %s; %s.\n", //nolint:errcheck // best-effort
+				view.Projection.Target, refused.Reason(), refused.Remedy())
+		}
+	}
+	writeSkippedMCPServers(w, cityPath, view.Skipped)
+}
+
+// writeSkippedMCPServers lists the shared-layer servers the target's provider
+// cannot receive, so the listing never presents them as projected.
+func writeSkippedMCPServers(w io.Writer, cityPath string, skipped []mcpServerSkip) {
+	if len(skipped) == 0 {
 		return
 	}
-	fmt.Fprintln(w) //nolint:errcheck // best-effort
-
+	fmt.Fprintf(w, "\nNot projected (%s; the agent starts without these):\n", skipped[0].Reason) //nolint:errcheck // best-effort
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTRANSPORT\tCOMMAND/URL\tSOURCE\tENV\tHEADERS") //nolint:errcheck // best-effort
-	for _, server := range view.Catalog.Servers {
+	fmt.Fprintln(tw, "NAME\tTRANSPORT\tCOMMAND/URL\tSOURCE") //nolint:errcheck // best-effort
+	for _, skip := range skipped {
 		_, _ = fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\n",
-			server.Name,
-			server.Transport,
-			mcpCommandOrURL(server),
-			displayMCPSourcePath(cityPath, server.SourceFile),
-			formatMCPKeyNames(server.Env),
-			formatMCPKeyNames(server.Headers),
+			"%s\t%s\t%s\t%s\n",
+			skip.Server.Name,
+			skip.Server.Transport,
+			mcpCommandOrURL(skip.Server),
+			displayMCPSourcePath(cityPath, skip.Server.SourceFile),
 		)
 	}
 	_ = tw.Flush()
-	if refused != nil {
-		fmt.Fprintf(w, "\nNot delivered: gc leaves %s as it is, so the agent starts without these servers: %s; %s.\n", //nolint:errcheck // best-effort
-			view.Projection.Target, refused.Reason(), refused.Remedy())
-	}
 }
 
 func mcpCommandOrURL(server materialize.MCPServer) string {

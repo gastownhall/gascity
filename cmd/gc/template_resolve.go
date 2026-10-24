@@ -678,7 +678,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			mcpCity.PackMCPDir = cityMCPDir
 		}
 	}
-	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
+	// Shared-layer servers the provider cannot receive are left out of
+	// mcpCatalog and mcpProjection (the agent starts without them; stage 1
+	// warns), while agent-local ones fail this agent's start.
+	mcp, err := resolveAgentMCPProjection(
 		p.cityPath,
 		mcpCity,
 		cfgAgent,
@@ -689,12 +692,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
+	mcpCatalog, mcpProjection := mcp.Catalog, mcp.Projection
+	if resolvedServers := len(mcpCatalog.Servers) + len(mcp.Skipped); mcpCityIsSynthetic && resolvedServers > 0 {
 		return TemplateParams{}, fmt.Errorf(
 			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) - "+
 				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
 				"cannot see import/implicit/bootstrap layers and would diverge from production)",
-			qualifiedName, len(mcpCatalog.Servers),
+			qualifiedName, resolvedServers,
 		)
 	}
 	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
