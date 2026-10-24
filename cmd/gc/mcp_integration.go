@@ -19,15 +19,32 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
-// mcpGitignoreEntry is the .gitignore entry, relative to the projection's
-// root, for the target gc writes: gc ignores the files it projects, which may
-// hold expanded secrets, and nothing else.
+// mcpGitignoreEntry is the .gitignore entry for the target gc writes, which
+// may hold expanded secrets: the target's path from the projection's root,
+// anchored with a leading slash, since the .gitignore gc edits is the one at
+// that root. It matches that file only, not a file of the same name deeper in
+// the repository, as an unanchored ".mcp.json" would.
 func mcpGitignoreEntry(p materialize.MCPProjection) string {
 	rel, err := filepath.Rel(p.Root, p.Target)
 	if err != nil {
 		return ""
 	}
-	return filepath.ToSlash(rel)
+	return "/" + filepath.ToSlash(rel)
+}
+
+// missingMCPGitignoreEntries returns the entries root's .gitignore lacks. The
+// same path without its leading slash, as an earlier gc wrote it, counts as
+// present: it matches the file too, and rewriting it would churn every
+// existing .gitignore.
+func missingMCPGitignoreEntries(fs fsys.FS, root string, entries []string) []string {
+	var missing []string
+	for _, entry := range missingGitignoreEntries(fs, root, entries) {
+		if len(missingGitignoreEntries(fs, root, []string{strings.TrimPrefix(entry, "/")})) == 0 {
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	return missing
 }
 
 type mcpTargetSpec struct {
@@ -162,9 +179,14 @@ func appendProjectMCPPreStart(prestart []string, agentName, identity, workDir st
 }
 
 // ensureMCPGitignoreBestEffort adds entries, the .gitignore entries of the
-// MCP targets gc projected under root, to root's .gitignore.
+// MCP targets gc projected under root, to root's .gitignore, unless it
+// already has them (missingMCPGitignoreEntries).
 func ensureMCPGitignoreBestEffort(root string, entries []string, stderr io.Writer) {
-	if strings.TrimSpace(root) == "" || len(entries) == 0 {
+	if strings.TrimSpace(root) == "" {
+		return
+	}
+	entries = missingMCPGitignoreEntries(fsys.OSFS{}, root, entries)
+	if len(entries) == 0 {
 		return
 	}
 	if err := ensureGitignoreEntries(fsys.OSFS{}, root, entries); err != nil && stderr != nil {
@@ -281,12 +303,13 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 		if errors.As(err, &refused) {
 			// The file holds content gc does not manage. gc leaves it as it
 			// is, and the agents that read it start without gc's servers.
-			warnMCPAdoptionRefused(cityPath, target.Agents, target.Projection, refused, stderr)
+			warnMCPAdoptionRefused(cityPath, target.Agents, target.Projection, refused, fsys.OSFS{}, stderr)
 			continue
 		}
 		if err != nil {
 			return fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
 		}
+		clearMCPAdoptionRefusal(cityPath, target.Projection.Target)
 		desired[managedKey(target.Projection.Provider, target.Root)] = true
 		if len(target.Projection.Servers) > 0 {
 			gitignore[target.Root] = append(gitignore[target.Root], mcpGitignoreEntry(target.Projection))
@@ -298,39 +321,75 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 	return nil
 }
 
-// mcpAdoptionRefusalWarned remembers which refused adoptions have been
-// reported, keyed by city and message, so a supervisor that runs stage 1, or
-// resolves a stage-2 agent, again warns once per process.
+// mcpAdoptionRefusalWarned holds, per city and target, the refusal last
+// reported and the target's modification time and size then
+// (mcpRefusalWarning). A refusal is reported once, and again when its message
+// or the target changes (a work dir checked out afresh, say), or after it
+// cleared: clearMCPAdoptionRefusal forgets the target once gc writes it or
+// finds nothing in its way.
 var mcpAdoptionRefusalWarned sync.Map
 
+type mcpRefusalWarning struct {
+	message string
+	stamp   string
+}
+
+func mcpRefusalKey(cityPath, target string) string {
+	return filepath.Clean(cityPath) + "\x00" + filepath.Clean(target)
+}
+
+// mcpTargetStamp identifies the target's current version by modification
+// time and size; "" when it cannot be read.
+func mcpTargetStamp(fs fsys.FS, target string) string {
+	info, err := fs.Lstat(target)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
+}
+
 // warnMCPAdoptionRefused reports a target gc will not adopt: who starts
-// without which of gc's servers, why, and what to do about it. It warns once
-// per process for each city and message.
-func warnMCPAdoptionRefused(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, stderr io.Writer) {
+// without which of gc's servers, why, and what to do about it. It reports a
+// refusal once until it changes or clears (mcpAdoptionRefusalWarned).
+func warnMCPAdoptionRefused(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, fs fsys.FS, stderr io.Writer) {
 	if stderr == nil {
 		return
 	}
 	message := describeMCPAdoptionRefused(agents, projection, refused)
-	if _, seen := mcpAdoptionRefusalWarned.LoadOrStore(filepath.Clean(cityPath)+"\x00"+message, true); seen {
+	key := mcpRefusalKey(cityPath, projection.Target)
+	seen := mcpRefusalWarning{message: message, stamp: mcpTargetStamp(fs, projection.Target)}
+	if previous, ok := mcpAdoptionRefusalWarned.Load(key); ok && previous.(mcpRefusalWarning) == seen {
 		return
 	}
+	mcpAdoptionRefusalWarned.Store(key, seen)
 	fmt.Fprintf(stderr, "gc: warning: %s\n", message) //nolint:errcheck // best-effort stderr
 }
 
-// warnStage2MCPAdoptionRefusal reports, once per process, a stage-2 target
-// the session's project-mcp pre-start will leave alone. The pre-start warns
-// too, but a runtime discards a pre-start's output when it succeeds, so this
-// is the warning the controller log shows. It reads the target and writes
-// nothing; a target that cannot be read is the pre-start's to report.
+// clearMCPAdoptionRefusal forgets a target's reported refusal, so a refusal
+// that comes back is reported again.
+func clearMCPAdoptionRefusal(cityPath, target string) {
+	mcpAdoptionRefusalWarned.Delete(mcpRefusalKey(cityPath, target))
+}
+
+// warnStage2MCPAdoptionRefusal reports a stage-2 target the session's
+// project-mcp pre-start will leave alone (warnMCPAdoptionRefused). The
+// pre-start warns too, but a runtime discards a pre-start's output when it
+// succeeds, so this is the warning the controller log shows. It reads the
+// target and writes nothing; a target that cannot be inspected is the
+// pre-start's to report.
 func warnStage2MCPAdoptionRefusal(cityPath, identity string, projection materialize.MCPProjection, fs fsys.FS, stderr io.Writer) {
 	if stderr == nil || fs == nil {
 		return
 	}
 	refused, err := projection.AdoptionRefusal(fs)
-	if err != nil || refused == nil {
+	if err != nil {
 		return
 	}
-	warnMCPAdoptionRefused(cityPath, []string{identity}, projection, refused, stderr)
+	if refused == nil {
+		clearMCPAdoptionRefusal(cityPath, projection.Target)
+		return
+	}
+	warnMCPAdoptionRefused(cityPath, []string{identity}, projection, refused, fs, stderr)
 }
 
 // describeMCPAdoptionRefused renders a refused adoption for a warning:

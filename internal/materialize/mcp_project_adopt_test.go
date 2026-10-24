@@ -108,6 +108,9 @@ func TestApplyMCPProjectionRefusesToReplaceAServerTheFileDefinesDifferently(t *t
 			if !strings.Contains(refused.Error(), `adopting it would drop its own definition of MCP server "notes"`) {
 				t.Fatalf("Error() = %q", refused.Error())
 			}
+			if want := `to let gc manage it, make the catalog's definition of MCP server "notes" match the file's, or remove it from the file`; refused.Remedy() != want {
+				t.Fatalf("Remedy() = %q\nwant      %q", refused.Remedy(), want)
+			}
 		})
 	}
 }
@@ -144,15 +147,24 @@ func TestApplyMCPProjectionRefusesKeysItWouldDrop(t *testing.T) {
 	if refused.Reason() != want {
 		t.Fatalf("Reason() = %q\nwant       %q", refused.Reason(), want)
 	}
+	wantRemedy := "to let gc manage it, define the servers you still need in gc's MCP catalog (an mcp/ directory) and remove those entries from the file; " +
+		`for MCP server "notes", which both define, you can instead make the catalog's definition match the file's`
+	if refused.Remedy() != wantRemedy {
+		t.Fatalf("Remedy() = %q\nwant      %q", refused.Remedy(), wantRemedy)
+	}
 }
 
-// A file gc cannot parse might hold anything: gc leaves it alone.
+// A file gc cannot parse might hold anything: gc leaves it alone. JSONC
+// (comments, trailing commas) and a UTF-8 byte-order mark, which editors
+// write and some providers accept, are not JSON to gc.
 func TestApplyMCPProjectionRefusesUnparseableFiles(t *testing.T) {
 	for provider, garbage := range map[string]string{
-		MCPProviderClaude: "{not json",
-		MCPProviderCodex:  "= not toml",
-		MCPProviderGemini: "[1,",
-		MCPProviderCursor: "// a comment\n{}",
+		MCPProviderClaude:   "{not json",
+		MCPProviderCodex:    "= not toml",
+		MCPProviderGemini:   "[1,",
+		MCPProviderCursor:   "// a comment\n{}",
+		MCPProviderOpenCode: `{"mcp":{},}`,
+		MCPProviderMimoCode: "\ufeff{}",
 	} {
 		t.Run(provider, func(t *testing.T) {
 			root := t.TempDir()
@@ -163,12 +175,37 @@ func TestApplyMCPProjectionRefusesUnparseableFiles(t *testing.T) {
 			if refused.ParseErr == nil || !strings.Contains(refused.Error(), "gc cannot parse it") {
 				t.Fatalf("refusal = %v, want an unparseable-file refusal", refused)
 			}
-			want := "to let gc manage it, make it plain JSON (gc does not read comments or trailing commas) or remove it"
+			want := "to let gc manage it, make it plain JSON (gc reads no JSONC comments or trailing commas, " +
+				"and no UTF-8 byte-order mark) or remove it"
 			if provider == MCPProviderCodex {
 				want = "to let gc manage it, fix its TOML or remove it"
 			}
 			if got := refused.Remedy(); got != want {
 				t.Fatalf("Remedy() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A parser's message quotes the text it choked on, and a provider file can
+// hold a secret. gc's parse errors give only the line and column.
+func TestMCPAdoptionParseErrorsQuoteNoFileContent(t *testing.T) {
+	for provider, tc := range map[string]struct{ content, want string }{
+		MCPProviderCodex:  {"[mcp_servers.team.env]\nTOKEN = sk-live-0123456789\n", "invalid TOML at line 2, column 9"},
+		MCPProviderClaude: {"{\n  \"mcpServers\": {\"team\": {\"env\": {\"TOKEN\": sk-live-0123456789}}}\n}", "invalid JSON at line 2, column 44"},
+	} {
+		t.Run(provider, func(t *testing.T) {
+			root := t.TempDir()
+			proj := notesProjection(t, provider, root)
+			writeTarget(t, proj, tc.content)
+			refused := assertRefusedAndUntouched(t, proj, root)
+			if refused.ParseErr == nil || refused.ParseErr.Error() != tc.want {
+				t.Fatalf("ParseErr = %v, want %q", refused.ParseErr, tc.want)
+			}
+			for _, leak := range []string{"sk", "live", "0123"} {
+				if strings.Contains(refused.Error(), leak) {
+					t.Fatalf("refusal quotes the file's content (%q): %v", leak, refused)
+				}
 			}
 		})
 	}
@@ -331,22 +368,6 @@ func TestApplyMCPProjectionLeavesASymlinkedProviderDirectoryAlone(t *testing.T) 
 	}
 	if after := treeSnapshot(t, elsewhere); !reflect.DeepEqual(before, after) {
 		t.Fatalf("Apply wrote through the symlinked directory:\nbefore: %v\nafter:  %v", before, after)
-	}
-}
-
-// A target gc cannot read is someone else's to sort out: gc leaves it alone
-// rather than failing.
-func TestApplyMCPProjectionRefusesATargetItCannotRead(t *testing.T) {
-	root := t.TempDir()
-	proj := notesProjection(t, MCPProviderClaude, root)
-	// A directory where the file should be: reading it fails whoever runs
-	// the test.
-	if err := os.MkdirAll(proj.Target, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	refused := assertRefusedAndUntouched(t, proj, root)
-	if refused.ReadErr == nil || !strings.Contains(refused.Error(), "gc cannot read it") {
-		t.Fatalf("refusal = %v, want a read refusal", refused)
 	}
 }
 

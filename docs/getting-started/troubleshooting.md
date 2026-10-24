@@ -464,10 +464,12 @@ gc's. To see where this applies:
 - `gc doctor` lists every such file under `mcp-adoption`.
 - `gc start --dry-run` shows a file at the city root or a rig root as
   `leave ... as it is`, and warns about a file in an agent's own work dir.
-- `gc mcp list --agent <name>` says "Not delivered" for an agent that reads
-  one.
+- `gc mcp list --agent <name>`, or `--session <id>` for a pool or worktree
+  session, says "Not delivered" for an agent that reads one.
 - The supervisor log shows the warning when the city starts, and when gc
-  next resolves an agent whose own work dir holds such a file.
+  next resolves an agent whose own work dir holds such a file, such as a
+  session's checkout of a repository that commits its own `.mcp.json`. It
+  shows it once, and again if the file changes or comes back.
 
 gc also leaves alone a file it cannot read or parse, and a symlinked one.
 

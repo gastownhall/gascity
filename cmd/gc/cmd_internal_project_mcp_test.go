@@ -96,8 +96,8 @@ AGENT = "{{.AgentName}}"
 		t.Fatalf("ReadFile(.gitignore): %v", err)
 	}
 	// gc ignores the file it projected, and only that file.
-	if !strings.Contains(string(gitignore), ".gemini/settings.json\n") || strings.Contains(string(gitignore), ".mcp.json") {
-		t.Fatalf(".gitignore = %q, want only the projected .gemini/settings.json", string(gitignore))
+	if !strings.Contains(string(gitignore), "\n/.gemini/settings.json\n") || strings.Contains(string(gitignore), ".mcp.json") {
+		t.Fatalf(".gitignore = %q, want only the projected /.gemini/settings.json", string(gitignore))
 	}
 }
 
@@ -180,7 +180,7 @@ args = ["notes-mcp"]
 	if err != nil {
 		t.Fatalf("ReadFile(.gitignore): %v", err)
 	}
-	if !strings.Contains(string(gitignore), ".cursor/mcp.json") {
+	if !strings.Contains(string(gitignore), "\n/.cursor/mcp.json\n") {
 		t.Fatalf(".gitignore missing cursor MCP target:\n%s", string(gitignore))
 	}
 }

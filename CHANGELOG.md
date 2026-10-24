@@ -34,12 +34,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the file, define the servers you still need in an `mcp/` catalog that
   reaches every agent reading it, and remove the file's own entries. Files
   gc already manages are unaffected.
+  - This includes the work dirs of pool and worktree sessions: sessions in
+    a checkout of a repository that commits its own `.mcp.json` (or another
+    provider file with servers of its own) now start without gc's servers.
+    The warning is in the controller log (`gc supervisor logs`) once gc
+    resolves a session whose work dir holds the file, and again whenever the
+    file comes back after it cleared or changes (a fresh checkout, say).
+    `gc mcp list --session <id>` shows it as "Not delivered". The session's
+    own pre-start prints it too, but a runtime does not keep a successful
+    pre-start's output.
   - The servers in a `.mcp.json` gc leaves alone now run in its Claude
     agents, which gc starts with project MCP servers pre-approved, as they
     already did in cities without an MCP catalog. Review a repository's MCP
     config before adding it as a rig.
-  - gc's `.gitignore` entries now cover only the files it projects at each
-    root. Entries an earlier gc added for the other provider files stay.
+  - gc's `.gitignore` entries now name only the files it projects, anchored
+    to the root that holds them (`/.mcp.json`), so a file of the same name
+    deeper in the repository is no longer ignored. Entries an earlier gc
+    wrote stay as they are and count as present, so an existing
+    `.gitignore` does not change.
 
 - **An unset `[daemon] session_reconciler` now runs the v2 reconciler where
   the city can run it, and `[beads] conditional_writes` now defaults to
@@ -470,9 +482,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lost its team servers (the original was saved under `.gc/mcp-adopted/`),
   and they silently stopped working. gc now leaves a file alone when
   adopting it would drop content it does not manage, as listed under
-  Upgrading Notes. It warns which agents start without gc's servers there;
-  for a session's own work dir, the warning comes from the controller,
-  since a session's pre-start output is not kept. `gc start --dry-run`,
+  Upgrading Notes. It warns which agents start without gc's servers there,
+  once until the refusal changes or clears; for a session's own work dir,
+  the warning comes from the controller, since a session's pre-start output
+  is not kept. A parse error names the line and column only, never the
+  file's text, which can hold a secret. `gc start --dry-run`,
   `gc mcp list` ("Not delivered"), and the new `mcp-adoption` doctor check
   show these files. The doctor check also lists files an earlier gc took
   over while they held servers the catalog still does not define, and where

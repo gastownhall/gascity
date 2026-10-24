@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const teamMCPJSON = `{"mcpServers":{"team-db":{"command":"team-db-mcp"}}}` + "\n"
@@ -93,6 +95,65 @@ command = "team-db-mcp"
 	}
 }
 
+// A refusal is reported once, and again when it comes back: after the file
+// changes (a work dir checked out afresh rewrites it), and after it cleared
+// (gc adopted the file, then the user handed it back).
+func TestRunStage1MCPProjectionWarnsAgainWhenARefusalComesBack(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, ".mcp.json"), []byte(teamMCPJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude"),
+		Agents:     []config.Agent{{Name: "mayor", Scope: "city", Provider: "claude"}},
+	}
+	target := filepath.Join(cityPath, ".mcp.json")
+	pass := func(label string, wantWarning bool) {
+		t.Helper()
+		var stderr bytes.Buffer
+		if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
+			t.Fatalf("%s: runStage1MCPProjection: %v", label, err)
+		}
+		if got := strings.Contains(stderr.String(), "not adopting "+target); got != wantWarning {
+			t.Fatalf("%s: warned = %v, want %v:\n%s", label, got, wantWarning, stderr.String())
+		}
+	}
+	pass("first pass", true)
+	pass("unchanged", false)
+
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(target, later, later); err != nil {
+		t.Fatal(err)
+	}
+	pass("file rewritten", true)
+	pass("unchanged again", false)
+
+	// The catalog takes the team server over; gc adopts the file.
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "team-db.toml"), `
+name = "team-db"
+command = "team-db-mcp"
+`)
+	pass("adopted", false)
+	// The user hands the file back: catalog entry gone, marker deleted, the
+	// team's file restored.
+	if err := os.Remove(filepath.Join(cityPath, "mcp", "team-db.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(cityPath, ".gc", "mcp-managed", "claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(teamMCPJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pass("handed back", true)
+}
+
 // gc's .gitignore entries cover the files it projects and no others: at a
 // root where it leaves the Claude file alone but projects Gemini's, only
 // .gemini/settings.json is ignored. The dry-run plan says the same.
@@ -126,10 +187,10 @@ command = "uvx"
 		t.Fatalf("planStage1MCPProjection: %v", err)
 	}
 	plan := strings.Join(lines, "\n")
-	if want := "create " + filepath.Join(rigPath, ".gitignore") + ": add .gemini/settings.json\n"; !strings.Contains(plan+"\n", want) {
+	if want := "create " + filepath.Join(rigPath, ".gitignore") + ": add /.gemini/settings.json\n"; !strings.Contains(plan+"\n", want) {
 		t.Fatalf("plan missing %q:\n%s", want, plan)
 	}
-	if want := "create " + filepath.Join(cityPath, ".gitignore") + ": add .mcp.json\n"; !strings.Contains(plan+"\n", want) {
+	if want := "create " + filepath.Join(cityPath, ".gitignore") + ": add /.mcp.json\n"; !strings.Contains(plan+"\n", want) {
 		t.Fatalf("plan missing %q:\n%s", want, plan)
 	}
 
@@ -137,8 +198,8 @@ command = "uvx"
 		t.Fatalf("runStage1MCPProjection: %v", err)
 	}
 	for root, want := range map[string]string{
-		rigPath:  "# Gas City\n.gemini/settings.json\n",
-		cityPath: "# Gas City\n.mcp.json\n",
+		rigPath:  "# Gas City\n/.gemini/settings.json\n",
+		cityPath: "# Gas City\n/.mcp.json\n",
 	} {
 		got, err := os.ReadFile(filepath.Join(root, ".gitignore"))
 		if err != nil || string(got) != want {
@@ -147,6 +208,44 @@ command = "uvx"
 	}
 	if lines, err := planStage1MCPProjection(cityPath, cfg, stubLookPath, io.Discard); err != nil || strings.Contains(strings.Join(lines, "\n"), ".gitignore") {
 		t.Fatalf("plan after the pass = %q (err %v), want no .gitignore change", lines, err)
+	}
+}
+
+// gc's entries are anchored to the root they ignore (/.mcp.json), so a
+// .mcp.json deeper in the repository is not ignored. An earlier gc wrote them
+// unanchored; such an entry matches the file too and counts as present, so
+// an existing .gitignore does not change.
+func TestStage1MCPGitignoreKeepsAnEarlierGCsEntries(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude", "gemini"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude"},
+			{Name: "analyst", Scope: "city", Provider: "gemini"},
+		},
+	}
+	earlier := "node_modules/\n\n# Gas City\n.mcp.json\n/.gemini/settings.json\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".gitignore"), []byte(earlier), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := planStage1MCPProjection(cityPath, cfg, stubLookPath, io.Discard)
+	if err != nil {
+		t.Fatalf("planStage1MCPProjection: %v", err)
+	}
+	if plan := strings.Join(lines, "\n"); strings.Contains(plan, ".gitignore") {
+		t.Fatalf("plan changes .gitignore though it has both entries:\n%s", plan)
+	}
+	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, io.Discard); err != nil {
+		t.Fatalf("runStage1MCPProjection: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(cityPath, ".gitignore")); err != nil || string(got) != earlier {
+		t.Fatalf(".gitignore = %q (err %v), want it unchanged: %q", got, err, earlier)
 	}
 }
 
@@ -191,7 +290,7 @@ command = "uvx"
 	if _, ok := mcpServersInFile(t, filepath.Join(cityPath, ".mcp.json"))["notes"]; !ok {
 		t.Fatal("the city root was not projected before the failure")
 	}
-	if got, err := os.ReadFile(filepath.Join(cityPath, ".gitignore")); err != nil || string(got) != "# Gas City\n.mcp.json\n" {
+	if got, err := os.ReadFile(filepath.Join(cityPath, ".gitignore")); err != nil || string(got) != "# Gas City\n/.mcp.json\n" {
 		t.Fatalf("city .gitignore = %q (err %v), want the projected .mcp.json ignored", got, err)
 	}
 }
@@ -334,6 +433,27 @@ command = "uvx"
 	if data, err := os.ReadFile(filepath.Join(workDir, ".gemini", "settings.json")); err != nil || string(data) != team {
 		t.Fatalf("resolveTemplate changed the work dir's settings: %q (err %v)", data, err)
 	}
+
+	// The work dir goes away with its session; a later session checks it out
+	// again, file and all. The refusal is back, so the warning is too.
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTemplate(params, agent, agent.QualifiedName(), nil); err != nil {
+		t.Fatalf("resolveTemplate without the work dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workDir, ".gemini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".gemini", "settings.json"), []byte(team), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTemplate(params, agent, agent.QualifiedName(), nil); err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got := strings.Count(stderr.String(), want); got != 2 {
+		t.Fatalf("warning %q appeared %d times, want twice once the refusal came back:\n%s", want, got, stderr.String())
+	}
 }
 
 func TestMCPAdoptionDoctorCheck(t *testing.T) {
@@ -458,6 +578,75 @@ command = "uvx"
 	if notAdopted == nil || strings.Join(notAdopted.UnmanagedServers, ",") != "team-db" ||
 		strings.Join(notAdopted.RedefinedServers, ",") != "notes" || notAdopted.Remedy == "" {
 		t.Fatalf("projection.not_adopted = %+v", notAdopted)
+	}
+}
+
+// A pool or worktree session works in a checkout of its own. When that
+// checkout commits an MCP file of its own, gc mcp list --session says gc
+// leaves it alone.
+func TestMcpListSessionReportsAWorkDirFileGCLeavesAlone(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	writeProjectedMCPCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+command = "echo"
+prompt_mode = "none"
+`, `
+provider = "claude"
+scope = "city"
+max_active_sessions = 1
+`)
+	writeCatalogFile(t, cityDir, "mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionDir := filepath.Join(cityDir, "worktrees", "mayor-2")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, ".mcp.json"), []byte(teamMCPJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "mayor session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":      "mayor",
+			"session_name":  "s-mayor-2",
+			"agent_name":    "mayor-2",
+			"provider":      "claude",
+			"provider_kind": "claude",
+			"work_dir":      sessionDir,
+			"state":         "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"mcp", "list", "--session", bead.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mcp list --session exited %d: %s", code, stderr.String())
+	}
+	want := "Not delivered: gc leaves " + filepath.Join(sessionDir, ".mcp.json") +
+		` as it is, so the agent starts without these servers: gc does not manage it yet, and adopting it would drop MCP server "team-db"`
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("mcp list --session output missing %q:\n%s", want, stdout.String())
 	}
 }
 

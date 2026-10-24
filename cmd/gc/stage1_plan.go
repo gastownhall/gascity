@@ -50,7 +50,7 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 	}
 	lines = append(lines, orphans...)
 	for _, root := range sortedMapKeys(gitignore) {
-		missing := missingGitignoreEntries(fs, root, gitignore[root])
+		missing := missingMCPGitignoreEntries(fs, root, gitignore[root])
 		if len(missing) == 0 {
 			continue
 		}

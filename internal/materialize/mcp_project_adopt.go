@@ -3,6 +3,7 @@ package materialize
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -75,12 +76,29 @@ func (e *MCPAdoptionRefusedError) Remedy() string {
 	case e.ParseErr != nil && e.Provider == MCPProviderCodex:
 		return "to let gc manage it, fix its TOML or remove it"
 	case e.ParseErr != nil:
-		return "to let gc manage it, make it plain JSON (gc does not read comments or trailing commas) or remove it"
-	case len(e.Servers) == 0 && len(e.Redefined) == 0:
-		return "to let gc manage it, remove those entries from the file"
+		return "to let gc manage it, make it plain JSON (gc reads no JSONC comments or trailing commas, " +
+			"and no UTF-8 byte-order mark) or remove it"
 	}
-	return "to let gc manage it, define the servers you still need in gc's MCP catalog " +
-		"(an mcp/ directory) and remove those entries from the file"
+	var steps []string
+	switch {
+	case len(e.Servers) > 0:
+		steps = append(steps, "define the servers you still need in gc's MCP catalog (an mcp/ directory) "+
+			"and remove those entries from the file")
+	case len(e.Keys) > 0:
+		steps = append(steps, "remove those entries from the file")
+	}
+	if len(e.Redefined) > 0 {
+		servers, pronoun := quotedList("MCP server", e.Redefined), "it"
+		if len(e.Redefined) > 1 {
+			pronoun = "them"
+		}
+		if len(steps) == 0 {
+			steps = append(steps, "make the catalog's definition of "+servers+" match the file's, or remove "+pronoun+" from the file")
+		} else {
+			steps = append(steps, "for "+servers+", which both define, you can instead make the catalog's definition match the file's")
+		}
+	}
+	return "to let gc manage it, " + strings.Join(steps, "; ")
 }
 
 // dropped renders what adopting the file would drop: `MCP server "a"`,
@@ -150,13 +168,15 @@ func parseMCPDocument(provider string, data []byte) (map[string]any, error) {
 	return parseJSONDocument(data)
 }
 
+// parseJSONDocument decodes a JSON provider file. Its error gives only where
+// the file stops being valid (redactedJSONError).
 func parseJSONDocument(data []byte) (map[string]any, error) {
 	doc := map[string]any{}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return doc, nil
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, err
+		return nil, redactedJSONError(data, err)
 	}
 	if doc == nil {
 		doc = map[string]any{}
@@ -164,13 +184,53 @@ func parseJSONDocument(data []byte) (map[string]any, error) {
 	return doc, nil
 }
 
+// redactedJSONError reports where data stops being a valid JSON document, by
+// line and column. The decoder's own message quotes the offending text, and
+// a provider file's text can hold a secret; these errors reach warnings, the
+// controller log, gc doctor, and gc mcp list --json.
+func redactedJSONError(data []byte, err error) error {
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		line, col := lineAndColumn(data, syntax.Offset-1)
+		return fmt.Errorf("invalid JSON at line %d, column %d", line, col)
+	}
+	var typed *json.UnmarshalTypeError
+	if errors.As(err, &typed) {
+		line, col := lineAndColumn(data, typed.Offset-1)
+		return fmt.Errorf("a JSON %s where an object was expected, at line %d, column %d", typed.Value, line, col)
+	}
+	return errors.New("invalid JSON")
+}
+
+// lineAndColumn returns the 1-based line and column of byte offset off in
+// data, clamped to data.
+func lineAndColumn(data []byte, off int64) (int, int) {
+	if off < 0 {
+		off = 0
+	}
+	if off > int64(len(data)) {
+		off = int64(len(data))
+	}
+	before := data[:off]
+	line := bytes.Count(before, []byte("\n")) + 1
+	col := len(before) - bytes.LastIndexByte(before, '\n')
+	return line, col
+}
+
+// parseTOMLDocument decodes a TOML provider file. Its error gives only where
+// the file stops being valid: the decoder's message quotes the offending
+// text, as redactedJSONError explains.
 func parseTOMLDocument(data []byte) (map[string]any, error) {
 	doc := map[string]any{}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return doc, nil
 	}
 	if _, err := toml.Decode(string(data), &doc); err != nil {
-		return nil, err
+		var parse toml.ParseError
+		if errors.As(err, &parse) {
+			return nil, fmt.Errorf("invalid TOML at line %d, column %d", parse.Position.Line, parse.Position.Col)
+		}
+		return nil, errors.New("invalid TOML")
 	}
 	if doc == nil {
 		doc = map[string]any{}

@@ -359,11 +359,14 @@ Adoption and migration rules:
   a pack the rig imports; only a file in one agent's own work dir can take
   that agent's `agents/<name>/mcp/` (see "Shared Target Validation"). It
   says so in:
-  - stage 1's warning, once per process
+  - stage 1's warning, once until the refusal changes (its message, or the
+    file's modification time or size) or clears (gc writes the target, or
+    finds nothing in its way); then again
   - the stage-2 pre-start's warning (`gc internal project-mcp`, which still
     exits 0 so the session starts), and, since a runtime discards a
-    successful pre-start's output, a warning from template resolution, once
-    per process, where the controller logs
+    successful pre-start's output, a warning from template resolution, on
+    the same once-until-it-changes-or-clears terms, where the controller
+    logs
   - the `gc start --dry-run` plan (`leave <file> as it is`) for scope roots;
     a configured agent's own work dir gets the template-resolution warning
   - `gc mcp list` ("Not delivered", `projection.not_adopted` in `--json`)
@@ -461,9 +464,14 @@ Rules:
   manages is a hard error; one it does not manage is left alone, as a
   refused adoption, when there are servers to project, and ignored when
   there are none
-- `.gitignore` updates are best-effort and local-only, and cover the files gc
-  projects at that root (`.mcp.json`, `.gemini/settings.json`,
-  `.codex/config.toml`, and so on), not files it leaves alone
+- `.gitignore` updates are best-effort and local-only. They name the files gc
+  projects at that root, anchored to it (`/.mcp.json`,
+  `/.gemini/settings.json`, `/.codex/config.toml`, and so on), not files it
+  leaves alone, and not files of the same name deeper in the repository. An
+  entry an earlier gc wrote unanchored (`.mcp.json`) counts as present and
+  is left as it is
+- parse errors in provider files name the line and column, never the
+  offending text, which can be part of a secret
 - failed `.gitignore` updates surface as doctor warnings; they are not silent
 - diagnostics, doctor output, equality failures, and drift logs never print
   expanded secret values; they identify field names and source paths only
