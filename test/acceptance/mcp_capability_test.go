@@ -38,6 +38,10 @@ func writeHTTPMCPServerPack(t *testing.T, dir, server string) {
 // providing an HTTP MCP server into a city with an agent on the cursor
 // provider family, whose MCP config carries only stdio servers.
 func TestImportedHTTPMCPServerSkipsAgentsThatCannotReceiveIt(t *testing.T) {
+	// The pack the city imports outlives the city: its temp dir is made
+	// first, so its cleanup runs after the city's gc stop, which loads the
+	// city's config.
+	packDir := filepath.Join(helpers.TempDir(t), "search")
 	c := helpers.NewCity(t, testEnv)
 	c.InitNoStart("claude")
 	c.AppendToConfig(`
@@ -48,7 +52,6 @@ prompt_mode = "none"
 `)
 	c.WriteV2AgentDir("researcher", `provider = "editor"`)
 
-	packDir := filepath.Join(t.TempDir(), "search")
 	writeHTTPMCPServerPack(t, packDir, "search")
 
 	const skipped = `start without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness`

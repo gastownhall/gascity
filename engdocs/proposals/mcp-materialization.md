@@ -711,14 +711,21 @@ Projection is fail-closed.
 - servers an agent's provider cannot receive follow
   [Servers a provider cannot receive](#servers-a-provider-cannot-receive)
 - undeliverable runtime/workdir topologies with effective MCP are hard errors
-- projection write or permission failures are hard errors
+- projection write or permission failures are hard errors, with one
+  exception: a stage-1 pass run by a config reload that fails (a target
+  conflict, a write error) warns, leaves the targets it did not reach as they
+  were, and lets the reload apply. A city start still fails on it.
 
-There is no best-effort warning mode once effective MCP exists, with two
-exceptions: servers a provider cannot receive (below), and a provider-native
-file gc does not manage and would have to drop content from, which is left
-as it is, with a warning (see "Ownership and cleanup"). That file belongs to
-a repository or a user, not to gc, and failing would stop every agent in the
-city over it.
+Apart from these exceptions, there is no best-effort warning mode once
+effective MCP exists:
+
+- servers a provider cannot receive (below)
+- agents whose provider does not resolve, which stage 1 skips with a warning
+- a failed projection on reload, which warns and lets the reload apply
+- a provider-native file gc does not manage and would have to drop content
+  from, which is left as it is, with a warning (see "Ownership and
+  cleanup"): that file belongs to a repository or a user, not to gc, and
+  failing would stop every agent in the city over it
 
 ### Servers a provider cannot receive
 
@@ -753,8 +760,9 @@ A skipped server is visible in every surface that shows MCP:
 
 - each stage-1 pass (the supervisor log, or the output of `gc start
   --foreground` and `--dry-run`) prints one warning per group of agents that
-  skip the same servers, once per process; agents that cannot start are
-  reported the same way
+  skip the same servers, once per process, naming the city; agents that
+  cannot start are reported the same way. An implicit agent, which gc adds
+  for each declared provider, is named with the provider it stands for
 - `gc mcp list --agent|--session` lists it under "Not projected" (`skipped` in
   `--json`) instead of with the projected servers
 - `gc doctor` reports it as an `mcp-config` warning
@@ -763,7 +771,10 @@ A skipped server is visible in every surface that shows MCP:
   provider cannot receive: `gc start` starts the rest of the city
 - `gc import add` names the agents that will start without the new import's
   servers, comparing the city before and after the add
-- the stage-2 `gc internal project-mcp` pre-start prints it when it runs
+- the stage-2 `gc internal project-mcp` pre-start prints it, but a runtime
+  keeps a pre-start's output only when the pre-start fails (tmux, for one,
+  discards it otherwise), so for a session in its own work dir the other
+  surfaces above are where it shows
 
 Skipped servers are not part of the projection, its hash, or the session
 fingerprint, so the agent's MCP drift tracks only what it receives.

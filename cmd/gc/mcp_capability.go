@@ -197,12 +197,10 @@ func describeMCPOrigin(server materialize.MCPServer) string {
 
 // describeMCPServerSkips renders one line for the agents that start without
 // the same skipped servers: who, which servers (transport and origin), and
-// why their provider cannot receive them.
+// why their provider cannot receive them. agents are labels
+// (mcpAgentLabel), already quoted.
 func describeMCPServerSkips(agents []string, skipped []mcpServerSkip) string {
-	quoted := make([]string, len(agents))
-	for i, agent := range agents {
-		quoted[i] = strconv.Quote(agent)
-	}
+	quoted := agents
 	who, verb := "agent", "starts"
 	if len(agents) > 1 {
 		who, verb = "agents", "start"
@@ -268,6 +266,17 @@ func (g *mcpSkipGroups) lines() []string {
 	return out
 }
 
+// mcpAgentLabel names an agent in an MCP warning: its quoted qualified name,
+// and for an implicit agent, which gc adds for every declared provider and
+// the user never defined, which provider it stands for.
+func mcpAgentLabel(agent *config.Agent) string {
+	label := strconv.Quote(agent.QualifiedName())
+	if agent.Implicit {
+		label += " (the implicit agent for provider " + strconv.Quote(agent.Provider) + ")"
+	}
+	return label
+}
+
 // resolveAnyProviderBinary is a LookPathFunc that finds every binary, so a
 // provider's family resolves from config alone. Static checks use it: what a
 // city's agents can receive must not depend on what this host has installed.
@@ -276,10 +285,12 @@ func resolveAnyProviderBinary(name string) (string, error) { return name, nil }
 // mcpCapabilityReport is what a city's MCP config means for each agent whose
 // provider cannot receive some of its servers.
 type mcpCapabilityReport struct {
-	// skips maps an agent to the shared-layer servers it starts without.
+	// skips maps an agent's label (mcpAgentLabel) to the shared-layer
+	// servers it starts without.
 	skips map[string][]mcpServerSkip
-	// blocked maps an agent to the error that stops it from starting: its
-	// own mcp/ directory declares servers its provider cannot receive.
+	// blocked maps an agent's label to the error that stops it from
+	// starting: its own mcp/ directory declares servers its provider cannot
+	// receive.
 	blocked map[string]string
 }
 
@@ -311,9 +322,9 @@ func collectMCPCapabilityReport(cityPath string, cfg *config.City) mcpCapability
 		_, skipped, err := partitionAgentMCPCatalog(kind, catalog)
 		switch {
 		case err != nil:
-			report.blocked[agent.QualifiedName()] = err.Error()
+			report.blocked[mcpAgentLabel(agent)] = err.Error()
 		case len(skipped) > 0:
-			report.skips[agent.QualifiedName()] = skipped
+			report.skips[mcpAgentLabel(agent)] = skipped
 		}
 	}
 	return report
@@ -353,7 +364,8 @@ func (r mcpCapabilityReport) lines() []string {
 }
 
 // groupBlockedAgents renders agents that cannot start, one line per reason:
-// `agents "a", "b" cannot start: <reason>`.
+// `agents "a", "b" cannot start: <reason>`. blocked is keyed by agent label
+// (mcpAgentLabel).
 func groupBlockedAgents(blocked map[string]string) []string {
 	byReason := make(map[string][]string)
 	for agent, reason := range blocked {
@@ -366,14 +378,10 @@ func groupBlockedAgents(blocked map[string]string) []string {
 	sort.Strings(reasons)
 	out := make([]string, 0, len(reasons))
 	for _, reason := range reasons {
-		agents := byReason[reason]
-		sort.Strings(agents)
-		quoted := make([]string, len(agents))
-		for i, agent := range agents {
-			quoted[i] = strconv.Quote(agent)
-		}
+		quoted := byReason[reason]
+		sort.Strings(quoted)
 		who := "agent " + quoted[0] + " cannot start"
-		if len(agents) > 1 {
+		if len(quoted) > 1 {
 			who = "agents " + strings.Join(quoted, ", ") + " cannot start"
 		}
 		out = append(out, who+": "+reason)

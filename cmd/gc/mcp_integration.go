@@ -225,7 +225,9 @@ func ensureMCPGitignoreBestEffort(root string, entries []string, stderr io.Write
 // and warns again.
 var stage1MCPSkipWarned sync.Map
 
-func warnStage1MCPOnce(cityPath, message string, stderr io.Writer) {
+// warnStage1MCPOnce prints a stage-1 skip warning naming its city, since a
+// supervisor's log interleaves every city it runs.
+func warnStage1MCPOnce(cityPath, cityName, message string, stderr io.Writer) {
 	if stderr == nil {
 		return
 	}
@@ -233,7 +235,7 @@ func warnStage1MCPOnce(cityPath, message string, stderr io.Writer) {
 	if _, seen := stage1MCPSkipWarned.LoadOrStore(key, true); seen {
 		return
 	}
-	fmt.Fprintf(stderr, "gc: warning: %s\n", message) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc: warning: city %q: %s\n", cityName, message) //nolint:errcheck // best-effort stderr
 }
 
 // isProviderResolutionError reports whether err says an agent's provider
@@ -310,7 +312,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		if isAgentMCPCapabilityError(err) || isProviderResolutionError(err) {
 			// One agent that cannot start must not fail the whole city:
 			// skip it here. Its own session start reports the same error.
-			blocked[agent.QualifiedName()] = err.Error()
+			blocked[mcpAgentLabel(agent)] = err.Error()
 			if key, ok := heldStage1MCPKey(cityPath, cfg, agent, pathOnly); ok {
 				held = append(held, key)
 			}
@@ -321,7 +323,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		}
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
-		skips.add(agent.QualifiedName(), view.Skipped)
+		skips.add(mcpAgentLabel(agent), view.Skipped)
 		if view.Delivery != "stage1" {
 			continue
 		}
@@ -354,8 +356,9 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		}
 	}
 
+	cityName := loadedCityName(cfg, cityPath)
 	for _, line := range append(skips.lines(), groupBlockedAgents(blocked)...) {
-		warnStage1MCPOnce(cityPath, line, stderr)
+		warnStage1MCPOnce(cityPath, cityName, line, stderr)
 	}
 
 	keys := make([]string, 0, len(byKey))

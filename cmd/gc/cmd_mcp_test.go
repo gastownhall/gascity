@@ -157,6 +157,65 @@ API_TOKEN = "super-secret"
 	}
 }
 
+// An ACP session receives its servers in session/new; gc writes no file for
+// it, so gc mcp list shows the in-band delivery instead of a file target.
+func TestMcpListShowsInBandDeliveryForACPAgents(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.relay]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+supports_acp = true
+acp_command = "echo"
+`, `
+provider = "relay"
+scope = "city"
+session = "acp"
+`)
+	writeCatalogFile(t, cityDir, "mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"mcp", "list", "--agent", "mayor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mcp list --agent exited %d: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Target: (none: an ACP session receives these servers in-band, in session/new)",
+		"Delivery: acp",
+		"notes",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("mcp list output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), ".mcp.json") {
+		t.Fatalf("mcp list shows a file target for an ACP agent:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	if code := run([]string{"mcp", "list", "--agent", "mayor", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mcp list --agent --json exited %d: %s", code, stderr.String())
+	}
+	contentOpValidate(t, "schemas/mcp/list/result.schema.json", stdout.String())
+	var got projectedMCPJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Projection.Delivery != "acp" || got.Projection.Target != "" || len(got.Servers) != 1 {
+		t.Fatalf("projection = %+v, servers %d; want acp delivery, no target, one server", got.Projection, len(got.Servers))
+	}
+}
+
 func TestMcpListAgentRequiresSessionForMultiSessionTargets(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

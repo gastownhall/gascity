@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -81,7 +82,7 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if len(mcp.Skipped) > 0 {
-				fmt.Fprintf(stderr, "gc internal project-mcp: warning: %s\n", describeMCPServerSkips([]string{identity}, mcp.Skipped)) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc internal project-mcp: warning: %s\n", describeMCPServerSkips([]string{strconv.Quote(identity)}, mcp.Skipped)) //nolint:errcheck // best-effort stderr
 			}
 			catalog, projection := mcp.Catalog, mcp.Projection
 			if projection.Provider == "" {

@@ -216,6 +216,10 @@ func mcpViewAdoptionRefusal(view resolvedMCPProjection) *materialize.MCPAdoption
 	return refused
 }
 
+// acpMCPTarget is gc mcp list's target for an ACP session, which receives its
+// servers in the session/new request; gc writes no provider-native file.
+const acpMCPTarget = "(none: an ACP session receives these servers in-band, in session/new)"
+
 func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agentName, sessionID string, refused *materialize.MCPAdoptionRefusedError) projectedMCPJSON {
 	servers := make([]projectedMCPServerJSON, 0, len(view.Catalog.Servers))
 	for _, server := range view.Catalog.Servers {
@@ -277,6 +281,12 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 			notAdopted.ParseError = refused.ParseErr.Error()
 		}
 	}
+	target := view.Projection.Target
+	if view.Delivery == "acp" {
+		// No file is written for an ACP session; delivery says how it gets
+		// its servers.
+		target = ""
+	}
 	return projectedMCPJSON{
 		SchemaVersion: "1",
 		OK:            true,
@@ -288,7 +298,7 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 		},
 		Projection: projectedMCPTargetJSON{
 			Provider:     view.Projection.Provider,
-			Target:       view.Projection.Target,
+			Target:       target,
 			WorkDir:      view.WorkDir,
 			Delivery:     view.Delivery,
 			ScopeRoot:    view.ScopeRoot,
@@ -303,9 +313,14 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 
 func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProjection, refused *materialize.MCPAdoptionRefusedError) {
 	provider, target := view.Projection.Provider, view.Projection.Target
-	if provider == "" && strings.TrimSpace(view.ProviderKind) != "" {
-		// A harness gc cannot write an MCP config for has no target.
+	if provider == "" {
 		provider = view.ProviderKind
+	}
+	switch {
+	case view.Delivery == "acp":
+		target = acpMCPTarget
+	case view.Projection.Provider == "" && strings.TrimSpace(view.ProviderKind) != "":
+		// A harness gc cannot write an MCP config for has no target.
 		target = "(none: this harness cannot receive MCP)"
 	}
 	fmt.Fprintf(w, "Provider: %s\n", provider) //nolint:errcheck // best-effort
