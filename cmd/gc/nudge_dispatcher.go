@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -186,8 +187,10 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 	// tick would multiply lock contention against the claim path below for
 	// no benefit (the counters only need tick-granularity, not per-item).
 	skipCounts := make(map[string]int64)
+	census := nudgeFenceCensusFromSnapshot(sessionBeads)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		target.fenceCensus = census
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
@@ -266,6 +269,26 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// nudgeFenceCensusFromSnapshot is a dispatch pass's Leg-B census: the open
+// sessions of the pass's snapshot that still hold a nudge fence
+// (sessionHoldsNudgeFence), built at most once and handed to every claim of the
+// pass, instead of one store list per matching session.
+func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[string]struct{}, bool) {
+	var once sync.Once
+	var live map[string]struct{}
+	return func() (map[string]struct{}, bool) {
+		once.Do(func() {
+			live = make(map[string]struct{})
+			for _, info := range snapshot.OpenInfos() {
+				if sessionHoldsNudgeFence(info) {
+					live[info.ID] = struct{}{}
+				}
+			}
+		})
+		return live, true
+	}
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

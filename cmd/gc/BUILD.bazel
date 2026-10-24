@@ -1630,6 +1630,7 @@ go_test(
         "nudge_poller_city_stop_test.go",
         "nudge_poller_env_test.go",
         "nudge_queue_bounded_maintenance_test.go",
+        "nudge_queue_lock_free_test.go",
         "nudge_queue_seam_test.go",
         "nudge_queue_shim_test.go",
         "nudge_shadow_debts_test.go",

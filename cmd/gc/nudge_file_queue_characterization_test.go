@@ -144,6 +144,9 @@ func nudgeQueueLockHeldForTest(city string) bool {
 // probe fails the test when what is a store call, store open or census made
 // while the queue lock is held.
 func (h *nqCharHarness) probe(what string) {
+	if h.lockHeldByTest {
+		return
+	}
 	if nudgeQueueLockHeldForTest(h.city) {
 		h.underLock = append(h.underLock, what)
 		h.t.Errorf("%s ran under the nudge queue lock", what)
@@ -215,8 +218,11 @@ type nqCharHarness struct {
 	// underLock lists the store calls, opens and census calls made while
 	// the queue lock was held.
 	underLock []string
-	warnings  bytes.Buffer
-	out       bytes.Buffer
+	// lockHeldByTest turns the probe off while the test itself holds the
+	// queue lock on purpose.
+	lockHeldByTest bool
+	warnings       bytes.Buffer
+	out            bytes.Buffer
 }
 
 func newNQCharHarness(t *testing.T) *nqCharHarness {
@@ -250,6 +256,7 @@ func newNQCharHarness(t *testing.T) *nqCharHarness {
 	t.Cleanup(func() { openNudgeWorkStore = prevWork })
 	prevCensus := liveNudgeFenceSessionIDs
 	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		h.probe("session census")
 		h.census++
 		return h.live
 	}

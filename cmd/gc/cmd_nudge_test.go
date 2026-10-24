@@ -5763,6 +5763,12 @@ func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
 func TestCmdNudgeDropNonexistentIDReportsError(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	// A city whose runtime directory exists. Classifying against an empty
+	// queue reads a snapshot and creates nothing, so the city must not depend
+	// on that read to look like one.
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GC_CITY", dir)
 	// A city dir with no queue state file at all is a legitimate case ("no
 	// nudge has ever been queued here") and must classify the same as one

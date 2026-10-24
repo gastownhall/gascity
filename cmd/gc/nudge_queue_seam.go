@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -20,6 +21,15 @@ type nudgeQueueHandle struct {
 	// Repin moves in-flight claims onto a new delivery key without a
 	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
 	Repin nudgeClaimRepinner
+	// Probe answers whether a claim would claim anything, from a lock-free
+	// snapshot (the poll loop's due-work gate, nudgePollGate).
+	Probe nudgeClaimProber
+}
+
+// nudgeClaimProber reports, without the queue lock and without claiming,
+// whether ClaimBatch for ct at now would claim anything.
+type nudgeClaimProber interface {
+	WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error)
 }
 
 // nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.
@@ -69,6 +79,7 @@ func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 		Location: q.location(),
 		Skips:    q,
 		Repin:    q,
+		Probe:    q,
 	}
 }
 
@@ -80,8 +91,17 @@ func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
 
 // claimTarget is the contract's view of t: its queue keys, its fence, and a
 // census of cityPath's sessions, taken at most once, that lets it adopt a
-// superseded session's nudges.
+// superseded session's nudges. A target that carries a census of its own
+// (fenceCensus, the dispatcher's per-pass census) answers with it instead.
 func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
+	if t.fenceCensus != nil {
+		return storebinding.ClaimTarget{
+			QueueKeys:         t.queueKeys(),
+			SessionID:         t.sessionID,
+			ContinuationEpoch: t.continuationEpoch,
+			LiveFenceSessions: t.fenceCensus,
+		}
+	}
 	var once sync.Once
 	var ids map[string]struct{}
 	return storebinding.ClaimTarget{

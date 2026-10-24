@@ -160,6 +160,10 @@ type nudgeTarget struct {
 	// (fileClaimTarget): its queue keys are exactly claimKeys.
 	fromClaim bool
 	claimKeys []string
+	// fenceCensus, when set, is the Leg-B census claimTarget hands a claim
+	// instead of listing the city's sessions itself: the dispatcher's
+	// per-pass census.
+	fenceCensus func() (map[string]struct{}, bool)
 }
 
 type nudgeStatusJSON struct {
@@ -1101,6 +1105,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	var idleTicksSinceObserve int
+	gate := newNudgePollGate()
+	skips := &nudgePollSkips{cityPath: target.cityPath}
+	defer func() { skips.flush(time.Now(), stderr) }()
 	for {
 		// Each tick that observes a changed beads.json re-parses the whole-file
 		// store, leaving several hundred MB of transient garbage. The soft
@@ -1119,7 +1126,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		// more than nudgePollIdleObserveEvery consecutive ticks, so a poller
 		// whose session died while its queue sat empty still notices and
 		// exits instead of being immortalized (ga-8x82f4).
-		hasDue := nudgePollTargetHasDueWork(target, time.Now())
+		hasDue := gate.hasDue(target, time.Now())
 		observeThisTick := hasDue
 		if !observeThisTick {
 			idleTicksSinceObserve++
@@ -1184,47 +1191,112 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			continue
 		}
 		// Mirror dispatchAllQueuedNudges' skip accounting (nudge_dispatcher.go),
-		// gate included: "not-delivered" means this target HAD due queued work
-		// and still got nothing this tick -- most commonly
+		// gate included: "not-delivered" means this target HAD work it could
+		// claim and still got nothing this tick -- most commonly
 		// tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a
-		// continuously busy session. A running session with nothing queued is
-		// the dispatcher's separate "not-matched" class and is deliberately not
-		// counted here: the poll loop never exits while the session runs, so
-		// counting it would turn this into a tick counter and take the queue
-		// flock every interval. See #5317. Re-checked fresh (not reusing the
-		// pre-observe hasDue above) because the delivery attempt just run can
-		// itself have consumed the only due item.
-		if nudgePollTargetHasDueWork(target, time.Now()) {
+		// continuously busy session. A running session with nothing it may
+		// claim (nothing queued, or only items fenced to a live sibling) is
+		// the dispatcher's separate "not-matched" class and is deliberately
+		// not counted here: the poll loop never exits while the session runs,
+		// so counting it would turn this into a tick counter. See #5317.
+		// Re-checked fresh (not reusing the pre-observe hasDue above) because
+		// the delivery attempt just run can itself have consumed the only due
+		// item. The counts are flushed at most every
+		// nudgePollSkipFlushInterval, not once per tick.
+		if now := time.Now(); gate.hasDue(target, now) {
 			skipReason := "not-delivered"
 			if pollErr != nil {
 				skipReason = "not-delivered-error"
 			}
-			if recErr := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Skips.RecordDispatchSkips(map[string]int64{skipReason: 1}); recErr != nil {
-				fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
-			}
+			skips.add(skipReason, now, stderr)
 		}
 		time.Sleep(interval)
 	}
 }
 
-// nudgePollTargetHasDueWork reports whether the queue currently holds work
-// this target could have received on this tick: a due pending item, or an
-// in-flight item whose lease has expired (recoverable on the next claim).
-// It mirrors the dispatcher's pendingAgents gate (nudge_dispatcher.go) so the
-// poll loop's "not-delivered" means the same thing the dispatcher's does.
-// Read-only on purpose: the skip counter must not take the queue flock on
-// every tick.
+// nudgePollTargetHasDueWork reports whether a claim for this target would
+// claim anything now: a due item it may take, or an in-flight item whose lease
+// has expired and that it may take once recovered. An item fenced to another
+// live session is not due work for this target (ga-fsp5w9): every session of
+// one agent matches that agent's items by key, and a sibling that cannot claim
+// them must not observe, claim or count a skip for them. It reads a lock-free
+// snapshot and takes no lock; the census of the city's sessions is read only
+// when a due candidate is fenced to another session.
 func nudgePollTargetHasDueWork(target nudgeTarget, now time.Time) bool {
-	keys, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Queue.DueKeys(now)
-	if err != nil {
-		return false
+	return newNudgePollGate().hasDue(target, now)
+}
+
+// nudgePollCensusTTL is how long the poll gate reuses a census that showed
+// every candidate fenced to a live session.
+const nudgePollCensusTTL = 30 * time.Second
+
+// nudgePollSkipFlushInterval is how often the poll loop flushes the skip
+// counts it accumulated into the queue state.
+const nudgePollSkipFlushInterval = 30 * time.Second
+
+// nudgePollGate is the poll loop's due-work gate (nudgePollTargetHasDueWork)
+// with a short census cache, so N sibling pollers do not each list the city's
+// sessions every tick. The cache is used only to skip a tick: when the gate
+// sees claimable work, including an adoption, the poller claims with a fresh
+// census (claimDueQueuedNudgeBatchForTarget), so an adoption decision is as
+// fresh as an uncached one.
+type nudgePollGate struct {
+	census   map[string]struct{}
+	censusOK bool
+	censusAt time.Time
+}
+
+func newNudgePollGate() *nudgePollGate { return &nudgePollGate{} }
+
+func (g *nudgePollGate) hasDue(target nudgeTarget, now time.Time) bool {
+	ct := target.claimTarget(target.cityPath)
+	fresh := ct.LiveFenceSessions
+	ct.LiveFenceSessions = func() (map[string]struct{}, bool) {
+		if g.censusOK && !g.censusAt.IsZero() && now.Sub(g.censusAt) < nudgePollCensusTTL {
+			return g.census, true
+		}
+		live, ok := fresh()
+		g.census, g.censusOK, g.censusAt = live, ok, now
+		return live, ok
 	}
-	for _, key := range keys {
-		if target.matchesQueueAgent(key) {
-			return true
+	would, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Probe.WouldClaimBatch(ct, now)
+	return err == nil && would
+}
+
+// nudgePollSkips accumulates the poll loop's skip counts and flushes them at
+// most every nudgePollSkipFlushInterval, and at exit, so a poller takes the
+// queue lock for its counters once per interval, not once per tick.
+type nudgePollSkips struct {
+	cityPath  string
+	counts    map[string]int64
+	lastFlush time.Time
+}
+
+func (s *nudgePollSkips) add(reason string, now time.Time, stderr io.Writer) {
+	if s.counts == nil {
+		s.counts = map[string]int64{}
+		if s.lastFlush.IsZero() {
+			s.lastFlush = now
 		}
 	}
-	return false
+	s.counts[reason]++
+	if now.Sub(s.lastFlush) >= nudgePollSkipFlushInterval {
+		s.flush(now, stderr)
+	}
+}
+
+func (s *nudgePollSkips) flush(now time.Time, stderr io.Writer) {
+	if len(s.counts) == 0 {
+		return
+	}
+	if err := openNudgeQueue(s.cityPath, beads.NudgesStore{}).Skips.RecordDispatchSkips(s.counts); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", err) //nolint:errcheck
+		}
+		return
+	}
+	s.counts = nil
+	s.lastFlush = now
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {

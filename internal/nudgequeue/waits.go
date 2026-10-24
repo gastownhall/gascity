@@ -45,8 +45,11 @@ func withdraw(cityPath string, ids []string, store beads.Store, now string) erro
 		return removeWaitNudgeIDs(cityPath, remove)
 	}
 
+	// The candidates are read from a lock-free snapshot: the read changes
+	// nothing, and the removal below matches by (ID, BeadID, CreatedAt) under
+	// the lock.
 	candidates := map[string][]withdrawCandidate{}
-	if err := WithState(cityPath, func(state *State) error {
+	if err := UpdateIfChanged(cityPath, func(state *State) error {
 		candidates = queuedWaitNudgeCandidates(state, remove)
 		return nil
 	}); err != nil {

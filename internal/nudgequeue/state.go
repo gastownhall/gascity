@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -181,6 +182,21 @@ func debtTime(item Item) time.Time {
 // that rule, not at a budget that is too small.
 const defaultLockWaitTimeout = 8 * time.Second
 
+// lockWaitTimeout is the wait budget WithState and UpdateIfChanged use:
+// defaultLockWaitTimeout, unless a test shortened it (SetLockWaitForTest).
+var lockWaitTimeout atomic.Int64
+
+func init() { lockWaitTimeout.Store(int64(defaultLockWaitTimeout)) }
+
+// SetLockWaitForTest sets the lock wait budget of WithState and
+// UpdateIfChanged to d and returns the restore. It exists for tests that hold
+// the queue lock on purpose and must not wait the production budget out;
+// production code never calls it.
+func SetLockWaitForTest(d time.Duration) (restore func()) {
+	prev := lockWaitTimeout.Swap(int64(d))
+	return func() { lockWaitTimeout.Store(prev) }
+}
+
 // ErrQueueBusy reports that the queue lock was not taken within the wait
 // budget. Nothing was read or written; a retry may succeed.
 var ErrQueueBusy = errors.New("nudge queue busy")
@@ -203,7 +219,7 @@ func (e lockTimeoutError) Is(target error) bool { return target == ErrQueueBusy 
 // that must keep cycling other work under contention -- can call
 // withStateBounded directly instead.
 func WithState(cityPath string, fn func(*State) error) error {
-	return withStateBounded(cityPath, defaultLockWaitTimeout, fn)
+	return withStateBounded(cityPath, time.Duration(lockWaitTimeout.Load()), fn)
 }
 
 // nudgeQueueLockPollInterval is how often withStateBounded retries a
@@ -260,22 +276,36 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, fn func(*State
 // reset anything it captures (claimed items, buckets) at its start. A dry run
 // that fails falls through to the locked run, whose error is the answer.
 func UpdateIfChanged(cityPath string, fn func(*State) error) error {
-	return updateIfChangedBounded(cityPath, defaultLockWaitTimeout, fn)
+	return updateIfChangedBounded(cityPath, time.Duration(lockWaitTimeout.Load()), fn)
 }
 
 func updateIfChangedBounded(cityPath string, waitTimeout time.Duration, fn func(*State) error) error {
-	if state, _, err := loadStateBytes(cityPath); err == nil {
-		before, err := marshalState(state)
-		if err == nil {
-			if fnErr := fn(&state); fnErr == nil {
-				after, err := marshalState(state)
-				if err == nil && bytes.Equal(before, after) {
-					return nil
-				}
-			}
-		}
+	if changed, err := DryRun(cityPath, fn); err == nil && !changed {
+		return nil
 	}
 	return withStateBounded(cityPath, waitTimeout, fn)
+}
+
+// DryRun runs fn on a lock-free snapshot of the queue (a whole committed
+// state: writes are atomic renames) and reports whether fn changed it. It
+// takes no lock and writes nothing. fn must be pure (see withStateBounded).
+func DryRun(cityPath string, fn func(*State) error) (bool, error) {
+	state, _, err := loadStateBytes(cityPath)
+	if err != nil {
+		return false, err
+	}
+	before, err := marshalState(state)
+	if err != nil {
+		return false, err
+	}
+	if err := fn(&state); err != nil {
+		return false, err
+	}
+	after, err := marshalState(state)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(before, after), nil
 }
 
 // lockState takes the queue's exclusive flock within waitTimeout and returns

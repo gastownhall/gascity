@@ -23,6 +23,7 @@ import (
 var nudgeQueueRawAccess = map[string]bool{
 	"nudgequeue.WithState":          true,
 	"nudgequeue.UpdateIfChanged":    true,
+	"nudgequeue.DryRun":             true,
 	"nudgequeue.LoadState":          true,
 	"nudgequeue.WithdrawWaitNudges": true,
 	"nudgequeue.StatePath":          true,

@@ -31,7 +31,7 @@ func pinQueuedNudgeClaims(cityPath string, ids []string, batch string) error {
 	for _, id := range ids {
 		want[id] = true
 	}
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	return updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		pinned := 0
 		for i := range state.InFlight {
 			if want[state.InFlight[i].ID] {
@@ -161,27 +161,111 @@ func maintainNudgeQueue(state *nudgeQueueState, ledger *nudgeShadowLedger, now, 
 }
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
-	return claimDueQueuedNudges(cityPath, now, match, nil)
+	plain := func(item queuedNudge, _ func() map[string]struct{}) bool { return match(item) }
+	return claimDueQueuedNudges(cityPath, now, plain, nil, nil)
 }
 
-// claimDueQueuedNudges claims every due nudge match accepts and pins nothing
-// (claimDueQueuedNudgesMatching), or, given a batchTarget, that target's next
-// delivery batch (claimDueQueuedNudgeBatchForTarget).
-func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge) bool, batchTarget *nudgeTarget) ([]queuedNudge, error) {
-	ledger := newNudgeShadowLedger(now)
-	var claimed []queuedNudge
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		ledger.reset()
-		claimed = nil
-		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
-		claimed = claimQueuedNudges(state, now, match, batchTarget)
+// nudgeClaimMatch is a claim predicate given the claim's Leg-B census (see
+// queuedNudgeClaimableForTarget).
+type nudgeClaimMatch func(item queuedNudge, liveSessions func() map[string]struct{}) bool
+
+// nudgeClaimCensus is a claim's Leg-B session census. The census lists the
+// city's sessions, so it is read outside the queue lock, before the claim's
+// locked run (ga-fsp5w9): a run that meets a candidate fenced to another
+// session before the census was read records that it needs it and treats the
+// candidate as not claimable, which is the fail-closed answer.
+type nudgeClaimCensus struct {
+	read   bool
+	live   map[string]struct{}
+	needed bool
+}
+
+func (c *nudgeClaimCensus) liveSessions() map[string]struct{} {
+	if !c.read {
+		c.needed = true
 		return nil
-	})
-	if err != nil {
+	}
+	return c.live
+}
+
+// nudgeClaimRun is one claim, run as a pure queue callback: the whole-queue
+// maintenance pass, then the claim.
+type nudgeClaimRun struct {
+	cityPath    string
+	now         time.Time
+	match       nudgeClaimMatch
+	readCensus  func() (map[string]struct{}, bool)
+	batchTarget *nudgeTarget
+
+	census  nudgeClaimCensus
+	ledger  *nudgeShadowLedger
+	claimed []queuedNudge
+}
+
+func newNudgeClaimRun(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) *nudgeClaimRun {
+	return &nudgeClaimRun{cityPath: cityPath, now: now, match: match, readCensus: readCensus, batchTarget: batchTarget, ledger: newNudgeShadowLedger(now)}
+}
+
+func (r *nudgeClaimRun) run(state *nudgeQueueState) error {
+	r.ledger.reset()
+	r.claimed = nil
+	maintainNudgeQueue(state, r.ledger, r.now, r.now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
+	r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool { return r.match(item, r.census.liveSessions) }, r.batchTarget)
+	return nil
+}
+
+// dryRun runs the claim on a lock-free snapshot and reports whether it would
+// change the queue. When the snapshot has a candidate only the census can
+// decide, it reads the census once, outside any lock, and runs again.
+func (r *nudgeClaimRun) dryRun() (bool, error) {
+	changed, err := nudgequeue.DryRun(r.cityPath, r.run)
+	if err != nil || !r.census.needed || r.census.read || r.readCensus == nil {
+		return changed, err
+	}
+	live, ok := r.readCensus()
+	if !ok {
+		live = nil
+	}
+	r.census.read, r.census.live = true, live
+	return nudgequeue.DryRun(r.cityPath, r.run)
+}
+
+// claimDueQueuedNudges claims every due nudge match accepts and pins nothing,
+// or, given a batchTarget, that target's next delivery batch
+// (claimDueQueuedNudgeBatchForTarget). A claim that would change nothing (no
+// claimable item, no maintenance to persist) is answered from a lock-free
+// snapshot and takes no lock; otherwise the claim runs again under the lock,
+// with the census its dry run read, and that run's answer is authoritative. A
+// Leg-B candidate that appears only in the locked state has no census and
+// stays pending for the next pass.
+func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) ([]queuedNudge, error) {
+	r := newNudgeClaimRun(cityPath, now, match, readCensus, batchTarget)
+	if changed, err := r.dryRun(); err == nil && !changed {
+		return nil, nil
+	}
+	if nudgeClaimAfterDryRun != nil {
+		nudgeClaimAfterDryRun()
+	}
+	if err := withNudgeQueueState(cityPath, r.run); err != nil {
 		return nil, err
 	}
-	settleNudgeShadowDebts(cityPath, beads.NudgesStore{}, ledger.taken, nudgeEnqueueMaintenanceBudget, now)
-	return claimed, nil
+	settleNudgeShadowDebts(cityPath, beads.NudgesStore{}, r.ledger.taken, nudgeEnqueueMaintenanceBudget, now)
+	return r.claimed, nil
+}
+
+// nudgeClaimAfterDryRun is a test seam that runs between a claim's dry run and
+// its locked run, so a test can change the queue in between. Nil in
+// production. Tests that set it must stay serial.
+var nudgeClaimAfterDryRun func()
+
+// wouldClaimQueuedNudges reports, without the lock and without claiming,
+// whether claimDueQueuedNudges would claim anything at now.
+func wouldClaimQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) (bool, error) {
+	r := newNudgeClaimRun(cityPath, now, match, readCensus, batchTarget)
+	if _, err := r.dryRun(); err != nil {
+		return false, err
+	}
+	return len(r.claimed) > 0, nil
 }
 
 // claimQueuedNudges moves the due items match accepts from pending to in
@@ -292,7 +376,7 @@ func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now
 func listQueuedNudgesMatching(cityPath string, now time.Time, clk clock.Clock, matches func(agent string) bool) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	ledger := newNudgeShadowLedger(now)
 	var pending, inFlight, dead []queuedNudge
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		pending, inFlight, dead = nil, nil, nil
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clk)
@@ -354,7 +438,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	}
 	now := clk.Now()
 	ledger := newNudgeShadowLedger(now)
-	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err = updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		maintainNudgeQueue(state, ledger, now, deadline, clk)
@@ -738,6 +822,14 @@ func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error
 	return nudgequeue.WithState(cityPath, fn)
 }
 
+// updateNudgeQueueState is withNudgeQueueState for a verb that is often a
+// no-op: fn runs first on a lock-free snapshot, and the lock is taken only when
+// that run changes the state (nudgequeue.UpdateIfChanged). fn must be pure and
+// reset what it captures at its start.
+func updateNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {
+	return nudgequeue.UpdateIfChanged(cityPath, fn)
+}
+
 // fileLookupQueuedNudges reports the bucket each of the given IDs is in; an ID
 // in no bucket is absent. It first runs a full maintenance pass at now, so a
 // since-expired or since-recovered item is reported from current state rather
@@ -750,7 +842,7 @@ func fileLookupQueuedNudges(cityPath string, ids []string, now time.Time) (map[s
 	}
 	ledger := newNudgeShadowLedger(now)
 	var buckets map[string]nudgequeue.Bucket
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		buckets = make(map[string]nudgequeue.Bucket, len(ids))
 		maintainNudgeQueue(state, ledger, now, noMaintenanceDeadline(), clock.Real{})
@@ -790,7 +882,7 @@ func fileRollbackQueuedNudge(cityPath string, store beads.NudgesStore, item queu
 	now := time.Now()
 	found := false
 	ledger := newNudgeShadowLedger(now)
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		found = false
 		removed := []queuedNudge(nil)
@@ -833,7 +925,7 @@ func fileAckQueuedNudges(cityPath string, ids []string, outcome, reason, commitB
 	}
 	now := time.Now()
 	ledger := newNudgeShadowLedger(now)
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		retire := func(item queuedNudge) {
@@ -883,7 +975,7 @@ func fileReleaseQueuedNudgeClaims(cityPath string, ids []string, deliverAfter ti
 	}
 	now := time.Now()
 	ledger := newNudgeShadowLedger(now)
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		var released []queuedNudge
@@ -934,7 +1026,7 @@ func fileRecordQueuedNudgeFailure(cityPath string, store beads.NudgesStore, ids 
 	}
 	ledger := newNudgeShadowLedger(now)
 	var deadLettered []queuedNudge
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	err := updateNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		ledger.reset()
 		deadLettered = nil
 		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
@@ -1004,6 +1096,7 @@ var (
 	_ storebinding.NudgeQueue   = (*fileNudgeQueue)(nil)
 	_ nudgeDispatchSkipRecorder = (*fileNudgeQueue)(nil)
 	_ nudgeClaimRepinner        = (*fileNudgeQueue)(nil)
+	_ nudgeClaimProber          = (*fileNudgeQueue)(nil)
 )
 
 // fileClaimTarget is ct as the file mechanics read a target: exactly ct's
@@ -1017,24 +1110,17 @@ func fileClaimTarget(ct storebinding.ClaimTarget) nudgeTarget {
 	}
 }
 
-// fileClaimMatcher is the claim predicate for ct, asking ct's census at most
-// once per claim.
-func fileClaimMatcher(ct storebinding.ClaimTarget) func(queuedNudge) bool {
+// fileClaimMatcher is the claim predicate for ct. The census it is given is
+// the claim's, read outside the queue lock (nudgeClaimCensus); with no
+// LiveFenceSessions the fence is strict.
+func fileClaimMatcher(ct storebinding.ClaimTarget) nudgeClaimMatch {
 	target := fileClaimTarget(ct)
-	var census func() map[string]struct{}
-	if ct.LiveFenceSessions != nil {
-		var once sync.Once
-		var live map[string]struct{}
-		census = func() map[string]struct{} {
-			once.Do(func() {
-				if ids, ok := ct.LiveFenceSessions(); ok {
-					live = ids
-				}
-			})
-			return live
+	return func(item queuedNudge, liveSessions func() map[string]struct{}) bool {
+		if ct.LiveFenceSessions == nil {
+			liveSessions = nil
 		}
+		return queuedNudgeClaimableForTarget(target, item, liveSessions)
 	}
-	return func(item queuedNudge) bool { return queuedNudgeClaimableForTarget(target, item, census) }
 }
 
 func (q *fileNudgeQueue) location() string { return nudgequeue.StatePath(q.cityPath) }
@@ -1051,7 +1137,7 @@ func (q *fileNudgeQueue) EnqueueDeferred(item nudgequeue.Item) error {
 
 // ClaimDue claims every due nudge ct may take and pins nothing.
 func (q *fileNudgeQueue) ClaimDue(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
-	return claimDueQueuedNudgesMatching(q.cityPath, now, fileClaimMatcher(ct))
+	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, nil)
 }
 
 // ClaimBatch claims ct's next delivery batch. It keeps the file queue's batch
@@ -1061,7 +1147,16 @@ func (q *fileNudgeQueue) ClaimDue(ct storebinding.ClaimTarget, now time.Time) ([
 // be asked about a member that is not yet due.
 func (q *fileNudgeQueue) ClaimBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	target := fileClaimTarget(ct)
-	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), &target)
+	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, &target)
+}
+
+// WouldClaimBatch reports, from a lock-free snapshot, whether ClaimBatch for
+// ct at now would claim anything. It claims nothing and writes nothing; ct's
+// census is asked only for a due candidate fenced to another session, as
+// ClaimBatch asks it.
+func (q *fileNudgeQueue) WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error) {
+	target := fileClaimTarget(ct)
+	return wouldClaimQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, &target)
 }
 
 // ListForAgent lists the items addressed to exactly agent. The empty agent
