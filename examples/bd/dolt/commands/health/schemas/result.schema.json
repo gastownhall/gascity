@@ -9,7 +9,7 @@
     },
     "server": {
       "type": "object",
-      "required": ["running", "reachable", "external", "pid", "port", "latency_ms"],
+      "required": ["running", "reachable", "external", "pid", "port", "latency_ms", "probe_attempts", "probe_error"],
       "properties": {
         "running": {
           "type": "boolean"
@@ -28,6 +28,13 @@
         },
         "latency_ms": {
           "type": "integer"
+        },
+        "probe_attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "probe_error": {
+          "type": "string"
         }
       },
       "additionalProperties": true
@@ -36,16 +43,19 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "commits", "open_beads"],
+        "required": ["name", "commits", "open_beads", "probe_error"],
         "properties": {
           "name": {
             "type": "string"
           },
           "commits": {
-            "type": "integer"
+            "type": ["integer", "null"]
           },
           "open_beads": {
-            "type": "integer"
+            "type": ["integer", "null"]
+          },
+          "probe_error": {
+            "type": "string"
           }
         },
         "additionalProperties": true
