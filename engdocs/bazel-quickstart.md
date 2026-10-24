@@ -46,8 +46,10 @@ x86_64 machine computes the same action keys as CI (host toolchain detection
 is off). The first fetch downloads the 2GB LLVM release archive once and
 keeps ~700MB of it. Running the toolchain needs glibc 2.34+, `xz` (to unpack
 it), and the runtime libraries the official LLVM binaries load: libstdc++6,
-zlib1g and libxml2. Bazel-built binaries load glibc, libstdc++ and ICU 74
-(`libicu74`) at run time, as on the RBE workers.
+zlib1g and liblzma5. lld's libxml2.so.2 and the ICU 74 it loads come with
+the toolchain (pinned Ubuntu 24.04 builds, in its `lib/`), so hosts that ship
+neither, such as Ubuntu 26.04, link too. Bazel-built binaries load glibc,
+libstdc++ and ICU 74 (`libicu74`) at run time, as on the RBE workers.
 
 Other hosts (macOS arm64, Linux arm64) build with toolchains_llvm's stock
 release of the same LLVM version, also pinned by sha256, but without a

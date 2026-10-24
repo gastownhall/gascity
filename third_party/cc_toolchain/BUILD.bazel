@@ -1,3 +1,28 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 # Repository rules behind the hermetic C/C++ toolchain registered in
 # MODULE.bazel: llvm_dist.bzl (pinned LLVM) and deb_sysroot.bzl (pinned
 # Ubuntu sysroot).
+
+# The pinned LLVM's own executables start on hosts newer than the RBE
+# workers' Ubuntu 24.04: every library they load is a stable host soname or
+# bundled in the distribution's lib/ (llvm_dist runtime_debs).
+sh_test(
+    name = "llvm_dist_runtime_libs_test",
+    size = "small",
+    srcs = ["llvm_dist_runtime_libs_test.sh"],
+    args = [
+        "$(rootpath @llvm_dist_linux_x86_64//:bin/llvm-readelf)",
+        "$(rootpaths @llvm_dist_linux_x86_64//:bin)",
+        "$(rootpaths @llvm_dist_linux_x86_64//:runtime_libs)",
+    ],
+    data = [
+        "@llvm_dist_linux_x86_64//:bin",
+        "@llvm_dist_linux_x86_64//:bin/llvm-readelf",
+        "@llvm_dist_linux_x86_64//:runtime_libs",
+    ],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+)

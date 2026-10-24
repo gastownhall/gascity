@@ -106,29 +106,51 @@ func checkHermeticCCModule(module string) []error {
 
 	if dist, err := moduleCall(module, "llvm_dist", `name = "llvm_dist_linux_x86_64"`); err != nil {
 		errs = append(errs, err)
-	} else if m := regexp.MustCompile(`sha256 = "([^"]*)"`).FindStringSubmatch(dist); m == nil || !sha256HexRE.MatchString(m[1]) {
-		errs = append(errs, errors.New("llvm_dist must pin its archive by sha256"))
+	} else {
+		if m := regexp.MustCompile(`(?m)^\s*sha256 = "([^"]*)"`).FindStringSubmatch(dist); m == nil || !sha256HexRE.MatchString(m[1]) {
+			errs = append(errs, errors.New("llvm_dist must pin its archive by sha256"))
+		}
+		errs = append(errs, checkLLVMRuntimeDebs(module, dist)...)
 	}
 
 	if _, err := moduleCall(module, "deb_sysroot", `name = "cc_sysroot_noble_amd64"`); err != nil {
 		errs = append(errs, err)
 	}
 	for _, m := range regexp.MustCompile(`(?ms)^deb_sysroot\(\n(.*?)^\)`).FindAllStringSubmatch(module, -1) {
-		errs = append(errs, checkDebSysroot(module, m[1])...)
+		name := "deb_sysroot"
+		if n := regexp.MustCompile(`name = "([^"]+)"`).FindStringSubmatch(m[1]); n != nil {
+			name += " " + n[1]
+		}
+		errs = append(errs, checkDebPins(module, m[1], name, "urls", "packages")...)
 	}
 	return errs
 }
 
-// checkDebSysroot: every package is an amd64 pool .deb pinned by sha256, and
-// its URL templates give each package more than one host, keep the snapshot
-// the pins were taken from, and never start with a moving mirror.
-func checkDebSysroot(module, call string) []error {
-	var errs []error
-	name := "deb_sysroot"
-	if m := regexp.MustCompile(`name = "([^"]+)"`).FindStringSubmatch(call); m != nil {
-		name += " " + m[1]
+// checkLLVMRuntimeDebs: the shared libraries llvm_dist bundles into the
+// distribution's lib/ (runtime_libs) come from .debs pinned exactly as a
+// deb_sysroot's packages are; neither attribute is set without the other.
+func checkLLVMRuntimeDebs(module, dist string) []error {
+	hasDebs := regexp.MustCompile(`(?m)^\s*runtime_debs = `).MatchString(dist)
+	libs := regexp.MustCompile(`(?m)^\s*runtime_libs = \[([^\]]*)\]`).FindStringSubmatch(dist)
+	hasLibs := libs != nil && strings.TrimSpace(libs[1]) != ""
+	switch {
+	case !hasDebs && !hasLibs:
+		return nil
+	case !hasDebs:
+		return []error{errors.New("llvm_dist runtime_libs needs the runtime_debs that provide them")}
+	case !hasLibs:
+		return []error{errors.New("llvm_dist runtime_debs bundles nothing without runtime_libs")}
 	}
-	urls, err := debSysrootURLs(module, call)
+	return checkDebPins(module, dist, "llvm_dist runtime_debs", "runtime_deb_urls", "runtime_debs")
+}
+
+// checkDebPins: every package in the call's packagesAttr dict is an amd64
+// pool .deb pinned by sha256, and the urlsAttr templates give each package
+// more than one host, keep the snapshot the pins were taken from, and never
+// start with a moving mirror.
+func checkDebPins(module, call, name, urlsAttr, packagesAttr string) []error {
+	var errs []error
+	urls, err := debURLTemplates(module, call, urlsAttr)
 	if err != nil {
 		errs = append(errs, errors.New(name+": "+err.Error()))
 	} else {
@@ -153,13 +175,13 @@ func checkDebSysroot(module, call string) []error {
 			errs = append(errs, errors.New(name+": the first url must not be a moving mirror (archive.ubuntu.com drops superseded packages)"))
 		}
 	}
-	body := regexp.MustCompile(`(?s)packages = \{(.*?)\}`).FindStringSubmatch(call)
+	body := regexp.MustCompile(`(?ms)^\s*` + packagesAttr + ` = \{(.*?)\}`).FindStringSubmatch(call)
 	if body == nil {
-		return append(errs, errors.New(name+" has no packages"))
+		return append(errs, errors.New(name+" has no "+packagesAttr))
 	}
 	pkgs := quotedPairs(body[1])
 	if len(pkgs) == 0 {
-		errs = append(errs, errors.New(name+" has no packages"))
+		errs = append(errs, errors.New(name+" has no "+packagesAttr))
 	}
 	for path, sum := range pkgs {
 		if !strings.HasPrefix(path, "pool/") || !strings.HasSuffix(path, "_amd64.deb") || !sha256HexRE.MatchString(sum) {
@@ -169,18 +191,18 @@ func checkDebSysroot(module, call string) []error {
 	return errs
 }
 
-// debSysrootURLs returns a deb_sysroot call's url templates: an inline list,
-// or a top-level MODULE.bazel list constant.
-func debSysrootURLs(module, call string) ([]string, error) {
-	m := regexp.MustCompile(`(?s)urls = (\[.*?\]|[A-Z][A-Z0-9_]*),`).FindStringSubmatch(call)
+// debURLTemplates returns the url templates a call's attr names: an inline
+// list, or a top-level MODULE.bazel list constant.
+func debURLTemplates(module, call, attr string) ([]string, error) {
+	m := regexp.MustCompile(`(?ms)^\s*` + attr + ` = (\[.*?\]|[A-Z][A-Z0-9_]*),`).FindStringSubmatch(call)
 	if m == nil {
-		return nil, errors.New("no urls")
+		return nil, errors.New("no " + attr)
 	}
 	list := m[1]
 	if !strings.HasPrefix(list, "[") {
 		def := regexp.MustCompile(`(?ms)^` + list + ` = (\[.*?^\])`).FindStringSubmatch(module)
 		if def == nil {
-			return nil, errors.New("urls names " + list + ", which MODULE.bazel does not define as a list")
+			return nil, errors.New(attr + " names " + list + ", which MODULE.bazel does not define as a list")
 		}
 		list = def[1]
 	}
@@ -189,7 +211,7 @@ func debSysrootURLs(module, call string) ([]string, error) {
 		urls = append(urls, q[1])
 	}
 	if len(urls) == 0 {
-		return nil, errors.New("no urls")
+		return nil, errors.New("no " + attr)
 	}
 	return urls, nil
 }
@@ -263,6 +285,11 @@ deb_sysroot(
 
 llvm_dist(
     name = "llvm_dist_linux_x86_64",
+    runtime_debs = {
+        "pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb": "` + sum + `",
+    },
+    runtime_deb_urls = NOBLE_DEB_URLS,
+    runtime_libs = ["libxml2.so.2"],
     sha256 = "` + sum + `",
 )
 
@@ -313,6 +340,12 @@ llvm.sysroot(
 		"no urls":                  strings.Replace(module, "urls = NOBLE_DEB_URLS,", "", 1),
 		"unpinned package":         strings.Replace(module, `_amd64.deb": "`+sum+`"`, `_amd64.deb": ""`, 1),
 		"sysroot other targets":    strings.Replace(module, "label = \""+hermeticCCSysrootLabel+"\",\n    targets = [\"linux-x86_64\"]", "label = \""+hermeticCCSysrootLabel+"\",\n    targets = []", 1),
+		"unpinned runtime deb":     strings.Replace(module, `libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb": "`+sum+`"`, `libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb": ""`, 1),
+		"runtime deb not in pool":  strings.Replace(module, `"pool/main/libx/libxml2/`, `"libxml2/`, 1),
+		"runtime debs no urls":     strings.Replace(module, "    runtime_deb_urls = NOBLE_DEB_URLS,\n", "", 1),
+		"runtime debs no snapshot": strings.Replace(module, "runtime_deb_urls = NOBLE_DEB_URLS,", `runtime_deb_urls = ["https://archive.ubuntu.com/ubuntu/{path}"],`, 1),
+		"runtime debs no libs":     strings.Replace(module, "    runtime_libs = [\"libxml2.so.2\"],\n", "", 1),
+		"runtime libs no debs":     strings.Replace(module, "    runtime_debs = {\n        \"pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb\": \""+sum+"\",\n    },\n", "", 1),
 	} {
 		if len(checkHermeticCCModule(bad)) == 0 {
 			t.Errorf("%s: expected an error for MODULE.bazel fixture:\n%s", name, bad)
