@@ -298,14 +298,13 @@ used: the test binary panics at init, naming the directory to remove.
 
 ### Merge queue
 
-The required-check workflows are merge-queue ready but the queue is off: it
-starts working only when a maintainer adds a `merge_queue` rule to the main
-ruleset. `bazel.yml`, `ci.yml` and `codeql.yml` run on
+The main ruleset's `merge_queue` rule sends every merge to `main` through
+the queue. `bazel.yml`, `ci.yml` and `codeql.yml` run on
 `merge_group: [checks_requested]`, so every required check reports on a
 queue entry's merge-group commit: `Check` and `CI / required` (`ci.yml`),
-the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
-`code_scanning` rule), `bazel test (side-by-side)` and `BUILD files in sync`
-(`bazel.yml`). `scripts/ci_merge_queue_test.go` pins this:
+the four `Analyze (...)` (`codeql.yml`), `bazel test (side-by-side)` and
+`BUILD files in sync` (`bazel.yml`). `scripts/ci_merge_queue_test.go` pins
+this:
 
 - **Same-repo trust.** A merge group has no `github.event.pull_request`, so
   the `rbe` job takes the same-repo path (mode `remote`, no mint), whoever
@@ -322,6 +321,12 @@ the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
   group's concurrency group on its own `gh-readonly-queue/*` ref, which is
   unique per entry and base, with `cancel-in-progress` false. A PR's runs,
   keyed on its number, never share a queue entry's group.
+- **CodeQL reports without analyzing.** Each `Analyze (...)` leg of a merge
+  group runs one step, on a 2 vCPU runner, that says why: the pull
+  request's own run analyzed the change, and the ruleset's `code_scanning`
+  rule gated it there (GitHub applies that rule to pull requests, never to
+  merge queue groups); the push to `main` analyzes the merged commit
+  (`scripts/codeql_merge_group_test.go`).
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
   any other run. The `integration` lane can later be gated on `merge_group`

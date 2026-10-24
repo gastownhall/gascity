@@ -110,6 +110,7 @@ go_test(
         "cmd_gc_shards_test.go",
         "cmd_gc_testhooks_test.go",
         "codeql_go_cache_test.go",
+        "codeql_merge_group_test.go",
         "complexity_test.go",
         "complexity_workflow_test.go",
         "container_scan_fail_fast_test.go",

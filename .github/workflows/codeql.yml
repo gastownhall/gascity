@@ -10,10 +10,10 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
-  # queue"): the four required Analyze checks, and the ruleset's
-  # code_scanning rule, need results on every queue entry's merge-group
-  # commit.
+  # Merge queue (TESTING.md "Merge queue"): the four Analyze checks are
+  # required, so every queue entry's merge-group commit needs them to report,
+  # but a merge group analyzes nothing (the analyze job's merge-group step
+  # says why).
   merge_group:
     types: [checks_requested]
   schedule:
@@ -49,7 +49,8 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    # A merge group runs only the merge-group step: a 2 vCPU runner.
+    runs-on: ${{ github.event_name == 'merge_group' && needs.runner-policy.outputs.runner_2vcpu || needs.runner-policy.outputs.runner_16vcpu }}
     timeout-minutes: 30
     permissions:
       actions: read
@@ -68,7 +69,22 @@ jobs:
           - language: python
             build-mode: none
     steps:
+      # A merge group reports each required Analyze check without analyzing
+      # again (owner decision, ga-ylpbsy.51): the pull request's own run
+      # analyzed the change, and the ruleset's code_scanning rule gated it
+      # there (GitHub applies that rule to pull requests, never to merge
+      # queue groups); the push to main analyzes the merged commit. A full
+      # Analyze (go) leg was the last required check in 54-60% of queue
+      # entries. Every other step skips on merge_group
+      # (scripts/codeql_merge_group_test.go).
+      - name: Merge group (the pull request's analysis stands)
+        id: merge-group
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "Merge group: no CodeQL analysis here. The pull request's run analyzed this change, and the push to main analyzes the merged commit." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
+        if: github.event_name != 'merge_group'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # Go leg only: warm caches for the autobuild. The Go autobuilder runs
@@ -87,17 +103,17 @@ jobs:
       #     GitHub-hosted labels) an actions/cache entry keyed on go.mod and
       #     go.sum, restored on every event, saved only by a push to main.
       - name: Set up Go
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' && github.event_name != 'merge_group'
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
           cache: false
       - name: Restore Go modules
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' && github.event_name != 'merge_group'
         uses: ./.github/actions/go-mod-download
       - name: Go build cache backend
         id: gocache
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' && github.event_name != 'merge_group'
         run: |
           prog="$(go env GOCACHEPROG)"
           dir="$(go env GOCACHE)"
@@ -119,13 +135,14 @@ jobs:
             codeql-go-build-v1-${{ runner.os }}-
 
       - name: Initialize CodeQL
+        if: github.event_name != 'merge_group'
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
       - name: Autobuild
-        if: matrix.build-mode == 'autobuild'
+        if: matrix.build-mode == 'autobuild' && github.event_name != 'merge_group'
         uses: github/codeql-action/autobuild@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
 
       # Only a push to main that missed the exact key writes the build cache
@@ -138,6 +155,7 @@ jobs:
           key: codeql-go-build-v1-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
 
       - name: Perform CodeQL Analysis
+        if: github.event_name != 'merge_group'
         uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
           category: "/language:${{ matrix.language }}"
