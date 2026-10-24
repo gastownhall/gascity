@@ -468,3 +468,42 @@ func TestEnsureRunning_ProviderWithLivenessReadButNoFreshReadTakesNoExtraRead(t 
 		})
 	}
 }
+
+// The stale-key check must not read an unknown runtime as a dead resume. A
+// committed manual conversation is where the difference shows: a failed resume
+// of one is retained and reported with the pane's last output, naming
+// `gc session reset` as the way out. An unknown read after a successful Start
+// reaches the unavailable error alone, with the pane never read.
+func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessDoesNotRetainACommittedConversation(t *testing.T) {
+	for entry, newStart := range startEntry {
+		t.Run(entry, func(t *testing.T) {
+			mgr, sp, store, id, _ := seedUnconfirmedSession(t, StateSuspended, true, false, freshAbsent, freshUnknown)
+			if err := store.SetMetadata(id, "session_origin", "manual"); err != nil {
+				t.Fatalf("SetMetadata(session_origin): %v", err)
+			}
+			before := metadataOf(t, store, id)
+			start := newStart(t, mgr, id)
+
+			err := start()
+
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s error = %v, want runtime unavailable", entry, err)
+			}
+			if errors.Is(err, ErrConversationRetained) {
+				t.Errorf("%s error = %v, want no retained-conversation report for a runtime that could not be read", entry, err)
+			}
+			if got := callCount(sp.Fake, "Peek"); got != 0 {
+				t.Errorf("pane read %d times, want 0: nothing was seen to exit", got)
+			}
+			if got := callCount(sp.Fake, "Start"); got != 1 {
+				t.Errorf("Start called %d times, want 1 (no fresh retry)", got)
+			}
+			after := metadataOf(t, store, id)
+			for _, k := range []string{"session_key", "started_config_hash", "continuation_reset_pending"} {
+				if after[k] != before[k] {
+					t.Errorf("%s = %q, want %q kept", k, after[k], before[k])
+				}
+			}
+		})
+	}
+}
