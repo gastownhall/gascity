@@ -2,6 +2,7 @@ package materialize
 
 import (
 	"bytes"
+	"fmt"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -49,6 +50,13 @@ func (p MCPProjection) Plan(fs fsys.FS) (MCPProjectionPlan, error) {
 	if err := ensureNotSymlink(fs, p); err != nil {
 		return plan, err
 	}
+	if len(p.Servers) > 0 && !p.isManaged(fs) {
+		// Apply saves a target it does not manage before replacing it, so
+		// it fails, before anything else, on one it cannot read.
+		if _, err := fs.ReadFile(p.Target); err != nil && !errorsIsNotExist(err) {
+			return plan, fmt.Errorf("reading %s for adoption snapshot: %w", p.Target, err)
+		}
+	}
 	change, err := p.targetChange(fs)
 	if err != nil {
 		return plan, err
@@ -59,9 +67,10 @@ func (p MCPProjection) Plan(fs fsys.FS) (MCPProjectionPlan, error) {
 	existing, err := fs.ReadFile(p.Target)
 	exists := err == nil
 	if err != nil && !errorsIsNotExist(err) {
-		// Apply overwrites a target it cannot read (Claude's whole file)
-		// or fails on it (the others, in targetChange above); either way
-		// the target is there and would change.
+		// Only a target gc manages gets here: Apply overwrites a Claude
+		// target it cannot read (gc owns the whole file), and the other
+		// providers failed in targetChange above. The target is there and
+		// would change.
 		exists, existing = true, nil
 	}
 	switch {

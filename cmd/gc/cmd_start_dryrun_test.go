@@ -48,7 +48,7 @@ func TestPrintDryRunPreview(t *testing.T) {
 	if !strings.Contains(out, "1 agent(s) suspended") {
 		t.Errorf("should mention 1 suspended, got:\n%s", out)
 	}
-	if !strings.Contains(out, "No agents started, and nothing written outside the bead store (--dry-run).") {
+	if !strings.Contains(out, dryRunFooter) {
 		t.Errorf("should show dry-run footer, got:\n%s", out)
 	}
 }
@@ -241,7 +241,7 @@ name = "frontend"
 		"link 1 skill in " + filepath.Join(cityPath, ".claude", "skills"),
 		"create " + filepath.Join(rigPath, ".gitignore") + ": add .mcp.json",
 		"frontend/coder",
-		"No agents started, and nothing written outside the bead store (--dry-run).",
+		"No agents started (--dry-run). Only gc's own state may have been written: the bead store, the pack cache, and .gc/ runtime directories.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview missing %q:\n%s", want, out)

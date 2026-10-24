@@ -144,6 +144,38 @@ func TestMCPProjectionPlanMatchesApply(t *testing.T) {
 	}
 }
 
+// Apply saves a target gc does not manage before replacing it, so it fails
+// on one it cannot read. Plan returns that error instead of planning an
+// adoption, and writes nothing.
+func TestMCPProjectionPlanReturnsApplysErrorForAnUnreadableTarget(t *testing.T) {
+	for provider := range existingProviderConfig {
+		t.Run(provider, func(t *testing.T) {
+			root := t.TempDir()
+			proj, err := BuildMCPProjection(provider, root, []MCPServer{{Name: "notes", Transport: MCPTransportStdio, Command: "uvx"}})
+			if err != nil {
+				t.Fatalf("BuildMCPProjection: %v", err)
+			}
+			// A directory where the file should be: no one can read it as a
+			// file, whoever runs the test.
+			if err := os.MkdirAll(proj.Target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			before := treeSnapshot(t, root)
+			plan, planErr := proj.Plan(fsys.OSFS{})
+			if after := treeSnapshot(t, root); !reflect.DeepEqual(before, after) {
+				t.Fatalf("Plan wrote to the filesystem:\nbefore: %v\nafter:  %v", before, after)
+			}
+			applyErr := proj.Apply(fsys.OSFS{})
+			if planErr == nil || applyErr == nil || planErr.Error() != applyErr.Error() {
+				t.Fatalf("Plan = %+v, error %v; Apply error = %v; want Apply's error from both", plan, planErr, applyErr)
+			}
+			if !strings.Contains(planErr.Error(), "for adoption snapshot") {
+				t.Fatalf("Plan error = %v", planErr)
+			}
+		})
+	}
+}
+
 func TestMCPProjectionPlanReturnsApplyValidationErrors(t *testing.T) {
 	root := t.TempDir()
 	proj, err := BuildMCPProjection(MCPProviderCursor, root, []MCPServer{{Name: "search", Transport: MCPTransportHTTP, URL: "https://mcp.example.test/search"}})

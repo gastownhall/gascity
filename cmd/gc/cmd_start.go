@@ -1278,8 +1278,15 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 		}
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprintln(stdout, "No agents started, and nothing written outside the bead store (--dry-run).") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, dryRunFooter) //nolint:errcheck // best-effort stdout
 }
+
+// dryRunFooter ends a dry run's preview. The preview writes none of the files
+// it reports, but it still starts the bead store (initializing a rig store
+// that is not yet initialized) to read pool demand, fills the pack cache to
+// load the config, and creates the city's runtime directories under .gc/
+// (ensureCityScaffold) when they are missing.
+const dryRunFooter = "No agents started (--dry-run). Only gc's own state may have been written: the bead store, the pack cache, and .gc/ runtime directories."
 
 // settingsArgs returns "--settings <path>" to append to a Claude command
 // if settings.json exists for this city. Uses the absolute city-root path so
