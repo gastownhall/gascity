@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1105,6 +1106,68 @@ func TestZombieSessionsCheck_Found(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Details = %v, want a line naming %q as confirmed zombie", r.Details, "mayor")
+	}
+}
+
+// TestZombieSessionsCheck_SkipsRigSuspendedViaState is the zombie-check twin of
+// TestAgentSessionsCheck_SkipsRigSuspendedViaState: a rig suspended through
+// the runtime suspension-state overlay must be skipped at Run()-time even
+// though the agent's own config.Agent.Suspended is false, so a confirmed
+// zombie behind a deliberately suspended rig is not reported (ga-8u05ya AF2).
+func TestZombieSessionsCheck_SkipsRigSuspendedViaState(t *testing.T) {
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		Rigs: map[string]suspensionstate.Override{
+			"alpha": {Suspended: boolPtr(true)},
+		},
+	}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "alpha"}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", ProcessNames: []string{"claude"}}},
+	}
+	sn := agent.SessionNameFor("test", cfg.Agents[0].QualifiedName(), "")
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), sn, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Zombies[sn] = true // would be a confirmed zombie if not skipped
+
+	c := NewZombieSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (rig suspended via runtime state); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestZombieSessionsCheck_SkipsCitySuspendedViaState covers the city-level
+// half: a whole-city suspension recorded in the runtime suspension-state
+// overlay must skip every agent, including city-scoped agents (empty Dir).
+func TestZombieSessionsCheck_SkipsCitySuspendedViaState(t *testing.T) {
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		City: suspensionstate.Override{Suspended: boolPtr(true)},
+	}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Zombies["mayor"] = true // would be a confirmed zombie if not skipped
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", ProcessNames: []string{"claude"}}}, // city-scoped: empty Dir
+	}
+	c := NewZombieSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (city suspended via runtime state); msg = %s", r.Status, r.Message)
 	}
 }
 
