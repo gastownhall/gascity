@@ -10,8 +10,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // TestWithState_TimesOutInsteadOfBlockingForever guards ga-2kzci3 FR1/FR2:
@@ -92,7 +90,7 @@ func TestWithStateBounded_TimesOutInsteadOfBlockingForever(t *testing.T) {
 	var called bool
 	var mu sync.Mutex
 	go func() {
-		done <- withStateBounded(cityPath, waitTimeout, clock.Real{}, func(_ *State) error {
+		done <- withStateBounded(cityPath, waitTimeout, func(_ *State) error {
 			mu.Lock()
 			called = true
 			mu.Unlock()
@@ -129,7 +127,7 @@ func TestWithStateBounded_TimeoutIsErrQueueBusy(t *testing.T) {
 	release := holdQueueLockForTest(t, cityPath)
 	defer release()
 
-	err := withStateBounded(cityPath, 50*time.Millisecond, clock.Real{}, func(_ *State) error {
+	err := withStateBounded(cityPath, 50*time.Millisecond, func(_ *State) error {
 		t.Error("fn ran without the lock")
 		return nil
 	})

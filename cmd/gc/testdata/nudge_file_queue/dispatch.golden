@@ -121,7 +121,7 @@ state.json:
 ### dispatch one supervisor pass
 result: delivered=0 err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [

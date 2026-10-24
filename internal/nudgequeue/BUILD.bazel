@@ -13,7 +13,6 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
-        "//internal/clock",
         "//internal/fsys",
     ],
 )
@@ -21,6 +20,7 @@ go_library(
 go_test(
     name = "nudgequeue_test",
     srcs = [
+        "state_debt_test.go",
         "state_file_queue_test.go",
         "state_test.go",
         "store_test.go",
@@ -31,7 +31,6 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/beads/beadstest",
-        "//internal/clock",
         "//internal/testenv",
     ],
 )

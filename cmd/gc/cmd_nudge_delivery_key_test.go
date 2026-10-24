@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -224,38 +225,35 @@ func (h *keyedPollerHarness) enqueueWaitNudge(store beads.Store, message, state 
 	return item.ID, wait.ID
 }
 
-// failBeadWritesOf makes every metadata write to the bead behind queued nudge
-// nudgeID fail, as a store outage fails its withdraw, until restore is called.
-func (h *keyedPollerHarness) failBeadWritesOf(store beads.Store, nudgeID string) (restore func()) {
+// failWithdrawOf makes the withdrawal of queued nudge nudgeID fail without
+// committing, as an ack that cannot take the queue lock does: the item stays
+// in flight. The other blocked items are withdrawn as usual.
+func (h *keyedPollerHarness) failWithdrawOf(nudgeID string) (restore func()) {
 	h.t.Helper()
-	item, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(nudgeID)
-	if err != nil || !ok {
-		h.t.Fatalf("finding the bead of %s: ok=%v err=%v", nudgeID, ok, err)
-	}
-	prev := openOwnedNudgeBeadStore
-	openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
-		nudges, opened := prev(cityPath)
-		if nudges.Store != nil {
-			nudges.Store = metadataFailingStore{Store: nudges.Store, failID: item.BeadID}
+	prev := terminalizeBlockedQueuedNudges
+	terminalizeBlockedQueuedNudges = func(cityPath string, blocked map[string][]queuedNudge) error {
+		rest := make(map[string][]queuedNudge, len(blocked))
+		failed := false
+		for reason, items := range blocked {
+			for _, item := range items {
+				if item.ID == nudgeID {
+					failed = true
+					continue
+				}
+				rest[reason] = append(rest[reason], item)
+			}
 		}
-		return nudges, opened
+		if err := prev(cityPath, rest); err != nil {
+			return err
+		}
+		if failed {
+			return fmt.Errorf("acking %s: %w", nudgeID, nudgequeue.ErrQueueBusy)
+		}
+		return nil
 	}
-	restore = func() { openOwnedNudgeBeadStore = prev }
+	restore = func() { terminalizeBlockedQueuedNudges = prev }
 	h.t.Cleanup(restore)
 	return restore
-}
-
-// metadataFailingStore fails every metadata batch write to one bead.
-type metadataFailingStore struct {
-	beads.Store
-	failID string
-}
-
-func (s metadataFailingStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if id == s.failID {
-		return fmt.Errorf("setting metadata on %q: connection refused", id)
-	}
-	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 // A batch whose delivery had an unknown outcome is redelivered under its
@@ -490,7 +488,7 @@ func TestTryDeliverQueuedNudgesByPollerRekeysTheBatchWhenAWithdrawFails(t *testi
 	store := openNudgeBeadStore(h.dir).Store
 	h.enqueue("nudge A")
 	nudgeB, waitB := h.enqueueWaitNudge(store, "nudge B", waitStatePending)
-	restore := h.failBeadWritesOf(store, nudgeB)
+	restore := h.failWithdrawOf(nudgeB)
 
 	// {A,B} is claimed under one key. B's wait has not fired, so B is
 	// withheld, and its withdraw fails: B stays in flight while A goes out.
@@ -565,7 +563,7 @@ func TestTryDeliverQueuedNudgesByPollerRedeliversARekeyedBatchUnderItsNewKey(t *
 	store := openNudgeBeadStore(h.dir).Store
 	h.enqueue("nudge A")
 	nudgeB, _ := h.enqueueWaitNudge(store, "nudge B", waitStatePending)
-	restore := h.failBeadWritesOf(store, nudgeB)
+	restore := h.failWithdrawOf(nudgeB)
 	h.fake.NudgeErrors = map[string]error{"sess-worker": errors.New("read tcp: i/o timeout")}
 
 	if _, err := tryDeliverQueuedNudgesByPoller(h.target, store, store, h.sp, 3*time.Second, h.obs); err == nil || !strings.Contains(err.Error(), "withdrawing blocked nudges") {

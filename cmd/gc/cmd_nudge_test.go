@@ -287,9 +287,8 @@ func TestPruneExpiredQueuedNudgesIgnoresMissingTerminalBead(t *testing.T) {
 		},
 	}
 
-	if err := pruneExpiredQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneExpiredQueuedNudges: %v", err)
-	}
+	ledger := newNudgeShadowLedger(now)
+	pruneExpiredQueuedNudges(state, ledger, now, noMaintenanceDeadline())
 	if len(state.Pending) != 0 {
 		t.Fatalf("pending = %d, want 0", len(state.Pending))
 	}
@@ -298,6 +297,11 @@ func TestPruneExpiredQueuedNudgesIgnoresMissingTerminalBead(t *testing.T) {
 	}
 	if state.Dead[0].LastError != "expired" {
 		t.Fatalf("dead[0].LastError = %q, want expired", state.Dead[0].LastError)
+	}
+	for _, payment := range payNudgeShadowDebts(nudgeFrontDoor(store), ledger.taken, noMaintenanceDeadline()) {
+		if payment.err != nil {
+			t.Fatalf("paying the expired debt over a missing bead: %v", payment.err)
+		}
 	}
 }
 
@@ -322,12 +326,14 @@ func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
 	item.DeadAt = now.Add(-30 * time.Minute)
 
 	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneDeadQueuedNudges: %v", err)
-	}
+	pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
 	if len(state.Dead) != 1 {
 		t.Fatalf("dead = %d, want 1 before retention cutoff", len(state.Dead))
 	}
+	if debt := state.Dead[0].Shadow; debt == nil || !debt.Verify {
+		t.Fatalf("legacy dead letter debt = %+v, want a Verify debt", debt)
+	}
+	payDueDebtsInMemoryForTest(t, state, store, now)
 
 	bead, err := store.Get(beadID)
 	if err != nil {
@@ -402,9 +408,9 @@ func TestPruneExpiredQueuedNudgesWithAmbiguousBeadIDContinues(t *testing.T) {
 		},
 	}
 
-	if err := pruneExpiredQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneExpiredQueuedNudges: %v", err)
-	}
+	ledger := newNudgeShadowLedger(now)
+	pruneExpiredQueuedNudges(state, ledger, now, noMaintenanceDeadline())
+	payNudgeShadowDebts(nudgeFrontDoor(store), ledger.taken, noMaintenanceDeadline())
 	if len(state.Pending) != 0 {
 		t.Fatalf("pending = %d, want 0 (stale entry must be pruned)", len(state.Pending))
 	}
@@ -425,7 +431,7 @@ func TestPruneExpiredQueuedNudgesWithAmbiguousBeadIDContinues(t *testing.T) {
 // re-panicked in a loop. Both helpers must instead complete and move the expired
 // pending and in-flight items to Dead even with no shadow store.
 func TestExpiredNudgeCleanupSurvivesNilFrontDoor(t *testing.T) {
-	var front *nudgequeue.Store // nil: shadow bead store failed to open
+	var ledger *nudgeShadowLedger // nil: the debts are recorded untaken
 	now := time.Now().UTC()
 	state := &nudgeQueueState{
 		Pending: []queuedNudge{{
@@ -454,12 +460,8 @@ func TestExpiredNudgeCleanupSurvivesNilFrontDoor(t *testing.T) {
 		}},
 	}
 
-	if err := recoverExpiredInFlightNudges(state, front, now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("recoverExpiredInFlightNudges with nil front: %v", err)
-	}
-	if err := pruneExpiredQueuedNudges(state, front, now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneExpiredQueuedNudges with nil front: %v", err)
-	}
+	recoverExpiredInFlightNudges(state, ledger, now, noMaintenanceDeadline())
+	pruneExpiredQueuedNudges(state, ledger, now, noMaintenanceDeadline())
 
 	if len(state.Pending) != 0 {
 		t.Fatalf("pending = %d, want 0", len(state.Pending))
@@ -5348,10 +5350,11 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 		}
 	}
 
-	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (has terminal bead), recent kept.
-	store := openNudgeBeadStore(dir)
+	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (its
+	// failed debt was paid when it was dead-lettered), recent kept.
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		return pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline())
+		pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
@@ -5391,7 +5394,8 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 	}
 
 	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		return pruneDeadQueuedNudges(state, nil, now, noMaintenanceDeadline())
+		pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
@@ -5492,9 +5496,12 @@ func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
 	}
 
 	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
+	if len(state.Dead) != 1 {
+		t.Fatalf("dead = %d, want the item kept until its Verify debt is paid", len(state.Dead))
 	}
+	payDueDebtsInMemoryForTest(t, state, store, now)
+	pruneDeadQueuedNudges(state, now, noMaintenanceDeadline())
 	if len(state.Dead) != 0 {
 		t.Fatalf("dead = %d, want 0 -- a dead-letter item whose bead was reaped and is past retention must still be prunable", len(state.Dead))
 	}
@@ -6221,14 +6228,15 @@ func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
 	}
 }
 
-// TestNudgePollHelpersOpenOnceWhenQueueHasWork pins the no-regression edge: when
-// the queue is non-empty the maintenance passes (recover/prune/terminalize) must
-// still run against Dolt, so each helper opens the front-door store exactly once
-// per call and releases it (open == close, no leak, no double-open).
-func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
+// TestNudgePollHelpersOpenOnlyToPayShadowDebts pins when a per-tick helper
+// opens the front-door store over a non-empty queue: only to pay the shadow
+// debts its own commit took (ga-fsp5w9), after the queue lock, exactly once,
+// and it releases what it opened. A helper whose call moves nothing out of the
+// queue has no debt and opens nothing.
+func TestNudgePollHelpersOpenOnlyToPayShadowDebts(t *testing.T) {
 	now := time.Now()
 
-	assertOneOpenOneClose := func(t *testing.T, name string, run func(dir string)) {
+	assertOpens := func(t *testing.T, name string, want int, run func(dir string)) {
 		t.Helper()
 		opens, closes := installCountingNudgeStoreSeam(t)
 		dir := t.TempDir()
@@ -6239,37 +6247,42 @@ func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
 		// enqueue opened+closed its own store; measure deltas around the helper.
 		opensBefore, closesBefore := *opens, *closes
 		run(dir)
-		if got := *opens - opensBefore; got != 1 {
-			t.Fatalf("%s: opens delta=%d, want 1 (non-empty queue must open the front door exactly once)", name, got)
+		if got := *opens - opensBefore; got != want {
+			t.Fatalf("%s: opens delta=%d, want %d", name, got, want)
 		}
-		if got := *closes - closesBefore; got != 1 {
-			t.Fatalf("%s: closes delta=%d, want 1 (the opened store must be released)", name, got)
+		if got := *closes - closesBefore; got != want {
+			t.Fatalf("%s: closes delta=%d, want %d (the opened store must be released)", name, got, want)
 		}
 	}
 
-	assertOneOpenOneClose(t, "claim", func(dir string) {
+	assertOpens(t, "claim", 0, func(dir string) {
 		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
 			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "list", func(dir string) {
+	assertOpens(t, "list", 0, func(dir string) {
 		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
 			t.Fatalf("listQueuedNudges: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "listForTarget", func(dir string) {
+	assertOpens(t, "listForTarget", 0, func(dir string) {
 		if _, _, _, err := listQueuedNudgesForTarget(dir, nudgeTarget{cityPath: dir}, now); err != nil {
 			t.Fatalf("listQueuedNudgesForTarget: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "release", func(dir string) {
+	assertOpens(t, "release", 0, func(dir string) {
 		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
 			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "ack", func(dir string) {
+	assertOpens(t, "ack", 1, func(dir string) {
 		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "", "test-boundary"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+		}
+	})
+	assertOpens(t, "claim that expires the item", 1, func(dir string) {
+		if _, err := claimDueQueuedNudgesMatching(dir, now.Add(defaultQueuedNudgeTTL+time.Minute), func(queuedNudge) bool { return false }); err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 		}
 	})
 }
@@ -6326,7 +6339,8 @@ func TestRecordQueuedNudgeFailureDetailedClosesOnlyOwnedStore(t *testing.T) {
 	// measure the deltas around the recordQueuedNudgeFailureDetailed call.
 	opensBefore := *opens
 	closesBefore := *closes
-	if _, err := recordQueuedNudgeFailureDetailed(dir, beads.NudgesStore{}, []string{"n-fail"}, context.DeadlineExceeded, now); err != nil {
+	// The drop dead-letters the item, so the helper has a shadow debt to pay.
+	if _, err := recordQueuedNudgeFailureDetailed(dir, beads.NudgesStore{}, []string{"n-fail"}, errNudgeManualDrop, now); err != nil {
 		t.Fatalf("recordQueuedNudgeFailureDetailed(nil store): %v", err)
 	}
 	if *opens != opensBefore+1 {
@@ -6345,7 +6359,7 @@ func TestRecordQueuedNudgeFailureDetailedClosesOnlyOwnedStore(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudgeWithStore(passed store): %v", err)
 	}
 	closesAfterEnqueue := *closes
-	if _, err := recordQueuedNudgeFailureDetailed(dir2, beads.NudgesStore{Store: passed}, []string{"n-fail2"}, context.DeadlineExceeded, now); err != nil {
+	if _, err := recordQueuedNudgeFailureDetailed(dir2, beads.NudgesStore{Store: passed}, []string{"n-fail2"}, errNudgeManualDrop, now); err != nil {
 		t.Fatalf("recordQueuedNudgeFailureDetailed(passed store): %v", err)
 	}
 	if *closes != closesAfterEnqueue {

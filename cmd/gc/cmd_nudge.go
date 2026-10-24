@@ -2750,7 +2750,13 @@ func blockedQueuedMailNudgeReason(mp mail.Provider, item queuedNudge) (string, b
 	return "", false, nil
 }
 
-func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queuedNudge) error {
+// terminalizeBlockedQueuedNudges withdraws the blocked items by acking them
+// failed with their reason. It is a seam so a test can make the withdrawal of
+// chosen items fail, as an ack that cannot take the queue lock does. Tests
+// that replace it must stay serial.
+var terminalizeBlockedQueuedNudges = ackBlockedQueuedNudgesWithdrawn
+
+func ackBlockedQueuedNudgesWithdrawn(cityPath string, blocked map[string][]queuedNudge) error {
 	for reason, items := range blocked {
 		if err := ackQueuedNudgesWithOutcome(cityPath, queuedNudgeIDs(items), "failed", reason, "delivery-withdrawn"); err != nil {
 			return err

@@ -121,7 +121,7 @@ state.json:
 ### claim n-1, n-2 and n-3
 result: [n-1 n-2 n-3] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -173,7 +173,7 @@ state.json:
 ### release n-1 and n-3
 result: <nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -233,7 +233,7 @@ stderr:
 gc nudge drop n-missing: no such queued nudge
 
 rewrote_state: true
-store_opens: 2 store_closes: 2 census_calls: 0 wake_pings: 0
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
 op SetMetadataBatch BEAD-1
 op Close BEAD-1
 op SetMetadataBatch BEAD-2
@@ -271,7 +271,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-2",
@@ -287,7 +294,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -298,10 +312,8 @@ stdout:
 stderr:
 gc nudge drop n-1: already dead-lettered
 
-rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-1 include_closed limit=21}
-op List {label=nudge:n-2 include_closed limit=21}
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -335,7 +347,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-2",
@@ -351,7 +370,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -365,11 +391,7 @@ gc nudge drop n-1: already dead-lettered
 gc nudge drop n-missing: no such queued nudge
 
 rewrote_state: true
-store_opens: 2 store_closes: 2 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-1 include_closed limit=21}
-op List {label=nudge:n-2 include_closed limit=21}
-op List {label=nudge:n-1 include_closed limit=21}
-op List {label=nudge:n-2 include_closed limit=21}
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
 op SetMetadataBatch BEAD-3
 op Close BEAD-3
 state.json:
@@ -389,7 +411,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-2",
@@ -405,7 +434,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-3",
@@ -421,7 +457,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -451,7 +494,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-2",
@@ -467,7 +517,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-5"
+      "dead_at": "T-5",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-5",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-3",
@@ -483,7 +540,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
