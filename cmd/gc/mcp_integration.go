@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,13 +21,32 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
-var managedMCPGitignoreEntries = []string{
-	".mcp.json",
-	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
-	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
-	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
-	"opencode.json",
-	"mimocode.json",
+// mcpGitignoreEntry is the .gitignore entry for the target gc writes, which
+// may hold expanded secrets: the target's path from the projection's root,
+// anchored with a leading slash, since the .gitignore gc edits is the one at
+// that root. It matches that file only, not a file of the same name deeper in
+// the repository, as an unanchored ".mcp.json" would.
+func mcpGitignoreEntry(p materialize.MCPProjection) string {
+	rel, err := filepath.Rel(p.Root, p.Target)
+	if err != nil {
+		return ""
+	}
+	return "/" + filepath.ToSlash(rel)
+}
+
+// missingMCPGitignoreEntries returns the entries root's .gitignore lacks. The
+// same path without its leading slash, as an earlier gc wrote it, counts as
+// present: it matches the file too, and rewriting it would churn every
+// existing .gitignore.
+func missingMCPGitignoreEntries(fs fsys.FS, root string, entries []string) []string {
+	var missing []string
+	for _, entry := range missingGitignoreEntries(fs, root, entries) {
+		if len(missingGitignoreEntries(fs, root, []string{strings.TrimPrefix(entry, "/")})) == 0 {
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	return missing
 }
 
 type mcpTargetSpec struct {
@@ -158,11 +180,18 @@ func appendProjectMCPPreStart(prestart []string, agentName, identity, workDir st
 	return append(prestart, cmd)
 }
 
-func ensureMCPGitignoreBestEffort(root string, stderr io.Writer) {
+// ensureMCPGitignoreBestEffort adds entries, the .gitignore entries of the
+// MCP targets gc projected under root, to root's .gitignore, unless it
+// already has them (missingMCPGitignoreEntries).
+func ensureMCPGitignoreBestEffort(root string, entries []string, stderr io.Writer) {
 	if strings.TrimSpace(root) == "" {
 		return
 	}
-	if err := ensureGitignoreEntries(fsys.OSFS{}, root, managedMCPGitignoreEntries); err != nil && stderr != nil {
+	entries = missingMCPGitignoreEntries(fsys.OSFS{}, root, entries)
+	if len(entries) == 0 {
+		return
+	}
+	if err := ensureGitignoreEntries(fsys.OSFS{}, root, entries); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc: warning: updating %s/.gitignore for MCP: %v\n", root, err) //nolint:errcheck // best-effort stderr
 	}
 }
@@ -261,19 +290,173 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 		return err
 	}
 	desired := make(map[string]bool, len(targets)) // provider+root keys we still own
+	// .gitignore entries for the targets projected so far, by root; written
+	// on every way out, so a later target's failure does not leave a
+	// projected file unignored.
+	gitignore := make(map[string][]string)
+	defer func() {
+		for _, root := range sortedMapKeys(gitignore) {
+			ensureMCPGitignoreBestEffort(root, gitignore[root], stderr)
+		}
+	}()
 	for _, target := range targets {
-		if err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+		err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr)
+		var refused *materialize.MCPAdoptionRefusedError
+		if errors.As(err, &refused) {
+			// The file holds content gc does not manage. gc leaves it as it
+			// is, and the agents that read it start without gc's servers.
+			warnMCPAdoptionRefused(cityPath, target.Agents, target.Projection, refused, fsys.OSFS{}, stderr)
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
 		}
+		clearMCPAdoptionRefusal(cityPath, target.Projection.Target)
 		desired[managedKey(target.Projection.Provider, target.Root)] = true
 		if len(target.Projection.Servers) > 0 {
-			ensureMCPGitignoreBestEffort(target.Root, stderr)
+			gitignore[target.Root] = append(gitignore[target.Root], mcpGitignoreEntry(target.Projection))
 		}
 	}
 	if err := cleanupOrphanStage1Targets(cityPath, cfg, desired, stderr); err != nil {
 		return err
 	}
 	return nil
+}
+
+// mcpAdoptionRefusals remembers the refusals reported so far, so a refusal is
+// reported once, and again when it comes back:
+//
+//   - byTarget maps a city and target (mcpRefusalTargetKey) to each refusal
+//     message reported for it, with a stamp of the target's content then
+//     (mcpTargetStamp; for a symlink refusal, the link alone). Agents that
+//     share a target are named in messages of their own, so keying on the
+//     message keeps them from evicting each other's entry.
+//   - A message is reported again when the target's content changes: a team
+//     edits the file, or a session's work dir is checked out with other
+//     content. The content, not the modification time, is what counts, so
+//     gc's own rewrites of the same bytes (overlay staging, for one) do not
+//     report it on every tick. A work dir checked out afresh with the same
+//     content is reported again only after a pass saw the file missing.
+//   - clearMCPAdoptionRefusal forgets every message for a target once gc
+//     writes it or finds nothing in its way, so a refusal that comes back
+//     after it cleared is reported again.
+var mcpAdoptionRefusals = struct {
+	sync.Mutex
+	byTarget map[string]map[string]string
+}{byTarget: map[string]map[string]string{}}
+
+func mcpRefusalTargetKey(cityPath, target string) string {
+	return filepath.Clean(cityPath) + "\x00" + filepath.Clean(target)
+}
+
+// mcpTargetStamp identifies the target's current content: the SHA-256 of a
+// regular file of at most materialize.MaxMCPFileSize bytes. It never reads
+// anything else (a symlink, a named pipe, a device, a larger file), since
+// reading one can block or never end; such a target is stamped by its type
+// or its size instead. "" when it cannot be inspected.
+func mcpTargetStamp(fs fsys.FS, target string) string {
+	data, err := materialize.ReadMCPFile(fs, target)
+	var notRegular *materialize.NotRegularFileError
+	var tooLarge *materialize.FileTooLargeError
+	switch {
+	case err == nil:
+		sum := sha256.Sum256(data)
+		return "sha256:" + hex.EncodeToString(sum[:])
+	case errors.As(err, &notRegular):
+		return "type:" + notRegular.Mode.Type().String()
+	case errors.As(err, &tooLarge):
+		return fmt.Sprintf("size:%d", tooLarge.Size)
+	default:
+		return ""
+	}
+}
+
+// warnMCPAdoptionRefused reports a target gc will not adopt: who starts
+// without which of gc's servers, why, and what to do about it. It reports a
+// refusal once until the target's content changes or the refusal clears
+// (mcpAdoptionRefusals).
+func warnMCPAdoptionRefused(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, fs fsys.FS, stderr io.Writer) {
+	if stderr == nil {
+		return
+	}
+	message := describeMCPAdoptionRefused(agents, projection, refused)
+	key := mcpRefusalTargetKey(cityPath, projection.Target)
+	// A symlink refusal does not depend on what the link points at, and gc
+	// never reads through a link.
+	stamp := "symlink:" + refused.Symlink
+	if refused.Symlink == "" {
+		stamp = mcpTargetStamp(fs, projection.Target)
+	}
+	mcpAdoptionRefusals.Lock()
+	reported := mcpAdoptionRefusals.byTarget[key]
+	if previous, seen := reported[message]; seen && previous == stamp {
+		mcpAdoptionRefusals.Unlock()
+		return
+	}
+	if reported == nil {
+		reported = make(map[string]string, 1)
+		mcpAdoptionRefusals.byTarget[key] = reported
+	}
+	reported[message] = stamp
+	mcpAdoptionRefusals.Unlock()
+	fmt.Fprintf(stderr, "gc: warning: %s\n", message) //nolint:errcheck // best-effort stderr
+}
+
+// clearMCPAdoptionRefusal forgets every refusal reported for a target, so a
+// refusal that comes back is reported again.
+func clearMCPAdoptionRefusal(cityPath, target string) {
+	mcpAdoptionRefusals.Lock()
+	delete(mcpAdoptionRefusals.byTarget, mcpRefusalTargetKey(cityPath, target))
+	mcpAdoptionRefusals.Unlock()
+}
+
+// warnStage2MCPAdoptionRefusal reports a stage-2 target the session's
+// project-mcp pre-start will leave alone (warnMCPAdoptionRefused). The
+// pre-start warns too, but a runtime discards a pre-start's output when it
+// succeeds, so this is the warning the controller log shows. It reads the
+// target and writes nothing; a target that cannot be inspected is the
+// pre-start's to report.
+func warnStage2MCPAdoptionRefusal(cityPath, identity string, projection materialize.MCPProjection, fs fsys.FS, stderr io.Writer) {
+	if stderr == nil || fs == nil {
+		return
+	}
+	refused, err := projection.AdoptionRefusal(fs)
+	if err != nil {
+		return
+	}
+	if refused == nil {
+		clearMCPAdoptionRefusal(cityPath, projection.Target)
+		return
+	}
+	warnMCPAdoptionRefused(cityPath, []string{identity}, projection, refused, fs, stderr)
+}
+
+// describeMCPAdoptionRefused renders a refused adoption for a warning:
+// `agent "a" starts without gc's MCP server "s": not adopting <target>:
+// <reason>; <remedy>`.
+func describeMCPAdoptionRefused(agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError) string {
+	quoted := make([]string, len(agents))
+	for i, agent := range agents {
+		quoted[i] = strconv.Quote(agent)
+	}
+	who := "agent " + strings.Join(quoted, ", ") + " starts"
+	if len(quoted) > 1 {
+		who = "agents " + strings.Join(quoted, ", ") + " start"
+	}
+	return fmt.Sprintf("%s without %s: %v; %s", who, describeGCMCPServers(projection), refused, refused.Remedy())
+}
+
+// describeGCMCPServers renders `gc's MCP server "a"` or `gc's MCP servers
+// "a", "b"`.
+func describeGCMCPServers(projection materialize.MCPProjection) string {
+	servers := make([]string, len(projection.Servers))
+	for i, server := range projection.Servers {
+		servers[i] = strconv.Quote(server.Name)
+	}
+	if len(servers) == 1 {
+		return "gc's MCP server " + servers[0]
+	}
+	return "gc's MCP servers " + strings.Join(servers, ", ")
 }
 
 // managedKey combines provider and scope-root into the key used by stage-1

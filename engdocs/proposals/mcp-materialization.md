@@ -317,9 +317,12 @@ projection surface for that target.
 
 Ownership rules:
 
-- first projection overwrites preexisting provider-native MCP content
-- any effective `mcp/` catalog is treated as an explicit opt-in to GC-owned MCP
-  projection for that target
+- first projection overwrites preexisting provider-native MCP content that
+  holds nothing gc would drop (see the adoption rules below)
+- an effective `mcp/` catalog is an opt-in to GC-owned MCP projection for a
+  target, but not to dropping servers the target already holds: a catalog
+  often arrives through an import, which reaches every root in its scope,
+  including rig repositories with MCP config of their own
 - for Gemini and Codex, "preserve unrelated settings" means preserve sibling
   config outside the GC-owned MCP subtree; Gas City owns every server entry
   inside the managed subtree
@@ -332,7 +335,65 @@ Ownership rules:
 Adoption and migration rules:
 
 - if a target already contains provider-native MCP content, the first
-  reconcile that sees effective MCP takes ownership and replaces that content
+  reconcile that sees effective MCP takes ownership and replaces that content,
+  unless replacing it would drop content gc does not manage: MCP servers the
+  projection does not carry, the file's own definition of a server the
+  projection defines differently, or, in Claude's `.mcp.json`, which gc owns
+  whole, any other top-level key. Definitions are compared as JSON values,
+  ignoring nulls, empty lists and tables, and a provider's defaults written
+  out (Claude's and Cursor's `"type": "stdio"`, the `enabled = true` of
+  Codex, OpenCode and MiMo Code; Claude's `streamable-http` is its alias for
+  `http`). A file gc cannot read or parse, and a symlinked target or provider
+  directory, are in the same case, as is a target that is not a regular
+  file (a named pipe, a device) or is larger than 4 MiB, which gc does not
+  read. A server the file defines as the projection does is not in the way.
+- Gas City then does not adopt the target. It writes no snapshot, marker, or
+  `.gitignore` entry there; a refusal found only under the target lock (the
+  file changed after the unlocked check) leaves the lock file, as any apply
+  does. The agents that read the file keep its servers and start without
+  gc's. Gas City says so, naming the agents, gc's servers, what keeps it
+  from adopting the file, and how to let it: define the servers still needed
+  in an `mcp/` catalog that reaches every agent reading the file, and remove
+  the file's entries. A file at a scope root is shared by every agent of
+  that provider there, including the implicit agent each declared provider
+  gets, so its servers must come from the city's `mcp/` or, for a rig root,
+  a pack the rig imports; only a file in one agent's own work dir can take
+  that agent's `agents/<name>/mcp/` (see "Shared Target Validation"). It
+  says so in:
+  - stage 1's warning, once per agent and target until the target's content
+    changes or the refusal clears (gc writes the target, or finds nothing in
+    its way); then again. gc's own rewrites of the same bytes, such as
+    overlay staging, do not count as a change, and a work dir checked out
+    afresh with the same content is reported again only after a pass saw
+    the file missing
+  - the stage-2 pre-start's warning (`gc internal project-mcp`, which still
+    exits 0 so the session starts), and, since a runtime discards a
+    successful pre-start's output, a warning from template resolution, on
+    the same once-until-it-changes-or-clears terms, where the controller
+    logs
+  - the `gc start --dry-run` plan (`leave <file> as it is`) for scope roots;
+    a configured agent's own work dir gets the template-resolution warning
+  - `gc mcp list` ("Not delivered", `projection.not_adopted` in `--json`)
+  - the `mcp-adoption` doctor check, for every scope root and every
+    configured agent's own work dir
+  - work dirs that exist only per session, such as a pool instance's, are
+    seen only when template resolution finds the file. A work dir the
+    session's own `pre_start` creates (a fresh checkout, say) has no file
+    yet when its first start is resolved, so the first start is silent and
+    a later pass, while the session lives, warns.
+- once gc adopts a file, it owns its servers, including a tracked file in a
+  repository: gc's version, which may hold expanded secrets, then shows up
+  as a change to that file, and `.gitignore` does not hide changes to
+  tracked files. gc does not check whether a file is tracked. A tracked file
+  that holds no servers of its own (an `opencode.json` or
+  `.gemini/settings.json` with only settings, an empty `.mcp.json`) is still
+  adopted, its settings kept and its formatting rewritten; see the
+  follow-up below.
+- gc starts Claude with project MCP servers pre-approved
+  (`enableAllProjectMcpServers`, so agents do not block on the trust
+  prompt). The servers in a `.mcp.json` gc leaves alone therefore run in its
+  Claude agents, as they always have in a city without an MCP catalog;
+  review a repository's MCP config before adding it as a rig.
 - first adoption is non-interactive but not destructive: before overwrite, Gas
   City snapshots the exact provider-native MCP content it is about to replace
   into a GC-owned adoption backup location under `.gc/`
@@ -340,11 +401,22 @@ Adoption and migration rules:
   backup churn on every reconcile
 - first adoption also emits a one-time high-signal warning naming the target
   path and the backup location before the overwrite lands
-- users who want to preserve existing provider-native MCP entries must port
-  them into neutral `mcp/*.toml` before enabling GC-owned MCP
-- `gc doctor` should surface preexisting provider-native MCP content as
-  "will be adopted and replaced" before first projection so the transition is
-  visible, but the runtime behavior remains deterministic and non-interactive
+- users who want to keep existing provider-native MCP entries port them into
+  neutral `mcp/*.toml`; until they do, or remove the entries, gc leaves the
+  file alone
+- `gc doctor` (`mcp-adoption`) reports files gc leaves alone, and files an
+  earlier gc adopted while they held servers the catalog still does not
+  carry: their definitions survive only in the adoption snapshot. A server
+  the catalog now defines under the same name is not reported for such a
+  file; compare the snapshot. Deleting the snapshots clears the report. To
+  hand an adopted file back, with the city stopped, restore it from its
+  snapshot and delete the managed marker (`.gc/mcp-managed/<provider>.json`
+  at its root): gc then
+  treats it as a file it does not manage, and leaves it alone if it holds
+  servers of its own. Restoring the file without deleting the marker does
+  not hand it back: gc still owns it, so its next pass reverts the edit, and
+  an empty catalog removes the file (or, for the formats gc shares, its
+  servers).
 - once a target is GC-owned, out-of-band edits to the managed MCP surface are
   treated as drift: reconcile restores the canonical payload, and doctor/warn
   paths should identify that the managed surface was edited after adoption
@@ -352,6 +424,34 @@ Adoption and migration rules:
   exist in the neutral v1 model are preserved only in the adoption backup; they
   do not survive active GC ownership and should be called out in the adoption
   warning text
+
+### Follow-up: sharing a provider-native file
+
+Leaving a file alone protects its servers, but the agents that read it then
+miss gc's servers until someone ports or removes the file's own. Three
+directions would let both coexist; each changes the ownership model above and
+needs its own design:
+
+- **Merge with recorded ownership.** Record in the managed marker which
+  server names gc wrote; reconcile only those, and leave every other entry
+  (and, for Claude, other top-level keys) as the user wrote it. Drift then
+  covers gc's entries only, cleanup removes only them, and a name the user
+  and the catalog both define needs a precedence rule. gc's entries, which
+  may carry expanded secrets, would then live in a file the repository may
+  track.
+- **Deliver outside the repository.** Point the provider at a gc-owned file
+  instead of writing into the work dir: Claude Code's `--mcp-config` loads
+  servers from a file alongside the project's `.mcp.json`, and other
+  providers have config paths or environment overrides. This keeps
+  repositories untouched, but each provider needs its own mechanism, and
+  support differs by version.
+- **Explicit adoption.** A command (or a per-root setting) that adopts a
+  named file anyway, snapshotting it, for users who want gc to own it.
+
+A narrower follow-up closes the remaining gap for tracked files: treat a
+file the work dir's repository tracks (`git ls-files --error-unmatch`) as
+one gc leaves alone, whatever it holds, so gc never writes its servers, and
+their secrets, into a committed file.
 
 ### Security and file permissions
 
@@ -363,10 +463,27 @@ Rules:
 - writes use atomic temp-file creation with `0600` before rename; there is no
   write-then-chmod window on the final path
 - failure to write or tighten permissions is a hard error
-- if the managed target path already exists as a symlink, projection hard-errors
-  instead of following it
-- `.gitignore` updates for `.mcp.json`, `.gemini/settings.json`, and
-  `.codex/config.toml` are best-effort and local-only
+- projection never follows a symlink, checked before the target lock and
+  again under it: a symlinked target (or provider directory) that gc
+  manages is a hard error; one it does not manage is left alone, as a
+  refused adoption, when there are servers to project, and ignored when
+  there are none
+- gc reads a provider file, or an adoption snapshot, only when it is a
+  regular file of at most 4 MiB (`materialize.MaxMCPFileSize`), opened
+  without following a link and without blocking, and checked after it is
+  opened. A named pipe or a device (`/dev/zero`, which a repository can
+  commit a link to) can neither block a pass nor exhaust memory: an
+  unmanaged one is refused, unread; a snapshot is skipped; the refusal
+  warning's dedupe stamps a symlink by the link and anything else that is
+  not a small regular file by its type or size
+- `.gitignore` updates are best-effort and local-only. They name the files gc
+  projects at that root, anchored to it (`/.mcp.json`,
+  `/.gemini/settings.json`, `/.codex/config.toml`, and so on), not files it
+  leaves alone, and not files of the same name deeper in the repository. An
+  entry an earlier gc wrote unanchored (`.mcp.json`) counts as present and
+  is left as it is
+- parse errors in provider files name the line and column, never the
+  offending text, which can be part of a secret
 - failed `.gitignore` updates surface as doctor warnings; they are not silent
 - diagnostics, doctor output, equality failures, and drift logs never print
   expanded secret values; they identify field names and source paths only
@@ -388,8 +505,9 @@ This handles:
 - cleanup after catalog removal
 
 `gc start --dry-run` computes the same stage-1 plan (`MCPProjection.Plan`)
-and reports each target it would adopt, create, update, or remove, without
-writing a target, marker, lock, adoption snapshot, or `.gitignore` entry.
+and reports each target it would adopt, leave alone, create, update, or
+remove, without writing a target, marker, lock, adoption snapshot, or
+`.gitignore` entry.
 
 Stage-1 and stage-2 both flow through one serialized writer keyed by
 `(provider-kind, target path)`. That writer is responsible for:
@@ -554,6 +672,8 @@ Checks cover:
 - invalid transport field combinations
 - unsupported provider/runtime delivery
 - conflicting projected payloads for a shared target
+- provider-native files gc leaves alone, and adopted files whose servers
+  survive only in an adoption snapshot (`mcp-adoption`)
 
 Doctor and runtime diagnostics must include:
 
@@ -575,7 +695,11 @@ Projection is fail-closed.
 - undeliverable runtime/workdir topologies with effective MCP are hard errors
 - projection write or permission failures are hard errors
 
-There is no best-effort warning mode once effective MCP exists.
+There is no best-effort warning mode once effective MCP exists, with one
+exception: a provider-native file gc does not manage and would have to drop
+content from is left as it is, with a warning (see "Ownership and cleanup").
+That file belongs to a repository or a user, not to gc, and failing would
+stop every agent in the city over it.
 
 ## Implementation Shape
 

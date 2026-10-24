@@ -351,7 +351,7 @@ func TestProjectedMCPWriterNoServers(t *testing.T) {
 			Provider: "gemini",
 			Target:   "/tmp/example/.gemini/settings.json",
 		},
-	})
+	}, nil)
 	out := buf.String()
 	if !strings.Contains(out, "No projected MCP servers.") {
 		t.Fatalf("writeProjectedMCPView() missing empty-state message:\n%s", out)

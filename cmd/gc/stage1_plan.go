@@ -25,7 +25,7 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 	fs := fsys.OSFS{}
 	var lines []string
 	desired := make(map[string]bool, len(targets))
-	gitignoreRoots := make(map[string]bool)
+	gitignore := make(map[string][]string)
 	for _, target := range targets {
 		plan, err := target.Projection.Plan(fs)
 		if err != nil {
@@ -34,9 +34,14 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 		if line := describeMCPPlan(plan); line != "" {
 			lines = append(lines, line)
 		}
+		if plan.Refused != nil {
+			// The real pass leaves the target alone: it neither claims it
+			// nor adds it to .gitignore.
+			continue
+		}
 		desired[managedKey(target.Projection.Provider, target.Root)] = true
 		if len(target.Projection.Servers) > 0 {
-			gitignoreRoots[target.Root] = true
+			gitignore[target.Root] = append(gitignore[target.Root], mcpGitignoreEntry(target.Projection))
 		}
 	}
 	orphans, err := planOrphanStage1Targets(cityPath, cfg, desired)
@@ -44,13 +49,8 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 		return nil, err
 	}
 	lines = append(lines, orphans...)
-	roots := make([]string, 0, len(gitignoreRoots))
-	for root := range gitignoreRoots {
-		roots = append(roots, root)
-	}
-	sort.Strings(roots)
-	for _, root := range roots {
-		missing := missingGitignoreEntries(fs, root, managedMCPGitignoreEntries)
+	for _, root := range sortedMapKeys(gitignore) {
+		missing := missingMCPGitignoreEntries(fs, root, gitignore[root])
 		if len(missing) == 0 {
 			continue
 		}
@@ -102,6 +102,8 @@ func describeMCPPlan(plan materialize.MCPProjectionPlan) string {
 		servers += "s"
 	}
 	switch {
+	case plan.Refused != nil:
+		return fmt.Sprintf("leave %s (%s) as it is: %s; %s", plan.Target, plan.Provider, plan.Refused.Reason(), plan.Refused.Remedy())
 	case plan.Adopt && plan.Provider == materialize.MCPProviderClaude:
 		return fmt.Sprintf("adopt %s (%s): save its current content under %s, then replace it with %s",
 			plan.Target, plan.Provider, plan.SnapshotDir, servers)
