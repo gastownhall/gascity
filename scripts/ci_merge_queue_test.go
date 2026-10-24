@@ -12,10 +12,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Merge-queue readiness (TESTING.md "Merge queue"). The queue is dormant
-// until the main ruleset enables it, but every required check must already
-// report on a queue entry's merge-group commit, from a merge_group run that
-// has no github.event.pull_request at all: Check and CI / required
+// Merge queue (TESTING.md "Merge queue"). Every required check must report
+// on a queue entry's merge-group commit, from a merge_group run that has no
+// github.event.pull_request at all: Check and CI / required
 // (ci.yml), the four Analyze checks (codeql.yml), "bazel test
 // (side-by-side)" and "BUILD files in sync" (bazel.yml). These tests
 // simulate that event with evalGHExpr (gh_expr_test.go) and the workflows'

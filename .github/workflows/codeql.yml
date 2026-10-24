@@ -70,18 +70,14 @@ jobs:
             build-mode: none
     steps:
       # A merge group reports each required Analyze check without analyzing
-      # again (owner decision, ga-ylpbsy.51): the pull request's own run
-      # analyzed the change, and the ruleset's code_scanning rule gated it
-      # there (GitHub applies that rule to pull requests, never to merge
-      # queue groups); the push to main analyzes the merged commit. A full
-      # Analyze (go) leg was the last required check in 54-60% of queue
-      # entries. Every other step skips on merge_group
-      # (scripts/codeql_merge_group_test.go).
+      # (TESTING.md "Merge queue"): every queued pull request's own run
+      # analyzed it, and the push to main analyzes the merged commit. Every
+      # other step skips on merge_group (scripts/codeql_merge_group_test.go).
       - name: Merge group (the pull request's analysis stands)
         id: merge-group
         if: github.event_name == 'merge_group'
         run: |
-          echo "Merge group: no CodeQL analysis here. The pull request's run analyzed this change, and the push to main analyzes the merged commit." >> "$GITHUB_STEP_SUMMARY"
+          echo "Merge group: no CodeQL analysis here. Each queued pull request's own run analyzed it, and the push to main analyzes the merged commit." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout
         if: github.event_name != 'merge_group'
@@ -96,12 +92,13 @@ jobs:
       #   - setup-go: the go.mod toolchain instead of a download, before
       #     init so CodeQL wraps that go;
       #   - go-mod-download: the shared module cache, restored on every
-      #     event and saved only by push and schedule runs after go mod
-      #     verify (the composite's trust note);
+      #     event that analyzes and saved only by push and schedule runs
+      #     after go mod verify (the composite's trust note);
       #   - the build cache: on Blacksmith, GOCACHEPROG (blacksmithd) already
       #     serves it, as for every Go job here; elsewhere (runner_policy.py's
       #     GitHub-hosted labels) an actions/cache entry keyed on go.mod and
-      #     go.sum, restored on every event, saved only by a push to main.
+      #     go.sum, restored on every event that analyzes, saved only by a
+      #     push to main.
       - name: Set up Go
         if: matrix.language == 'go' && github.event_name != 'merge_group'
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -146,7 +143,7 @@ jobs:
         uses: github/codeql-action/autobuild@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
 
       # Only a push to main that missed the exact key writes the build cache
-      # (pull_request and merge_group runs restore it, never write it).
+      # (pull_request runs restore it, never write it).
       - name: Save Go build cache
         if: matrix.language == 'go' && steps.gocache.outputs.managed == 'false' && steps.gocache-restore.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

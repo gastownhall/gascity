@@ -322,18 +322,22 @@ this:
   unique per entry and base, with `cancel-in-progress` false. A PR's runs,
   keyed on its number, never share a queue entry's group.
 - **CodeQL reports without analyzing.** Each `Analyze (...)` leg of a merge
-  group runs one step, on a 2 vCPU runner, that says why: the pull
-  request's own run analyzed the change, and the ruleset's `code_scanning`
-  rule gated it there (GitHub applies that rule to pull requests, never to
-  merge queue groups); the push to `main` analyzes the merged commit
-  (`scripts/codeql_merge_group_test.go`).
+  group runs one step, on a 2 vCPU runner, that says why: each queued pull
+  request's own run analyzed it, and the ruleset's `code_scanning` rule
+  gated it there (GitHub applies that rule to pull requests, never to merge
+  queue groups); the push to `main` analyzes the merged commit
+  (`scripts/codeql_merge_group_test.go`). What a group gives up is a CodeQL
+  run on the combined commit (up to five pull requests over a `main` that
+  may have moved) before it merges: an alert only that combination creates
+  surfaces on the push to `main`, after the merge. The `code_scanning` rule
+  is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
   any other run. The `integration` lane can later be gated on `merge_group`
   only (G3).
 
-**Recommended queue settings** (for 60-70 merges a day, with a peak of 7 an
-hour from 2026-10-05 to 10-07). A queue run costs about what a push run
+**Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
+2026-10-05 to 10-07). A queue run costs about what a push run
 does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 
 | Setting | Value | Why |
@@ -346,9 +350,8 @@ does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 | Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |
 | Required checks | the ruleset's 7 contexts, unchanged | Classic branch protection keeps `CI / required`, which also reports on `merge_group` |
 
-Repository auto-merge is already on, so `gh pr merge --auto` queues a PR.
-After enabling the queue, watch the first day's `merge_group` run times, then
-adjust the build concurrency.
+Repository auto-merge is on, so `gh pr merge --auto` queues a PR. Watch
+`merge_group` run times when changing the build concurrency.
 
 **Security.** A queue run executes the queued commit's own workflows with
 CI secrets, including the rbe-west executor credentials. Queueing a fork PR

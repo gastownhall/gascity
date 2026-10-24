@@ -5,15 +5,14 @@ import (
 	"testing"
 )
 
-// CodeQL off the merge-queue path (owner decision, ga-ylpbsy.51 item 9).
-// The four Analyze checks stay required (main ruleset and classic branch
-// protection), so codeql.yml still runs on merge_group and every leg still
-// reports its check, but a merge group analyzes nothing: each leg runs one
-// step that says why, on the 2 vCPU runner. The pull request's own run
-// analyzed the change, and the ruleset's code_scanning rule gated it there
-// (GitHub applies that rule to pull requests, never to merge queue groups);
-// the push to main analyzes the merged commit. Before, the full Analyze (go)
-// leg (3.9 min) was the last required check in 54-60% of queue entries.
+// CodeQL off the merge-queue path (TESTING.md "Merge queue"). The four
+// Analyze checks stay required (main ruleset and classic branch protection),
+// so codeql.yml still runs on merge_group and every leg still reports its
+// check, but a merge group analyzes nothing: each leg runs one step that says
+// why, on the 2 vCPU runner. Each queued pull request's own run analyzed it,
+// and the ruleset's code_scanning rule gated it there (GitHub applies that
+// rule to pull requests, never to merge queue groups); the push to main
+// analyzes the merged commit.
 
 // codeqlMergeGroupStep is the id of the one step a merge group runs.
 const codeqlMergeGroupStep = "merge-group"
@@ -45,7 +44,7 @@ func TestCodeQLMergeGroupReportsWithoutAnalysis(t *testing.T) {
 		t.Fatalf("analyze has no step with id %q (the merge group's only step)", codeqlMergeGroupStep)
 	}
 	if s := job.Steps[stub]; s.Uses != "" || s.Run == "" {
-		t.Errorf("the merge group step uses %q; want a run step that needs no checkout", s.Uses)
+		t.Errorf("the merge group step uses %q and runs %q; want a run step that needs no checkout", s.Uses, s.Run)
 	}
 
 	runners := map[string]string{
