@@ -1243,6 +1243,34 @@ func TestReaperRunBudgetDeclaresPartialAndCarriesWorkForward(t *testing.T) {
 	}
 }
 
+// bd answers a one-id delete without deleted_count ({"deleted":"<id>",...}),
+// so a batch of exactly one closed session must still count as one deletion
+// and must not be escalated as a failed prune.
+func TestReaperTypeSafeSessionPruneCountsASingleIdBatch(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "batches")
+	f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    if [ "$n" = "0" ]; then
+      printf '1' > "`+stateFile+`"
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+	f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+	f.runReaper(t)
+
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "type-safe session prune failed") {
+		t.Fatalf("a successful one-id delete was escalated as a failed prune:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "sessions-pruned:1") {
+		t.Fatalf("summary did not count the single deleted session:\n%s", gcLog)
+	}
+}
+
 func TestReaperRecordsFailedSessionPruneAsAnAnomaly(t *testing.T) {
 	f := sessionPruneFixture(t, "")
 	writeExecutable(t, filepath.Join(f.binDir, "bd"), `#!/bin/sh
