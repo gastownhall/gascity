@@ -25,20 +25,20 @@ type NotRegularFileError struct {
 }
 
 func (e *NotRegularFileError) Error() string {
-	kind := "not a regular file"
 	switch t := e.Mode.Type(); {
 	case t&os.ModeSymlink != 0:
-		kind = "a symlink"
+		return "a symlink, not a regular file"
 	case t&os.ModeNamedPipe != 0:
-		kind = "a named pipe"
+		return "a named pipe, not a regular file"
 	case t&os.ModeSocket != 0:
-		kind = "a socket"
+		return "a socket, not a regular file"
 	case t&os.ModeDevice != 0:
-		kind = "a device"
+		return "a device, not a regular file"
 	case t&os.ModeDir != 0:
-		kind = "a directory"
+		return "a directory, not a regular file"
+	default:
+		return "not a regular file"
 	}
-	return kind + ", not a regular file"
 }
 
 // FileTooLargeError reports a regular file larger than gc reads.

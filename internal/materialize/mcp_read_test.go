@@ -61,12 +61,49 @@ func makeFIFO(t *testing.T) string {
 // guardedFS passes every call to the real filesystem but never reads the
 // guarded paths: it records the attempt and fails it, so a test can show gc
 // does not read them, and a regression fails instead of reading /dev/zero
-// or a huge file.
+// or a huge file. It also records every path it is asked about.
 type guardedFS struct {
 	fsys.OSFS
 	guarded map[string]bool
 	mu      sync.Mutex
 	reads   []string
+	touched []string
+}
+
+func (g *guardedFS) touch(name string) {
+	g.mu.Lock()
+	g.touched = append(g.touched, filepath.Clean(name))
+	g.mu.Unlock()
+}
+
+func (g *guardedFS) Lstat(name string) (os.FileInfo, error) {
+	g.touch(name)
+	return g.OSFS.Lstat(name)
+}
+
+func (g *guardedFS) Stat(name string) (os.FileInfo, error) {
+	g.touch(name)
+	return g.OSFS.Stat(name)
+}
+
+func (g *guardedFS) ReadDir(name string) ([]os.DirEntry, error) {
+	g.touch(name)
+	return g.OSFS.ReadDir(name)
+}
+
+// touchedUnder returns the paths at or under dir the filesystem was asked
+// about.
+func (g *guardedFS) touchedUnder(dir string) []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	dir = filepath.Clean(dir)
+	var out []string
+	for _, path := range g.touched {
+		if path == dir || strings.HasPrefix(path, dir+string(filepath.Separator)) {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 func newGuardedFS(paths ...string) *guardedFS {
@@ -78,6 +115,7 @@ func newGuardedFS(paths ...string) *guardedFS {
 }
 
 func (g *guardedFS) ReadFile(name string) ([]byte, error) {
+	g.touch(name)
 	if g.guarded[filepath.Clean(name)] {
 		g.mu.Lock()
 		g.reads = append(g.reads, name)
@@ -236,11 +274,138 @@ func TestDroppedAtAdoptionSkipsSnapshotsGCDidNotWrite(t *testing.T) {
 	if err := os.Symlink("/dev/zero", zero); err != nil {
 		t.Fatal(err)
 	}
-	guarded := newGuardedFS(big, zero, filepath.Join(snapshotDir, "20260102T000000Z.json"))
+	pipe := filepath.Join(snapshotDir, "20260105T000000Z.json")
+	if err := syscall.Mkfifo(pipe, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	guarded := newGuardedFS(big, zero, pipe, filepath.Join(snapshotDir, "20260102T000000Z.json"))
 	if dropped, _, err = proj.DroppedAtAdoption(guarded); err != nil || !reflect.DeepEqual(dropped, []string{"team"}) {
 		t.Fatalf("DroppedAtAdoption(guarded) = %v, %v", dropped, err)
 	}
 	if reads := guarded.guardedReads(); len(reads) != 0 {
 		t.Fatalf("snapshots gc did not write were read: %v", reads)
+	}
+	// The listing decides: an entry that is not a regular file is skipped
+	// before it is opened, or even looked at.
+	for _, entry := range []string{zero, pipe, filepath.Join(snapshotDir, "20260102T000000Z.json")} {
+		if touched := guarded.touchedUnder(entry); len(touched) != 0 {
+			t.Fatalf("the scan touched %s, which the listing shows is not a regular file", entry)
+		}
+	}
+}
+
+// gc creates the snapshot directory itself, so the scan does not follow a
+// symlink to it, or to the .gc/mcp-adopted directory above it: one pointing
+// at /dev would have gc open device nodes.
+func TestDroppedAtAdoptionDoesNotFollowASymlinkedSnapshotDirectory(t *testing.T) {
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(elsewhere, MCPProviderClaude), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{elsewhere, filepath.Join(elsewhere, MCPProviderClaude)} {
+		if err := os.WriteFile(filepath.Join(dir, "20260101T000000Z.json"), []byte(`{"mcpServers":{"team":{"command":"team"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, link := range map[string]struct{ at, to string }{
+		"provider directory":    {filepath.Join(".gc", "mcp-adopted", MCPProviderClaude), elsewhere},
+		"mcp-adopted directory": {filepath.Join(".gc", "mcp-adopted"), elsewhere},
+		"provider dir to /dev":  {filepath.Join(".gc", "mcp-adopted", MCPProviderClaude), "/dev"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			proj := notesProjection(t, MCPProviderClaude, root)
+			markMCPManaged(t, root, MCPProviderClaude)
+			at := filepath.Join(root, link.at)
+			if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(link.to, at); err != nil {
+				t.Fatal(err)
+			}
+			guarded := newGuardedFS()
+			dropped, _, err := proj.DroppedAtAdoption(guarded)
+			if err != nil || len(dropped) != 0 {
+				t.Fatalf("DroppedAtAdoption = %v, %v; want nothing through the link", dropped, err)
+			}
+			snapshotDir := filepath.Join(root, ".gc", "mcp-adopted", MCPProviderClaude)
+			for _, path := range guarded.touchedUnder(snapshotDir) {
+				if path != snapshotDir {
+					t.Fatalf("the scan looked inside the linked snapshot directory: %s", path)
+				}
+			}
+			for _, path := range guarded.touched {
+				if path == snapshotDir {
+					continue
+				}
+				if strings.HasPrefix(path, filepath.Clean(link.to)+string(filepath.Separator)) {
+					t.Fatalf("the scan followed the link to %s", path)
+				}
+			}
+			if name != "provider dir to /dev" {
+				if dropped, _, err := proj.DroppedAtAdoption(fsys.OSFS{}); err != nil || len(dropped) != 0 {
+					t.Fatalf("DroppedAtAdoption(OSFS) = %v, %v; want nothing through the link", dropped, err)
+				}
+			}
+		})
+	}
+}
+
+// A target gc manages is read under the lock to keep the provider's other
+// settings. That read takes the same guard: a named pipe there fails the
+// pass at once instead of blocking it, and an oversized file is not read.
+func TestMCPProjectionDoesNotReadAManagedTargetThatIsAPipeOrOversized(t *testing.T) {
+	t.Run("named pipe", func(t *testing.T) {
+		root := t.TempDir()
+		proj := notesProjection(t, MCPProviderGemini, root)
+		markMCPManaged(t, root, MCPProviderGemini)
+		if err := os.MkdirAll(filepath.Dir(proj.Target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(proj.Target, 0o600); err != nil {
+			t.Fatalf("mkfifo: %v", err)
+		}
+		var applyErr, planErr error
+		returnsPromptly(t, proj.Target, func() { applyErr = proj.Apply(fsys.OSFS{}) })
+		returnsPromptly(t, proj.Target, func() { _, planErr = proj.Plan(fsys.OSFS{}) })
+		for name, err := range map[string]error{"Apply": applyErr, "Plan": planErr} {
+			if err == nil || !strings.Contains(err.Error(), "a named pipe, not a regular file") {
+				t.Fatalf("%s error = %v, want the named pipe refused unread", name, err)
+			}
+		}
+	})
+	t.Run("oversized", func(t *testing.T) {
+		root := t.TempDir()
+		proj := notesProjection(t, MCPProviderGemini, root)
+		markMCPManaged(t, root, MCPProviderGemini)
+		if err := os.MkdirAll(filepath.Dir(proj.Target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sparseFile(t, proj.Target, 64<<20)
+		guarded := newGuardedFS(proj.Target)
+		_, planErr := proj.Plan(guarded)
+		applyErr := proj.Apply(guarded)
+		for name, err := range map[string]error{"Apply": applyErr, "Plan": planErr} {
+			if err == nil || !strings.Contains(err.Error(), "67108864 bytes, more than the 4194304 gc reads") {
+				t.Fatalf("%s error = %v, want the oversized target refused unread", name, err)
+			}
+		}
+		if reads := guarded.guardedReads(); len(reads) != 0 {
+			t.Fatalf("the oversized target was read: %v", reads)
+		}
+	})
+}
+
+func TestNotRegularFileErrorNamesTheKind(t *testing.T) {
+	for mode, want := range map[os.FileMode]string{
+		os.ModeNamedPipe:   "a named pipe, not a regular file",
+		os.ModeDevice:      "a device, not a regular file",
+		os.ModeIrregular:   "not a regular file",
+		os.ModeSymlink:     "a symlink, not a regular file",
+		os.ModeDir | 0o755: "a directory, not a regular file",
+	} {
+		if got := (&NotRegularFileError{Mode: mode}).Error(); got != want {
+			t.Errorf("Error(%v) = %q, want %q", mode, got, want)
+		}
 	}
 }

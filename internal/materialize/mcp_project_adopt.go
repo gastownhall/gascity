@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -154,6 +155,29 @@ func quotedList(noun string, items []string) string {
 // exist, or adopting it would drop nothing gc does not manage.
 func (p MCPProjection) AdoptionRefusal(fs fsys.FS) (*MCPAdoptionRefusedError, error) {
 	return p.adoptionConflict(fs)
+}
+
+// symlinkedComponent reports whether a path component of path below root
+// is a symlink: root itself may be reached through a link, but nothing gc
+// creates under it should be one. A missing component returns false and an
+// error errorsIsNotExist reports.
+func symlinkedComponent(fs fsys.FS, root, path string) (bool, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, fmt.Errorf("%s is not below %s", path, root)
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := fs.Lstat(current)
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // mcpServersKey is the document key each provider keeps its MCP servers
@@ -463,11 +487,23 @@ func isEmptyMCPValue(v any) bool {
 // catalog has not taken over since. Their definitions survive only in the
 // adoption snapshots under the returned directory. A server the catalog now
 // defines under the same name is not listed. It reads the snapshots and
-// writes nothing; a snapshot gc cannot parse, or that is not a regular file
-// of at most MaxMCPFileSize bytes, is skipped.
+// writes nothing. gc writes the snapshot directory and the files in it, so
+// it does not follow a symlink to the directory (one pointing at /dev would
+// have it open device nodes), and it reads only the entries the listing
+// shows as regular files, skipping the rest unopened; a snapshot gc cannot
+// parse, or that is larger than MaxMCPFileSize, is skipped too.
 func (p MCPProjection) DroppedAtAdoption(fs fsys.FS) ([]string, string, error) {
 	dir := p.adoptionSnapshotDir()
 	if !p.isManaged(fs) {
+		return nil, dir, nil
+	}
+	linked, err := symlinkedComponent(fs, p.Root, dir)
+	switch {
+	case err != nil && errorsIsNotExist(err):
+		return nil, dir, nil
+	case err != nil:
+		return nil, dir, fmt.Errorf("inspecting %s: %w", dir, err)
+	case linked:
 		return nil, dir, nil
 	}
 	entries, err := fs.ReadDir(dir)
@@ -483,12 +519,14 @@ func (p MCPProjection) DroppedAtAdoption(fs fsys.FS) ([]string, string, error) {
 	}
 	dropped := make(map[string]bool)
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// gc writes snapshots as regular files. Anything else in the
+		// listing (a directory, a symlink, a named pipe, a device node) is
+		// skipped before it is opened: opening some devices has effects.
+		if !entry.Type().IsRegular() {
 			continue
 		}
-		// gc writes snapshots as regular files; anything else in the
-		// directory, such as a symlink to a named pipe or a device, is
-		// skipped unread, as is a snapshot that has since been removed.
+		// readRegularFile checks the file it opens again, and a snapshot
+		// that has since been removed is skipped.
 		data, err := readRegularFile(fs, filepath.Join(dir, entry.Name()))
 		var notRegular *NotRegularFileError
 		var tooLarge *FileTooLargeError
