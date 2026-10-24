@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -630,5 +631,70 @@ func TestClaimOfAWispThatVanishesBeforeTheClaimIsNotFound(t *testing.T) {
 	_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
 	if claimed || !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Claim(vanished wisp) = (claimed=%v, err=%v), want ErrNotFound", claimed, err)
+	}
+}
+
+// bdServeProblem stands in for the refusal the beads http store returns when
+// bd serve answers a request with a problem document: Error renders it the way
+// the store's wire client does ("<op>: bd serve at <url> answered <status>
+// <code>: <detail>"), and Unwrap reaches the sentinel the problem code maps to
+// (not_found -> issueops.ErrNotFound; a codeless 4xx -> a bad-request sentinel).
+type bdServeProblem struct {
+	text     string
+	sentinel error
+}
+
+func (e *bdServeProblem) Error() string { return e.text }
+func (e *bdServeProblem) Unwrap() error { return e.sentinel }
+
+// TestClaimMapsABdServeNotFoundRefusalToErrNotFound: a remote work store's
+// claim of an id bd serve holds no issue or wisp for comes back as the wire's
+// not_found refusal, whose text carries none of the local not-found phrasings.
+// Claim must still report it as ErrNotFound, the one error that lets the
+// hook's claim-time class route find the bead in the relocated graph binding.
+// Read as an ordinary failure, the hook skipped the step and drained with
+// claims_errored, and the controller kept spawning sessions for it.
+func TestClaimMapsABdServeNotFoundRefusalToErrNotFound(t *testing.T) {
+	const id = "gcg--9223372036837730461"
+	spy := &claimRoleSpy{
+		err:    &bdServeProblem{text: bdServeClaimNotFound, sentinel: issueops.ErrNotFound},
+		getErr: &bdServeProblem{text: "getIssue: bd serve at https://beads.example.test answered 404 not_found: no issue or wisp with that id", sentinel: issueops.ErrNotFound},
+	}
+	store := newNativeDoltStoreForTest(claimRemoteSpy{claimRoleSpy: spy, capabilities: bdServeHandshake})
+
+	_, claimed, err := store.Claim(id, "worker-1")
+	if claimed {
+		t.Fatal("claimed = true on a refused claim")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Claim(%q) err = %v, want it to wrap beads.ErrNotFound", id, err)
+	}
+	if errors.Is(err, ErrWispNotClaimable) {
+		t.Errorf("Claim(%q) err = %v, want it NOT to name a missing id a wisp", id, err)
+	}
+	if !strings.Contains(err.Error(), bdServeClaimNotFound) {
+		t.Errorf("Claim(%q) err = %v, want it to keep bd serve's answer", id, err)
+	}
+	if len(spy.updates) != 0 {
+		t.Errorf("Update dialed %d times for a missing id, want none", len(spy.updates))
+	}
+}
+
+// TestClaimKeepsACodelessBdServe404AnError: a 404 without a problem code may
+// come from a gateway in front of bd serve, so it says nothing about the bead
+// and must stay an error rather than open the class route.
+func TestClaimKeepsACodelessBdServe404AnError(t *testing.T) {
+	spy := &claimRoleSpy{
+		err:    &bdServeProblem{text: bdServeCodeless404, sentinel: errors.New("bad request")},
+		getErr: issueops.ErrNotFound,
+	}
+	store := newNativeDoltStoreForTest(claimRemoteSpy{claimRoleSpy: spy, capabilities: bdServeHandshake})
+
+	_, claimed, err := store.Claim("gcg-404", "worker-1")
+	if claimed || err == nil {
+		t.Fatalf("Claim = (claimed=%v, err=%v), want an error", claimed, err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("Claim err = %v; a codeless 404 must not read as ErrNotFound", err)
 	}
 }

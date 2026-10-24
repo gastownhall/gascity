@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -309,5 +310,76 @@ func TestBindingClaimRefusalAloneStillDrains(t *testing.T) {
 	}
 	if result.Reason != "claims_errored" {
 		t.Fatalf("drain reason = %q, want claims_errored: a refused claim must not be laundered into a healthy no_work", result.Reason)
+	}
+}
+
+// TestClassEscalationReachesTheBindingFromAnHTTPBackedRigLeg is the live
+// incident at the seam it broke. A rig whose work store is attached to a bd
+// serve over HTTP runs the claim through the production bd claim op, and bd
+// serve refuses a graph step it does not hold with its structured not_found
+// answer, not with bd's local "Issue <id> not found". Only the rig leg's
+// city-wide reader serves the step, so if that refusal is not read as
+// not-found the class route never opens and the hook drains with
+// claims_errored on every tick, while the controller keeps spawning sessions
+// for the routed step. The step lives in the relocated graph binding, and
+// that is where it must be claimed.
+func TestClassEscalationReachesTheBindingFromAnHTTPBackedRigLeg(t *testing.T) {
+	const (
+		stepID  = "gcg-9223"
+		refusal = "exit status 1: Error: claimIssue: bd serve at https://bdserve-prj-61e0c78386cf8895.beads.svc.aws-usw2.internal:30635 answered 404 not_found: no issue or wisp with that id"
+	)
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, stepID, nil)
+	route := newFanoutClassRoute(t, class)
+
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	var bdCalls []string
+	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+		return func(dir, name string, args ...string) ([]byte, error) {
+			call := dir + ": " + name + " " + strings.Join(args, " ")
+			bdCalls = append(bdCalls, call)
+			if dir == "rig-a" && name == "bd" && strings.Join(args, " ") == "update "+stepID+" --claim --json" {
+				return nil, errors.New(refusal)
+			}
+			t.Errorf("unexpected bd call %q", call)
+			return nil, fmt.Errorf("unexpected bd call %q", call)
+		}
+	}
+
+	// Only the primary (rig) leg runs the city-wide reader, so only it serves
+	// the graph step; the city work leg's own query has nothing.
+	row := `[{"id":"` + stepID + `","status":"open","metadata":{"gc.routed_to":"worker"}}]`
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "rig-a" {
+			return row, nil
+		}
+		return "[]", nil
+	}
+	base := hookFanoutBaseOps(hookClaimWithBdStore)
+	base.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+		return beads.Bead{}, fmt.Errorf("getting bead %q: %w", beadID, beads.ErrNotFound)
+	}
+
+	stores := hookFanoutRigFirstStores()
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
+		classRoutedHookClaimOps(base, route), run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %q", err, stdout.String())
+	}
+	if result.Action != "work" || result.BeadID != stepID {
+		t.Fatalf("claim result = %+v (stderr=%q), want %s claimed through the class binding, not a drain", result, stderr.String(), stepID)
+	}
+	if got, want := strings.Join(bdCalls, "\n"), "rig-a: bd update "+stepID+" --claim --json"; got != want {
+		t.Errorf("bd calls = %q, want only the rig leg's claim %q", got, want)
+	}
+	held, err := class.Get(stepID)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(held.Status), "in_progress") || strings.TrimSpace(held.Assignee) != "worker-1" {
+		t.Fatalf("binding holds %s as status=%q assignee=%q (err=%v), want in_progress owned by worker-1", stepID, held.Status, held.Assignee, err)
 	}
 }

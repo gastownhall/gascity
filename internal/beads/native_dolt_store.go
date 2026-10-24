@@ -2079,9 +2079,13 @@ func nativeReleaseRefused(err error) bool {
 // release already reports for an unclaimed row. A claim has no equivalent
 // benign reading of "the bead does not exist": it is a caller error every
 // other Store.Claim implementation already surfaces as an error (see
-// SQLiteStore.Claim, BdStore.Claim), so this front door does too, via the
-// ordinary nativeStoreError not-found translation every other role accessor
-// in this file uses.
+// SQLiteStore.Claim, BdStore.Claim), so this front door does too. The verdict
+// is the claimer's issueops.ErrNotFound sentinel, read with errors.Is the way
+// nativeReadNotFound reads the reader role's, not nativeStoreError's message
+// match: a remote store's miss is bd serve's not_found problem code, whose
+// text ("answered 404 not_found: no issue or wisp with that id") matches none
+// of the local phrasings. Read as an ordinary error, it would keep the hook's
+// claim-time class route from reaching a relocated graph step.
 //
 // A WISP ID IS CLAIMED THROUGH THE UPDATE OPERATION WHEN THE STORE CAN, AND
 // OTHERWISE GETS A NAMED REFUSAL, ErrWispNotClaimable, NEVER A BARE
@@ -2155,6 +2159,9 @@ func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 			if nativeClaimTargetIsWisp(ctx, storage, id) {
 				return nativeClaimWisp(ctx, storage, id, assignee)
 			}
+			// Classified by the sentinel, not the message: see "A MISSING
+			// BEAD IS ErrNotFound" above.
+			return Bead{}, false, fmt.Errorf("bead %q: %w: %w", id, ErrNotFound, err)
 		}
 		return Bead{}, false, nativeStoreError(id, err)
 	}

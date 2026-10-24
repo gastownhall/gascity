@@ -333,3 +333,99 @@ func TestIsExactIDQueryable(t *testing.T) {
 		}
 	}
 }
+
+// bdServeClaimNotFound is bd serve's structured refusal of a claim on an id it
+// holds no issue or wisp for, as bd renders it: the problem document's
+// not_found code follows the status, then its detail. Verbatim from a live
+// `gc hook --claim` transcript against an HTTP-attached rig work store. None of
+// bd's local not-found phrasings ("not found", "no issue found") appear in it.
+const bdServeClaimNotFound = "claimIssue: bd serve at https://bdserve-prj-61e0c78386cf8895.beads.svc.aws-usw2.internal:30635 answered 404 not_found: no issue or wisp with that id"
+
+// bdServeCodeless404 is a 404 from something in front of bd serve (a gateway
+// or proxy answering for a path it does not route). It carries no problem
+// code, so it says nothing about whether the bead exists.
+const bdServeCodeless404 = "claimIssue: bd serve at https://gateway.example.test answered 404"
+
+// TestIsBdNotFoundRecognizesBdServeNotFoundCode pins the classification
+// itself: bd serve's not_found code is a bead-level miss, and a codeless 404
+// is not.
+func TestIsBdNotFoundRecognizesBdServeNotFoundCode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{name: "bd serve not_found, bare", err: bdServeClaimNotFound, want: true},
+		{name: "bd serve not_found, through the bd subprocess", err: "exit status 1: Error: " + bdServeClaimNotFound, want: true},
+		{name: "bd serve not_found, read op", err: "exit status 1: getIssue: bd serve at http://100.64.0.1:7491 answered 404 not_found: no issue or wisp with that id", want: true},
+		{name: "codeless gateway 404", err: "exit status 1: Error: " + bdServeCodeless404, want: false},
+		{name: "bd serve refusing a credential", err: "exit status 1: Error: claimIssue: bd serve at http://100.64.0.1:7491 answered 401 unauthenticated", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := errors.New(tc.err)
+			if got := isBdNotFound(err); got != tc.want {
+				t.Errorf("isBdNotFound(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+			if got := isBdBeadNotFound(err); got != tc.want {
+				t.Errorf("isBdBeadNotFound(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdStoreClaimTreatsBdServeNotFoundAsErrNotFound: a rig whose work store is
+// attached to a bd serve over HTTP refuses a claim on a bead it does not hold
+// with the not_found code. Claim must report that as ErrNotFound, the one
+// error that lets the hook's claim-time class route look for the bead in the
+// relocated graph binding. Read as an ordinary failure, the hook skipped the
+// step and drained with claims_errored on every tick while the controller kept
+// spawning sessions for it.
+func TestBdStoreClaimTreatsBdServeNotFoundAsErrNotFound(t *testing.T) {
+	const id = "gcg--9223372036837730461"
+	runner := cannedBdRunner(t, map[string]bdCanned{
+		"update " + id + " --claim --json": {err: "exit status 1: Error: " + bdServeClaimNotFound},
+	})
+	_, ok, err := NewBdStore("/rig", runner.run).Claim(id)
+	if ok {
+		t.Fatal("Claim ok = true on a refused claim")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Claim(%q) err = %v, want ErrNotFound", id, err)
+	}
+}
+
+// TestBdStoreClaimKeepsACodeless404AnError is the other side: a 404 with no
+// problem code may come from a gateway in front of bd serve, so it proves
+// nothing about the bead and must stay an error.
+func TestBdStoreClaimKeepsACodeless404AnError(t *testing.T) {
+	const id = "gcg-404"
+	runner := cannedBdRunner(t, map[string]bdCanned{
+		"update " + id + " --claim --json": {err: "exit status 1: Error: " + bdServeCodeless404},
+	})
+	_, ok, err := NewBdStore("/rig", runner.run).Claim(id)
+	if ok || err == nil {
+		t.Fatalf("Claim(%q) = (ok=%v, err=%v), want an error", id, ok, err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("Claim(%q) err = %v; a codeless 404 must not read as ErrNotFound", id, err)
+	}
+}
+
+// TestBdStoreGetTreatsBdServeNotFoundAsErrNotFound: bd serve's not_found code
+// on bd show names the requested bead the way a direct-mode "no issue found"
+// does, so it is a verdict by itself and needs no exact-ID confirmation.
+func TestBdStoreGetTreatsBdServeNotFoundAsErrNotFound(t *testing.T) {
+	const id = "ga-zz9p"
+	showErr := "exit status 1: Error: getIssue: bd serve at http://100.64.0.1:7491 answered 404 not_found: no issue or wisp with that id"
+	runner := cannedBdRunner(t, map[string]bdCanned{
+		bdShowCmd(id):      {err: showErr},
+		bdWispQueryCmd(id): {out: "[]"},
+	})
+	_, err := NewBdStore("/city", runner.run).Get(id)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get(%q) err = %v, want ErrNotFound", id, err)
+	}
+	if got, want := bdCommands(runner), []string{bdShowCmd(id), bdWispQueryCmd(id)}; !slices.Equal(got, want) {
+		t.Errorf("Get(%q) ran %q, want %q", id, got, want)
+	}
+}
