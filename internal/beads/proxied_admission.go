@@ -645,8 +645,10 @@ type AdmissionInput struct {
 	Ops ProviderOps
 
 	// LongLived says the store will be held for the process lifetime. It
-	// decides two things: whether a finite idle policy is admissible at all,
-	// and whether a draining proxy is waited out or refused immediately.
+	// decides three things: whether a finite idle policy is admissible at
+	// all, whether a draining proxy is waited out or refused immediately, and
+	// whether the no-greeting ladder may spend the recover rung (`bd dolt
+	// stop`). A one-shot open never does: see escalateZombie.
 	LongLived bool
 
 	// Observed records generations a ping has already proven healthy, and
@@ -1004,9 +1006,11 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 // neither: it holds the rung for failedPingBackoff (council A-F5, D-F9).
 //
 // Only a recover bd itself refused is terminal (round4 recheck M1); see
-// recoverFailed for every other way a recover can fail. And only a scope that
-// can cycle its proxy root spends the recover at all: a rig on the city's
-// root leaves it to the city scope (round4 recheck M2, leaveRecoverToCity).
+// recoverFailed for every other way a recover can fail. And only a long-lived
+// open of a scope that can cycle its proxy root spends the recover at all: a
+// one-shot open stops at the ping and takes the bd front door, and a rig on
+// the city's root leaves it to the city scope (round4 recheck M2,
+// leaveRecoverToCity).
 // "Spent" means the recover has RETURNED: a ladder that reaches the rung
 // while another open's recover of the same generation is still queued or
 // running answers non-terminal and runs nothing (round4 review F1).
@@ -1148,6 +1152,21 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"bd answered this generation's ping after this ladder's probes; re-admitting on fresh evidence", ep.Err)
 		}
+	}
+
+	// The recover rung is spent only by a long-lived open. Its once-per-
+	// generation bound is this process's ledger, and a one-shot command is a
+	// fresh process with an empty one: a city running many one-shot gc
+	// commands would have each of them able to `bd dolt stop` the same
+	// zombie. Cycling the server is the long-lived owner's (the controller's
+	// health loop recovers provider-owned scopes itself). The one-shot has
+	// spent the ping, which is what a bd fork would do to this proxy anyway,
+	// and takes the bd front door. The rung is left unclaimed, so a long-lived
+	// open in the same process still spends it.
+	if !in.LongLived {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the endpoint accepts and never greets, and a one-shot open does not spend the provider recover; "+
+				"recovering the proxy is the long-lived owner's", ep.Err)
 	}
 
 	// The recover rung is spent by the scope that can run it (round4 recheck
