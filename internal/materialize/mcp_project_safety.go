@@ -71,7 +71,7 @@ func snapshotExistingIfUnmanaged(fs fsys.FS, p MCPProjection, now func() time.Ti
 		now = time.Now
 	}
 	timestamp := now().UTC().Format("20060102T150405Z")
-	backupDir := filepath.Join(p.Root, ".gc", "mcp-adopted", p.Provider)
+	backupDir := p.adoptionSnapshotDir()
 	ext := filepath.Ext(p.Target)
 	if ext == "" {
 		ext = ".bak"
@@ -90,6 +90,12 @@ func snapshotExistingIfUnmanaged(fs fsys.FS, p MCPProjection, now func() time.Ti
 		)
 	}
 	return nil
+}
+
+// adoptionSnapshotDir is where Apply saves a target's content before it
+// adopts the target: .gc/mcp-adopted/<provider>/ under the projection root.
+func (p MCPProjection) adoptionSnapshotDir() string {
+	return filepath.Join(p.Root, ".gc", "mcp-adopted", p.Provider)
 }
 
 // adoptionStderr returns the stderr sink that Apply should use for adoption
