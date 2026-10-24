@@ -193,7 +193,7 @@ func assertExactRuntimeNameSerializesPoolCreates(
 	secondResult := make(chan result, 1)
 	create := func(spec guardedPoolCreateSpec, out chan<- result) {
 		info, err := createPoolSessionBeadWithGuardedAliasUsingLock(
-			bp,
+			poolCreateViewOf(bp),
 			spec.agent,
 			spec.template,
 			spec.qualifiedInstance,
@@ -520,7 +520,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LateForeignExactNameHolderBlocksC
 		return fn()
 	}
 	created, err := createPoolSessionBeadWithGuardedAliasUsingLock(
-		bp,
+		poolCreateViewOf(bp),
 		&cfg.Agents[0],
 		cfg.Agents[0].QualifiedName(),
 		qualifiedInstance,

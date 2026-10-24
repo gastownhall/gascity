@@ -49,6 +49,24 @@ type promptDeliveryResult struct {
 	// through a different mechanism than its configured prompt mode would
 	// otherwise select.
 	OversizedFallback bool
+	// ConfiguredMode is the agent's configured prompt delivery mode
+	// (rp.PromptMode: "arg", "flag", or "none"); empty when rp is nil, i.e.
+	// no provider resolved. Reported alongside EffectiveMode so a
+	// nudge-fallback or hard-fail finding can be traced back to what the
+	// agent actually asked for.
+	ConfiguredMode string
+	// EffectiveMode is the delivery mode promptDelivery actually selected:
+	// "acp", "none", "argv", "flag", "nudge-fallback", or "hard-fail". It
+	// can diverge from ConfiguredMode — e.g. a configured_mode=arg prompt
+	// that is oversized effectively becomes "nudge-fallback" or
+	// "hard-fail" depending on runtime support.
+	EffectiveMode string
+	// RawBytes and ArgvBytes are the prompt's raw and shellquote-encoded
+	// byte lengths, recorded whenever the oversized-prompt guard is
+	// evaluated (i.e. whenever the ACP/none-mode short-circuits don't
+	// apply). Zero when the guard never ran.
+	RawBytes  int
+	ArgvBytes int
 }
 
 // promptDeliverySupport classifies how a runtime can absorb a prompt that is
@@ -150,6 +168,9 @@ var errOversizedPromptUnsupportedRuntime = errors.New("startup prompt exceeds ar
 // construction, handshake, or subprocess spawn happens here.
 func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudge string, runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) (promptDeliveryResult, error) {
 	res := promptDeliveryResult{Nudge: nudge}
+	if rp != nil {
+		res.ConfiguredMode = rp.PromptMode
+	}
 	if prompt == "" {
 		return res, nil
 	}
@@ -157,14 +178,18 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 	case isACP:
 		res.Nudge = prependStartupPromptToNudge(prompt, nudge)
 		res.Delivered = true
+		res.EffectiveMode = "acp"
 		return res, nil
 	case rp != nil && rp.PromptMode == "none":
 		res.Nudge = prependStartupPromptToNudge(prompt, nudge)
 		res.Delivered = true
+		res.EffectiveMode = "none"
 		return res, nil
 	}
 
 	suffix := shellquote.Quote(prompt)
+	res.RawBytes = len(prompt)
+	res.ArgvBytes = len(suffix)
 	if len(prompt) >= maxPromptSuffixRawBytes || len(suffix) >= maxPromptSuffixQuotedBytes {
 		switch promptDeliverySupportFor(runtimeName, packRuntimes) {
 		case promptDeliverySupportArgvSafe:
@@ -175,9 +200,11 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 			res.Nudge = prependStartupPromptToNudge(prompt, nudge)
 			res.Delivered = true
 			res.OversizedFallback = true
+			res.EffectiveMode = "nudge-fallback"
 			return res, nil
 		default:
-			return promptDeliveryResult{}, fmt.Errorf(
+			res.EffectiveMode = "hard-fail"
+			return res, fmt.Errorf(
 				"%w: runtime %q, prompt %d raw bytes / %d argv-encoded bytes (limits: %d raw / %d argv-encoded)",
 				errOversizedPromptUnsupportedRuntime, runtimeName, len(prompt), len(suffix),
 				maxPromptSuffixRawBytes, maxPromptSuffixQuotedBytes)
@@ -186,7 +213,9 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 
 	res.PromptSuffix = suffix
 	res.Delivered = res.PromptSuffix != ""
+	res.EffectiveMode = "argv"
 	if rp != nil && rp.PromptMode == "flag" {
+		res.EffectiveMode = "flag"
 		if rp.PromptFlag != "" {
 			res.PromptFlag = rp.PromptFlag
 		} else {

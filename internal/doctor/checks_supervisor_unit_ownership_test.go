@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -30,9 +31,10 @@ func TestSupervisorUnitOwnershipCheck_WarmupEligible(t *testing.T) {
 // TestSupervisorUnitOwnershipCheckRun exercises
 // SupervisorUnitOwnershipCheck.Run, the doctor-facing half of ga-9pjtoy: it
 // must flag as an error a live supervisor that is not owned by gc's own
-// installed systemd unit (unit inactive, or active with a mismatched
-// MainPID), while treating "no supervisor running" and "no unit installed"
-// as OK.
+// installed systemd unit (unit inactive, or active with the supervisor
+// outside its MainPID's process tree), and only warn, naming the probe
+// error, when the supervisor's process ancestry could not be read. "No
+// supervisor running" and "no unit installed" are OK.
 func TestSupervisorUnitOwnershipCheckRun(t *testing.T) {
 	const livePID = 4242
 
@@ -77,7 +79,7 @@ func TestSupervisorUnitOwnershipCheckRun(t *testing.T) {
 			wantStatus: StatusError,
 		},
 		{
-			name:              "unit active but MainPID mismatch",
+			name:              "unit active but supervisor is not a MainPID descendant",
 			supervisorRunning: true,
 			ownership: SupervisorUnitOwnership{
 				Status:     "outside_unit",
@@ -86,6 +88,18 @@ func TestSupervisorUnitOwnershipCheckRun(t *testing.T) {
 				UnitPID:    9999,
 			},
 			wantStatus: StatusError,
+		},
+		{
+			name:              "unit active but supervisor ancestry unreadable",
+			supervisorRunning: true,
+			ownership: SupervisorUnitOwnership{
+				Status:     "outside_unit",
+				Unit:       "gascity-supervisor.service",
+				UnitActive: true,
+				UnitPID:    9999,
+				ProbeErr:   errors.New("reading the parent of PID 4242: open /proc/4242/stat: no such file or directory"),
+			},
+			wantStatus: StatusWarning,
 		},
 	}
 
@@ -97,16 +111,25 @@ func TestSupervisorUnitOwnershipCheckRun(t *testing.T) {
 			if result.Status != tc.wantStatus {
 				t.Fatalf("Status = %v, want %v (result: %+v)", result.Status, tc.wantStatus, result)
 			}
-			if tc.wantStatus != StatusError {
+			if tc.wantStatus == StatusOK {
 				return
-			}
-			if result.FixHint == "" || !strings.Contains(result.FixHint, "reset-failed") {
-				t.Errorf("FixHint = %q, want a remedy mentioning systemctl --user reset-failed", result.FixHint)
 			}
 			for _, wantPID := range []int{livePID, tc.ownership.UnitPID} {
 				if !strings.Contains(result.Message, fmt.Sprintf("%d", wantPID)) {
 					t.Errorf("Message = %q, want it to name PID %d", result.Message, wantPID)
 				}
+			}
+			if tc.wantStatus == StatusWarning {
+				if !strings.Contains(result.Message, tc.ownership.ProbeErr.Error()) {
+					t.Errorf("Message = %q, want it to name the probe error %q", result.Message, tc.ownership.ProbeErr)
+				}
+				if result.FixHint != "" {
+					t.Errorf("FixHint = %q, want none: an unverified result has no remedy to run", result.FixHint)
+				}
+				return
+			}
+			if result.FixHint == "" || !strings.Contains(result.FixHint, "reset-failed") {
+				t.Errorf("FixHint = %q, want a remedy mentioning systemctl --user reset-failed", result.FixHint)
 			}
 		})
 	}

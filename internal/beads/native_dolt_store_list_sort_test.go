@@ -103,6 +103,13 @@ func TestNativeIssueFilterStillStripsLimitForWispTier(t *testing.T) {
 // client-side ApplyListQuery re-sort must keep them stable and the limit cut
 // must match the server page. Models the dispatcher's RecentRunsAll aggregate
 // read, which opts into the bounded backing limit.
+//
+// The tier is stated because the read re-point made it load-bearing: the role's
+// request has no member that EXCLUDES the ephemeral plane, so a durable-tier
+// listing drops rows Go-side and cannot carry a backing limit at all
+// (nativeListLimitPushdown). Every policy-wrapped store rewrites a TierIssues
+// read to TierBoth before it reaches this store (cmd/gc's expandPolicyReadTier),
+// which is the shape the dispatcher's read actually arrives in.
 func TestNativeDoltStoreListSortedLimitedPassesFilterToBacking(t *testing.T) {
 	var got beadslib.IssueFilter
 	storage := &nativeDoltStorageSpy{
@@ -112,7 +119,10 @@ func TestNativeDoltStoreListSortedLimitedPassesFilterToBacking(t *testing.T) {
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
-	if _, err := store.List(ListQuery{Label: "order-tracking", Limit: 2048, IncludeClosed: true, Sort: SortCreatedDesc, AllowBackingCreatedLimit: true}); err != nil {
+	if _, err := store.List(ListQuery{
+		Label: "order-tracking", Limit: 2048, IncludeClosed: true, TierMode: TierBoth,
+		Sort: SortCreatedDesc, AllowBackingCreatedLimit: true,
+	}); err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if got.Limit != 2048 || got.SortBy != "created" || got.SortDesc {
@@ -145,7 +155,7 @@ func TestNativeDoltStoreListCreatedDescExactTieBreakByDefault(t *testing.T) {
 	}
 	store := newNativeDoltStoreForTest(storage)
 
-	got, err := store.List(ListQuery{AllowScan: true, Sort: SortCreatedDesc, Limit: 3})
+	got, err := store.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, Limit: 3})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -174,7 +184,7 @@ func TestNativeDoltStoreListCreatedDescOptInBoundsTheFetch(t *testing.T) {
 	}
 	store := newNativeDoltStoreForTest(storage)
 
-	got, err := store.List(ListQuery{AllowScan: true, Sort: SortCreatedDesc, Limit: 3, AllowBackingCreatedLimit: true})
+	got, err := store.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, Limit: 3, AllowBackingCreatedLimit: true})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -222,7 +232,7 @@ func TestNativeDoltStoreListCreatedDescMaxSeqReducerKeepsHighSeqWithoutOptIn(t *
 	}
 
 	// Seq-reducer shape (no opt-in): the max-seq row survives the client-side cut.
-	got, err := newNativeDoltStoreForTest(spyFor()).List(ListQuery{AllowScan: true, Sort: SortCreatedDesc, Limit: 3})
+	got, err := newNativeDoltStoreForTest(spyFor()).List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, Limit: 3})
 	if err != nil {
 		t.Fatalf("List (no opt-in): %v", err)
 	}
@@ -234,7 +244,7 @@ func TestNativeDoltStoreListCreatedDescMaxSeqReducerKeepsHighSeqWithoutOptIn(t *
 	// The same read WITH the opt-in shows the regression the cursor avoids: the
 	// backing keeps its id-ASC prefix (gc-01..03) and drops the max-seq row gc-06;
 	// the client re-sort then presents them canonically as gc-03, gc-02, gc-01.
-	bugged, err := newNativeDoltStoreForTest(spyFor()).List(ListQuery{AllowScan: true, Sort: SortCreatedDesc, Limit: 3, AllowBackingCreatedLimit: true})
+	bugged, err := newNativeDoltStoreForTest(spyFor()).List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDesc, Limit: 3, AllowBackingCreatedLimit: true})
 	if err != nil {
 		t.Fatalf("List (opt-in): %v", err)
 	}
@@ -288,6 +298,8 @@ func TestNativeDoltStoreListSeekAfterFetchesFullSetForCreatedDesc(t *testing.T) 
 
 	got, err := store.List(ListQuery{
 		AllowScan:                true,
+		IncludeClosed:            true,
+		TierMode:                 TierBoth,
 		Sort:                     SortCreatedDesc,
 		Limit:                    1,
 		AllowBackingCreatedLimit: true,

@@ -88,7 +88,7 @@ func pendingCreateRuntimeClearedForRollback(result startResult, sp runtime.Provi
 	if name == "" {
 		return false
 	}
-	if staleAsyncStartRuntimeAttribution(info, name, sp) != pendingCreateRuntimeOurs {
+	if staleAsyncStartRuntimeAttribution(info, name, sp, startLeaseStillHeld(result.prepared.candidate.lease, time.Now())) != pendingCreateRuntimeOurs {
 		// Nothing of ours is there, or the identity probe could not tell. Only
 		// the first is safe to act on, and this attempt may not stop a runtime
 		// it cannot attribute, so require positive absence.
@@ -98,26 +98,11 @@ func pendingCreateRuntimeClearedForRollback(result startResult, sp runtime.Provi
 		fmt.Fprintf(stderr, "session reconciler: stopping runtime %s before releasing its identifiers: %v\n", name, err) //nolint:errcheck // best-effort diagnostics
 		return false
 	}
-	obs, err := runtime.ObserveLivenessWithError(sp, name, nil)
-	if err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
-		fmt.Fprintf(stderr, "session reconciler: cannot confirm runtime %s stopped (%v); keeping its bead so the alias is not stranded\n", name, err) //nolint:errcheck // best-effort diagnostics
-		return false
-	}
-	if err == nil && obs.Running {
+	switch err := confirmRuntimeStopped(name, sp); {
+	case errors.Is(err, errRuntimeSurvivedStop):
 		fmt.Fprintf(stderr, "session reconciler: runtime %s survived its stop; keeping its bead so the alias is not stranded\n", name) //nolint:errcheck // best-effort diagnostics
 		return false
-	}
-	// A provider without the error-bearing liveness capability answers the
-	// probe above with a bare IsRunning, which cannot tell "gone" from "could
-	// not look". ListRunning reports an observation failure as an error, so
-	// consult its error too. Only the error: a stopped runtime may stay listed
-	// for a while (a terminating k8s pod keeps phase Running), and this branch
-	// already holds an attributed runtime and a clean Stop.
-	//
-	// A server-absent error is the one error accepted here. Stopping the only
-	// session on a tmux server takes the server down with it, so this stop
-	// produces that answer itself, and a session cannot outlive its server.
-	if _, err := sp.ListRunning(name); err != nil && !runtime.IsRuntimeServerAbsent(err) {
+	case err != nil:
 		fmt.Fprintf(stderr, "session reconciler: cannot confirm runtime %s stopped (%v); keeping its bead so the alias is not stranded\n", name, err) //nolint:errcheck // best-effort diagnostics
 		return false
 	}

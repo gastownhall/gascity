@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -50,9 +51,10 @@ type condWritesStamp struct {
 	// the seam treats it exactly like Off, so an unwired open path can never
 	// RAISE enforcement.
 	condWritesModeVal gate.Mode
-	// condWritesDefaulted records that the factory received ModeUnset and
-	// mapped it to Off — an unthreaded open path, distinguishable from a
-	// deliberate off for tests and future doctor surfaces.
+	// condWritesDefaulted records that no operator chose the mode: the
+	// factory received ModeUnset and mapped it to Off (an unthreaded open
+	// path), or the caller passed the builtin default
+	// (StoreOpenOptions.ConditionalWritesDefaulted).
 	condWritesDefaulted bool
 	// condWritesDegradeNoted arms at-most-once degraded-event emission per
 	// store instance.
@@ -80,7 +82,7 @@ type ConditionalWritesDegrade struct {
 }
 
 // stampConditionalWritesMode records the resolved mode on this store.
-// defaulted marks a ModeUnset→Off factory mapping (unthreaded open path). The
+// defaulted marks a mode no operator chose (condWritesDefaulted). The
 // return reports whether the stamp LANDED: a store that owns its stamp always
 // lands it; a delegating wrapper (CachingStore) forwards into its backing and
 // reports false when the backing cannot carry a mode — the factory logs that
@@ -95,7 +97,7 @@ func (s *condWritesStamp) stampConditionalWritesMode(mode gate.Mode, defaulted b
 }
 
 // conditionalWritesMode returns the stamped mode and whether it was a
-// factory default for an unthreaded open path.
+// default no operator chose.
 func (s *condWritesStamp) conditionalWritesMode() (gate.Mode, bool) {
 	s.condWritesMu.Lock()
 	defer s.condWritesMu.Unlock()
@@ -199,6 +201,34 @@ type ConditionalWritesResolveTargeter interface {
 	ConditionalWritesResolveTarget() Store
 }
 
+// ConditionalWritesModeSourcer is implemented by store wrappers outside this
+// package that perform conditional writes themselves (so the resolved writer
+// must stay the wrapper, which adds behavior such as event emission) but carry
+// no stamp. ResolveConditionalWriter reads the mode, liveness, capability probe
+// and degrade latch from the declared source and returns the wrapper as the
+// writer. Like a resolve target, a source can only point at a store, never
+// supply a mode; a nil source, or the wrapper itself, declares nothing.
+type ConditionalWritesModeSourcer interface {
+	ConditionalWritesModeSource() Store
+}
+
+// conditionalWritesModeSource returns the store whose stamp, liveness, prober
+// and degrade latch govern resolution of store: the declared mode source,
+// followed through its own resolve targets, or store itself. sourced reports
+// a declared source; callers gate on it rather than comparing the two stores,
+// because a store passed by value need not be comparable and == on it panics.
+func conditionalWritesModeSource(store Store) (src Store, sourced bool) {
+	sourcer, ok := store.(ConditionalWritesModeSourcer)
+	if !ok {
+		return store, false
+	}
+	source := sourcer.ConditionalWritesModeSource()
+	if source == nil || source == store {
+		return store, false
+	}
+	return followConditionalWritesResolveTarget(source), true
+}
+
 // conditionalWritesMaxResolveDepth bounds resolve-target following so a
 // self-referential wrapper degrades to legacy instead of looping.
 const conditionalWritesMaxResolveDepth = 8
@@ -269,33 +299,44 @@ func IsConditionalWritesRequired(err error) bool {
 //
 // The seam never GUESSES at unwrapping: a wrapper participates only by
 // declaring its resolution target via ConditionalWritesResolveTargeter (the
-// typed class wrappers and the cmd/gc policy wrapper do). A wrapper that
-// declares nothing resolves as unset→legacy, exactly like any other
-// carrier-less store.
+// typed class wrappers and the cmd/gc policy wrapper do), or its mode source
+// via ConditionalWritesModeSourcer (the one-shot CLI's emitting class store
+// does). A wrapper that declares neither resolves as unset→legacy, exactly
+// like any other carrier-less store.
+//
+// A mode-sourced wrapper is capable only when it and its source both
+// implement ConditionalWriter and the source's prober agrees: the wrapper
+// forwards its conditional verbs to the source, so the source's capability is
+// the wrapper's.
 func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic, error) {
+	src, sourced := store, false
 	if store != nil {
 		store = followConditionalWritesResolveTarget(store)
+		src, sourced = conditionalWritesModeSource(store)
 	}
 	mode := gate.ModeUnset
-	carrier, hasCarrier := store.(conditionalWritesModeCarrier)
+	carrier, hasCarrier := src.(conditionalWritesModeCarrier)
 	if hasCarrier {
 		mode, _ = carrier.conditionalWritesMode()
 	}
 	if mode == gate.ModeUnset || mode == gate.Off {
 		return nil, nil, nil
 	}
-	if liveness, ok := store.(conditionalWritesLiveness); ok {
+	if liveness, ok := src.(conditionalWritesLiveness); ok {
 		if err := liveness.conditionalWritesStoreOpen(); err != nil {
 			return nil, nil, err
 		}
 	}
 
 	writer, hasWriter := ConditionalWriterFor(store)
+	if hasWriter && sourced {
+		_, hasWriter = ConditionalWriterFor(src)
+	}
 	pred := func(context.Context) (bool, string) {
 		if !hasWriter {
 			return false, "store does not implement conditional writes"
 		}
-		if prober, ok := store.(conditionalWriteCapabilityProber); ok {
+		if prober, ok := src.(conditionalWriteCapabilityProber); ok {
 			return prober.probeConditionalWriteCapability()
 		}
 		return true, "store implements conditional writes"
@@ -308,11 +349,11 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 			// Unreachable by construction (the predicate reports incapable
 			// when hasWriter is false), but stay mode-correct if it ever
 			// happens: require still fails closed, auto degrades loudly.
-			return refuseOrDegrade(store, mode, "store did not yield a conditional writer")
+			return refuseOrDegrade(src, mode, "store did not yield a conditional writer")
 		}
 		return writer, nil, nil
 	case gate.DegradeLoud:
-		w, diag, degradeErr := refuseOrDegrade(store, mode, reason)
+		w, diag, degradeErr := refuseOrDegrade(src, mode, reason)
 		if hasCarrier {
 			// Auto-degrade is the state most likely to persist unnoticed;
 			// the factory-injected callback pushes it onto the event bus,
@@ -326,7 +367,7 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 		}
 		return w, diag, degradeErr
 	case gate.RefuseClosed:
-		return refuseOrDegrade(store, mode, reason)
+		return refuseOrDegrade(src, mode, reason)
 	default: // gate.UseLegacy — unreachable: off/unset short-circuit above.
 		return nil, nil, nil
 	}
@@ -350,7 +391,11 @@ func refuseOrDegrade(store Store, mode gate.Mode, reason string) (ConditionalWri
 
 // conditionalStoreKind names the store type for diagnostics. Types that only
 // exist under build tags (DoltliteReadStore) and test doubles fall through to
-// the %T spelling, which is descriptive enough for a diagnostic surface.
+// the %T spelling, which is descriptive enough for a diagnostic surface. That
+// spelling comes from reflect.TypeOf, not fmt.Sprintf("%T"): taint analysis
+// models fmt as propagating the whole store value, so a store wrapping
+// credential-bearing config would mark every log line carrying this kind as
+// leaking it (CodeQL go/clear-text-logging), though a type name holds no data.
 func conditionalStoreKind(store Store) string {
 	switch store.(type) {
 	case *BdStore:
@@ -368,6 +413,6 @@ func conditionalStoreKind(store Store) string {
 	case nil:
 		return "<nil>"
 	default:
-		return fmt.Sprintf("%T", store)
+		return reflect.TypeOf(store).String()
 	}
 }

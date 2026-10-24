@@ -32,6 +32,25 @@ func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
 }
 
+// applyNamedTemplateOverrides stamps a configured named session's identity
+// on the template resolved for its backing agent: legacy's desired state and
+// the allocator's named create share it.
+func applyNamedTemplateOverrides(tp *TemplateParams, spec namedSessionSpec, identity, boundStepID string) {
+	tp.Alias = identity
+	tp.TemplateName = namedSessionBackingTemplate(spec)
+	tp.InstanceName = identity
+	tp.ConfiguredNamedIdentity = identity
+	tp.ConfiguredNamedMode = spec.Mode
+	tp.BoundStepID = boundStepID
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
+	tp.Env["GC_ALIAS"] = identity
+	tp.Env["GC_AGENT"] = identity
+	tp.Env["GC_SESSION_ORIGIN"] = "named"
+}
+
 // namedSessionAssigneeMatchesSpec reports whether assignee names spec's session.
 // Work routed to a named session is claimed under the session's runtime name
 // (config.NamedSessionRuntimeName: "/" -> "--", "." -> "__"), not under its

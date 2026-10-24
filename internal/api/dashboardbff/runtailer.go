@@ -170,7 +170,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 		ok = false
 	}
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), syncCh: make(chan chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
 	m.startLocked(t)
@@ -187,7 +187,10 @@ type cityRunTailer struct {
 	started bool
 	readyCh chan struct{} // closed once the cold replay attempt completes
 	doneCh  chan struct{} // closed after the path-bound loop exits
-	cancel  context.CancelFunc
+	// syncCh carries catch-up requests (see sync): the loop folds the log
+	// through its current end, publishes, and closes each request's channel.
+	syncCh chan chan struct{}
+	cancel context.CancelFunc
 
 	// snapshotCache caches the folded run snapshot (and the formula target
 	// derived from it) per fold generation so a same-generation repeat request
@@ -338,7 +341,64 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 		case <-poll.C:
 			t.foldNext(proj, st)
 			t.logDecodeMisses(proj, st)
+		case done := <-t.syncCh:
+			// Coalesce every request already waiting into this one fold: each
+			// asked for the log through a point at or before now.
+			waiting := []chan struct{}{done}
+			for drained := false; !drained; {
+				select {
+				case more := <-t.syncCh:
+					waiting = append(waiting, more)
+				default:
+					drained = true
+				}
+			}
+			t.foldNext(proj, st)
+			t.logDecodeMisses(proj, st)
+			for _, w := range waiting {
+				close(w)
+			}
 		}
+	}
+}
+
+// sync folds everything appended to the event log before the call and
+// publishes the result before it returns, so a writer that recorded its events
+// synchronously (a POST /runs/{id}/cancel through the supervisor's cache) reads
+// its own write on the next GET instead of waiting out runTailPollInterval. It
+// costs one stat and a read of the bytes appended since the last fold — no
+// store access — and concurrent requests share one fold. It reports false
+// when the tailer is not running or ctx ended first; the projection then
+// catches up on its next poll as before.
+func (t *cityRunTailer) sync(ctx context.Context) bool {
+	t.mgr.mu.Lock()
+	started := t.started
+	t.mgr.mu.Unlock()
+	if !started {
+		return false
+	}
+	select {
+	case <-t.readyCh:
+	case <-t.doneCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+	done := make(chan struct{})
+	select {
+	case t.syncCh <- done:
+	case <-t.doneCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-t.doneCh:
+		return false
+	case <-ctx.Done():
+		return false
 	}
 }
 

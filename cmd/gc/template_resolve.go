@@ -4,7 +4,9 @@
 //
 // One side effect lives here by necessity: managed Claude settings are
 // projected to .gc/settings.json via ensureClaudeSettingsArgs so that the
-// --settings path is on disk before runtime fingerprints are captured.
+// --settings path is on disk before runtime fingerprints are captured. A
+// readOnly resolution (agentBuildParams.readOnly) skips it, along with the
+// work-dir mkdir and skill snapshot writes.
 // This is the single chokepoint for Claude projection — installAgentSideEffects
 // skips the "claude" entry in its hook list to avoid duplicate work.
 //
@@ -122,6 +124,12 @@ type TemplateParams struct {
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
+	// NamedCanonicalOnly marks an on_demand configured named session that is
+	// desired only because the tick's session snapshot held its canonical
+	// bead (no assigned work wants it). syncSessionBeads creates no row for
+	// it when its fresh read finds that bead gone: an operator close won
+	// the race (mc-58gr9).
+	NamedCanonicalOnly bool
 	// ManualSession marks a discovered root created outside pool scale logic
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
@@ -186,7 +194,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
-	workDir, err := resolveConfiguredWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	resolveWorkDir := resolveConfiguredWorkDir
+	if p.readOnly {
+		resolveWorkDir = resolveConfiguredWorkDirPath
+	}
+	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -199,31 +211,25 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
-	var command string
-	switch sessionTransport {
-	case config.SessionTransportACP:
-		command = resolved.ACPCommandString()
-	case "", config.SessionTransportTmux:
-		command = resolved.CommandString()
-	default:
-		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
-	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
 	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
-	if providerFamily == "kimi" && installHooksIncludeFamily(installHooks, "kimi", p.providers) {
-		command = appendKimiHookConfigArg(command)
-	}
-	// Append schema-derived default args (e.g., --dangerously-skip-permissions
-	// from EffectiveDefaults["permission_mode"] = "unrestricted").
-	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-		command = command + " " + shellquote.Join(defaultArgs)
+	// The API persists the same composition as a deferred create's baseline
+	// (config.BuildProviderTemplateLaunchCommand), so keep it shared.
+	command, err := config.ProviderTemplateCommand(resolved, sessionTransport, installHooks, p.providers)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	if p.stderr != nil {
 		for _, pin := range resolved.UnhonoredOptionPins() {
 			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
 		}
 	}
-	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
+	var sa string
+	if p.readOnly {
+		sa, err = claudeSettingsArgsReadOnly(p.fs, p.cityPath, providerFamily)
+	} else {
+		sa, err = ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
+	}
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -429,14 +435,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// instruction costs a turn and duplicates the context it just received.
 	includePrimeInstruction := !hasHooks && prompt == ""
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
-	switch {
-	case suppressStartupPrompt:
-		prompt = ""
-	case prompt != "":
-		prompt = beacon + "\n\n" + prompt
-	default:
-		prompt = beacon
-	}
+	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
@@ -604,7 +603,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// is populated" and § "Stage 2 runtime gate"). Stage-2 eligible
 	// runtimes (tmux for v0.15.1) get a PreStart entry for per-session
 	// materialization into non-scope-root workdirs, and every eligible
-	// agent gets per-skill fingerprint entries so catalog edits drain.
+	// agent gets per-skill FingerprintExtra entries. Those are NextStart
+	// (runtime.FingerprintExtraChangePolicy): a skill edit, or a skill
+	// added or removed while another remains, reaches the next start's
+	// materialization without draining a running session. The PreStart
+	// entry is a Restart input present only while the agent has a skill,
+	// so a non-scope-root agent drains once when its first skill is added
+	// or its last removed, a shared catalog that loads empty included.
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
@@ -627,7 +632,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				// templateNameFor returns cfgAgent.PoolName for pool
 				// instances and qualifiedName for singletons.
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
-				if sharedCatalog != nil {
+				switch {
+				case p.readOnly:
+					// No snapshot write: the start's resolution writes it.
+				case sharedCatalog != nil:
 					if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
 						if writeSkillSnapshotFile(workDir, materializeAgent, snapshot) == "" {
 							removeSkillSnapshotFile(workDir, materializeAgent)
@@ -635,7 +643,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 					} else {
 						removeSkillSnapshotFile(workDir, materializeAgent)
 					}
-				} else {
+				default:
 					removeSkillSnapshotFile(workDir, materializeAgent)
 				}
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
@@ -698,6 +706,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			if stage2Delivers {
 				projectAgent := templateNameFor(cfgAgent, qualifiedName)
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
+				warnStage2MCPAdoptionRefusal(p.cityPath, qualifiedName, mcpProjection, p.fs, p.stderr)
 			}
 		default:
 			return TemplateParams{}, fmt.Errorf(
@@ -790,38 +799,19 @@ func isOperationalScript(rel string) bool {
 	return false
 }
 
-func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
-	family = strings.TrimSpace(family)
-	if family == "" {
-		return false
+// composeStartupPrompt combines the session beacon with the rendered prompt
+// into the startup prompt a launch delivers: empty when the agent's startup
+// prompt is suppressed, the beacon alone when nothing rendered, and otherwise
+// the beacon, a blank line, and the rendered prompt.
+func composeStartupPrompt(beacon, prompt string, suppress bool) string {
+	switch {
+	case suppress:
+		return ""
+	case prompt != "":
+		return beacon + "\n\n" + prompt
+	default:
+		return beacon
 	}
-	for _, hook := range installHooks {
-		hook = strings.TrimSpace(hook)
-		if hook == "" {
-			continue
-		}
-		if hook == family || config.BuiltinFamily(hook, providers) == family {
-			return true
-		}
-	}
-	return false
-}
-
-func appendKimiHookConfigArg(command string) string {
-	parts := shellquote.Split(command)
-	if len(parts) == 0 {
-		return command
-	}
-	configArgs := []string{"--config-file", ".kimi/config.toml"}
-	if parts[len(parts)-1] == "acp" {
-		withConfig := make([]string, 0, len(parts)+len(configArgs))
-		withConfig = append(withConfig, parts[:len(parts)-1]...)
-		withConfig = append(withConfig, configArgs...)
-		withConfig = append(withConfig, parts[len(parts)-1])
-		return shellquote.Join(withConfig)
-	}
-	parts = append(parts, configArgs...)
-	return shellquote.Join(parts)
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {

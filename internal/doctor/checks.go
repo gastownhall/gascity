@@ -548,7 +548,10 @@ func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all zombie sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles zombie
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. A zombie that is
+// already gone when Fix stops it — its tmux server died after the observation —
+// is fixed, so Fix stops through runtime.StopForCleanup and reports only a
+// stop that failed to remove a session.
 func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -559,7 +562,7 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
 		if c.sp.IsRunning(sn) && !c.sp.ProcessAlive(sn, a.ProcessNames) {
-			if err := c.sp.Stop(sn); err != nil {
+			if err := runtime.StopForCleanup(c.sp, sn); err != nil {
 				return fmt.Errorf("killing zombie session %q: %w", sn, err)
 			}
 		}
@@ -634,7 +637,9 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all orphaned sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles orphan
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. Like
+// ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
+// orphan whose tmux server died after the listing counts as removed.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -654,7 +659,7 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	}
 	for _, s := range running {
 		if !expected[s] {
-			if err := c.sp.Stop(s); err != nil {
+			if err := runtime.StopForCleanup(c.sp, s); err != nil {
 				return fmt.Errorf("killing orphan session %q: %w", s, err)
 			}
 		}
@@ -1289,6 +1294,33 @@ func doctorScopeHasFileStoreMarker(scopePath string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// scopeNonDoltBackend reports the backend a scope's .beads/metadata.json names
+// when that backend is not Dolt, so a Dolt-only check can answer "not
+// applicable" instead of dialing a server that does not exist. It decides from
+// metadata alone and names no backend: "is Dolt" is contract.IsDoltBackend, the
+// predicate the store factory and the provider lifecycle route on, so every
+// spelling they serve as Dolt ("dolt", "bd", in any case) keeps its dial and
+// any other name is not Dolt. Metadata that names nothing, or cannot be read,
+// stays with the Dolt checks: an unnamed backend is the Dolt default, and an
+// unreadable file must not silence a check that would report it.
+func scopeNonDoltBackend(scopeRoot string) (string, bool) {
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !named || contract.IsDoltBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// nonDoltScopeResult is the not-applicable answer for a Dolt-server check on a
+// scope bound to a non-Dolt backend.
+func nonDoltScopeResult(name, backend string) *CheckResult {
+	return &CheckResult{
+		Name:    name,
+		Status:  StatusOK,
+		Message: fmt.Sprintf("not applicable (beads backend %q is not Dolt)", backend),
+	}
+}
+
 // DoltServerCheck verifies the dolt server is running and reachable.
 type DoltServerCheck struct {
 	cityPath string
@@ -1316,6 +1348,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if backend, ok := scopeNonDoltBackend(c.cityPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
 	}
 	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
 		return pending
@@ -1385,6 +1420,9 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if backend, ok := scopeNonDoltBackend(rigPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
 	}
 	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
 		return pending

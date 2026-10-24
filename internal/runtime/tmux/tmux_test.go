@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -71,6 +72,238 @@ func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []strin
 	if !e.used && firstArgsContainHasSession(args) {
 		e.used = true
 		return "", ErrNoServer
+	}
+	return realExecutor{}.executeCtx(ctx, args)
+}
+
+func TestAttachSessionNoStartServerDoesNotSelfRebindAfterProbe(t *testing.T) {
+	t.Run("missing-socket-after-preflight", func(t *testing.T) {
+		if !hasTmux() {
+			t.Skip("tmux not installed")
+		}
+
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set-option -g exit-empty off\n"), 0o600); err != nil {
+			t.Fatalf("write isolated tmux config: %v", err)
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+		socketRoot, err := os.MkdirTemp("/tmp", "gc-tmux-attach-")
+		if err != nil {
+			t.Fatalf("create isolated tmux socket root: %v", err)
+		}
+		t.Setenv("TMUX_TMPDIR", socketRoot)
+
+		cfg := DefaultConfig()
+		cfg.SocketName = fmt.Sprintf("gctest-attach-rebind-%d-%d", os.Getpid(), time.Now().UnixNano())
+		tm := NewTmuxWithConfig(cfg)
+		socketPath := namedSocketPath(cfg.SocketName)
+		var originalServer processTarget
+		t.Cleanup(func() {
+			var boundServer processTarget
+			if rawPID, err := tm.run("display-message", "-p", "#{pid}"); err == nil {
+				if boundServer, err = tmuxServerTarget(rawPID); err != nil && !errors.Is(err, proctable.ErrProcessGone) {
+					t.Errorf("capture server bound to test socket: %v", err)
+				}
+			}
+			if err := tm.KillServer(); err != nil && !errors.Is(err, ErrNoServer) {
+				t.Errorf("stop server bound to test socket: %v", err)
+			}
+			if err := terminateProcesses([]processTarget{boundServer, originalServer}); err != nil {
+				t.Errorf("terminate test tmux servers: %v", err)
+			}
+			if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove test socket: %v", err)
+			}
+			if err := os.RemoveAll(socketRoot); err != nil {
+				t.Errorf("remove test socket root: %v", err)
+			}
+		})
+		sessionName := fmt.Sprintf("gc-attach-rebind-%d", time.Now().UnixNano())
+		if err := tm.NewSessionWithCommand(sessionName, "", "sleep 60"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if exitEmpty, err := tm.run("show-options", "-gv", "exit-empty"); err != nil || exitEmpty != "off" {
+			t.Fatalf("isolated server exit-empty = %q, %v; want off", exitEmpty, err)
+		}
+		serverPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server PID: %v", err)
+		}
+		originalServer, err = tmuxServerTarget(serverPID)
+		if err != nil {
+			t.Fatalf("capture server identity: %v", err)
+		}
+
+		guarded := NewTmuxWithConfig(cfg)
+		lstatCalls := 0
+		guarded.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+			lstatCalls++
+			info, err := os.Lstat(socketPath)
+			if err != nil {
+				return namedSocketObservation{}, err
+			}
+			observation := namedSocketObservation{node: info, isSocket: info.Mode()&os.ModeSocket != 0}
+			if lstatCalls == 4 {
+				if err := os.Remove(socketPath); err != nil {
+					return namedSocketObservation{}, fmt.Errorf("unlink named socket after witness preflight: %w", err)
+				}
+			}
+			return observation, nil
+		}
+		err = guarded.AttachSession(sessionName)
+		if !errors.Is(err, ErrNoServer) {
+			t.Fatalf("AttachSession error = %v, want ErrNoServer from no-start attach", err)
+		}
+		if lstatCalls != 4 {
+			t.Fatalf("attach lstat calls = %d, want A/B observations", lstatCalls)
+		}
+		if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("final attach self-rebound socket %q: lstat error = %v", socketPath, err)
+		}
+		if err := syscall.Kill(originalServer.PID, 0); err != nil {
+			t.Fatalf("original server PID %d was not preserved: %v", originalServer.PID, err)
+		}
+	})
+
+	t.Run("external-live-replacement", func(t *testing.T) {
+		if !hasTmux() {
+			t.Skip("tmux not installed")
+		}
+
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set-option -g exit-empty off\n"), 0o600); err != nil {
+			t.Fatalf("write isolated tmux config: %v", err)
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+		socketRoot, err := os.MkdirTemp("/tmp", "gc-tmux-attach-")
+		if err != nil {
+			t.Fatalf("create isolated tmux socket root: %v", err)
+		}
+		t.Setenv("TMUX_TMPDIR", socketRoot)
+
+		cfg := DefaultConfig()
+		cfg.SocketName = fmt.Sprintf("gctest-attach-rebind-%d-%d", os.Getpid(), time.Now().UnixNano())
+		original := NewTmuxWithConfig(cfg)
+		socketPath := namedSocketPath(cfg.SocketName)
+		var originalServer, replacementServer processTarget
+		var replacementSocket os.FileInfo
+		replacement := NewTmuxWithConfig(cfg)
+		t.Cleanup(func() {
+			if err := replacement.KillServer(); err != nil && !errors.Is(err, ErrNoServer) {
+				t.Errorf("stop explicit replacement server: %v", err)
+			}
+			if err := terminateProcesses([]processTarget{originalServer, replacementServer}); err != nil {
+				t.Errorf("terminate test tmux servers: %v", err)
+			}
+			if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove test socket: %v", err)
+			}
+			if err := os.RemoveAll(socketRoot); err != nil {
+				t.Errorf("remove test socket root: %v", err)
+			}
+		})
+		sessionName := fmt.Sprintf("gc-attach-rebind-%d", time.Now().UnixNano())
+		if err := original.NewSessionWithCommand(sessionName, "", "sleep 60"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if exitEmpty, err := original.run("show-options", "-gv", "exit-empty"); err != nil || exitEmpty != "off" {
+			t.Fatalf("isolated server exit-empty = %q, %v; want off", exitEmpty, err)
+		}
+		serverPID, err := original.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server PID: %v", err)
+		}
+		originalServer, err = tmuxServerTarget(serverPID)
+		if err != nil {
+			t.Fatalf("capture server identity: %v", err)
+		}
+		guarded := NewTmuxWithConfig(cfg)
+		exec := &recordFinalAttachExecutor{}
+		guarded.exec = exec
+		lstatCalls := 0
+		guarded.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+			lstatCalls++
+			info, observeErr := os.Lstat(socketPath)
+			if observeErr != nil {
+				return namedSocketObservation{}, observeErr
+			}
+			observation := namedSocketObservation{node: info, isSocket: info.Mode()&os.ModeSocket != 0}
+			if lstatCalls != 2 {
+				return observation, nil
+			}
+			if err := os.Remove(socketPath); err != nil {
+				return namedSocketObservation{}, fmt.Errorf("unlink original named socket: %w", err)
+			}
+			if err := replacement.NewSessionWithCommand(sessionName, "", "sleep 60"); err != nil {
+				return namedSocketObservation{}, fmt.Errorf("start replacement named server: %w", err)
+			}
+			rawReplacementPID, err := replacement.run("display-message", "-p", "#{pid}")
+			if err != nil {
+				return namedSocketObservation{}, fmt.Errorf("read replacement server PID: %w", err)
+			}
+			replacementServer, err = tmuxServerTarget(rawReplacementPID)
+			if err != nil {
+				return namedSocketObservation{}, fmt.Errorf("capture replacement server identity: %w", err)
+			}
+			replacementSocket, err = os.Lstat(socketPath)
+			if err != nil {
+				return namedSocketObservation{}, fmt.Errorf("lstat replacement socket: %w", err)
+			}
+			return observation, nil
+		}
+		err = guarded.AttachSession(sessionName)
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("AttachSession error = %v, want ErrServerDegraded after live replacement", err)
+		}
+		if lstatCalls != 4 {
+			t.Fatalf("attach lstat calls = %d, want A/B observations", lstatCalls)
+		}
+		if exec.attachCalls != 0 {
+			t.Fatalf("final attach reached replacement %d times", exec.attachCalls)
+		}
+		if currentSocket, err := os.Lstat(socketPath); err != nil || !os.SameFile(replacementSocket, currentSocket) {
+			t.Fatalf("replacement socket changed after refusal: current=%v err=%v", currentSocket, err)
+		}
+		if err := syscall.Kill(originalServer.PID, 0); err != nil {
+			t.Fatalf("original server PID %d was not preserved: %v", originalServer.PID, err)
+		}
+		if err := syscall.Kill(replacementServer.PID, 0); err != nil {
+			t.Fatalf("replacement server PID %d was not preserved: %v", replacementServer.PID, err)
+		}
+		if has, err := replacement.HasSession(sessionName); err != nil || !has {
+			t.Fatalf("replacement session %q is not live: has=%v err=%v", sessionName, has, err)
+		}
+	})
+}
+
+// tmuxServerTarget captures the identity of the server PID reported by tmux's
+// "#{pid}" so test cleanup signals only that server, never a recycled PID.
+func tmuxServerTarget(rawPID string) (processTarget, error) {
+	pid, err := strconv.Atoi(strings.TrimSpace(rawPID))
+	if err != nil {
+		return processTarget{}, fmt.Errorf("parse server PID %q: %w", rawPID, err)
+	}
+	startTime, err := proctable.ProcessIdentity(pid)
+	if err != nil {
+		return processTarget{}, fmt.Errorf("read identity of server PID %d: %w", pid, err)
+	}
+	return processTarget{PID: pid, StartTime: normalizeProcessStartTime(startTime)}, nil
+}
+
+type recordFinalAttachExecutor struct{ attachCalls int }
+
+func (e *recordFinalAttachExecutor) execute(args []string) (string, error) {
+	return e.executeCtx(context.Background(), args)
+}
+
+func (e *recordFinalAttachExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	for _, arg := range args {
+		if arg == "attach-session" {
+			e.attachCalls++
+			return "", errors.New("final attach must not run after socket replacement")
+		}
 	}
 	return realExecutor{}.executeCtx(ctx, args)
 }
@@ -489,7 +722,7 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 	}
 	defer tm.CloseHiddenAttachClient(sessionName)
 
-	used, err := tm.sendHiddenAttachedText(sessionName, "HELLO_HIDDEN_ATTACH")
+	used, err := tm.sendHiddenAttachedText(context.Background(), sessionName, "HELLO_HIDDEN_ATTACH")
 	if err != nil {
 		t.Fatalf("sendHiddenAttachedText: %v", err)
 	}
@@ -510,13 +743,17 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 }
 
 func TestHiddenAttachScriptArgsArePlatformSpecific(t *testing.T) {
-	tmuxArgs := []string{"-u", "-L", "socket", "attach-session", "-t", "target"}
+	tm := &Tmux{cfg: Config{SocketName: "socket"}}
+	tmuxArgs := tm.hiddenAttachCommandArgsForWitness("target", namedSocketWitness{})
 
-	if got, want := hiddenAttachScriptArgs("darwin", tmuxArgs), []string{"-q", "/dev/null", "tmux", "-u", "-L", "socket", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
+	if got, want := hiddenAttachScriptArgs("darwin", tmuxArgs), []string{"-q", "/dev/null", "tmux", "-u", "-N", "-L", "socket", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("darwin script args = %#v, want %#v", got, want)
 	}
-	if got, want := hiddenAttachScriptArgs("linux", tmuxArgs), []string{"-qfc", "tmux -u -L socket attach-session -t target", "/dev/null"}; !reflect.DeepEqual(got, want) {
+	if got, want := hiddenAttachScriptArgs("linux", tmuxArgs), []string{"-qfc", "tmux -u -N -L socket attach-session -t target", "/dev/null"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("linux script args = %#v, want %#v", got, want)
+	}
+	if got, want := NewTmux().hiddenAttachCommandArgsForWitness("target", namedSocketWitness{}), []string{"-u", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("default-socket hidden attach args = %#v, want %#v", got, want)
 	}
 }
 
@@ -645,11 +882,9 @@ func TestEnsureSessionFresh_ZombieSession(t *testing.T) {
 	// Clean up any existing session
 	_ = tm.KillSession(sessionName)
 
-	// Create a zombie session (session exists but no Claude/node running)
-	// A normal tmux session with bash/zsh is a "zombie" for our purposes
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
+	// Create a zombie session (session exists but no Claude/node running):
+	// a pane that is just a settled shell.
+	newPlainShellSession(t, tm, sessionName)
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Verify it's a zombie (not running any agent)
@@ -658,16 +893,22 @@ func TestEnsureSessionFresh_ZombieSession(t *testing.T) {
 	}
 
 	// Verify generic agent check also treats it as not running (shell session).
-	// Allow a brief settle time — tmux pane command may not be stable immediately.
-	time.Sleep(200 * time.Millisecond)
 	if tm.IsAgentRunning(sessionName) {
-		t.Fatalf("expected IsAgentRunning(%q) to be false for a fresh shell session", sessionName)
+		cmd, err := tm.GetPaneCommand(sessionName)
+		t.Fatalf("expected IsAgentRunning(%q) to be false for a fresh shell session (pane command %q, err %v)", sessionName, cmd, err)
+	}
+	zombiePID, err := tm.GetPanePID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPanePID(zombie): %v", err)
 	}
 
 	// EnsureSessionFresh should kill the zombie and create fresh session
 	// This should NOT error with "session already exists"
 	if err := tm.EnsureSessionFresh(sessionName, ""); err != nil {
 		t.Fatalf("EnsureSessionFresh on zombie: %v", err)
+	}
+	if freshPID, err := tm.GetPanePID(sessionName); err != nil || freshPID == zombiePID {
+		t.Fatalf("EnsureSessionFresh kept the zombie pane: pid %q -> %q (err %v)", zombiePID, freshPID, err)
 	}
 
 	// Session should still exist
@@ -1062,7 +1303,10 @@ func startDescendantTestProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHasDescendantWithNames$")
-	cmd.Env = append(os.Environ(), "GC_TMUX_DESCENDANT_HELPER=1")
+	// Without Bazel's test-runner variables: under sharding the helper would
+	// inherit this shard's filter, run no test and exit at once, leaving no
+	// descendant to find.
+	cmd.Env = append(bazeltest.HelperProcessEnv(os.Environ()), "GC_TMUX_DESCENDANT_HELPER=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start descendant helper: %v", err)
 	}
@@ -1599,9 +1843,9 @@ func TestKillPaneProcessesExcluding(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Get the pane ID
-	paneID, err := tm.GetPaneID(sessionName)
+	paneID, err := agentPaneID(tm, sessionName)
 	if err != nil {
-		t.Fatalf("GetPaneID: %v", err)
+		t.Fatalf("agent pane id: %v", err)
 	}
 
 	// Kill pane processes with empty excludePIDs (should kill all processes)
@@ -1633,9 +1877,9 @@ func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Get the pane ID and PID
-	paneID, err := tm.GetPaneID(sessionName)
+	paneID, err := agentPaneID(tm, sessionName)
 	if err != nil {
-		t.Fatalf("GetPaneID: %v", err)
+		t.Fatalf("agent pane id: %v", err)
 	}
 
 	panePID, err := tm.GetPanePID(sessionName)
@@ -1719,7 +1963,27 @@ func TestKillPaneProcessesExcluding_FiltersPIDs(t *testing.T) {
 	}
 }
 
-func TestFindAgentPane_SinglePane(t *testing.T) {
+// markedAgentPane returns the one pane of session carrying the agent-pane
+// marker that every create path sets.
+func markedAgentPane(t *testing.T, tm *Tmux, session string) string {
+	t.Helper()
+	out, err := tm.run("list-panes", "-s", "-t", paneTarget(session), "-F", agentPaneMarkerFormat+"\t#{pane_id}")
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	var marked []string
+	for _, row := range strings.Split(strings.TrimSpace(out), "\n") {
+		if id, ok := strings.CutPrefix(row, agentPaneMarked+"\t"); ok {
+			marked = append(marked, id)
+		}
+	}
+	if len(marked) != 1 {
+		t.Fatalf("marked panes in %s = %q, want exactly one (rows %q)", session, marked, out)
+	}
+	return marked[0]
+}
+
+func TestAgentInputTarget_SinglePane(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -1733,17 +1997,42 @@ func TestFindAgentPane_SinglePane(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Single pane — should return empty (no disambiguation needed)
-	paneID, err := tm.FindAgentPane(sessionName)
-	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+	// The marked single pane is the agent's.
+	agentPane := markedAgentPane(t, tm, sessionName)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Errorf("input pane of the marked single pane = (%q, %v), want the agent's %q", got, err, agentPane)
 	}
-	if paneID != "" {
-		t.Errorf("FindAgentPane single pane = %q, want empty", paneID)
+
+	// An unmarked (pre-upgrade) session's only pane is its agent pane.
+	unmarkSession(t, tm, sessionName, agentPane)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Errorf("input pane of an unmarked single pane = (%q, %v), want %q", got, err, agentPane)
 	}
 }
 
-func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
+// inputPaneID returns the pane id of session's agentInputTarget.
+func inputPaneID(tm *Tmux, session string) (string, error) {
+	target, err := tm.agentInputTarget(session)
+	if err != nil {
+		return "", err
+	}
+	_, id, _ := strings.Cut(strings.TrimPrefix(target, paneTarget(session)), ".")
+	return id, nil
+}
+
+// unmarkSession turns session into one created before the agent-pane marker:
+// no pane marker and no session flag.
+func unmarkSession(t *testing.T, tm *Tmux, session, agentPane string) {
+	t.Helper()
+	if _, err := tm.run("set-option", "-p", "-u", "-t", agentPane, agentPaneOption); err != nil {
+		t.Fatalf("unset agent-pane marker: %v", err)
+	}
+	if _, err := tm.run("set-option", "-u", "-t", paneTarget(session), agentSessionOption); err != nil {
+		t.Fatalf("unset session flag: %v", err)
+	}
+}
+
+func TestAgentInputTarget_MultiPaneWithNode(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -1780,15 +2069,21 @@ func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
 		t.Skipf("Expected 2 panes, got %d — skipping multi-pane test", len(lines))
 	}
 
-	// FindAgentPane should find the node pane
-	paneID, err := tm.FindAgentPane(sessionName)
-	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+	// The marked pane is the agent's, even though the split runs node (one of
+	// the default process names): a pane a human added never wins over it.
+	agentPane := markedAgentPane(t, tm, sessionName)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Fatalf("input pane = (%q, %v), want the marked agent pane %q over the node split", got, err, agentPane)
 	}
 
-	// Verify it found the correct pane (the one running node)
-	if paneID == "" {
-		t.Log("FindAgentPane returned empty — node may not have started yet or detection missed it")
+	// Unmarked (a pre-upgrade session), process detection finds the node pane.
+	unmarkSession(t, tm, sessionName, agentPane)
+	paneID, err := inputPaneID(tm, sessionName)
+	if err != nil {
+		t.Fatalf("agentInputTarget: %v", err)
+	}
+	if paneID == agentPane {
+		t.Log("input pane fell back to the first pane — node may not have started yet or detection missed it")
 		// Not a hard failure since node startup timing varies
 		return
 	}
@@ -1801,7 +2096,7 @@ func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
 	paneCmd := strings.TrimSpace(cmdOut)
 	t.Logf("Agent pane %s running: %s", paneID, paneCmd)
 	if paneCmd != "node" {
-		t.Errorf("FindAgentPane returned pane running %q, want 'node'", paneCmd)
+		t.Errorf("input pane runs %q, want 'node'", paneCmd)
 	}
 }
 
@@ -1904,15 +2199,14 @@ func TestNudgeLockDifferentSessions(t *testing.T) {
 	}
 }
 
-func TestFindAgentPane_NonexistentSession(t *testing.T) {
+func TestAgentInputTarget_NonexistentSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
 
 	tm := testTmux()
-	_, err := tm.FindAgentPane("nonexistent-session-findagent-xyz")
-	if err == nil {
-		t.Error("FindAgentPane on nonexistent session should return error")
+	if _, err := tm.agentInputTarget("nonexistent-session-findagent-xyz"); err == nil {
+		t.Error("agentInputTarget on nonexistent session should return error")
 	}
 }
 
@@ -1966,7 +2260,7 @@ func TestEnsureSessionFresh_RejectsInvalidName(t *testing.T) {
 	}
 }
 
-func TestFindAgentPane_MultiPaneNoAgent(t *testing.T) {
+func TestAgentInputTarget_MultiPaneNoAgent(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -1988,13 +2282,20 @@ func TestFindAgentPane_MultiPaneNoAgent(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// FindAgentPane should return empty (no agent in either pane)
-	paneID, err := tm.FindAgentPane(sessionName)
-	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+	// The marked pane is the agent's, whatever it runs.
+	agentPane := markedAgentPane(t, tm, sessionName)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Errorf("input pane = (%q, %v), want the marked agent pane %q", got, err, agentPane)
 	}
-	if paneID != "" {
-		t.Errorf("FindAgentPane with no agent = %q, want empty", paneID)
+
+	// Unmarked, with no agent process in either pane: the first pane.
+	unmarkSession(t, tm, sessionName, agentPane)
+	first, _, _ := strings.Cut(strings.TrimSpace(func() string {
+		out, _ := tm.run("list-panes", "-s", "-t", paneTarget(sessionName), "-F", "#{pane_id}")
+		return out
+	}()), "\n")
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != first {
+		t.Errorf("unmarked input pane with no agent = (%q, %v), want the first pane %q", got, err, first)
 	}
 }
 
@@ -2178,7 +2479,7 @@ func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Should succeed immediately — no retry needed
-	err := tm.sendKeysLiteralWithRetry(sessionName, "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), sessionName, "hello", 5*time.Second)
 	if err != nil {
 		t.Errorf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2193,7 +2494,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFails(t *testing.T) {
 
 	// Target a session that doesn't exist — should fail immediately, not retry
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-xyz", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-xyz", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2214,7 +2515,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	// Use a nonexistent session — tmux returns "session not found" which is
 	// non-transient, so the function should fail fast (well under the timeout).
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2233,7 +2534,7 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", "large startup prompt", time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2260,7 +2561,7 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2278,7 +2579,7 @@ func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2299,7 +2600,7 @@ func TestSendStartupKeysLiteralWithRetryRecognizesCopilotProviderFamily(t *testi
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "github-copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "github-copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2320,7 +2621,7 @@ func TestSendKeysLiteralWithRetryDoesNotChunkOrdinaryCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendKeysLiteralWithRetry("%1", text, 3*time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", text, 3*time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2341,7 +2642,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T)
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "claude", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "claude", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2364,7 +2665,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *t
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2944,7 +3245,11 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 		{"bare drained composer", []string{"❯ "}, "hello", true},
 		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
 		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
-		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		// Any text left in the composer puts the submit in doubt: a draft
+		// Claude restored after an interrupt, with the sent message pasted
+		// behind it, starts with the old prompt (see
+		// TestPaneShowsDrainedComposerRejectsMergedClaudeDraft).
+		{"composer holds other text", []string{"❯ something else entirely"}, "hello", false},
 		{
 			"long draft truncated to pane width still detected via 40-rune compare",
 			[]string{"❯ " + longSentFirst40},
@@ -2987,10 +3292,46 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 			"\nfirst line of reminder\nsecond line",
 			true,
 		},
+		{
+			"composer still holds the paste collapsed into a staged placeholder",
+			[]string{"● Done.", "────", "❯\u00a0[Pasted text #1 +42 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"placeholder only echoed in the transcript above a bare composer",
+			[]string{"❯\u00a0[Pasted text #1 +44 lines]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex placeholder echoed in the transcript above a bare composer",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex composer still staged below a transcript line starting with the ready prompt",
+			[]string{"  ❯ make test", "  ok  ./...", "› [Pasted Content 1234 chars]", "", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"bare codex composer below a ready-prompt transcript line and an echoed placeholder",
+			[]string{"  ❯ make test", "› [Pasted Content 999 chars]", "• Done.", "› ", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"staged composer below a codex placeholder echoed in the transcript",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0[Pasted text #2 +7 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			got := paneShowsDrainedComposer(tt.lines)
 			if got != tt.want {
 				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}
@@ -3039,7 +3380,7 @@ func TestWaitForCodexInterruptBoundary(t *testing.T) {
 		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
 	}()
 
-	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {
+	if err := waitForCodexInterruptBoundary(context.Background(), transcript, since, 2*time.Second); err != nil {
 		t.Fatalf("waitForCodexInterruptBoundary: %v", err)
 	}
 }
@@ -3680,6 +4021,7 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 		nil,
 		func() error { order = append(order, "kill-session"); return nil },
 		func(processKillPlan) error { order = append(order, "terminate"); return nil },
+		sessionMissingOnLiveServer,
 	); err != nil {
 		t.Fatalf("teardown ordering for live plan: %v", err)
 	}
@@ -3708,6 +4050,48 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 	}
 }
 
+// newPlainShellSession creates a detached session whose pane runs a plain `sh`
+// with no startup files, and returns once the pane reports it.
+//
+// NewSession starts the server's default-shell as a LOGIN shell, and its pane
+// passes through transient foreground processes before it settles: tmux's own
+// forked child before it execs the shell ("tmux"), and — under zsh, which hands
+// the terminal to startup-file jobs — /etc/profile.d helpers ("sh" from
+// grepconf.sh) and zsh-newuser-install's clear probe ("clear") when HOME has no
+// zsh dotfiles. How long that lasts depends on host load, $SHELL and $HOME, so
+// an assertion about pane_current_command taken a fixed delay after NewSession
+// races it (ga-kmwwcx). A non-login `sh` with $ENV unset runs no startup
+// files, and once the pane reports "sh" it stays "sh".
+func newPlainShellSession(t *testing.T, tm *Tmux, name string) {
+	t.Helper()
+	if err := tm.NewSessionWithCommand(name, "", "exec env -u ENV sh"); err != nil {
+		t.Fatalf("NewSessionWithCommand(%q): %v", name, err)
+	}
+	waitForPaneCommand(t, tm, name, "sh", 10*time.Second)
+}
+
+// waitForPaneCommand waits until session's first pane reports want as its
+// pane_current_command, failing the test if that does not happen within
+// timeout.
+func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		got, err := tm.GetPaneCommand(session)
+		if err == nil && got == want {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("pane of %q did not report %q within %s (last %q, err %v)", session, want, timeout, got, err)
+		case <-ticker.C:
+		}
+	}
+}
+
 // waitForFileContents returns the trimmed contents of path once it is non-empty,
 // failing the test if that does not happen within timeout.
 func waitForFileContents(t *testing.T, path string, timeout time.Duration) string {
@@ -3728,6 +4112,75 @@ func waitForFileContents(t *testing.T, path string, timeout time.Duration) strin
 			t.Fatalf("%s did not become non-empty within %s (last error: %v)", path, timeout, lastErr)
 		case <-ticker.C:
 		}
+	}
+}
+
+func TestProviderStopPreservesResponsiveEmptyNamedServer(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	socket := fmt.Sprintf("gctest-empty-stop-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cfg := DefaultConfig()
+	cfg.SocketName = socket
+	provider := NewProviderWithConfig(cfg)
+	tmux := provider.Tmux()
+	_ = provider.TeardownServer()
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	const session = "empty-stop-target"
+	if err := provider.Start(context.Background(), session, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := provider.Stop(session); err != nil {
+		t.Fatalf("stop session: %v", err)
+	}
+
+	names, err := provider.ListRunning("")
+	if err != nil {
+		t.Fatalf("list empty named server: %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("remaining sessions = %v, want none", names)
+	}
+	if got := mustExitEmpty(t, tmux); got != "off" {
+		t.Fatalf("empty named server exit-empty=%q, want off", got)
+	}
+}
+
+// The provider conformance suite cannot pin the missing-server half of Stop's
+// contract: its shared socket keeps whatever server an earlier case started.
+// This private socket has no server until the test starts one, so real tmux
+// decides both halves here — a missing server reaches Stop's caller and only
+// the teardown layer absorbs it, while a never-started name on a responsive
+// server is Stop's own nil.
+func TestProviderStopReportsMissingServerThatStopForCleanupAbsorbs(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("ms")
+	provider := NewProviderWithConfig(cfg)
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	const missing = "never-started"
+	err := provider.Stop(missing)
+	if !errors.Is(err, ErrNoServer) {
+		t.Fatalf("Stop with no server = %v, want an error wrapping ErrNoServer", err)
+	}
+	if !runtimepkg.IsSessionGone(err) {
+		t.Errorf("IsSessionGone(%v) = false, want callers that classify Stop errors to see the session as gone", err)
+	}
+	if err := runtimepkg.StopForCleanup(provider, missing); err != nil {
+		t.Fatalf("StopForCleanup with no server = %v, want nil", err)
+	}
+
+	if err := provider.Start(context.Background(), "server-holder", runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start server-holder session: %v", err)
+	}
+	if err := provider.Stop(missing); err != nil {
+		t.Fatalf("Stop of a never-started session on a responsive server = %v, want nil", err)
 	}
 }
 

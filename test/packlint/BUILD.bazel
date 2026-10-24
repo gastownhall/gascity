@@ -16,13 +16,8 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
-        "//examples/bd:pack_files",
-        "//examples/bd/dolt:pack_files",
-        "//examples/gastown:pack_files",
-        "//examples/hyperscale:pack_files",
-        "//examples/lifecycle:pack_files",
-        "//examples/swarm:pack_files",
+        "//docs:all_files",
+        "//examples:all_examples",
         "//internal/bootstrap/packs/core:pack_files",
     ],
     deps = [
@@ -39,6 +34,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

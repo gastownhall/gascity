@@ -20,6 +20,7 @@ var (
 	RigNotFound         = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
 	SessionNotFound     = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
 	WaitNotFound        = Register(ProblemType{Code: "wait-not-found", Status: http.StatusNotFound, Title: "Wait Not Found"})
+	RequestNotFound     = Register(ProblemType{Code: "request-not-found", Status: http.StatusNotFound, Title: "Request Not Found"})
 	AgentNotFound       = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
 	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
 	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
@@ -47,6 +48,17 @@ var (
 	// dispatch (unknown/unwired sink, policy) — distinct from validation-failed,
 	// which is huma's schema-validation auto-stamp.
 	WebhookRejected = Register(ProblemType{Code: "webhook-rejected", Status: http.StatusUnprocessableEntity, Title: "Webhook Rejected"})
+	// DemandOnlySingleton refuses a session create or wake for a pool agent
+	// with max_active_sessions = 1 and no [[named_session]]: the controller
+	// starts its one session only from pool demand. The request is well-formed;
+	// the client recovers by slinging work to the agent or declaring a named
+	// session, not by fixing the request.
+	DemandOnlySingleton = Register(ProblemType{Code: "demand-only-singleton", Status: http.StatusBadRequest, Title: "Demand-Only Singleton Agent"})
+	// WakeWillNotStart reports a recorded wake the controller will not act
+	// on (an idle-latched row, a suspended rig or agent, no runnable template,
+	// a dependency-only row, a startup-health quarantine). The client
+	// recovers by fixing that condition, not the request.
+	WakeWillNotStart = Register(ProblemType{Code: "wake-will-not-start", Status: http.StatusConflict, Title: "Wake Recorded But Will Not Start"})
 
 	// Concurrency / state conflicts. concurrent-delete/concurrent-modify are
 	// retryable lost-update races (the target changed under the write); wrong-state
@@ -88,6 +100,45 @@ var (
 	// Idempotency (two-phase reserve/complete).
 	IdempotencyInFlight = Register(ProblemType{Code: "idempotency-in-flight", Status: http.StatusConflict, Title: "Idempotency Key In Flight"})
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
+	// InvalidIdempotencyKey is an Idempotency-Key the operation journal
+	// cannot record under (empty after trimming, over 512 bytes, control
+	// characters, leading or trailing space). Only an ops gate in require
+	// refuses it; auto runs such a request unrecorded.
+	InvalidIdempotencyKey = Register(ProblemType{Code: "invalid-idempotency-key", Status: http.StatusUnprocessableEntity, Title: "Invalid Idempotency Key"})
+
+	// Operation journal (DES-O0API D12): refusals of an ops gate in require,
+	// made before the request is delivered. A request to a configured named
+	// session with no row is checked for these before the session is
+	// materialized, except a store that opens but cannot write the op row:
+	// that refusal comes after the materialization, which require needs to
+	// name the op's conversation (§6.4).
+	//
+	// OpJournalUnavailable is an op store that cannot record the request
+	// (no conditional writes, no op bead type, a store error). The client may
+	// retry; nothing was delivered.
+	OpJournalUnavailable = Register(ProblemType{Code: "op-journal-unavailable", Status: http.StatusServiceUnavailable, Title: "Operation Journal Unavailable"})
+	// PayloadTooLarge is a request payload over the operation journal's
+	// 16 KiB inline limit.
+	PayloadTooLarge = Register(ProblemType{Code: "payload-too-large", Status: http.StatusUnprocessableEntity, Title: "Payload Too Large"})
+	// OpAlreadyFailed answers a same-key retry of a session command whose
+	// recorded operation already closed failed for a reason the request
+	// cannot be rebuilt from (its deadline passed, its turn did not end, an
+	// unclassified error; DES-O0API §7.3). Nothing ran; the client resends
+	// with a new Idempotency-Key to act again.
+	OpAlreadyFailed = Register(ProblemType{Code: "op-already-failed", Status: http.StatusConflict, Title: "Operation Already Failed"})
+
+	// The producer API (POST and GET .../session/{id}/ops, DES-O1 §11).
+	//
+	// KindNotEnabled refuses a proposal whose kind [ops] authoritative does
+	// not list: the conversation lane would never execute it, and a proposal
+	// is never silently shadowed. Nothing was written.
+	KindNotEnabled = Register(ProblemType{Code: "kind-not-enabled", Status: http.StatusConflict, Title: "Operation Kind Not Enabled"})
+	// OpKeyReuse refuses a proposal whose client key already names another
+	// request from the same principal on the same session. The first
+	// request wins; errors[0] carries the existing op id at location op_id.
+	OpKeyReuse = Register(ProblemType{Code: "key-reuse", Status: http.StatusConflict, Title: "Client Key Reused"})
+	// OpNotFound is an op id that names no operation of the session.
+	OpNotFound = Register(ProblemType{Code: "op-not-found", Status: http.StatusNotFound, Title: "Operation Not Found"})
 
 	// Backend availability. store-unavailable is the bead-store-not-live 503 emitted
 	// by the shared cacheLiveOr503 helper; service-unavailable is the generic 503

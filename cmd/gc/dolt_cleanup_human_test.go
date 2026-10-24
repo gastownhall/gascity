@@ -78,6 +78,7 @@ func TestRunDoltCleanup_HumanOutputForceOmitsDryRunFooter(t *testing.T) {
 		DoltClient:        client,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
 		ReapGracePeriod:   1,
+		LiveResolve:       fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -131,6 +132,7 @@ func TestRunDoltCleanup_HumanOutputShowsErrorsSection(t *testing.T) {
 		DoltClient:        client,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
 		ReapGracePeriod:   1,
+		LiveResolve:       fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -158,6 +160,7 @@ func TestRunDoltCleanup_HumanOutputShowsForceBlockersSection(t *testing.T) {
 		FS:                fs,
 		JSON:              false,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		LiveResolve:       fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -173,6 +176,111 @@ func TestRunDoltCleanup_HumanOutputShowsForceBlockersSection(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("human output missing force-blocker detail %q:\n%s", want, out)
 		}
+	}
+}
+
+// humanReportSection returns one blank-line-delimited section of the human
+// report, from its header line on, so a test can assert on that section
+// without matching text another section prints.
+func humanReportSection(t *testing.T, out, header string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(out, "\n"+header)
+	if !ok {
+		t.Fatalf("human output missing section %q\n--- output ---\n%s", header, out)
+	}
+	section, _, _ := strings.Cut(rest, "\n\n")
+	return header + strings.TrimSuffix(section, "\n") + "\n"
+}
+
+// TestRunDoltCleanup_HumanOutputOnLegacyFallbackPortSaysNothingWasScanned pins
+// what an operator reads when the port fell back to the legacy default. No
+// database was listed there, so the dropped section must not read as a clean
+// "(none)", and the footer must not invite a --force run that will be refused.
+func TestRunDoltCleanup_HumanOutputOnLegacyFallbackPortSaysNothingWasScanned(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
+	client := &fakeCleanupDoltClient{databases: []string{"hq", "testdb_abc"}}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:              []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:                fs,
+		CityPath:          "/city",
+		LiveResolve:       fakeLiveResolveMiss(),
+		JSON:              false,
+		DoltClient:        client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0: a dry run reports the blocker without failing; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "(legacy default — fallback)") {
+		t.Fatalf("fixture: want a legacy-default fallback run\n--- output ---\n%s", out)
+	}
+
+	dropped := humanReportSection(t, out, "DROPPED-DATABASE DIRECTORIES")
+	if !strings.Contains(dropped, "  (not scanned: legacy fallback port)\n") {
+		t.Errorf("dropped section must say the legacy fallback port was not scanned:\n%s", dropped)
+	}
+	if strings.Contains(dropped, "(none)") {
+		t.Errorf("dropped section reads (none) for a server that was never listed:\n%s", dropped)
+	}
+
+	blockers := humanReportSection(t, out, "FORCE BLOCKERS")
+	if !strings.Contains(blockers, cleanupErrorKindLegacyFallbackPort) {
+		t.Errorf("FORCE BLOCKERS section missing %s:\n%s", cleanupErrorKindLegacyFallbackPort, blockers)
+	}
+
+	if !strings.Contains(out, "\n--force is refused on the legacy fallback port; see FORCE BLOCKERS above.\n") {
+		t.Errorf("dry-run footer must say --force is refused on the legacy fallback port:\n%s", out)
+	}
+	if strings.Contains(out, "Re-run with --force") {
+		t.Errorf("dry-run footer invites a --force run that is refused on the legacy fallback port:\n%s", out)
+	}
+
+	summary := humanReportSection(t, out, "SUMMARY")
+	if !strings.Contains(summary, "  Purge:         skipped\n") {
+		t.Errorf("dry-run summary must keep the purge as skipped:\n%s", summary)
+	}
+}
+
+// TestRunDoltCleanup_HumanOutputForceOnLegacyFallbackPortSaysPurgeRefused pins
+// the summary of a forced run on the fallback port: the purge was refused
+// before it was attempted, which is not the report of a purge that failed.
+func TestRunDoltCleanup_HumanOutputForceOnLegacyFallbackPortSaysPurgeRefused(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
+	client := &fakeCleanupDoltClient{databases: []string{"hq", "testdb_abc"}}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:              []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:                fs,
+		CityPath:          "/city",
+		LiveResolve:       fakeLiveResolveMiss(),
+		JSON:              false,
+		Force:             true,
+		DoltClient:        client,
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		ReapGracePeriod:   1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1: a forced run on the legacy fallback port must fail; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "(legacy default — fallback)") {
+		t.Fatalf("fixture: want a legacy-default fallback run\n--- output ---\n%s", out)
+	}
+
+	summary := humanReportSection(t, out, "SUMMARY")
+	if !strings.Contains(summary, "  Purge:         refused\n") {
+		t.Errorf("forced summary must say the purge was refused on the legacy fallback port:\n%s", summary)
+	}
+	if strings.Contains(summary, "Purge:         failed") {
+		t.Errorf("forced summary reports a failed purge for one that was never attempted:\n%s", summary)
 	}
 }
 
@@ -201,6 +309,7 @@ func TestRunDoltCleanup_HumanOutputCountsPostSIGTERMGoneAsReaped(t *testing.T) {
 		},
 		KillProcess:     func(_ int, _ syscall.Signal) error { return nil },
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {

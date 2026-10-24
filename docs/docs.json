@@ -149,6 +149,7 @@
         "pages": [
           "index",
           "getting-started/installation",
+          "getting-started/upgrading",
           "getting-started/quickstart",
           "getting-started/dashboard",
           "getting-started/how-gas-city-works",
@@ -214,7 +215,8 @@
             "pages": [
               "runbooks/managed-city-endpoints",
               "runbooks/remote-hardened-city",
-              "runbooks/split-storage-classes"
+              "runbooks/split-storage-classes",
+              "runbooks/dolt-compact"
             ]
           }
         ]

@@ -140,6 +140,11 @@ type ListAllOptions struct {
 	// order that a no-op sort would not stabilize (the cold path returns store
 	// order — the two would disagree). Every CacheFirst caller sets SortCreatedDesc.
 	CacheFirst bool
+	// TierMode sets query.TierMode on each leg. The zero value is the
+	// store's default tier; a federated census states
+	// beads.FederatedReadTier so a relocated sessions binding answers its
+	// ephemeral rows too.
+	TierMode beads.TierMode
 }
 
 // ListedSession pairs the scalar Info projection with the persisted-response
@@ -337,6 +342,7 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 		Sort:          opts.Sort,
 		Limit:         opts.Limit,
 		Live:          opts.Live,
+		TierMode:      opts.TierMode,
 	}
 	if !opts.IncludeClosed && !opts.Live {
 		// Session bead status is open/closed; richer lifecycle states live in
@@ -388,8 +394,8 @@ func (s *Store) cachedListUnion(opts ListAllOptions) ([]beads.Bead, bool) {
 	if !ok {
 		return nil, false
 	}
-	typeQuery := beads.ListQuery{Type: BeadType, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed}
-	labelQuery := beads.ListQuery{Label: LabelSession, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed}
+	typeQuery := beads.ListQuery{Type: BeadType, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed, TierMode: opts.TierMode}
+	labelQuery := beads.ListQuery{Label: LabelSession, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed, TierMode: opts.TierMode}
 	typeRows, typeOK := cached.CachedList(typeQuery)
 	labelRows, labelOK := cached.CachedList(labelQuery)
 	if !typeOK || !labelOK {

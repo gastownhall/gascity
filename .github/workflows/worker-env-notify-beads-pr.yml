@@ -1,0 +1,168 @@
+# Tell a PR that re-pins the rbe-west worker host what merging it does to
+# gastownhall/beads.
+#
+# beads carries a byte-identical copy of the worker-env manifest and pin
+# (TESTING.md "Re-pinning the RBE worker host"), and rbe-west's pool workers
+# serve main's pin only, so merging a re-pin leaves every beads PR failing at
+# `Bazel / execution mode` until beads' sync PR lands; on the merge,
+# worker-env-notify-beads.yml tells beads to open it. A same-repo PR into
+# main that moves the pin gets one comment saying so, updated in place on
+# each push; if it stops moving the pin, the comment says that instead. The
+# workflow runs only on PRs that touch the worker host's files, so a PR that
+# later drops both of them entirely keeps its last comment: nothing runs for
+# it any more, which is acceptable.
+#
+# SECURITY MODEL: pull_request_target runs this file from main with a token
+# that can write to the PR. So it names no environment and reads no secret,
+# checks nothing out and runs no repository code: its one step is this
+# file's shell. Its GITHUB_TOKEN has pull-requests: write alone; gascity is
+# public, so reading its contents through the API needs no grant. It reads
+# the PR's file list and merge base, and platforms/BUILD.bazel at main, the
+# PR head and the merge base, through the API as data, and reads their pins
+# with tools/rbe/worker-env-drift's sed (scripts/worker_env_notify_beads_test.go
+# holds the two to the same answers).
+name: rbe worker-env re-pin notice
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - platforms/BUILD.bazel
+      - tools/rbe/worker-env.txt
+
+permissions: {}
+
+env:
+  # The repository whose copy of the manifest and pin follows main's, the
+  # workflow there that syncs the copy, and the event that starts it.
+  BEADS_REPO: gastownhall/beads
+  BEADS_AUTOSYNC: worker-env-autosync.yml
+  BEADS_EVENT: gascity-worker-env-repinned
+  # The workflow here that sends beads that event on the merge.
+  NOTIFY_WORKFLOW: worker-env-notify-beads.yml
+
+jobs:
+  comment:
+    name: tell this PR what merging does to beads
+    if: >-
+      github.repository == 'gastownhall/gascity' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    # A newer head supersedes an older one's run.
+    concurrency:
+      group: worker-env-notify-beads-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      # A PR that does not change platforms/BUILD.bazel leaves main's pin as
+      # it is, whatever its head pins (an old branch pins an old host), so its
+      # head's BUILD is read only when the file list names that file. A head
+      # that pins another host than main is checked against its merge base
+      # too: a branch from before main's last re-pin can edit BUILD and still
+      # pin the host it started from, and merging it keeps main's pin. Main
+      # is the commit this file was read from. The comment is
+      # github-actions[bot]'s, found by its marker; one by anyone else is
+      # never edited.
+      - name: Post, update or retract the beads re-pin comment
+        id: comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAIN_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ $PR_NUMBER =~ ^[0-9]+$ && $HEAD_SHA =~ ^[0-9a-f]{40}$ && $MAIN_SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=beads re-pin comment::unexpected PR number '$PR_NUMBER', head '$HEAD_SHA' or main '$MAIN_SHA'"
+            exit 1
+          fi
+          repo=$GITHUB_REPOSITORY
+          # build_at SHA FILE: platforms/BUILD.bazel at SHA, raw.
+          build_at() {
+            gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/$repo/contents/platforms/BUILD.bazel?ref=$1" >"$2"
+          }
+          # pin_of FILE: its worker-env pin as tools/rbe/worker-env-drift pin
+          # reads it, "none" without one, a failure with more than one.
+          pin_of() {
+            local pins
+            pins=$(sed -n 's/^ *"worker-env": "\(sha256:[0-9a-f]\{64\}\)",$/\1/p' "$1")
+            case $(printf '%s' "$pins" | grep -c .) in
+            0) echo none ;;
+            1) echo "$pins" ;;
+            *)
+              echo "$1 has more than one worker-env pin" >&2
+              return 1
+              ;;
+            esac
+          }
+          status=$(gh api --paginate "repos/$repo/pulls/$PR_NUMBER/files?per_page=100" \
+            --jq '.[] | select(.filename == "platforms/BUILD.bazel") | .status')
+          build_at "$MAIN_SHA" "$RUNNER_TEMP/worker-env-main.bazel"
+          main=$(pin_of "$RUNNER_TEMP/worker-env-main.bazel")
+          head=$main
+          case $status in
+          '') ;;
+          removed) head=none ;;
+          *)
+            build_at "$HEAD_SHA" "$RUNNER_TEMP/worker-env-head.bazel"
+            head=$(pin_of "$RUNNER_TEMP/worker-env-head.bazel")
+            ;;
+          esac
+          moves=false
+          if [ "$head" != "$main" ] && [[ $head =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            base=$(gh api "repos/$repo/compare/$MAIN_SHA...$HEAD_SHA" --jq .merge_base_commit.sha)
+            if ! [[ $base =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error title=beads re-pin comment::no merge base for $MAIN_SHA...$HEAD_SHA (got '$base')"
+              exit 1
+            fi
+            build_at "$base" "$RUNNER_TEMP/worker-env-base.bazel"
+            forked=$(pin_of "$RUNNER_TEMP/worker-env-base.bazel")
+            if [ "$head" != "$forked" ]; then
+              moves=true
+            fi
+          fi
+          marker='<!-- worker-env-notify-beads -->'
+          ids=$(gh api --paginate "repos/$repo/issues/$PR_NUMBER/comments?per_page=100" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id")
+          comment=${ids%%$'\n'*}
+          workflow=${GITHUB_WORKFLOW_REF%@*}
+          workflow_url=$GITHUB_SERVER_URL/$repo/actions/workflows/${workflow##*/}
+          notify_url=$GITHUB_SERVER_URL/$repo/actions/workflows/$NOTIFY_WORKFLOW
+          autosync_url=$GITHUB_SERVER_URL/$BEADS_REPO/actions/workflows/$BEADS_AUTOSYNC
+          footer="<sub>Updated by [$GITHUB_WORKFLOW]($workflow_url) on each push to this PR that touches the worker host's files.</sub>"
+          body=$RUNNER_TEMP/worker-env-notify-beads.md
+          if [ "$moves" = true ]; then
+            cat >"$body" <<EOF
+          $marker
+          **Merging this PR re-pins rbe-west's OSS pool for $BEADS_REPO too.**
+
+          It moves \`//platforms:rbe_worker\`'s worker-env pin from \`$main\` (main) to \`$head\`. rbe-west's pool workers serve main's pin only, and $BEADS_REPO carries a byte-identical copy of the manifest and pin:
+
+          - [$NOTIFY_WORKFLOW]($notify_url) then sends $BEADS_REPO the \`$BEADS_EVENT\` dispatch, and beads' [$BEADS_AUTOSYNC]($autosync_url) opens its sync PR within a minute or two of the merge. That PR lands as soon as its CI passes (auto-merge) or after beads' automated review.
+          - Until that PR merges, beads PRs fail at \`Bazel / execution mode\`. The sync PR's own CI runs fully uncached after a re-pin, so it takes about an hour, sometimes more: its release cross-compile lane (about 24k remote actions) gates it.
+
+          $footer
+          EOF
+          elif [ -n "$comment" ]; then
+            cat >"$body" <<EOF
+          $marker
+          **This PR no longer moves the worker-env pin**, so merging it no longer re-pins rbe-west's OSS pool for $BEADS_REPO.
+
+          $footer
+          EOF
+          else
+            echo "PR #$PR_NUMBER does not move the worker-env pin (main pins $main); nothing to say."
+            exit 0
+          fi
+          jq -n --rawfile body "$body" '{body: $body}' >"$body.json"
+          if [ -n "$comment" ]; then
+            gh api --method PATCH "repos/$repo/issues/comments/$comment" --input "$body.json" >/dev/null
+            echo "Updated comment $comment on PR #$PR_NUMBER (moves the pin: $moves)."
+          else
+            gh api --method POST "repos/$repo/issues/$PR_NUMBER/comments" --input "$body.json" >/dev/null
+            echo "Commented on PR #$PR_NUMBER (moves the pin: $moves)."
+          fi

@@ -1425,7 +1425,7 @@ func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 			// Peer setup under the barrier can stretch under make test -p=N CPU
 			// contention; keep the quiescence budget above GoroutineRaceTimeout.
 			service.deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
-			call := startDisableAndPurge(t, service)
+			call := startDisableAndPurgeAtUploaderBarrier(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1750,7 +1750,7 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			}
 			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
-			call := startDisableAndPurge(t, service)
+			call := startDisableAndPurgeAtUploaderBarrier(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1827,7 +1827,7 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		return nil
 	}
 	service := mustOpenTestService(t, deps)
-	call := startDisableAndPurge(t, service)
+	call := startDisableAndPurgeAtUploaderBarrier(t, service)
 	owner := waitForMetricsState(t, home, func(state persistedState) bool {
 		return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 	})
@@ -1852,7 +1852,8 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		t.Fatalf("replace peer successor during proof: %v", replaceErr)
 	}
 	if !replaced.Load() {
-		t.Fatal("peer successor was not replaced during the clean-tree proof")
+		t.Fatalf("peer successor was not replaced during the clean-tree proof; purge outcome = %+v err = %v",
+			outcome.result, outcome.err)
 	}
 	requirePurgeErrorClass(t, outcome.err, PurgeErrorStateChanged)
 	if outcome.result.Outcome != PurgeCleanupPending || !outcome.result.DisabledDurable {
@@ -2282,6 +2283,22 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 		result <- purgeCallResult{result: purge, err: err}
 	}()
 	return result
+}
+
+// startDisableAndPurgeAtUploaderBarrier starts DisableAndPurge and returns
+// once it is about to wait for the uploader lock. The disable record becomes
+// visible the moment beginDisable renames it into place, but beginDisable still
+// syncs and reads it back under the state lock. A test that plays a peer by
+// writing config without that lock must wait for this point, or its write can
+// land inside beginDisable's read-back window and fail the purge at
+// disable-write instead of reaching the post-barrier peer checks.
+func startDisableAndPurgeAtUploaderBarrier(t *testing.T, service *Service) <-chan purgeCallResult {
+	t.Helper()
+	attempts := make(chan struct{}, 1)
+	service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
+	call := startDisableAndPurge(t, service)
+	receiveUploaderAttempt(t, attempts)
+	return call
 }
 
 // waitForTestArm blocks until armed is closed, or until hangBudget, so a

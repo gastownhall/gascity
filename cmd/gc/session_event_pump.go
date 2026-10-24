@@ -48,7 +48,7 @@ const (
 // polled path untouched.
 type sessionEventPump struct {
 	parent         context.Context
-	pokeCh         chan<- struct{}
+	wake           *controllerWake
 	stderr         io.Writer
 	logPrefix      string
 	resyncDelay    time.Duration
@@ -69,11 +69,11 @@ type sessionEventPump struct {
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
-// and poke pokeCh. Wire a provider with restart.
-func newSessionEventPump(parent context.Context, pokeCh chan<- struct{}, stderr io.Writer, logPrefix string) *sessionEventPump {
+// and enqueue through wake. Wire a provider with restart.
+func newSessionEventPump(parent context.Context, wake *controllerWake, stderr io.Writer, logPrefix string) *sessionEventPump {
 	return &sessionEventPump{
 		parent:         parent,
-		pokeCh:         pokeCh,
+		wake:           wake,
 		stderr:         stderr,
 		logPrefix:      logPrefix,
 		resyncDelay:    sessionEventResyncPokeDelay,
@@ -218,7 +218,7 @@ func (p *sessionEventPump) poke(kind, session string) {
 	}
 	// Log only when the send lands: a replayed backlog burst fills the
 	// buffer once and stays quiet.
-	if legacyEnqueue(p.pokeCh, nil, reconcilekey.SessionNamed(session)) {
+	if p.wake.Enqueue(wakeReasonProviderEvent, reconcilekey.SessionNamed(session)) {
 		fmt.Fprintf(p.stderr, "%s: session event %s(%s) → reconcile poke\n", p.logPrefix, kind, session) //nolint:errcheck // best-effort stderr
 	}
 }

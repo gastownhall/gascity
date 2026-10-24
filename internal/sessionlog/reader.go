@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -23,6 +24,11 @@ type Session struct {
 	// Entries that aren't relevant for display (file-history-snapshot,
 	// progress hooks) are filtered out.
 	Messages []*Entry
+
+	// DetachedUsage holds per-invocation usage parsed from the whole transcript
+	// for providers that record usage apart from assistant messages (Codex).
+	// Consumers associate it against the full message list before paging.
+	DetachedUsage []TailUsage
 
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
@@ -42,6 +48,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -156,7 +165,9 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -238,7 +249,9 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -451,6 +464,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 		raw := make([]byte, len(line))
 		copy(raw, line)
 		e.Raw = raw
+		attachClaudeAPIErrorEvent(&e)
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
@@ -1674,12 +1688,16 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		// Current Claude versions replace every UTF-16 code unit outside
+		// [A-Za-z0-9] with "-", underscores included. Keep the legacy
+		// spelling as a candidate for transcripts written earlier.
+		for _, slug := range []string{claudeSanitizedProjectSlug(path), ProjectSlug(path)} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }
@@ -1710,6 +1728,27 @@ func addDarwinClaudePathAliases(path string, add func(string)) {
 	case strings.HasPrefix(path, "/private/var/"):
 		add("/var/" + strings.TrimPrefix(path, "/private/var/"))
 	}
+}
+
+// claudeSanitizedProjectSlug is the project directory name current Claude
+// Code versions write: every UTF-16 code unit outside [A-Za-z0-9] becomes "-"
+// (Claude is a JavaScript program, so a character outside the Basic
+// Multilingual Plane becomes two).
+func claudeSanitizedProjectSlug(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		n := utf16.RuneLen(r)
+		if n < 1 {
+			n = 1
+		}
+		b.WriteString(strings.Repeat("-", n))
+	}
+	return b.String()
 }
 
 // ProjectSlug converts an absolute path to the project directory slug

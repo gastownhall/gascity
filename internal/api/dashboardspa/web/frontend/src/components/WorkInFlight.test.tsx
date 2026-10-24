@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkInFlight } from './WorkInFlight';
 import { NowProvider } from '../contexts/NowContext';
@@ -42,7 +42,7 @@ function renderSection(
   opts: { loading?: boolean; error?: string | null } = {},
 ) {
   return render(
-    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+    <MemoryRouter>
       <NowProvider intervalMs={1_000_000}>
         <WorkInFlight
           beads={beads}

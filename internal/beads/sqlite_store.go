@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,17 +49,6 @@ const (
 	// costs one indexed lookup per id; the scan is for a floor that is stale by
 	// a lot, and it runs while this transaction holds the write lock.
 	sqliteMintProbesBeforeReseed = 64
-
-	// sqliteSequenceCeiling is the largest sequence value the id allocator
-	// hands out. The top of the int64 range is reserved so the allocator can
-	// never overflow: nextID is an atomic int64 Add, and one id pinned near
-	// math.MaxInt64 (a deployed graph holds gcg-9223372036854775806) used to
-	// reseed the sequence there, after which Add wrapped to math.MinInt64 and
-	// every cook walked a growing block of "gcg--9223…" ids one point lookup at
-	// a time. An id whose suffix is above the ceiling (or negative) can never
-	// be minted, so it cannot collide with a minted id and never moves the
-	// floor; reaching the ceiling is an explicit exhaustion error, not a wrap.
-	sqliteSequenceCeiling int64 = 1 << 62
 )
 
 // SQLiteStoreOptions configures the SQLite bead store.
@@ -184,14 +175,28 @@ func isSQLiteBusy(err error) bool {
 // a SQLITE_BUSY error, backing off by sqliteBusyBackoff between attempts.
 // The busy_timeout PRAGMA already retries at the C layer for 5 s per call, so
 // each application-level retry is an additional 5 s+ window for the lock.
+// fn must be one transaction: a busy error that outlasts the retries is
+// marked ErrSQLiteBusyExhausted, a write that committed nothing.
 func retryOnBusy(fn func() error) error {
 	err := fn()
 	for attempt := 0; attempt < sqliteBusyRetryAttempts && isSQLiteBusy(err); attempt++ {
 		sqliteBusySleep(sqliteBusyBackoff(attempt))
 		err = fn()
 	}
+	if isSQLiteBusy(err) {
+		return sqliteBusyExhaustedError{err: err}
+	}
 	return err
 }
+
+// sqliteBusyExhaustedError is a busy error that outlasted retryOnBusy. It
+// keeps the driver's message, unwraps to it, and matches
+// ErrSQLiteBusyExhausted.
+type sqliteBusyExhaustedError struct{ err error }
+
+func (e sqliteBusyExhaustedError) Error() string        { return e.err.Error() }
+func (e sqliteBusyExhaustedError) Unwrap() error        { return e.err }
+func (e sqliteBusyExhaustedError) Is(target error) bool { return target == ErrSQLiteBusyExhausted }
 
 // sqliteBusyBackoff is the jittered exponential delay before busy retry
 // number attempt (0-based): uniformly in [d/2, d] for
@@ -224,10 +229,16 @@ type SQLiteStore struct {
 	disableRetentionSweeper    bool
 	retentionStop              context.CancelFunc
 	retentionDone              chan struct{}
-	seq                        atomic.Int64 // in-memory sequence; recovered from DB on Open
-	sequenceFloorMu            sync.Mutex
+	sequenceFloorMu            sync.Mutex // guards the allocator fields below; see sqlite_sequence.go
+	seq                        int64      // last id value issued or skipped, in allocation order
+	sequenceLimit              int64      // last value of this process's reserved block
+	sequenceReserved           bool       // sequenceLimit holds a block this process reserved
+	sequenceWrapped            bool       // a negative auto id ranks above the floor; minting refuses
+	sequenceWrappedAt          int64      // highest-ranked negative auto id seen above the floor
+	recoveredHighWater         sqliteSequenceHighWater
 	sequenceFloorBeforePersist func() // test-only seam for the serialized floor critical section.
 	closeMu                    sync.Mutex
+	closed                     atomic.Bool  // set by CloseStore; ensureOpen refuses once it is
 	closeReadDB                func() error // test-only seam; production falls back to readDB.Close.
 	closeWriteDB               func() error // test-only seam; production falls back to db.Close.
 	readOnly                   bool
@@ -324,7 +335,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		retentionSweepInterval:  cfg.retentionSweepInterval,
 		disableRetentionSweeper: cfg.disableRetentionSweeper,
 		readOnly:                cfg.readOnly,
-		sequenceFloorPath:       filepath.Join(dir, sqliteGraphSequenceFloorFilename),
+		sequenceFloorPath:       filepath.Join(dir, sqliteSequenceFloorFilenameFor(cfg.prefix)),
 		localStrings:            newLocalSidecar(filepath.Join(dir, ".beads", "local-strings.json")),
 	}
 
@@ -408,15 +419,7 @@ func sqliteStoreDSN(path string, readOnly bool) string {
 // It is a begin mode, not a pragma, so it does not ride the per-connection
 // pragma budget, and it is deliberately off the read pool and read-only DSN.
 func sqliteStoreWriterDSN(path string) string {
-	dsn := sqliteStoreDSNWithMode(path, "")
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	query := parsed.Query()
-	query.Set("_txlock", "immediate")
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return sqliteStoreDSNWithOptions(path, "", "immediate")
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
@@ -424,6 +427,12 @@ func sqliteStorePrivateRecoveryDSN(path string) string {
 }
 
 func sqliteStoreDSNWithMode(path, mode string) string {
+	return sqliteStoreDSNWithOptions(path, mode, "")
+}
+
+// sqliteStoreDSNWithOptions is the one DSN builder. txlock, when set, is the
+// modernc _txlock begin mode ("immediate" for the write connection only).
+func sqliteStoreDSNWithOptions(path, mode, txlock string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
@@ -466,20 +475,21 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 	// 11.3 s) — a regression on precisely the sorted scans it looks like it
 	// should help.
 	//
-	// synchronous(NORMAL) — a genuine ~30% write win that is not safe to take
-	// until the sequence floor leads the allocator. This store rebuilds its ID
-	// allocator at open from MAX(numeric suffix) over durable rows, so a WAL
-	// tail lost to a host crash regresses the allocator and reissues bead IDs
-	// that already escaped into the event log, into gc.root_bead_id and
-	// gc.step_ref in other class stores, and into printed output — durable
-	// references that then resolve, silently, to a different bead. FULL is
-	// what makes a returned ID durable before the caller sees it. The
-	// graph.seqfloor sidecar was built for this hazard but does not cover it
-	// today: it is written only at genesis, it trails rather than leads the
-	// allocator, and the other four reserved prefixes have no floor at all.
+	// synchronous(NORMAL) — a genuine ~30% write win, not taken here. This
+	// store rebuilds its ID allocator at open from the strict high-water of
+	// durable rows AND the graph.seqfloor-style sidecar, which now leads the
+	// allocator: a block is fsynced to the sidecar before any id in it is
+	// handed out (sqlite_sequence.go), so a WAL tail lost to a host crash can
+	// no longer reissue an id that escaped into the event log,
+	// gc.root_bead_id, gc.step_ref or printed output. NORMAL would still lose
+	// the committed ROWS in that tail, which callers were told exist; that is
+	// a durability decision for a separate change.
 
 	if mode != "" {
 		query.Set("mode", mode)
+	}
+	if txlock != "" {
+		query.Set("_txlock", txlock)
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
@@ -524,85 +534,24 @@ func sqliteDepsUsesLegacyPrimaryKey(ctx context.Context, db *sql.DB) (bool, erro
 	return primaryKeys["issue_id"] > 0 && primaryKeys["depends_on_id"] > 0 && primaryKeys["dep_type"] > 0, nil
 }
 
+// recoverSequence seeds the allocator from the strict high-water of the auto
+// ids present and the persisted floor, whichever is later. It never reserves:
+// a store that is only read never writes its floor sidecar.
 func (s *SQLiteStore) recoverSequence(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM beads WHERE id LIKE ?`, s.prefix+"-%")
+	hw, err := scanSQLiteSequenceHighWater(ctx, s.db, s.prefix)
 	if err != nil {
 		return fmt.Errorf("recovering sqlite sequence: %w", err)
 	}
-	maxSeq, err := s.maxSequenceFromRows(rows)
+	floor, err := s.SequenceFloor()
 	if err != nil {
-		return err
+		return fmt.Errorf("recovering sqlite sequence floor: %w", err)
 	}
-	if s.prefix == sqliteGraphPrefix {
-		floor, err := s.SequenceFloor()
-		if err != nil {
-			return fmt.Errorf("recovering sqlite graph sequence floor: %w", err)
-		}
-		if floor > maxSeq && floor <= sqliteSequenceCeiling {
-			maxSeq = floor
-		}
-	}
-	s.seq.Store(maxSeq)
+	s.sequenceFloorMu.Lock()
+	defer s.sequenceFloorMu.Unlock()
+	s.recoveredHighWater = hw
+	s.seq = sequenceMax(s.seq, floor)
+	s.applySequenceHighWaterLocked(hw, floor)
 	return nil
-}
-
-// maxSequenceFromRows returns the largest allocatable sequence value among
-// the ids in rows (a single id column), or 0 when none carries one. It closes
-// rows.
-func (s *SQLiteStore) maxSequenceFromRows(rows *sql.Rows) (int64, error) {
-	defer rows.Close() //nolint:errcheck
-	var maxSeq int64
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, err
-		}
-		if n, ok := s.sequenceOfID(id); ok && n > maxSeq {
-			maxSeq = n
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	return maxSeq, nil
-}
-
-// sequenceOfID returns the allocator sequence value an id occupies, if any.
-// Only values in (0, sqliteSequenceCeiling] count: the allocator never mints
-// anything else, so no other id can collide with a minted one.
-//
-// An id in this store's own namespace is "<prefix>-<n>" as nextID formats it,
-// so the whole remainder parses as an int64; that is what keeps the "-N" of a
-// legacy wrapped id ("gcg--9223372036854775808") from reading as the positive
-// N. Any other id (a foreign prefix, or a non-numeric own-prefix id) counts
-// its trailing digit run, as numericIDSuffix always did, but only when the
-// run parses as an int64: numericIDSuffix discarded strconv.Atoi's range error
-// and clamped an overlong run to math.MaxInt64.
-func (s *SQLiteStore) sequenceOfID(id string) (int64, bool) {
-	n, ok := int64(0), false
-	if rest, own := strings.CutPrefix(id, s.prefix+"-"); own && rest != "" && rest[0] != '+' {
-		if parsed, err := strconv.ParseInt(rest, 10, 64); err == nil {
-			n, ok = parsed, true
-		}
-	}
-	if !ok {
-		i := len(id)
-		for i > 0 && id[i-1] >= '0' && id[i-1] <= '9' {
-			i--
-		}
-		if i == len(id) {
-			return 0, false
-		}
-		parsed, err := strconv.ParseInt(id[i:], 10, 64)
-		if err != nil {
-			return 0, false
-		}
-		n = parsed
-	}
-	if n <= 0 || n > sqliteSequenceCeiling {
-		return 0, false
-	}
-	return n, true
 }
 
 // StoreHealthPath returns the SQLite database file path.
@@ -613,12 +562,15 @@ func (s *SQLiteStore) StoreHealthPath() string {
 	return s.path
 }
 
-// ensureOpen reports ErrStoreClosed once CloseStore has released the store's
-// database handles. Every exported method that reaches a handle starts with
-// it, so a use-after-close returns an error instead of dereferencing nil;
-// methods that only delegate inherit the guard from the method they call.
+// ensureOpen reports ErrStoreClosed once CloseStore has run. Every exported
+// method that reaches a handle starts with it, so a use-after-close returns an
+// error instead of reaching a closed handle; methods that only delegate inherit
+// the guard from the method they call. CloseStore closes the handles but never
+// clears them: a call already past this check when the store closes reads its
+// handle again later (Get's dependency hydration is a second query), and gets
+// the closed handle's error, never a nil dereference.
 func (s *SQLiteStore) ensureOpen() error {
-	if s == nil || s.db == nil || s.readDB == nil {
+	if s == nil || s.closed.Load() || s.db == nil || s.readDB == nil {
 		return fmt.Errorf("sqlite store: %w", ErrStoreClosed)
 	}
 	return nil
@@ -637,13 +589,16 @@ func (s *SQLiteStore) Ping() error {
 
 // CloseStore stops the background retention sweeper and closes both the write
 // and read database connections. Idempotent — safe to call multiple times.
-// Every other method reports ErrStoreClosed once it has run.
+// Every other method reports ErrStoreClosed once it has run. It does not wait
+// for calls already in flight: they finish on the closed handles, which it
+// keeps rather than clears (see ensureOpen).
 func (s *SQLiteStore) CloseStore() error {
 	if s == nil {
 		return nil
 	}
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
+	s.closed.Store(true)
 
 	if s.retentionStop != nil {
 		s.retentionStop()
@@ -666,7 +621,6 @@ func (s *SQLiteStore) CloseStore() error {
 			errs = append(errs, err)
 		} else {
 			s.closeReadDB = nil
-			s.readDB = nil
 		}
 	}
 	if s.closeWriteDB != nil || s.db != nil {
@@ -680,7 +634,6 @@ func (s *SQLiteStore) CloseStore() error {
 			errs = append(errs, err)
 		} else {
 			s.closeWriteDB = nil
-			s.db = nil
 		}
 	}
 	return errors.Join(errs...)
@@ -706,6 +659,7 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	return s.create(b, false)
 }
 
@@ -730,7 +684,10 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 			return fmt.Errorf("sqlite create: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		stored = s.normalizeCreate(b)
+		stored, err = s.normalizeCreate(b)
+		if err != nil {
+			return err
+		}
 		if autoID {
 			// Store-generated id: self-heal a stale sequence floor so a suffix
 			// already minted by another process is never reissued.
@@ -779,11 +736,21 @@ func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 	return checkPinnedIDNamespace("sqlite create", id, s.reservedPrefixes)
 }
 
-func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
+func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 	b = cloneBead(b)
 	if b.ID == "" {
-		b.ID = s.nextID()
-	} else if n, ok := s.sequenceOfID(b.ID); ok {
+		id, err := s.nextID()
+		if err != nil {
+			return Bead{}, err
+		}
+		b.ID = id
+	} else if n, ok := parseSQLiteAutoIDSuffix(s.prefix, b.ID); ok && n > 0 {
+		// A caller-pinned id in this store's own auto format consumes its
+		// value. Only positive values: a pinned wrapped id must not drag the
+		// allocator into the negative range. The wrapped check sees it at the
+		// next row scan (open, or a collision reseed) instead, and minting
+		// refuses until the row is deleted and the store reopened, or the
+		// floor covers it.
 		s.ensureSequenceAtLeast(n)
 	}
 	if b.Status == "" {
@@ -798,17 +765,31 @@ func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
 	if b.UpdatedAt.IsZero() {
 		b.UpdatedAt = b.CreatedAt
 	}
-	return b
+	b.Revision = s.insertRevision()
+	return b, nil
 }
 
-func (s *SQLiteStore) nextID() string {
-	return fmt.Sprintf("%s-%d", s.prefix, s.seq.Add(1))
+// insertRevision is the revision upsertBeadTx inserts a new row at: 1, as on
+// MemStore, so an insert mints a nonzero token as every other write does (a
+// row at 0 is one an older binary inserted, whose 0 is a real token under the
+// REVISION CONTRACT on ConditionalWriter); 0 on a layout with no revision
+// column, whose reads carry none.
+func (s *SQLiteStore) insertRevision() int64 {
+	if !s.hasRevisionColumn {
+		return 0
+	}
+	return 1
 }
 
 // AdvanceSequenceFloor lifts the store's in-memory id sequence so the next
 // auto-minted id has a numeric suffix strictly greater than n. It never lowers
-// the floor. Call SetSequenceFloor when the floor must survive a reopen.
+// the floor, and ignores n <= 0: only the operator repair
+// (RaiseSQLiteSequenceFloor) may move an allocator into the negative range.
+// Call SetSequenceFloor when the floor must survive a reopen.
 func (s *SQLiteStore) AdvanceSequenceFloor(n int64) {
+	if n <= 0 {
+		return
+	}
 	s.ensureSequenceAtLeast(n)
 }
 
@@ -832,12 +813,7 @@ func (s *SQLiteStore) SetSequenceFloor(n int64) error {
 	if err != nil {
 		return err
 	}
-	if current > n {
-		n = current
-	}
-	if allocated := s.seq.Load(); allocated > n {
-		n = allocated
-	}
+	n = sequenceMax(sequenceMax(current, n), s.seq)
 	if s.sequenceFloorBeforePersist != nil {
 		s.sequenceFloorBeforePersist()
 	}
@@ -845,13 +821,15 @@ func (s *SQLiteStore) SetSequenceFloor(n int64) error {
 	if err != nil {
 		return fmt.Errorf("setting sqlite sequence floor: %w", err)
 	}
-	s.ensureSequenceAtLeast(persisted)
+	s.seq = sequenceMax(s.seq, persisted)
 	return nil
 }
 
-// SequenceFloor returns the persisted Graph ID floor. An absent sidecar is the
-// genesis floor zero; malformed or negative contents are rejected rather than
-// silently allowing a reserved-ID collision.
+// SequenceFloor returns the persisted ID floor for this store's prefix. An
+// absent sidecar is the genesis floor zero; malformed contents are rejected
+// rather than silently allowing a reserved-ID collision. A negative floor is
+// valid: it is an operator-set continuation point for a store an older build
+// wrapped (see sqlite_sequence.go).
 func (s *SQLiteStore) SequenceFloor() (int64, error) {
 	if s == nil {
 		return 0, errors.New("reading sqlite sequence floor on nil store")
@@ -875,8 +853,8 @@ func readSQLiteSequenceFloor(path string) (int64, error) {
 	}
 	text := string(bytes[:len(bytes)-1])
 	n, err := strconv.ParseInt(text, 10, 64)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("reading %s: invalid nonnegative floor %q", path, text)
+	if err != nil {
+		return 0, fmt.Errorf("reading %s: invalid floor %q", path, text)
 	}
 	if string(bytes) != strconv.FormatInt(n, 10)+"\n" {
 		return 0, fmt.Errorf("reading %s: non-canonical floor %q", path, string(bytes))
@@ -957,22 +935,12 @@ func writeSQLiteSequenceFloor(path string, floor int64) (returnErr error) {
 	return nil
 }
 
-// ensureSequenceAtLeast lifts the allocator to n. It never moves the
-// allocator back, and ignores n above sqliteSequenceCeiling: a floor there
-// would only make the next Add overflow.
+// ensureSequenceAtLeast lifts the allocator to n in allocation order; it never
+// moves it backwards. Callers pass only positive n.
 func (s *SQLiteStore) ensureSequenceAtLeast(n int64) {
-	if n > sqliteSequenceCeiling {
-		return
-	}
-	for {
-		cur := s.seq.Load()
-		if n <= cur {
-			return
-		}
-		if s.seq.CompareAndSwap(cur, n) {
-			return
-		}
-	}
+	s.sequenceFloorMu.Lock()
+	defer s.sequenceFloorMu.Unlock()
+	s.seq = sequenceMax(s.seq, n)
 }
 
 // idExistsTx reports whether a bead with the given id is already persisted
@@ -1004,21 +972,25 @@ func (s *SQLiteStore) ensureCreateDoesNotExist(ctx context.Context, tx *sql.Tx, 
 	return nil
 }
 
-// reseedSeqFromTx lifts the in-memory sequence floor to the on-disk max suffix
-// observed within the open transaction. It mirrors recoverSequence's MAX-suffix
-// scan but reads through tx so it sees IDs minted by other processes since this
-// store opened — the stale-seq self-heal in one step.
+// reseedSeqFromTx lifts the in-memory sequence to the strict on-disk
+// high-water observed within the open transaction, so one step clears a run of
+// live rows (caller-pinned ids, or rows an older build minted). It uses the
+// same strict scan as recovery: it can only move the allocator forward, never
+// inflates it from non-auto ids, and marks a wrapped store rather than
+// continuing into the negative range.
 func (s *SQLiteStore) reseedSeqFromTx(ctx context.Context, tx *sql.Tx) error {
 	observeSQLiteSequenceReseed()
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM beads WHERE id LIKE ?`, s.prefix+"-%")
+	hw, err := scanSQLiteSequenceHighWater(ctx, tx, s.prefix)
 	if err != nil {
 		return fmt.Errorf("reseeding sqlite sequence: %w", err)
 	}
-	maxSeq, err := s.maxSequenceFromRows(rows)
+	floor, err := s.SequenceFloor()
 	if err != nil {
-		return err
+		return fmt.Errorf("reseeding sqlite sequence: %w", err)
 	}
-	s.ensureSequenceAtLeast(maxSeq)
+	s.sequenceFloorMu.Lock()
+	defer s.sequenceFloorMu.Unlock()
+	s.applySequenceHighWaterLocked(hw, floor)
 	return nil
 }
 
@@ -1038,9 +1010,6 @@ func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate 
 	id := candidate
 	reseeded := false
 	for attempt := 0; attempt < mintUniqueIDMaxAttempts; attempt++ {
-		if _, ok := s.sequenceOfID(id); !ok {
-			return "", fmt.Errorf("minting unique sqlite bead id: sequence exhausted at %q (ceiling %d)", id, sqliteSequenceCeiling)
-		}
 		taken := seen[id]
 		if !taken {
 			exists, err := s.idExistsTx(ctx, tx, id)
@@ -1061,7 +1030,11 @@ func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate 
 			}
 			reseeded = true
 		}
-		id = s.nextID()
+		next, err := s.nextID()
+		if err != nil {
+			return "", err
+		}
+		id = next
 	}
 	return "", fmt.Errorf("minting unique sqlite bead id: exhausted %d attempts from candidate %q", mintUniqueIDMaxAttempts, candidate)
 }
@@ -1093,15 +1066,20 @@ func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) erro
 			 ref=excluded.ref,
 			 description=excluded.description,
 			 bead_json=excluded.bead_json`
+	columns, values := `id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json`, `?,?,?,?,?,?,?,?,?,?,?,?,?,?`
+	args := []any{
+		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
+		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload),
+	}
 	if s.hasRevisionColumn {
+		columns, values = columns+`,revision`, values+`,?`
+		args = append(args, s.insertRevision())
 		update += `, revision=beads.revision+1`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO beads(id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET `+update,
-		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
-		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))
+		INSERT INTO beads(`+columns+`)
+		VALUES(`+values+`)
+		ON CONFLICT(id) DO UPDATE SET `+update, args...)
 	if err != nil {
 		return fmt.Errorf("sqlite upsert bead %q: %w", b.ID, err)
 	}
@@ -1218,13 +1196,22 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // applySQLiteUpdateOpts applies opts to b with SQLiteStore.Update's exact
 // field semantics (nil pointers skipped, Labels appended, RemoveLabels
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
-// and unfenced paths cannot drift.
+// and unfenced paths cannot drift on what an edit sets. They differ on an edit
+// that leaves the row as it is: Update's rewriteBead commits nothing, while
+// the fenced verbs, the guarded batch and sqliteStoreTx.Update write the row
+// anyway and mint a fresh revision. The REVISION CONTRACT on ConditionalWriter
+// allows both.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	noteSessionKeys(b, opts.Metadata) // every SQLite update applies its opts here
+	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
 	}
 	if opts.Status != nil {
-		b.Status = *opts.Status
+		setBeadStatus(&b, *opts.Status)
+	}
+	if wasClosed && b.Status != "closed" {
+		forgetCloseReason(&b)
 	}
 	if opts.Type != nil {
 		b.Type = *opts.Type
@@ -1249,6 +1236,11 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			b.Metadata[k] = v
 		}
 	}
+	// Removing the key from the map is an exact unset, not an empty value:
+	// upsertBeadTx deletes every metadata row of the bead and re-inserts only
+	// the keys b.Metadata still carries. An absent key leaves the row
+	// unchanged, which rewriteBead commits as a no-op.
+	unsetMetadataKeys(b.Metadata, opts.UnsetMetadata)
 	if len(opts.Labels) > 0 {
 		b.Labels = append(b.Labels, opts.Labels...)
 	}
@@ -1265,13 +1257,29 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 		}
 		b.Labels = filtered
 	}
+	if !wasClosed && b.Status == "closed" {
+		recordCloseReason(&b)
+	}
 	return b
 }
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
+	return s.rewriteBead(id, func(b Bead) Bead { return applySQLiteUpdateOpts(b, opts) })
+}
+
+// rewriteBead replaces id's row with apply's edit of it in one transaction,
+// bumping the claim fence when the edit moves ownership. An edit that leaves
+// the stored row as it is commits nothing: the store decides the no-op against
+// the row its own transaction read, so the revision and updated_at stay put
+// and no CAS token another writer holds goes stale. A read-only store refuses
+// every edit up front, so a same-value one is refused as a changing one is.
+func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
+	}
+	if s.readOnly {
+		return fmt.Errorf("sqlite update %q: store is read-only", id)
 	}
 	return retryOnBusy(func() error {
 		ctx := context.Background()
@@ -1284,8 +1292,11 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		if err != nil {
 			return err
 		}
-		before := b
-		b = applySQLiteUpdateOpts(b, opts)
+		before := cloneBead(b) // apply may edit b's maps and slices in place
+		b = apply(b)
+		if sqliteRowUnchanged(before, b) {
+			return nil // commit nothing: the deferred rollback ends the transaction
+		}
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
@@ -1295,6 +1306,33 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		}
 		return tx.Commit()
 	})
+}
+
+// sqliteRowUnchanged reports whether next, an edit of the stored row before,
+// would store what before already holds. Labels compare as the set the labels
+// table keeps (INSERT OR IGNORE), so re-adding a present label is no change.
+// A row either side cannot marshal is treated as changed. The compare sees
+// only what the row marshals, so Revision, ClaimFence and
+// IndefinitelyDeferred (json:"-") are invisible to it. That holds because no
+// edit moves them: the fence moves only in
+// bumpClaimFenceIfOwnershipTransitionTx, on an ownership transition, which
+// always changes a marshaled field (the assignee or the status); the
+// revision is the store's own counter; and IndefinitelyDeferred is a bd read
+// projection no SQLite row carries. An edit that moves one directly must
+// compare it here.
+func sqliteRowUnchanged(before, next Bead) bool {
+	if !slices.Equal(sqliteLabelSet(before.Labels), sqliteLabelSet(next.Labels)) {
+		return false
+	}
+	before.Labels, next.Labels = nil, nil
+	next.UpdatedAt = before.UpdatedAt
+	a, errA := json.Marshal(before)
+	b, errB := json.Marshal(next)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
+}
+
+func sqliteLabelSet(labels []string) []string {
+	return slices.Compact(slices.Sorted(slices.Values(labels)))
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
@@ -1379,7 +1417,13 @@ func (s *SQLiteStore) Reopen(id string) error {
 		return nil
 	}
 	status := "open"
-	return s.Update(id, UpdateOpts{Status: &status})
+	return s.rewriteBead(id, func(row Bead) Bead {
+		row = applySQLiteUpdateOpts(row, UpdateOpts{Status: &status})
+		// The old close's reason must not feed the next close, whatever
+		// status the bead is reopened from (dropCloseReasonMetadata).
+		dropCloseReasonMetadata(&row)
+		return row
+	})
 }
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.
@@ -1487,6 +1531,23 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, residual("b.assignee")+"=?")
 		args = append(args, q.Assignee)
 	}
+	if len(q.Assignees) > 0 {
+		// The assignee column holds exactly the bead's assignee, and SQLite
+		// compares TEXT byte for byte, so this keeps precisely the rows
+		// ListQuery.Matches keeps: it only stops the rest from being decoded.
+		// A mailbox read is this shape, and every open message used to be
+		// decoded to keep the session's own. The predicate is indexable: a
+		// listing with an issue-type filter keeps idx_beads_type, and one with
+		// none (a session's in-progress work) now reads only its identities'
+		// rows through idx_beads_assignee instead of scanning. Beside a
+		// metadata equality it is residual like the other columns.
+		placeholders := make([]string, len(q.Assignees))
+		for i, assignee := range q.Assignees {
+			placeholders[i] = "?"
+			args = append(args, assignee)
+		}
+		where = append(where, residual("b.assignee")+" IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if q.ParentID != "" {
 		where = append(where, "b.parent_id=?")
 		args = append(args, q.ParentID)
@@ -1548,11 +1609,11 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 
 // sqliteListCanPushLimit reports whether SQLite can apply q.Limit before the
 // Go-side ListQuery match. A source-side limit is only exact when every active
-// filter is represented by sqliteListSQL: the wisp tier, plural assignees, and
-// seek boundary remain residual filters over decoded Beads. Applying LIMIT
-// before any of those filters can discard a later matching row permanently.
+// filter is represented by sqliteListSQL: the wisp tier and the seek boundary
+// remain residual filters over decoded Beads. Applying LIMIT before either can
+// discard a later matching row permanently.
 func sqliteListCanPushLimit(q ListQuery) bool {
-	return q.TierMode != TierWisps && len(q.Assignees) == 0 && q.SeekAfter == nil
+	return q.TierMode != TierWisps && q.SeekAfter == nil
 }
 
 // ListOpen returns non-closed beads in creation order by default.
@@ -1687,7 +1748,8 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
-// closed, or closed with gc.work_outcome=blocked. A target missing from this
+// closed, or closed with gc.work_outcome=blocked unless it is a formula step
+// (gc.step_ref) that passed (gc.outcome=pass). A target missing from this
 // store (deleted, or another store's id) has no status and so blocks. Ready
 // negates it and enrichReadyProjectionForCache selects it, so the store and a
 // cache over it cannot disagree about which rows are blocked.
@@ -1699,14 +1761,30 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
+			    OR (
+			         EXISTS (
+			           SELECT 1 FROM metadata m
+			           WHERE m.bead_id = blocker.id
+			             AND m.meta_key = '%s'
+			             AND m.meta_value = '%s'
+			         )
+			         AND NOT (
+			           EXISTS (
+			             SELECT 1 FROM metadata o
+			             WHERE o.bead_id = blocker.id
+			               AND o.meta_key = '%s'
+			               AND o.meta_value = '%s'
+			           )
+			           AND EXISTS (
+			             SELECT 1 FROM metadata r
+			             WHERE r.bead_id = blocker.id
+			               AND r.meta_key = '%s'
+			               AND r.meta_value <> ''
+			           )
+			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.
@@ -1802,6 +1880,14 @@ func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
 // Tx executes fn in one SQLite transaction. Every write is rolled back when
 // the callback returns an error, so callers can safely compose Create, Update,
 // metadata updates, and Close as one all-or-nothing operation.
+//
+// Except on read-only and private-recovery stores, which keep a deferred
+// begin, the transaction takes the write lock as it begins (BEGIN IMMEDIATE,
+// see sqliteStoreWriterDSN), so write contention surfaces there, before fn
+// runs, and a contended begin is retried like every other write. fn itself
+// runs at most once: an error from fn or from the commit is returned without
+// running fn again. Under contention fn can start well after Tx is called, so
+// state read before Tx may have changed by the time fn runs.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1810,9 +1896,15 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 		return errors.New("beads tx: nil callback")
 	}
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite tx: begin: %w", err)
+	var tx *sql.Tx
+	if err := retryOnBusy(func() error {
+		var err error
+		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
+			return fmt.Errorf("sqlite tx: begin: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
@@ -1848,10 +1940,14 @@ type sqliteStoreTx struct {
 // the exemption runs through CreateWithForeignID on the store, not inside a
 // caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}
-	stored := t.store.normalizeCreate(b)
+	stored, err := t.store.normalizeCreate(b)
+	if err != nil {
+		return Bead{}, err
+	}
 	if b.ID == "" {
 		id, err := t.store.mintUniqueIDTx(t.ctx, t.tx, stored.ID, nil)
 		if err != nil {
@@ -1905,7 +2001,8 @@ func (t *sqliteStoreTx) Close(id string) error {
 		return nil
 	}
 	before := b
-	b.Status = "closed"
+	setBeadStatus(&b, "closed")
+	recordCloseReason(&b)
 	b.UpdatedAt = time.Now()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err
@@ -2153,20 +2250,4 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 
 func ptrTo(v string) *string {
 	return &v
-}
-
-// numericIDSuffix parses the trailing numeric portion of a bead ID like
-// "gc-42" and returns 42. Returns 0 if the ID has no numeric suffix.
-func numericIDSuffix(id string) int {
-	for i := len(id) - 1; i >= 0; i-- {
-		if id[i] < '0' || id[i] > '9' {
-			if i == len(id)-1 {
-				return 0
-			}
-			n, _ := strconv.Atoi(id[i+1:])
-			return n
-		}
-	}
-	n, _ := strconv.Atoi(id)
-	return n
 }

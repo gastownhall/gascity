@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -10,6 +11,9 @@ import (
 
 type sessionMessageRequest struct {
 	Message string `json:"message"`
+	// Resume lets the message resume a held session (CONTRACT v5.9 D8);
+	// without it the message queues on one.
+	Resume bool `json:"resume,omitempty"`
 }
 
 type sessionPendingResponse struct {
@@ -57,11 +61,13 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message); err != nil {
+	if _, err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message, body.Resume); err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return
 	}
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	resp := map[string]string{"status": "accepted", "id": id}
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
@@ -81,12 +87,9 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	if err := handle.Kill(r.Context()); err != nil {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	// The kill is `gc session kill`'s (Server.operatorKill), recorded as no op.
+	if _, err := s.operatorKill(r.Context(), store.Store, id, force, nil); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}

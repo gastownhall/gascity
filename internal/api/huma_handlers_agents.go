@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -31,17 +34,20 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// Raw config drives accurate provenance detection (pack-derived vs.
 	// city-native). Optional capability: when absent, agentOrigin falls
 	// back to the patch-presence heuristic.
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
+	rawCfg := s.rawConfig()
 
-	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
-		cacheKey = cacheKeyFor("agents", input)
+		// The list projects the config, whose swaps do not advance the
+		// event index, so the key also carries the config generation.
+		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
+		// A hit needs the exact index captured above, before any state was
+		// read, so the cached body reflects every change up to index and
+		// returning this request's index with it is safe. A key that can hit
+		// across index changes (the time bucket /status uses) must cache the
+		// build index with the body instead (indexedResponse).
 		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
@@ -69,13 +75,31 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
+	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
 
 	var agents []agentResponse
+	var partialErrors []string
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
 		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded, expandErr := expandAgentChecked(a, cityName, sessTmpl, sp, cfg.NamedSessions)
+		// A runtime server that is not running at all (tmux before its first
+		// session) has no sessions; that is a complete answer, not a failure.
+		if runtime.IsRuntimeServerAbsent(expandErr) {
+			expandErr = nil
+		}
+		switch {
+		case expandErr != nil:
+			// Say the pool's sessions are unknown rather than listing it as
+			// stopped or dropping it silently.
+			partialErrors = append(partialErrors, fmt.Sprintf("agent %s: listing pool sessions: %v", a.QualifiedName(), expandErr))
+		case len(expanded) == 0 && isMultiSessionAgent(a):
+			// An on-demand pool with no live session is still a configured
+			// agent: list it under its own name, like an idle singleton.
+			expanded = []expandedAgent{configuredPoolRow(a)}
+		}
+		limits := agentPoolLimits(a)
 		for _, ea := range expanded {
 			if input.Rig != "" && ea.rig != input.Rig {
 				continue
@@ -84,13 +108,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				continue
 			}
 
-			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			// Liveness stays on IsRunning: it is already a cached,
 			// fleet-wide read that excludes pane_dead corpses, whereas
 			// roster membership comes from list-sessions, which still
 			// lists a session whose pane exited under remain-on-exit.
-			// The roster is an attributes source only.
-			running := sp.IsRunning(sessionName)
+			// The roster is an attributes source only. The name probed is
+			// the session the row runs under, which for a pool slot is not
+			// the name the slot derives (agentSessionResolver).
+			sessionName, running := runtimeSessions.resolve(a, ea.qualifiedName, sp.IsRunning)
 			var rosterEntry runtime.SessionRosterEntry
 			var haveRosterEntry bool
 			if rosterMap != nil {
@@ -130,7 +155,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			provider, displayName := resolveProviderInfo(ea.provider, cfg)
+			provider, displayName := agentProviderInfo(&a, cfg)
 
 			available := true
 			var unavailableReason string
@@ -157,6 +182,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				UnavailableReason: unavailableReason,
 				PackDerived:       packDerived,
 				Pack:              pack,
+				PoolLimits:        limits,
 			}
 
 			var lastActivity *time.Time
@@ -215,13 +241,21 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			agents = append(agents, resp)
 		}
 	}
+	partialErrors = append(partialErrors, runtimeSessions.partialErrors()...)
 
 	if agents == nil {
 		agents = []agentResponse{}
 	}
 
-	body := ListBody[agentResponse]{Items: agents, Total: len(agents)}
-	if cacheKey != "" {
+	body := ListBody[agentResponse]{
+		Items:         agents,
+		Total:         len(agents),
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	}
+	// A partial list reflects a transient backend failure; don't serve it
+	// from cache once the backend recovers.
+	if cacheKey != "" && !body.Partial {
 		s.storeResponse(cacheKey, index, body)
 	}
 
@@ -233,20 +267,21 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 // humaHandleAgent is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{base} (unqualified form).
-func (s *Server) humaHandleAgent(_ context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.Name)
+func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.Name)
 }
 
 // humaHandleAgentQualified is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{dir}/{base} (qualified form).
-func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.QualifiedName())
+func (s *Server) humaHandleAgentQualified(ctx context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.QualifiedName())
 }
 
 // agentByName is the shared agent-get implementation. Both the qualified
 // and unqualified routes normalize to a single "name" string before
 // dispatching here.
-func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
+func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[agentResponse], error) {
+	index := s.latestIndex()
 	if name == "" {
 		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
@@ -260,8 +295,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
-	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	sessionName, running := s.newAgentSessionResolver(ctx, cfg, cityName).resolve(agentCfg, name, sp.IsRunning)
 	// Fold active graph-resident (wisp) work into the running signal so a
 	// graph-working agent reports running even when its named provider session
 	// is down. hasGraphWork is always false on a single-store city.
@@ -273,7 +307,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		suspended = true
 	}
 
-	provider, displayName := resolveProviderInfo(agentCfg.Provider, cfg)
+	provider, displayName := agentProviderInfo(&agentCfg, cfg)
 
 	available := true
 	var unavailableReason string
@@ -287,11 +321,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		}
 	}
 
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
-	pack, packDerived := agentPackProvenance(agentCfg, rawCfg, cfg)
+	pack, packDerived := agentPackProvenance(agentCfg, s.rawConfig(), cfg)
 
 	resp := agentResponse{
 		Name:              name,
@@ -305,6 +335,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		UnavailableReason: unavailableReason,
 		PackDerived:       packDerived,
 		Pack:              pack,
+		PoolLimits:        agentPoolLimits(agentCfg),
 	}
 	if isMultiSessionAgent(agentCfg) {
 		resp.Pool = agentCfg.QualifiedName()
@@ -347,7 +378,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	}
 
 	return &IndexOutput[agentResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -438,6 +469,9 @@ func (s *Server) updateAgentByName(name, provider, scope string, suspended *bool
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
+	if err := rigTemplateInstanceConflict(s.state.Config(), name, "update"); err != nil {
+		return nil, err
+	}
 	patch := AgentUpdate{Provider: provider, Scope: scope, Suspended: suspended}
 	if err := sm.UpdateAgent(name, patch); err != nil {
 		return nil, mutationError(err)
@@ -463,6 +497,9 @@ func (s *Server) deleteAgentByName(name string) (*OKResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
+	}
+	if err := rigTemplateInstanceConflict(s.state.Config(), name, "delete"); err != nil {
+		return nil, err
 	}
 	if err := sm.DeleteAgent(name); err != nil {
 		return nil, mutationError(err)
@@ -493,6 +530,9 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	if _, ok := findAgent(cfg, name); !ok {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
+	if err := rigTemplateInstanceConflict(cfg, name, action); err != nil {
+		return nil, err
+	}
 	var err error
 	switch action {
 	case "suspend":
@@ -508,6 +548,25 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	resp := &OKResponse{}
 	resp.Body.Status = "ok"
 	return resp, nil
+}
+
+// rigTemplateInstanceConflict refuses an edit addressed to a per-rig instance
+// of a generic rig-scoped template (see rigTemplateInstance): the only config
+// behind the instance is the template, so the edit would change every rig. The
+// 409 names the template to edit instead and, for suspend and resume, the rig
+// action that stays within one rig. It returns nil when name is not such an
+// instance.
+func rigTemplateInstanceConflict(cfg *config.City, name, verb string) error {
+	template, rig, ok := rigTemplateInstance(cfg, name)
+	if !ok {
+		return nil
+	}
+	msg := "agent " + name + " is a per-rig instance of the rig-scoped template " + template +
+		", which serves every rig; " + verb + " agent " + template + " to " + verb + " it in every rig"
+	if verb == "suspend" || verb == "resume" {
+		msg += ", or " + verb + " rig " + rig + " to " + verb + " that rig's agents"
+	}
+	return apierr.ConflictWrongState.Msg(msg)
 }
 
 // humaHandleAgentOutput is the Huma-typed handler for GET /v0/agent/{base}/output

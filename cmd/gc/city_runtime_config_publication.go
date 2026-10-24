@@ -25,6 +25,7 @@ func (cr *CityRuntime) publishRuntimeConfig(
 	cr.cfg = cfg
 	cr.sp = sp
 	cr.dops = dops
+	cr.publishedRev = revision
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil
 	return true
@@ -37,6 +38,15 @@ func (cr *CityRuntime) serviceProviderSnapshot() (*config.City, runtime.Provider
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
 	return cr.cfg, cr.sp
+}
+
+// serviceEnvSnapshot returns the config, provider and config revision a
+// reload last published, read together under serviceStateMu, for the v2
+// runtime's environment.
+func (cr *CityRuntime) serviceEnvSnapshot() (*config.City, runtime.Provider, string) {
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
+	return cr.cfg, cr.sp, cr.publishedRev
 }
 
 // requestConfigReloadRetry leaves a config reload pending for the next tick.

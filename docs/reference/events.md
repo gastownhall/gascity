@@ -192,6 +192,19 @@ For stream mode, keep these separate:
 
 `gc events` outputs the JSON payloads and envelopes, not the raw SSE frame text.
 
+## The `actor` Field
+
+`actor` names who recorded the event, which is not always who made the change
+it reports. The orchestrator records `bead.*` events from its bead cache under
+one of two actors:
+
+| Actor | Meaning |
+|-------|---------|
+| `cache-local` | A write the orchestrator made through its cache. |
+| `cache-reconcile` | A change the cache noticed when it re-read the store, such as a bead another process closed. |
+
+Neither names the agent or person who closed or changed the bead.
+
 ## Errors
 
 Successful event queries write only data to stdout.

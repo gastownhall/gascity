@@ -131,9 +131,15 @@ type ListQuery struct {
 	// caller does not need labels for change detection. Stores that cannot
 	// omit labels may ignore it.
 	SkipLabels bool
-	// Live bypasses CachingStore and reads from the backing store. Other Store
-	// implementations ignore it. Use it only for lifecycle gates that must
-	// observe external mutations immediately.
+	// Live bypasses CachingStore and reads from the backing store. Use it only
+	// for lifecycle gates that must observe external mutations immediately.
+	// A Live Status "open" is the backing's own answer, which on a bd-backed
+	// store is bd's raw "open": a bead bd records as blocked, deferred or
+	// another parked status reads as "open" but is not in it. NativeDoltStore
+	// reads the flag to push that raw status (nativeListPushesRawOpen); other
+	// backing stores ignore it. A non-Live "open" through CachingStore is gc's
+	// folded answer only while the cache serves it: the cache's fallback
+	// re-issues the read Live, so a cold or dirty cache returns the raw answer.
 	Live bool
 	Sort SortOrder
 	// AllowBackingCreatedLimit lets a backing store satisfy a bounded
@@ -203,6 +209,31 @@ type ReadyQuery struct {
 	// default Ready reads to TierBoth so no-history and ephemeral policy rows
 	// remain reachable under bd 1.0.4.
 	TierMode TierMode
+
+	// Unassigned and MetadataEquals are ADVISORY narrowing predicates, the
+	// same contract ListQuery.ParentIDs carries: a store MAY apply them to
+	// narrow its answer, and a store that does not recognize them ignores them
+	// and returns a superset. A store that applies one must apply it exactly —
+	// never drop a row that satisfies it — so a caller that needs the exact
+	// answer re-applies the predicates to what comes back, and pays for the
+	// pushdown only in rows it does not have to read.
+	//
+	// Unassigned keeps beads whose assignee is empty, as `bd ready
+	// --unassigned` matches.
+	Unassigned bool
+	// MetadataEquals keeps beads whose metadata carries every key with exactly
+	// that value, as `bd ready --metadata-field key=value` matches. Keys and
+	// values are passed as given; a caller that cannot vouch for a pair's
+	// equality semantics on every backend (a value that is a JSON literal, a
+	// key outside bd's key grammar) must not push it.
+	MetadataEquals map[string]string
+}
+
+// IsZero reports whether q selects nothing beyond Ready's historical default:
+// every open, unblocked, main-tier bead.
+func (q ReadyQuery) IsZero() bool {
+	return q.Assignee == "" && q.Limit == 0 && q.TierMode == TierIssues &&
+		!q.Unassigned && len(q.MetadataEquals) == 0
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {

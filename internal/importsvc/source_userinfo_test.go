@@ -28,7 +28,7 @@ func TestRejectSourceUserinfo(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := rejectSourceUserinfo(tc.source)
+			err := RejectSourceUserinfo(tc.source)
 			if tc.wantReject && err == nil {
 				t.Fatalf("expected rejection for %q", tc.source)
 			}

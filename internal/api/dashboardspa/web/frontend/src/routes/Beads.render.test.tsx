@@ -1,5 +1,5 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
 import { invalidate, setCached } from '../api/cache';
@@ -153,10 +153,7 @@ function renderPage(
   options: { readOnly?: boolean } = {},
 ) {
   return render(
-    <MemoryRouter
-      initialEntries={[path]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[path]}>
       <NowProvider intervalMs={1_000_000}>
         <ReadOnlyProvider readOnly={options.readOnly ?? false}>
           <AttentionProvider contributors={contributors}>
