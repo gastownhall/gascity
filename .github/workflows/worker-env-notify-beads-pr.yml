@@ -17,9 +17,9 @@
 # checks nothing out and runs no repository code: its one step is this
 # file's shell. Its GITHUB_TOKEN has pull-requests: write alone; gascity is
 # public, so reading its contents through the API needs no grant. It reads
-# the PR's file list, and main's and the PR head's platforms/BUILD.bazel,
-# through the API as data, and reads their pins with
-# tools/rbe/worker-env-drift's sed (scripts/worker_env_notify_beads_test.go
+# the PR's file list and merge base, and platforms/BUILD.bazel at main, the
+# PR head and the merge base, through the API as data, and reads their pins
+# with tools/rbe/worker-env-drift's sed (scripts/worker_env_notify_beads_test.go
 # holds the two to the same answers).
 name: rbe worker-env re-pin notice
 
@@ -59,8 +59,11 @@ jobs:
     steps:
       # A PR that does not change platforms/BUILD.bazel leaves main's pin as
       # it is, whatever its head pins (an old branch pins an old host), so its
-      # head's BUILD is read only when the file list names that file. Main is
-      # the commit this file was read from. The comment is
+      # head's BUILD is read only when the file list names that file. A head
+      # that pins another host than main is checked against its merge base
+      # too: a branch from before main's last re-pin can edit BUILD and still
+      # pin the host it started from, and merging it keeps main's pin. Main
+      # is the commit this file was read from. The comment is
       # github-actions[bot]'s, found by its marker; one by anyone else is
       # never edited.
       - name: Post, update or retract the beads re-pin comment
@@ -111,7 +114,16 @@ jobs:
           esac
           moves=false
           if [ "$head" != "$main" ] && [[ $head =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            moves=true
+            base=$(gh api "repos/$repo/compare/$MAIN_SHA...$HEAD_SHA" --jq .merge_base_commit.sha)
+            if ! [[ $base =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error title=beads re-pin comment::no merge base for $MAIN_SHA...$HEAD_SHA (got '$base')"
+              exit 1
+            fi
+            build_at "$base" "$RUNNER_TEMP/worker-env-base.bazel"
+            forked=$(pin_of "$RUNNER_TEMP/worker-env-base.bazel")
+            if [ "$head" != "$forked" ]; then
+              moves=true
+            fi
           fi
           marker='<!-- worker-env-notify-beads -->'
           ids=$(gh api --paginate "repos/$repo/issues/$PR_NUMBER/comments?per_page=100" \
@@ -130,7 +142,7 @@ jobs:
 
           It moves \`//platforms:rbe_worker\`'s worker-env pin from \`$main\` (main) to \`$head\`. rbe-west's pool workers serve main's pin only, and $BEADS_REPO carries a byte-identical copy of the manifest and pin:
 
-          - On the merge, [$NOTIFY_WORKFLOW]($notify_url) sends $BEADS_REPO the \`$BEADS_EVENT\` dispatch, and beads' [$BEADS_AUTOSYNC]($autosync_url) opens its sync PR within a minute or two and auto-merges it once its CI passes.
+          - [$NOTIFY_WORKFLOW]($notify_url) then sends $BEADS_REPO the \`$BEADS_EVENT\` dispatch, and beads' [$BEADS_AUTOSYNC]($autosync_url) opens its sync PR within a minute or two of the merge. That PR lands as soon as its CI passes (auto-merge) or after beads' automated review.
           - Until that PR merges, beads PRs fail at \`Bazel / execution mode\`. The sync PR's own CI runs fully uncached after a re-pin, so it takes about an hour, sometimes more: its release cross-compile lane (about 24k remote actions) gates it.
 
           $footer

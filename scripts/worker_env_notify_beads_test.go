@@ -122,6 +122,8 @@ const notifyBeadsSleepStub = "#!/bin/sh\necho \"$1\" >>\"$SLEEP_LOG\"\n"
 //     after saving --input as $GH_DIR/dispatch.N.json;
 //   - GET .../pulls/N/files and .../issues/N/comments: $GH_FILES and
 //     $GH_COMMENTS through the --jq filter given, as gh --jq does (one page);
+//   - GET .../compare/BASE...HEAD: $GH_COMPARE through the --jq filter,
+//     after logging BASE...HEAD to $GH_DIR/compare;
 //   - GET .../contents/platforms/BUILD.bazel?ref=SHA with the raw media
 //     type: $GH_BUILDS/SHA (404 without one), after logging SHA to
 //     $GH_DIR/contents;
@@ -165,6 +167,10 @@ case "$method $endpoint" in
 	;;
 "GET repos/"*/pulls/*/files*) jq -r "$jq" "$GH_FILES" ;;
 "GET repos/"*/issues/*/comments*) jq -r "$jq" "$GH_COMMENTS" ;;
+"GET repos/"*/compare/*...*)
+	echo "${endpoint##*/compare/}" >>"$GH_DIR/compare"
+	jq -r "$jq" "$GH_COMPARE"
+	;;
 "GET repos/"*/contents/platforms/BUILD.bazel"?ref="*)
 	[ "$accept" = "Accept: application/vnd.github.raw+json" ] || unexpected "contents without the raw media type: $accept"
 	ref=${endpoint##*ref=}
@@ -186,8 +192,8 @@ esac
 // notifyBeadsGH is a bin directory with the gh and sleep stubs, and the
 // files they read and write.
 type notifyBeadsGH struct {
-	t                                                                *testing.T
-	bin, dir, builds, log, tokens, statuses, files, comments, sleeps string
+	t                                                                         *testing.T
+	bin, dir, builds, log, tokens, statuses, files, comments, compare, sleeps string
 }
 
 func newNotifyBeadsGH(t *testing.T) *notifyBeadsGH {
@@ -205,7 +211,7 @@ func newNotifyBeadsGH(t *testing.T) *notifyBeadsGH {
 			t.Fatal(err)
 		}
 	}
-	for _, p := range []*string{&g.log, &g.tokens, &g.statuses, &g.files, &g.comments, &g.sleeps} {
+	for _, p := range []*string{&g.log, &g.tokens, &g.statuses, &g.files, &g.comments, &g.compare, &g.sleeps} {
 		f, err := os.CreateTemp(g.dir, "gh-")
 		if err != nil {
 			t.Fatal(err)
@@ -229,6 +235,7 @@ func (g *notifyBeadsGH) env() map[string]string {
 		"GH_STATUSES": g.statuses,
 		"GH_FILES":    g.files,
 		"GH_COMMENTS": g.comments,
+		"GH_COMPARE":  g.compare,
 		"SLEEP_LOG":   g.sleeps,
 	}
 }
@@ -244,6 +251,14 @@ func (g *notifyBeadsGH) write(path, content string) {
 func (g *notifyBeadsGH) build(sha, content string) {
 	g.t.Helper()
 	g.write(filepath.Join(g.builds, sha), content)
+}
+
+// mergeBase answers the compare API with sha as the merge base, and serves
+// build as platforms/BUILD.bazel there.
+func (g *notifyBeadsGH) mergeBase(sha, build string) {
+	g.t.Helper()
+	g.write(g.compare, `{"merge_base_commit":{"sha":"`+sha+`"}}`)
+	g.build(sha, build)
 }
 
 // lines are the non-empty lines of one of the stub's files.
@@ -873,6 +888,7 @@ const (
 	notifyBeadsPR      = "17"
 	notifyBeadsHeadSHA = "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff"
 	notifyBeadsMainSHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
+	notifyBeadsBaseSHA = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
 )
 
 // runNotifyBeadsComment runs the comment step for PR 17 of
@@ -903,35 +919,46 @@ func runNotifyBeadsComment(t *testing.T, gh *notifyBeadsGH) (string, error) {
 // platforms/BUILD.bazel at all (a PR that does not leaves main's pin as it
 // is, whatever an old head pins), and only then is its head's BUILD read,
 // raw, at the event's head sha; main's is read at the commit the workflow
-// file came from. A PR that moves the pin gets one comment, posted once and
-// updated in place; one that no longer does has that comment say so; no
-// other PR gets one. Only github-actions[bot]'s marker comment is edited.
+// file came from. A head that pins another host than main is compared with
+// its merge base too: a PR that edits BUILD on a branch from before main's
+// last re-pin pins its merge base's host, which merging does not bring
+// back. A PR that moves the pin gets one comment, posted once and updated in
+// place; one that no longer does has that comment say so; no other PR gets
+// one. Only github-actions[bot]'s marker comment is edited.
 func TestWorkerEnvNotifyBeadsPRComment(t *testing.T) {
-	pinMain, pinNew := sha256Pin("a\n"), sha256Pin("b\n")
+	pinMain, pinNew, pinOld := sha256Pin("a\n"), sha256Pin("b\n"), sha256Pin("o\n")
 	const (
 		bot   = "github-actions[bot]"
 		human = "someone"
 	)
 	repin := notifyBeadsFiles(t, "go.mod", "modified", rbeWorkerEnvManifest, "modified", rbeWorkerPlatformBuild, "modified")
+	buildOnly := notifyBeadsFiles(t, rbeWorkerPlatformBuild, "modified")
 	manifestOnly := notifyBeadsFiles(t, rbeWorkerEnvManifest, "modified")
 	ours := notifyBeadsCommentBy(42, bot, notifyBeadsMarker+"\nan earlier version")
 	for _, tc := range []struct {
-		name, files, head, comments string
+		name, files, comments string
+		// head and base: the BUILD at the PR head and at its merge base
+		// ("" serves none).
+		head, base string
 		// write is "" (none), "POST" (a new comment) or "PATCH 42".
 		write string
-		// moves: the comment says merging re-pins; else it says it no
-		// longer does.
+		// moves: the comment says merging re-pins, from main's pin to
+		// pinNew; else it says the PR no longer moves the pin.
 		moves bool
-		// fetchedHead: the head's BUILD was read (main's always is).
-		fetchedHead bool
+		// fetchedHead: the head's BUILD was read (main's always is);
+		// compared: the merge base was asked for and its BUILD read.
+		fetchedHead, compared bool
 	}{
 		{name: "manifest only, BUILD untouched", files: manifestOnly, comments: notifyBeadsComments(t)},
 		{name: "old branch: head pins another host, PR leaves BUILD alone", files: manifestOnly, head: buildWithPin(pinNew), comments: notifyBeadsComments(t)},
-		{name: "re-pin, first push", files: repin, head: buildWithPin(pinNew), comments: notifyBeadsComments(t, notifyBeadsCommentBy(7, human, "LGTM")), write: "POST", moves: true, fetchedHead: true},
-		{name: "re-pin, comment already there", files: repin, head: buildWithPin(pinNew), comments: notifyBeadsComments(t, notifyBeadsCommentBy(7, human, "LGTM"), ours), write: "PATCH 42", moves: true, fetchedHead: true},
-		{name: "re-pin, only a human's comment carries the marker", files: repin, head: buildWithPin(pinNew), comments: notifyBeadsComments(t, notifyBeadsCommentBy(43, human, notifyBeadsMarker+"\nquoted")), write: "POST", moves: true, fetchedHead: true},
-		{name: "BUILD edited, pin unchanged", files: notifyBeadsFiles(t, rbeWorkerPlatformBuild, "modified"), head: "# docs\n" + buildWithPin(pinMain), comments: notifyBeadsComments(t), fetchedHead: true},
-		{name: "re-pin reverted within the PR", files: notifyBeadsFiles(t, rbeWorkerPlatformBuild, "modified"), head: buildWithPin(pinMain), comments: notifyBeadsComments(t, ours), write: "PATCH 42", fetchedHead: true},
+		{name: "re-pin, first push", files: repin, head: buildWithPin(pinNew), base: buildWithPin(pinMain), comments: notifyBeadsComments(t, notifyBeadsCommentBy(7, human, "LGTM")), write: "POST", moves: true, fetchedHead: true, compared: true},
+		{name: "re-pin, comment already there", files: repin, head: buildWithPin(pinNew), base: buildWithPin(pinMain), comments: notifyBeadsComments(t, notifyBeadsCommentBy(7, human, "LGTM"), ours), write: "PATCH 42", moves: true, fetchedHead: true, compared: true},
+		{name: "re-pin, only a human's comment carries the marker", files: repin, head: buildWithPin(pinNew), base: buildWithPin(pinMain), comments: notifyBeadsComments(t, notifyBeadsCommentBy(43, human, notifyBeadsMarker+"\nquoted")), write: "POST", moves: true, fetchedHead: true, compared: true},
+		{name: "re-pin on a branch from before main's last re-pin", files: repin, head: buildWithPin(pinNew), base: buildWithPin(pinOld), comments: notifyBeadsComments(t), write: "POST", moves: true, fetchedHead: true, compared: true},
+		{name: "BUILD edited on a branch from before main's last re-pin", files: buildOnly, head: "# docs\n" + buildWithPin(pinOld), base: buildWithPin(pinOld), comments: notifyBeadsComments(t), fetchedHead: true, compared: true},
+		{name: "re-pin dropped, BUILD still edited, on an old branch", files: buildOnly, head: "# docs\n" + buildWithPin(pinOld), base: buildWithPin(pinOld), comments: notifyBeadsComments(t, ours), write: "PATCH 42", fetchedHead: true, compared: true},
+		{name: "BUILD edited, pin unchanged", files: buildOnly, head: "# docs\n" + buildWithPin(pinMain), comments: notifyBeadsComments(t), fetchedHead: true},
+		{name: "re-pin reverted within the PR", files: buildOnly, head: buildWithPin(pinMain), comments: notifyBeadsComments(t, ours), write: "PATCH 42", fetchedHead: true},
 		{name: "BUILD change dropped, manifest still touched", files: manifestOnly, comments: notifyBeadsComments(t, ours), write: "PATCH 42"},
 		{name: "BUILD removed", files: notifyBeadsFiles(t, rbeWorkerPlatformBuild, "removed"), comments: notifyBeadsComments(t)},
 	} {
@@ -942,6 +969,9 @@ func TestWorkerEnvNotifyBeadsPRComment(t *testing.T) {
 			gh.build(notifyBeadsMainSHA, buildWithPin(pinMain))
 			if tc.head != "" {
 				gh.build(notifyBeadsHeadSHA, tc.head)
+			}
+			if tc.base != "" {
+				gh.mergeBase(notifyBeadsBaseSHA, tc.base)
 			}
 			out, err := runNotifyBeadsComment(t, gh)
 			if err != nil {
@@ -960,11 +990,19 @@ func TestWorkerEnvNotifyBeadsPRComment(t *testing.T) {
 				}
 			}
 			wantRefs := []string{notifyBeadsMainSHA}
+			var wantCompare []string
 			if tc.fetchedHead {
 				wantRefs = append(wantRefs, notifyBeadsHeadSHA)
 			}
+			if tc.compared {
+				wantRefs = append(wantRefs, notifyBeadsBaseSHA)
+				wantCompare = []string{notifyBeadsMainSHA + "..." + notifyBeadsHeadSHA}
+			}
 			if refs := gh.lines(filepath.Join(gh.dir, "contents")); !reflect.DeepEqual(refs, wantRefs) {
-				t.Errorf("BUILD read at %v, want %v (main's, then the head's only when the PR changes it)", refs, wantRefs)
+				t.Errorf("BUILD read at %v, want %v (main's; the head's only when the PR changes it; the merge base's only when the head pins another host than main)", refs, wantRefs)
+			}
+			if compares := gh.lines(filepath.Join(gh.dir, "compare")); !reflect.DeepEqual(compares, wantCompare) {
+				t.Errorf("compared %v, want %v", compares, wantCompare)
 			}
 			writes := gh.lines(filepath.Join(gh.dir, "writes"))
 			var want []string
@@ -1004,11 +1042,16 @@ func TestWorkerEnvNotifyBeadsPRComment(t *testing.T) {
 					notifyBeadsEvent,
 					"https://github.com/gastownhall/gascity/actions/workflows/" + filepath.Base(notifyBeadsWorkflow),
 					"https://github.com/" + notifyBeadsRepo + "/actions/workflows/" + notifyBeadsAutosync,
-					"auto-merges", "`Bazel / execution mode`", "fully uncached", "about an hour, sometimes more",
+					// True whether or not beads auto-merges its sync PR yet.
+					"within a minute or two of the merge", "as soon as its CI passes (auto-merge) or after beads' automated review",
+					"`Bazel / execution mode`", "fully uncached", "about an hour, sometimes more",
 				} {
 					if !strings.Contains(body.Body, w) {
 						t.Errorf("re-pin comment lacks %q:\n%s", w, body.Body)
 					}
+				}
+				if strings.Contains(body.Body, "auto-merges") {
+					t.Errorf("re-pin comment promises beads auto-merges its sync PR, which needs beads' opt-in:\n%s", body.Body)
 				}
 			} else if !strings.Contains(body.Body, "no longer moves the worker-env pin") || strings.Contains(body.Body, pinNew) {
 				t.Errorf("retracted comment does not say the PR no longer moves the pin:\n%s", body.Body)
@@ -1049,6 +1092,7 @@ func TestWorkerEnvNotifyBeadsPRReadsPinsAsWorkerEnvDrift(t *testing.T) {
 			gh.write(gh.comments, notifyBeadsComments(t))
 			gh.build(notifyBeadsMainSHA, buildWithPin(pinMain))
 			gh.build(notifyBeadsHeadSHA, head)
+			gh.mergeBase(notifyBeadsBaseSHA, buildWithPin(pinMain))
 			out, err := runNotifyBeadsComment(t, gh)
 			gh.checkNoUnexpected()
 			if (err != nil) != (driftErr != nil) {

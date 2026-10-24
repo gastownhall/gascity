@@ -844,13 +844,14 @@ gascity's main) until beads' sync PR lands. While a PR moves the pin,
 push that merges it, `worker-env-notify-beads.yml` sends gastownhall/beads
 the repository dispatch `gascity-worker-env-repinned` (the main commit and
 its pin), and beads' `worker-env-autosync.yml` opens the sync PR within a
-minute or two and auto-merges it once its CI passes. That CI runs fully
-uncached after a re-pin, so it takes about an hour, sometimes more: on
-2026-10-21 (beads#7746) it took 50 minutes, gated by the release
-cross-compile lane (about 24k remote actions), and on beads#7411 and
-beads#7732 that lane's first attempt hit its 90-minute timeout (beads now
-re-runs a failed first attempt once). autosync's 15-minute cron is the
-backstop. If the dispatch fails, its run fails and prints
+minute or two of the merge. It lands as soon as its CI passes (auto-merge)
+or after beads' automated review. Its CI runs fully uncached after a
+re-pin, so it takes about an hour, sometimes more: on 2026-10-21
+(beads#7746) it took 50 minutes, gated by the release cross-compile lane
+(about 24k remote actions), and on beads#7411 and beads#7732 that lane's
+first attempt hit its 90-minute timeout (beads now re-runs a failed first
+attempt once). autosync's 15-minute cron is the backstop. If the dispatch
+fails, its run fails and prints
 `gh workflow run worker-env-autosync.yml -R gastownhall/beads`, which
 starts autosync at once.
 

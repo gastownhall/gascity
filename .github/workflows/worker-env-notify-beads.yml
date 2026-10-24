@@ -6,8 +6,9 @@
 # a byte-identical copy of the manifest and pin. Once a re-pin merges here,
 # beads' copy is out of step: no worker serves its pin, and every beads PR
 # fails at `Bazel / execution mode`, until beads' own sync PR lands. beads'
-# worker-env-autosync.yml opens that sync PR and auto-merges it once its CI
-# passes; its 15-minute cron noticed gascity#8165's re-pin 24 minutes late.
+# worker-env-autosync.yml opens that sync PR, which lands as soon as its CI
+# passes (auto-merge) or after beads' automated review; its 15-minute cron
+# noticed gascity#8165's re-pin 24 minutes late.
 # So when a push to main moves the pin, the dispatch job sends beads the
 # repository_dispatch event gascity-worker-env-repinned, client_payload
 # {"sha": <this main commit>, "pin": <its pin>}, which starts autosync at
