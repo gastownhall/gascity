@@ -188,10 +188,8 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 	// no benefit (the counters only need tick-granularity, not per-item).
 	skipCounts := make(map[string]int64)
 	snapshotCensus := nudgeFenceCensusFromSnapshot(sessionBeads)
-	liveCensus := nudgeLiveFenceCensusOnce(cityPath)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
-		target.fenceCensus = liveCensus
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
@@ -244,9 +242,9 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		// The pass's snapshot census only lets the target skip: when, judged
 		// by it, the target may claim nothing, the claim is not tried, and an
 		// adoption the snapshot denies waits for the next pass. A claim that
-		// is tried reads the live census (once per pass) before it adopts,
-		// since the snapshot misses a session another process created after
-		// it.
+		// is tried reads its own live census before it adopts, since the
+		// snapshot, or a census an earlier claim of the pass read, misses a
+		// session another process created after it.
 		ok := false
 		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, time.Now()) {
 			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
@@ -300,19 +298,6 @@ func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[str
 			}
 		})
 		return live, true
-	}
-}
-
-// nudgeLiveFenceCensusOnce is a dispatch pass's adoption census: the city's
-// sessions listed live (liveNudgeFenceSessionIDsForCity), read at most once per
-// pass and only when a claim meets a candidate fenced to another session,
-// instead of once per claim. An unavailable census fails the adoption closed.
-func nudgeLiveFenceCensusOnce(cityPath string) func() (map[string]struct{}, bool) {
-	var once sync.Once
-	var live map[string]struct{}
-	return func() (map[string]struct{}, bool) {
-		once.Do(func() { live = liveNudgeFenceSessionIDsForCity(cityPath) })
-		return live, live != nil
 	}
 }
 

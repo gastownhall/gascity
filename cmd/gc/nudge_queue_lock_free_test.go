@@ -268,6 +268,37 @@ func TestNudgeClaimWhoseItemWasTakenAfterTheDryRun(t *testing.T) {
 	}
 }
 
+// A claim adopts only the candidates its census-reading dry run judged. A
+// nudge fenced to a session created after that census read, queued between
+// the dry run and the locked run, has no census of its own: the locked run
+// leaves it pending, though it adopts the candidate the dry run judged.
+func TestNudgeClaimDoesNotAdoptACandidateItsDryRunDidNotJudge(t *testing.T) {
+	h := newNQCharHarness(t)
+	alpha := h.target("s-new", "2")
+	if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-0", "alpha", -time.Minute, queuedNudgeOptions{SessionID: "s-gone"})); err != nil {
+		t.Fatal(err)
+	}
+	nudgeClaimAfterDryRun = func() {
+		nudgeClaimAfterDryRun = nil
+		h.live = map[string]struct{}{"s-new": {}, "s-sib": {}, "s-3": {}}
+		if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-3", "alpha", -time.Second, queuedNudgeOptions{SessionID: "s-3"})); err != nil {
+			t.Errorf("enqueue n-3: %v", err)
+		}
+	}
+	t.Cleanup(func() { nudgeClaimAfterDryRun = nil })
+	claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != "n-0" {
+		t.Fatalf("claimed %v (census reads %d); want only n-0, the candidate the dry run judged", nqCharItems(claimed), h.census)
+	}
+	state := loadNudgeStateForTest(t, h.city)
+	if len(state.Pending) != 1 || state.Pending[0].ID != "n-3" || state.Pending[0].SessionID != "s-3" {
+		t.Fatalf("pending = %v; want n-3 still fenced to s-3", nqCharItems(state.Pending))
+	}
+}
+
 // The poll loop's skip counts are flushed at most once per interval and at
 // exit, not once per tick.
 func TestNudgePollSkipsCoalesce(t *testing.T) {

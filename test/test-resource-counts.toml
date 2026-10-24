@@ -930,7 +930,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/nudge_queue_lock_policy_test.go"
 resource = "fixed_sleep"
-calls = 1
+calls = 2
 
 [[count]]
 path = "cmd/gc/op_record_content_test.go"

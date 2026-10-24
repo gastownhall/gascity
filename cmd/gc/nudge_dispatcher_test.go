@@ -800,9 +800,15 @@ func newLegBDispatchFixture(t *testing.T) *legBDispatchFixture {
 
 func (f *legBDispatchFixture) create(t *testing.T) session.Info {
 	t.Helper()
-	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: f.dir, Provider: "codex", Hints: runtime.Config{WorkDir: f.dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	return f.createAs(t, "worker")
+}
+
+// createAs creates a session bead of template's agent.
+func (f *legBDispatchFixture) createAs(t *testing.T, template string) session.Info {
+	t.Helper()
+	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: template, Title: template, Command: "codex", WorkDir: f.dir, Provider: "codex", Hints: runtime.Config{WorkDir: f.dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("Create %s: %v", template, err)
 	}
 	return info
 }
@@ -870,5 +876,78 @@ func TestDispatchAdoptsANudgeFencedToAnArchivedSibling(t *testing.T) {
 	msgs := f.nudgeCalls()
 	if delivered != 1 || len(msgs) != 1 || !strings.Contains(msgs[0], "left for s3") || !strings.HasPrefix(msgs[0], f.s1.SessionName+":") {
 		t.Fatalf("delivered=%d nudges=%v, want s1 to adopt the archived s3's nudge", delivered, msgs)
+	}
+}
+
+// onNudgeProvider runs onNudge after each delivery the fake records.
+type onNudgeProvider struct {
+	*runtime.Fake
+	onNudge func(name string)
+}
+
+func (p onNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	err := p.Fake.Nudge(name, content)
+	p.onNudge(name)
+	return err
+}
+
+func (p onNudgeProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	err := p.Fake.NudgeFenced(ctx, name, content, n)
+	p.onNudge(name)
+	return err
+}
+
+// Each claim of a dispatch pass reads its own live census. A session another
+// process creates between two targets of one pass (after s1's delivery,
+// before helper s2's claim), with a nudge fenced to it, is live to s2's
+// claim, so s2 does not adopt that nudge on a census s1's claim read before
+// the session existed.
+func TestDispatchClaimsReadTheirOwnCensusWithinAPass(t *testing.T) {
+	f := newLegBDispatchFixture(t) // s1: worker, running
+	s2 := f.createAs(t, "helper")
+	if err := f.mgr.Start(context.Background(), testOperatorIn(t, f.dir), s2.ID, "", runtime.Config{WorkDir: f.dir}); err != nil {
+		t.Fatalf("Start s2: %v", err)
+	}
+	f.fake.Activity[s2.SessionName] = time.Now().Add(-10 * time.Second)
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos := snapshot.OpenInfos(); len(infos) != 2 || infos[0].ID != f.s1.ID || infos[1].ID != s2.ID {
+		t.Fatalf("setup: snapshot order %v, want s1 then s2", infos)
+	}
+	// s1's claim meets a nudge fenced to a gone worker, so it reads the
+	// census; s2 matches a helper nudge.
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "left by a gone worker", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: "gc-gone-worker"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("helper", "for any helper", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{})); err != nil {
+		t.Fatal(err)
+	}
+	var s3 session.Info
+	sp := onNudgeProvider{Fake: f.fake, onNudge: func(name string) {
+		if name != f.s1.SessionName || s3.ID != "" {
+			return
+		}
+		s3 = f.createAs(t, "helper")
+		if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("helper", "for s3 only", "session", time.Now().Add(-time.Second), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+			t.Errorf("enqueue for s3: %v", err)
+		}
+	}}
+	delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, sp, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if s3.ID == "" {
+		t.Fatalf("setup: s1 was not delivered to (nudges %v)", f.nudgeCalls())
+	}
+	msgs := f.nudgeCalls()
+	for _, m := range msgs {
+		if strings.Contains(m, "for s3 only") {
+			t.Fatalf("helper s2 adopted the nudge fenced to live helper s3 (delivered=%d): %s", delivered, strings.Join(msgs, " | "))
+		}
+	}
+	if delivered != 2 {
+		t.Fatalf("delivered=%d nudges=%v, want s1 and s2 each delivered once", delivered, msgs)
 	}
 }

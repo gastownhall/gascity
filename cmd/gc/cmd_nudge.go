@@ -162,7 +162,7 @@ type nudgeTarget struct {
 	claimKeys []string
 	// fenceCensus, when set, is the Leg-B census claimTarget hands a claim
 	// instead of listing the city's sessions itself: the dispatcher's
-	// per-pass census.
+	// snapshot census, which only its skip probe uses.
 	fenceCensus func() (map[string]struct{}, bool)
 }
 

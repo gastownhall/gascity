@@ -173,18 +173,35 @@ type nudgeClaimMatch func(item queuedNudge, liveSessions func() map[string]struc
 // city's sessions, so it is read outside the queue lock, before the claim's
 // locked run (ga-fsp5w9): a run that meets a candidate fenced to another
 // session before the census was read records that it needs it and treats the
-// candidate as not claimable, which is the fail-closed answer.
+// candidate as not claimable, which is the fail-closed answer. The census
+// answers the locked run only for the candidates a dry run judged with it
+// (judged): a candidate queued after the census was read may be fenced to a
+// session the census predates, so it has no census and fails closed too.
 type nudgeClaimCensus struct {
 	read   bool
 	live   map[string]struct{}
 	needed bool
+	judged map[string]struct{}
 }
 
-func (c *nudgeClaimCensus) liveSessions() map[string]struct{} {
+// liveSessionsFor is the census a run consults for the candidate with ID id:
+// a dry run records the candidates it judged; the locked run gets the census
+// only for those.
+func (c *nudgeClaimCensus) liveSessionsFor(id string, locked bool) map[string]struct{} {
 	if !c.read {
 		c.needed = true
 		return nil
 	}
+	if locked {
+		if _, ok := c.judged[id]; !ok {
+			return nil
+		}
+		return c.live
+	}
+	if c.judged == nil {
+		c.judged = make(map[string]struct{})
+	}
+	c.judged[id] = struct{}{}
 	return c.live
 }
 
@@ -198,6 +215,7 @@ type nudgeClaimRun struct {
 	batchTarget *nudgeTarget
 
 	census  nudgeClaimCensus
+	locked  bool
 	ledger  *nudgeShadowLedger
 	claimed []queuedNudge
 }
@@ -210,7 +228,9 @@ func (r *nudgeClaimRun) run(state *nudgeQueueState) error {
 	r.ledger.reset()
 	r.claimed = nil
 	maintainNudgeQueue(state, r.ledger, r.now, r.now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
-	r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool { return r.match(item, r.census.liveSessions) }, r.batchTarget)
+	r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool {
+		return r.match(item, func() map[string]struct{} { return r.census.liveSessionsFor(item.ID, r.locked) })
+	}, r.batchTarget)
 	return nil
 }
 
@@ -236,8 +256,9 @@ func (r *nudgeClaimRun) dryRun() (bool, error) {
 // claimable item, no maintenance to persist) is answered from a lock-free
 // snapshot and takes no lock; otherwise the claim runs again under the lock,
 // with the census its dry run read, and that run's answer is authoritative. A
-// Leg-B candidate that appears only in the locked state has no census and
-// stays pending for the next pass.
+// Leg-B candidate the census-reading dry run did not judge (one that appears
+// only in the locked state) has no census and stays pending for the next
+// pass.
 func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) ([]queuedNudge, error) {
 	r := newNudgeClaimRun(cityPath, now, match, readCensus, batchTarget)
 	if changed, err := r.dryRun(); err == nil && !changed {
@@ -246,6 +267,7 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch,
 	if nudgeClaimAfterDryRun != nil {
 		nudgeClaimAfterDryRun()
 	}
+	r.locked = true
 	if err := withNudgeQueueState(cityPath, "claim", r.run); err != nil {
 		return nil, err
 	}

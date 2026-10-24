@@ -92,7 +92,8 @@ func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
 // claimTarget is the contract's view of t: its queue keys, its fence, and a
 // census of cityPath's sessions, taken at most once, that lets it adopt a
 // superseded session's nudges. A target that carries a census of its own
-// (fenceCensus, the dispatcher's per-pass census) answers with it instead.
+// (fenceCensus, the dispatcher's skip-only snapshot census) answers with it
+// instead.
 func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
 	if t.fenceCensus != nil {
 		return storebinding.ClaimTarget{

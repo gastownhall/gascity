@@ -64,7 +64,11 @@ type Sentinels struct {
 // definitive answers are consulted first, then a Refusals match
 // (failed{refused:<why>}), then the retryable ones: an error that joins a
 // definitive failure to a refusal (a rollback that met a busy queue) reports
-// the definitive one. Message ops always close (DES-O0API D10).
+// the definitive one. A delivery timeout is definitive (the message may have
+// been delivered) unless the error also says the runtime was unavailable: a
+// wait for an unavailable runtime that ended on a deadline never sent the
+// message, so it is provider_unavailable. Message ops always close
+// (DES-O0API D10).
 func (s Sentinels) MessageResult(queued bool, err error) Result {
 	switch {
 	case err == nil && queued:
@@ -77,7 +81,7 @@ func (s Sentinels) MessageResult(queued bool, err error) Result {
 		return Result{Outcome: skipped(opjournal.ReasonConversationClosed)}
 	case matches(err, s.SessionGone):
 		return Result{Outcome: failed(opjournal.ReasonSessionGone)}
-	case matches(err, s.DeliveryTimeout):
+	case matches(err, s.DeliveryTimeout) && !matches(err, s.ProviderUnavailable):
 		return Result{Outcome: failed(opjournal.ReasonDeadlineInFlight)}
 	}
 	if why, ok := s.refusal(err); ok {

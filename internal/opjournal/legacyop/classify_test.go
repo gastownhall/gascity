@@ -58,6 +58,14 @@ func TestMessageResult(t *testing.T) {
 		{false, errors.Join(wrap(errClosed), wrap(errStarting)), skipped(opjournal.ReasonConversationClosed)},
 		// A refusal outranks a retryable answer, as in SyncResult.
 		{false, errors.Join(wrap(errUnavailable), wrap(errStarting)), failed(opjournal.RefusedReasonPrefix + "session_starting")},
+		// An unavailable runtime whose wait ended on a deadline (an
+		// observation that went unanswered) never sent the message: it is
+		// provider_unavailable, not a delivery in flight.
+		{false, fmt.Errorf("observation unanswered: %w: %w", errUnavailable, errTimeout), failed(opjournal.ReasonProviderUnavailable)},
+		{false, errors.Join(wrap(errTimeout), wrap(errUnavailable)), failed(opjournal.ReasonProviderUnavailable)},
+		// A delivery in flight outranks a refusal joined to it: the message
+		// may have been delivered.
+		{false, errors.Join(wrap(errTimeout), wrap(errStarting)), failed(opjournal.ReasonDeadlineInFlight)},
 	} {
 		got := testSentinels.MessageResult(c.queued, c.err)
 		if got.Outcome != c.want || got.LeaveOpen {
