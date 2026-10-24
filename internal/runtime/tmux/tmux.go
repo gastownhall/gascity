@@ -3852,6 +3852,15 @@ func (t *Tmux) nudgeSession(
 		}
 		delivered = true
 		if !confirmed {
+			// An auth-dead pane never goes busy and answers every prompt with
+			// a banner in 0s, so it drains its composer and would read as
+			// delivered-but-unobserved below, or as a lost submit that a
+			// resend might fix. Neither is true: no retry clears it. Look for
+			// the banner first, on this already-failed path only, so the
+			// confirmed hot path pays nothing.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneContainsAuthFailure(lines) {
+				return fmt.Errorf("%w: session %q", ErrNudgeSubmitAuthFailed, session)
+			}
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
@@ -6227,7 +6236,16 @@ func paneContainsBusyIndicator(lines []string) bool {
 
 // paneContainsAuthFailure reports whether the pane shows a provider
 // authentication banner that no retry can clear.
-func paneContainsAuthFailure(_ []string) bool {
+func paneContainsAuthFailure(lines []string) bool {
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "login expired") ||
+			strings.Contains(lower, "please run /login") ||
+			strings.Contains(lower, "oauth token has expired") ||
+			strings.Contains(lower, "authentication_error") {
+			return true
+		}
+	}
 	return false
 }
 
