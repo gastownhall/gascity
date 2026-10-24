@@ -123,6 +123,8 @@ go_test(
         "liveness_present_test.go",
         "main_test.go",
         "nudge_auth_failure_test.go",
+        "nudge_auth_submit_integration_test.go",
+        "nudge_auth_submit_test.go",
         "nudge_busy_codex_test.go",
         "nudge_busy_defer_test.go",
         "nudge_claude_queued_cursor_test.go",
