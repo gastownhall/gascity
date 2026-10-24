@@ -199,6 +199,7 @@ command = "uvx"
 args = ["notes-mcp"]
 `)
 	cfg := &config.City{
+		Workspace:                 config.Workspace{Name: "my-city"},
 		PackMCPDir:                filepath.Join(cityPath, "mcp"),
 		ExplicitImportPackDirs:    []string{packDir},
 		ExplicitImportMCPBindings: map[string]string{packDir: "search"},
@@ -230,7 +231,9 @@ args = ["notes-mcp"]
 		t.Fatalf("cursor projection lost its stdio server: %v", cursor)
 	}
 
-	want := `gc: warning: agent "editor" starts without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness`
+	// The warning names its city: a supervisor's log interleaves every city
+	// it runs.
+	want := `gc: warning: city "my-city": agent "editor" starts without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness`
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("warning missing\n want: %s\n got: %s", want, stderr.String())
 	}
@@ -423,8 +426,9 @@ func TestMCPConfigDoctorCheckWarnsAboutServersAnAgentStartsWithout(t *testing.T)
 	if result.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v, want warning: %+v", result.Status, result)
 	}
-	// "editor" is the provider's implicit agent; it skips the same server.
-	if !strings.Contains(result.Message, `agents "editor", "mayor" start without MCP server "search" (http, from the city pack)`) {
+	// "editor" is the provider's implicit agent, which the user never
+	// defined; it skips the same server, and the warning says what it is.
+	if !strings.Contains(result.Message, `agents "editor" (the implicit agent for provider "editor"), "mayor" start without MCP server "search" (http, from the city pack)`) {
 		t.Fatalf("message = %q", result.Message)
 	}
 }
@@ -437,7 +441,7 @@ func TestConfigShowValidateReportsMCPServersAgentsCannotReceive(t *testing.T) {
 	if code := run([]string{"config", "show", "--validate"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("config show --validate = %d, want 0 (a shared server is a warning); stderr=%s", code, stderr.String())
 	}
-	want := `gc config show: warning: agents "editor", "mayor" start without MCP server "search" (http, from the city pack)`
+	want := `gc config show: warning: agents "editor" (the implicit agent for provider "editor"), "mayor" start without MCP server "search" (http, from the city pack)`
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
 	}
@@ -485,7 +489,7 @@ func TestDoImportAddWarnsAboutMCPServersAgentsCannotReceive(t *testing.T) {
 	if code := doImportAdd(fsys.OSFS{}, cityDir, "./packs/search", "", "", &stdout, &stderr); code != 0 {
 		t.Fatalf("doImportAdd = %d, stderr = %s", code, stderr.String())
 	}
-	want := `gc import add: warning: agents "editor", "mayor" start without MCP server "websearch" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness`
+	want := `gc import add: warning: agents "editor" (the implicit agent for provider "editor"), "mayor" start without MCP server "websearch" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness`
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr missing\n want: %s\n got: %s", want, stderr.String())
 	}
@@ -573,6 +577,204 @@ command = "docs-mcp"
 	}
 }
 
+// A stage-1 pass that fails on a config reload warns instead of refusing the
+// reload: the reload's other changes apply, and the targets the pass did not
+// reach stay as they were. A city start still fails on the same error.
+func TestCityRuntimeReloadWarnsWhenMCPProjectionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeMCPReloadTestConfig(t, tomlPath)
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, io.Discard); err != nil {
+		t.Fatalf("stage 1 at city start: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  &atomic.Bool{},
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: make(chan struct{}, 8),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// The managed .mcp.json has become a symlink, which projection refuses
+	// to write through.
+	target := filepath.Join(cityPath, ".mcp.json")
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(elsewhere, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, target); err != nil {
+		t.Fatal(err)
+	}
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "docs.toml"), `
+name = "docs"
+command = "docs-mcp"
+`)
+	writeMCPReloadTestConfig(t, tomlPath, "[orders]\nskip = [\"reaper\"]\n")
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want applied despite the MCP failure; stderr=%s", reply.Outcome, stderr.String())
+	}
+	warned := false
+	for _, warning := range reply.Warnings {
+		if strings.HasPrefix(warning, "MCP projection: ") && strings.Contains(warning, "symlinked path") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("reload warnings = %q, want the MCP projection failure", reply.Warnings)
+	}
+	if data, err := os.ReadFile(elsewhere); err != nil || string(data) != "{}\n" {
+		t.Fatalf("the symlink's target changed: %q (err %v)", data, err)
+	}
+}
+
+// An ACP session on a harness that has a file projection receives, in-band,
+// the servers that projection cannot carry: a cursor-family agent whose
+// sessions use ACP gets the city's HTTP server, and nothing is reported as
+// skipped for it.
+func TestACPSessionsOnAFileHarnessReceiveServersItsFileCannotCarry(t *testing.T) {
+	cityPath := t.TempDir()
+	packDir := filepath.Join(t.TempDir(), "search")
+	writeHTTPMCPPack(t, packDir, "search")
+	acp := true
+	cfg := &config.City{
+		ExplicitImportPackDirs:    []string{packDir},
+		ExplicitImportMCPBindings: map[string]string{packDir: "search"},
+		Providers: map[string]config.ProviderSpec{
+			"editor": {Base: ptrString("builtin:cursor"), Command: "echo", PromptMode: "none", SupportsACP: &acp, ACPCommand: "echo"},
+		},
+		Session: config.SessionConfig{Provider: "tmux"},
+	}
+	agent := config.Agent{Name: "editor", Scope: "city", Provider: "editor", Session: "acp"}
+	cfg.Agents = []config.Agent{agent}
+
+	params := &agentBuildParams{
+		city:            cfg,
+		cityName:        "city",
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		providers:       cfg.Providers,
+		lookPath:        stubLookPath,
+		fs:              fsys.OSFS{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		sessionProvider: "tmux",
+	}
+	tp, err := resolveTemplate(params, &agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(acp): %v", err)
+	}
+	if len(tp.MCPServers) != 1 || tp.MCPServers[0].Name != "search" {
+		t.Fatalf("ACP session MCP servers = %+v, want the http server in-band", tp.MCPServers)
+	}
+	view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], stubLookPath)
+	if err != nil {
+		t.Fatalf("resolveConfiguredAgentMCPProjection(acp): %v", err)
+	}
+	if view.ProviderKind != "cursor" || view.Delivery != "acp" || len(view.Skipped) != 0 || len(view.Catalog.Servers) != 1 {
+		t.Fatalf("view = kind %q, delivery %q, catalog %d, skipped %d; want cursor, acp, 1, 0",
+			view.ProviderKind, view.Delivery, len(view.Catalog.Servers), len(view.Skipped))
+	}
+	if report := collectMCPCapabilityReport(cityPath, cfg); len(report.skips) != 0 || len(report.blocked) != 0 {
+		t.Fatalf("report = %+v, want nothing for an ACP session", report)
+	}
+}
+
+// An ACP session writes no provider-native file, so it shares no target with
+// the agents that do: mcp-shared-target must not call an explicit ACP agent
+// with servers of its own a conflict with a stage-1 agent at the same root.
+func TestMCPSharedTargetDoctorCheckIgnoresACPSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	writeMCPSource(t, filepath.Join(cityPath, "agents", "relay", "mcp", "private.toml"), `
+name = "private"
+command = "private-mcp"
+`)
+	acp := true
+	providers := builtinProviderAliasesForTest("claude")
+	providers["relay"] = config.ProviderSpec{Base: ptrString("builtin:claude"), Command: "echo", PromptMode: "none", SupportsACP: &acp, ACPCommand: "echo"}
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  providers,
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude"},
+			{Name: "relay", Scope: "city", Provider: "relay", Session: "acp", MCPDir: filepath.Join(cityPath, "agents", "relay", "mcp")},
+		},
+	}
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("mcp-shared-target = %v (%s; %v), want OK: the ACP agent writes no file", result.Status, result.Message, result.Details)
+	}
+}
+
+// An agent whose provider does not resolve cannot start: its provider name is
+// not in the catalog (a typo), or it is not set at all. Stage 1 skips it with
+// a warning and projects the rest of the city, as it does an agent whose
+// provider is not installed.
+func TestRunStage1MCPProjectionSkipsAgentsWhoseProviderIsUnknownOrUnset(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		Workspace:  config.Workspace{Name: "my-city"},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("gemini"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "gemini"},
+			{Name: "typo", Scope: "city", Provider: "gemnii"},
+			{Name: "unset", Scope: "city"},
+		},
+	}
+	var stderr bytes.Buffer
+	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
+		t.Fatalf("runStage1MCPProjection: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); err != nil {
+		t.Fatalf("the rest of the city was not projected: %v", err)
+	}
+	for _, want := range []string{
+		`gc: warning: city "my-city": agent "typo" cannot start: unknown provider`,
+		`gc: warning: city "my-city": agent "unset" cannot start: unknown provider`,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("warning missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
 // An ACP session receives its MCP servers in session/new, not through a
 // file, so a harness without a file projection still receives every server,
 // shared or its own, and nothing is reported as skipped.
@@ -637,13 +839,14 @@ command = "uvx"
 func TestMCPCapabilityReportSinceReportsOnlyWhatChanged(t *testing.T) {
 	notes := mcpServerSkip{Server: materialize.MCPServer{Name: "notes", Transport: materialize.MCPTransportStdio, Origin: "city"}, Reason: "r"}
 	search := mcpServerSkip{Server: materialize.MCPServer{Name: "search", Transport: materialize.MCPTransportHTTP, Origin: "import:search"}, Reason: "r"}
+	// The report is keyed by agent label (mcpAgentLabel).
 	before := mcpCapabilityReport{
-		skips:   map[string][]mcpServerSkip{"helper": {notes}},
-		blocked: map[string]string{"editor": "old reason"},
+		skips:   map[string][]mcpServerSkip{`"helper"`: {notes}},
+		blocked: map[string]string{`"editor"`: "old reason"},
 	}
 	after := mcpCapabilityReport{
-		skips:   map[string][]mcpServerSkip{"helper": {notes, search}, "cursor": {search}},
-		blocked: map[string]string{"editor": "old reason", "coder": "new reason"},
+		skips:   map[string][]mcpServerSkip{`"helper"`: {notes, search}, `"cursor"`: {search}},
+		blocked: map[string]string{`"editor"`: "old reason", `"coder"`: "new reason"},
 	}
 	got := strings.Join(after.since(before).lines(), "\n")
 	want := `agents "cursor", "helper" start without MCP server "search" (http, from import "search"): r` + "\n" +

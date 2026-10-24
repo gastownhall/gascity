@@ -126,7 +126,12 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			issues = append(issues, fmt.Sprintf("agent %q: %v", agent.QualifiedName(), err))
 			continue
 		}
-		skips.add(agent.QualifiedName(), view.Skipped)
+		skips.add(mcpAgentLabel(agent), view.Skipped)
+		// An ACP session receives its servers in-band and writes no
+		// provider-native file, so it shares no target with anyone.
+		if view.Delivery == "acp" {
+			continue
+		}
 		if len(view.Catalog.Servers) == 0 || strings.TrimSpace(view.Projection.Provider) == "" || strings.TrimSpace(view.Projection.Target) == "" {
 			continue
 		}

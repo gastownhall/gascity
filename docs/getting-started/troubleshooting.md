@@ -449,8 +449,12 @@ The supervisor log (`gc supervisor logs`) shows a warning like this one when
 the city starts or reloads its config; `gc start --dry-run` prints it too:
 
 ```text
-gc: warning: agent "editor" starts without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
+gc: warning: city "my-city": agents "cursor" (the implicit agent for provider "cursor"), "editor" start without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
 ```
+
+An implicit agent is one gc adds for every provider the city declares, so
+work can be slung to that provider without defining an agent; the warning
+names its provider because you never wrote it.
 
 MCP servers from the city's `mcp/` directory, a rig pack, or an import apply
 to every agent in that scope. When an agent's provider cannot receive one of

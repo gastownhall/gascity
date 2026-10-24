@@ -215,7 +215,9 @@ command = "uvx"
 	if _, err := os.Stat(filepath.Join(cityPath, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("skipped agent's target was written, stat err = %v", err)
 	}
-	for _, want := range []string{`agent "codex" cannot start: provider not found in PATH`} {
+	// codex is the implicit agent gc adds for the declared codex provider,
+	// which the user never defined; the warning says so.
+	for _, want := range []string{`agent "codex" (the implicit agent for provider "codex") cannot start: provider not found in PATH`} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("warning missing %q:\n%s", want, stderr.String())
 		}
