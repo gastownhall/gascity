@@ -2715,6 +2715,11 @@ calls = 3
 medium = 3
 
 [[count]]
+path = "scripts/go_test_budget_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "scripts/go_test_observable_test.go"
 resource = "subprocess"
 calls = 2

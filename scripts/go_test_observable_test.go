@@ -422,3 +422,85 @@ func goEnvValue(t *testing.T, key string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// timeoutPanicEvents builds a go test -json stream for one package whose
+// -timeout fired: one finished test, one still running (with a subtest), the
+// test binary's timeout header, a goroutine dump longer than the output tail
+// the wrapper prints, and the package-level fail with no test-level fail.
+func timeoutPanicEvents(pkg string) string {
+	event := fmt.Sprintf
+	output := func(line string) string {
+		encoded, _ := json.Marshal(line)
+		return event(`{"Time":"2026-07-14T00:15:00Z","Action":"output","Package":%q,"Output":%s}`, pkg, encoded)
+	}
+	events := []string{
+		event(`{"Time":"2026-07-14T00:00:00Z","Action":"start","Package":%q}`, pkg),
+		event(`{"Time":"2026-07-14T00:00:01Z","Action":"run","Package":%q,"Test":"TestFinished"}`, pkg),
+		event(`{"Time":"2026-07-14T00:00:02Z","Action":"pass","Package":%q,"Test":"TestFinished","Elapsed":0.1}`, pkg),
+		event(`{"Time":"2026-07-14T00:00:03Z","Action":"run","Package":%q,"Test":"TestStuck"}`, pkg),
+		event(`{"Time":"2026-07-14T00:00:03Z","Action":"run","Package":%q,"Test":"TestStuck/case"}`, pkg),
+		output("panic: test timed out after 15m0s\n"),
+		output("\trunning tests:\n"),
+		output("\t\tTestStuck (14m59s)\n"),
+		output("\n"),
+	}
+	for i := 0; i < 300; i++ {
+		events = append(events, output(fmt.Sprintf("goroutine %d [select]:\n", i)))
+	}
+	events = append(events, event(`{"Time":"2026-07-14T00:15:01Z","Action":"fail","Package":%q,"Elapsed":900.1}`, pkg))
+	return strings.Join(events, "\n") + "\n"
+}
+
+// TestGoTestObservableNamesTestsLeftRunningAtTimeout guards this: a package
+// that hits -timeout panics with "test timed out after <d>" and a "running
+// tests:" list, then a goroutine dump that pushes that header out of the
+// output tail. No test-level fail event exists, so the wrapper reported a red
+// with no failing test to name. It now prints the binary's own header and
+// counts the top-level tests that started but never finished.
+func TestGoTestObservableNamesTestsLeftRunningAtTimeout(t *testing.T) {
+	t.Parallel()
+	const pkg = "github.com/gastownhall/gascity/internal/example"
+	tmpDir := t.TempDir()
+	status, combined := runObservableCommand(t, tmpDir, filepath.Join(tmpDir, "timing.json"), timeoutPanicEvents(pkg), 1)
+	if status != 1 {
+		t.Fatalf("observable exit = %d, want the product status 1\n%s", status, combined)
+	}
+	out := string(combined)
+	for _, want := range []string{
+		"no test-level failure event was emitted",
+		"a package hit its -timeout budget",
+		"panic: test timed out after 15m0s",
+		"TestStuck (14m59s)",
+		pkg + ": 1 top-level test(s) started but never finished",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("timeout summary lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestGoTestObservableTimeoutSummaryOnlyOnTimeout keeps the summary out of an
+// ordinary red: a package whose test failed names that test and nothing else.
+func TestGoTestObservableTimeoutSummaryOnlyOnTimeout(t *testing.T) {
+	t.Parallel()
+	const pkg = "github.com/gastownhall/gascity/internal/example"
+	events := strings.Join([]string{
+		`{"Time":"2026-07-14T00:00:00Z","Action":"start","Package":"` + pkg + `"}`,
+		`{"Time":"2026-07-14T00:00:01Z","Action":"run","Package":"` + pkg + `","Test":"TestBroken"}`,
+		`{"Time":"2026-07-14T00:00:02Z","Action":"output","Package":"` + pkg + `","Test":"TestBroken","Output":"--- FAIL: TestBroken (0.01s)\n"}`,
+		`{"Time":"2026-07-14T00:00:02Z","Action":"fail","Package":"` + pkg + `","Test":"TestBroken","Elapsed":0.01}`,
+		`{"Time":"2026-07-14T00:00:03Z","Action":"fail","Package":"` + pkg + `","Elapsed":0.5}`,
+	}, "\n") + "\n"
+	tmpDir := t.TempDir()
+	status, combined := runObservableCommand(t, tmpDir, filepath.Join(tmpDir, "timing.json"), events, 1)
+	if status != 1 {
+		t.Fatalf("observable exit = %d, want 1\n%s", status, combined)
+	}
+	out := string(combined)
+	if !strings.Contains(out, "failed test: TestBroken") {
+		t.Fatalf("ordinary failure no longer names its test:\n%s", out)
+	}
+	if strings.Contains(out, "hit its -timeout budget") {
+		t.Fatalf("timeout summary printed for an ordinary failure:\n%s", out)
+	}
+}
