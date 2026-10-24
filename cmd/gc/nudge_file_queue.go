@@ -440,7 +440,9 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	ledger := newNudgeShadowLedger(now)
 	err = updateNudgeQueueState(cityPath, "enqueue", func(state *nudgeQueueState) error {
 		ledger.reset()
-		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
+		// The budget runs from this run's start, not from now: a run that
+		// waited for the lock still has its whole budget to supersede.
+		deadline := clk.Now().Add(nudgeEnqueueMaintenanceBudget)
 		maintainNudgeQueue(state, ledger, now, deadline, clk)
 		if queuedNudgeExists(state, item.ID) {
 			return nil
@@ -680,7 +682,7 @@ func runNudgeQueueMaintenanceSweepWithStore(cityPath string, store beads.NudgesS
 	}); err != nil {
 		return err
 	}
-	settleNudgeShadowDebts(cityPath, store, ledger.taken, nudgeMaintenanceSweepBudget, now)
+	settleNudgeShadowDebts(cityPath, store, ledger.taken, nudgeControllerPayBudget, now)
 	return nil
 }
 
@@ -818,10 +820,11 @@ func sortQueuedNudges(state *nudgeQueueState) {
 	nudgequeue.SortState(state)
 }
 
-// withNudgeQueueState runs fn under the queue lock; verb names the holder for
-// the lock telemetry (observeNudgeQueueLock).
+// withNudgeQueueState runs fn under the queue lock, waiting for it no longer
+// than nudgeQueueLockWait; verb names the holder for the lock telemetry
+// (observeNudgeQueueLock).
 func withNudgeQueueState(cityPath, verb string, fn func(*nudgeQueueState) error) error {
-	return nudgequeue.WithStateFor(cityPath, verb, fn)
+	return nudgequeue.WithStateWithin(cityPath, verb, nudgeQueueLockWait(), fn)
 }
 
 // updateNudgeQueueState is withNudgeQueueState for a verb that is often a
@@ -829,7 +832,7 @@ func withNudgeQueueState(cityPath, verb string, fn func(*nudgeQueueState) error)
 // that run changes the state (nudgequeue.UpdateIfChanged). fn must be pure and
 // reset what it captures at its start.
 func updateNudgeQueueState(cityPath, verb string, fn func(*nudgeQueueState) error) error {
-	return nudgequeue.UpdateIfChangedFor(cityPath, verb, fn)
+	return nudgequeue.UpdateIfChangedWithin(cityPath, verb, nudgeQueueLockWait(), fn)
 }
 
 // fileLookupQueuedNudges reports the bucket each of the given IDs is in; an ID
@@ -929,7 +932,7 @@ func fileAckQueuedNudges(cityPath string, ids []string, outcome, reason, commitB
 	ledger := newNudgeShadowLedger(now)
 	err := updateNudgeQueueState(cityPath, "ack", func(state *nudgeQueueState) error {
 		ledger.reset()
-		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
+		maintainNudgeQueue(state, ledger, now, time.Now().Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		retire := func(item queuedNudge) {
 			ledger.owe(&item, outcome, reason, commitBoundary, now)
 			if item.Shadow != nil {
@@ -979,7 +982,7 @@ func fileReleaseQueuedNudgeClaims(cityPath string, ids []string, deliverAfter ti
 	ledger := newNudgeShadowLedger(now)
 	err := updateNudgeQueueState(cityPath, "release", func(state *nudgeQueueState) error {
 		ledger.reset()
-		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
+		maintainNudgeQueue(state, ledger, now, time.Now().Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		var released []queuedNudge
 		inFlight := state.InFlight[:0]
 		for _, item := range state.InFlight {
@@ -1411,6 +1414,7 @@ func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) (nudgeImportSki
 				return fmt.Errorf("moved nudge %q became importable while the moved shadows were saved; retry the batch", item.ID)
 			}
 			imported[key] = true
+			dropRetiredDebtsOnShadow(state, copied)
 			state.Pending = append(state.Pending, copied)
 		}
 		skips = lockedSkips

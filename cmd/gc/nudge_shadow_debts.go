@@ -26,6 +26,11 @@ const (
 	// nudgeShadowPayBatch bounds how many leftover debts one controller pass
 	// takes.
 	nudgeShadowPayBatch = 16
+	// nudgeControllerPayBudget bounds the payments of one controller pass. The
+	// pass runs on the supervisor's dispatch loop or the orders lane, so a
+	// hung store must not hold it; the next pass takes what this one did not
+	// reach.
+	nudgeControllerPayBudget = 5 * time.Second
 	// nudgeShadowRetryBase and nudgeShadowRetryMax bound the backoff after a
 	// failed payment: base * 2^(attempts-1), capped.
 	nudgeShadowRetryBase = 15 * time.Second
@@ -246,10 +251,58 @@ var settleNudgeShadowDebts = payAndConfirmNudgeShadowDebts
 // it opens (and closes) itself when store is the zero store. A payment that
 // fails, and a confirm that fails, leave the debt for a later payer; neither
 // undoes the committed transition, so both are warnings, not errors.
+//
+// Inside a hook the work must end with the time the hook's deadline leaves
+// (hookWorkEnd): the commit before it may be an ack, and gc hook run discards
+// the output of a child that overruns, which would lose a nudge the ack
+// retired. There the tail pays only while that time remains, confirms only if
+// it still does, and is left behind when it does not end in time, a store call
+// that hangs included. A debt it did not confirm stays leased to it until
+// nudgeShadowPayLease runs out, and then the controller pays it.
 func payAndConfirmNudgeShadowDebts(cityPath string, store beads.NudgesStore, taken []queuedNudge, budget time.Duration, now time.Time) {
 	if len(taken) == 0 {
 		return
 	}
+	payBy := time.Now().Add(budget)
+	end, inHook := hookWorkEnd()
+	if !inHook {
+		payAndConfirmNudgeShadowDebtsBy(cityPath, store, taken, payBy, now, nil)
+		return
+	}
+	if !time.Now().Before(end) {
+		warnNudgeShadowDebtsLeft(len(taken))
+		return
+	}
+	if end.Before(payBy) {
+		payBy = end
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		payAndConfirmNudgeShadowDebtsBy(cityPath, store, taken, payBy, now, hookDeadlineStillLeavesTime)
+	}()
+	timer := time.NewTimer(time.Until(end))
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		warnNudgeShadowDebtsLeft(len(taken))
+		if nudgeHookTailAbandoned != nil {
+			nudgeHookTailAbandoned(done)
+		}
+	}
+}
+
+// nudgeHookTailAbandoned is a test seam called with the tail's done channel
+// when payAndConfirmNudgeShadowDebts leaves a tail behind at a hook's
+// deadline, so a test can wait it out. Nil in production. Tests that set it
+// must stay serial.
+var nudgeHookTailAbandoned func(done <-chan struct{})
+
+// payAndConfirmNudgeShadowDebtsBy pays taken until payBy and confirms the
+// payments. A non-nil mayConfirm is asked before the confirm; when it says
+// no, the payments go unrecorded and the debts stay leased.
+func payAndConfirmNudgeShadowDebtsBy(cityPath string, store beads.NudgesStore, taken []queuedNudge, payBy, now time.Time, mayConfirm func() bool) {
 	var front *nudgequeue.Store
 	if store.Store != nil {
 		front = nudgeFrontDoor(store)
@@ -258,15 +311,24 @@ func payAndConfirmNudgeShadowDebts(cityPath string, store beads.NudgesStore, tak
 		defer maint.close() //nolint:errcheck // best-effort
 		front = maint.frontDoor()
 	}
-	payments := payNudgeShadowDebts(front, taken, time.Now().Add(budget))
+	payments := payNudgeShadowDebts(front, taken, payBy)
 	for _, payment := range payments {
 		if payment.reached && payment.err != nil {
 			warnNudgeShadowDebt(payment.item, payment.err)
 		}
 	}
+	if mayConfirm != nil && !mayConfirm() {
+		return
+	}
 	if err := confirmNudgeShadowDebts(cityPath, payments, now); err != nil {
 		warnNudgeShadowDebt(queuedNudge{}, fmt.Errorf("recording shadow payments: %w", err))
 	}
+}
+
+// warnNudgeShadowDebtsLeft says that n debts were left for the controller at a
+// hook's deadline.
+func warnNudgeShadowDebtsLeft(n int) {
+	warnNudgeShadowDebt(queuedNudge{}, fmt.Errorf("hook deadline: leaving %d nudge shadow write(s) to the controller", n))
 }
 
 func warnNudgeShadowDebt(item queuedNudge, err error) {

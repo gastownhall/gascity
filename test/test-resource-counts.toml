@@ -923,6 +923,16 @@ resource = "listener_helper"
 calls = 4
 
 [[count]]
+path = "cmd/gc/nudge_queue_lock_free_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/nudge_queue_lock_policy_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "cmd/gc/op_record_content_test.go"
 resource = "http_test_server"
 calls = 4

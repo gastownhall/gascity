@@ -467,9 +467,9 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 				InFlight: len(inFlight),
 				Dead:     len(dead),
 			},
-			Pending:       nonNilQueuedNudges(pending),
-			InFlight:      nonNilQueuedNudges(inFlight),
-			Dead:          nonNilQueuedNudges(dead),
+			Pending:       nudgeStatusItems(pending),
+			InFlight:      nudgeStatusItems(inFlight),
+			Dead:          nudgeStatusItems(dead),
 			DispatchSkips: dispatchSkips,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc nudge status: writing JSON: %v\n", err) //nolint:errcheck
@@ -526,11 +526,16 @@ func sortedNudgeDispatchSkipReasons(counts map[string]int64) []string {
 	return reasons
 }
 
-func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
-	if items == nil {
-		return []queuedNudge{}
+// nudgeStatusItems is items as gc nudge status --json lists them: never null,
+// and without the queue's internal shadow-debt bookkeeping, which is not part
+// of the command's item shape.
+func nudgeStatusItems(items []queuedNudge) []queuedNudge {
+	out := make([]queuedNudge, len(items))
+	for i, item := range items {
+		item.Shadow = nil
+		out[i] = item
 	}
-	return items
+	return out
 }
 
 // nudgeDropStatus classifies an ID passed to `gc nudge drop` against the
@@ -1190,28 +1195,33 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if delivered {
 			continue
 		}
-		// Mirror dispatchAllQueuedNudges' skip accounting (nudge_dispatcher.go),
-		// gate included: "not-delivered" means this target HAD work it could
-		// claim and still got nothing this tick -- most commonly
-		// tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a
-		// continuously busy session. A running session with nothing it may
-		// claim (nothing queued, or only items fenced to a live sibling) is
-		// the dispatcher's separate "not-matched" class and is deliberately
-		// not counted here: the poll loop never exits while the session runs,
-		// so counting it would turn this into a tick counter. See #5317.
-		// Re-checked fresh (not reusing the pre-observe hasDue above) because
-		// the delivery attempt just run can itself have consumed the only due
-		// item. The counts are flushed at most every
-		// nudgePollSkipFlushInterval, not once per tick.
-		if now := time.Now(); gate.hasDue(target, now) {
-			skipReason := "not-delivered"
-			if pollErr != nil {
-				skipReason = "not-delivered-error"
-			}
-			skips.add(skipReason, now, stderr)
-		}
+		countNudgePollSkip(gate, skips, target, pollErr, time.Now(), stderr)
 		time.Sleep(interval)
 	}
+}
+
+// countNudgePollSkip is the poll loop's skip accounting after a tick that
+// delivered nothing. It mirrors dispatchAllQueuedNudges' (nudge_dispatcher.go),
+// gate included: "not-delivered" means this target HAD work it could claim and
+// still got nothing this tick -- most commonly
+// tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a continuously
+// busy session. A running session with nothing it may claim (nothing queued,
+// or only items fenced to a live sibling) is the dispatcher's separate
+// "not-matched" class and is deliberately not counted: the poll loop never
+// exits while the session runs, so counting it would turn this into a tick
+// counter. See #5317. The gate is asked afresh (not the tick's pre-observe
+// answer) because the delivery attempt just run can itself have consumed the
+// only due item. The counts are flushed at most every
+// nudgePollSkipFlushInterval, not once per tick.
+func countNudgePollSkip(gate *nudgePollGate, skips *nudgePollSkips, target nudgeTarget, pollErr error, now time.Time, stderr io.Writer) {
+	if !gate.hasDue(target, now) {
+		return
+	}
+	reason := "not-delivered"
+	if pollErr != nil {
+		reason = "not-delivered-error"
+	}
+	skips.add(reason, now, stderr)
 }
 
 // nudgePollTargetHasDueWork reports whether a claim for this target would
@@ -1654,11 +1664,20 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
 	if err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
-			return 0, errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
+			return 0, managedWakeRollbackError(item.ID, err, rollbackErr)
 		}
 		return 0, err
 	}
 	return outcome, nil
+}
+
+// managedWakeRollbackError reports a managed wake that failed and the rollback
+// of its queued nudge that failed too. Only the wake's error is wrapped, so it
+// alone classifies the op: the rollback's (a busy queue lock, say) is named in
+// the text but must not make the op read as "nothing was queued" while the
+// nudge it failed to roll back is still queued.
+func managedWakeRollbackError(itemID string, wakeErr, rollbackErr error) error {
+	return errors.Join(wakeErr, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %s", itemID, rollbackErr.Error()))
 }
 
 // requestManagedNudgeWake asks the controller to wake a managed session that

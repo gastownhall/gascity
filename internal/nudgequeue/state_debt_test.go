@@ -98,7 +98,7 @@ func TestUpdateIfChangedTakesNoLockForANoOp(t *testing.T) {
 	calls := 0
 	var seen []string
 	start := time.Now()
-	err := updateIfChangedBounded(cityPath, "test", time.Second, func(state *State) error {
+	err := UpdateIfChangedWithin(cityPath, "test", time.Second, func(state *State) error {
 		calls++
 		seen = seen[:0]
 		for _, item := range state.Pending {
@@ -131,14 +131,14 @@ func TestUpdateIfChangedLocksAndPersistsAChange(t *testing.T) {
 	}
 
 	release := holdQueueLockForTest(t, cityPath)
-	err := updateIfChangedBounded(cityPath, "test", 50*time.Millisecond, add)
+	err := UpdateIfChangedWithin(cityPath, "test", 50*time.Millisecond, add)
 	release()
 	if !errors.Is(err, ErrQueueBusy) {
 		t.Fatalf("a change under a held lock: err = %v, want ErrQueueBusy", err)
 	}
 
 	runs := 0
-	if err := updateIfChangedBounded(cityPath, "test", time.Second, func(state *State) error {
+	if err := UpdateIfChangedWithin(cityPath, "test", time.Second, func(state *State) error {
 		runs++
 		return add(state)
 	}); err != nil {
@@ -191,5 +191,45 @@ func TestLockObserverReportsVerbOutcomeAndTimes(t *testing.T) {
 	}
 	if s := samples[1]; s.Verb != "blocked" || s.Outcome != LockOutcomeBusy || s.Wait < 30*time.Millisecond || s.Hold != 0 {
 		t.Fatalf("busy sample = %+v", s)
+	}
+}
+
+// A caller-chosen wait of zero tries the lock once: it takes a free lock, and
+// gives up on a held one at once, without running its callback.
+func TestWithStateWithinZeroWaitTriesTheLockOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	seedState(t, cityPath, Item{ID: "n-1", Agent: "a"})
+	add := func(state *State) error {
+		state.Pending = append(state.Pending, Item{ID: "n-2", Agent: "a"})
+		return nil
+	}
+
+	release := holdQueueLockForTest(t, cityPath)
+	start := time.Now()
+	ran := false
+	err := WithStateWithin(cityPath, "test", 0, func(state *State) error {
+		ran = true
+		return add(state)
+	})
+	release()
+	if !errors.Is(err, ErrQueueBusy) || ran {
+		t.Fatalf("a zero wait on a held lock: err = %v, ran = %v; want ErrQueueBusy and no run", err, ran)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("a zero wait on a held lock took %s", elapsed)
+	}
+
+	if err := WithStateWithin(cityPath, "test", 0, add); err != nil {
+		t.Fatalf("a zero wait on a free lock: %v", err)
+	}
+	state, err := LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 2 {
+		t.Fatalf("pending = %+v, want n-1 and n-2", state.Pending)
+	}
+	if LockWait() != defaultLockWaitTimeout {
+		t.Fatalf("LockWait() = %s, want the default %s", LockWait(), defaultLockWaitTimeout)
 	}
 }

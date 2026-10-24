@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Restart agent sessions after upgrading gc so their `gc nudge poll`
+  sidecars run the new binary.** The file nudge queue's lock now covers only
+  its `state.json`: shadow-bead writes run after the lock is released, as
+  debts recorded in the queue (`retired` items and per-item `shadow`
+  records) that the verb, or later the controller, pays. A sidecar started by
+  an earlier gc keeps doing bead-store I/O while it holds the lock, so it can
+  still time out other queue users on a slow store, and every queue rewrite it
+  makes drops the `retired` and `shadow` records, leaving those shadow beads
+  for the stale-shadow sweep instead of their own outcome. Restarting the
+  sessions (or the city) replaces the sidecars; nothing else needs to change.
+  `gc nudge status --json` output is unchanged.
+
 - **An unset `[daemon] session_reconciler` now runs the v2 reconciler where
   the city can run it, and `[beads] conditional_writes` now defaults to
   `"auto"`.** With the key unset, the controller resolves v2 at boot from

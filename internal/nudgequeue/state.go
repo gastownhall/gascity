@@ -225,7 +225,20 @@ func WithState(cityPath string, fn func(*State) error) error {
 // WithStateFor is WithState naming the verb that holds the lock, for the lock
 // observer (SetLockObserver).
 func WithStateFor(cityPath, verb string, fn func(*State) error) error {
-	return withStateBounded(cityPath, verb, time.Duration(lockWaitTimeout.Load()), fn)
+	return WithStateWithin(cityPath, verb, LockWait(), fn)
+}
+
+// WithStateWithin is WithStateFor with a caller-chosen wait for the lock: a
+// caller that must finish by a deadline of its own (a hook's) waits no
+// longer than that leaves. A wait of zero or less tries the lock once.
+func WithStateWithin(cityPath, verb string, wait time.Duration, fn func(*State) error) error {
+	return withStateBounded(cityPath, verb, wait, fn)
+}
+
+// LockWait is the wait budget WithState and UpdateIfChanged give the lock:
+// defaultLockWaitTimeout, unless a test shortened it (SetLockWaitForTest).
+func LockWait() time.Duration {
+	return time.Duration(lockWaitTimeout.Load())
 }
 
 // The outcomes a LockSample reports.
@@ -339,10 +352,12 @@ func UpdateIfChanged(cityPath string, fn func(*State) error) error {
 
 // UpdateIfChangedFor is UpdateIfChanged naming the verb, for the lock observer.
 func UpdateIfChangedFor(cityPath, verb string, fn func(*State) error) error {
-	return updateIfChangedBounded(cityPath, verb, time.Duration(lockWaitTimeout.Load()), fn)
+	return UpdateIfChangedWithin(cityPath, verb, LockWait(), fn)
 }
 
-func updateIfChangedBounded(cityPath, verb string, waitTimeout time.Duration, fn func(*State) error) error {
+// UpdateIfChangedWithin is UpdateIfChangedFor with a caller-chosen wait for
+// the lock (see WithStateWithin).
+func UpdateIfChangedWithin(cityPath, verb string, waitTimeout time.Duration, fn func(*State) error) error {
 	if changed, err := DryRun(cityPath, fn); err == nil && !changed {
 		return nil
 	}

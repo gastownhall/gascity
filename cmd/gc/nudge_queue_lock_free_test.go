@@ -96,9 +96,7 @@ func TestNudgeSiblingPollersTakeNoLock(t *testing.T) {
 				t.Fatalf("sibling s-%d sees due work fenced to live s-1", i)
 			}
 			// The poll loop's skip check after a tick that delivered nothing.
-			if gate.hasDue(sibling, now) {
-				skips.add("not-delivered", now, nil)
-			}
+			countNudgePollSkip(gate, skips, sibling, nil, now, nil)
 		})
 		if len(skips.counts) != 0 {
 			t.Fatalf("sibling s-%d counted skips %v", i, skips.counts)
@@ -297,5 +295,57 @@ func TestNudgePollSkipsCoalesce(t *testing.T) {
 	skips.flush(now.Add(nudgePollSkipFlushInterval+2*time.Second), nil)
 	if got := read(); got["not-delivered"] != 11 || got["not-delivered-error"] != 1 {
 		t.Fatalf("skips after the exit flush = %v", got)
+	}
+}
+
+// An enqueue that waited long for the lock still supersedes: its maintenance
+// and supersession budget starts when its locked run does, not when the verb
+// was called.
+func TestNudgeEnqueueSupersedesAfterALongLockWait(t *testing.T) {
+	h := newNQCharHarness(t)
+	ref := &nudgeReference{Kind: "bead", ID: "mail-1"}
+	if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-a", "alpha", -time.Minute, queuedNudgeOptions{Reference: ref})); err != nil {
+		t.Fatal(err)
+	}
+	release := holdNudgeQueueLockForTest(t, h.city)
+	h.lockHeldByTest = true
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(nudgeEnqueueMaintenanceBudget + 500*time.Millisecond)
+		release()
+	}()
+	err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-b", "alpha", -time.Minute, queuedNudgeOptions{Reference: ref}))
+	<-released
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.lockHeldByTest = false
+	state := loadNudgeStateForTest(t, h.city)
+	if len(state.Pending) != 1 || state.Pending[0].ID != "n-b" {
+		t.Fatalf("after a long lock wait pending=%v dead=%v, want n-a superseded by n-b", nqCharItems(state.Pending), nqCharItems(state.Dead))
+	}
+}
+
+// The poll loop counts a skip after a tick that delivered nothing only while
+// the target still has work it may claim, under the reason the tick's error
+// names.
+func TestCountNudgePollSkipCountsOnlyClaimableWork(t *testing.T) {
+	h := newNQCharHarness(t)
+	now := time.Now()
+	gate := newNudgePollGate()
+	skips := &nudgePollSkips{cityPath: h.city}
+	self := h.target("s-new", "")
+	countNudgePollSkip(gate, skips, self, nil, now, nil)
+	if len(skips.counts) != 0 {
+		t.Fatalf("an empty queue counted skips %v", skips.counts)
+	}
+	if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-1", "alpha", -time.Minute, queuedNudgeOptions{})); err != nil {
+		t.Fatal(err)
+	}
+	countNudgePollSkip(gate, skips, self, nil, now, nil)
+	countNudgePollSkip(gate, skips, self, errors.New("delivery failed"), now, nil)
+	if skips.counts["not-delivered"] != 1 || skips.counts["not-delivered-error"] != 1 {
+		t.Fatalf("skips = %v, want one not-delivered and one not-delivered-error", skips.counts)
 	}
 }

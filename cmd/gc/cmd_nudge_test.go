@@ -7383,3 +7383,63 @@ func TestNudgeOverACrashedAgentQueues(t *testing.T) {
 		}
 	})
 }
+
+// gc nudge status --json keeps its item shape: the queue's internal shadow
+// debt bookkeeping is not part of it.
+func TestCmdNudgeStatusJSONOmitsShadowDebts(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	now := time.Now().UTC()
+	dead := newQueuedNudge("mayor", "dropped", now.Add(-time.Minute))
+	dead.BeadID = "gc-dead-1"
+	dead.DeadAt = now
+	dead.LastError = "boom"
+	dead.Shadow = &nudgequeue.ShadowDebt{State: "failed", Reason: "boom", At: now, NotBefore: now.Add(time.Minute), LastError: "store down", Attempts: 1}
+	if err := nudgequeue.WithState(cityDir, func(state *nudgequeue.State) error {
+		state.Dead = append(state.Dead, dead)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeStatus([]string{"mayor"}, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"shadow"`) || strings.Contains(stdout.String(), "store down") {
+		t.Fatalf("status JSON carries the shadow debt: %s", stdout.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if len(result.Dead) != 1 || result.Dead[0].ID != dead.ID {
+		t.Fatalf("dead = %+v, want the dead letter listed", result.Dead)
+	}
+	state, err := nudgequeue.LoadState(cityDir)
+	if err != nil || len(state.Dead) != 1 || state.Dead[0].Shadow == nil {
+		t.Fatalf("queue after status = %+v, %v; want the debt kept in the queue", state.Dead, err)
+	}
+}
+
+// A managed wake that fails, followed by a rollback that fails, reports both,
+// but only the wake's error is the outcome: a busy rollback must not make the
+// op read as "nothing was queued" while the nudge is still queued.
+func TestManagedWakeRollbackErrorKeepsTheWakeOutcome(t *testing.T) {
+	wakeErr := errors.New("wake refused")
+	rollbackErr := fmt.Errorf("locking: %w", nudgequeue.ErrQueueBusy)
+	err := managedWakeRollbackError("n-1", wakeErr, rollbackErr)
+	if !errors.Is(err, wakeErr) {
+		t.Fatalf("err = %v, want it to wrap the wake error", err)
+	}
+	if errors.Is(err, nudgequeue.ErrQueueBusy) {
+		t.Fatalf("err = %v wraps ErrQueueBusy, which classifies the op as refused:nudge_queue_busy", err)
+	}
+	if !strings.Contains(err.Error(), "n-1") || !strings.Contains(err.Error(), nudgequeue.ErrQueueBusy.Error()) {
+		t.Fatalf("err = %q, want the rollback failure named", err)
+	}
+}

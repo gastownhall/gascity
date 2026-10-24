@@ -43,6 +43,19 @@ func observeNudgeQueueLock(sample nudgequeue.LockSample) {
 
 func durationMs(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
+// nudgeQueueLockWait is how long a queue verb of this process waits for the
+// queue lock: the queue's budget, or, inside a hook, no longer than the time
+// its deadline leaves (hookWorkEnd). A verb that took the lock as the deadline
+// fell would commit a transition, an ack, whose delivery gc hook run then
+// discards with the output. With no time left the verb tries the lock once.
+func nudgeQueueLockWait() time.Duration {
+	wait := nudgequeue.LockWait()
+	if end, ok := hookWorkEnd(); ok {
+		wait = min(wait, max(0, time.Until(end)))
+	}
+	return wait
+}
+
 // nudgeBookkeepingRetries bounds how often bookkeeping on a held claim retries
 // a busy queue lock.
 const nudgeBookkeepingRetries = 3
@@ -65,8 +78,9 @@ var nudgeBookkeepingBackoff = func(retry int) time.Duration {
 // it fails with nudgequeue.ErrQueueBusy. Giving up there after a delivery
 // leaves the items in flight until their lease expires and redelivers them,
 // so the retries, a few seconds at most, are well inside the two-minute
-// lease. Inside a hook, it stops retrying when the next attempt would run into
-// the hook's deadline. A producer (Enqueue) does not retry: nothing happened,
+// lease. Inside a hook, it stops retrying when the backoff would run into the
+// time the hook's deadline leaves, and each attempt's lock wait ends there too
+// (nudgeQueueLockWait). A producer (Enqueue) does not retry: nothing happened,
 // and its op says so.
 func retryNudgeBookkeeping(fn func() error) error {
 	err := fn()
