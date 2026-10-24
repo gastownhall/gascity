@@ -1,7 +1,11 @@
 package beadstest
 
 import (
+	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -96,6 +100,121 @@ func TestOwnedHome(t testing.TB) string {
 	home := GuardedTempDir(t)
 	t.Setenv("HOME", home)
 	return home
+}
+
+// baitFiles are the files of the bait workspace GuardedBdWorkspaceDir plants:
+// project files and no database. bd adopts a directory like this: `bd init`
+// below it initializes into it, and `bd config` below it runs against it.
+// Nothing in it is valid for use, so a bd that adopts it leaves files beside
+// these, which is the escape the end-of-test check reports.
+var baitFiles = map[string]string{
+	"config.yaml":   "# bait workspace planted by beadstest.GuardedBdWorkspaceDir\n",
+	"metadata.json": `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"bait","project_id":"11111111-2222-3333-4444-555555555555"}`,
+}
+
+// plantBait writes the bait workspace at root/.beads and returns its path.
+func plantBait(t testing.TB, root string) string {
+	t.Helper()
+	baitDir := filepath.Join(root, ".beads")
+	if err := os.Mkdir(baitDir, 0o700); err != nil {
+		t.Fatalf("plant bait workspace: %v", err)
+	}
+	for name, body := range baitFiles {
+		if err := os.WriteFile(filepath.Join(baitDir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("plant bait workspace: %v", err)
+		}
+	}
+	return baitDir
+}
+
+// baitDisturbance reports what bd left in the bait workspace at baitDir, or ""
+// when it holds exactly the planted files with their planted contents. A bd
+// command that adopted the bait writes its own files beside them (a database,
+// version and gate files) or rewrites a planted file in place.
+func baitDisturbance(baitDir string) string {
+	entries, err := os.ReadDir(baitDir)
+	if err != nil {
+		return fmt.Sprintf("could not be read back: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	want := slices.Sorted(maps.Keys(baitFiles))
+	if !slices.Equal(names, want) {
+		return fmt.Sprintf("holds %v, planted %v", names, want)
+	}
+	for _, name := range want {
+		got, err := os.ReadFile(filepath.Join(baitDir, name))
+		if err != nil {
+			return fmt.Sprintf("could not read back planted %s: %v", name, err)
+		}
+		if string(got) != baitFiles[name] {
+			return fmt.Sprintf("rewrote planted %s", name)
+		}
+	}
+	return ""
+}
+
+// markGitRoot makes dir the root of a git repository without running git. bd
+// bounds its workspace walk at the git root it gets from git, and git accepts
+// a HEAD, an objects dir and a refs dir as a repository.
+func markGitRoot(t testing.TB, dir string) {
+	t.Helper()
+	gitDir := filepath.Join(dir, ".git")
+	for _, sub := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(gitDir, sub), 0o700); err != nil {
+			t.Fatalf("mark %s as a git root: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatalf("mark %s as a git root: %v", dir, err)
+	}
+}
+
+// GuardedBdWorkspaceDir returns a dir for a real bd subprocess to `bd init`
+// and run in, isolated from every directory above it. Use it, not
+// GuardedTempDir, for any dir bd will treat as a workspace.
+//
+// bd finds its workspace by walking up from the working directory toward / for
+// a .beads that holds project files, and the git root is the only thing that
+// bounds the walk. A temp dir that is not its own git root therefore inherits
+// whatever .beads sits above it. An ancestor with project files but no
+// database is adopted: `bd init` in the temp dir exits 0 having initialized
+// the ANCESTOR, and later bd commands there run against it. An ancestor that
+// is a full workspace makes `bd init` abort as already initialized and lets
+// `bd config` succeed through it. Both shapes were seen on one host, where a
+// stray /var/tmp/.beads failed every real-bd test below it (ga-l7otw9).
+//
+// The returned dir is its own git root, which stops the walk at the dir. It is
+// also the child of a bait workspace (project files, no database): bd reaching
+// the bait is a failure of that isolation, so it fails the caller in every run
+// and not only on a polluted host. The bait is checked when the test ends,
+// and a bd that wrote into it is reported with what it left there.
+func GuardedBdWorkspaceDir(t testing.TB) string {
+	t.Helper()
+	return guardedBdWorkspaceDirWith(t, t.Errorf)
+}
+
+// guardedBdWorkspaceDirWith is GuardedBdWorkspaceDir with the escape report
+// injected. Failing a test from its own cleanup is invisible to an assertion,
+// so injecting the report is what lets a test observe that the check ran at
+// all. Ordinary callers want GuardedBdWorkspaceDir.
+func guardedBdWorkspaceDirWith(t testing.TB, errorf func(format string, args ...any)) string {
+	t.Helper()
+	root := GuardedTempDir(t)
+	baitDir := plantBait(t, root)
+	dir := filepath.Join(root, "workspace")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("create bd workspace dir: %v", err)
+	}
+	markGitRoot(t, dir)
+	t.Cleanup(func() {
+		if left := baitDisturbance(baitDir); left != "" {
+			errorf("a bd command escaped %s and reached the ancestor workspace %s, which %s", dir, baitDir, left)
+		}
+	})
+	return dir
 }
 
 // BdSubprocessEnv builds an env map for a real bd subprocess, defaulting
