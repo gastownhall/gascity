@@ -160,8 +160,8 @@ func (f *turnLaneFixture) deps(st *opjournal.Store) laneExecDeps {
 // fixture's virtual clock.
 func (f *turnLaneFixture) exec(t *testing.T, st *opjournal.Store) (*conversationLaneExec, opjournal.ConversationView) {
 	t.Helper()
-	v, info := f.view(t)
-	e := newConversationLaneExec(f.deps(st), info)
+	v, row := f.view(t)
+	e := newConversationLaneExec(f.deps(st), row)
 	start := time.Now()
 	e.now = func() time.Time {
 		f.mu.Lock()

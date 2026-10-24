@@ -229,12 +229,28 @@ op they parked or fault, and the variable is in the GC_* env-read inventory
 and in `internal/testenv.LeakVectorVars`.
 
 The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
-15-minute waits) in `conversationlane_test`. The full evidence runs in four
-manual variants, a matrix part and a load part per backend: the matrix part
-runs every kill-matrix cell at production timing, waits out each op's
-`finish_by` and, on embedded Dolt, runs the incapable-store arm; the load
-part runs the fault-free load (six rounds on SQLite, three on embedded
-Dolt). Each writes
+15-minute waits) in `conversationlane_x12_test`, one of the six targets the
+integration build splits the package into
+(`test/conversationlane/BUILD.bazel`); `TestBdDoltArmProvisionsAndRecords`,
+which keeps the bd-dolt arm's provisioning and recording in the gating run,
+runs in `conversationlane_test`. The full evidence runs in four manual
+variants, a matrix part and a load part on two backends each. The matrix
+part, the crash arms, runs on SQLite and embedded Dolt: every kill-matrix cell at production
+timing, waiting out each op's `finish_by`, and, on embedded Dolt, the
+incapable-store arm. The load part runs the six-round fault-free load on
+SQLite and on `bd-dolt`, requires every well-formed request to succeed and
+the load to finish within its 90-minute budget, and reports its latency per
+backend and its op-row growth. `bd-dolt` is a workspace the pinned bd's
+`bd init --server` provisioned on a `dolt sql-server` the harness runs
+(automatic GC and the stats workers off, so its growth is what the city
+wrote), served natively through a `beads-workspace` binding: bd runs only to
+provision it. That is the store a city bound directly to a Dolt server gets,
+not the default topology, whose sessions are served through BdStore; with
+the pinned bd, which lacks `--if-revision`, a BdStore makes no conditional
+writes and records no ops (ga-ve3tjw). So `bd-dolt` stands in for the load
+arm the maintainers' 2026-10-23 ruling on #8217 asked for, a bd-served Dolt
+arm on the topology real cities run, until a maintainer accepts the
+substitute or ga-ve3tjw adds that arm. Each part writes
 `x12-report-<backend>-<part>.{json,md}` to the test's undeclared outputs.
 A part takes from 30 minutes to well over an hour, past the remote
 executor's action timeout, so run them locally:
@@ -242,14 +258,20 @@ executor's action timeout, so run them locally:
 ```bash
 bazel test --config=ci --config=integration --strategy=TestRunner=local \
   --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
-  //test/conversationlane:x12_evidence
+  //test/conversationlane:x12_evidence_matrix
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --local_test_jobs=1 \
+  --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+  //test/conversationlane:x12_evidence_load
 ```
 
 `GC_X12_SOURCE` names the source revision in the report; the test-hooks gc
 is not stamped.
 
-Add `--local_test_jobs=1` when the load's latency (R2) should be measured
-with nothing running beside it.
+The load parts run one at a time (`--local_test_jobs=1`): their latency (R2)
+is measured with nothing beside them, and the 90-minute budget leaves about
+16 minutes over the slowest bd-dolt load that ran alone (1h13m49s). Beside
+the matrix parts a load can run past it, so no suite runs the two together.
 
 ### Git auto-maintenance in test repos
 
@@ -298,14 +320,13 @@ used: the test binary panics at init, naming the directory to remove.
 
 ### Merge queue
 
-The required-check workflows are merge-queue ready but the queue is off: it
-starts working only when a maintainer adds a `merge_queue` rule to the main
-ruleset. `bazel.yml`, `ci.yml` and `codeql.yml` run on
+The main ruleset's `merge_queue` rule sends every merge to `main` through
+the queue. `bazel.yml`, `ci.yml` and `codeql.yml` run on
 `merge_group: [checks_requested]`, so every required check reports on a
 queue entry's merge-group commit: `Check` and `CI / required` (`ci.yml`),
-the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
-`code_scanning` rule), `bazel test (side-by-side)` and `BUILD files in sync`
-(`bazel.yml`). `scripts/ci_merge_queue_test.go` pins this:
+the four `Analyze (...)` (`codeql.yml`), `bazel test (side-by-side)` and
+`BUILD files in sync` (`bazel.yml`). `scripts/ci_merge_queue_test.go` pins
+this:
 
 - **Same-repo trust.** A merge group has no `github.event.pull_request`, so
   the `rbe` job takes the same-repo path (mode `remote`, no mint), whoever
@@ -322,13 +343,23 @@ the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
   group's concurrency group on its own `gh-readonly-queue/*` ref, which is
   unique per entry and base, with `cancel-in-progress` false. A PR's runs,
   keyed on its number, never share a queue entry's group.
+- **CodeQL reports without analyzing.** Each `Analyze (...)` leg of a merge
+  group runs one step, on a 2 vCPU runner, that says why: each queued pull
+  request's own run analyzed it, and the ruleset's `code_scanning` rule
+  gated it there (GitHub applies that rule to pull requests, never to merge
+  queue groups); the push to `main` analyzes the merged commit
+  (`scripts/codeql_merge_group_test.go`). What a group gives up is a CodeQL
+  run on the combined commit (up to five pull requests over a `main` that
+  may have moved) before it merges: an alert only that combination creates
+  surfaces on the push to `main`, after the merge. The `code_scanning` rule
+  is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
   any other run. The `integration` lane can later be gated on `merge_group`
   only (G3).
 
-**Recommended queue settings** (for 60-70 merges a day, with a peak of 7 an
-hour from 2026-10-05 to 10-07). A queue run costs about what a push run
+**Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
+2026-10-05 to 10-07). A queue run costs about what a push run
 does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 
 | Setting | Value | Why |
@@ -341,9 +372,8 @@ does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 | Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |
 | Required checks | the ruleset's 7 contexts, unchanged | Classic branch protection keeps `CI / required`, which also reports on `merge_group` |
 
-Repository auto-merge is already on, so `gh pr merge --auto` queues a PR.
-After enabling the queue, watch the first day's `merge_group` run times, then
-adjust the build concurrency.
+Repository auto-merge is on, so `gh pr merge --auto` queues a PR. Watch
+`merge_group` run times when changing the build concurrency.
 
 **Security.** A queue run executes the queued commit's own workflows with
 CI secrets, including the rbe-west executor credentials. Queueing a fork PR
@@ -826,10 +856,8 @@ To re-pin, anyone with write access:
    worker: its measured package list, its dolt, the test `PATH`, the pin.
    rbe-worker's own CI runs the same check against gascity's main, but
    only as information, and it gates nothing here.
-   Make the same change in gastownhall/beads (its
-   `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
-   together: once the pool workers serve the new pin, beads' actions on
-   the old pin don't schedule.
+   gastownhall/beads, which carries a byte-identical copy of both, follows
+   on its own once this merges (below).
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
    bazel.yml lane skips the remote suite. The worker-host job measures
@@ -838,6 +866,24 @@ To re-pin, anyone with write access:
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
+
+Once main's pin moves, beads' copy is out of step, and every beads PR
+fails at `Bazel / execution mode` (its preflight compares the copy with
+gascity's main) until beads' sync PR lands. While a PR moves the pin,
+`worker-env-notify-beads-pr.yml` keeps one comment on it saying so. On the
+push that merges it, `worker-env-notify-beads.yml` sends gastownhall/beads
+the repository dispatch `gascity-worker-env-repinned` (the main commit and
+its pin), and beads' `worker-env-autosync.yml` opens the sync PR within a
+minute or two of the merge. It lands as soon as its CI passes (auto-merge)
+or after beads' automated review. Its CI runs fully uncached after a
+re-pin, so it takes about an hour, sometimes more: on 2026-10-21
+(beads#7746) it took 50 minutes, gated by the release cross-compile lane
+(about 24k remote actions), and on beads#7411 and beads#7732 that lane's
+first attempt hit its 90-minute timeout (beads now re-runs a failed first
+attempt once). autosync's 15-minute cron is the backstop. If the dispatch
+fails, its run fails and prints
+`gh workflow run worker-env-autosync.yml -R gastownhall/beads`, which
+starts autosync at once.
 
 A re-pin is a new key for every action. The first runs after it miss
 the cache entirely and re-execute everything on the new host, which is
@@ -877,8 +923,8 @@ manifest pin above). Bumping it is a one-line PR titled
    body: the compare URL, the commit list, and whether the bump touches the
    measurement, isolation or microVM files.
 3. If the bump changes what the worker measures, re-pin the worker host in
-   the same PR ("Re-pinning the RBE worker host" above), and merge the
-   matching beads re-pin right after.
+   the same PR ("Re-pinning the RBE worker host" above); beads follows on
+   its own.
 4. Open the PR and merge it once `worker-host` is green. The canary runs
    on the merge, and new pool runs pick the pin up at their next dispatch.
    Workers already running keep their revision until they retire.

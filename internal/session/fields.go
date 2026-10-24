@@ -205,6 +205,9 @@ var (
 	// started, which clears the stop request as PreWake does
 	// (restartStopRequestClears); opConsumeHold's consume does too.
 	opRestartConfirm = op("internal/session/chat.go", "Manager.confirmLiveSessionState")
+	// opContentGateRead is the content gate's reader of the controller half
+	// (V2-18); it runs under either controller.
+	opContentGateRead = op("internal/session/stop_request_keys.go", "ReadStopRequest")
 	// opEncode is the disposition class's one encoder (R7).
 	opEncode     = op("internal/session/disposition.go", "Disposition.Encode")
 	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
@@ -348,9 +351,9 @@ var registry = slices.Concat([]Field{
 
 	// The stop request: the controller half, then the CLI's ack (E3), which
 	// writes only in a v2 city.
-	{Key: DrainIntentReasonKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainIntentReasonKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys"), opContentGateRead), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainIntentAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
-	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys"), opContentGateRead), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	// The operator's drain (`gc runtime drain` in a v2 city, PAR-FLOORACK):

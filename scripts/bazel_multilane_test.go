@@ -30,11 +30,12 @@ const (
 
 // setupBazelBeadsDigests: sha256 of beads' .github/actions/setup-bazel files
 // (beads main b8a9545c, #7174: R4's -Xmx4g client heap; action.yml from beads
-// main 533f9529, #7379: MODULE.bazel in the runner cache key). A change here
-// is a change in beads first: copy the files from beads and update these
-// digests in the same PR.
+// main 533f9529, #7379: MODULE.bazel in the runner cache key, and beads #7816:
+// Bazelisk and Bazel from a runner-cache entry checked against their pins,
+// whose steps it carries byte for byte). A change here is a change in beads
+// first: copy the files from beads and update these digests in the same PR.
 var setupBazelBeadsDigests = map[string]string{
-	"action.yml":         "e3e8b2904de5153a9f8006ecd7058c11569c3e5311d2381f0c192843b760f559",
+	"action.yml":         "7e9b529fe08957bc9029e6349b5cde4e4c0030bc87232b5faa67058e5a238803",
 	"fork-credential.sh": "abd68bbacb42fa5c7a71d06aa652bcf0f2fbe870f00b13b51650fe95c3bef59e",
 	"write-bazelrc.sh":   "ffd2f3ebca5a449e12db342c143b9d082cd1d3d5ab7abc8fac84475d5ed56550",
 }
@@ -94,6 +95,42 @@ func TestSetupBazelPinsThisBazelVersion(t *testing.T) {
 	}
 	if strings.Contains(install, "bazel-ci-cache") {
 		t.Errorf("setup-bazel puts Bazelisk's home in the runner cache; the Bazel binary must never be restored from it")
+	}
+}
+
+// setup-bazel restores Bazelisk and the Bazel binary from a runner-cache
+// entry of their own and checks both against their pins before running them
+// (beads' TestSetupBazelBinariesComeFromAVerifiedCacheEntry pins the steps
+// this copy carries). The composite saves nothing: the lane job's unit lane
+// writes the entry, beside the runner cache, on a push to main that missed
+// it, under the key setup-bazel restored.
+func TestSetupBazelBinariesSavedFromTheUnitLane(t *testing.T) {
+	steps := readCompositeSteps(t, setupBazelDir)
+	restore := stepByID(steps, "bin-restore")
+	if restore == nil || !strings.HasPrefix(restore.Uses, "actions/cache/restore@") || restore.With["path"] != "${{ runner.temp }}/bazel-bin" {
+		t.Fatalf("%s has no bin-restore step restoring ${{ runner.temp }}/bazel-bin: %+v", setupBazelDir, restore)
+	}
+	for _, step := range steps {
+		if strings.HasPrefix(step.Uses, "actions/cache/save@") {
+			t.Errorf("%s step %q saves a cache; only the lane job's push-to-main steps do", setupBazelDir, step.Name)
+		}
+	}
+	var save *multiLaneStep
+	lane := readMultiLaneWorkflow(t).Jobs["lane"].Steps
+	for i := range lane {
+		if lane[i].Name == "Save Bazelisk and Bazel" {
+			save = &lane[i]
+		}
+	}
+	if save == nil {
+		t.Fatalf("%s lane job has no Save Bazelisk and Bazel step", bazelMultiLaneWorkflow)
+	}
+	if !strings.HasPrefix(save.Uses, "actions/cache/save@") || save.With["path"] != restore.With["path"] ||
+		save.With["key"] != "${{ steps.bazel.outputs.bin-cache-key }}" {
+		t.Errorf("lane job: Save Bazelisk and Bazel uses %q with %v; want actions/cache/save of %s under setup-bazel's bin-cache-key", save.Uses, save.With, restore.With["path"])
+	}
+	if want := runnerCacheSaveScope + "steps.bazel.outcome == 'success' && steps.bazel.outputs.bin-cache-hit != 'true'"; save.If != want {
+		t.Errorf("lane job: Save Bazelisk and Bazel if %q, want %q (the unit lane, on a push to main that missed)", save.If, want)
 	}
 }
 

@@ -61,6 +61,7 @@ func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (stri
 		configDirty:         &atomic.Bool{},
 	}
 	w.wake = newLegacyWake(w.pokeCh, w.controlDispatcherCh)
+	w.wake.mode = mode
 	if mode == reconcilerV2 {
 		w.v2 = newDefaultPlanner(stderr)
 		w.wake.planner, w.wake.waitDepClosed, w.wake.wakeReads = w.v2.planner, w.v2.waitDependencyClosed, w.v2.wakeReads

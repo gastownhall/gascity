@@ -256,6 +256,11 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	if got, want := string(legacyPing), strconv.Itoa(os.Getpid()); got != want {
 		t.Fatalf("legacy ping response = %q, want numeric PID %q", got, want)
 	}
+	// The published mode crosses the real socket (V2-18): a legacy wake is
+	// read as a latched legacy.
+	if mode, known, err := queryControllerReconcilerMode(cityPath, time.Second); !known || mode != reconcilerLegacy || err != nil {
+		t.Fatalf("queryControllerReconcilerMode = %v, %v, %v; want legacy, known", mode, known, err)
+	}
 	identity := probeControllerIdentity(cityPath)
 	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingStandalone {
 		t.Fatalf("probeControllerIdentity = %+v, want PID %d hosted standalone", identity, os.Getpid())

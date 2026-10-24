@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router';
 import { api } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
 import { NavAttentionIndicator } from '../attention/NavAttentionIndicator';

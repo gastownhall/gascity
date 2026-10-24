@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -20,6 +21,15 @@ type nudgeQueueHandle struct {
 	// Repin moves in-flight claims onto a new delivery key without a
 	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
 	Repin nudgeClaimRepinner
+	// Probe answers whether a claim would claim anything, from a lock-free
+	// snapshot (the poll loop's due-work gate, nudgePollGate).
+	Probe nudgeClaimProber
+}
+
+// nudgeClaimProber reports, without the queue lock and without claiming,
+// whether ClaimBatch for ct at now would claim anything.
+type nudgeClaimProber interface {
+	WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error)
 }
 
 // nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.
@@ -35,17 +45,18 @@ type nudgeClaimRepinner interface {
 
 // openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
 // store is the nudges-class store the caller already holds. With the zero
-// value, Enqueue, RecordFailure and the verbs that run a maintenance pass open
-// their own, as the facades always did, and so does the shim's import
-// (importMigrated), which saves the moved items' shadows; Rollback and
-// WithdrawQueuedWaitNudges do not, and reach shadows only through a
-// caller-passed store, so with the zero value they retire the queue item and
-// leave its shadow open.
+// value, Enqueue opens its own to save the shadow, the verbs whose commit owes
+// shadow debts open their own after the queue lock to pay them
+// (settleNudgeShadowDebts), and so does the shim's import (importMigrated),
+// which saves the moved items' shadows. WithdrawQueuedWaitNudges does not, and
+// reaches shadows only through a caller-passed store: with the zero value it
+// retires the queue item and leaves its shadow open, as does Rollback of an
+// item no longer queued.
 //
 // It builds the file queue only: the beads queue, its shadow view
 // (storebinding.NewBeadsNudgeFrontDoors) and the shim that moves live work
 // between the two (shimNudgeQueue) have no production caller yet. The change
-// that selects the queue by mode here owes four more things (ga-w0hgvz):
+// that selects the queue by mode here owes three more things (ga-w0hgvz):
 //
 //   - In beads mode, the wait helpers' shadow reads (nudgeShadows) must go
 //     through that view: a moved item's legacy gc:nudge shadow stays open, so
@@ -53,11 +64,7 @@ type nudgeClaimRepinner interface {
 //     The view's Save confirms a record in any state, even one retired
 //     migrated; Find is the state-aware read.
 //   - A shim pass must run in the configured mode's direction from the site
-//     that reads the mode. Its import (importMigrated) saves each moved
-//     item's shadow under the state.json lock, one delivery batch per hold,
-//     so a large batch on a slow store can keep the other queue verbs past
-//     their lock wait: save the shadows before taking the lock, as Enqueue
-//     does, or bound the hold.
+//     that reads the mode.
 //   - file → beads must reinstate a record retired "migrated"
 //     (ReinstateMigrated, DES-NQ D12), or a quick flip back strands the
 //     batch in the file queue (the shim header).
@@ -72,6 +79,7 @@ func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 		Location: q.location(),
 		Skips:    q,
 		Repin:    q,
+		Probe:    q,
 	}
 }
 
@@ -83,8 +91,18 @@ func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
 
 // claimTarget is the contract's view of t: its queue keys, its fence, and a
 // census of cityPath's sessions, taken at most once, that lets it adopt a
-// superseded session's nudges.
+// superseded session's nudges. A target that carries a census of its own
+// (fenceCensus, the dispatcher's skip-only snapshot census) answers with it
+// instead.
 func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
+	if t.fenceCensus != nil {
+		return storebinding.ClaimTarget{
+			QueueKeys:         t.queueKeys(),
+			SessionID:         t.sessionID,
+			ContinuationEpoch: t.continuationEpoch,
+			LiveFenceSessions: t.fenceCensus,
+		}
+	}
 	var once sync.Once
 	var ids map[string]struct{}
 	return storebinding.ClaimTarget{

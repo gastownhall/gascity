@@ -1,0 +1,179 @@
+# Tell gastownhall/beads the moment main re-pins the rbe-west worker host.
+#
+# rbe-west's OSS pool workers serve the worker-env pin of the host main
+# describes (tools/rbe/worker-env.txt, pinned in platforms/BUILD.bazel;
+# TESTING.md "Re-pinning the RBE worker host"), and gastownhall/beads carries
+# a byte-identical copy of the manifest and pin. Once a re-pin merges here,
+# beads' copy is out of step: no worker serves its pin, and every beads PR
+# fails at `Bazel / execution mode`, until beads' own sync PR lands. beads'
+# worker-env-autosync.yml opens that sync PR, which lands as soon as its CI
+# passes (auto-merge) or after beads' automated review; its 15-minute cron
+# noticed gascity#8165's re-pin 24 minutes late.
+# So when a push to main moves the pin, the dispatch job sends beads the
+# repository_dispatch event gascity-worker-env-repinned, client_payload
+# {"sha": <this main commit>, "pin": <its pin>}, which starts autosync at
+# once. The cron stays as the backstop: a dispatch that never goes through
+# fails the run, which prints the command that starts autosync by hand.
+# worker-env-notify-beads-pr.yml tells a re-pin PR's author all this before
+# the merge.
+#
+# SECURITY MODEL: the gastownhall-autofix App's private key is a secret of
+# the `autofix` environment, whose deployment-branch policy admits main only
+# (docs-autofix.yml uses it too). This workflow runs on pushes to main alone,
+# and no pull_request_target workflow names an environment or reads a secret
+# (scripts/pull_request_target_checkout_test.go). The dispatch job never
+# checks out the repository, and its mint step is the only step that sees
+# the key: what runs after the mint is this file's own shell, not repository
+# code. The minted token is scoped to gastownhall/beads with contents:write,
+# which POST /repos/{owner}/{repo}/dispatches requires.
+name: rbe worker-env notify beads
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - platforms/BUILD.bazel
+      - tools/rbe/worker-env.txt
+
+permissions: {}
+
+env:
+  # The repository whose copy of the manifest and pin follows main's, the
+  # workflow there that syncs the copy, and the event that starts it.
+  BEADS_REPO: gastownhall/beads
+  BEADS_AUTOSYNC: worker-env-autosync.yml
+  BEADS_EVENT: gascity-worker-env-repinned
+
+jobs:
+  repin:
+    name: detect a worker-env re-pin on main
+    if: github.repository == 'gastownhall/gascity'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      moved: ${{ steps.pin.outputs.moved }}
+      pin: ${{ steps.pin.outputs.pin }}
+      sha: ${{ steps.pin.outputs.sha }}
+    steps:
+      # The pushed commit and its parent, for a push with no usable before.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      # Compares with main before the whole push, not with HEAD's parent, so
+      # a re-pin anywhere in a merge-queue group counts and one moved back
+      # within the push does not. A new branch's before is all zeros, and a
+      # force push can leave it unfetchable: then the parent stands in. With
+      # neither, main had no pin. beads can follow a pin, not its removal.
+      - name: Compare the pin with main's before this push
+        id: pin
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          prev=
+          if [[ ${BEFORE:-} =~ ^[0-9a-f]{40}$ && $BEFORE != 0000000000000000000000000000000000000000 ]]; then
+            for attempt in 1 2 3; do
+              if git fetch --no-tags --depth=1 origin "$BEFORE"; then
+                prev=$BEFORE
+                break
+              fi
+              [ "$attempt" -eq 3 ] || sleep 5
+            done
+            if [ -z "$prev" ]; then
+              echo "::warning title=worker-env notify::cannot fetch $BEFORE, main before this push; comparing with this commit's parent instead"
+            fi
+          fi
+          if [ -z "$prev" ]; then
+            prev=$(git rev-parse --verify --quiet 'HEAD^') || prev=
+          fi
+          was_build=$RUNNER_TEMP/worker-env-was.bazel
+          : >"$was_build"
+          if [ -n "$prev" ] && [ -n "$(git ls-tree "$prev" -- platforms/BUILD.bazel)" ]; then
+            git show "$prev:platforms/BUILD.bazel" >"$was_build"
+          fi
+          was=$(tools/rbe/worker-env-drift pin "$was_build")
+          pin=$(tools/rbe/worker-env-drift pin)
+          sha=$(git rev-parse HEAD)
+          moved=false
+          if [ "$pin" != "$was" ]; then
+            if ! [[ $pin =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error title=worker-env pin removed::$sha pins worker-env=$pin (main before this push pinned $was): there is no pin for $BEADS_REPO to follow. Re-pin it by hand (TESTING.md \"Re-pinning the RBE worker host\")."
+              exit 1
+            fi
+            moved=true
+          fi
+          {
+            echo "moved=$moved"
+            echo "pin=$pin"
+            echo "sha=$sha"
+          } >>"$GITHUB_OUTPUT"
+          echo "worker-env: $sha pins $pin; main before this push (${prev:-no commit}) pinned $was; moved=$moved" |
+            tee -a "$GITHUB_STEP_SUMMARY"
+
+  dispatch:
+    name: dispatch the re-pin to gastownhall/beads
+    needs: repin
+    if: needs.repin.outputs.moved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Grants this job read access to the App's key; the environment's
+    # deployment-branch policy admits main only.
+    environment: autofix
+    permissions: {}
+    steps:
+      - name: Mint a beads dispatch token (gastownhall-autofix)
+        id: token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3
+        with:
+          app-id: ${{ secrets.AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          owner: gastownhall
+          repositories: beads
+          permission-contents: write
+      # A 5xx, or no answer at all, is GitHub's to retry; a 4xx (the App not
+      # installed on beads, a revoked key, a refused payload) gets the same
+      # answer every time.
+      - name: Send gascity-worker-env-repinned to beads
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          SHA: ${{ needs.repin.outputs.sha }}
+          PIN: ${{ needs.repin.outputs.pin }}
+        run: |
+          set -euo pipefail
+          if ! [[ ${SHA:-} =~ ^[0-9a-f]{40}$ && ${PIN:-} =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=beads dispatch::not dispatching: '${SHA:-}' and '${PIN:-}' are not a commit and a worker-env pin"
+            exit 1
+          fi
+          payload=$RUNNER_TEMP/beads-dispatch.json
+          jq -n --arg event "$BEADS_EVENT" --arg sha "$SHA" --arg pin "$PIN" \
+            '{event_type: $event, client_payload: {sha: $sha, pin: $pin}}' >"$payload"
+          for attempt in 1 2 3 4 5; do
+            if gh api --include --method POST "repos/$BEADS_REPO/dispatches" --input "$payload" \
+              >"$RUNNER_TEMP/beads-dispatch.out" 2>"$RUNNER_TEMP/beads-dispatch.err"; then
+              echo "Sent $BEADS_EVENT to $BEADS_REPO: $PIN at $SHA." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            status=$(sed -n '1s/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$RUNNER_TEMP/beads-dispatch.out")
+            echo "attempt $attempt: HTTP ${status:-no answer}: $(cat "$RUNNER_TEMP/beads-dispatch.err")"
+            case $status in
+            5?? | '') ;;
+            *) exit 1 ;;
+            esac
+            [ "$attempt" -eq 5 ] || sleep $((attempt * 10))
+          done
+          exit 1
+      - name: Say how to start beads' autosync by hand
+        id: fallback
+        if: failure()
+        env:
+          SHA: ${{ needs.repin.outputs.sha }}
+          PIN: ${{ needs.repin.outputs.pin }}
+        run: |
+          set -euo pipefail
+          msg="$BEADS_REPO was not told that main pins worker-env=$PIN since $SHA. Its $BEADS_AUTOSYNC cron (every 15 minutes) still opens the sync PR; to start it now: gh workflow run $BEADS_AUTOSYNC -R $BEADS_REPO"
+          echo "::error title=beads not notified of the worker-env re-pin::$msg"
+          echo "$msg" >>"$GITHUB_STEP_SUMMARY"

@@ -115,7 +115,7 @@ func newLaneHostHarness(t *testing.T, f *laneFixture, kinds ...string) *laneHost
 		exits:    make(chan string, 256),
 		timers:   make(chan laneTimer, 256),
 	}
-	h := newConversationLaneHost(env, kinds)
+	h := newConversationLaneHost(env, kinds, session.StopRequestsLive)
 	h.clk = f.clk
 	h.newTimer = func(d time.Duration) (<-chan time.Time, func()) {
 		tm := laneTimer{d: d, c: make(chan time.Time, 1), stopped: make(chan struct{})}
@@ -564,7 +564,7 @@ func TestLaneHostCapsWorkers(t *testing.T) {
 	b := newLaneBlocker(f.clk)
 	hh := newLaneHostHarness(t, f)
 	hh.h.maxWorkers = 2
-	hh.h.newExec = func(_ laneExecDeps, info session.Info) opjournal.Executor { return blockingExec{conv: info.ID, b: b} }
+	hh.h.newExec = func(_ laneExecDeps, row laneRow) opjournal.Executor { return blockingExec{conv: row.info.ID, b: b} }
 	hh.start()
 	b.waitEntered(t)
 	b.waitEntered(t)
@@ -591,7 +591,7 @@ func TestLaneHostOnePassAtATime(t *testing.T) {
 	f.propose(t, st, f.msg("k1", opjournal.RoleNotice, "hello"))
 	b := newLaneBlocker(f.clk)
 	hh := newLaneHostHarness(t, f)
-	hh.h.newExec = func(_ laneExecDeps, info session.Info) opjournal.Executor { return blockingExec{conv: info.ID, b: b} }
+	hh.h.newExec = func(_ laneExecDeps, row laneRow) opjournal.Executor { return blockingExec{conv: row.info.ID, b: b} }
 	hh.start()
 	b.waitEntered(t)
 	for range 10 {
@@ -620,11 +620,11 @@ func TestLaneHostRecoversPanic(t *testing.T) {
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 	var calls atomic.Int32
 	hh := newLaneHostHarness(t, f)
-	hh.h.newExec = func(deps laneExecDeps, info session.Info) opjournal.Executor {
+	hh.h.newExec = func(deps laneExecDeps, row laneRow) opjournal.Executor {
 		if calls.Add(1) == 1 {
 			panic("executor bug")
 		}
-		return newConversationLaneExec(deps, info)
+		return newConversationLaneExec(deps, row)
 	}
 	hh.start()
 	if p := hh.nextPass(t); p.out.err == nil || !strings.Contains(p.out.err.Error(), "panicked") {
@@ -1019,21 +1019,22 @@ func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
 
 // TestConversationLaneHostStartedAfterOpSweep pins runController's start
 // line: the statement right after cs.startOpSweep(ctx), with the
-// controller's ctx.
+// controller's ctx and the reconciler mode it latched (V2-18).
 func TestConversationLaneHostStartedAfterOpSweep(t *testing.T) {
 	fn := parseFuncDecl(t, "controller.go", "runController")
-	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "startConversationLaneHost(ctx)" {
-		t.Fatalf("runController: the statements after its startOpSweep calls call %q, want one cs.startConversationLaneHost(ctx)", next)
+	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "startConversationLaneHost(ctx, wiring.mode)" {
+		t.Fatalf("runController: the statements after its startOpSweep calls call %q, want one cs.startConversationLaneHost(ctx, wiring.mode)", next)
 	}
 }
 
 // TestSupervisorStartsLaneHostAfterOpSweep pins startOneCity's start line:
 // the statement right after cs.startOpSweep(cityCtx), as in runController,
-// with the city's context, so the host stops with the city.
+// with the city's context, so the host stops with the city, and the
+// reconciler mode the city latched (V2-18).
 func TestSupervisorStartsLaneHostAfterOpSweep(t *testing.T) {
 	fn := parseFuncDecl(t, "cmd_supervisor.go", "startOneCity")
-	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "startConversationLaneHost(cityCtx)" {
-		t.Fatalf("startOneCity: the statements after its startOpSweep calls call %q, want one cs.startConversationLaneHost(cityCtx)", next)
+	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "startConversationLaneHost(cityCtx, wiring.mode)" {
+		t.Fatalf("startOneCity: the statements after its startOpSweep calls call %q, want one cs.startConversationLaneHost(cityCtx, wiring.mode)", next)
 	}
 }
 
@@ -1082,14 +1083,19 @@ func calleesAfterOpSweep(fn *ast.FuncDecl) []string {
 	return next
 }
 
-// laneCallArgs is call's arguments that are identifiers, comma-separated;
-// any other argument reads "?".
+// laneCallArgs is call's arguments that are identifiers, or selectors of
+// an identifier (X.Sel), comma-separated; any other argument reads "?".
 func laneCallArgs(call *ast.CallExpr) string {
 	args := make([]string, 0, len(call.Args))
 	for _, a := range call.Args {
 		name := "?"
-		if id, ok := a.(*ast.Ident); ok {
-			name = id.Name
+		switch arg := a.(type) {
+		case *ast.Ident:
+			name = arg.Name
+		case *ast.SelectorExpr:
+			if x, ok := arg.X.(*ast.Ident); ok {
+				name = x.Name + "." + arg.Sel.Name
+			}
 		}
 		args = append(args, name)
 	}
@@ -1122,7 +1128,7 @@ func TestStartConversationLaneHostDelivers(t *testing.T) {
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 	cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := cs.startConversationLaneHost(ctx)
+	h := cs.startConversationLaneHost(ctx, reconcilerLegacy)
 	t.Cleanup(func() {
 		cancel()
 		h.wg.Wait()
@@ -1144,6 +1150,118 @@ func TestStartConversationLaneHostDelivers(t *testing.T) {
 	if s := conversationLaneStatusFor(f.dir, time.Now()); s.State != laneHostStateRunning || len(s.Kinds) != 1 {
 		t.Fatalf("status = %+v, want running with the latched list", s)
 	}
+}
+
+// TestLaneStopReading (V2-18) pins how a lane host reads stop requests by
+// its controller's latched mode: as residue under legacy, which ignores the
+// keys (the R1 rollback), and live under v2.
+func TestLaneStopReading(t *testing.T) {
+	if got := laneStopReading(reconcilerLegacy); got != session.StopRequestsIgnored {
+		t.Errorf("legacy reads %d, want StopRequestsIgnored", got)
+	}
+	if got := laneStopReading(reconcilerV2); got != session.StopRequestsLive {
+		t.Errorf("v2 reads %d, want StopRequestsLive", got)
+	}
+}
+
+// TestStartConversationLaneHostReadsStopRequestsByItsLatchedMode (V2-18)
+// drives startConversationLaneHost over a row carrying v2's stop request at
+// its generation. A controller that latched legacy, as after an R1
+// rollback, delivers: legacy will never carry the request out. One that
+// latched v2 holds the prompt as content_block stop_requested, and
+// releases it once the request clears: each pass reads the request afresh,
+// so a cleared request never keeps holding content.
+func TestStartConversationLaneHostReadsStopRequestsByItsLatchedMode(t *testing.T) {
+	start := func(t *testing.T, mode reconcilerMode) (*laneFixture, *opjournal.Store, opjournal.Op, *conversationLaneHost) {
+		t.Helper()
+		f := newLaneFixture(t, laneStopRequestedAt(1))
+		// The started host reads the wall clock, so the op is proposed on
+		// it too.
+		f.clk.mu.Lock()
+		f.clk.now = time.Now().UTC()
+		f.clk.mu.Unlock()
+		f.cfg.Ops.Authoritative = []string{"message"}
+		st := f.laneStore(t)
+		op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+		cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
+		ctx, cancel := context.WithCancel(context.Background())
+		h := cs.startConversationLaneHost(ctx, mode)
+		t.Cleanup(func() {
+			cancel()
+			h.wg.Wait()
+		})
+		return f, st, op, h
+	}
+	waitStopRequested := func(t *testing.T, f *laneFixture, st *opjournal.Store, op opjournal.Op) {
+		t.Helper()
+		deadline := time.After(laneWaitBudget)
+		for !laneStatusWaitsFor(conversationLaneStatusFor(f.dir, time.Now()), op.ID, opjournal.WaitContentBlock, session.ContentGateStopRequested) {
+			select {
+			case <-deadline:
+				t.Fatalf("the v2 host never reported the op waiting on stop_requested: %+v", conversationLaneStatusFor(f.dir, time.Now()).Waiting)
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		if got := f.get(t, st, op.ID); got.Status != opjournal.StatusSubmitted || len(f.nudges()) != 0 {
+			t.Fatalf("op = %s, nudges %d; want submitted and nothing typed", got.Status, len(f.nudges()))
+		}
+	}
+	t.Run("legacy: the R1 rollback delivers", func(t *testing.T) {
+		f, st, op, _ := start(t, reconcilerLegacy)
+		deadline := time.After(laneWaitBudget)
+		for {
+			if got := f.get(t, st, op.ID); got.Status == opjournal.StatusClosed {
+				if got.Outcome.Arm != opjournal.ArmSucceeded || len(f.nudges()) != 1 {
+					t.Fatalf("op = %+v nudges %d, want one succeeded delivery", got.Outcome, len(f.nudges()))
+				}
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal("the legacy host never delivered past a request legacy ignores")
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	})
+	t.Run("v2 holds the prompt", func(t *testing.T) {
+		f, st, op, _ := start(t, reconcilerV2)
+		waitStopRequested(t, f, st, op)
+	})
+	t.Run("v2 releases the prompt once the request clears", func(t *testing.T) {
+		f, st, op, h := start(t, reconcilerV2)
+		waitStopRequested(t, f, st, op)
+		if err := f.store.SetMetadataBatch(f.id, stopCancelPatch()); err != nil {
+			t.Fatal(err)
+		}
+		h.Poke(f.id)
+		deadline := time.After(laneWaitBudget)
+		for {
+			if got := f.get(t, st, op.ID); got.Status == opjournal.StatusClosed {
+				if got.Outcome.Arm != opjournal.ArmSucceeded || len(f.nudges()) != 1 {
+					t.Fatalf("op = %+v nudges %d, want one succeeded delivery", got.Outcome, len(f.nudges()))
+				}
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal("the v2 host kept holding the prompt after the stop request cleared")
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	})
+}
+
+// laneStatusWaitsFor reports whether st shows op waiting for reason with
+// detail.
+func laneStatusWaitsFor(st conversationLaneStatus, op string, reason opjournal.WaitReason, detail string) bool {
+	for _, conv := range st.Waiting {
+		for _, w := range conv.Waits {
+			if w.Op == op && w.Reason == string(reason) && w.Detail == detail {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // laneJournalingStore is a journaling sessions store whose guarded batches
@@ -1234,7 +1352,7 @@ func TestStartConversationLaneHostRingsFromTheLedgerFeed(t *testing.T) {
 	}
 	cs := &controllerState{cityBeadStore: cache, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool), ledgerFeeds: feeds}
 	hctx, hcancel := context.WithCancel(ctx)
-	h := cs.startConversationLaneHost(hctx)
+	h := cs.startConversationLaneHost(hctx, reconcilerLegacy)
 	t.Cleanup(func() {
 		hcancel()
 		h.wg.Wait()
@@ -1378,8 +1496,8 @@ func TestLaneHostBusyWorkersYieldToTheQueue(t *testing.T) {
 	}
 	hh := newLaneHostHarness(t, f)
 	hh.h.maxWorkers = 2
-	hh.h.newExec = func(_ laneExecDeps, info session.Info) opjournal.Executor {
-		if busy[info.ID] {
+	hh.h.newExec = func(_ laneExecDeps, row laneRow) opjournal.Executor {
+		if busy[row.info.ID] {
 			return laneBoundaryExec{clk: f.clk, boundary: opjournal.TriNo}
 		}
 		return laneBoundaryExec{clk: f.clk, boundary: opjournal.TriYes}
@@ -1420,8 +1538,8 @@ func TestLaneHostReprobesABusyDrainNoticeWithoutAPass(t *testing.T) {
 		r.Policy.Message = opjournal.MessagePolicy{Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly}
 	}))
 	hh := newLaneHostHarness(t, f)
-	hh.h.newExec = func(deps laneExecDeps, info session.Info) opjournal.Executor {
-		e := newConversationLaneExec(deps, info)
+	hh.h.newExec = func(deps laneExecDeps, row laneRow) opjournal.Executor {
+		e := newConversationLaneExec(deps, row)
 		e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
 		return e
 	}
@@ -1453,11 +1571,11 @@ func TestLaneHostReprobesBusyRuntimeWithoutRows(t *testing.T) {
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 	var idle atomic.Bool
 	hh := newLaneHostHarness(t, f)
-	hh.h.newExec = func(deps laneExecDeps, info session.Info) opjournal.Executor {
+	hh.h.newExec = func(deps laneExecDeps, row laneRow) opjournal.Executor {
 		if _, live := deps.sessions.(laneLiveSessions); live {
 			t.Error("the executor reads the session through the live-read wrapper")
 		}
-		e := newConversationLaneExec(deps, info)
+		e := newConversationLaneExec(deps, row)
 		e.idle = func(nudgeTarget, worker.LiveObservation) bool { return idle.Load() }
 		return e
 	}
@@ -1554,7 +1672,7 @@ func TestLaneHostLogsFailures(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	hh := newLaneHostHarness(t, f)
-	hh.h.newExec = func(_ laneExecDeps, _ session.Info) opjournal.Executor {
+	hh.h.newExec = func(_ laneExecDeps, _ laneRow) opjournal.Executor {
 		if fail.Load() {
 			return laneFailingExec{laneBoundaryExec{clk: f.clk}}
 		}
@@ -1607,8 +1725,8 @@ func laneParkedBusy(t *testing.T) (*laneHostHarness, string, laneTimer) {
 	}
 	hh := newLaneHostHarness(t, f)
 	hh.h.maxWorkers = 1
-	hh.h.newExec = func(_ laneExecDeps, info session.Info) opjournal.Executor {
-		if info.ID == f.id {
+	hh.h.newExec = func(_ laneExecDeps, row laneRow) opjournal.Executor {
+		if row.info.ID == f.id {
 			return laneBoundaryExec{clk: f.clk, boundary: opjournal.TriNo}
 		}
 		return laneBoundaryExec{clk: f.clk, boundary: opjournal.TriYes}
@@ -1688,7 +1806,7 @@ func sameLaneWorkerState(a, b laneWorkerState) bool {
 func TestLaneHostReleaseParksInOneStep(t *testing.T) {
 	f := newLaneFixture(t)
 	hh := newLaneHostHarness(t, f)
-	hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneBoundaryExec{clk: f.clk, boundary: opjournal.TriNo}
 	}
 	hh.start()

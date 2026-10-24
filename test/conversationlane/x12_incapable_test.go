@@ -16,7 +16,7 @@ import (
 
 func TestX12IncapableStore(t *testing.T) {
 	t.Parallel() // after the load, which measures latency alone
-	if x12Evidence() && x12Backend(t) != armDolt {
+	if x12Evidence() && x12Backend(t, x12PartMatrix) != armDolt {
 		t.Skip("the incapable arm is an embedded-Dolt workspace: the dolt variant runs it")
 	}
 	baselines := x12Baselines(t)

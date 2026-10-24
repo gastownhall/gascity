@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,12 +53,14 @@ func newCLILaneCityOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt)
 	t.Cleanup(func() { cliOpClock, cliOpLookupEnv, cliLaneRing = oldClock, oldLookup, oldRing })
 	cliOpClock = f.clk
 	cliOpLookupEnv = func(k string) (string, bool) { v, ok := c.env[k]; return v, ok }
+	// No controller answers by default: the mode is unknown.
+	setLaneControllerMode(t, reconcilerLegacy, false)
 	cliLaneRing = func(_, conv, opID string) (string, error) {
 		c.rings = append(c.rings, conv+":"+opID)
 		c.events = append(c.events, "ring")
 		return c.ringReply, c.ringErr
 	}
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	c.target = resolveNudgeTargetFromSessionInfo(f.dir, f.cfg, info)
 	return c
 }
@@ -208,7 +211,7 @@ func TestSessionNudgeListEmptyKeepsOJ5Path(t *testing.T) {
 
 func (c *cliLaneCity) targetInfo(t *testing.T) session.Info {
 	t.Helper()
-	_, info := c.view(t)
+	info := c.rowInfo(t)
 	return info
 }
 
@@ -221,8 +224,12 @@ func TestSessionNudgeLaneRoutesUnservedSessionsLegacy(t *testing.T) {
 		prevPoller := startNudgePoller
 		startNudgePoller = func(_, _, _ string) error { return nil }
 		t.Cleanup(func() { startNudgePoller = prevPoller })
+		asks := setLaneControllerMode(t, reconcilerLegacy, false)
 		if code, _, stderr := c.nudge(nudgeDeliveryQueue, "", false, cliLaneTestMessage); code != 0 {
 			t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+		}
+		if len(asks.cities) != 0 {
+			t.Fatalf("the legacy path asked the controller's mode %d times, want none", len(asks.cities))
 		}
 		for _, op := range c.ops(t) {
 			if op.Executor == opjournal.ExecutorLane {
@@ -351,13 +358,90 @@ func TestSessionNudgeLaneBusyIsQueued(t *testing.T) {
 	}
 }
 
-// Queue mode proposes and rings: no pass, no runtime call, no note.
+// A session v2 asked to stop at its generation leaves the op queued for the
+// controller (V2-18) while the controller's latched mode is v2 or unknown:
+// the CLI holds no latch, so its inline pass reads the request by the mode
+// the controller answers, live when none answers, and defers the content to
+// the lane host.
+func TestSessionNudgeLaneStopRequestedIsQueued(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mode  reconcilerMode
+		known bool
+	}{
+		{"latched v2", reconcilerV2, true},
+		// The real query answers an unknown mode as legacy, not known.
+		{"mode unknown", reconcilerLegacy, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testSessionNudgeLaneStopRequestedIsQueued(t, tc.mode, tc.known)
+		})
+	}
+}
+
+func testSessionNudgeLaneStopRequestedIsQueued(t *testing.T, mode reconcilerMode, known bool) {
+	t.Helper()
+	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	asks := setLaneControllerMode(t, mode, known)
+	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if !slices.Equal(asks.cities, []string{c.target.cityPath}) || !slices.Equal(asks.legs, []time.Duration{cliReconcilerModeLeg}) {
+		t.Fatalf("mode asks %+v; want one for the target's city %s with legs of %s", asks, c.target.cityPath, cliReconcilerModeLeg)
+	}
+	if noted := strings.Contains(stderr, "stop request is honored because the controller's session reconciler is unknown"); noted == known {
+		t.Fatalf("stderr %q: unknown-mode note %v, want %v", stderr, noted, !known)
+	}
+	if len(c.nudges()) != 0 {
+		t.Fatalf("deliveries %+v into a session v2 asked to stop", c.nudges())
+	}
+	want := "Queued nudge for " + c.target.agentKey() + " in the conversation lane (the session cannot take input now: stop_requested; the controller delivers it once that clears)\n"
+	if stdout != want {
+		t.Fatalf("stdout %q, want %q", stdout, want)
+	}
+	op := c.only(t)
+	if op.Status != opjournal.StatusSubmitted || len(c.rings) != 1 || c.rings[0] != c.id+":"+op.ID {
+		t.Fatalf("op %s, rings %v; want submitted and one ring for it", op.Status, c.rings)
+	}
+}
+
+// A controller that latched legacy, as after a rollback, makes the CLI read
+// a stale v2 stop request as residue at once (V2-18): the inline pass
+// delivers, as legacy will never carry the request out.
+func TestSessionNudgeLaneStopResidueUnderLatchedLegacyDelivers(t *testing.T) {
+	c := newCLILaneCity(t, laneStopRequestedAt(1))
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
+	code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if !slices.Equal(asks.cities, []string{c.target.cityPath}) {
+		t.Fatalf("mode asks %v; want one for the target's city %s", asks.cities, c.target.cityPath)
+	}
+	if nudges := c.nudges(); len(nudges) != 1 || nudges[0].Message != cliLaneTestMessage {
+		t.Fatalf("deliveries %+v, want the message verbatim once", nudges)
+	}
+	if op := c.only(t); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != laneViaLive {
+		t.Fatalf("op %+v, want succeeded via live", op)
+	}
+	if stdout != "Nudged "+c.target.agentKey()+"\n" {
+		t.Fatalf("stdout %q", stdout)
+	}
+}
+
+// Queue mode proposes and rings: no pass, no runtime call, no note, and no
+// ask for the controller's mode, which only a pass reads by.
 func TestSessionNudgeLaneQueueModeRunsNoPass(t *testing.T) {
 	c := newCLILaneCity(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, false)
 	calls := len(c.sp.Calls)
 	code, stdout, stderr := c.nudge(nudgeDeliveryQueue, "", false, cliLaneTestMessage)
 	if code != 0 {
 		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	if len(asks.cities) != 0 {
+		t.Fatalf("queue mode asked the controller's mode %d times, want none", len(asks.cities))
 	}
 	if n := len(c.sp.Calls); n != calls {
 		t.Fatalf("queue mode made %d runtime calls: %+v", n-calls, c.sp.Calls[calls:])

@@ -53,6 +53,9 @@ const (
 	cliLaneLeaseTTL = 30 * time.Second
 	// cliLaneRingTimeout bounds each leg of the CLI's ring.
 	cliLaneRingTimeout = time.Second
+	// cliReconcilerModeLeg bounds each leg of the inline pass's ask for the
+	// controller's latched session reconciler (controllerStopReading).
+	cliReconcilerModeLeg = 500 * time.Millisecond
 )
 
 // cliLaneExecutesMessage reports whether [ops] authoritative lists message.
@@ -203,7 +206,7 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 		return true, 1
 	}
 	n.st = st
-	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID)
+	view, absent, err := readConversationLaneViewOnly(sessionFrontDoor(n.sessions), target.sessionID)
 	switch {
 	case err != nil:
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Errorf("reading session %s: %w", target.sessionID, err)), "", key)
@@ -308,9 +311,17 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		return opjournal.PassResult{}, err
 	}
 	armLaneFailpoints(lane, cliLaneHostName)
-	view, info, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID)
+	// The CLI holds no latch, so it reads the stop request by the mode the
+	// controller latched, asked right before the row read so the answer is
+	// as fresh as the row: a request it holds back waits for the
+	// controller's lane host, which reads by the same mode.
+	reading, modeErr := controllerStopReading(n.target.cityPath, cliReconcilerModeLeg)
+	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, reading)
 	if err != nil {
 		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", n.target.sessionID, err)
+	}
+	if note := unknownModeStopNote(row, modeErr); note != "" {
+		n.warnf("%s", note)
 	}
 	live := newConversationLaneExec(laneExecDeps{
 		cityPath: n.target.cityPath,
@@ -319,7 +330,7 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		sp:       n.sp,
 		lane:     n.st,
 		clk:      cliOpClock,
-	}, info)
+	}, row)
 	exec := &cliLaneExec{conversationLaneExec: live, ownsInput: live.target.sessionTransport() != "acp"}
 	res, err := lane.Pass(ctx, view, exec)
 	laneFailpointAfterPass(cliLaneHostName, res)

@@ -149,7 +149,7 @@ func TestAbandonedCreateSettlesAmbiguousWithToken(t *testing.T) {
 	if err := x.submit(rowKey{}, e); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	if s.Outcome != settledAmbiguous || s.Token != "tok-1" || s.Seq != seq || s.Cause != causeDeadline {
@@ -189,7 +189,7 @@ func TestCreateAbandonedBeforeItsWriteStaysThrottled(t *testing.T) {
 	if err := x.submit(rowKey{}, e); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	if s.Outcome != settledAmbiguous || s.BackoffKey != createBackoffKey(ident) || e.Latch.begin() {

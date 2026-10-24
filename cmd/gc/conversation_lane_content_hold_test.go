@@ -37,8 +37,8 @@ func holdFixture(t *testing.T, f *laneFixture) {
 // releaseFixture clears the hold f's row holds, as a resume that read it.
 func releaseFixture(t *testing.T, f *laneFixture) {
 	t.Helper()
-	_, info := f.view(t)
-	if cleared, standing, err := sessionFrontDoor(f.store).ClearContentHold(f.id, info.ContentHoldRaw); err != nil || !cleared {
+	_, row := f.view(t)
+	if cleared, standing, err := sessionFrontDoor(f.store).ClearContentHold(f.id, row.info.ContentHoldRaw); err != nil || !cleared {
 		t.Fatalf("ClearContentHold = %v, %q, %v", cleared, standing, err)
 	}
 }
@@ -194,8 +194,8 @@ func TestLaneStopWithHoldRunsTheInterruptAndHoldsTheQueue(t *testing.T) {
 	if soloWrites != 0 {
 		t.Fatalf("the hold was written on its own %d times; want it in the interrupt's batch", soloWrites)
 	}
-	if _, info := c.f.view(t); info.ContentHoldRaw != hold.String() {
-		t.Fatalf("hold = %q, want %q beside the interrupt", info.ContentHoldRaw, hold.String())
+	if _, row := c.f.view(t); row.info.ContentHoldRaw != hold.String() {
+		t.Fatalf("hold = %q, want %q beside the interrupt", row.info.ContentHoldRaw, hold.String())
 	}
 	if res := c.pass(t); res.Took != opjournal.TakeControl || len(c.requests()) != 1 {
 		t.Fatalf("pass 1 = %+v, %d interrupts; want the interrupt run first", res, len(c.requests()))

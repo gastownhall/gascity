@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -186,6 +187,7 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 	// tick would multiply lock contention against the claim path below for
 	// no benefit (the counters only need tick-granularity, not per-item).
 	skipCounts := make(map[string]int64)
+	snapshotCensus := nudgeFenceCensusFromSnapshot(sessionBeads)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
@@ -237,7 +239,16 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		// The pass's snapshot census only lets the target skip: when, judged
+		// by it, the target may claim nothing, the claim is not tried, and an
+		// adoption the snapshot denies waits for the next pass. A claim that
+		// is tried reads its own live census before it adopts, since the
+		// snapshot, or a census an earlier claim of the pass read, misses a
+		// session another process created after it.
+		ok := false
+		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, time.Now()) {
+			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -266,6 +277,38 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// nudgeFenceCensusFromSnapshot is a dispatch pass's skip-only Leg-B census:
+// the open sessions of the pass's snapshot that still hold a nudge fence
+// (sessionHoldsNudgeFence), built at most once. The snapshot reads through the
+// controller's bead cache, which sees another process's session only after its
+// own reconcile pass, so it may skip a claim but never license an adoption
+// (nudgeTargetMayClaimPerSnapshot).
+func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[string]struct{}, bool) {
+	var once sync.Once
+	var live map[string]struct{}
+	return func() (map[string]struct{}, bool) {
+		once.Do(func() {
+			live = make(map[string]struct{})
+			for _, info := range snapshot.OpenInfos() {
+				if sessionHoldsNudgeFence(info) {
+					live[info.ID] = struct{}{}
+				}
+			}
+		})
+		return live, true
+	}
+}
+
+// nudgeTargetMayClaimPerSnapshot reports whether a claim for target, judged
+// with the pass's snapshot census, would claim anything: a lock-free dry run
+// (WouldClaimBatch) that reads no store. A dry run that fails answers yes, so
+// the authoritative claim decides.
+func nudgeTargetMayClaimPerSnapshot(queue nudgeQueueHandle, target nudgeTarget, snapshotCensus func() (map[string]struct{}, bool), now time.Time) bool {
+	target.fenceCensus = snapshotCensus
+	would, err := queue.Probe.WouldClaimBatch(target.claimTarget(target.cityPath), now)
+	return err != nil || would
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

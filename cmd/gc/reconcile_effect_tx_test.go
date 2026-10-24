@@ -286,7 +286,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-inCall
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	close(release) // what it returns carries no facts, so nothing is posted late
@@ -830,7 +830,7 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 4)
+	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 2)
 	clk.Advance(30 * time.Second)
 	for range latches {
 		switch s := receive(t, posted); s.Key.ID {

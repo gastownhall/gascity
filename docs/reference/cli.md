@@ -4935,7 +4935,7 @@ gc supervisor run
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--allow-supervisor-mismatch` | bool |  | start even when the running supervisor is a different gc installation than this binary |
-| `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
+| `-n`, `--dry-run` | bool |  | preview the agents that would start and the MCP config, skill links, and .gitignore entries gc would write, without starting or writing them |
 | `--json` | bool |  | emit JSONL summary |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
 | `--verbose` | bool |  | disable warning deduplication and print every supervisor warning |

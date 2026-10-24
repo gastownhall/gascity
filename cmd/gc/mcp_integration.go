@@ -184,6 +184,13 @@ func warnStage1MCPSkip(cityPath, agent string, harnessErr *unsupportedMCPHarness
 }
 
 func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
+	return buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, false)
+}
+
+// buildStage1MCPTargetsWith is buildStage1MCPTargets with pathOnly: agents'
+// work dirs are resolved without being created, for a plan that must write
+// nothing.
+func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) ([]mcpTargetSpec, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -193,7 +200,7 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
 			continue
 		}
-		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
+		view, err := resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, pathOnly)
 		var harnessErr *unsupportedMCPHarnessError
 		if errors.As(err, &harnessErr) {
 			// One agent's harness must not fail the whole city: skip it here.
@@ -330,19 +337,42 @@ func collectStage1ScopeRoots(cityPath string, cfg *config.City) []string {
 }
 
 func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer) error {
+	providers, err := orphanStage1Markers(root, desired)
+	if err != nil {
+		return err
+	}
+	for _, provider := range providers {
+		orphan, err := materialize.BuildMCPProjection(provider, root, nil)
+		if err != nil {
+			return fmt.Errorf("building orphan projection for %s at %s: %w", provider, root, err)
+		}
+		if err := orphan.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+			return fmt.Errorf("cleaning up orphan %s marker at %s: %w", provider, root, err)
+		}
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc: cleaned up orphan MCP marker %s at %s\n", provider, root) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return nil
+}
+
+// orphanStage1Markers lists the providers whose managed marker under root has
+// no claimant in desired.
+func orphanStage1Markers(root string, desired map[string]bool) ([]string, error) {
 	markersDir := filepath.Join(root, ".gc", "mcp-managed")
 	entries, err := fsys.OSFS{}.ReadDir(markersDir)
 	if err != nil {
 		// Missing directory is the steady state when no targets have ever
 		// been adopted at this root — not an error.
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
 		// Permission or corruption problems must surface — silently
 		// skipping would leave stale managed state unreconciled and
 		// hide operator-facing diagnostics.
-		return fmt.Errorf("scanning %s: %w", markersDir, err)
+		return nil, fmt.Errorf("scanning %s: %w", markersDir, err)
 	}
+	var providers []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -358,18 +388,9 @@ func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer
 		if desired[managedKey(provider, root)] {
 			continue
 		}
-		orphan, err := materialize.BuildMCPProjection(provider, root, nil)
-		if err != nil {
-			return fmt.Errorf("building orphan projection for %s at %s: %w", provider, root, err)
-		}
-		if err := orphan.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
-			return fmt.Errorf("cleaning up orphan %s marker at %s: %w", provider, root, err)
-		}
-		if stderr != nil {
-			fmt.Fprintf(stderr, "gc: cleaned up orphan MCP marker %s at %s\n", provider, root) //nolint:errcheck // best-effort stderr
-		}
+		providers = append(providers, provider)
 	}
-	return nil
+	return providers, nil
 }
 
 // agentMayHaveSessionSpecificMCPTargets reports whether an agent's MCP
@@ -421,11 +442,28 @@ func resolveConfiguredAgentMCPProjection(
 	agent *config.Agent,
 	lookPath config.LookPathFunc,
 ) (resolvedMCPProjection, error) {
+	return resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, false)
+}
+
+// resolveConfiguredAgentMCPProjectionWith is resolveConfiguredAgentMCPProjection
+// with pathOnly: resolve the agent's work dir path without creating it, for a
+// plan that must write nothing.
+func resolveConfiguredAgentMCPProjectionWith(
+	cityPath string,
+	cfg *config.City,
+	agent *config.Agent,
+	lookPath config.LookPathFunc,
+	pathOnly bool,
+) (resolvedMCPProjection, error) {
 	if cfg == nil || agent == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
 	identity := agent.QualifiedName()
-	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+	resolveWorkDir := resolveWorkDirForQualifiedName
+	if pathOnly {
+		resolveWorkDir = resolveWorkDirPathForQualifiedName
+	}
+	workDir, err := resolveWorkDir(cityPath, cfg, agent, identity)
 	if err != nil {
 		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
 		if catErr != nil {

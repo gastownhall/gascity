@@ -123,7 +123,7 @@ state.json:
 ### claim a new batch, adopting n-legb onto the claimer's fence
 result: [n-a1@BATCH-1 n-a2@BATCH-1 n-legb@BATCH-1[s-new/2]] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 1 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 1 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -180,7 +180,7 @@ state.json:
 ### release with a backoff keeps the pin
 result: <nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -236,8 +236,8 @@ state.json:
 
 ### claim inside the backoff
 result: [] err=<nil>
-rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -294,7 +294,7 @@ state.json:
 ### claim resumes the pinned batch whole
 result: [n-a1@BATCH-1 n-a2@BATCH-1 n-legb@BATCH-1[s-new/2]] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -477,7 +477,7 @@ state.json:
 ### a due member resumes the batch, its not-due sibling with it
 result: [n-a2@BATCH-1 n-legb@BATCH-1[s-new/2] n-a1@BATCH-1] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -676,7 +676,7 @@ state.json:
 ### claim a new batch after the rejection
 result: [n-a3@BATCH-2 n-a1@BATCH-2 n-a2@BATCH-2 n-legb@BATCH-2[s-new/2]] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -754,7 +754,7 @@ state.json:
 ### release one member
 result: <nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -930,7 +930,7 @@ state.json:
 ### a batch with a member in flight is not resumed; the unpinned item gets a new batch
 result: [n-a4@BATCH-3] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1121,7 +1121,7 @@ state.json:
 result: [] err=withdrawing a sibling failed
 moving the delivery onto a new key: 1 of 5 claimed nudges are no longer in flight
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1297,7 +1297,7 @@ state.json:
 ### claim a batch across both keys
 result: [n-k1@BATCH-5 n-k2@BATCH-5] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -1337,7 +1337,7 @@ state.json:
 ### release it
 result: <nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1376,8 +1376,8 @@ state.json:
 
 ### a target with one of the keys does not take the split batch
 result: [] err=<nil>
-rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1417,7 +1417,7 @@ state.json:
 ### the target with both keys resumes it
 result: [n-k1@BATCH-5 n-k2@BATCH-5] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [

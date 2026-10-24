@@ -46,4 +46,14 @@ describe('runDetailHref', () => {
     const scope: RunLaneScope = { status: 'unavailable', error: 'x' };
     expect(runDetailHref('a/b c', scope)).toBe('/runs/a%2Fb%20c');
   });
+
+  it('keeps separator-led run ids inside the /runs path (GHSA-wrjc-x8rr-h8h6)', () => {
+    // react-router treats a `to` that starts with two separators (`//`, `\\`,
+    // `/\`, `\/`) as an external URL, so no run id may produce one.
+    const scope: RunLaneScope = { status: 'unavailable', error: 'x' };
+    expect(runDetailHref('//evil.example', scope)).toBe('/runs/%2F%2Fevil.example');
+    expect(runDetailHref('/\\evil.example', scope)).toBe('/runs/%2F%5Cevil.example');
+    expect(runDetailHref('\\\\evil.example', scope)).toBe('/runs/%5C%5Cevil.example');
+    expect(runDetailHref('https://evil.example', scope)).toBe('/runs/https%3A%2F%2Fevil.example');
+  });
 });
