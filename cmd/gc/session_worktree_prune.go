@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // gitProbe is the slice of internal/git.Git used by the worker-dir
@@ -52,7 +53,8 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // happened.
 //
 // The decision is mechanical, never role-coupled: any pool-managed agent
-// worktree that lives under the city's .gc/worktrees/ tree, is a git
+// worktree that lives under the configured worktrees root
+// (workdir.WorktreesRoot), is a git
 // worktree, and probes clean is safe to reclaim. Pool sessions are
 // transient by design — their worktrees were never meant to outlive the
 // session bead.
@@ -60,7 +62,8 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // No-op when:
 //   - cfg.Daemon.AutoPruneWorkerDir is false
 //   - the session bead has no worker_dir metadata
-//   - the worker_dir does not live under cityPath/.gc/worktrees/
+//   - the worker_dir does not live under the configured worktrees root
+//     (workdir.WorktreesRoot)
 //   - the worker_dir is missing on disk or has no .git pointer
 //   - the worktree has uncommitted changes, unpushed commits, or stashes
 //   - the rig that owns the session cannot be resolved to a filesystem path
@@ -80,7 +83,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
 		return false
 	}
@@ -156,7 +159,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
 		return
 	}
