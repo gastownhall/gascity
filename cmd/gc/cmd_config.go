@@ -137,6 +137,15 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	}
 	validationErrors = append(validationErrors, validateLegacyFormulaConfigRoutes(cfg)...)
 	validationWarnings := singletonSessionMigrationWarnings(cfg)
+	if validate {
+		// MCP servers an agent's provider cannot receive: shared-layer
+		// ones the agent starts without (warnings), and ones in its own
+		// mcp/ directory, which keep it from starting (errors). Only
+		// --validate pays for loading every agent's MCP catalog.
+		mcpWarnings, mcpErrors := mcpCapabilityFindings(cityPath, cfg, nil, nil)
+		validationWarnings = append(validationWarnings, mcpWarnings...)
+		validationErrors = append(validationErrors, mcpErrors...)
+	}
 
 	if validate {
 		if asJSON {

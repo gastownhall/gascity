@@ -71,11 +71,15 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
-			catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolvedProviderLaunchFamily(resolved))
+			mcp, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolvedProviderLaunchFamily(resolved))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			if len(mcp.Skipped) > 0 {
+				fmt.Fprintf(stderr, "gc internal project-mcp: warning: %s\n", describeMCPServerSkips([]string{identity}, mcp.Skipped)) //nolint:errcheck // best-effort stderr
+			}
+			catalog, projection := mcp.Catalog, mcp.Projection
 			if projection.Provider == "" {
 				return nil
 			}

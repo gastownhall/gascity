@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/importsvc"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
@@ -671,7 +672,33 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stdout, "Locked to registry release %s\n", res.RegistryRelease) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
+	warnImportMCPCapability(cityPath, res.Name, stderr)
 	return 0
+}
+
+// warnImportMCPCapability reports, right after gc import add, the agents that
+// will start without MCP servers the new import provides because their
+// provider cannot receive them, and the import's own agents whose mcp/
+// directory declares servers their provider cannot receive. It is advisory:
+// when the import root is not a city or its config does not load, it says
+// nothing and the add still succeeds.
+func warnImportMCPCapability(cityPath, binding string, stderr io.Writer) {
+	if !citylayout.HasCityConfig(cityPath) {
+		return
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return
+	}
+	fromImport := func(server materialize.MCPServer) bool {
+		layer, name, ok := strings.Cut(server.Origin, ":")
+		return ok && name == binding && (layer == "import" || layer == "rig-import")
+	}
+	ofImport := func(agent *config.Agent) bool { return agent.BindingName == binding }
+	warnings, errs := mcpCapabilityFindings(cityPath, cfg, fromImport, ofImport)
+	for _, line := range append(warnings, errs...) {
+		fmt.Fprintf(stderr, "gc import add: warning: %s\n", line) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // importAddErrorLine frames the `gc import add` exit-1 stderr line. The

@@ -153,6 +153,46 @@
         },
         "additionalProperties": true
       }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Servers from a shared layer (the city or rig pack, or an import) that this target's provider cannot receive. They are not projected; the agent starts without them.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "transport",
+          "source",
+          "reason"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
     }
   },
   "additionalProperties": true

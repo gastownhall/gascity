@@ -2848,7 +2848,12 @@ gc mcp
 
 ## gc mcp list
 
-Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
+Show the precedence-resolved MCP servers that Gas City would project into the
+provider-native config for one agent or session target.
+
+Servers from a shared layer (the city or rig pack, or an import) that the
+target's provider cannot receive are listed separately under "Not projected",
+with the reason: the agent starts without them.
 
 ```
 gc mcp list [flags]
