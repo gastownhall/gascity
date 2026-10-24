@@ -210,6 +210,12 @@
               "null"
             ]
           },
+          "ColdWake": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "ContextAdvisory": {
             "$ref": "#/components/schemas/ContextAdvisory"
           },
@@ -590,7 +596,8 @@
           "InjectFragmentsAppend",
           "MaxActiveSessions",
           "MinActiveSessions",
-          "ScaleCheck"
+          "ScaleCheck",
+          "ColdWake"
         ],
         "type": "object"
       },
