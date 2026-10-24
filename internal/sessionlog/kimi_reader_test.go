@@ -313,6 +313,32 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 	}
 }
 
+// Companion to TestFindKimiSessionFileFollowsSymlinkedRoots: a dangling
+// symlinked account root is a deliberate existence check (bare EvalSymlinks
+// site), not comparison prep, so it must be skipped without error and must
+// not block discovery through a later, valid sibling root.
+func TestFindKimiSessionFileSkipsBrokenSymlinkedRoot(t *testing.T) {
+	isolateKimiSearchRoots(t)
+	base := t.TempDir()
+	accountRoot := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi-broken"
+	workHash := kimiWorkDirHash(workDir)
+	want := writeKimiContext(t, filepath.Join(accountRoot, workHash, "session-key", "context.jsonl"), []string{
+		`{"role":"user","content":"via valid root"}`,
+	})
+
+	if err := os.Symlink(filepath.Join(base, "does-not-exist"), filepath.Join(base, "account-a-broken")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	if err := os.Symlink(accountRoot, filepath.Join(base, "account-b-valid")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindKimiSessionFile([]string{base}, workDir); !samePath(got, want) {
+		t.Fatalf("FindKimiSessionFile() = %q, want %q (broken sibling root must be skipped, not fatal)", got, want)
+	}
+}
+
 // isolateKimiSearchRoots pins every ambient variable DefaultKimiSearchPaths
 // reads, so a discovery test sees only the roots it creates. Pinning HOME alone
 // is insufficient: KIMI_CODE_HOME contributes a root independently of HOME, and
