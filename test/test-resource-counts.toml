@@ -802,6 +802,21 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "cmd/gc/gc_beads_bd_detached_launch_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_detached_launch_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/gc_beads_bd_enospc_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/gc_beads_bd_force_reinit_guard_test.go"
 resource = "subprocess"
 calls = 1
