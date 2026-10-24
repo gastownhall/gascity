@@ -87,7 +87,7 @@ func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalRea
 		fmt.Fprintf(l.stderr, "external reads: loading sessions for the nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	l.clearLadderReleases(env.CityStore, raw)
+	l.clearLadderReleases(env.Cfg, env.CityStore, raw)
 	now, sessStore := l.now(), beads.SessionStore{Store: env.CityStore}
 	claim := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claim))
