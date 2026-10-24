@@ -468,7 +468,7 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().MarkHidden("file")      //nolint:errcheck // flag always exists
 	cmd.Flags().MarkHidden("no-strict") //nolint:errcheck // flag always exists
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
-		"preview the agents that would start and the provider config, skill links, and .gitignore entries gc would write, without starting or writing them")
+		"preview the agents that would start and the MCP config, skill links, and .gitignore entries gc would write, without starting or writing them")
 	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
 		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
 	cmd.Flags().BoolVar(&allowSupervisorMismatch, allowSupervisorMismatchFlag, false,
@@ -845,8 +845,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// --dry-run previews; it writes nothing into the city or its rigs
-	// (stage-1 skills and MCP report a plan instead, below).
+	// --dry-run installs no hooks or overlays; stage-1 skills and MCP report
+	// a plan instead of writing (below).
 	if !dryRunMode {
 		ensureInitArtifacts(cityPath, stderr, "gc start")
 	}
@@ -1278,7 +1278,7 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 		}
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprintln(stdout, "No side effects executed (--dry-run).") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "No agents started, and nothing written outside the bead store (--dry-run).") //nolint:errcheck // best-effort stdout
 }
 
 // settingsArgs returns "--settings <path>" to append to a Claude command

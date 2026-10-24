@@ -48,7 +48,7 @@ func TestPrintDryRunPreview(t *testing.T) {
 	if !strings.Contains(out, "1 agent(s) suspended") {
 		t.Errorf("should mention 1 suspended, got:\n%s", out)
 	}
-	if !strings.Contains(out, "No side effects executed (--dry-run).") {
+	if !strings.Contains(out, "No agents started, and nothing written outside the bead store (--dry-run).") {
 		t.Errorf("should show dry-run footer, got:\n%s", out)
 	}
 }
@@ -83,11 +83,30 @@ func TestStartDryRunFlagExists(t *testing.T) {
 }
 
 // dryRunTreeSnapshot maps every path under root to its content, a symlink's
-// target, or "<dir>", skipping gc's own runtime state (.gc/ and .beads/,
-// which the bead-store lifecycle owns) but not the MCP bookkeeping gc keeps
-// under .gc/.
+// target, or "<dir>". Under gc's own .gc/ and .beads/ directories it records
+// only what a dry run must not touch either (MCP bookkeeping, Claude
+// settings, formula links), since the bead-store lifecycle, which a dry run
+// still runs, writes the rest (its store files and their events).
 func dryRunTreeSnapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
+	watchedInternal := []string{
+		".gc/mcp-adopted", ".gc/mcp-managed", ".gc/mcp-locks",
+		".gc/settings.json", ".beads/formulas",
+	}
+	internal := func(rel string) (watched, descend bool) {
+		if rel != ".gc" && rel != ".beads" && !strings.HasPrefix(rel, ".gc/") && !strings.HasPrefix(rel, ".beads/") {
+			return true, true
+		}
+		for _, prefix := range watchedInternal {
+			if rel == prefix || strings.HasPrefix(rel, prefix+"/") {
+				return true, true
+			}
+			if strings.HasPrefix(prefix, rel+"/") {
+				return false, true
+			}
+		}
+		return false, false
+	}
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -95,13 +114,12 @@ func dryRunTreeSnapshot(t *testing.T, root string) map[string]string {
 		}
 		rel, _ := filepath.Rel(root, path)
 		slashed := filepath.ToSlash(rel)
-		if d.IsDir() && (slashed == ".beads" || slashed == ".gc") {
-			for _, mcpDir := range []string{"mcp-adopted", "mcp-managed", "mcp-locks"} {
-				if _, statErr := os.Stat(filepath.Join(path, mcpDir)); statErr == nil && slashed == ".gc" {
-					out[slashed+"/"+mcpDir] = "<dir>"
-				}
+		watched, descend := internal(slashed)
+		if !watched {
+			if d.IsDir() && !descend {
+				return filepath.SkipDir
 			}
-			return filepath.SkipDir
+			return nil
 		}
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -140,7 +158,14 @@ func TestStartDryRunWritesNothingInTheCityOrItsRigs(t *testing.T) {
 	requireNoLeakedDoltAfterForPaths(t, cityPath, rigPath)
 	t.Chdir(t.TempDir())
 	// The provider's implicit agents cover the city root and the rig root.
-	for _, dir := range []string{filepath.Join(cityPath, citylayout.RuntimeRoot), filepath.Join(cityPath, "mcp"), filepath.Join(cityPath, "skills", "plan"), filepath.Join(cityPath, "agents", "mayor"), rigPath} {
+	// scribe has a work dir of its own, and coder, a rig agent whose named
+	// session is always on, installs gemini hooks into its work dir: both
+	// resolve while the preview lists the agents that would start.
+	for _, dir := range []string{
+		filepath.Join(cityPath, citylayout.RuntimeRoot), filepath.Join(cityPath, "mcp"), filepath.Join(cityPath, "skills", "plan"),
+		filepath.Join(cityPath, "formulas"), filepath.Join(cityPath, "agents", "mayor"), filepath.Join(cityPath, "agents", "scribe"),
+		filepath.Join(cityPath, "agents", "coder"), rigPath,
+	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -156,18 +181,28 @@ base = "builtin:claude"
 command = "echo"
 prompt_mode = "none"
 
+[providers.gemini]
+base = "builtin:gemini"
+command = "echo"
+prompt_mode = "none"
+
 [[rigs]]
 name = "frontend"
 `
 	siteTOML := fmt.Sprintf("workspace_name = \"dry-run-purity\"\n\n[[rig]]\nname = \"frontend\"\npath = %q\n", rigPath)
 	for path, body := range map[string]string{
-		filepath.Join(cityPath, "city.toml"):                     cityTOML,
-		filepath.Join(cityPath, ".gc", "site.toml"):              siteTOML,
-		filepath.Join(cityPath, "pack.toml"):                     "[pack]\nname = \"dry-run-purity\"\nschema = 2\n",
-		filepath.Join(cityPath, "mcp", "notes.toml"):             "name = \"notes\"\ncommand = \"uvx\"\n",
-		filepath.Join(cityPath, "skills", "plan", "SKILL.md"):    "---\nname: plan\ndescription: test\n---\nbody\n",
-		filepath.Join(cityPath, "agents", "mayor", "agent.toml"): "provider = \"claude\"\nscope = \"city\"\n",
-		filepath.Join(cityPath, "agents", "mayor", "prompt.md"):  "You are the mayor.\n",
+		filepath.Join(cityPath, "city.toml"):                      cityTOML,
+		filepath.Join(cityPath, ".gc", "site.toml"):               siteTOML,
+		filepath.Join(cityPath, "pack.toml"):                      "[pack]\nname = \"dry-run-purity\"\nschema = 2\n\n[[named_session]]\ntemplate = \"coder\"\nscope = \"rig\"\nmode = \"always\"\n",
+		filepath.Join(cityPath, "formulas", "hello.toml"):         "formula = \"hello\"\n\n[[steps]]\nid = \"greet\"\ntitle = \"Greet\"\n",
+		filepath.Join(cityPath, "agents", "scribe", "agent.toml"): "provider = \"claude\"\nscope = \"city\"\nwork_dir = \"workspaces/scribe\"\n",
+		filepath.Join(cityPath, "agents", "scribe", "prompt.md"):  "You are the scribe.\n",
+		filepath.Join(cityPath, "agents", "coder", "agent.toml"):  "provider = \"gemini\"\nscope = \"rig\"\ninstall_agent_hooks = [\"gemini\"]\n",
+		filepath.Join(cityPath, "agents", "coder", "prompt.md"):   "You are the coder.\n",
+		filepath.Join(cityPath, "mcp", "notes.toml"):              "name = \"notes\"\ncommand = \"uvx\"\n",
+		filepath.Join(cityPath, "skills", "plan", "SKILL.md"):     "---\nname: plan\ndescription: test\n---\nbody\n",
+		filepath.Join(cityPath, "agents", "mayor", "agent.toml"):  "provider = \"claude\"\nscope = \"city\"\n",
+		filepath.Join(cityPath, "agents", "mayor", "prompt.md"):   "You are the mayor.\n",
 		// The rig's own, hand-written MCP config.
 		filepath.Join(rigPath, ".mcp.json"): `{"mcpServers":{"team-db":{"command":"team-db-mcp"}}}` + "\n",
 	} {
@@ -204,8 +239,9 @@ name = "frontend"
 		"adopt " + filepath.Join(rigPath, ".mcp.json") + " (claude): save its current content under " + filepath.Join(rigPath, ".gc", "mcp-adopted", "claude") + ", then replace it with 1 MCP server",
 		"create " + filepath.Join(cityPath, ".mcp.json") + " (claude) with 1 MCP server",
 		"link 1 skill in " + filepath.Join(cityPath, ".claude", "skills"),
-		"update " + filepath.Join(rigPath, ".gitignore") + ": add .mcp.json",
-		"No side effects executed (--dry-run).",
+		"create " + filepath.Join(rigPath, ".gitignore") + ": add .mcp.json",
+		"frontend/coder",
+		"No agents started, and nothing written outside the bead store (--dry-run).",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview missing %q:\n%s", want, out)

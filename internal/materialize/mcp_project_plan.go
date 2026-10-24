@@ -2,7 +2,6 @@ package materialize
 
 import (
 	"bytes"
-	"fmt"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -60,7 +59,10 @@ func (p MCPProjection) Plan(fs fsys.FS) (MCPProjectionPlan, error) {
 	existing, err := fs.ReadFile(p.Target)
 	exists := err == nil
 	if err != nil && !errorsIsNotExist(err) {
-		return plan, fmt.Errorf("reading %s: %w", p.Target, err)
+		// Apply overwrites a target it cannot read (Claude's whole file)
+		// or fails on it (the others, in targetChange above); either way
+		// the target is there and would change.
+		exists, existing = true, nil
 	}
 	switch {
 	case change.remove:

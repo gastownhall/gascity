@@ -184,6 +184,13 @@ func warnStage1MCPSkip(cityPath, agent string, harnessErr *unsupportedMCPHarness
 }
 
 func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
+	return buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, false)
+}
+
+// buildStage1MCPTargetsWith is buildStage1MCPTargets with pathOnly: agents'
+// work dirs are resolved without being created, for a plan that must write
+// nothing.
+func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) ([]mcpTargetSpec, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -193,7 +200,7 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
 			continue
 		}
-		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
+		view, err := resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, pathOnly)
 		var harnessErr *unsupportedMCPHarnessError
 		if errors.As(err, &harnessErr) {
 			// One agent's harness must not fail the whole city: skip it here.
@@ -435,11 +442,28 @@ func resolveConfiguredAgentMCPProjection(
 	agent *config.Agent,
 	lookPath config.LookPathFunc,
 ) (resolvedMCPProjection, error) {
+	return resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, false)
+}
+
+// resolveConfiguredAgentMCPProjectionWith is resolveConfiguredAgentMCPProjection
+// with pathOnly: resolve the agent's work dir path without creating it, for a
+// plan that must write nothing.
+func resolveConfiguredAgentMCPProjectionWith(
+	cityPath string,
+	cfg *config.City,
+	agent *config.Agent,
+	lookPath config.LookPathFunc,
+	pathOnly bool,
+) (resolvedMCPProjection, error) {
 	if cfg == nil || agent == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
 	identity := agent.QualifiedName()
-	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+	resolveWorkDir := resolveWorkDirForQualifiedName
+	if pathOnly {
+		resolveWorkDir = resolveWorkDirPathForQualifiedName
+	}
+	workDir, err := resolveWorkDir(cityPath, cfg, agent, identity)
 	if err != nil {
 		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
 		if catErr != nil {

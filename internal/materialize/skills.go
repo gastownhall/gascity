@@ -397,7 +397,7 @@ type SkippedConflict struct {
 // invocation. Lists are sorted for deterministic test/log output.
 type Result struct {
 	// Materialized is the list of names whose symlinks now point at the
-	// desired source (created or already correct).
+	// desired source (created or already correct); after a DryRun, would.
 	Materialized []string
 	// Skipped lists desired names that were not materialized because
 	// user content occupies the target path.
@@ -485,7 +485,8 @@ func manifestRecordsTarget(m ownershipManifest, name, canonTarget string) bool {
 //
 // Pass order:
 //
-//  1. Ensure SinkDir exists (mkdir -p).
+//  1. Ensure SinkDir exists (mkdir -p; a DryRun only notes that it is
+//     missing).
 //  2. Legacy-stub migration: for each name in req.LegacyNames, if a
 //     regular directory at <SinkDir>/<name> matches the v0.15.0 stub
 //     shape exactly, remove it.

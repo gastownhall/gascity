@@ -18,7 +18,7 @@ import (
 // would extend. It returns the errors that would fail the real pass, so a
 // preview fails where the start would.
 func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]string, error) {
-	targets, err := buildStage1MCPTargets(cityPath, cfg, lookPath, stderr)
+	targets, err := buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, true)
 	if err != nil {
 		return nil, err
 	}
@@ -50,15 +50,23 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 	}
 	sort.Strings(roots)
 	for _, root := range roots {
-		if missing := missingGitignoreEntries(fs, root, managedMCPGitignoreEntries); len(missing) > 0 {
-			lines = append(lines, fmt.Sprintf("update %s: add %s", filepath.Join(root, ".gitignore"), strings.Join(missing, ", ")))
+		missing := missingGitignoreEntries(fs, root, managedMCPGitignoreEntries)
+		if len(missing) == 0 {
+			continue
 		}
+		path := filepath.Join(root, ".gitignore")
+		verb := "update"
+		if _, err := fs.Stat(path); err != nil {
+			verb = "create"
+		}
+		lines = append(lines, fmt.Sprintf("%s %s: add %s", verb, path, strings.Join(missing, ", ")))
 	}
 	return lines, nil
 }
 
-// planOrphanStage1Targets reports the managed MCP targets cleanupOrphanStage1Targets
-// would remove because no agent claims them anymore.
+// planOrphanStage1Targets reports what cleanupOrphanStage1Targets would do to
+// managed MCP targets no agent claims anymore: remove the file, or remove
+// gc's servers from it where other settings remain.
 func planOrphanStage1Targets(cityPath string, cfg *config.City, desired map[string]bool) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
@@ -94,8 +102,11 @@ func describeMCPPlan(plan materialize.MCPProjectionPlan) string {
 		servers += "s"
 	}
 	switch {
-	case plan.Adopt:
+	case plan.Adopt && plan.Provider == materialize.MCPProviderClaude:
 		return fmt.Sprintf("adopt %s (%s): save its current content under %s, then replace it with %s",
+			plan.Target, plan.Provider, plan.SnapshotDir, servers)
+	case plan.Adopt:
+		return fmt.Sprintf("adopt %s (%s): save its current content under %s, then replace its MCP servers with %s",
 			plan.Target, plan.Provider, plan.SnapshotDir, servers)
 	case plan.Action == materialize.MCPPlanCreate:
 		return fmt.Sprintf("create %s (%s) with %s", plan.Target, plan.Provider, servers)
@@ -119,7 +130,7 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 		return nil
 	}
 	type sinkPlan struct {
-		created, relinked, removed map[string]bool
+		created, relinked, removed, stubs map[string]bool
 	}
 	sinks := make(map[string]*sinkPlan)
 	for _, req := range stage1SkillRequests(cityPath, cfg, stderr) {
@@ -131,7 +142,7 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 		}
 		plan := sinks[req.Request.SinkDir]
 		if plan == nil {
-			plan = &sinkPlan{created: map[string]bool{}, relinked: map[string]bool{}, removed: map[string]bool{}}
+			plan = &sinkPlan{created: map[string]bool{}, relinked: map[string]bool{}, removed: map[string]bool{}, stubs: map[string]bool{}}
 			sinks[req.Request.SinkDir] = plan
 		}
 		for _, name := range res.Created {
@@ -142,6 +153,9 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 		}
 		for _, name := range res.Removed {
 			plan.removed[name] = true
+		}
+		for _, name := range res.LegacyMigrated {
+			plan.stubs[name] = true
 		}
 	}
 	dirs := make([]string, 0, len(sinks))
@@ -161,6 +175,11 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 		}
 		if n := len(plan.removed); n > 0 {
 			parts = append(parts, fmt.Sprintf("remove %d stale skill link%s", n, plural(n)))
+		}
+		if n := len(plan.stubs); n == 1 {
+			parts = append(parts, "remove 1 legacy skill stub directory")
+		} else if n > 1 {
+			parts = append(parts, fmt.Sprintf("remove %d legacy skill stub directories", n))
 		}
 		if len(parts) > 0 {
 			lines = append(lines, fmt.Sprintf("%s in %s", strings.Join(parts, ", "), dir))

@@ -109,7 +109,9 @@ func ensureGitignoreEntries(fs fsys.FS, dir string, entries []string) error {
 }
 
 // missingGitignoreEntries returns the entries ensureGitignoreEntries would
-// append to dir/.gitignore, reading the file and writing nothing.
+// append to dir/.gitignore, reading the file and writing nothing. It does not
+// model ensureGitignoreEntries' rewrite of legacy .beads lines, which applies
+// only to the canonical beads entries.
 func missingGitignoreEntries(fs fsys.FS, dir string, entries []string) []string {
 	existing, err := fs.ReadFile(filepath.Join(dir, ".gitignore"))
 	if err != nil {
