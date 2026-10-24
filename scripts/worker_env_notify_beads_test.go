@@ -348,25 +348,27 @@ func TestWorkerEnvNotifyBeadsTriggers(t *testing.T) {
 
 // TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould evaluates each job's `if`:
 // repin runs on gastownhall/gascity alone (not on a fork's main), dispatch
-// only after repin found a moved pin, comment on same-repo PRs of
+// and grace (the rbe-west grace record, tools/rbe/worker-env-grace) only
+// after repin found a moved pin, comment on same-repo PRs of
 // gastownhall/gascity.
 func TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould(t *testing.T) {
 	push := loadNotifyBeads(t, notifyBeadsWorkflow)
 	pr := loadNotifyBeads(t, notifyBeadsPRWorkflow)
-	if got := rbeSortedKeys(push.Jobs); strings.Join(got, ",") != "dispatch,repin" {
-		t.Fatalf("%s jobs %v, want repin and dispatch", notifyBeadsWorkflow, got)
+	if got := rbeSortedKeys(push.Jobs); strings.Join(got, ",") != "dispatch,grace,repin" {
+		t.Fatalf("%s jobs %v, want repin, dispatch and grace", notifyBeadsWorkflow, got)
 	}
 	if got := rbeSortedKeys(pr.Jobs); strings.Join(got, ",") != "comment" {
 		t.Fatalf("%s jobs %v, want comment", notifyBeadsPRWorkflow, got)
 	}
-	repin, dispatch, comment := push.Jobs["repin"], push.Jobs["dispatch"], pr.Jobs["comment"]
-	if dispatch.Needs != "repin" || repin.Needs != nil || comment.Needs != nil {
-		t.Errorf("needs: dispatch %v, repin %v, comment %v; want dispatch on repin alone", dispatch.Needs, repin.Needs, comment.Needs)
+	repin, dispatch, grace, comment := push.Jobs["repin"], push.Jobs["dispatch"], push.Jobs["grace"], pr.Jobs["comment"]
+	if dispatch.Needs != "repin" || grace.Needs != "repin" || repin.Needs != nil || comment.Needs != nil {
+		t.Errorf("needs: dispatch %v, grace %v, repin %v, comment %v; want dispatch and grace on repin alone", dispatch.Needs, grace.Needs, repin.Needs, comment.Needs)
 	}
-	// A status function (always(), failure() ...) would let dispatch run
-	// after a skipped or failed repin; without one, GitHub skips it then.
-	if strings.Contains(dispatch.If, "(") {
-		t.Errorf("dispatch if %q calls a function; it must run only after repin succeeded", dispatch.If)
+	// A status function (always(), failure() ...) would let dispatch or
+	// grace run after a skipped or failed repin; without one, GitHub skips
+	// them then.
+	if strings.Contains(dispatch.If, "(") || strings.Contains(grace.If, "(") {
+		t.Errorf("dispatch if %q, grace if %q call a function; they must run only after repin succeeded", dispatch.If, grace.If)
 	}
 	const (
 		gascity = "gastownhall/gascity"
@@ -383,10 +385,11 @@ func TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := evalGHIf(t, repin.If, tc.ctx)
-			// dispatch needs repin: a skipped repin skips it.
+			// dispatch and grace need repin: a skipped repin skips them.
 			d := r && evalGHIf(t, dispatch.If, tc.ctx)
-			if r != tc.repin || d != tc.dispatch {
-				t.Errorf("runs repin %v, dispatch %v; want %v, %v", r, d, tc.repin, tc.dispatch)
+			g := r && evalGHIf(t, grace.If, tc.ctx)
+			if r != tc.repin || d != tc.dispatch || g != tc.dispatch {
+				t.Errorf("runs repin %v, dispatch %v, grace %v; want %v, %v, %v", r, d, g, tc.repin, tc.dispatch, tc.dispatch)
 			}
 		})
 	}
@@ -501,7 +504,7 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 	usesLine := regexp.MustCompile(`^\s*(?:- )?uses: (\S+)(.*)$`)
 	pinned := regexp.MustCompile(`^[a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}$`)
 	version := regexp.MustCompile(`^ # v\d+(\.\d+)*$`)
-	for path, wantUses := range map[string]int{notifyBeadsWorkflow: 2, notifyBeadsPRWorkflow: 0} {
+	for path, wantUses := range map[string]int{notifyBeadsWorkflow: 3, notifyBeadsPRWorkflow: 0} {
 		wf := loadNotifyBeads(t, path)
 		if wf.Permissions == nil || len(wf.Permissions) != 0 {
 			t.Errorf("%s permissions %v, want {} (each job grants its own)", path, wf.Permissions)
@@ -532,6 +535,8 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 		}
 	}
 
+	// grace publishes one record at a time without canceling one in
+	// flight (TestWorkerEnvNotifyBeadsGraceJob).
 	if push.Concurrency != nil || push.Jobs["repin"].Concurrency != nil || push.Jobs["dispatch"].Concurrency != nil {
 		t.Errorf("concurrency on the push side (workflow %v, repin %v, dispatch %v): no push run may cancel another",
 			push.Concurrency, push.Jobs["repin"].Concurrency, push.Jobs["dispatch"].Concurrency)
@@ -540,13 +545,13 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 	if want := map[string]string{"contents": "read"}; !reflect.DeepEqual(repin.Permissions, want) {
 		t.Errorf("repin permissions %v, want %v", repin.Permissions, want)
 	}
-	for _, k := range []string{"moved", "pin", "sha"} {
+	for _, k := range []string{"moved", "pin", "sha", "before"} {
 		if want := "${{ steps.pin.outputs." + k + " }}"; repin.Outputs[k] != want {
 			t.Errorf("repin output %s = %q, want %q", k, repin.Outputs[k], want)
 		}
 	}
-	if len(repin.Outputs) != 3 {
-		t.Errorf("repin outputs %v, want moved, pin, sha", repin.Outputs)
+	if len(repin.Outputs) != 4 {
+		t.Errorf("repin outputs %v, want moved, pin, sha, before", repin.Outputs)
 	}
 	if len(repin.Steps) != 2 || !strings.HasPrefix(repin.Steps[0].Uses, "actions/checkout@") || repin.Steps[1].Uses != "" {
 		t.Fatalf("repin steps %+v, want a checkout and one inline script", repin.Steps)
@@ -674,22 +679,26 @@ func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 	const zero = "0000000000000000000000000000000000000000"
 	unknown := strings.Repeat("e", 40)
 
+	// compared: the main commit the pin was compared with, repin's before
+	// output (the grace record's previous host): the push's before, else
+	// the pushed commit's parent, else none.
 	for _, tc := range []struct {
 		name, before, head string
 		moved              string
 		pin                string
+		compared           string
 		fail, warn         bool
 	}{
-		{name: "comment only", before: sha["a"], head: sha["a-docs"], moved: "false", pin: pinA},
-		{name: "re-pin", before: sha["a-docs"], head: sha["b"], moved: "true", pin: pinB},
-		{name: "re-pin before the last commit of the push", before: sha["a-docs"], head: sha["b-again"], moved: "true", pin: pinB},
-		{name: "moved and moved back within the push", before: sha["a-docs"], head: sha["a-back"], moved: "false", pin: pinA},
-		{name: "new branch, parent pins another host", before: zero, head: sha["b"], moved: "true", pin: pinB},
-		{name: "new branch, parent pins the same host", before: zero, head: sha["b-again"], moved: "false", pin: pinB},
-		{name: "no before", before: "", head: sha["b"], moved: "true", pin: pinB},
-		{name: "before not fetchable, parent pins the same host", before: unknown, head: sha["b-again"], moved: "false", pin: pinB, warn: true},
-		{name: "before not fetchable, parent pins another host", before: unknown, head: sha["b"], moved: "true", pin: pinB, warn: true},
-		{name: "first commit", before: zero, head: sha["a"], moved: "true", pin: pinA},
+		{name: "comment only", before: sha["a"], head: sha["a-docs"], moved: "false", pin: pinA, compared: sha["a"]},
+		{name: "re-pin", before: sha["a-docs"], head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"]},
+		{name: "re-pin before the last commit of the push", before: sha["a-docs"], head: sha["b-again"], moved: "true", pin: pinB, compared: sha["a-docs"]},
+		{name: "moved and moved back within the push", before: sha["a-docs"], head: sha["a-back"], moved: "false", pin: pinA, compared: sha["a-docs"]},
+		{name: "new branch, parent pins another host", before: zero, head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"]},
+		{name: "new branch, parent pins the same host", before: zero, head: sha["b-again"], moved: "false", pin: pinB, compared: sha["b"]},
+		{name: "no before", before: "", head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"]},
+		{name: "before not fetchable, parent pins the same host", before: unknown, head: sha["b-again"], moved: "false", pin: pinB, compared: sha["b"], warn: true},
+		{name: "before not fetchable, parent pins another host", before: unknown, head: sha["b"], moved: "true", pin: pinB, compared: sha["a-docs"], warn: true},
+		{name: "first commit", before: zero, head: sha["a"], moved: "true", pin: pinA, compared: ""},
 		{name: "pin removed", before: sha["a-back"], head: sha["none"], fail: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -722,8 +731,9 @@ func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 			}
 			pin, _ := readStepOutput(t, output, "pin")
 			head, _ := readStepOutput(t, output, "sha")
-			if moved != tc.moved || pin != tc.pin || head != tc.head {
-				t.Errorf("moved %q pin %q sha %q, want %q %q %q\n%s", moved, pin, head, tc.moved, tc.pin, tc.head, out)
+			compared, found := readStepOutput(t, output, "before")
+			if moved != tc.moved || pin != tc.pin || head != tc.head || compared != tc.compared || !found {
+				t.Errorf("moved %q pin %q sha %q before %q (written %v), want %q %q %q %q\n%s", moved, pin, head, compared, found, tc.moved, tc.pin, tc.head, tc.compared, out)
 			}
 			if warned := strings.Contains(out, "::warning"); warned != tc.warn {
 				t.Errorf("::warning printed %v, want %v\n%s", warned, tc.warn, out)

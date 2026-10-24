@@ -185,6 +185,7 @@ func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
 	for _, tc := range []struct{ path, name string }{
 		{rbeWorkerWorkflow, "rbe-worker-pool"},
 		{rbeForkPoolWorkflow, "rbe-fork-pool"},
+		{rbeWorkerLegacyWorkflow, "rbe-worker-legacy"},
 	} {
 		text := readFile(t, repoRoot(t), tc.path)
 		var wf struct {
