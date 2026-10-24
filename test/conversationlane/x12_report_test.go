@@ -106,9 +106,10 @@ type x12LoadRecord struct {
 	R3      x12Growth                 `json:"r3_growth"`
 	// Budget is the evidence load's wall-time budget (0 in the gating
 	// tier); Elapsed is how long its rounds took, or, for a load that
-	// stopped early, how far it got.
-	Budget  time.Duration `json:"budget,omitempty"`
-	Elapsed time.Duration `json:"elapsed"`
+	// stopped before its last round (Finished false), how far it got.
+	Budget   time.Duration `json:"budget,omitempty"`
+	Elapsed  time.Duration `json:"elapsed"`
+	Finished bool          `json:"finished"`
 	// WellFormed counts the load's well-formed requests; NotSucceeded
 	// names each of them that did not succeed (x12NotSucceeded).
 	WellFormed   int      `json:"well_formed_requests"`
@@ -297,10 +298,12 @@ func (r *x12Collector) passLines() []x12PassLine {
 			offending["I8"] = append(offending["I8"], a.Backend+"/"+a.Mode+": "+p)
 		}
 	}
-	// The load lines count what the load records carry.
+	// The load lines count what the load records carry. A load that stopped
+	// before its last round has not shown it finishes within its budget; it
+	// fails the line only once it ran past it.
 	evals := maps.Clone(r.evals)
 	for _, l := range r.loads {
-		if l.Budget > 0 {
+		if l.Budget > 0 && l.Finished {
 			evals[x12LineBudget]++
 		}
 		evals[x12LineSucceeds] += l.WellFormed
@@ -323,8 +326,12 @@ func (r *x12Collector) passLines() []x12PassLine {
 	}
 	budget := measured(x12LineBudget)
 	for _, l := range r.loads {
-		if l.Budget > 0 {
+		switch {
+		case l.Budget <= 0:
+		case l.Finished:
 			budget = fmt.Sprintf("%s: %s of %s", l.Backend, l.Elapsed, l.Budget)
+		default:
+			budget = fmt.Sprintf("%s: stopped before its last round after %s of %s", l.Backend, l.Elapsed, l.Budget)
 		}
 	}
 	p5 := fmt.Sprintf("%d offending; %d deliveries compared with off's text, %d scanned for identifiers", len(offending["P5"]), r.evals["P5"], r.evals[x12P5Identifiers])
@@ -457,9 +464,12 @@ func renderX12Markdown(doc x12ReportDoc) string {
 	}
 	for _, l := range doc.Loads {
 		fmt.Fprintf(&b, "\n### Fault-free load (%s)\n\n", l.Backend)
-		if l.Budget > 0 {
+		switch {
+		case !l.Finished:
+			fmt.Fprintf(&b, "Load stopped before its last round after %s\n\n", l.Elapsed)
+		case l.Budget > 0:
 			fmt.Fprintf(&b, "Load wall time %s of its %s budget\n\n", l.Elapsed, l.Budget)
-		} else {
+		default:
 			fmt.Fprintf(&b, "Load wall time %s\n\n", l.Elapsed)
 		}
 		fmt.Fprintf(&b, "P4: %d requests, %d equal (%.4f); late mismatches %d; other %d; open ops not replayed %d (%d unexplained); mail notifies excluded %d\n\n", l.P4.Requests, l.P4.Equal, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other), l.P4.NotReplay, len(l.P4.OpenUnexplained), l.P4.MailNotifyExcluded)
@@ -566,10 +576,11 @@ func TestX12LifecycleWaitIsBoundedInTheGatingTier(t *testing.T) {
 	}
 }
 
-// TestX12ArmsByPart pins which store arms each evidence part runs on (the
-// maintainers' 2026-10-23 ruling on #8217): the crash arms on SQLite and
-// embedded Dolt, the load on SQLite and a bd-provisioned Dolt sql-server,
-// served natively.
+// TestX12ArmsByPart pins which store arms each evidence part runs on
+// (x12PartArms): the crash arms on SQLite and embedded Dolt, and the load on
+// SQLite and on a bd-provisioned Dolt sql-server, served natively, which
+// stands in for the BdStore-served arm the maintainers' 2026-10-23 ruling on
+// #8217 asked for until a maintainer accepts it or ga-ve3tjw adds that arm.
 func TestX12ArmsByPart(t *testing.T) {
 	for _, tc := range []struct {
 		part, backend string
@@ -808,22 +819,24 @@ func TestX12NotSucceeded(t *testing.T) {
 // of the report: its R2 table names the backend of every latency row, its
 // R3 line names the arm whose op-row growth it states and prints a figure
 // per op only when one was computed, it lists every well-formed request that
-// did not succeed, and it states the load's wall time against its budget.
+// did not succeed, and it states the load's wall time against its budget,
+// or, for a load that stopped before its last round, how far it got.
 func TestX12LoadReportStatesLatencyPerBackendAndGrowth(t *testing.T) {
 	perOp := 150.0
 	stated := x12Growth{Recorded: 5, NewRows: 5, LogicalByKind: map[string]x12Size{}, PhysicalBytes: 1000, PhysicalOverOff: 750, PhysicalPerOp: &perOp, PhysicalNote: "150 physical bytes per op over the off round"}
 	unstated := x12Growth{Recorded: 5, NewRows: 5, LogicalByKind: map[string]x12Size{}, PhysicalBytes: 1000, PhysicalOverOff: -750, PhysicalNote: "no physical figure per op: round 5 (auto) shrank by 9 bytes, so the store compacted mid-load"}
 	doc := x12ReportDoc{Tier: "evidence", Backend: "bd-dolt", Loads: []x12LoadRecord{{
 		Tier: "evidence", Backend: "bd-dolt",
-		Budget: 45 * time.Minute, Elapsed: 12 * time.Minute,
+		Budget: 45 * time.Minute, Elapsed: 12 * time.Minute, Finished: true,
 		WellFormed: 7, NotSucceeded: []string{"require round 3 cli-nudge-wait key \"k\": client failed"},
 		R2: []x12Latency{{Backend: "bd-dolt", Mode: "auto", Path: "submit", N: 3, P50: time.Millisecond, P95: 2 * time.Millisecond, P99: 3 * time.Millisecond, Max: 4 * time.Millisecond}},
 		R3: stated,
-	}, {Tier: "evidence", Backend: "sqlite", R3: unstated}}}
+	}, {Tier: "evidence", Backend: "sqlite", Budget: 45 * time.Minute, Elapsed: 20 * time.Minute, R3: unstated}}}
 	md := renderX12Markdown(doc)
 	for _, want := range []string{
 		"### Fault-free load (bd-dolt)",
 		"Load wall time 12m0s of its 45m0s budget",
+		"### Fault-free load (sqlite)\n\nLoad stopped before its last round after 20m0s\n",
 		"Well-formed requests that did not succeed: 1 of 7\n- require round 3 cli-nudge-wait key \"k\": client failed\n",
 		"| Backend | Mode | Path | n | p50 | p95 | p99 | max |",
 		"| bd-dolt | auto | submit | 3 | 1ms | 2ms | 3ms | 4ms |",
@@ -850,15 +863,17 @@ func TestX12LoadReportStatesLatencyPerBackendAndGrowth(t *testing.T) {
 }
 
 // TestX12PassLineBudget pins the budget line, judged from each load
-// record's Budget and Elapsed, not from the problems its test wrote: not
-// run without an evidence load, pass within the budget, FAIL past it; an
+// record's Budget, Elapsed and Finished, not from the problems its test
+// wrote: not run without an evidence load, pass within the budget, FAIL past
+// it; a load that stopped before its last round has not shown it finishes
+// within its budget, so it leaves the line not run until it ran past it; an
 // evidence load that carries no budget is a harness item.
 func TestX12PassLineBudget(t *testing.T) {
 	if got := x12PassLineOf(t, &x12Collector{evals: map[string]int{}}, x12LineBudget).Status; got != "not run" {
 		t.Errorf("budget status with no load %q, want not run", got)
 	}
 	gating := &x12Collector{evals: map[string]int{}}
-	gating.addLoad(x12LoadRecord{Tier: "gating", Backend: "sqlite", Budget: x12LoadBudgetFor("gating"), Elapsed: time.Minute})
+	gating.addLoad(x12LoadRecord{Tier: "gating", Backend: "sqlite", Budget: x12LoadBudgetFor("gating"), Elapsed: time.Minute, Finished: true})
 	if got := x12PassLineOf(t, gating, x12LineBudget).Status; got != "not run" {
 		t.Errorf("budget status with only a gating load %q, want not run", got)
 	}
@@ -866,24 +881,34 @@ func TestX12PassLineBudget(t *testing.T) {
 		t.Errorf("a gating load without a budget is a harness item: %+v", x12PassLineOf(t, gating, "harness"))
 	}
 	within := &x12Collector{evals: map[string]int{}}
-	within.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: 90 * time.Minute, Elapsed: 63 * time.Minute})
+	within.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: 90 * time.Minute, Elapsed: 63 * time.Minute, Finished: true})
 	if got := x12PassLineOf(t, within, x12LineBudget); got.Status != "pass" || got.Measured != "bd-dolt: 1h3m0s of 1h30m0s" {
 		t.Errorf("budget line within the budget = %+v, want pass measuring bd-dolt: 1h3m0s of 1h30m0s", got)
 	}
 	over := &x12Collector{evals: map[string]int{}}
-	over.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: 90 * time.Minute, Elapsed: 2 * time.Hour})
+	over.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: 90 * time.Minute, Elapsed: 2 * time.Hour, Finished: true})
 	got := x12PassLineOf(t, over, x12LineBudget)
 	if got.Status != "FAIL" || len(got.Offending) != 1 || !strings.Contains(got.Offending[0], x12BudgetProblem(90*time.Minute, 2*time.Hour)) {
 		t.Errorf("budget line past the budget, with no problem written = %+v, want FAIL naming the overrun", got)
 	}
 	// A problem the test wrote under the line is not counted a second time.
 	written := &x12Collector{evals: map[string]int{}}
-	written.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: time.Minute, Elapsed: time.Hour, Problem: []string{"[" + x12LineBudget + "] " + x12BudgetProblem(time.Minute, time.Hour)}})
+	written.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: time.Minute, Elapsed: time.Hour, Finished: true, Problem: []string{"[" + x12LineBudget + "] " + x12BudgetProblem(time.Minute, time.Hour)}})
 	if got := x12PassLineOf(t, written, x12LineBudget); got.Status != "FAIL" || len(got.Offending) != 1 {
 		t.Errorf("budget line past the budget with its problem written = %+v, want FAIL with one item", got)
 	}
+	stopped := &x12Collector{evals: map[string]int{}}
+	stopped.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: 90 * time.Minute, Elapsed: 20 * time.Minute})
+	if got := x12PassLineOf(t, stopped, x12LineBudget); got.Status != "not run" || got.Measured != "bd-dolt: stopped before its last round after 20m0s of 1h30m0s" {
+		t.Errorf("budget line of a load that stopped within its budget = %+v, want not run, naming the stop", got)
+	}
+	stoppedOver := &x12Collector{evals: map[string]int{}}
+	stoppedOver.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Budget: 90 * time.Minute, Elapsed: 2 * time.Hour})
+	if got := x12PassLineOf(t, stoppedOver, x12LineBudget); got.Status != "FAIL" || len(got.Offending) != 1 {
+		t.Errorf("budget line of a load that stopped past its budget = %+v, want FAIL with one item", got)
+	}
 	unbudgeted := &x12Collector{evals: map[string]int{}}
-	unbudgeted.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Elapsed: 2 * time.Hour})
+	unbudgeted.addLoad(x12LoadRecord{Tier: "evidence", Backend: "bd-dolt", Elapsed: 2 * time.Hour, Finished: true})
 	if got := x12PassLineOf(t, unbudgeted, "harness"); got.Status != "FAIL" || len(got.Offending) != 1 || !strings.Contains(got.Offending[0], "no wall-time budget") {
 		t.Errorf("harness line with an evidence load that carries no budget = %+v, want FAIL naming it", got)
 	}

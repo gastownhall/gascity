@@ -145,11 +145,28 @@ func (c *laneCity) runTool(env []string, dir, bin string, args ...string) {
 }
 
 // doltServerConfig is the sql-server's configuration: loopback on port,
-// over dataDir, with automatic garbage collection off, so the data dir's
-// size is what the city wrote (R3 measures it per round; an automatic GC
-// mid-round compacts it and the round's growth goes negative).
+// over dataDir, with automatic garbage collection and the stats workers off
+// as gc's managed server turns them off (cmd/gc writeManagedDoltConfigFile:
+// the auto-GC behavior, its system variable and the four stats switches),
+// so the data dir's size is what the city wrote. R3 measures it per round:
+// a GC mid-round compacts it, so the round's growth goes negative, and a
+// persisted stats write grows it with no op.
 func doltServerConfig(port int, dataDir string) string {
-	return fmt.Sprintf("log_level: info\nbehavior:\n  auto_gc_behavior:\n    enable: false\nlistener:\n  host: 127.0.0.1\n  port: %d\ndata_dir: %q\n", port, dataDir)
+	return fmt.Sprintf(`log_level: info
+behavior:
+  auto_gc_behavior:
+    enable: false
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
+listener:
+  host: 127.0.0.1
+  port: %d
+data_dir: %q
+`, port, dataDir)
 }
 
 // startDoltServer starts dolt sql-server on a leased loopback port over

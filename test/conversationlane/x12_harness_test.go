@@ -84,14 +84,18 @@ const (
 	x12PartLoad   = "load"
 )
 
-// x12PartArms are the store arms each evidence part runs on (the
-// maintainers' 2026-10-23 ruling on #8217). The crash arms (the matrix part,
-// the incapable-store arm with it) run on SQLite and embedded Dolt, whose
-// one-process store a crash leaves exactly as the killed gc wrote it. The
-// load runs on SQLite and on the bd-dolt arm (harness_bddolt_test.go): a
-// workspace bd provisioned on a dolt sql-server, served natively, the store
-// a direct-server city gets. On embedded Dolt its six rounds outlast any
-// test timeout (ga-rqb904).
+// x12PartArms are the store arms each evidence part runs on. The crash arms
+// (the matrix part, the incapable-store arm with it) run on SQLite and
+// embedded Dolt, whose one-process store a crash leaves exactly as the
+// killed gc wrote it; the maintainers' 2026-10-23 ruling on #8217 keeps
+// embedded Dolt for them only. The load runs on SQLite and on the bd-dolt
+// arm (harness_bddolt_test.go): a workspace bd provisioned on a dolt
+// sql-server, served natively, the store a direct-server city gets. That arm
+// stands in for the load arm the ruling asked for, a bd-served Dolt arm on
+// the topology real cities run, until a maintainer accepts the substitute or
+// ga-ve3tjw adds that arm: that topology serves sessions through BdStore,
+// which records no ops with the pinned bd. On embedded Dolt the load's six
+// rounds outlast any test timeout (ga-rqb904).
 var x12PartArms = map[string][]storeArm{
 	x12PartMatrix: {armSQLite, armDolt},
 	x12PartLoad:   {armSQLite, armBdDolt},

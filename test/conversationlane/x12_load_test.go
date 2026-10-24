@@ -34,10 +34,11 @@ import (
 const x12StateWait = 5 * time.Minute
 
 // x12LoadBudget is the wall time the evidence load must finish in, from its
-// city's creation to its last replay. The evidence run command gives the
-// binary 7200 s (BUILD.bazel); the load leaves the off baselines, the report
-// and the cleanup the rest. It was 50 minutes until the bd-dolt arm's first
-// run took 1h3m10s; its six rounds took 1h2m14s run alone on 2026-10-23.
+// city's creation to its last replay. The slowest bd-dolt load run alone
+// took 1h13m49s (2026-10-24), which leaves it about 16 minutes of headroom.
+// The evidence run command gives the binary 7200 s (BUILD.bazel), which
+// leaves the off baselines, the report and the cleanup the other 30
+// minutes; beside that load they took about 4.
 const x12LoadBudget = 90 * time.Minute
 
 // x12LoadBudgetFor is the wall-time budget of tier's load: x12LoadBudget
@@ -201,17 +202,6 @@ func TestX12FaultFreeLoad(t *testing.T) {
 		record.Problem = append(record.Problem, "["+line+"] "+msg)
 		t.Errorf("[%s] %s", line, msg)
 	}
-	defer func() {
-		if record.Elapsed == 0 {
-			// The load stopped before its last round: its elapsed time is
-			// how far it got.
-			record.Elapsed = time.Since(began).Round(time.Second)
-		}
-		if t.Failed() && len(record.Problem) == 0 {
-			record.Problem = append(record.Problem, "[harness] "+t.Name()+" failed outside every recorded check; its log says why")
-		}
-		x12Report.addLoad(record)
-	}()
 	var all []*x12LoadReq
 	latency := map[string][]time.Duration{}
 	// R3 is measured over the recorded rounds: the op rows the store gained
@@ -220,6 +210,18 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	// round before it (the same mix, recording nothing).
 	opsBefore := -1
 	var rounds []x12RoundGrowth
+	defer func() {
+		if !record.Finished {
+			// The load stopped before its last round: its elapsed time is
+			// how far it got, and the harness item names the rounds it ran.
+			record.Elapsed = time.Since(began).Round(time.Second)
+			fail("harness", "%s", x12RoundsProblem(tier, rounds))
+		}
+		if t.Failed() && len(record.Problem) == 0 {
+			record.Problem = append(record.Problem, "[harness] "+t.Name()+" failed outside every recorded check; its log says why")
+		}
+		x12Report.addLoad(record)
+	}()
 	for round, mode := range modes {
 		c.setMode(mode)
 		c.restart("")
@@ -243,8 +245,9 @@ func TestX12FaultFreeLoad(t *testing.T) {
 		rounds = append(rounds, x12RoundGrowth{Mode: mode, Bytes: c.bindingSize() - start})
 		all = append(all, reqs...)
 	}
-	newRows := len(c.allOps()) - opsBefore
+	record.Finished = true
 	record.Elapsed = time.Since(began).Round(time.Second)
+	newRows := len(c.allOps()) - opsBefore
 	if p := x12BudgetProblem(record.Budget, record.Elapsed); p != "" {
 		fail(x12LineBudget, "%s", p)
 	}

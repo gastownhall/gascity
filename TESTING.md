@@ -240,12 +240,15 @@ SQLite and on `bd-dolt`, requires every well-formed request to succeed and
 the load to finish within its 90-minute budget, and reports its latency per
 backend and its op-row growth. `bd-dolt` is a workspace the pinned bd's
 `bd init --server` provisioned on a `dolt sql-server` the harness runs
-(automatic GC off, so its growth is what the city wrote), served natively
-through a `beads-workspace` binding: bd runs only to provision it. That is
-the store a city bound directly to a Dolt server gets, not the default
-topology, whose sessions are served through BdStore; with the pinned bd,
-which lacks `--if-revision`, a BdStore makes no conditional writes and
-records no ops (ga-ve3tjw). Each writes
+(automatic GC and the stats workers off, so its growth is what the city
+wrote), served natively through a `beads-workspace` binding: bd runs only to
+provision it. That is the store a city bound directly to a Dolt server gets,
+not the default topology, whose sessions are served through BdStore; with
+the pinned bd, which lacks `--if-revision`, a BdStore makes no conditional
+writes and records no ops (ga-ve3tjw). So `bd-dolt` stands in for the load
+arm the maintainers' 2026-10-23 ruling on #8217 asked for, a bd-served Dolt
+arm on the topology real cities run, until a maintainer accepts the
+substitute or ga-ve3tjw adds that arm. Each part writes
 `x12-report-<backend>-<part>.{json,md}` to the test's undeclared outputs.
 A part takes from 30 minutes to well over an hour, past the remote
 executor's action timeout, so run them locally:
@@ -264,9 +267,9 @@ bazel test --config=ci --config=integration --strategy=TestRunner=local \
 is not stamped.
 
 The load parts run one at a time (`--local_test_jobs=1`): their latency (R2)
-is measured with nothing beside them, and the budget was set from a bd-dolt
-load that ran alone (1h2m14s; the first run, at 1h3m10s, broke the earlier
-50-minute budget). Beside the matrix parts a load can run past it.
+is measured with nothing beside them, and the 90-minute budget leaves about
+16 minutes over the slowest bd-dolt load that ran alone (1h13m49s). Beside
+the matrix parts a load can run past it, so no suite runs the two together.
 
 ### Git auto-maintenance in test repos
 

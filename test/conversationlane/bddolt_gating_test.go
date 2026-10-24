@@ -23,9 +23,10 @@ import (
 // TestBdDoltArmProvisionsAndRecords provisions the bd-dolt arm with the
 // city's temp root inside a git repository that holds a staged change, and
 // checks that the repository gained no commit and kept its index as it
-// was, and that the arm's server runs with automatic GC off (R3 measures
-// its data dir per round); then a city on the arm, in require, records a
-// well-formed API submit and a CLI nudge, and both ops close succeeded.
+// was, and that the arm's server runs with automatic GC and the stats
+// workers off (R3 measures its data dir per round); then a city on the arm,
+// in require, records a well-formed API submit and a CLI nudge, and both ops
+// close succeeded.
 func TestBdDoltArmProvisionsAndRecords(t *testing.T) {
 	outer := t.TempDir()
 	gitIn := func(args ...string) (string, error) {
@@ -55,8 +56,9 @@ func TestBdDoltArmProvisionsAndRecords(t *testing.T) {
 		t.Errorf("the enclosing repository's index = %q (%v), want only the staged user-staged.txt", staged, err)
 	}
 
-	if got, err := doltAutoGCEnabled(c.doltServer.port); err != nil || got != 0 {
-		t.Errorf("the arm's dolt sql-server @@dolt_auto_gc_enabled = %d (%v), want 0", got, err)
+	off := doltSwitches{autoGC: 0, stats: 0, statsGC: 0, statsMemoryOnly: 1, statsPaused: 1}
+	if got, err := readDoltSwitches(c.doltServer.port); err != nil || got != off {
+		t.Errorf("the arm's dolt sql-server switches = %+v (%v), want %+v: automatic GC and the stats workers off", got, err, off)
 	}
 
 	c.start("")
@@ -80,17 +82,26 @@ func TestBdDoltArmProvisionsAndRecords(t *testing.T) {
 	}
 }
 
-// doltAutoGCEnabled is @@dolt_auto_gc_enabled on the dolt sql-server
-// listening on port.
-func doltAutoGCEnabled(port int) (int, error) {
+// doltSwitches are a dolt sql-server's automatic-GC and stats switches as
+// its system variables read (1 on, 0 off): @@dolt_auto_gc_enabled,
+// @@dolt_stats_enabled, @@dolt_stats_gc_enabled, @@dolt_stats_memory_only
+// and @@dolt_stats_paused.
+type doltSwitches struct {
+	autoGC, stats, statsGC, statsMemoryOnly, statsPaused int
+}
+
+// readDoltSwitches reads the switches of the dolt sql-server listening on
+// port.
+func readDoltSwitches(port int) (doltSwitches, error) {
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
 	if err != nil {
-		return 0, fmt.Errorf("opening the dolt sql-server on port %d: %w", port, err)
+		return doltSwitches{}, fmt.Errorf("opening the dolt sql-server on port %d: %w", port, err)
 	}
 	defer func() { _ = db.Close() }()
-	var enabled int
-	if err := db.QueryRow("SELECT @@dolt_auto_gc_enabled").Scan(&enabled); err != nil {
-		return 0, fmt.Errorf("reading @@dolt_auto_gc_enabled: %w", err)
+	var s doltSwitches
+	row := db.QueryRow("SELECT @@dolt_auto_gc_enabled, @@dolt_stats_enabled, @@dolt_stats_gc_enabled, @@dolt_stats_memory_only, @@dolt_stats_paused")
+	if err := row.Scan(&s.autoGC, &s.stats, &s.statsGC, &s.statsMemoryOnly, &s.statsPaused); err != nil {
+		return doltSwitches{}, fmt.Errorf("reading the automatic-GC and stats switches: %w", err)
 	}
-	return enabled, nil
+	return s, nil
 }
