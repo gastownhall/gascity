@@ -196,10 +196,47 @@ func redactedJSONError(data []byte, err error) error {
 	}
 	var typed *json.UnmarshalTypeError
 	if errors.As(err, &typed) {
-		line, col := lineAndColumn(data, typed.Offset-1)
-		return fmt.Errorf("a JSON %s where an object was expected, at line %d, column %d", typed.Value, line, col)
+		// The decoder's Value spells an out-of-range number out ("number
+		// 1e999"), and its Offset points past the value it rejected; neither
+		// is repeated. Values below the top level decode into interfaces, so
+		// a number out of range is the only type error there.
+		switch {
+		case strings.HasPrefix(typed.Value, "number "):
+			line, col := lineAndColumn(data, numberStart(data, typed.Offset))
+			return fmt.Errorf("a JSON number out of range at line %d, column %d", line, col)
+		case typed.Field == "":
+			kind := "value"
+			switch typed.Value {
+			case "array", "string", "number", "bool":
+				kind = typed.Value
+			}
+			start := int64(len(data) - len(bytes.TrimLeft(data, " \t\r\n")))
+			line, col := lineAndColumn(data, start)
+			return fmt.Errorf("the top level is a JSON %s, not an object, at line %d, column %d", kind, line, col)
+		}
+		return errors.New("a JSON value gc cannot read")
 	}
 	return errors.New("invalid JSON")
+}
+
+// numberStart returns the offset of the number literal in data that ends at
+// or before end, the offset the decoder reports past it.
+func numberStart(data []byte, end int64) int64 {
+	if end > int64(len(data)) {
+		end = int64(len(data))
+	}
+	i := end
+	for i > 0 && !isJSONNumberByte(data[i-1]) {
+		i--
+	}
+	for i > 0 && isJSONNumberByte(data[i-1]) {
+		i--
+	}
+	return i
+}
+
+func isJSONNumberByte(c byte) bool {
+	return c >= '0' && c <= '9' || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E'
 }
 
 // lineAndColumn returns the 1-based line and column of byte offset off in

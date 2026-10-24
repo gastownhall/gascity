@@ -188,26 +188,45 @@ func TestApplyMCPProjectionRefusesUnparseableFiles(t *testing.T) {
 }
 
 // A parser's message quotes the text it choked on, and a provider file can
-// hold a secret. gc's parse errors give only the line and column.
+// hold a secret. gc's parse errors give only what went wrong and where, by
+// line and column, whatever the file holds.
 func TestMCPAdoptionParseErrorsQuoteNoFileContent(t *testing.T) {
-	for provider, tc := range map[string]struct{ content, want string }{
-		MCPProviderCodex:  {"[mcp_servers.team.env]\nTOKEN = sk-live-0123456789\n", "invalid TOML at line 2, column 9"},
-		MCPProviderClaude: {"{\n  \"mcpServers\": {\"team\": {\"env\": {\"TOKEN\": sk-live-0123456789}}}\n}", "invalid JSON at line 2, column 44"},
-	} {
-		t.Run(provider, func(t *testing.T) {
-			root := t.TempDir()
-			proj := notesProjection(t, provider, root)
-			writeTarget(t, proj, tc.content)
-			refused := assertRefusedAndUntouched(t, proj, root)
-			if refused.ParseErr == nil || refused.ParseErr.Error() != tc.want {
-				t.Fatalf("ParseErr = %v, want %q", refused.ParseErr, tc.want)
+	cases := []struct {
+		provider, content, want string
+	}{
+		{MCPProviderCodex, "[mcp_servers.team.env]\nTOKEN = sk-live-0123456789\n", "invalid TOML at line 2, column 9"},
+		{MCPProviderCodex, "TOKEN = \"sk-live-0123456789\nX = 1\n", ""},
+		{MCPProviderCodex, "a = 1\na = \"sk-live-0123456789\"\n", ""},
+		{MCPProviderCodex, "key = 'sk-live-0123456789' junk\n", ""},
+		{MCPProviderClaude, "{\n  \"mcpServers\": {\"team\": {\"env\": {\"TOKEN\": sk-live-0123456789}}}\n}", "invalid JSON at line 2, column 44"},
+		{MCPProviderClaude, `{"env":{"TOKEN":"sk-live-0123456789"}`, ""},
+		{MCPProviderClaude, "{\"env\":{\"TOKEN\":\"sk-live-0123\x01\"}}", ""},
+		{MCPProviderClaude, `{"a":"sk-live-0123456789" "b":1}`, ""},
+		{MCPProviderClaude, `{"mcpServers":{"team":{"env":{"PORT":1e999}}}}`, "a JSON number out of range at line 1, column 38"},
+		{MCPProviderGemini, `{"a":1e999}`, "a JSON number out of range at line 1, column 6"},
+		{MCPProviderGemini, `  "sk-live-0123456789"`, "the top level is a JSON string, not an object, at line 1, column 3"},
+		{MCPProviderGemini, "\n[1]", "the top level is a JSON array, not an object, at line 2, column 1"},
+		{MCPProviderCursor, `12345`, "the top level is a JSON number, not an object, at line 1, column 1"},
+		{MCPProviderOpenCode, `true`, "the top level is a JSON bool, not an object, at line 1, column 1"},
+	}
+	for _, tc := range cases {
+		root := t.TempDir()
+		proj := notesProjection(t, tc.provider, root)
+		writeTarget(t, proj, tc.content)
+		refused := assertRefusedAndUntouched(t, proj, root)
+		if refused.ParseErr == nil {
+			t.Fatalf("%s %q: refusal = %v, want a parse error", tc.provider, tc.content, refused)
+		}
+		if tc.want != "" && refused.ParseErr.Error() != tc.want {
+			t.Fatalf("%s %q: ParseErr = %q, want %q", tc.provider, tc.content, refused.ParseErr, tc.want)
+		}
+		// Reason, not Error: Error names the file, and a temp dir's path
+		// can hold any text.
+		for _, leak := range []string{"sk-live", "0123", "1e999", "12345"} {
+			if strings.Contains(refused.Reason(), leak) {
+				t.Fatalf("%s %q: refusal quotes the file's content (%q): %s", tc.provider, tc.content, leak, refused.Reason())
 			}
-			for _, leak := range []string{"sk", "live", "0123"} {
-				if strings.Contains(refused.Error(), leak) {
-					t.Fatalf("refusal quotes the file's content (%q): %v", leak, refused)
-				}
-			}
-		})
+		}
 	}
 }
 
