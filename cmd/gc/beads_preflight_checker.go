@@ -30,6 +30,7 @@ func newBeadsPreflightChecker(cityPath, provider string, cfg *config.City) contr
 		BDContext:                  preflightBDContextReader(cityPath),
 		DatabaseProjectID:          preflightDatabaseProjectIDReader(cityPath),
 		DeferIdentityToNativeOpen:  preflightIdentityDeferredReader(cityPath),
+		SkipIdentityProbe:          preflightIdentityProbeSkipReader(cityPath),
 		DatabaseSchemaCursors:      preflightDatabaseSchemaCursorsReader(cityPath),
 		AllowSchemaBehindMigrate:   preflightAllowSchemaBehindMigrateReader(cityPath, cfg),
 		SchemaLatestIgnoredVersion: beads.SchemaCursorIgnored,
@@ -224,6 +225,23 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 			return false
 		}
 		return target.External || target.DoltMode == "proxied-server"
+	}
+}
+
+// preflightIdentityProbeSkipReader reports whether a scope resolves to a remote
+// external Dolt endpoint (a hosted beads-gateway or hub) that the direct
+// root/plaintext project_id probe is known in advance to be unable to
+// authenticate, so the probe is never dialed for it (gastownhall/gascity#5965).
+// It is narrower than preflightIdentityDeferredReader: a loopback external
+// endpoint speaks plaintext, so its probe still runs and a genuine project_id
+// mismatch still blocks native activation.
+func preflightIdentityProbeSkipReader(cityPath string) func(scope string) bool {
+	return func(scope string) bool {
+		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+		if err != nil || !ok {
+			return false
+		}
+		return targetCarriesHostedGatewayTLS(target)
 	}
 }
 
