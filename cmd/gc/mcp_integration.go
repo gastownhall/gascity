@@ -223,19 +223,59 @@ func warnStage1MCPSkip(cityPath, agent string, err error, stderr io.Writer) {
 	warnStage1MCPOnce(cityPath, fmt.Sprintf("skipping MCP projection for agent %q: %v", agent, err), stderr)
 }
 
-func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
-	return buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, false)
+// stage1MCPTargets is what a stage-1 pass reconciles: the targets to apply,
+// and the managed keys of agents it skipped. A skipped agent cannot start,
+// but its last projected target is left as it was instead of being cleaned
+// up as an orphan: the skip can be transient (a provider binary missing from
+// the supervisor's PATH), and a session already running may read the file.
+type stage1MCPTargets struct {
+	targets []mcpTargetSpec
+	held    []string
 }
 
-// buildStage1MCPTargetsWith is buildStage1MCPTargets with pathOnly: agents'
-// work dirs are resolved without being created, for a plan that must write
-// nothing.
-func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) ([]mcpTargetSpec, error) {
+func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, false)
+	return set.targets, err
+}
+
+// heldStage1MCPKey returns the managed key of the stage-1 target a skipped
+// agent would reconcile: set when its provider family has an MCP projection
+// and its work dir is its scope root. The family resolves from config alone,
+// since the provider binary may be what is missing. With pathOnly, the work
+// dir is resolved without being created.
+func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pathOnly bool) (string, bool) {
+	resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, resolveAnyProviderBinary)
+	if err != nil {
+		return "", false
+	}
+	kind := resolvedProviderLaunchFamily(resolved)
+	if !supportsMCPProviderKind(kind) {
+		return "", false
+	}
+	scopeRoot := agentScopeRoot(agent, cityPath, cfg.Rigs)
+	resolveWorkDir := resolveWorkDirForQualifiedName
+	if pathOnly {
+		resolveWorkDir = resolveWorkDirPathForQualifiedName
+	}
+	workDir, err := resolveWorkDir(cityPath, cfg, agent, agent.QualifiedName())
+	if err != nil || canonicaliseFilePath(workDir, cityPath) != scopeRoot {
+		return "", false
+	}
+	return managedKey(kind, scopeRoot), true
+}
+
+// collectStage1MCPTargets resolves every stage-1 agent's MCP target, and the
+// targets of the agents it skips. With pathOnly, agents' work dirs are
+// resolved without being created, for a plan that must write nothing.
+func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer, pathOnly bool) (stage1MCPTargets, error) {
 	if cfg == nil {
-		return nil, nil
+		return stage1MCPTargets{}, nil
 	}
 	byKey := make(map[string]mcpTargetSpec)
-	var skips mcpSkipGroups
+	var (
+		skips mcpSkipGroups
+		held  []string
+	)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
@@ -246,10 +286,13 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 			// One agent's provider must not fail the whole city: skip it
 			// here. Its own session start still reports the same error.
 			warnStage1MCPSkip(cityPath, agent.QualifiedName(), err, stderr)
+			if key, ok := heldStage1MCPKey(cityPath, cfg, agent, pathOnly); ok {
+				held = append(held, key)
+			}
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
+			return stage1MCPTargets{}, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
 		}
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
@@ -264,7 +307,7 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 		existing, ok := byKey[key]
 		if ok {
 			if existing.Projection.Hash() != view.Projection.Hash() {
-				return nil, fmt.Errorf(
+				return stage1MCPTargets{}, fmt.Errorf(
 					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
 					view.Projection.Target,
 					view.Projection.Provider,
@@ -299,15 +342,20 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 	for _, key := range keys {
 		out = append(out, byKey[key])
 	}
-	return out, nil
+	return stage1MCPTargets{targets: out, held: held}, nil
 }
 
 func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) error {
-	targets, err := buildStage1MCPTargets(cityPath, cfg, lookPath, stderr)
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, false)
 	if err != nil {
 		return err
 	}
-	desired := make(map[string]bool, len(targets)) // provider+root keys we still own
+	desired := make(map[string]bool, len(set.targets)+len(set.held)) // provider+root keys we still own
+	// A skipped agent's target is left as it was, not cleaned up as an
+	// orphan (stage1MCPTargets).
+	for _, key := range set.held {
+		desired[key] = true
+	}
 	// .gitignore entries for the targets projected so far, by root; written
 	// on every way out, so a later target's failure does not leave a
 	// projected file unignored.
@@ -317,7 +365,7 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 			ensureMCPGitignoreBestEffort(root, gitignore[root], stderr)
 		}
 	}()
-	for _, target := range targets {
+	for _, target := range set.targets {
 		err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr)
 		var refused *materialize.MCPAdoptionRefusedError
 		if errors.As(err, &refused) {

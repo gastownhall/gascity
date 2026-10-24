@@ -18,15 +18,20 @@ import (
 // would extend. It returns the errors that would fail the real pass, so a
 // preview fails where the start would.
 func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]string, error) {
-	targets, err := buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, true)
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, true)
 	if err != nil {
 		return nil, err
 	}
 	fs := fsys.OSFS{}
 	var lines []string
-	desired := make(map[string]bool, len(targets))
+	// As in the real pass, a skipped agent's target stays claimed: the plan
+	// does not report its cleanup as an orphan.
+	desired := make(map[string]bool, len(set.targets)+len(set.held))
+	for _, key := range set.held {
+		desired[key] = true
+	}
 	gitignore := make(map[string][]string)
-	for _, target := range targets {
+	for _, target := range set.targets {
 		plan, err := target.Projection.Plan(fs)
 		if err != nil {
 			return nil, fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
