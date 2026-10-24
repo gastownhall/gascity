@@ -106,6 +106,7 @@ var (
 	managedDoltStartSQLServerFn = startManagedDoltSQLServer
 	managedDoltWaitForReadyFn   = waitForManagedDoltReady
 	managedDoltLogSuffixFn      = managedDoltLogSuffix
+	managedDoltNowFn            = time.Now
 )
 
 // init is the re-entry point for the dolt-managed-test watchdog. The watchdog
@@ -220,6 +221,10 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("open log file: %w", err)
 		}
 
+		// Capture the durable classification boundary before launching. The
+		// provider state is written after PID acquisition, but this timestamp
+		// must remain valid when an immediately-failing child is already dead.
+		launchStartedAt := managedDoltNowFn().UTC().Format(time.RFC3339)
 		started, err := managedDoltStartSQLServerFn(cityPath, layout.ConfigFile, layout.LogFile, logFile)
 		if err != nil {
 			_ = logFile.Close()
@@ -242,7 +247,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			PID:       started.PID,
 			Port:      currentPort,
 			DataDir:   layout.DataDir,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			StartedAt: launchStartedAt,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
