@@ -19,6 +19,16 @@
 #      table there and leaves the row uncommitted).
 #   1. Pre-flight: record row counts and value hashes for all user tables and
 #      require HEAD to remain stable across a bounded retry loop.
+#   1a. Pin the stable pre-flight HEAD to a Dolt branch
+#      (__gc_compact_preflight_<db>) BEFORE the mutating reset. Flatten
+#      orphans that commit (the flatten commit's parent becomes the
+#      gc-compact-base watermark, not the previous HEAD), and managed
+#      auto-GC then collects it. Without the pin, DOLT_DIFF_STAT/DOLT_DIFF
+#      against the recorded preflight hash fail with "target commit not
+#      found" and operators cannot prove row preservation (hq 2026-09-17 /
+#      ga-f5n). The pin is dropped only once post-flatten integrity passes,
+#      just before full GC so GC can reclaim the orphaned graph; quarantine
+#      and writer-race defer keep it.
 #   2. Soft-reset to the history-provenance watermark (the gc-compact-base
 #      tag; see "History protection" below); all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
@@ -36,17 +46,20 @@
 #      otherwise looks identical to the ambiguous gain+drift corruption signal.
 #      Quarantining that false positive blocks all future GC of the db and
 #      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
-#      push path's HEAD-stability defer, gain+drift, row-count-decrease, and
-#      same-count value-hash-drift cases are downgraded from a blocking
-#      quarantine to a skip-and-retry-next-run ONLY when a concurrent writer is
-#      proven. A writer is proven (and distinguished from the flatten's OWN
-#      commit) when either HEAD captured immediately before the mutating reset
-#      differs from the stable pre-flight HEAD (a writer landed in the
-#      preflight->reset window, before the flatten committed), or HEAD captured
-#      after verify moved past the flatten's own commit (a writer landed
-#      during/after verify). All other failures — and any of those signatures
-#      with a stable HEAD — still quarantine. Probe failure leaves the race
-#      unproven and quarantines.
+#      push path's HEAD-stability defer, gain+drift, row-count-decrease,
+#      same-count value-hash-drift, and the mixed INSERT+UPDATE of gain+drift
+#      on some tables plus same-count hash drift on others are downgraded from
+#      a blocking quarantine to a skip-and-retry-next-run ONLY when a concurrent
+#      writer is proven. Busy databases produce that mixed signature on every
+#      flatten (hq 2026-09-02 / ga-mku): append-only tables gain rows while
+#      update-in-place tables keep their count and drift their hash. A writer
+#      is proven (and distinguished from the flatten's OWN commit) when either
+#      HEAD captured immediately before the mutating reset differs from the
+#      stable pre-flight HEAD (a writer landed in the preflight->reset window,
+#      before the flatten committed), or HEAD captured after verify moved past
+#      the flatten's own commit (a writer landed during/after verify). All
+#      other failures — and any of those signatures with a stable HEAD — still
+#      quarantine. Probe failure leaves the race unproven and quarantines.
 #   4b. Committed-root drift gate. When per-table verification passed but the
 #      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
 #      differ across the flatten. Drift is benign only when every named table
@@ -110,7 +123,25 @@
 #                                         compaction window announced to
 #                                         every clone of that history.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
-#     (default: 1800) — wall-clock bound for each SQL CALL.
+#     (default: 1800) — wall-clock bound for each SQL CALL. This does
+#     NOT extend the sql-server's listener.read_timeout_millis (managed
+#     default 120000; releases through v1.4.2 shipped 15000), which
+#     cancels a statement that produces no rows for that long. CALL
+#     DOLT_GC('--full') produces none until GC finishes, so the listener
+#     caps the whole reclaim. Raise [dolt] read_timeout_millis and
+#     restart managed dolt, or put this variable (or
+#     GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS) in the managed-server start
+#     environment so start floors the listener.
+#   GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS
+#     (optional) — dedicated full-GC bound, in seconds. When set, wins
+#     over GC_DOLT_COMPACT_CALL_TIMEOUT_SECS as the --gc-only preflight
+#     bound and as the start-path listener floor. Set it to the longest
+#     full GC you expect.
+#   GC_DOLT_READ_TIMEOUT_MILLIS
+#     (optional) — the listener read_timeout_millis --gc-only assumes
+#     when the server's rendered config is unreadable (15000 when this
+#     is unset too). gc dolt compact --gc-only fail-closes when the
+#     ceiling is below the full-GC bound above.
 #   GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS
 #     (default: 120) — wall-clock bound for remote compare-and-push
 #                     after local compaction. Push failures are recorded for
@@ -440,6 +471,30 @@ case "$call_timeout" in
     ;;
 esac
 
+case "${GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS:-}" in
+  '')
+    compact_gc_read_timeout_secs="$call_timeout"
+    ;;
+  *[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS" >&2
+    exit 2
+    ;;
+  *)
+    compact_gc_read_timeout_secs="$GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS"
+    ;;
+esac
+
+case "${GC_DOLT_READ_TIMEOUT_MILLIS:-}" in
+  '')
+    ;;
+  *[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_READ_TIMEOUT_MILLIS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_READ_TIMEOUT_MILLIS" >&2
+    exit 2
+    ;;
+esac
+
 case "$push_timeout" in
   ''|*[!0-9]*|0)
     printf 'compact: invalid GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
@@ -621,6 +676,82 @@ valid_branch_name() {
       ;;
     *) return 1 ;;
   esac
+}
+
+# preflight_evidence_ref DB — Dolt branch that keeps the pre-flight HEAD
+# reachable across flatten + auto-GC. Name is ASCII-safe: valid_database_name
+# already rejects anything outside [A-Za-z0-9_-].
+preflight_evidence_ref() {
+  _pe_db="$1"
+  valid_database_name "$_pe_db" || return 1
+  printf '__gc_compact_preflight_%s' "$_pe_db"
+}
+
+# pin_preflight_evidence DB HEAD — force-create the evidence branch at HEAD
+# before flatten. Fail closed: flattening without a pin is how the preflight
+# commit becomes unreviewable.
+pin_preflight_evidence() {
+  _pe_db="$1"
+  _pe_head="$2"
+  case "$_pe_head" in
+    ''|*[!A-Za-z0-9]*)
+      printf 'compact: db=%s preflight HEAD %s is not a pin-able commit id — aborting before flatten\n' \
+        "$_pe_db" "${_pe_head:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+  flatten_preflight_ref=$(preflight_evidence_ref "$_pe_db") || {
+    printf 'compact: db=%s cannot derive preflight evidence branch name — aborting before flatten\n' \
+      "$_pe_db" >&2
+    return 1
+  }
+  valid_branch_name "$flatten_preflight_ref" || {
+    printf 'compact: db=%s preflight evidence branch %s is not a valid branch name — aborting before flatten\n' \
+      "$_pe_db" "$flatten_preflight_ref" >&2
+    flatten_preflight_ref=""
+    return 1
+  }
+  _pe_err=$(mktemp)
+  if ! dolt_query "$_pe_db" \
+    "CALL DOLT_BRANCH('-f', '$flatten_preflight_ref', '$_pe_head')" \
+    >/dev/null 2>"$_pe_err"; then
+    printf 'compact: db=%s failed to pin preflight HEAD=%s at branch %s — aborting before flatten so evidence stays reachable\n' \
+      "$_pe_db" "$_pe_head" "$flatten_preflight_ref" >&2
+    emit_error_file "$_pe_db" "$_pe_err"
+    rm -f "$_pe_err"
+    flatten_preflight_ref=""
+    return 1
+  fi
+  rm -f "$_pe_err"
+  printf 'compact: db=%s pinned preflight HEAD=%s at branch %s so flatten cannot GC the evidence commit\n' \
+    "$_pe_db" "$_pe_head" "$flatten_preflight_ref"
+  return 0
+}
+
+# unpin_preflight_evidence DB — drop the evidence branch once preservation is
+# proven (post-flatten integrity passed, or a quarantine auto-clear proved it),
+# ahead of full GC so GC can reclaim the orphaned graph. Best-effort: a missing
+# branch must not fail the compact run.
+unpin_preflight_evidence() {
+  _ue_db="$1"
+  _ue_ref=$(preflight_evidence_ref "$_ue_db") || return 0
+  valid_branch_name "$_ue_ref" || return 0
+  _ue_err=$(mktemp)
+  dolt_query "$_ue_db" "CALL DOLT_BRANCH('-D', '$_ue_ref')" \
+    >/dev/null 2>"$_ue_err" || true
+  rm -f "$_ue_err"
+  return 0
+}
+
+# preflight_diff_from HEAD — prefer the pinned evidence branch for
+# DOLT_DIFF / DOLT_DIFF_STAT so proofs survive flatten even if the raw
+# commit hash has already dropped out of dolt_log.
+preflight_diff_from() {
+  if [ -n "${flatten_preflight_ref:-}" ]; then
+    printf '%s' "$flatten_preflight_ref"
+  else
+    printf '%s' "$1"
+  fi
 }
 
 refspec_env_value() {
@@ -901,6 +1032,63 @@ discover_database_names() {
       emit_server_database_name "$db"
     done
   fi
+}
+
+# resolve_listener_target — sets listener_server, listener_config and
+# listener_remedy for the sql-server this run targets. Both managed config
+# writers render dolt-config.yaml right before they launch the server, so it
+# holds the running server's read_timeout_millis. An explicit external-local
+# target reads only GC_DOLT_CONFIG_FILE, never the managed pack state, and gets
+# a target-neutral remedy: city.toml cannot reconfigure that server.
+resolve_listener_target() {
+  if [ "$explicit_external_local_dolt" = "1" ]; then
+    listener_server="sql-server"
+    listener_config="${GC_DOLT_CONFIG_FILE:-}"
+    listener_remedy="raise it in that sql-server's own config, then restart the server"
+  else
+    listener_server="managed sql-server"
+    listener_config="${GC_DOLT_CONFIG_FILE:-${DOLT_STATE_DIR:-}/dolt-config.yaml}"
+    listener_remedy='raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart (see docs/troubleshooting/dolt-bloat-recovery.md "A full GC canceled at the read timeout")'
+  fi
+}
+
+# listener_config_read_timeout_millis — the positive read_timeout_millis in
+# listener_config (set by resolve_listener_target), or nothing when no
+# readable file names one.
+listener_config_read_timeout_millis() {
+  [ -n "$listener_config" ] && [ -r "$listener_config" ] || return 0
+  sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([1-9][0-9]*\).*/\1/p' "$listener_config" | sed -n '1p'
+}
+
+# require_listener_timeout_for_full_gc DB — --gc-only fail-close. DOLT_GC
+# produces no rows until it finishes, so a listener read_timeout_millis below
+# the full-GC bound (GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS, else
+# GC_DOLT_COMPACT_CALL_TIMEOUT_SECS) would let the server cancel the reclaim
+# mid-GC. The ceiling comes from the running server's rendered config. Without
+# one, GC_DOLT_READ_TIMEOUT_MILLIS stands in for it, and with neither the check
+# assumes 15000, the lowest managed default any release shipped, so an unknown
+# ceiling refuses rather than starting a GC the server may kill.
+require_listener_timeout_for_full_gc() {
+  db="$1"
+  resolve_listener_target
+  listener_ms=$(listener_config_read_timeout_millis)
+  listener_source="in $listener_config"
+  if [ -z "$listener_ms" ]; then
+    if [ -n "${GC_DOLT_READ_TIMEOUT_MILLIS:-}" ]; then
+      listener_ms="$GC_DOLT_READ_TIMEOUT_MILLIS"
+      listener_source="from GC_DOLT_READ_TIMEOUT_MILLIS, no readable server config"
+    else
+      listener_ms=15000
+      listener_source="assumed, no readable server config"
+    fi
+  fi
+  required_ms=$((compact_gc_read_timeout_secs * 1000))
+  if [ "$listener_ms" -lt "$required_ms" ]; then
+    printf 'compact: db=%s the %s listener.read_timeout_millis=%s ceiling (%s) is below the %ss full-GC bound — DOLT_GC produces no rows until it finishes, so that timeout would cancel the reclaim; refusing to start DOLT_GC. Set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS to the longest full GC you expect, or %s\n' \
+      "$db" "$listener_server" "$listener_ms" "$listener_source" "$compact_gc_read_timeout_secs" "$listener_remedy" >&2
+    return 1
+  fi
+  return 0
 }
 
 # dolt_query — wrapper that runs a single SQL statement against the
@@ -2225,16 +2413,17 @@ print_existing_quarantine_marker() {
   reason="$3"
   created_at="$4"
 
-  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
+  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
     "$db" "$marker" "${reason:-<unknown>}" "${created_at:-<unknown>}" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" integrity_table_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" database_value_hash_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_preflight_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_preflight_ref)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_pre_reset_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_post_verify_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
-  printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
+  printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss (DOLT_DIFF_STAT the flatten_preflight_ref branch against flatten_head when the raw preflight hash is gone); then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
     "$db" "$marker" "$db" >&2
 }
 
@@ -2245,6 +2434,7 @@ write_quarantine_marker() {
 
   write_compact_marker "$quarantine_dir" "$db" "$reason" \
     "flatten_preflight_head=${head:-}" \
+    "flatten_preflight_ref=${flatten_preflight_ref:-}" \
     "flatten_pre_reset_head=${head_before_reset:-}" \
     "flatten_head=${flatten_head:-}" \
     "flatten_post_verify_head=${post_verify_head:-}" \
@@ -2411,13 +2601,11 @@ clear_compact_marker() {
 #   server stop or restart, a dropped connection). ELAPSED is the statement's
 #   wall time, measured from before it started, so a deadline kill always has
 #   ELAPSED >= ceiling - 1s; the ceiling is blamed only when ELAPSED reached it.
-#   Both managed config writers render the file right before they launch the
-#   server, so it holds the running server's value. GC_DOLT_READ_TIMEOUT_MILLIS
-#   in this command's env is not read: it carries city.toml's current value,
-#   which an edit makes differ from the running server's until gc dolt restart.
-#   With no readable config the line is hedged. An explicit external-local
-#   target reads only GC_DOLT_CONFIG_FILE, never the managed pack state, and
-#   gets a target-neutral remedy.
+#   The ceiling and the remedy come from resolve_listener_target, the same
+#   source the --gc-only fail-close reads. GC_DOLT_READ_TIMEOUT_MILLIS in this
+#   command's env is not read: it carries city.toml's current value, which an
+#   edit makes differ from the running server's until gc dolt restart. With no
+#   readable config the line is hedged.
 explain_full_gc_cancellation() {
   db="$1"
   err_file="$2"
@@ -2428,31 +2616,20 @@ explain_full_gc_cancellation() {
     *"connection was closed"*|*"row read wait bigger than connection timeout"*|*"context canceled"*) ;;
     *) return 0 ;;
   esac
-  if [ "$explicit_external_local_dolt" = "1" ]; then
-    gc_server="sql-server"
-    gc_server_config="${GC_DOLT_CONFIG_FILE:-}"
-    gc_remedy="raise it in that sql-server's own config, then restart the server"
-  else
-    gc_server="managed sql-server"
-    gc_server_config="${GC_DOLT_CONFIG_FILE:-${DOLT_STATE_DIR:-}/dolt-config.yaml}"
-    gc_remedy='raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart (see docs/troubleshooting/dolt-bloat-recovery.md "A full GC canceled at the read timeout")'
-  fi
-  gc_ceiling=""
-  if [ -n "$gc_server_config" ] && [ -r "$gc_server_config" ]; then
-    gc_ceiling=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([1-9][0-9]*\).*/\1/p' "$gc_server_config" | sed -n '1p')
-  fi
+  resolve_listener_target
+  gc_ceiling=$(listener_config_read_timeout_millis)
   if [ -z "$gc_ceiling" ]; then
     printf 'compact: db=%s DOLT_GC was canceled after %ss, most likely by the %s at its listener.read_timeout_millis ceiling — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim; if the sql-server log shows an i/o timeout on that connection, %s\n' \
-      "$db" "$gc_elapsed" "$gc_server" "$gc_remedy" >&2
+      "$db" "$gc_elapsed" "$listener_server" "$listener_remedy" >&2
     return 0
   fi
   if [ "$(( (gc_elapsed + 1) * 1000 ))" -lt "$gc_ceiling" ]; then
     printf 'compact: db=%s DOLT_GC was canceled after %ss, before the listener.read_timeout_millis=%s ceiling in %s, so that timeout did not end it — look in the sql-server log for a stop, restart, or dropped connection\n' \
-      "$db" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" >&2
+      "$db" "$gc_elapsed" "$gc_ceiling" "$listener_config" >&2
     return 0
   fi
   printf 'compact: db=%s the %s ended DOLT_GC after %ss at its listener.read_timeout_millis=%s ceiling in %s — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim and the next full GC hits the same ceiling; %s\n' \
-    "$db" "$gc_server" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" "$gc_remedy" >&2
+    "$db" "$listener_server" "$gc_elapsed" "$gc_ceiling" "$listener_config" "$listener_remedy" >&2
 }
 
 run_full_gc() {
@@ -3022,10 +3199,12 @@ flatten_database() {
   flatten_head=""
   post_verify_head=""
   final_verify_head=""
+  flatten_preflight_ref=""
   preflight_hash=""
   postflight_hash=""
   writer_race_detected=0
   preflight_excluded_tables=""
+  integrity_defer_blocked_by=""
 
   if [ -n "$only_dbs" ]; then
     case ",$only_dbs," in
@@ -3050,16 +3229,29 @@ flatten_database() {
     case "${quarantine_reason:-}" in
       "post-flatten table value hash changed without row-count increase"|"post-flatten value hash changed without row-count increase"|"post-flatten table value hash changed with row-count increase"|"post-flatten value hash changed with row-count increase")
         autoclear_preflight_head=$(compact_marker_value "$quarantine_dir" "$db" flatten_preflight_head || true)
+        # Prove preservation from the pinned evidence branch when the marker
+        # names it: flatten orphaned the raw preflight commit, and auto-GC may
+        # already have collected it (ga-f5n). Only the exact branch this
+        # script pins for $db is trusted; anything else falls back to the hash.
+        autoclear_diff_from="$autoclear_preflight_head"
+        autoclear_marker_ref=$(compact_marker_value "$quarantine_dir" "$db" flatten_preflight_ref || true)
+        if [ -n "$autoclear_marker_ref" ] && \
+           [ "$autoclear_marker_ref" = "$(preflight_evidence_ref "$db" || true)" ]; then
+          autoclear_diff_from="$autoclear_marker_ref"
+        fi
         autoclear_preserved_tables_tmp=$(mktemp)
         if autoclear_current_head=$(head_commit "$db") && [ -n "$autoclear_current_head" ] && \
-           diff_stat_preserved_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
-           db_root_drift_within_verified_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
+           diff_stat_preserved_tables "$db" "$autoclear_diff_from" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
+           db_root_drift_within_verified_tables "$db" "$autoclear_diff_from" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
           rm -f "$autoclear_preserved_tables_tmp"
           printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
-            "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+            "$db" "${db_root_drift_proven_tables:-}" "${autoclear_diff_from:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
           emit_compact_quarantine_event "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
           mail_compact_quarantine_alert "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
           rm -f "$quarantine_marker"
+          # Preservation is proven, so the evidence branch has done its job;
+          # drop it so it stops holding the orphaned pre-flatten graph.
+          unpin_preflight_evidence "$db"
         else
           rm -f "$autoclear_preserved_tables_tmp"
           printf 'compact: db=%s cannot auto-clear integrity quarantine marker — preservation proof did not confirm drift is confined to content-preserved, verified tables (reason=%s)\n' \
@@ -3514,6 +3706,11 @@ flatten_database() {
     return 1
   fi
 
+  if ! pin_preflight_evidence "$db" "$head"; then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+
   table_count=$(wc -l < "$preflight_tmp")
   printf 'compact: db=%s commits=%s%s tables=%s — flattening...\n' \
     "$db" "$count" "$flatten_target_detail" "$table_count"
@@ -3601,22 +3798,27 @@ flatten_database() {
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
     # Downgrade quarantine -> defer for specific integrity-failure categories
     # where a concurrent writer is proven, rather than assuming corruption.
-    # Three categories get their own proof-gated defer path below: gain+drift
+    # Four categories get their own proof-gated defer path below: gain+drift
     # (HEAD-proven writer race, or an absorbed-writer race proven
-    # additive-only via diff), row-count decrease (HEAD-proven concurrent
-    # DELETE), and same-count hash drift (HEAD-proven writer race proven
-    # additive-only via diff — a concurrent UPDATE). Table-list drift, probe
-    # failure, or any case whose specific proof fails still quarantine below
-    # unchanged.
+    # additive-only via diff), mixed gain+drift plus same-count hash drift
+    # (HEAD-proven busy-db INSERT+UPDATE; ga-mku), row-count decrease
+    # (HEAD-proven concurrent DELETE), and same-count hash drift alone
+    # (HEAD-proven writer race proven additive-only via diff — a concurrent
+    # UPDATE). Table-list drift, probe failure, or any case whose specific
+    # proof fails still quarantine below unchanged.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
-       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — table value hash drift with row-count increase is concurrent-writer data, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      if [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; then
+        printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — mixed row-count gain+hash drift with same-count hash drift is concurrent-writer INSERT+UPDATE, not corruption; deferring, will retry next run\n' \
+          "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      else
+        printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — table value hash drift with row-count increase is concurrent-writer data, not corruption; deferring, will retry next run\n' \
+          "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      fi
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -3641,9 +3843,9 @@ flatten_database() {
        [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
-       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
+       gain_drift_is_additive_only "$db" "$(preflight_diff_from "$head")" "$flatten_head" "$verify_counts_gain_drift_tables"; then
       printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+        "$db" "$(preflight_diff_from "$head")" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then
@@ -3692,9 +3894,9 @@ flatten_database() {
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
-       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+       gain_drift_is_additive_only "$db" "$(preflight_diff_from "$head")" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$(preflight_diff_from "$head")" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -3708,14 +3910,26 @@ flatten_database() {
        { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
          [ "${verify_counts_saw_row_decrease:-0}" = "1" ] || \
          [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; }; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      integrity_defer_blocked_by=""
+      [ "${verify_counts_saw_table_list_change:-0}" = "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by table_list_change"
+      [ "${verify_counts_saw_probe_failure:-0}" = "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by probe_failure"
+      [ "${verify_counts_saw_row_decrease:-0}" = "1" ] && \
+        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by row_decrease_with_gain_drift"
+      [ "${verify_counts_saw_gain:-0}" != "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by missing_row_gain"
+      integrity_defer_blocked_by=${integrity_defer_blocked_by# }
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer blocked_by=%s; quarantine unchanged\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "${integrity_defer_blocked_by:-unspecified}" >&2
     fi
     printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (%s)\n' \
       "$db" "$integrity_guidance" >&2
     write_quarantine_marker "$db" "$integrity_reason" \
       "integrity_table_drift=${verify_counts_drift_details#;}" \
-      "integrity_failure_guidance=$integrity_guidance" || {
+      "integrity_failure_guidance=$integrity_guidance" \
+      "integrity_defer_blocked_by=${integrity_defer_blocked_by:-}" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -3828,9 +4042,9 @@ flatten_database() {
       # (gc's __gc_read_only_probe; daa 2026-08-04). Prove each drifted table
       # belongs to one of those categories; defer exactly as the proven
       # writer-race paths do. Anything else stays quarantined.
-      if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
+      if db_root_drift_within_verified_tables "$db" "$(preflight_diff_from "$head")" "$flatten_head" "$preflight_tmp"; then
         printf 'compact: db=%s committed-root drift confined to verified table(s) [%s], first-committed unversioned table(s) [%s] and dropped dolt_ignore'"'"'d table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
-          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$head" "$flatten_head" >&2
+          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$(preflight_diff_from "$head")" "$flatten_head" >&2
         if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
           "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
           "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -3886,6 +4100,11 @@ flatten_database() {
   rm -f "$preflight_tmp"
 
   after_count=$(commit_count "$db" || true)
+
+  # Integrity passed, so the preflight commit is no longer needed as
+  # review evidence. Drop the pin before full GC so the flatten's
+  # orphaned graph (including that commit) can actually be reclaimed.
+  unpin_preflight_evidence "$db"
 
   # CALL DOLT_GC() alone only reclaims working-set chunks — the bulk of
   # the orphaned history lives in noms/oldgen/ archives that require
@@ -3965,6 +4184,10 @@ gc_only_database() {
     # Same operator-visible state as a scheduled refusal, so it reports the
     # same way: stdout alone leaves the quarantine off the bus entirely.
     report_existing_quarantine "$db"
+    return 1
+  fi
+
+  if ! require_listener_timeout_for_full_gc "$db"; then
     return 1
   fi
 
