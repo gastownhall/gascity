@@ -9,7 +9,10 @@ and closes the bead when done.
 Use this for demos and simple single-agent workflows. For production
 multi-agent setups with worktree isolation, use mol-polecat-commit
 instead (or mol-polecat-work from the gastown pack for full refinery
-review).
+review). For rig-scoped implicit pools that must run parallel, the
+infrastructure-level opt-in is [workspace] implicit_agent_isolation =
+"worktree" in city.toml, which gives each pool instance its own git
+worktree; this formula stays unchanged either way.
 
 ## Variables
 

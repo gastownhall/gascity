@@ -18,6 +18,7 @@ go_library(
 go_test(
     name = "workdir_test",
     srcs = [
+        "implicit_agent_isolation_test.go",
         "pool_isolation_test.go",
         "testenv_import_test.go",
         "workdir_test.go",

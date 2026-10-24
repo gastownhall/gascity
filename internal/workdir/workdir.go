@@ -278,10 +278,9 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 		// wisp sessions) even though nothing in its static config predicts
 		// that. Falling through to the bare city path here would let those
 		// instances silently share a working directory. Agents that DO carry
-		// an explicit pool signal are excluded: RequiresPoolWorkDirIsolationCheck
-		// already fails config validation at init time if their work_dir
-		// doesn't vary per instance, so auto-isolating here would just mask
-		// a misconfiguration ValidatePoolWorkDirIsolation is supposed to catch.
+		// an explicit pool signal are excluded: their shared work_dir is the
+		// operator's configuration, which gc doctor's pool-workdir-isolation
+		// check reports instead of silently rewriting.
 		if a.Dir == "" && qualifiedName != a.QualifiedName() && !RequiresPoolWorkDirIsolationCheck(a) {
 			return filepath.Join(WorktreesRoot(cityPath), agent.SanitizeQualifiedNameForSession(qualifiedName)), nil
 		}

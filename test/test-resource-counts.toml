@@ -843,6 +843,11 @@ resource = "environment"
 calls = 3
 
 [[count]]
+path = "cmd/gc/implicit_agent_worktree_prune_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/init_provider_readiness_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1876,6 +1881,11 @@ calls = 1
 path = "internal/bootstrap/packs/core/escalate_script_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "internal/bootstrap/packs/core/worktree_setup_script_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "internal/cliauth/client_test.go"

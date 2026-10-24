@@ -1352,6 +1352,22 @@ type Workspace struct {
 	// Default (empty): "{{.Agent}}" — just the sanitized agent name. Per-city
 	// tmux socket isolation makes a city prefix unnecessary.
 	SessionTemplate string `toml:"session_template,omitempty"`
+	// ImplicitAgentIsolation selects the working-directory isolation for
+	// injected implicit provider agents: "shared" (default, also when empty)
+	// or "worktree". "shared" keeps today's behavior — every numbered
+	// instance of a rig-scoped implicit pool resolves to the rig root,
+	// which parallel git work can clobber (gc doctor's
+	// pool-workdir-isolation check warns). "worktree" gives each
+	// rig-scoped implicit instance its own git worktree at
+	// .gc/worktrees/<rig>/<slot>: the session cwd moves there, commits land
+	// on the per-slot branch gc-<provider>-<n>-<hash12> (recorded as
+	// gc.work_branch / gc.work_commit by mol-do-work), merging that branch
+	// back is the user's or a pack's job, and files the rig's .gitignore
+	// ignores (.env, node_modules, venvs) do not exist in a fresh worktree.
+	// Enabling it restarts implicit sessions once (pre_start joins the
+	// config fingerprint) and requires the core pack and a runtime that
+	// runs pre_start on the host (tmux, herdr).
+	ImplicitAgentIsolation string `toml:"implicit_agent_isolation,omitempty" jsonschema:"enum=shared,enum=worktree"`
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
@@ -1381,6 +1397,18 @@ type Workspace struct {
 	// agent, and patch env. Use for cross-cutting variables like
 	// GC_TARGET_BRANCH that every agent should inherit.
 	Env map[string]string `toml:"env,omitempty"`
+}
+
+// Values of [Workspace.ImplicitAgentIsolation].
+const (
+	ImplicitAgentIsolationShared   = "shared"
+	ImplicitAgentIsolationWorktree = "worktree"
+)
+
+// ImplicitAgentWorktreeIsolation reports whether rig-scoped implicit agents
+// run in per-instance git worktrees instead of the shared rig root.
+func (w *Workspace) ImplicitAgentWorktreeIsolation() bool {
+	return w.ImplicitAgentIsolation == ImplicitAgentIsolationWorktree
 }
 
 // LegacyIncludes returns the compatibility-only city.toml include list.
@@ -4038,6 +4066,17 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 	return ""
 }
 
+// ImplicitAgentWorktreeWorkDir is the work_dir template rig-scoped implicit
+// agents get in worktree isolation mode. It stays two levels under
+// .gc/worktrees so session-close pruning and doctor's worktree walk see it.
+const ImplicitAgentWorktreeWorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+
+// ImplicitAgentWorktreeSetupScript returns the path of the core pack's
+// worktree-setup.sh under coreDir.
+func ImplicitAgentWorktreeSetupScript(coreDir string) string {
+	return filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh")
+}
+
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
 // provider at both city scope and each rig scope. A provider is configured
 // only when it appears in cfg.Providers; workspace.provider selects the
@@ -4073,8 +4112,21 @@ func InjectImplicitAgents(cfg *City) {
 	// so the path is absolute). Without core the template stays empty and
 	// prompt rendering falls back to the embedded baseline.
 	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+	coreDir := cfg.PackDirByName("core")
+	if coreDir != "" {
 		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+	}
+
+	// In worktree isolation mode each rig-scoped instance gets its own git
+	// worktree, created by core's worktree-setup.sh before the session
+	// starts. The script path is absolute for the same reason the prompt
+	// is: implicit agents have no SourceDir for {{.ConfigDir}}. Without
+	// core there is no script; composed-root validation rejects that load.
+	rigWorkDir := ""
+	var rigPreStart []string
+	if cfg.Workspace.ImplicitAgentWorktreeIsolation() && coreDir != "" {
+		rigWorkDir = ImplicitAgentWorktreeWorkDir
+		rigPreStart = []string{ImplicitAgentWorktreeSetupScript(coreDir) + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"}
 	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
@@ -4105,8 +4157,10 @@ func InjectImplicitAgents(cfg *City) {
 			cfg.Agents = append(cfg.Agents, Agent{
 				Name:                name,
 				Dir:                 rig.Name,
+				WorkDir:             rigWorkDir,
 				Provider:            name,
 				PromptTemplate:      promptTemplate,
+				PreStart:            append([]string(nil), rigPreStart...),
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})
@@ -5049,6 +5103,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateOpsModes(cfg.Ops); err != nil {
+		return nil, err
+	}
+	if err := validateImplicitAgentIsolation(cfg.Workspace.ImplicitAgentIsolation); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

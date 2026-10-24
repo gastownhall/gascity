@@ -34,6 +34,7 @@ conversation-lanes
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
+pool-workdir-isolation
 builtin-pack-family
 config-semantics
 duration-range
