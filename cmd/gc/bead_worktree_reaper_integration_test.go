@@ -97,9 +97,21 @@ func reapTestConfig(rigRoot string) *config.City {
 // the test so liveness is deterministic, and restores it on cleanup.
 func injectLiveness(t *testing.T, state liveWorktreeState) {
 	t.Helper()
+	injectCountedLiveness(t, state)
+}
+
+// injectCountedLiveness is injectLiveness that also reports how many times the
+// scan seam has been invoked, for tests that pin "scan once, then reuse".
+func injectCountedLiveness(t *testing.T, state liveWorktreeState) *int {
+	t.Helper()
+	scans := new(int)
 	prev := collectLiveWorktreeStateFn
-	collectLiveWorktreeStateFn = func() liveWorktreeState { return state }
+	collectLiveWorktreeStateFn = func() liveWorktreeState {
+		*scans++
+		return state
+	}
 	t.Cleanup(func() { collectLiveWorktreeStateFn = prev })
+	return scans
 }
 
 // TestReapClosedBeadWorktrees_ReapsIdleNestedWorktree proves the depth fix: a
