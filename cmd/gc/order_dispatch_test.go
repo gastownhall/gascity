@@ -9544,6 +9544,56 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvCarriesItsOwnCityName pins that an exec order sees its own
+// city's GC_CITY_NAME, not the controller's ambient one: a supervisor running
+// several cities has one environment, so the ambient value names whichever
+// city its operator set it for.
+func TestOrderExecEnvCarriesItsOwnCityName(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := filepath.Join(t.TempDir(), "city-dir")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "digest", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	cases := []struct {
+		name string
+		cfg  *config.City
+		want string
+	}{
+		{"runtime identity", &config.City{ResolvedWorkspaceName: "own-city"}, "own-city"},
+		{"no config: the city directory", nil, "city-dir"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			envSlice, err := orderExecEnvWithError(cityDir, tc.cfg, target, a, nil)
+			if err != nil {
+				t.Fatalf("orderExecEnvWithError() error = %v", err)
+			}
+			merged := mergeOrderExecEnv([]string{"GC_CITY_NAME=neighbor-city", "PATH=/bin"}, envSlice)
+			var got []string
+			for _, entry := range merged {
+				if strings.HasPrefix(entry, "GC_CITY_NAME=") {
+					got = append(got, entry)
+				}
+			}
+			if len(got) != 1 || got[0] != "GC_CITY_NAME="+tc.want {
+				t.Fatalf("order sees %v, want exactly GC_CITY_NAME=%s", got, tc.want)
+			}
+		})
+	}
+
+	a.Env = map[string]string{"GC_CITY_NAME": "repointed"}
+	if _, err := orderExecEnvWithError(cityDir, &config.City{ResolvedWorkspaceName: "own-city"}, target, a, nil); err == nil {
+		t.Fatal("an [order.env] GC_CITY_NAME override was accepted; it is reserved")
+	}
+}
+
 // TestOrderExecEnvScrubsAmbientDoltEnvForCityWithoutDoltTarget pins the
 // projection contract the core maintenance scripts' no-Dolt guard relies
 // on: for a city without a canonical Dolt target (e.g. `[beads] provider =

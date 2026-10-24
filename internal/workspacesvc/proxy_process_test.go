@@ -93,7 +93,7 @@ func requirePython3(t *testing.T) {
 // what TestProxyProcessDisablesProductMetrics asserts. It is a leak vector
 // elsewhere — an ambient value silently flips the productmetrics projection —
 // so only this intentional seeding is exempted, by name.
-const helperPassthroughForTests = "GC_CITY,GC_CITY_PATH,GC_CITY_RUNTIME_DIR,GC_CONTROL_DISPATCHER_TRACE_DEFAULT,GC_DISABLE_USAGE_METRICS"
+const helperPassthroughForTests = "GC_CITY,GC_CITY_NAME,GC_CITY_PATH,GC_CITY_RUNTIME_DIR,GC_CONTROL_DISPATCHER_TRACE_DEFAULT,GC_DISABLE_USAGE_METRICS"
 
 // setHelperPassthrough installs extraHelperEnv so proxy_process.start()
 // appends the passthrough var to the helper subprocess env. Tests run
@@ -190,6 +190,7 @@ func TestProxyProcessHelper(t *testing.T) {
 			"OTEL_SERVICE_NAME":                   os.Getenv("OTEL_SERVICE_NAME"),
 			"UNRELATED_SERVICE_SENTINEL":          os.Getenv("UNRELATED_SERVICE_SENTINEL"),
 			"GC_CITY":                             os.Getenv("GC_CITY"),
+			"GC_CITY_NAME":                        os.Getenv("GC_CITY_NAME"),
 			"GC_CITY_PATH":                        os.Getenv("GC_CITY_PATH"),
 			"GC_CITY_RUNTIME_DIR":                 os.Getenv("GC_CITY_RUNTIME_DIR"),
 			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": os.Getenv("GC_CONTROL_DISPATCHER_TRACE_DEFAULT"),
@@ -312,6 +313,9 @@ func testProxyProcessDisablesProductMetrics(t *testing.T, ambientGC string, late
 
 func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	t.Setenv("GC_SERVICE_HELPER", "1")
+	// A supervisor serving several cities carries one ambient city name; the
+	// service must see its own.
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
 	// The helper subprocess is the same test binary. proxy_process.go seeds
 	// GC_CITY / GC_CITY_PATH / GC_CITY_RUNTIME_DIR /
 	// GC_CONTROL_DISPATCHER_TRACE_DEFAULT into the child env; without a
@@ -380,6 +384,9 @@ func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	}
 	if env["GC_CITY_PATH"] != rt.cityPath {
 		t.Fatalf("GC_CITY_PATH = %q, want %q", env["GC_CITY_PATH"], rt.cityPath)
+	}
+	if env["GC_CITY_NAME"] != rt.cityName {
+		t.Fatalf("GC_CITY_NAME = %q, want the service's own city %q over the ambient one", env["GC_CITY_NAME"], rt.cityName)
 	}
 	if env["GC_CITY_RUNTIME_DIR"] != filepath.Join(rt.cityPath, ".gc", "runtime") {
 		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", env["GC_CITY_RUNTIME_DIR"], filepath.Join(rt.cityPath, ".gc", "runtime"))
