@@ -32,6 +32,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		cityPath      string
 		hostText      string
 		userText      string
+		databaseName  string
 		checkReadOnly bool
 		checkDeleted  bool
 		forceReset    bool
@@ -329,7 +330,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			report, err := managedDoltHealthCheck(hostText, portText, userText, checkReadOnly)
+			report, err := managedDoltHealthCheckFor(hostText, portText, userText, checkReadOnly, managedDoltHealthTarget{
+				Database: databaseName,
+				DataDir:  dataDir,
+			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state health-check: %v\n", err) //nolint:errcheck
 				return errExit
@@ -347,6 +351,8 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	healthCheck.Flags().StringVar(&portText, "port", "", "Dolt port")
 	healthCheck.Flags().StringVar(&userText, "user", "", "Dolt user")
 	healthCheck.Flags().BoolVar(&checkReadOnly, "check-read-only", false, "include read-only status")
+	healthCheck.Flags().StringVar(&databaseName, "database", "", "scope database that must exist, resolve its default branch head, and accept a sample write and read")
+	healthCheck.Flags().StringVar(&dataDir, "data-dir", "", "managed Dolt data dir that must hold the --database repository")
 	_ = healthCheck.MarkFlagRequired("port")
 	cmd.AddCommand(healthCheck)
 
