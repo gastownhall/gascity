@@ -738,7 +738,7 @@ test-bd-cli-contract-home-isolation:
 ## is the only contract that needs a real CAS-capable bd. Every pinned bd
 ## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
 ## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
-## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.1):
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.2):
 ## strictly in //internal/beads:bd_conditional_release_contract_test, and in
 ## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
 ## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a

@@ -412,9 +412,9 @@ use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
-    name = "bd_bin_v1_3_1",
-    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.1/beads_1.3.1_linux_amd64.tar.gz"],
-    sha256 = "3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c",
+    name = "bd_bin_v1_3_2",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.2/beads_1.3.2_linux_amd64.tar.gz"],
+    sha256 = "c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e",
     build_file_content = """
 exports_files(["bd"])
 """,
