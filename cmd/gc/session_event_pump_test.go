@@ -338,6 +338,31 @@ func TestSessionEventPumpIgnoresAgentEvents(t *testing.T) {
 	})
 }
 
+func TestSessionEventPumpObservesAgentIdleWithoutReconciling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, pokeCh, cancel := newTestPump(t)
+		defer cancel()
+		observed := make(chan runtime.SessionEvent, 1)
+		pump.observe = func(ev runtime.SessionEvent) {
+			observed <- ev
+		}
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(fp)
+		want := runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: "crew-1"}
+		fp.emit(t, want)
+		synctest.Wait()
+		select {
+		case got := <-observed:
+			if got != want {
+				t.Fatalf("observed event = %#v, want %#v", got, want)
+			}
+		default:
+			t.Fatal("agent idle event was not observed")
+		}
+		assertNoPoke(t, pokeCh)
+	})
+}
+
 func TestSessionEventPumpBurstCoalesces(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pump, pokeCh, cancel := newTestPump(t)

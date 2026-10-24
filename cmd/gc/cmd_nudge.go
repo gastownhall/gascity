@@ -1774,7 +1774,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	// The observe is a session-class read; route through the session store
 	// (identity today). The enqueue above stays on its own nudge store.
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return sessionNudgeResult{queued: true, undelivered: undelivered}, nil
 }
@@ -2025,7 +2025,7 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 		return false, err
 	}
 	if obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return true, nil
 }
@@ -2483,7 +2483,7 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget) {
+func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
@@ -2495,7 +2495,7 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
 	// never block a spawn.
 	_ = reapStaleNudgePollers(target.cityPath)
-	startNudgePollerUnlessDispatched(target)
+	startNudgePollerUnlessDispatched(target, sp)
 }
 
 // startNudgePollerReap reaps cityPath's stale poller PID files in the
@@ -2522,7 +2522,7 @@ var nudgePollerReaper = reapStaleNudgePollers
 
 // startNudgePollerUnlessDispatched is maybeStartNudgePoller without the reap,
 // for a caller that reaps the pollers directory itself (startNudgePollerReap).
-func startNudgePollerUnlessDispatched(target nudgeTarget) {
+func startNudgePollerUnlessDispatched(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
@@ -2530,6 +2530,9 @@ func startNudgePollerUnlessDispatched(target nudgeTarget) {
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
 	if nudgeDispatcherIsSupervisor(target.cfg) {
+		return
+	}
+	if providerRetiresNudgePollers(target, sp) && nudgePollerDispatcherIsLive(target.cityPath) {
 		return
 	}
 	// ACP session/prompt delivery requires the process that owns the
@@ -2593,6 +2596,8 @@ func withNudgeTargetFenceFromLiveSession(store beads.Store, live *session.Info, 
 }
 
 var startNudgePoller = ensureNudgePoller
+
+var nudgePollerDispatcherIsLive = nudgeWakeListenerIsLive
 
 // nudgeDispatcherIsSupervisor reports whether the city is configured to use
 // the supervisor-hosted nudge dispatcher rather than per-session pollers.

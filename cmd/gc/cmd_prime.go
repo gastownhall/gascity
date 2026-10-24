@@ -265,6 +265,21 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	return code
 }
 
+var hookNudgePollerSessionProviderFn = hookNudgePollerSessionProvider
+
+func hookNudgePollerSessionProvider(spctx sessionProviderContext, sessionStart *primeSessionStart, stderr io.Writer) runtime.Provider {
+	snapshot := newSessionBeadSnapshotFromInfos(nil)
+	if sessionStart != nil {
+		snapshot = newSessionBeadSnapshotFromInfos([]sessionpkg.Info{sessionStart.info})
+	}
+	sp, err := newSessionProviderFromContext(spctx, snapshot)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", err) //nolint:errcheck
+		return nil
+	}
+	return sp
+}
+
 // doPrimeWithHookFormatOpts is the full entry point. consumeHandoff=false makes
 // the invocation non-destructive: durable auto-handoff mail is still rendered
 // into the output, but is not archived. Preview callers (--json) pass false so
@@ -452,6 +467,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		runHookSideEffects()
 	}
 
+	var hookSP runtime.Provider
+	var hookSPResolved bool
 	for _, a := range resolvedAgents {
 		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 			return 0, nil
@@ -461,6 +478,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			sessionName := os.Getenv("GC_SESSION_NAME")
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+			}
+			if !hookSPResolved {
+				spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+				hookSP = hookNudgePollerSessionProviderFn(spctx, sessionStart, stderr)
+				hookSPResolved = true
 			}
 			target := withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
 				cityPath:          cityPath,
@@ -473,9 +495,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionName:       sessionName,
 			})
 			if reapedEarly {
-				startNudgePollerUnlessDispatched(target)
+				startNudgePollerUnlessDispatched(target, hookSP)
 			} else {
-				maybeStartNudgePoller(target)
+				maybeStartNudgePoller(target, hookSP)
 			}
 		}
 		if hookMode && isClientProviderChat(&a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS")) {

@@ -3919,7 +3919,7 @@ func continuationNudgeEnqueueAt(cityPath, assignee string) {
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 		return
 	}
-	maybeStartNudgePoller(target)
+	maybeStartNudgePoller(target, nil)
 	_ = pokeController(cityPath)
 }
 

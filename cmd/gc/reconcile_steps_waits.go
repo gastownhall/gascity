@@ -64,7 +64,7 @@ func (l *externalReadsLane) waits(_ context.Context, env externalReadsEnv) {
 	if prev := l.readyWaits.Swap(&ready); prev == nil || !maps.Equal(*prev, ready) {
 		l.onChange()
 	}
-	if err := dispatchReadyWaitNudgesWithSnapshot(env.CityPath, env.Cfg, sessFront, env.Nudges, now, nil); err != nil {
+	if err := dispatchReadyWaitNudgesWithSnapshot(env.CityPath, env.Cfg, sessFront, env.Nudges, env.SP, now, nil); err != nil {
 		fmt.Fprintf(l.stderr, "external reads: dispatching wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 }
