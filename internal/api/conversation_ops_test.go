@@ -440,27 +440,22 @@ func TestProposeReplayDecodesThroughTheGeneratedClient(t *testing.T) {
 	}
 }
 
-// A message whose delivery mode this build's lane parks unexecuted (now,
-// interrupt) is refused 409 when-not-supported before anything is written.
-func TestProposeRefusesAWhenTheLaneDoesNotLower(t *testing.T) {
+// Every message delivery mode is one the lane lowers, a deliver-now message
+// (now, or the legacy interrupt) as a deliver-now unit (OJ-17), so each is
+// written and pokes the lane.
+func TestProposeAcceptsEveryWhen(t *testing.T) {
 	e, st := newLaneOpsEnv(t, "message")
 	info := e.session(t, "Now")
-	for _, when := range []string{"now", "interrupt"} {
-		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k-`+when+`","payload":"x","policy":{"message":{"when":"`+when+`"}}}`)
-		wantStatus(t, "when "+when, rec, http.StatusConflict)
-		if code := problemCode(t, rec); code != "when-not-supported" {
-			t.Fatalf("when %s: code = %q, want when-not-supported", when, code)
-		}
-	}
-	if rows := e.opRows(t); len(rows) != 0 {
-		t.Fatalf("refused proposals wrote %d op rows", len(rows))
-	}
-	if p := st.poked(); len(p) != 0 {
-		t.Fatalf("refused proposals poked the lane: %v", p)
-	}
-	for _, when := range []string{"boundary", "after_turn", "if_idle", "steer"} {
+	whens := []string{"boundary", "after_turn", "if_idle", "steer", "now", "interrupt"}
+	for _, when := range whens {
 		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k-`+when+`","payload":"x","policy":{"message":{"when":"`+when+`"}}}`)
 		wantStatus(t, "when "+when, rec, http.StatusCreated)
+	}
+	if rows := e.opRows(t); len(rows) != len(whens) {
+		t.Fatalf("wrote %d op rows, want %d", len(rows), len(whens))
+	}
+	if p := st.poked(); len(p) != len(whens) {
+		t.Fatalf("poked the lane %d times, want %d", len(p), len(whens))
 	}
 }
 
@@ -502,9 +497,8 @@ func TestProposeGatesOnTheRunningLaneHost(t *testing.T) {
 }
 
 // A proposal to a configured named session with no row that is refused (a
-// payload over the limit, an invalid policy or key, an unlowered when), or
-// whose event cursor cannot be read, materializes no session row; an
-// accepted one does.
+// payload over the limit, an invalid policy or key), or whose event cursor
+// cannot be read, materializes no session row; an accepted one does.
 func TestProposeRefusalMaterializesNoNamedSession(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, code string
@@ -514,7 +508,6 @@ func TestProposeRefusalMaterializesNoNamedSession(t *testing.T) {
 		{name: "payload too large", body: `{"kind":"message","client_key":"k","payload":"` + strings.Repeat("x", opjournal.MaxInlinePayload+1) + `"}`, code: "payload-too-large"},
 		{name: "policy of another kind", body: `{"kind":"message","client_key":"k","payload":"x","policy":{"interrupt":{"on_failure":"fail"}}}`, code: "validation"},
 		{name: "invalid key", body: `{"kind":"message","client_key":"` + strings.Repeat("k", 513) + `","payload":"x"}`, code: "invalid-idempotency-key"},
-		{name: "unlowered when", body: `{"kind":"message","client_key":"k","payload":"x","policy":{"message":{"when":"now"}}}`, code: "when-not-supported"},
 		{name: "cursor unreadable", body: `{"kind":"message","client_key":"k","payload":"x"}`, code: "service-unavailable", eventsDown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

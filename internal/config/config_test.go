@@ -130,7 +130,7 @@ func TestDaemonSessionReconcilerModeParses(t *testing.T) {
 		alias bool
 		ok    bool
 	}{
-		{raw: "", mode: SessionReconcilerLegacy, ok: true},
+		{raw: "", mode: "", ok: true}, // unset: the controller latch resolves it
 		{raw: "legacy", mode: SessionReconcilerLegacy, ok: true},
 		{raw: " Legacy ", mode: SessionReconcilerLegacy, ok: true},
 		{raw: "v2", mode: SessionReconcilerV2, ok: true},

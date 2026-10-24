@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **An unset `[daemon] session_reconciler` now runs the v2 reconciler where
+  the city can run it, and `[beads] conditional_writes` now defaults to
+  `"auto"`.** With the key unset, the controller resolves v2 at boot from
+  config alone when no feature v2 lacks is configured (agent `depends_on` or
+  `max_session_age`, `[chat_sessions] idle_timeout`, a session provider other
+  than tmux, acp or subprocess), conditional writes resolve on, and the
+  sessions and graph classes sit on a `sqlite-beads` `[storage]` binding.
+  Otherwise it runs legacy, as before, and logs a warning naming each reason;
+  `gc doctor` (`daemon-session-reconciler`) reports the same. Set
+  `session_reconciler = "legacy"` to keep legacy and silence the warning.
+  An explicit `"v2"` still refuses to start over those features. Under v2,
+  `[daemon] session_circuit_breaker`, `[session] progress_stall_timeout` and
+  `[session] claim_holder_stall_timeout` are deprecated and ignored (the work
+  ladder replaces them), with a boot and doctor warning; legacy still honors
+  them. Unset conditional writes now take compare-and-swap wherever the store
+  supports it, under legacy too; a store that cannot (an exec store, or a bd
+  without `--if-revision`) runs as before, quietly, with no degraded event or
+  status warning. Set `conditional_writes = "off"` (or
+  `GC_BEADS_CONDITIONAL_WRITES=off`) to keep unconditional writes. The mode
+  stays boot-latched, and `gc runtime drain`, `drain-ack` (including
+  `gc hook`'s drain-ack) and `undrain` follow the running controller's mode
+  until it restarts. A controller started by an earlier gc does not report
+  its mode, so these commands treat it as legacy unless city.toml sets
+  `session_reconciler = "v2"`: restart the controller after upgrading gc to
+  pick up the new default. The messages that said to remove
+  `session_reconciler` to run legacy now say to set it to `"legacy"`.
+  Rolling back: after rolling back the gc binary, restart the controller, so
+  the controller and the CLI resolve the mode under the same build.
+
+- **An exec session provider's `start` or `provision` that exits 2 now fails
+  the start.** Exit 2 meant "unknown operation, treat as success" on `start`
+  and `provision` too, so a `set -e` wrapper whose `grep` or `jq` exited 2 during `start`
+  counted as started and the half-created box was never cleaned up. Neither op
+  can be unknown, so exit 2 from them is now a failure, and a failed `start`
+  runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
+  `provision` on success. Exit 2 keeps meaning "unknown operation" for other
+  undeclared operations.
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
@@ -247,6 +284,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
 
+- **An `escalate.sh` override written before incident keys keeps alerting,
+  without deduplication.** The `reaper` and `mol-dog-backup` orders now call
+  `escalate.sh` with `--incident-key KEY --fingerprint F` on an alert and
+  `--resolve-incident KEY` on a clean run. An override that rejects those
+  flags as a usage error (exit 2, or an error that names the flag), as one
+  written for gc 1.5.0 does, is sent the alert again without them: it still
+  mails on every run, and the order's output names it as predating incident
+  keys. To deduplicate, the override must handle the flags and send nothing
+  for `--resolve-incident`. The core `escalate.sh` takes the flags and is
+  never sent an alert a second time. See "Why a maintenance alert did not
+  repeat" in `docs/getting-started/troubleshooting.md` (#6363, #8231).
+
 ### Added
 
 - **`gc agent is-foreign <identity>` reports whether this city can vouch for
@@ -381,6 +430,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The core `orphan-sweep` order times out a minute before its next run is
+  due.** The order declared no timeout, so it ran under the 300s exec
+  default, equal to its 5m interval. The cooldown counts from when a run
+  starts, so a sweep killed at its timeout was due again at once, and on a
+  slow store the sweep ran continuously. The order now sets `timeout = "4m"`,
+  which leaves at most two minutes after the 120s foreign-identity gate
+  budget, less the claim collection that precedes it. A city whose sweep
+  needs longer can raise it with `[[orders.overrides]]`,
+  `name = "orphan-sweep"` and a `timeout` (plus `rig = "*"` if a rig's own
+  pack also carries the order).
+
+- **The reaper's session prune no longer escalates a stale or missing backup
+  when it has nothing to delete.** The pattern path
+  (`GC_REAPER_SESSION_BEAD_PATTERN`, default `gm-*`) checked the city store's
+  backup age before anything else, so a city without a fresh bd backup of its
+  city store raised a MEDIUM "Reaper anomalies detected" escalation ("bulk
+  prune skipped: backup stale or absent") for a prune that, in most cities,
+  would delete nothing. The reaper now first counts the prune's candidates
+  (closed beads that match the pattern and closed more than
+  `GC_REAPER_SESSION_PURGE_AGE` ago) and, when there are none, skips the
+  backup check and the prune without an anomaly. When there are candidates,
+  the backup-age and type-scope gates apply as before. A count that fails is
+  reported as its own anomaly (`session prune candidate count failed for
+  <db>`), and the gates still apply. An invalid pattern is now reported before
+  the backup is checked (#6284).
+
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
@@ -397,6 +472,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current generation to the resident spelling the next time it proves the
   claim's store. A rollback still reads the new entries.
 
+- **A run the controller deletes no longer stays `pending` in the run
+  census.** When the controller's wisp GC deleted a run whose rows its bead
+  cache did not hold (closed rows, a restarted controller, an evicted entry),
+  or the read just before a delete failed, no `bead.deleted` event was
+  recorded. The run view drops a run only on that event and replays the
+  retained event log on every restart, so the run stayed listed as `pending`,
+  and canceling it returned `run-not-found`. Every delete made through the
+  controller's bead cache now records `bead.deleted`, carrying just the bead
+  id when no copy of the row is at hand, and a bead listed twice in one batch
+  records it once. Deletes made outside the controller, such as a script's
+  `bd purge` or `gc bd delete`, are not covered, and runs stranded before this
+  fix stay listed (#5934).
+
 - **A config reload no longer creates or rebinds a city's bead store.** When a
   city's `.beads/metadata.json` went missing (for example, a `git` checkout
   deleted a file an older commit had tracked), the next reload fell back to
@@ -410,9 +498,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a non-bd beads provider (such as `file`) to bd now also takes a restart; a
   reload refuses it. Rig scopes and boot are unchanged.
 
+- **Order history reports `has_output` only for a run that recorded output,
+  and an order that runs out of time says so.** Order history
+  (`GET /v0/city/{cityName}/orders/history`) set `has_output` on every run
+  of an exec order, because exec orders capture output, so a run that
+  recorded nothing advertised output its history detail then served empty;
+  `capture_output` still describes the order. An order stopped by its
+  `timeout` (or the `[orders] max_timeout` cap) failed with a bare
+  `context deadline exceeded` or `signal: killed` in its `order.failed`
+  event, in the controller log for an exec order, and in `gc order run`'s
+  error; the message now leads with the timeout it ran out of, for example
+  `order timeout of 5m0s exceeded`.
+
 - **Codex structured history keeps every turn's model and token usage.**
   Usage was read only from the rollout tail, so older turns (and older
   history pages) lost it once the session grew (thanks @csells).
+
+- **The run API lists a formula-v1 run's steps and reports the run active once
+  a step starts.** Formula-v1 instantiation types each untyped or `task`-typed
+  non-root step `step`, and the run projection dropped that type. For a v1
+  run, `GET /v0/city/{city}/runs/{id}/steps` returned no steps, and the run
+  list, `GET /runs/{id}` and the run census kept the run `pending` while its
+  steps were claimed and closed.
+
+- **`GET /v0/city/{city}/sessions?state=closed` and `?state=all` list closed
+  sessions.** The session list read only open sessions, whatever the filter,
+  so a filter naming `closed` matched nothing. A filter that can match a
+  closed session (`all`, or a list naming `closed`) now reads closed sessions
+  too, reported with state `closed`; they come from the bead store rather than
+  the cache. The default and every other filter still read open sessions from
+  the cache. `gc session list --state closed` and `--state all` list them too
+  when the city's supervisor answers the command.
 
 - **Stopping a Claude turn that is waiting on a permission prompt now cancels
   the prompt.** The tmux interrupt sent Ctrl-C, which leaves Claude's prompt
@@ -420,11 +536,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screen, never a numbered option. When it cannot read the pane it logs a
   warning and sends Ctrl-C as before. (thanks @csells)
 
+- **`GET /v0/city/{city}/agents` reports a live bounded-pool worker as
+  running, and no provider for the control dispatcher.** The agent list, the
+  agent read and the rig counts probed a pool slot (`<pool>-1`) on a session
+  name derived from the slot, but the controller runs an unaliased pool
+  session under a name carrying its session bead id (`<template>-<beadID>`).
+  Every worker of a pool with `max_active_sessions` set read `stopped` while
+  `/sessions` showed it active, `?running=true` listed none of them, and a
+  rig's `running_count` left them out. When a slot's derived name is not
+  live, these endpoints now find the slot's session the way `/status` does
+  and probe that one. A session whose bead still says active but whose
+  runtime is gone still reads stopped, and a session store that cannot be
+  read makes the list partial. The SDK's control dispatcher, which runs
+  `gc convoy control --serve` and has no provider, was reported under the
+  workspace provider, marked unavailable when that provider's binary was not
+  on `PATH`, and could take its session's model and context from another
+  agent's transcript in a shared work dir. It now reports no provider, its
+  session reads no transcript, and a Claude agent sharing its work dir no
+  longer loses its model and context on its account. (#4703, thanks
+  @remuscazacu)
+
 - **A Claude API failure now shows as a provider error in structured session
   history, not as an assistant reply.** Entries Claude flags with
   `isApiErrorMessage` carry a `provider_error` system event (with Claude's
   error code) and are projected as system messages; refusals and text that
   merely quotes an API error stay replies. (thanks @csells)
+
+- **Config, exec-provider, agent, orders and API reference docs now match the
+  code.** The `wisp_ttl` example was `"7d"`, which does not parse (Go
+  durations have no day unit) and leaves wisp GC off; it is now `"168h"`.
+  `idle_timeout` and `max_session_age` say they do not apply to
+  `mode = "always"` named sessions, the Gastown recipes stop setting
+  `idle_timeout` on the always-on mayor and show how to suspend `boot`, and an
+  exec order's default `timeout` reads 300s, not 60s. The exec session
+  provider page lists every field `start` receives, the per-operation
+  deadlines, the `stop` after a failed start and what the session `env`
+  carries, and no longer calls `start` fire-and-forget or says gc sends the
+  startup `nudge` through the `nudge` operation. The agent guide covers
+  Claude's builtin `permission_mode = "unrestricted"` and `effort = "max"`
+  defaults and how to override them; the orders tutorial covers `rig = "*"`
+  and not pairing an override with `skip`; the API reference says what each
+  endpoint's agent count counts and that the supervisor serves its
+  spec at `/openapi.json`, `/openapi.yaml` and `/docs`; the events reference
+  says the `cache-reconcile` actor names the cache, not whoever closed the
+  bead; the one-controller rule in the hardened-city runbook now covers every
+  city and Kubernetes rollouts; and the `contrib/` scripts link to pages that
+  exist.
 
 - **A Claude turn interrupted while a tool was running now reads as idle.**
   Claude writes `[Request interrupted by user for tool use]` for that case,
@@ -463,7 +620,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records as an `order.skipped` event with one scope per identity; the run
   still exits 0, and a sweep that only protects sends no mail. The verb is
   asked at most once per distinct identity per sweep, within a gate budget of
-  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 4m
   timeout); past it, the remaining claimants are not asked, their claims are
   kept and named with a "gate budget … exhausted" reason, and the sweep says
   how many identities it did not ask. Where `timeout` is installed, an ask
@@ -674,7 +831,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incident state. A send cut off only after that report still counts as
   delivered. The backup order's missing-`flock` and offsite-publication
   alerts still mail on every run, and an `escalate.sh` override must accept
-  or ignore the new flags.
+  or ignore the new flags. One that rejects them as a usage error, as one
+  written for 1.5.0 does, is sent the alert again without them, so it keeps
+  alerting, undeduplicated (#8231).
 - **The controller no longer wakes an on-demand named session for a
   deferred molecule or wisp root it cannot claim.** An assigned, open,
   ephemeral/no-history/workflow molecule root counts as ready wake demand

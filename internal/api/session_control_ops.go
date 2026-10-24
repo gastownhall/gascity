@@ -854,13 +854,20 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 
 // --- /respond ---
 
-// respondOpPayload is a respond op's payload, canonical JSON of the response
-// (DES-O0API §3.1); empty metadata is absent.
+// respondOpPayload is a legacy /respond op's payload, JSON of the response
+// (DES-O0API §3.1): text is always present, empty metadata is absent. It is
+// not opjournal.EncodeRespondPayload's lane form, so rows a previous build
+// recorded keep their request digest and a same-key retry replays them.
 type respondOpPayload struct {
 	Action   string            `json:"action"`
 	Text     string            `json:"text"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
+
+// respondOpPolicy is a legacy /respond's policy: at_least_once, the guarantee
+// it has always been recorded with. Nothing acts on it for a legacy op; it
+// keeps the request digest of rows a previous build recorded.
+var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce}
 
 // respondSession answers target's pending interaction with resp, recorded as
 // a respond op under ops.control, and returns the answer. key is the
@@ -875,7 +882,7 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 		return syncAnswer{}, humaResolveError(err)
 	}
 	mgr := s.sessionManager(store.Store)
-	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key}
+	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
 		if req, err = s.respondOpRequest(mgr, store.Store, req, resp); err != nil {
 			return syncAnswer{}, err
@@ -889,8 +896,9 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 			// click that read the same prompt pending, answers nothing
 			// (skipped{stale}) rather than the prompt pending now. A runtime
 			// that derives request IDs from content (tmux) gives an identical
-			// prompt raised again the same ID, so that one is answered, until
-			// OJ-16 keys respond ops by the interaction occurrence.
+			// prompt raised again the same ID, so that one is answered: this
+			// shadow op names the request id, not the interaction occurrence
+			// a lane respond is keyed by (opjournal.RespondKey).
 			run.RequestID = adm.Op.Scope.Interaction
 		}
 		err := mgr.Respond(id, run)
@@ -905,8 +913,9 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 	return syncAnswer{ID: id, syncOpFields: fields}, nil
 }
 
-// respondOpRequest completes a recorded /respond's op request: the canonical
-// payload and the session(generation) scope with the interaction it answers.
+// respondOpRequest completes a recorded /respond's op request: the payload
+// (respondOpPayload) and the session(generation) scope with the interaction
+// it answers.
 // The interaction is the request's request_id, else, under a client key that
 // already names a respond of that interaction, that respond's scope, else
 // the pending interaction read now; the respond then answers that

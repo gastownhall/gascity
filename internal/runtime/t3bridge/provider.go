@@ -1308,10 +1308,27 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 	if len(failures) > 1 {
 		lastErr = fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
 	}
+	// The failures above are text, so ctx's error survives only if named here.
+	if ctxErr := ctxEndErr(ctx); ctxErr != nil && !errors.Is(lastErr, ctxErr) {
+		lastErr = fmt.Errorf("%w: %w", ctxErr, lastErr)
+	}
 	if written {
 		return nil, fmt.Errorf("%w: %w", errRPCWrittenUnanswered, lastErr)
 	}
 	return nil, lastErr
+}
+
+// ctxEndErr is ctx.Err(), or context.DeadlineExceeded once ctx's deadline has
+// passed before its timer has run: a socket deadline taken from ctx.Deadline()
+// fires in that gap, and ctx.Err() is still nil there.
+func ctxEndErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // readRPCAnswer reads conn, for up to 30 s or until ctx's deadline, until T3

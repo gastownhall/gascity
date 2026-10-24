@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -95,6 +96,48 @@ func makeBundledCacheUnhealable(t *testing.T, cacheDir string) {
 	})
 }
 
+// unlinkedCacheEntry matches the entry in an "unlinkat <cache>/<entry>: <reason>"
+// clause: the cache directory is group 1, the entry is everything up to the
+// ": " that starts the reason.
+var unlinkedCacheEntry = regexp.MustCompile(`(unlinkat \$GC_HOME/cache/repos/[^/]+)/[^:\n]*: `)
+
+// withoutUnlinkedCacheEntry returns msg with the entry os.RemoveAll named
+// first dropped from an "unlinkat <cache>/<entry>: <reason>" clause.
+func withoutUnlinkedCacheEntry(msg string) string {
+	return unlinkedCacheEntry.ReplaceAllString(msg, "${1}/<entry>: ")
+}
+
+// TestUnlinkedCacheEntryIsNotPartOfTheErrorIdentity pins the comparison the
+// two unhealable-cache parity tests rely on. os.RemoveAll reports the first
+// entry it cannot unlink, in the filesystem's readdir order, so two runs over
+// identical caches name different files (spawn-storm-detect.sh in one,
+// orphan-sweep.sh in the other). The error's identity is everything but that
+// entry: the cache directory it names stays, the entry does not.
+func TestUnlinkedCacheEntryIsNotPartOfTheErrorIdentity(t *testing.T) {
+	const head = `gc bd: loading config: preparing builtin pack caches: removing stale bundled pack cache "$GC_HOME/cache/repos/b03dd4cd": `
+	a := head + "unlinkat $GC_HOME/cache/repos/b03dd4cd/internal/bootstrap/packs/core/assets/scripts/spawn-storm-detect.sh: permission denied\n"
+	b := head + "unlinkat $GC_HOME/cache/repos/b03dd4cd/internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh: permission denied\n"
+	if a == b {
+		t.Fatal("fixture error: the two messages must differ before normalising")
+	}
+	if got, want := withoutUnlinkedCacheEntry(a), withoutUnlinkedCacheEntry(b); got != want {
+		t.Fatalf("messages differing only in the unlinked entry compare unequal:\n %q\n %q", got, want)
+	}
+	if got := withoutUnlinkedCacheEntry(a); !strings.Contains(got, "unlinkat $GC_HOME/cache/repos/b03dd4cd/") || !strings.HasSuffix(got, ": permission denied\n") {
+		t.Fatalf("normalising dropped the cache directory or the error class: %q", got)
+	}
+	other := strings.Replace(a, "b03dd4cd/internal", "c0ffee00/internal", 1)
+	if withoutUnlinkedCacheEntry(a) == withoutUnlinkedCacheEntry(other) {
+		t.Fatal("a different cache directory must stay a different error")
+	}
+	if got := withoutUnlinkedCacheEntry(strings.Replace(a, "permission denied", "no such file or directory", 1)); got == withoutUnlinkedCacheEntry(a) {
+		t.Fatal("a different error class must stay a different error")
+	}
+	if msg := "gc bd: loading config: syntax error\n"; withoutUnlinkedCacheEntry(msg) != msg {
+		t.Fatal("a message without an unlinked entry must pass through unchanged")
+	}
+}
+
 // TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal pins the
 // fallback's failure path: when the cache composition rejects cannot be
 // healed, gc bd reports the readiness pass's own error, as the full load does,
@@ -123,7 +166,7 @@ func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
 	if !strings.Contains(stderr, "$GC_HOME/cache/repos/") {
 		t.Fatalf("the error does not name the cache under GC_HOME: %q", stderr)
 	}
-	if code != legacyCode || stderr != legacyStderr {
+	if code != legacyCode || withoutUnlinkedCacheEntry(stderr) != withoutUnlinkedCacheEntry(legacyStderr) {
 		t.Fatalf("unhealable cache differs from the full load:\n legacy:  %d %q\n trimmed: %d %q", legacyCode, legacyStderr, code, stderr)
 	}
 	if got.fallbacks != 1 || got.passes != 1 {
@@ -304,6 +347,8 @@ func TestGcBdPassthroughTrimsKeepRoutingMore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			legacy := runBdParityArm(t, true, tc.opts, tc.setup)
 			trimmed := runBdParityArm(t, false, tc.opts, tc.setup)
+			legacy.stderr = withoutUnlinkedCacheEntry(legacy.stderr)
+			trimmed.stderr = withoutUnlinkedCacheEntry(trimmed.stderr)
 			if legacy != trimmed {
 				t.Fatalf("routing changed:\nlegacy:  code=%d\n stdout=%q\n stderr=%q\n bd=%s\ntrimmed: code=%d\n stdout=%q\n stderr=%q\n bd=%s",
 					legacy.code, legacy.stdout, legacy.stderr, legacy.bd,

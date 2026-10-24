@@ -103,6 +103,9 @@ func resolveModeGate(
 
 	raw, defined := read(cfg)
 	mode, origin := Off, OriginBuiltin
+	if spec.Default.Mode != nil {
+		mode = *spec.Default.Mode
+	}
 	if defined {
 		m, err := ParseMode(raw)
 		if err != nil {

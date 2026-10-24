@@ -68,6 +68,17 @@ evidence from tests, source, an issue, or a commit.
   and third) take it as their first parameter. A `Manager` or `Store` method that takes a lock-bounding
   `ctx` puts it first and says in its doc comment what it bounds; do not add a
   parallel `...Ctx` variant.
+- The reconciler's advisory heal (`ApplyPatchIfLifecycleUnchanged`) decides
+  from its tick snapshot. Without conditional writes its re-check fences
+  nothing unless the check and the write share the row's mutation lock with the
+  in-process operator verbs, so it runs both inside that lock, tried through
+  `WithSessionMutationLockContext` with an already-done context: a free lock is
+  taken, a held one makes the heal skip (write nothing, `(false, nil)`) without
+  waiting. Never make it wait, since `Manager.Suspend` holds the lock through
+  the provider stop. Another process's writer (the CLI's managed
+  `gc session suspend` takes no mutation lock) is fenced only by a conditional
+  writer. `ApplyPatchIfLifecycleUnchangedUnder` runs under a caller-held lock
+  and must not take it again (ga-axgaemw).
 - `testing/synctest.Wait` does not consider `sync.Mutex.Lock` durably blocked.
   A test that pauses a lock holder on a channel and waits for a competing
   mutex waiter will hang. The context-aware waiter is durably blocked, since

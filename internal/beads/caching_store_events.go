@@ -195,6 +195,13 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		b = verifiedClosedFresh
 		refreshedFromBacking = true
 	} else if !cached {
+		// A delete of a row this cache already tombstoned (the echo of its own
+		// delete, or a repeat) has nothing to install, so it reads nothing:
+		// on a bd backing the read is a subprocess per id, and a batch delete
+		// echoes one event per id it removed.
+		if eventType == "bead.deleted" && locallyDeleted {
+			return
+		}
 		if fresh, err := c.backing.Get(patch.ID); err == nil {
 			b = fresh
 			refreshedFromBacking = true
@@ -589,6 +596,10 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
 		merged.IndefinitelyDeferred = patch.IndefinitelyDeferred
+		// An event's status is bd's raw one (decodeRawBead keeps all but
+		// deferred) or gc's folded one, so it does not say what the store
+		// recorded; the next backing read does.
+		merged.SourceStatus = ""
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type

@@ -124,7 +124,7 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 	}
 	oldest := staleOpDetails(r, scan.Expired)
 	if len(scan.Undecodable) > 0 {
-		r.Details = append(r.Details, fmt.Sprintf("%d op row(s) this gc cannot decode, which a newer gc may have written:%s",
+		r.Details = append(r.Details, fmt.Sprintf("%d op row(s) this gc cannot decode (a newer gc wrote them, or they are not valid to this one):%s",
 			len(scan.Undecodable), opSweepIDs(scan.Undecodable)))
 	}
 	switch {
@@ -149,7 +149,7 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 		r.Status = doctor.StatusWarning
 		r.Message = capable + ", but the scan for expired legacy ops stopped at its page cap " +
 			"behind a head of lane, undecodable or not yet stale legacy op rows, so the legacy ops behind that head were not checked"
-		r.FixHint = "upgrade this gc if a newer gc wrote the rows it cannot decode (see the details), or find why so many lane or legacy ops are still open; " +
+		r.FixHint = "inspect the rows this gc cannot decode (see the details), and upgrade it if a newer gc wrote them, or find why so many lane or legacy ops are still open; " +
 			"the controller's op sweeper misses the legacy ops behind a head of lane, undecodable or in-flight rows the same way, until that head shrinks"
 		if gates == "" {
 			r.FixHint += " (with every ops gate off it stops at that head, so restart the controller once the head has shrunk)"

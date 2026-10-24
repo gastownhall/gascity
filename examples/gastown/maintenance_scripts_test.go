@@ -6963,6 +6963,11 @@ case "$*" in
     printf 'ROW_COUNT()\n0\n'
   fi
   ;;
+*"session_prune_candidates"*)
+  # The reaper's count of bd prune's candidates: as many as the bd double
+  # prunes.
+  printf 'COUNT(*)\n%s\n' "${BD_PRUNE_COUNT:-0}"
+  ;;
 *"status = 'closed'"*"closed_at <"*)
   if [ -n "${DOLT_PURGE_COUNT:-}" ]; then
     printf 'COUNT(*)\n%s\n' "$DOLT_PURGE_COUNT"

@@ -240,6 +240,17 @@ type Bead struct {
 	// derived read-only representation is a wire-design decision, not a
 	// consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
+	// SourceStatus is the status the backing store recorded, as read, before
+	// Status folded it into Gas City's three-state model: bd's blocked,
+	// deferred, review, testing, hooked and pinned all read as "open". Empty
+	// means the store did not report one, or an explicit status transition
+	// (setBeadStatus) or an event-carried status superseded it. Like
+	// IndefinitelyDeferred it is store-internal and json:"-". CachingStore
+	// reads it to tell a row a Live read omits by design from one another
+	// process changed: a NativeDoltStore Live "open" is bd's raw open
+	// (nativeListPushesRawOpen), so a parked row is absent from that page
+	// without being stale.
+	SourceStatus string `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
@@ -937,6 +948,7 @@ func IsDeferred(b Bead, now time.Time) bool {
 func setBeadStatus(b *Bead, status string) {
 	b.Status = status
 	b.IndefinitelyDeferred = false
+	b.SourceStatus = ""
 	if status != "closed" {
 		b.CloseReason = ""
 	}

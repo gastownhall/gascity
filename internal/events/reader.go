@@ -95,6 +95,34 @@ func ApplyFilter(evts []Event, filter Filter) []Event {
 	return result
 }
 
+// lineMayMatchType is a cheap pre-decode screen for a raw JSONL line. A line
+// whose Type satisfies the filter must contain that type's text verbatim, so a
+// line containing none of the wanted types cannot match and is skipped without
+// paying for json.Unmarshal. It is deliberately a substring test on the type
+// value alone, not on `"type":"..."`, so it never depends on how the producer
+// spaces its JSON. A line containing a \u escape is always passed through,
+// since the escape can spell a type without its literal text. False positives
+// (a payload mentioning the type) are fine: matchesFilter still runs on the
+// decoded event.
+func lineMayMatchType(line []byte, f Filter) bool {
+	// A \u escape can spell a type without its literal text; decode such lines.
+	if bytes.Contains(line, []byte(`\u`)) {
+		return true
+	}
+	if f.Type != "" && !bytes.Contains(line, []byte(f.Type)) {
+		return false
+	}
+	if len(f.Types) == 0 {
+		return true
+	}
+	for _, t := range f.Types {
+		if bytes.Contains(line, []byte(t)) {
+			return true
+		}
+	}
+	return false
+}
+
 func limitReached(count int, filter Filter) bool {
 	return filter.Limit > 0 && count >= filter.Limit
 }
@@ -297,6 +325,9 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
 	for scanner.Scan() {
+		if !lineMayMatchType(scanner.Bytes(), filter) {
+			continue
+		}
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
@@ -528,6 +559,9 @@ func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 			if filter.BeforeSeq > 0 && seq >= filter.BeforeSeq {
 				continue
 			}
+		}
+		if !lineMayMatchType(line, filter) {
+			continue
 		}
 		var e Event
 		if err := json.Unmarshal(line, &e); err != nil {

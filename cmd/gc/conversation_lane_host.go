@@ -264,6 +264,8 @@ type conversationLaneHost struct {
 	newTicker func(time.Duration) (<-chan time.Time, func())
 	// newExec builds a pass's executor; production is the live executor.
 	newExec func(laneExecDeps, session.Info) opjournal.Executor
+	// interrupts records the interrupt each conversation's executor runs.
+	interrupts *laneInterrupts
 	// turnHandle resolves a conversation's turn handle for its observer
 	// (conversation_lane_turns.go); production builds the session's worker
 	// handle.
@@ -365,6 +367,7 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 		newExec: func(deps laneExecDeps, info session.Info) opjournal.Executor {
 			return newConversationLaneExec(deps, info)
 		},
+		interrupts:   newLaneInterrupts(),
 		logf:         log.Printf,
 		observerName: laneObserverName(),
 		workers:      map[string]*laneWorker{},
@@ -684,14 +687,14 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, queued: w.queued, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
 			pass: func() lanePassOutcome {
-				// The turn a content take starts begins after the pass
-				// does, never before.
+				// The turn a content take, or a deliver-now unit's
+				// message, starts begins after the pass does, never before.
 				began := h.clk.Now()
 				out := h.pass(conv)
 				if laneTurnsWatchAfter(out, len(h.kinds) > 0 || resumeTurns) {
 					h.watchTurns(conv, turns)
 				}
-				if out.err == nil && out.res.Took == opjournal.TakeContent {
+				if out.err == nil && (out.res.Took == opjournal.TakeContent || out.res.Took == opjournal.TakeNow) {
 					turns.expect(began)
 				}
 				return out
@@ -763,13 +766,14 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		h.logf("conversation-lanes: conversation %s has no session row on two reads; its open ops close as skipped{conversation_closed}", conv)
 	}
 	exec := h.newExec(laneExecDeps{
-		cityPath: h.env.CityPath(),
-		cfg:      h.env.Config(),
-		sessions: sessions,
-		sp:       h.env.SessionProvider(),
-		lane:     st,
-		clk:      h.clk,
-		note:     h.noteError,
+		cityPath:   h.env.CityPath(),
+		cfg:        h.env.Config(),
+		sessions:   sessions,
+		sp:         h.env.SessionProvider(),
+		lane:       st,
+		clk:        h.clk,
+		note:       h.noteError,
+		interrupts: h.interrupts,
 	}, info)
 	res, err := lane.Pass(h.ctx, view, exec)
 	h.notePass(conv, res, err)

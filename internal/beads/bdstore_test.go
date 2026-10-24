@@ -2944,6 +2944,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			if b.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
+			if b.SourceStatus != tt.bdStatus {
+				t.Errorf("SourceStatus = %q, want bd's %q", b.SourceStatus, tt.bdStatus)
+			}
 		})
 	}
 }
@@ -4820,37 +4823,266 @@ func TestBdStoreListAssigneesSingleUsesAssigneeFlag(t *testing.T) {
 	}
 }
 
-func TestBdStoreListAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+// TestBdStoreListAssigneesMultipleFansOutPerAssignee pins GH#7794's fix: two
+// or more Assignees used to clear the predicate and scan every row of the
+// type (one deployment measured ~1,300 rows per multi-route inbox read).
+// Each distinct Assignees value now gets its own predicated
+// `bd list --assignee=X` read instead. Sort is explicit (SortCreatedDesc, not the default) so the
+// combined limit below proves a real cross-assignee merge, not just
+// whichever assignee happens to be listed first in query.Assignees:
+// route-b's row is newer than route-a's, so it must win the cut even though
+// route-a is read first.
+func TestBdStoreListAssigneesMultipleFansOutPerAssignee(t *testing.T) {
+	var calls []string
+	rows := map[string]string{
+		"route-a": `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`,
+		"route-b": `{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:02Z"}`,
+	}
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
-		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit a single --assignee", gotCmd)
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		if strings.Contains(gotCmd, "assignee=route-c") {
+			t.Fatalf("cmd = %q, a route not asked for must not be queried", gotCmd)
 		}
-		if strings.Contains(gotCmd, "--limit 1") {
-			return []byte(`[{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"}]`), nil
+		if !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("cmd = %q, want each fanned-out read unlimited before the combined client limit", gotCmd)
 		}
-		return []byte(`[
-			{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"},
-			{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z"},
-			{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z"}
-		]`), nil
+		if !strings.Contains(gotCmd, "--status=open") || !strings.Contains(gotCmd, "--type=message") {
+			t.Fatalf("cmd = %q, want each fanned-out read to keep the query's --status and --type", gotCmd)
+		}
+		for route, row := range rows {
+			if strings.Contains(gotCmd, "--assignee="+route) {
+				return []byte("[" + row + "]"), nil
+			}
+		}
+		t.Fatalf("cmd = %q, want exactly one --assignee=<route> per Assignees value", gotCmd)
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{
 		Assignees: []string{"route-a", "route-b"},
 		Type:      "message",
 		Status:    "open",
+		Sort:      beads.SortCreatedDesc,
 		Limit:     1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want exactly 2 (one bd list per Assignees value)", calls)
 	}
 	if len(got) != 1 || got[0].ID != "bd-route-b" {
-		t.Fatalf("got = %+v, want first matching route after client filter", got)
+		t.Fatalf("got = %+v, want bd-route-b: newer, so it must win the combined limit despite being read second", got)
+	}
+}
+
+// TestBdStoreListAssigneesFanOutNormalizesTheSet pins that the fan-out reads
+// the set nativeListFanOutAssignees picks for NativeDoltStore's plan: a
+// repeated assignee is read once, and an empty entry ("unassigned", which
+// --assignee cannot say) keeps the single unpredicated read.
+func TestBdStoreListAssigneesFanOutNormalizesTheSet(t *testing.T) {
+	const (
+		unassigned = `{"id":"bd-unassigned","title":"message","status":"open","issue_type":"message","created_at":"2026-05-01T00:00:00Z"}`
+		routeA     = `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`
+		routeC     = `{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:02Z"}`
+	)
+	// runner answers like bd list: route-a's row for --assignee=route-a, and
+	// every row of the type for a read with no --assignee.
+	runner := func(calls *[]string) beads.CommandRunner {
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			*calls = append(*calls, cmd)
+			if strings.Contains(cmd, "--assignee=route-a") {
+				return []byte("[" + routeA + "]"), nil
+			}
+			if strings.Contains(cmd, "--assignee=") {
+				return nil, fmt.Errorf("unexpected assignee read: %s", cmd)
+			}
+			return []byte("[" + unassigned + "," + routeA + "," + routeC + "]"), nil
+		}
+	}
+
+	t.Run("repeated assignee is read once", func(t *testing.T) {
+		var calls []string
+		s := beads.NewBdStore("/city", runner(&calls))
+		got, err := s.List(beads.ListQuery{Assignees: []string{"route-a", "route-a"}, Type: "message", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 1 || !strings.Contains(calls[0], "--assignee=route-a") {
+			t.Fatalf("calls = %v, want one bd list --assignee=route-a", calls)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-route-a"}) {
+			t.Fatalf("got ids %v, want [bd-route-a] once", ids)
+		}
+	})
+
+	t.Run("empty entry keeps the single read", func(t *testing.T) {
+		var calls []string
+		s := beads.NewBdStore("/city", runner(&calls))
+		got, err := s.List(beads.ListQuery{Assignees: []string{"", "route-a"}, Type: "message", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 1 || strings.Contains(calls[0], "--assignee=") || !strings.Contains(calls[0], "--limit 0") {
+			t.Fatalf("calls = %v, want one unpredicated bd list --limit 0: --assignee cannot ask for unassigned rows", calls)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-unassigned", "bd-route-a"}) {
+			t.Fatalf("got ids %v, want [bd-unassigned bd-route-a]", ids)
+		}
+	})
+}
+
+// TestBdStoreListAssigneesFanOutUnionsByID pins the union. The reads are
+// several snapshots, so a bead reassigned from route-a to route-b between them
+// can come back from both; it is returned once, as the first read saw it.
+func TestBdStoreListAssigneesFanOutUnionsByID(t *testing.T) {
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		for _, route := range []string{"route-a", "route-b"} {
+			if strings.Contains(cmd, "--assignee="+route) {
+				return []byte(`[{"id":"bd-moved","title":"message","status":"open","issue_type":"message","assignee":"` + route + `","created_at":"2026-05-01T00:00:01Z"}]`), nil
+			}
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-moved" || got[0].Assignee != "route-a" {
+		t.Fatalf("got = %+v, want bd-moved once, as the route-a read returned it", got)
+	}
+}
+
+// TestBdStoreListAssigneesFanOutKeepsBdDefaultOrder pins the SortDefault
+// union. bd list answers in priority, then newest-first, then id order, and a
+// Limit on the single scan this fan-out replaces kept that order's prefix. The
+// union is put back into that order, so route-b's newer row outranks route-a's
+// older one of the same priority although route-a is read first.
+func TestBdStoreListAssigneesFanOutKeepsBdDefaultOrder(t *testing.T) {
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "--assignee=route-a"):
+			return []byte(`[
+				{"id":"bd-a-urgent","title":"message","status":"open","issue_type":"message","assignee":"route-a","priority":0,"created_at":"2026-05-01T00:00:00Z"},
+				{"id":"bd-a-old","title":"message","status":"open","issue_type":"message","assignee":"route-a","priority":2,"created_at":"2026-05-01T00:00:01Z"}
+			]`), nil
+		case strings.Contains(cmd, "--assignee=route-b"):
+			return []byte(`[{"id":"bd-b-new","title":"message","status":"open","issue_type":"message","assignee":"route-b","priority":2,"created_at":"2026-05-01T00:00:03Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-a-urgent", "bd-b-new"}) {
+		t.Fatalf("got ids %v, want [bd-a-urgent bd-b-new]: the first two rows of the single scan, in bd's default order", ids)
+	}
+}
+
+// TestBdStoreListAssigneesFanOutReturnsPartialResults pins bd list's partial
+// contract across the fan-out, as TestBdStoreListReturnsPartialResultsOnCorruptEntries
+// pins it for one read: a row parseIssuesTolerant drops from any one read
+// marks the whole answer partial, and an answer with no surviving row is an
+// error rather than an empty success.
+func TestBdStoreListAssigneesFanOutReturnsPartialResults(t *testing.T) {
+	const (
+		routeA  = `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`
+		routeB  = `{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:02Z"}`
+		corrupt = `{"id":"bd-corrupt","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"not-a-time"}`
+	)
+	runner := func(answers map[string]string) beads.CommandRunner {
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			for route, out := range answers {
+				if strings.Contains(cmd, "--assignee="+route) {
+					return []byte(out), nil
+				}
+			}
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
+	}
+	query := beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open", Sort: beads.SortCreatedAsc}
+
+	t.Run("surviving rows come back marked partial", func(t *testing.T) {
+		s := beads.NewBdStore("/city", runner(map[string]string{
+			"route-a": "[" + routeA + "]",
+			"route-b": "[" + routeB + "," + corrupt + "]",
+		}))
+		got, err := s.List(query)
+		var partial *beads.PartialResultError
+		if !errors.As(err, &partial) || partial.Op != "bd list" {
+			t.Fatalf("err = %v, want a bd list *beads.PartialResultError: route-b's read dropped a row", err)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-route-a", "bd-route-b"}) {
+			t.Fatalf("got ids %v, want both surviving rows [bd-route-a bd-route-b]", ids)
+		}
+	})
+
+	t.Run("no surviving row is an error", func(t *testing.T) {
+		s := beads.NewBdStore("/city", runner(map[string]string{
+			"route-a": "[]",
+			"route-b": "[" + corrupt + "]",
+		}))
+		got, err := s.List(query)
+		var partial *beads.PartialResultError
+		if err == nil || errors.As(err, &partial) {
+			t.Fatalf("List() = %+v, %v; want a hard error: the reads' only row was dropped", got, err)
+		}
+	})
+}
+
+// TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly pins both
+// legs of a multi-assignee TierBoth read, the shape of a multi-route mail
+// inbox. The bd list leg fans out to one --assignee read per route; the
+// listEphemeral bd query leg still carries no assignee clause and reads every
+// open ephemeral message, the part of GH#7794 the fan-out does not fix.
+func TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly(t *testing.T) {
+	var listCalls, queryCalls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(cmd, "bd list "):
+			listCalls = append(listCalls, cmd)
+			return []byte(`[]`), nil
+		case strings.HasPrefix(cmd, "bd query "):
+			queryCalls = append(queryCalls, cmd)
+			return []byte(`[
+				{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+				{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z","ephemeral":true}
+			]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Assignees: []string{"route-a", "route-b"},
+		Type:      "message",
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listCalls) != 2 {
+		t.Fatalf("bd list calls = %v, want one per route", listCalls)
+	}
+	for i, route := range []string{"route-a", "route-b"} {
+		if !strings.Contains(listCalls[i], "--assignee="+route) || !strings.Contains(listCalls[i], "--status=open") || !strings.Contains(listCalls[i], "--type=message") {
+			t.Fatalf("bd list call %d = %q, want --assignee=%s with the query's --status and --type", i, listCalls[i], route)
+		}
+	}
+	if len(queryCalls) != 1 || strings.Contains(queryCalls[0], "assignee=") || !strings.Contains(queryCalls[0], "--limit 0") {
+		t.Fatalf("bd query calls = %v, want one unbounded read with no assignee clause: bd query cannot yet ask for one of several assignees, so GH#7794 stays open for this leg (when it can, update this test and listViaBDList's comment)", queryCalls)
+	}
+	if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-wisp-a"}) {
+		t.Fatalf("got ids %v, want [bd-wisp-a]: route-c's row is filtered client-side", ids)
 	}
 }
 
@@ -4875,6 +5107,9 @@ func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
 	}
 }
 
+// TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter also pins the
+// TierWisps carve-out on listViaBDList's fan-out: the runner refuses every
+// --assignee flag, so a wisps-tier bd list leg that fanned out fails here.
 func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
 	var gotCmd string
 	runner := func(_, name string, args ...string) ([]byte, error) {

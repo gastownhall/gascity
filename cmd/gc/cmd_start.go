@@ -804,8 +804,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
 	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION, which no gc code
-	// sets.
+	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
+	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
 	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -816,7 +816,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// than run legacy session work under a v2 latch. Production never reaches
 	// it (A6, F11); --dry-run reconciles nothing.
 	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
-		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: the v2 session reconciler has no one-shot reconcile; run the controller (gc start --foreground) or set session_reconciler = \"legacy\"") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

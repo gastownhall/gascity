@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -53,6 +54,47 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 // for any write routed through store.Tx(...).
 func (s *failingMetadataBatchStore) Tx(_ string, fn func(beads.Tx) error) error {
 	return fn(s)
+}
+
+// failingFencedMetadataStore is failingMetadataBatchStore on the conditional
+// path: stamped auto (startCommitWriteArms), it fails the fenced metadata
+// write too, so the injected failure fires on whichever arm a write takes.
+type failingFencedMetadataStore struct{ *failingMetadataBatchStore }
+
+func (s failingFencedMetadataStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if s.failBatch && len(opts.Metadata) > 0 {
+		return errors.New("fenced batch failed")
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// Tx hands fn the wrapper, as failingMetadataBatchStore.Tx does.
+func (s failingFencedMetadataStore) Tx(_ string, fn func(beads.Tx) error) error { return fn(s) }
+
+// startCommitWriteArms are the two arms a session metadata write takes over a
+// store whose metadata batches fail: the unconditional batch (conditional
+// writes off), and the fenced write (auto over a store that fences, which
+// the default reaches since mc-dpo2b). Each builds the store; arm, called
+// once the rows are seeded, selects the arm.
+func startCommitWriteArms() map[string]func() (store beads.Store, arm func(*testing.T)) {
+	return map[string]func() (beads.Store, func(*testing.T)){
+		"unconditional": func() (beads.Store, func(*testing.T)) {
+			return &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}, func(*testing.T) {}
+		},
+		"conditional": func() (beads.Store, func(*testing.T)) {
+			inner := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+			store := failingFencedMetadataStore{inner}
+			return store, func(t *testing.T) {
+				t.Helper()
+				if err := beads.StampOpenedStore(inner.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
+					t.Fatalf("stamp: %v", err)
+				}
+				if w, _, err := beads.ResolveConditionalWriter(store); w == nil || err != nil {
+					t.Fatalf("the conditional arm is not active: writer %T, err %v", w, err)
+				}
+			}
+		},
+	}
 }
 
 type failNthMetadataBatchStore struct {
@@ -4755,8 +4797,18 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 // same SetMetadataBatch as the state/state_reason/creation_complete_at
 // transition so the sweep never observes a transient state without either
 // the claim or the marker.
+//
+// Both write arms keep the contract (startCommitWriteArms).
 func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
-	store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+	for name, newStore := range startCommitWriteArms() {
+		t.Run(name, func(t *testing.T) {
+			testCommitStartResultAtomicBatchFailureLeavesClaimIntact(t, newStore)
+		})
+	}
+}
+
+func testCommitStartResultAtomicBatchFailureLeavesClaimIntact(t *testing.T, newStore func() (beads.Store, func(*testing.T))) {
+	store, arm := newStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
 		Type:   sessionBeadType,
@@ -4772,6 +4824,7 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arm(t)
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
@@ -4816,7 +4869,8 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 // observe a wake whose metadata commit then fails (the reconciler reports
 // failure and retries, so the "fact" the event announced never landed).
 // When the atomic start batch fails no session.woke is emitted; on success
-// exactly one is. Regression test for ga-kmoj9c.
+// exactly one is, on both write arms (startCommitWriteArms). Regression test
+// for ga-kmoj9c.
 func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T) {
 	successResult := func(session *beads.Bead) startResult {
 		return startResult{
@@ -4844,29 +4898,11 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 	}
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}
 
-	t.Run("metadata batch failure suppresses the event", func(t *testing.T) {
-		store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
-		session, err := store.Create(beads.Bead{
-			Title:    "helper",
-			Type:     sessionBeadType,
-			Labels:   []string{sessionBeadLabel},
-			Metadata: sessionMeta(),
+	for name, newStore := range startCommitWriteArms() {
+		t.Run("metadata batch failure suppresses the event/"+name, func(t *testing.T) {
+			testCommitStartResultBatchFailureSuppressesSessionWoke(t, newStore, successResult, sessionMeta(), clk)
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := events.NewFake()
-		if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
-			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
-		}
-		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(woke) != 0 {
-			t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
-		}
-	})
+	}
 
 	t.Run("successful commit emits exactly one event", func(t *testing.T) {
 		store := beads.NewMemStore()
@@ -4891,6 +4927,31 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 			t.Fatalf("session.woke events = %d, want exactly 1 after the durable commit", len(woke))
 		}
 	})
+}
+
+func testCommitStartResultBatchFailureSuppressesSessionWoke(t *testing.T, newStore func() (beads.Store, func(*testing.T)), successResult func(*beads.Bead) startResult, meta map[string]string, clk *clock.Fake) {
+	store, arm := newStore()
+	session, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm(t)
+	rec := events.NewFake()
+	if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned true, want false when metadata batch fails")
+	}
+	woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(woke) != 0 {
+		t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
+	}
 }
 
 func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *testing.T) {

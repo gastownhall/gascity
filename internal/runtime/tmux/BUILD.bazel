@@ -112,6 +112,8 @@ go_test(
         "nudge_submit_key_sequence_test.go",
         "pane_idle_scan_test.go",
         "proctable_tracking_test.go",
+        "respond_fence_integration_test.go",
+        "respond_refusal_test.go",
         "runtime_inventory_integration_test.go",
         "runtime_inventory_test.go",
         "seam_conformance_test.go",

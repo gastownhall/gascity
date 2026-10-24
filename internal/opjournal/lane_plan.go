@@ -32,6 +32,7 @@ func (a incarnation) cmp(b incarnation) int {
 const (
 	lastErrorLeaseExpired = "lease_expired"
 	lastErrorTransient    = "transient"
+	lastErrorUnavailable  = "unavailable"
 	lastErrorNotDelivered = "not_delivered"
 	lastErrorUnknown      = "unknown"
 	lastErrorKeyRejected  = "key_rejected"
@@ -50,9 +51,26 @@ type entry struct {
 	cur    Op
 	wait   WaitReason
 	blocks bool
+	// unit, on a control entry, is a deliver-now unit: op is its message
+	// and unit its derived interrupt, taken together (DES-O1 §10.3).
+	unit *nowUnit
+	// postUnit is a deliver-now message whose unit is over: urgent content
+	// that goes alone at a boundary, marked nowDegradation (its interrupt's
+	// failure).
+	postUnit       bool
+	nowDegradation string
 }
 
 func (e entry) candidate() bool { return e.wait == "" }
+
+// entryIDs are the ids of the ops an entry stands for: a unit's interrupt
+// and message, else its op.
+func entryIDs(e entry) []string {
+	if e.unit != nil {
+		return []string{e.unit.op.ID, e.op.ID}
+	}
+	return []string{e.op.ID}
+}
 
 // maybeDelivered reports whether an earlier attempt may have reached the
 // executor: a re-take, or an op released after an Unknown result. The probe
@@ -92,12 +110,55 @@ type rulesPlan struct {
 	// that the rules leave open and not in flight, in a class or not: a
 	// member waiting on its after target is still in its replay group.
 	groups map[string][]Op
+	// raisings holds, by op id, the occurrence of each respond candidate as
+	// the pass read it after its probe (noteRaisings).
+	raisings map[string]raisingState
+	// responds are the open respond ops the rules leave open and not in
+	// flight, candidates or waiting: a look that shows a prompt gone ends
+	// their occurrences (clearGone).
+	responds []Op
+	now      time.Time
+	// remaining counts the ops the rules leave open, for closeRow.
+	remaining int
+	// nowState holds each deliver-now message's and derived-shape
+	// interrupt's phase-1 decision, which planNow finishes; nowOrder is
+	// their read order.
+	nowState map[string]*nowOpState
+	nowOrder []string
+	// lowerings are the deliver-now messages this pass lowers.
+	lowerings []nowLowering
+	// openUnits are the lowered deliver-now messages whose derived
+	// interrupt is open, whatever either op waits on, and the due ones not
+	// yet lowered only because a read (of their after target or of their
+	// derived id) failed transiently:
+	// while any is, no content is taken (U-ORDER), unless planTake admits it
+	// past the content block the unit waits on.
+	openUnits []string
 }
 
-// isUrgent reports urgent content precedence: steer (OJ-17 adds now and the
-// legacy interrupt).
+func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time.Time) {
+	rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
+	rp.next = minTime(rp.next, until)
+	rp.remaining++
+}
+
+// closeOp closes read, the op as read (its revision guards the write), from
+// cur, the op with any bookkeeping the rules record.
+func (rp *rulesPlan) closeOp(read, cur Op, o Outcome) {
+	rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, rp.by, rp.now)})
+}
+
+// isUrgent reports urgent content precedence: steer, and a deliver-now
+// message (now, or the legacy interrupt).
 func isUrgent(op Op) bool {
-	return op.Kind == KindMessage && op.Policy.Message.When == WhenSteer
+	if op.Kind != KindMessage {
+		return false
+	}
+	switch op.Policy.Message.When {
+	case WhenSteer, WhenNow, WhenInterrupt:
+		return true
+	}
+	return false
 }
 
 // scopeCmp compares an op's scope with the effective incarnation: -1 older,
@@ -118,7 +179,7 @@ func scopeCmp(s Scope, inc incarnation) int {
 // order of candidates and blocking waiters, whether a Take is possible at
 // all, the wake need and the next timer. It is pure.
 func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by string) rulesPlan {
-	rp := rulesPlan{by: by, inc: incarnation{conv.Generation, conv.Epoch}}
+	rp := rulesPlan{by: by, now: now, inc: incarnation{conv.Generation, conv.Epoch}, nowState: map[string]*nowOpState{}}
 	rt := snap.rt
 	rowOK := rt.found && rt.err == nil
 	switch {
@@ -136,16 +197,6 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 	// inFlight is the earliest time a live lease can end, zero when no op
 	// is in flight.
 	var inFlight time.Time
-	remaining := 0
-	waitOpDetail := func(op Op, r WaitReason, detail string, until time.Time) {
-		rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
-		rp.next = minTime(rp.next, until)
-		remaining++
-	}
-	waitOp := func(op Op, r WaitReason, until time.Time) { waitOpDetail(op, r, "", until) }
-	closeOp := func(read, cur Op, o Outcome) {
-		rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, by, now)})
-	}
 	// past holds every op past the in-flight and expiry rules, as the rules
 	// see it; the ones a later rule closes are dropped from groups.
 	var past []Op
@@ -153,6 +204,23 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		spec, err := Lookup(op.Kind)
 		if err != nil {
 			continue
+		}
+		// A deliver-now op's waits and placement are left to planNow
+		// (phase 2), which pairs it with its partner; its closes stand.
+		ns := rp.nowOp(op)
+		waitOpDetail := func(op Op, r WaitReason, detail string, until time.Time) {
+			if ns != nil {
+				ns.wait, ns.detail, ns.until = r, detail, until
+				return
+			}
+			rp.waitOpDetail(op, r, detail, until)
+		}
+		waitOp := func(op Op, r WaitReason, until time.Time) { waitOpDetail(op, r, "", until) }
+		closeOp := func(read, cur Op, o Outcome) {
+			rp.closeOp(read, cur, o)
+			if ns != nil {
+				ns.closing = &o
+			}
 		}
 		if op.Status == StatusSettling {
 			waitOp(op, WaitSettling, time.Time{})
@@ -201,17 +269,16 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			closeOp(op, cur, canceled)
 			continue
 		case !executing && now.After(op.StartBy):
-			reason := ReasonExpiredBeforeStart
-			if op.MaybeDelivered > 0 {
-				reason = ReasonDeadlineInFlight
-			}
-			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: reason})
+			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: startByReason(op)})
 			continue
 		}
 		past = append(past, cur)
 		// An expired op that survived the rules above is a re-take
 		// candidate; it still passes the scope and state rules.
 		e := entry{op: op, urgent: isUrgent(op), retake: expired, cur: cur}
+		if ns != nil {
+			ns.e = e
+		}
 		scope := scopeCmp(op.Scope, rp.inc)
 		switch {
 		case scope < 0:
@@ -224,7 +291,10 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			waitOp(op, WaitScopeFuture, time.Time{})
 			continue
 		}
-		if op.After != "" {
+		// A lowered deliver-now message passed its after at the lowering,
+		// and the target, closed, is immutable: it is not read again.
+		loweredNow := isNowMessage(op) && op.Status != StatusSubmitted
+		if op.After != "" && !loweredNow {
 			if snap.openIDs[op.After] {
 				waitOp(op, WaitAfterPending, time.Time{})
 				continue
@@ -262,22 +332,27 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		case op.RetryAt.After(now):
 			waitOp(op, WaitRetryBackoff, op.RetryAt)
 			e.wait, e.blocks = WaitRetryBackoff, true
-		case spec.Class == ClassContent && !op.Policy.Message.When.LaneLowered():
-			waitOp(op, WaitNowUnlowered, time.Time{})
-			continue
 		case spec.Class == ClassContent && !e.urgent && conv.ContentHold:
 			waitOp(op, WaitContentHold, time.Time{})
 			e.wait, e.blocks = WaitContentHold, true
-		default:
-			remaining++
+		case ns == nil:
+			rp.remaining++
+		}
+		if ns != nil {
+			ns.e, ns.placed, ns.blocks = e, true, e.blocks
+			continue
 		}
 		*class = append(*class, e)
 	}
+	rp.planNow(snap, conv)
 	orderEntries(rp.control)
 	orderEntries(rp.content)
 	rp.groups = replayGroups(past, rp.closes)
-	rp.closeRow = conv.Closed && remaining == 0 && rowOK && !rt.row.Closed
-	rp.takePossible = rp.decideTake(conv, rt, rowOK, inFlight, now)
+	rp.responds = openResponds(past, rp.closes)
+	rp.closeRow = conv.Closed && rp.remaining == 0 && rowOK && !rt.row.Closed
+	// A lowering is written and the conversation read again before any
+	// Take, so no content goes ahead of the unit it forms.
+	rp.takePossible = rp.decideTake(conv, rt, rowOK, inFlight, now) && len(rp.lowerings) == 0
 	return rp
 }
 
@@ -305,6 +380,18 @@ func replayGroups(ops []Op, closes []ruleClose) map[string][]Op {
 		}
 	}
 	return groups
+}
+
+// openResponds returns the respond ops among ops, less the ones closes
+// close.
+func openResponds(ops []Op, closes []ruleClose) []Op {
+	var out []Op
+	for _, op := range ops {
+		if op.Kind == KindRespond && !slices.ContainsFunc(closes, func(c ruleClose) bool { return c.cur.ID == op.ID }) {
+			out = append(out, op)
+		}
+	}
+	return out
 }
 
 // decideTake reports whether a Take is possible and, when it is not because
@@ -355,7 +442,9 @@ func (rp *rulesPlan) waitCandidates(r WaitReason, until time.Time, wake bool) {
 			if !e.candidate() {
 				continue
 			}
-			rp.waits = append(rp.waits, OpWait{ID: e.op.ID, Reason: r, Until: until})
+			for _, id := range entryIDs(e) {
+				rp.waits = append(rp.waits, OpWait{ID: id, Reason: r, Until: until})
+			}
 			if wake && wantsWake(e.op) {
 				rp.wake = true
 			}
@@ -428,6 +517,9 @@ type takePlan struct {
 	busy   bool
 	more   bool
 	next   time.Time
+	// unitBlocked are the open units (by message id) that wait on the
+	// probe's content block this pass.
+	unitBlocked map[string]bool
 }
 
 // takeSpec is the batch a Take writes.
@@ -445,6 +537,11 @@ type takeSpec struct {
 	baseSeq    uint64
 	probe      Probe
 	view       ConversationView
+	// now is a deliver-now Take's path (TakeNow).
+	now nowPath
+	// degradation marks a delivery that neither the executor nor the
+	// unfenced default marks: a post-unit deliver-now message's.
+	degradation string
 }
 
 // contentItem is a content candidate as the probe sees it.
@@ -455,6 +552,7 @@ type contentItem struct {
 	rider    bool // after_turn: rides only with a starter
 	stop     bool // a blocking waiter: nothing after it is taken
 	closing  bool // this pass closes it
+	solo     bool // goes alone: a post-unit deliver-now message
 }
 
 // planTake picks what one Take carries, given the probe (DES-O1 §4.4's when
@@ -466,7 +564,7 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 		return tp, err
 	}
 	caps := probe.Caps
-	if f := probe.Fence; f != (Fence{}) && (f.Conversation != conv.ID || f.Generation != conv.Generation || f.Epoch != conv.Epoch) {
+	if fenceDisagrees(probe, conv) {
 		// Nothing rings when the runtime and the view agree again: retry on
 		// a timer.
 		tp.next = now.Add(TransientBackoffBase)
@@ -484,9 +582,42 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 		probe:   probe,
 		view:    conv,
 	}
-	control := tp.planControl(rp, probe, now)
-	content := tp.planContent(rp, probe, now)
+	control, path := tp.planControl(rp, probe, now)
+	// While a deliver-now unit is open no content is taken (U-ORDER): its
+	// message heads the content, and its interrupt must not cut a turn
+	// other content just started. Content the probe admits past a content
+	// block (the 2026-10-19 ruling's drain reminder) still goes while every
+	// open unit waits on that block: the block, not the unit, holds the
+	// session, and the unit's interrupt runs only once it lifts.
+	var content *contentBatch
+	unitOpen := slices.ContainsFunc(rp.openUnits, func(id string) bool { return !tp.unitBlocked[id] })
+	held := false
+	if unitOpen {
+		for _, e := range rp.content {
+			if e.candidate() {
+				tp.wait(e.op, WaitBlocked, "")
+				held = true
+			}
+		}
+	} else {
+		content = tp.planContent(rp, probe, now)
+	}
 	switch {
+	case control != nil && control.unit != nil:
+		m := control.op
+		spec.kind = TakeNow
+		spec.ops = []entry{{op: control.unit.op, cur: control.unit.cur}, {op: m, cur: control.cur}}
+		// The message's lane_seq at this Take: the interrupt takes base+1.
+		spec.key = m.ID + ":" + strconv.FormatUint(rp.baseSeq+2, 10)
+		spec.mode = LinkStarts
+		spec.now = path
+		text, err := RenderDelivery([]Op{m}, caps.Text, false)
+		if err != nil {
+			return tp, err
+		}
+		spec.text = text
+		tp.take = &spec
+		tp.more = tp.more || held
 	case control != nil:
 		spec.kind = TakeControl
 		spec.ops = []entry{*control}
@@ -513,6 +644,10 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 			return tp, err
 		}
 		spec.text = text
+		if head := spec.ops[0]; head.postUnit {
+			// A post-unit message goes alone (contentItem.solo).
+			spec.degradation = head.nowDegradation
+		}
 		tp.take = &spec
 	}
 	return tp, nil
@@ -523,7 +658,7 @@ func (tp *takePlan) waitAll(rp rulesPlan, r WaitReason, until time.Time) {
 	for _, list := range [][]entry{rp.control, rp.content} {
 		for _, e := range list {
 			if e.candidate() {
-				tp.waits = append(tp.waits, OpWait{ID: e.op.ID, Reason: r, Until: until})
+				tp.waitEntry(e, r, "", until)
 			}
 		}
 	}
@@ -533,15 +668,29 @@ func (tp *takePlan) wait(op Op, r WaitReason, detail string) {
 	tp.waits = append(tp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail})
 }
 
+// waitUntil is wait with a timer: the wait ends by itself at until.
+func (tp *takePlan) waitUntil(op Op, r WaitReason, detail string, until time.Time) {
+	tp.waits = append(tp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
+	tp.next = minTime(tp.next, until)
+}
+
+// waitEntry reports every op of e (entryIDs) as waiting r, until until.
+func (tp *takePlan) waitEntry(e entry, r WaitReason, detail string, until time.Time) {
+	for _, id := range entryIDs(e) {
+		tp.waits = append(tp.waits, OpWait{ID: id, Reason: r, Detail: detail, Until: until})
+	}
+}
+
 func (tp *takePlan) close(rp rulesPlan, e entry, o Outcome, now time.Time) {
 	tp.closes = append(tp.closes, ruleClose{cur: e.op, next: closedAt(e.cur, o, rp.by, now)})
 }
 
 // planControl picks the first takeable control op (I10), closing a respond
-// the runtime cannot perform unless it may have been delivered (that one
-// waits). Control takes one op.
-func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry {
+// the runtime cannot perform. Control takes one op, or one deliver-now unit
+// (planUnit), whose path it returns.
+func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) (*entry, nowPath) {
 	var picked *entry
+	var path nowPath
 	blocked := false
 	for i := range rp.control {
 		e := rp.control[i]
@@ -552,22 +701,32 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry
 		case !e.candidate():
 			continue
 		case blocked:
-			tp.wait(e.op, WaitBlocked, "")
+			tp.waitEntry(e, WaitBlocked, "", time.Time{})
+		case e.unit != nil && picked != nil:
+			tp.more = true
+		case e.unit != nil:
+			if p, ok := tp.planUnit(rp, e, probe, now); ok {
+				picked, path = &e, p
+			}
+		case e.op.Kind == KindRespond && rp.raisings[e.op.ID].over():
+			// Its occurrence ended (another answer, or a look that saw its
+			// prompt gone): whatever the runtime shows, it answers nothing.
+			tp.close(rp, e, Outcome{Arm: ArmSkipped, Reason: ReasonStale}, now)
 		case !probe.Caps.Live:
 			tp.wait(e.op, WaitNotLive, "")
 		case !probe.Running:
 			tp.wait(e.op, WaitNotRunning, "")
-		case e.op.Kind == KindRespond && !probe.Caps.Respond && e.maybeDelivered():
-			tp.wait(e.op, WaitUnsupported, "")
 		case e.op.Kind == KindRespond && !probe.Caps.Respond:
 			tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+		case e.op.Kind == KindRespond && !tp.respondReady(rp, e, probe, now):
+			// respondReady recorded its wait or close.
 		case picked == nil:
 			picked = &e
 		default:
 			tp.more = true
 		}
 	}
-	return picked
+	return picked, path
 }
 
 // contentBatch is the content batch planContent formed.
@@ -602,7 +761,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	}
 	items := make([]contentItem, 0, len(rp.content))
 	for _, e := range rp.content {
-		it := contentItem{e: e}
+		it := contentItem{e: e, solo: e.postUnit}
 		if !e.candidate() {
 			it.stop = e.blocks
 			items = append(items, it)
@@ -632,7 +791,9 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 		case boundary == TriUnknown:
 			tp.wait(op, WaitBoundaryUnknown, "")
 			tp.busy = true
-		case m.When == WhenBoundary:
+		case m.When == WhenBoundary, e.postUnit:
+			// A post-unit deliver-now message waits for the boundary its
+			// interrupt did not reach.
 			if boundary == TriYes {
 				it.eligible, it.starter = true, true
 			} else {
@@ -672,7 +833,9 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 				tp.busy = true
 			}
 		default:
-			tp.wait(op, WaitNowUnlowered, "")
+			// Every when is handled above; a deliver-now message reaches
+			// content only post-unit.
+			tp.wait(op, WaitBlocked, "")
 		}
 		items = append(items, it)
 	}
@@ -833,8 +996,8 @@ func inReplayGroup(items []contentItem, head, i int) bool {
 }
 
 // pickFresh picks the longest fresh prefix from head: it stops at a stop, at
-// a maybe-delivered op and at the first op the limits or the text budget
-// refuse.
+// a maybe-delivered op, at a solo op (a solo head goes alone) and at the
+// first op the limits or the text budget refuse.
 func pickFresh(items []contentItem, head int, text textBudget) ([]int, bool) {
 	lim := batchLimits{text: text}
 	var picked []int
@@ -846,13 +1009,16 @@ func pickFresh(items []contentItem, head int, text textBudget) ([]int, bool) {
 		if !it.eligible {
 			continue
 		}
-		if it.e.maybeDelivered() {
+		if it.e.maybeDelivered() || it.solo && i != head {
 			break
 		}
 		if !lim.admit(it.e.op) {
 			return picked, true
 		}
 		picked = append(picked, i)
+		if it.solo {
+			break
+		}
 	}
 	return picked, false
 }

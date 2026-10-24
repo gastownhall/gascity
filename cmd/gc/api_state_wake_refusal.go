@@ -23,6 +23,10 @@ type wakeVerdictDeps struct {
 	// overrides an idle latch. No work store never refuses on it.
 	work      cityWorkLeg
 	rigStores func() map[string]beads.Store
+	// runsV2 reports the controller's latched mode, read only for a row whose
+	// respawn circuit is open: v2 never reads or clears the circuit, so under
+	// v2 a stale open circuit refuses nothing. Nil is legacy.
+	runsV2 func() bool
 }
 
 // wakeWillNotStart is CONTRACT v5.9 D8 7(a)'s one will-not-start predicate,
@@ -59,7 +63,7 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 		return "it is a drained pool seat; the pool restarts seats only for demand", true
 	case sessionWakeCreateAbandonedInfo(info, d.cfg.Session.StartupTimeoutDuration()):
 		return "its create never completed; use `gc session close` to release the slot", true
-	case info.SessionCircuitState == sessionpkg.SessionCircuitStateOpen:
+	case info.SessionCircuitState == sessionpkg.SessionCircuitStateOpen && (d.runsV2 == nil || !d.runsV2()):
 		return fmt.Sprintf("its respawn circuit breaker is open; `gc session reset %s` clears it", info.ID), true
 	}
 	if name := info.SessionNameMetadata; name != "" && d.sessFront != nil {
@@ -86,6 +90,7 @@ func (cs *controllerState) WakeStartRefusal(info sessionpkg.Info) (string, bool)
 	return wakeWillNotStart(info, wakeVerdictDeps{
 		cfg: cs.Config(), cityPath: cs.CityPath(), sessFront: sessionpkg.NewStore(cs.SessionsBeadStore()),
 		sp: cs.SessionProvider(), work: cityWorkLegOf(cs.cityWorkStore()), rigStores: cs.wakeRigStores,
+		runsV2: cs.wakeOf().runsV2,
 	}, time.Now())
 }
 

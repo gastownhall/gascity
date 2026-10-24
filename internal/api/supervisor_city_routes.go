@@ -486,7 +486,6 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Description: "Writes a conversation-lane operation, create-if-absent under its id, which derives from the session, the principal and the client key. " +
 			"201 when this request wrote it, 200 with the stored operation when the same request was proposed before. " +
 			"Only kinds the city's running conversation lane host executes are accepted: those [ops] authoritative listed when the controller started. Any other, or any kind while no lane host runs, is refused 409 kind-not-enabled. " +
-			"A message whose policy.message.when this build's lane does not deliver (now, interrupt) is refused 409 when-not-supported. " +
 			"A client key that already names a different request from the same principal is refused 409 key-reuse, naming the existing op_id. " +
 			"A refused request writes nothing and materializes no named session. " +
 			"Watch op.changed and fact.recorded on the city event stream from the returned cursor; after reconnecting, read a non-terminal operation again with GET .../ops/{op}, whose row is authoritative.",

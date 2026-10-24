@@ -14,11 +14,13 @@ import (
 //   - the capabilities are normalized, and name a known source, interrupt
 //     mode and replacement;
 //   - an unsupported interrupt mode has Fence none;
-//   - a session with no source has nothing on every axis, and CurrentTurn and
-//     WatchTurns refuse it with runtime.ErrTurnIdentityUnsupported;
-//   - a source records turn starts; CurrentTurn either reads a well-formed
-//     history or fails with an error that says why (unavailable, gone,
-//     initializing or unidentifiable), never an empty error;
+//   - a session with no source has nothing on every axis, and CurrentTurn,
+//     FreshTurn and WatchTurns refuse it with
+//     runtime.ErrTurnIdentityUnsupported;
+//   - a source records turn starts; CurrentTurn and FreshTurn each either
+//     read a well-formed history or fail with an error that says why
+//     (unavailable, gone, initializing or unidentifiable), never an empty
+//     error;
 //   - WatchTurns sends an update first, history or error, and closes once
 //     ctx ends.
 //
@@ -35,6 +37,9 @@ func CheckTurnHandle(ctx context.Context, h worker.TurnHandle) error {
 		if _, err := h.CurrentTurn(ctx); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			return fmt.Errorf("CurrentTurn with no source = %w, want ErrTurnIdentityUnsupported", err)
 		}
+		if _, err := h.FreshTurn(ctx); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+			return fmt.Errorf("FreshTurn with no source = %w, want ErrTurnIdentityUnsupported", err)
+		}
 		if _, err := h.WatchTurns(ctx); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			return fmt.Errorf("WatchTurns with no source = %w, want ErrTurnIdentityUnsupported", err)
 		}
@@ -43,6 +48,10 @@ func CheckTurnHandle(ctx context.Context, h worker.TurnHandle) error {
 	hist, err := h.CurrentTurn(ctx)
 	if err := checkTurnRead(hist, err); err != nil {
 		return fmt.Errorf("CurrentTurn: %w", err)
+	}
+	hist, err = h.FreshTurn(ctx)
+	if err := checkTurnRead(hist, err); err != nil {
+		return fmt.Errorf("FreshTurn: %w", err)
 	}
 	watchCtx, cancel := context.WithCancel(ctx)
 	ch, err := h.WatchTurns(watchCtx)

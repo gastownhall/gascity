@@ -216,12 +216,8 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	if err != nil {
 		return nil, err
 	}
-	preview, err := st.Preview(proposeRequest(previewConversation, key, minted, producer, body))
-	if err != nil {
+	if _, err := st.Preview(proposeRequest(previewConversation, key, minted, producer, body)); err != nil {
 		return nil, proposeError(err)
-	}
-	if spec, err := opjournal.Lookup(preview.Kind); err == nil && spec.Class == opjournal.ClassContent && !preview.Policy.Message.When.LaneLowered() {
-		return nil, apierr.WhenNotSupported.Msgf("when_not_supported: this build's conversation lane does not deliver a %q message; this request wrote nothing", preview.Policy.Message.When)
 	}
 	cursor, err := s.currentCityEventCursor()
 	if err != nil {

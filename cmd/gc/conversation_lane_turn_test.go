@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -105,12 +106,14 @@ type turnLaneFixture struct {
 	elapsed    time.Duration // virtual time the link waits slept
 }
 
-// laneStubTurns is a worker.TurnHandle answering from caps and read.
+// laneStubTurns is a worker.TurnHandle answering from caps and read, and
+// FreshTurn from fresh when it is set.
 type laneStubTurns struct {
 	worker.TurnHandle
 	caps    worker.TurnCapabilities
 	capsErr error
 	read    func(context.Context) (runtime.TurnHistory, error)
+	fresh   func(context.Context) (runtime.TurnHistory, error)
 }
 
 func (s laneStubTurns) TurnCapabilities(context.Context) (worker.TurnCapabilities, error) {
@@ -118,6 +121,13 @@ func (s laneStubTurns) TurnCapabilities(context.Context) (worker.TurnCapabilitie
 }
 
 func (s laneStubTurns) CurrentTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	return s.read(ctx)
+}
+
+func (s laneStubTurns) FreshTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	if s.fresh != nil {
+		return s.fresh(ctx)
+	}
 	return s.read(ctx)
 }
 
@@ -129,7 +139,13 @@ var laneTranscriptCaps = worker.TurnCapabilities{
 
 func newTurnLaneFixture(t *testing.T, p runtime.Profile, opts ...laneFixtureOpt) *turnLaneFixture {
 	t.Helper()
-	f := newLaneFixture(t, opts...)
+	return newTurnLaneFixtureOver(t, newLaneTestStore(), p, opts...)
+}
+
+// newTurnLaneFixtureOver is newTurnLaneFixture over store.
+func newTurnLaneFixtureOver(t *testing.T, store beads.Store, p runtime.Profile, opts ...laneFixtureOpt) *turnLaneFixture {
+	t.Helper()
+	f := newLaneFixtureOver(t, store, opts...)
 	turns := &scriptedTurns{FullFake: runtime.FullFake{Fake: f.sp}}
 	return &turnLaneFixture{laneFixture: f, sp: runtime.NewFakeProfile(p, turns), turns: turns}
 }

@@ -48,6 +48,14 @@ package main
 // (session.GateContentDrainNotice, laneDrainNoticeClass) and nothing else. A
 // row the gate holds the notice from for another reason is nudged directly
 // (deliverDrainReminder).
+//
+// A conversation an operator holds (its content_hold cell,
+// session.ContentHeldInfo) holds every notice, the drain reminder's included
+// (SESSION-RUNTIME-027), so the backstops and the drain reminder do not
+// remind it by either route: a backstop that would act on it spends no
+// attempt and takes no terminal action (runNudgeBackstop), and a due drain
+// reminder spends no attempt (drainReminderContentHeld), until the hold
+// clears.
 
 import (
 	"errors"

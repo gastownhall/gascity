@@ -488,6 +488,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			CityPath:                    cs.cityPath,
 			Provider:                    "file",
 			ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+			ConditionalWritesDefaulted:  conditionalWritesDefaultAuto(cs.rolloutFlags),
 			NativeTransport:             cs.nativeTransport,
 			OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "city"),
 			OpenFileStore: func() (beads.Store, error) {
@@ -669,6 +670,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		Provider:                    provider,
 		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider, cfg),
 		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+		ConditionalWritesDefaulted:  conditionalWritesDefaultAuto(cs.rolloutFlags),
 		NativeTransport:             cs.nativeTransport,
 		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),
 		// The controller holds a rig store for the process lifetime, which is

@@ -33,7 +33,7 @@ type conversationLanesDoctorCheck struct {
 
 // laneMessageUnderV2Warning is the check's warning when message is listed
 // under the v2 reconciler (ga-f35wnp, V2-18).
-const laneMessageUnderV2Warning = `message is listed under session_reconciler = "v2": the content gate cannot see a stop v2 requests before its drain begins (V2-18), so content can start a turn in a session v2 is about to drain`
+const laneMessageUnderV2Warning = `message is listed under the v2 session reconciler: the content gate cannot see a stop v2 requests before its drain begins (V2-18), so content can start a turn in a session v2 is about to drain`
 
 func newConversationLanesDoctorCheck(cityPath string, cfg *config.City) *conversationLanesDoctorCheck {
 	return &conversationLanesDoctorCheck{
@@ -199,7 +199,7 @@ func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st 
 		warnings = append(warnings, fmt.Sprintf("the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", ")))
 	}
 	if st.Quarantined > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined, which a newer gc may have written", st.Quarantined))
+		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined: a newer gc wrote them, or they are not valid to this one", st.Quarantined))
 		r.Details = append(r.Details, st.QuarantinedIDs...)
 	}
 	if st.LastError != "" {
@@ -216,7 +216,7 @@ func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st 
 		r.Status = doctor.StatusWarning
 		r.Severity = doctor.SeverityAdvisory
 		r.Message = fmt.Sprintf("conversation lanes on (%s), %s: %s", listed, pass, strings.Join(warnings, "; "))
-		r.FixHint = "see the details and the controller log; upgrade this gc if a newer gc wrote the rows it cannot decode; restart the controller to apply a changed list"
+		r.FixHint = "see the details and the controller log; inspect the rows this gc cannot decode, and upgrade it if a newer gc wrote them; restart the controller to apply a changed list"
 		return
 	}
 	r.Message = fmt.Sprintf("conversation lanes on (%s): %s, %d conversation(s) in service", listed, pass, st.Workers)

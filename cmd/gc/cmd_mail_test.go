@@ -2705,6 +2705,112 @@ func TestMailMarkReadSuccess(t *testing.T) {
 	}
 }
 
+// TestMailMarkReadList covers mark-read takes several ids, as
+// separate arguments or as one whitespace-separated argument (an unsplit
+// "$IDS"), which used to be looked up as a single id and mark nothing. A bad
+// id is reported and the rest are still marked.
+func TestMailMarkReadList(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for _, body := range []string{"one", "two", "three"} {
+		if _, err := mp.Send("human", "mayor", "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailMarkRead(mp, events.Discard, []string{"gc-1 gc-2", "gc-missing", "gc-3"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailMarkRead = %d, want 1 for the missing id; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc-missing") {
+		t.Errorf("stderr = %q, want the failing id named", stderr.String())
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		if !strings.Contains(stdout.String(), "Marked "+id+" as read") {
+			t.Errorf("stdout = %q, want %s confirmed", stdout.String(), id)
+		}
+	}
+	if _, unread, err := mp.Count("mayor"); err != nil || unread != 0 {
+		t.Fatalf("Count(mayor) unread = %d, err = %v; want 0 after marking all three", unread, err)
+	}
+}
+
+// TestMailMarkReadListJSON covers the --json result of mark-read: several ids
+// report ids and count with no id, a partial failure writes no JSON and names
+// the failing id, and a single id keeps its id/ids/count shape.
+func TestMailMarkReadListJSON(t *testing.T) {
+	newProvider := func(t *testing.T) mail.Provider {
+		t.Helper()
+		mp := beadmail.New(beads.NewMemStore())
+		for _, body := range []string{"one", "two"} {
+			if _, err := mp.Send("human", "mayor", "", body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return mp
+	}
+	decode := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("stdout = %q, want one JSON line", out)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+			t.Fatalf("Unmarshal(%q): %v", lines[0], err)
+		}
+		return got
+	}
+
+	t.Run("several ids", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1 gc-2"}, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		got := decode(t, stdout.String())
+		if id, ok := got["id"]; ok && id != "" {
+			t.Errorf("id = %v, want absent for several ids", id)
+		}
+		if ids, _ := got["ids"].([]any); len(ids) != 2 || ids[0] != "gc-1" || ids[1] != "gc-2" {
+			t.Errorf("ids = %v, want [gc-1 gc-2]", got["ids"])
+		}
+		if got["count"] != float64(2) {
+			t.Errorf("count = %v, want 2", got["count"])
+		}
+	})
+
+	t.Run("partial failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1", "gc-missing"}, true, &stdout, &stderr); code != 1 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 1; stderr: %s", code, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want no JSON on a partial failure", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "gc-missing") {
+			t.Errorf("stderr = %q, want the failing id named", stderr.String())
+		}
+	})
+
+	t.Run("single id", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1"}, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		got := decode(t, stdout.String())
+		if got["id"] != "gc-1" {
+			t.Errorf("id = %v, want gc-1", got["id"])
+		}
+		if ids, _ := got["ids"].([]any); len(ids) != 1 || ids[0] != "gc-1" {
+			t.Errorf("ids = %v, want [gc-1]", got["ids"])
+		}
+		if got["count"] != float64(1) {
+			t.Errorf("count = %v, want 1", got["count"])
+		}
+	})
+}
+
 func TestMailMarkUnreadSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
