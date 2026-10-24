@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isHistoricalLane, LaneCard } from './LaneCard';
 import type { RunLane } from 'gas-city-dashboard-shared';
@@ -37,7 +37,7 @@ describe('LaneCard navigation', () => {
     };
 
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <LaneCard lane={lane} now={Date.parse('2026-05-24T12:01:00Z')} />
       </MemoryRouter>,
     );
@@ -71,7 +71,7 @@ describe('LaneCard navigation', () => {
     };
 
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <LaneCard lane={lane} now={Date.parse('2026-05-24T12:01:00Z')} />
       </MemoryRouter>,
     );
@@ -101,11 +101,7 @@ describe('LaneCard navigation', () => {
     };
 
     render(
-      <MemoryRouter
-        basename="/city/test-city"
-        initialEntries={['/city/test-city/runs']}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter basename="/city/test-city" initialEntries={['/city/test-city/runs']}>
         <LaneCard lane={lane} now={Date.parse('2026-05-24T12:01:00Z')} />
       </MemoryRouter>,
     );
@@ -170,7 +166,7 @@ describe('LaneCard historical-lane render', () => {
 
   it('renders the run root bead id so look-alike runs are distinguishable (gascity-dashboard-7hek)', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <LaneCard
           lane={makeHistoricalLane({ id: 'gc-zz9q1', title: 'mol-focus-review' })}
           now={Date.parse('2026-05-29T12:00:00Z')}
@@ -183,7 +179,7 @@ describe('LaneCard historical-lane render', () => {
 
   it('does not render the health "unavailable" string for a historical lane', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <LaneCard lane={makeHistoricalLane()} now={Date.parse('2026-05-29T12:00:00Z')} />
       </MemoryRouter>,
     );
@@ -196,7 +192,7 @@ describe('LaneCard historical-lane render', () => {
 
   it('renders the phase label in a quieter (muted) tone for a historical lane', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <LaneCard lane={makeHistoricalLane()} now={Date.parse('2026-05-29T12:00:00Z')} />
       </MemoryRouter>,
     );

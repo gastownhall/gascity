@@ -510,7 +510,7 @@ npm.npm_translate_lock(
     ],
     pnpm_lock = "//internal/api/dashboardspa/web:pnpm-lock.yaml",
     # pnpm's default public-hoist-pattern (*types*) and npm's flat tree both
-    # make @types/react visible to react-router-dom's typings; rules_js
+    # make @types/react visible to react-router's typings; rules_js
     # hoists nothing unless asked.
     public_hoist_packages = {
         "@types/node": ["internal/api/dashboardspa/web"],
