@@ -380,8 +380,11 @@ config instead of skill symlinks.
 
 ### Stage 1: scope-root reconcile
 
-At `gc start` and supervisor ticks, Gas City reconciles MCP for every eligible
-scope root even if no session is currently running.
+When a city starts (`gc start`, or the supervisor starting it) and on every
+applied config reload, Gas City reconciles MCP for every eligible scope root
+even if no session is currently running. The reload pass runs before that
+tick's reconcile restarts drifted sessions, so they start against the new
+config; its failures warn instead of refusing the reload.
 
 This handles:
 
@@ -576,8 +579,11 @@ Projection is fail-closed.
   for that agent: its session start fails, while stage 1 skips it with a
   warning and projects the rest of the city. Stage 1 leaves the target a
   skipped agent last projected as it was, instead of cleaning it up as an
-  orphan: the skip may be transient (a provider binary missing from the
-  supervisor's PATH), and a session already running may read the file.
+  orphan: a session started before the skip may still read it, and the next
+  stage-1 pass (a city start or config reload) projects it again once the
+  agent resolves. Fixing the agent's config triggers that reload; installing a
+  missing provider binary does not, so restart the city afterwards
+  (`gc restart`).
 - servers an agent's provider cannot receive follow
   [Servers a provider cannot receive](#servers-a-provider-cannot-receive)
 - undeliverable runtime/workdir topologies with effective MCP are hard errors
@@ -593,6 +599,11 @@ all (copilot, for one), or when the server's transport is one its projection
 cannot express (the cursor projection carries only stdio servers; no
 projection renders SSE). `materialize.MCPProjectionSupportsTransport` is the
 single source for which transports each projection carries.
+
+This applies to sessions that read a provider-native file. An ACP session
+receives its servers in-band, in `session/new`, so it receives every server
+whatever its harness's file projection can carry, and nothing is skipped or
+reported for it.
 
 What happens depends on the layer the server came from:
 
@@ -612,16 +623,19 @@ hard error for that agent.
 
 A skipped server is visible in every surface that shows MCP:
 
-- `gc start` and the supervisor print one warning per group of agents that
-  skip the same servers, once per process
+- each stage-1 pass (the supervisor log, or the output of `gc start
+  --foreground` and `--dry-run`) prints one warning per group of agents that
+  skip the same servers, once per process; agents that cannot start are
+  reported the same way
 - `gc mcp list --agent|--session` lists it under "Not projected" (`skipped` in
   `--json`) instead of with the projected servers
 - `gc doctor` reports it as an `mcp-config` warning
-- `gc config show --validate` reports it as a warning; a server in an agent's
-  own `mcp/` directory that its provider cannot receive is a validation error
+- `gc config show` reports it as a validation warning, as it does an agent
+  that cannot start because its own `mcp/` directory declares a server its
+  provider cannot receive: `gc start` starts the rest of the city
 - `gc import add` names the agents that will start without the new import's
-  servers
-- the stage-2 `gc internal project-mcp` pre-start prints it
+  servers, comparing the city before and after the add
+- the stage-2 `gc internal project-mcp` pre-start prints it when it runs
 
 Skipped servers are not part of the projection, its hash, or the session
 fingerprint, so the agent's MCP drift tracks only what it receives.

@@ -45,14 +45,23 @@ func displayMCPHarness(harness string) string {
 type unsupportedMCPHarnessError struct {
 	Harness string
 	Servers []string
+	// Dir is the agent's mcp/ directory, which may sit in an imported pack.
+	Dir string
 }
 
 func (e *unsupportedMCPHarnessError) Error() string {
 	return fmt.Sprintf(
-		"MCP servers [%s] are declared in this agent's own mcp/ directory, but its provider runs on the %q harness, "+
+		"MCP servers [%s] are declared in this agent's own mcp/ directory%s, but its provider runs on the %q harness, "+
 			"which cannot receive MCP (supported harnesses: %s); switch the agent to a provider on a "+
 			"supported harness or remove those servers from the agent's mcp/ directory",
-		strings.Join(e.Servers, ", "), displayMCPHarness(e.Harness), strings.Join(mcpProviderKinds, ", "))
+		strings.Join(e.Servers, ", "), displayMCPDir(e.Dir), displayMCPHarness(e.Harness), strings.Join(mcpProviderKinds, ", "))
+}
+
+func displayMCPDir(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return " (" + dir + ")"
 }
 
 // unsupportedMCPTransportError reports MCP servers declared in an agent's own
@@ -63,14 +72,16 @@ type unsupportedMCPTransportError struct {
 	Harness string
 	// Servers are "name (transport)" entries.
 	Servers []string
+	// Dir is the agent's mcp/ directory, which may sit in an imported pack.
+	Dir string
 }
 
 func (e *unsupportedMCPTransportError) Error() string {
 	return fmt.Sprintf(
-		"MCP servers [%s] are declared in this agent's own mcp/ directory, but gc projects only %s MCP servers "+
+		"MCP servers [%s] are declared in this agent's own mcp/ directory%s, but gc projects only %s MCP servers "+
 			"for the %q harness; switch the agent to a provider that accepts them or remove those servers "+
 			"from the agent's mcp/ directory",
-		strings.Join(e.Servers, ", "), supportedMCPTransportsText(e.Harness), displayMCPHarness(e.Harness))
+		strings.Join(e.Servers, ", "), displayMCPDir(e.Dir), supportedMCPTransportsText(e.Harness), displayMCPHarness(e.Harness))
 }
 
 // isAgentMCPCapabilityError reports whether err says an agent's own mcp/
@@ -116,6 +127,7 @@ func partitionAgentMCPCatalog(providerKind string, catalog materialize.MCPCatalo
 	var (
 		skipped  []mcpServerSkip
 		declared []string
+		dir      string
 	)
 	rejected := make(map[string]bool)
 	for _, server := range catalog.Servers {
@@ -124,6 +136,7 @@ func partitionAgentMCPCatalog(providerKind string, catalog materialize.MCPCatalo
 		}
 		rejected[server.Name] = true
 		if server.Layer == materialize.MCPLayerAgent {
+			dir = server.SourceDir
 			if harnessSupported {
 				declared = append(declared, fmt.Sprintf("%s (%s)", server.Name, server.Transport))
 			} else {
@@ -135,9 +148,9 @@ func partitionAgentMCPCatalog(providerKind string, catalog materialize.MCPCatalo
 	}
 	if len(declared) > 0 {
 		if !harnessSupported {
-			return materialize.MCPCatalog{}, nil, &unsupportedMCPHarnessError{Harness: providerKind, Servers: declared}
+			return materialize.MCPCatalog{}, nil, &unsupportedMCPHarnessError{Harness: providerKind, Servers: declared, Dir: dir}
 		}
-		return materialize.MCPCatalog{}, nil, &unsupportedMCPTransportError{Harness: providerKind, Servers: declared}
+		return materialize.MCPCatalog{}, nil, &unsupportedMCPTransportError{Harness: providerKind, Servers: declared, Dir: dir}
 	}
 	if len(rejected) == 0 {
 		return catalog, nil, nil
@@ -154,21 +167,21 @@ func describeMCPOrigin(server materialize.MCPServer) string {
 		origin = strings.TrimSpace(server.Layer)
 	}
 	kind, binding, _ := strings.Cut(origin, ":")
-	named := func(what string) string {
+	named := func(article, what string) string {
 		if binding != "" {
 			return fmt.Sprintf("%s %q", what, binding)
 		}
-		return "an " + what
+		return article + " " + what
 	}
 	switch kind {
 	case "import":
-		return named("import")
+		return named("an", "import")
 	case "rig-import":
-		return named("rig import")
+		return named("a", "rig import")
 	case "implicit":
-		return named("implicit import")
+		return named("an", "implicit import")
 	case "bootstrap":
-		return named("bootstrap import")
+		return named("a", "bootstrap import")
 	case "city":
 		return "the city pack"
 	case "rig":
@@ -260,33 +273,31 @@ func (g *mcpSkipGroups) lines() []string {
 // city's agents can receive must not depend on what this host has installed.
 func resolveAnyProviderBinary(name string) (string, error) { return name, nil }
 
-// mcpCapabilityFindings reports, for every configured agent, the MCP servers
-// its provider cannot receive. Shared-layer servers the agent starts without
-// come back as warnings, one line per group of agents (mcpSkipGroups);
-// servers in an agent's own mcp/ directory, which stop that agent from
-// starting, come back as errors.
-//
-// It reads config only: provider families resolve without the provider
-// binaries, and catalogs load against each agent's scope root. Agents whose
-// provider or catalog does not resolve are skipped; gc doctor and their own
-// session start report why.
-//
-// When keepSkip is non-nil, only skipped servers it accepts are reported, and
-// when keepAgent is non-nil, only errors for agents it accepts.
-func mcpCapabilityFindings(
-	cityPath string,
-	cfg *config.City,
-	keepSkip func(materialize.MCPServer) bool,
-	keepAgent func(*config.Agent) bool,
-) (warnings, errs []string) {
+// mcpCapabilityReport is what a city's MCP config means for each agent whose
+// provider cannot receive some of its servers.
+type mcpCapabilityReport struct {
+	// skips maps an agent to the shared-layer servers it starts without.
+	skips map[string][]mcpServerSkip
+	// blocked maps an agent to the error that stops it from starting: its
+	// own mcp/ directory declares servers its provider cannot receive.
+	blocked map[string]string
+}
+
+// collectMCPCapabilityReport checks every configured agent's effective MCP
+// against what its provider can receive. It reads config only: provider
+// families resolve without the provider binaries, and catalogs load against
+// each agent's scope root. ACP sessions receive their servers in-band and
+// are never reported. Agents whose provider or catalog does not resolve are
+// left out; gc doctor and their own session start report why.
+func collectMCPCapabilityReport(cityPath string, cfg *config.City) mcpCapabilityReport {
+	report := mcpCapabilityReport{skips: map[string][]mcpServerSkip{}, blocked: map[string]string{}}
 	if cfg == nil {
-		return nil, nil
+		return report
 	}
-	var skips mcpSkipGroups
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, resolveAnyProviderBinary)
-		if err != nil {
+		if err != nil || mcpInBand(agent, resolved) {
 			continue
 		}
 		kind := resolvedProviderLaunchFamily(resolved)
@@ -298,23 +309,74 @@ func mcpCapabilityFindings(
 			continue
 		}
 		_, skipped, err := partitionAgentMCPCatalog(kind, catalog)
-		if err != nil {
-			if keepAgent == nil || keepAgent(agent) {
-				errs = append(errs, fmt.Sprintf("agent %q: %v", agent.QualifiedName(), err))
-			}
-			continue
+		switch {
+		case err != nil:
+			report.blocked[agent.QualifiedName()] = err.Error()
+		case len(skipped) > 0:
+			report.skips[agent.QualifiedName()] = skipped
 		}
-		if keepSkip != nil {
-			kept := skipped[:0:0]
-			for _, skip := range skipped {
-				if keepSkip(skip.Server) {
-					kept = append(kept, skip)
-				}
-			}
-			skipped = kept
-		}
-		skips.add(agent.QualifiedName(), skipped)
 	}
-	sort.Strings(errs)
-	return skips.lines(), errs
+	return report
+}
+
+// since returns the part of r that is not in before: servers an agent newly
+// starts without, and agents newly blocked or blocked for a new reason.
+func (r mcpCapabilityReport) since(before mcpCapabilityReport) mcpCapabilityReport {
+	out := mcpCapabilityReport{skips: map[string][]mcpServerSkip{}, blocked: map[string]string{}}
+	for agent, skipped := range r.skips {
+		had := make(map[string]bool, len(before.skips[agent]))
+		for _, skip := range before.skips[agent] {
+			had[skip.Server.Name] = true
+		}
+		for _, skip := range skipped {
+			if !had[skip.Server.Name] {
+				out.skips[agent] = append(out.skips[agent], skip)
+			}
+		}
+	}
+	for agent, msg := range r.blocked {
+		if before.blocked[agent] != msg {
+			out.blocked[agent] = msg
+		}
+	}
+	return out
+}
+
+// lines renders the report: one line per group of agents that start without
+// the same servers, then one per group of agents blocked for the same reason.
+func (r mcpCapabilityReport) lines() []string {
+	var groups mcpSkipGroups
+	for agent, skipped := range r.skips {
+		groups.add(agent, skipped)
+	}
+	return append(groups.lines(), groupBlockedAgents(r.blocked)...)
+}
+
+// groupBlockedAgents renders agents that cannot start, one line per reason:
+// `agents "a", "b" cannot start: <reason>`.
+func groupBlockedAgents(blocked map[string]string) []string {
+	byReason := make(map[string][]string)
+	for agent, reason := range blocked {
+		byReason[reason] = append(byReason[reason], agent)
+	}
+	reasons := make([]string, 0, len(byReason))
+	for reason := range byReason {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	out := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		agents := byReason[reason]
+		sort.Strings(agents)
+		quoted := make([]string, len(agents))
+		for i, agent := range agents {
+			quoted[i] = strconv.Quote(agent)
+		}
+		who := "agent " + quoted[0] + " cannot start"
+		if len(agents) > 1 {
+			who = "agents " + strings.Join(quoted, ", ") + " cannot start"
+		}
+		out = append(out, who+": "+reason)
+	}
+	return out
 }

@@ -441,11 +441,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the agent without it, and warns once, naming the agents, the servers and
   the reason. A server in the agent's own `agents/<name>/mcp/` directory is
   still an error for that agent, which does not start, while the rest of the
-  city does. `gc mcp list` lists skipped servers under "Not projected"
-  (`skipped` in `--json`) instead of as projected, `gc doctor` and
-  `gc import add` warn about them, and `gc config show --validate` warns
-  about shared servers and fails on a server in an agent's own `mcp/`
-  directory that its provider cannot receive.
+  city does. Agents whose sessions use ACP receive every server in-band, as
+  `gc session new` already gave them. `gc mcp list` lists skipped servers
+  under "Not projected" (`skipped` in `--json`) instead of as projected, and
+  `gc doctor`, `gc config show` and `gc import add` warn about skipped
+  servers and agents that cannot start.
+
+- **A config reload now projects MCP config.** Stage-1 MCP projection ran
+  only when a city started, so a server added or changed in a running city
+  drained the agents it reached and restarted them against their old
+  scope-root config. It now also runs on every applied config reload,
+  before that tick's restarts.
 
 - **An agent whose provider is not installed no longer stops the city when
   MCP servers are in scope.** Every provider a city declares has an implicit

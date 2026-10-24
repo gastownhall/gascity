@@ -230,7 +230,7 @@ args = ["beta-notes"]
 	// Simulate alpha invoking stage-2 pre-start: resolve alpha's workdir
 	// and projection, then validate against other claimants.
 	alphaWorkdir := filepath.Join(cityPath, ".gc", "worktrees", "alpha")
-	alpha, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini")
+	alpha, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(alpha): %v", err)
 	}
@@ -276,7 +276,7 @@ args = ["deputy-notes"]
 	}
 
 	sharedWorkdir := filepath.Join(cityPath, shared)
-	mayor, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "mayor", sharedWorkdir, "gemini")
+	mayor, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "mayor", sharedWorkdir, "gemini", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(mayor): %v", err)
 	}
@@ -319,7 +319,7 @@ args = ["beta-notes"]
 	}
 
 	alphaWorkdir := filepath.Join(cityPath, shared)
-	alpha, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini")
+	alpha, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(alpha): %v", err)
 	}
@@ -405,6 +405,7 @@ url = "http://localhost:3100/mcp/kb"
 		"control-dispatcher",
 		filepath.Join(cityPath, ".gc", "control-dispatcher"),
 		"", // empty providerKind matches the bug scenario
+		false,
 	)
 	catalog, projection := mcp.Catalog, mcp.Projection
 	if err != nil {
@@ -444,6 +445,7 @@ url = "http://localhost:3100/mcp/kb"
 		config.ControlDispatcherAgentName,
 		filepath.Join(cityPath, ".gc", "control-dispatcher"),
 		"claude",
+		false,
 	)
 	catalog, projection := mcp.Catalog, mcp.Projection
 	if err != nil {

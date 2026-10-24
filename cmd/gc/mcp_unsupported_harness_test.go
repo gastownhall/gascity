@@ -110,7 +110,7 @@ command = "uvx"
 		t.Fatalf("supported agent's projection was not written: %v", err)
 	}
 	warning := stderr.String()
-	for _, want := range []string{`skipping MCP projection for agent "helper"`, "private", `"copilot"`} {
+	for _, want := range []string{`agent "helper" cannot start: MCP servers [private]`, `"copilot"`} {
 		if !strings.Contains(warning, want) {
 			t.Fatalf("warning missing %q:\n%s", want, warning)
 		}
@@ -133,7 +133,7 @@ command = "uvx"
 	}
 	agent := &config.Agent{Name: "helper", Scope: "city", Provider: "copilot", MCPDir: helperMCP}
 
-	_, err := resolveAgentMCPProjection(cityPath, cfg, agent, agent.QualifiedName(), cityPath, "copilot")
+	_, err := resolveAgentMCPProjection(cityPath, cfg, agent, agent.QualifiedName(), cityPath, "copilot", false)
 	var harnessErr *unsupportedMCPHarnessError
 	if !errors.As(err, &harnessErr) {
 		t.Fatalf("err = %v, want *unsupportedMCPHarnessError", err)
@@ -164,7 +164,7 @@ command = "uvx"
 	}
 	agent := &config.Agent{Name: "helper", Scope: "city", Provider: "copilot"}
 
-	mcp, err := resolveAgentMCPProjection(cityPath, cfg, agent, agent.QualifiedName(), cityPath, "copilot")
+	mcp, err := resolveAgentMCPProjection(cityPath, cfg, agent, agent.QualifiedName(), cityPath, "copilot", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection: %v", err)
 	}
@@ -215,7 +215,7 @@ command = "uvx"
 	if _, err := os.Stat(filepath.Join(cityPath, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("skipped agent's target was written, stat err = %v", err)
 	}
-	for _, want := range []string{`skipping MCP projection for agent "codex"`, "provider not found in PATH"} {
+	for _, want := range []string{`agent "codex" cannot start: provider not found in PATH`} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("warning missing %q:\n%s", want, stderr.String())
 		}
