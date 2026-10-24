@@ -107,3 +107,23 @@ func ensureGitignoreEntries(fs fsys.FS, dir string, entries []string) error {
 
 	return fs.WriteFile(gitignorePath, []byte(b.String()), 0o644)
 }
+
+// missingGitignoreEntries returns the entries ensureGitignoreEntries would
+// append to dir/.gitignore, reading the file and writing nothing.
+func missingGitignoreEntries(fs fsys.FS, dir string, entries []string) []string {
+	existing, err := fs.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		existing = nil
+	}
+	present := make(map[string]bool)
+	for _, line := range strings.Split(string(existing), "\n") {
+		present[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, entry := range entries {
+		if !present[entry] {
+			missing = append(missing, entry)
+		}
+	}
+	return missing
+}

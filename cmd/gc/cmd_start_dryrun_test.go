@@ -2,10 +2,18 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestPrintDryRunPreview(t *testing.T) {
@@ -25,7 +33,7 @@ func TestPrintDryRunPreview(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	printDryRunPreview(ds, cfg, "test", &stdout)
+	printDryRunPreview(ds, cfg, "test", nil, &stdout)
 	out := stdout.String()
 
 	if !strings.Contains(out, "3 agent(s) would start") {
@@ -51,7 +59,7 @@ func TestPrintDryRunPreviewEmpty(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	printDryRunPreview(nil, cfg, "empty", &stdout)
+	printDryRunPreview(nil, cfg, "empty", nil, &stdout)
 	out := stdout.String()
 
 	if !strings.Contains(out, "0 agent(s) would start") {
@@ -72,4 +80,156 @@ func TestStartDryRunFlagExists(t *testing.T) {
 	if f.Shorthand != "n" {
 		t.Errorf("--dry-run shorthand = %q, want %q", f.Shorthand, "n")
 	}
+}
+
+// dryRunTreeSnapshot maps every path under root to its content, a symlink's
+// target, or "<dir>", skipping gc's own runtime state (.gc/ and .beads/,
+// which the bead-store lifecycle owns) but not the MCP bookkeeping gc keeps
+// under .gc/.
+func dryRunTreeSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		slashed := filepath.ToSlash(rel)
+		if d.IsDir() && (slashed == ".beads" || slashed == ".gc") {
+			for _, mcpDir := range []string{"mcp-adopted", "mcp-managed", "mcp-locks"} {
+				if _, statErr := os.Stat(filepath.Join(path, mcpDir)); statErr == nil && slashed == ".gc" {
+					out[slashed+"/"+mcpDir] = "<dir>"
+				}
+			}
+			return filepath.SkipDir
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, _ := os.Readlink(path)
+			out[slashed] = "-> " + target
+		case d.IsDir():
+			out[slashed] = "<dir>"
+		default:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out[slashed] = string(data)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	return out
+}
+
+// gc start --dry-run previews; it must not write into the city or its rigs.
+// Before, stage 1 adopted and rewrote a rig's hand-written .mcp.json (moving
+// the original under .gc/mcp-adopted/), linked skills into the provider
+// sinks, extended .gitignore, and installed hooks, all while printing "No
+// side effects executed". The preview now reports those changes instead.
+func TestStartDryRunWritesNothingInTheCityOrItsRigs(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "frontend")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath, rigPath)
+	t.Chdir(t.TempDir())
+	// The provider's implicit agents cover the city root and the rig root.
+	for _, dir := range []string{filepath.Join(cityPath, citylayout.RuntimeRoot), filepath.Join(cityPath, "mcp"), filepath.Join(cityPath, "skills", "plan"), filepath.Join(cityPath, "agents", "mayor"), rigPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityTOML := `[workspace]
+name = "dry-run-purity"
+
+[beads]
+provider = "file"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+
+[[rigs]]
+name = "frontend"
+`
+	siteTOML := fmt.Sprintf("workspace_name = \"dry-run-purity\"\n\n[[rig]]\nname = \"frontend\"\npath = %q\n", rigPath)
+	for path, body := range map[string]string{
+		filepath.Join(cityPath, "city.toml"):                     cityTOML,
+		filepath.Join(cityPath, ".gc", "site.toml"):              siteTOML,
+		filepath.Join(cityPath, "pack.toml"):                     "[pack]\nname = \"dry-run-purity\"\nschema = 2\n",
+		filepath.Join(cityPath, "mcp", "notes.toml"):             "name = \"notes\"\ncommand = \"uvx\"\n",
+		filepath.Join(cityPath, "skills", "plan", "SKILL.md"):    "---\nname: plan\ndescription: test\n---\nbody\n",
+		filepath.Join(cityPath, "agents", "mayor", "agent.toml"): "provider = \"claude\"\nscope = \"city\"\n",
+		filepath.Join(cityPath, "agents", "mayor", "prompt.md"):  "You are the mayor.\n",
+		// The rig's own, hand-written MCP config.
+		filepath.Join(rigPath, ".mcp.json"): `{"mcpServers":{"team-db":{"command":"team-db-mcp"}}}` + "\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldBuild := buildSessionProviderByName
+	oldDry := dryRunMode
+	t.Cleanup(func() {
+		buildSessionProviderByName = oldBuild
+		dryRunMode = oldDry
+	})
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+	dryRunMode = true
+
+	cityBefore, rigBefore := dryRunTreeSnapshot(t, cityPath), dryRunTreeSnapshot(t, rigPath)
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStartStandalone exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if after := dryRunTreeSnapshot(t, cityPath); !reflect.DeepEqual(cityBefore, after) {
+		t.Errorf("dry run wrote into the city:\n%s", describeTreeChanges(cityBefore, after))
+	}
+	if after := dryRunTreeSnapshot(t, rigPath); !reflect.DeepEqual(rigBefore, after) {
+		t.Errorf("dry run wrote into the rig:\n%s", describeTreeChanges(rigBefore, after))
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"Would change in the city and its rigs:",
+		"adopt " + filepath.Join(rigPath, ".mcp.json") + " (claude): save its current content under " + filepath.Join(rigPath, ".gc", "mcp-adopted", "claude") + ", then replace it with 1 MCP server",
+		"create " + filepath.Join(cityPath, ".mcp.json") + " (claude) with 1 MCP server",
+		"link 1 skill in " + filepath.Join(cityPath, ".claude", "skills"),
+		"update " + filepath.Join(rigPath, ".gitignore") + ": add .mcp.json",
+		"No side effects executed (--dry-run).",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(stderr.String(), "adopting provider-native MCP") {
+		t.Errorf("dry run adopted an MCP target:\n%s", stderr.String())
+	}
+}
+
+func describeTreeChanges(before, after map[string]string) string {
+	var lines []string
+	for path, was := range before {
+		if now, ok := after[path]; !ok {
+			lines = append(lines, "removed "+path)
+		} else if now != was {
+			lines = append(lines, "changed "+path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			lines = append(lines, "added "+path)
+		}
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
 }

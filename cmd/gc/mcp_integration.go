@@ -330,19 +330,42 @@ func collectStage1ScopeRoots(cityPath string, cfg *config.City) []string {
 }
 
 func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer) error {
+	providers, err := orphanStage1Markers(root, desired)
+	if err != nil {
+		return err
+	}
+	for _, provider := range providers {
+		orphan, err := materialize.BuildMCPProjection(provider, root, nil)
+		if err != nil {
+			return fmt.Errorf("building orphan projection for %s at %s: %w", provider, root, err)
+		}
+		if err := orphan.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+			return fmt.Errorf("cleaning up orphan %s marker at %s: %w", provider, root, err)
+		}
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc: cleaned up orphan MCP marker %s at %s\n", provider, root) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return nil
+}
+
+// orphanStage1Markers lists the providers whose managed marker under root has
+// no claimant in desired.
+func orphanStage1Markers(root string, desired map[string]bool) ([]string, error) {
 	markersDir := filepath.Join(root, ".gc", "mcp-managed")
 	entries, err := fsys.OSFS{}.ReadDir(markersDir)
 	if err != nil {
 		// Missing directory is the steady state when no targets have ever
 		// been adopted at this root — not an error.
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
 		// Permission or corruption problems must surface — silently
 		// skipping would leave stale managed state unreconciled and
 		// hide operator-facing diagnostics.
-		return fmt.Errorf("scanning %s: %w", markersDir, err)
+		return nil, fmt.Errorf("scanning %s: %w", markersDir, err)
 	}
+	var providers []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -358,18 +381,9 @@ func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer
 		if desired[managedKey(provider, root)] {
 			continue
 		}
-		orphan, err := materialize.BuildMCPProjection(provider, root, nil)
-		if err != nil {
-			return fmt.Errorf("building orphan projection for %s at %s: %w", provider, root, err)
-		}
-		if err := orphan.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
-			return fmt.Errorf("cleaning up orphan %s marker at %s: %w", provider, root, err)
-		}
-		if stderr != nil {
-			fmt.Fprintf(stderr, "gc: cleaned up orphan MCP marker %s at %s\n", provider, root) //nolint:errcheck // best-effort stderr
-		}
+		providers = append(providers, provider)
 	}
-	return nil
+	return providers, nil
 }
 
 // agentMayHaveSessionSpecificMCPTargets reports whether an agent's MCP

@@ -430,6 +430,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc start --dry-run` no longer rewrites MCP config, skill links, or
+  `.gitignore` in the city and its rigs.** The
+  preview ran the stage-1 passes for real while printing "No side effects
+  executed": it adopted provider-native MCP files (a rig's own `.mcp.json`
+  was rewritten to hold only gc's servers, the original moved under
+  `.gc/mcp-adopted/`), linked skills into `.claude/skills/` and the other
+  provider sinks, added MCP entries to `.gitignore`, installed provider
+  hooks into agents' work dirs, refreshed formula links, and opened the
+  event log. It now computes the same stage-1 changes without applying them
+  and lists them under "Would change in the city and its rigs" (adopt,
+  create, update, or remove each MCP file; links per skill sink; `.gitignore`
+  additions), resolves the agents it lists read-only, and skips the
+  warm-up doctor scan, which can send mail. A preview still fails where the
+  start would, for example on conflicting MCP targets. It still starts the
+  city's bead store, as before, to read pool demand.
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run

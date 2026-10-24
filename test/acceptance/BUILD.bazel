@@ -191,6 +191,7 @@ go_test(
         "session_test.go",
         "skill_test.go",
         "sling_test.go",
+        "start_dry_run_test.go",
         "status_test.go",
         "supervisor_registry_test.go",
         "testenv_import_test.go",

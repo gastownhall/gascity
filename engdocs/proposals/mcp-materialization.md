@@ -387,6 +387,10 @@ This handles:
 - ongoing drift correction
 - cleanup after catalog removal
 
+`gc start --dry-run` computes the same stage-1 plan (`MCPProjection.Plan`)
+and reports each target it would adopt, create, update, or remove, without
+writing a target, marker, lock, adoption snapshot, or `.gitignore` entry.
+
 Stage-1 and stage-2 both flow through one serialized writer keyed by
 `(provider-kind, target path)`. That writer is responsible for:
 
