@@ -191,6 +191,15 @@ type ConversationTranscriptStateRecord struct {
 Rules:
 
 - `NextSequence` is allocated only by core under the conversation lock.
+  That lock is in-process, so it does not order two writers that hold
+  different lock pools (another process, or the services generation a
+  config reload builds). The store enforces distinct sequences instead:
+  each entry is created at a pinned ID per `(conversation, sequence)`,
+  so a second create for a taken sequence is refused and the writer
+  moves to the next one. `NextSequence` only ever rises, by
+  compare-and-set where the store offers it, and it rises past an entry
+  only after that entry is stored, so range readers and read cursors see
+  sequences in order.
 - `EarliestAvailableSequence` marks the retained floor so future
   retention does not silently break replay semantics.
 - Historical hydration that must participate in durable transcript
@@ -433,6 +442,10 @@ New labels:
 
 Transcript entries use:
 
+- `ID`: `<transcript state bead ID>-<sequence>`, pinned so the store's
+  primary key refuses a second entry for one sequence. A store that
+  mints over a pinned ID keeps the entry under its own ID and loses
+  that guard.
 - `Title`: `<provider>/<account>/<conversation>#<sequence>`
 - `Description`: normalized text body
 - `Metadata`: sequence, actor JSON, attachments JSON, provider message
