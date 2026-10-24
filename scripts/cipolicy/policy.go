@@ -353,7 +353,11 @@ const (
 	// input default moves 2.1.123 -> 2.1.283 (Opus 5.5 needs >= 2.1.280);
 	// install-claude-native.sh pins its per-platform SHA-256s. No new step,
 	// input, permission or secret.
-	expectedSetupActionHash = "3446b4fc781027e4cbe18766ea10957afb2e3cfab5040239cc615dbe223fa8d0"
+	// Bumped again (eMudhra CA follow-up): 2.1.283 -> 2.1.308, the first
+	// stable Claude Code that rejects the compromised eMudhra intermediates.
+	// Reviewed delta: one input default; no new step, command, permission or
+	// secret.
+	expectedSetupActionHash = "2894a52d9e9e5fc4ae62402076003c6e7ee8f6ad74f53c14126ceda00b3dae70"
 )
 
 var requiredFilterPaths = map[string][]string{
