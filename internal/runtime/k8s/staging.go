@@ -35,13 +35,13 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		return err
 	}
 
-	// Copy rig work_dir into the pod.
-	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
+	// Copy the workdir to the same normalized pod path used by the pod spec
+	// and agent command.
+	workDirCity := strings.TrimSpace(ctrlCity)
+	if workDirCity == "" {
+		workDirCity = controllerCityPath(cfg.Env)
 	}
+	podWorkDir := projectedPodWorkDirForCity(workDirCity, cfg.WorkDir)
 	if cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
 		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir); err != nil {
 			return fmt.Errorf("staging workdir %s to %s: %w", cfg.WorkDir, podWorkDir, err)
