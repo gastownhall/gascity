@@ -7,7 +7,8 @@
 # starts, supervises and stops the `dolt sql-server` itself, under its own
 # `bd db-proxy-child`. Every managed-Dolt verb in this pack is therefore a
 # typed no-op there: probing, restarting or reaping would fight bd for a
-# process gc does not own.
+# process gc does not own. Sync is the exception: it pushes each scope's
+# database through `gc bd sql`, which reaches bd's server without managing it.
 #
 # Sourced by runtime.sh, and directly by the few commands that do not need the
 # rest of the runtime (health-check reads a report from stdin).
