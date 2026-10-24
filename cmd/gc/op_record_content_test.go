@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -1028,6 +1029,7 @@ func TestCLIMessageOpResult(t *testing.T) {
 		{name: "runtime session not found", err: fmt.Errorf("nudging: %w", runtime.ErrSessionNotFound), arm: opjournal.ArmFailed, reason: opjournal.ReasonSessionGone},
 		{name: "provider unavailable", err: runtime.ErrRuntimeUnavailable, arm: opjournal.ArmFailed, reason: opjournal.ReasonProviderUnavailable},
 		{name: "timeout", err: context.DeadlineExceeded, arm: opjournal.ArmFailed, reason: opjournal.ReasonDeadlineInFlight},
+		{name: "nudge queue busy", err: fmt.Errorf("gc session nudge: %w", nudgequeue.ErrQueueBusy), arm: opjournal.ArmFailed, reason: opjournal.RefusedReasonPrefix + "nudge_queue_busy"},
 		{name: "other", err: errors.New("boom"), arm: opjournal.ArmFailed, reason: opjournal.ReasonOther},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

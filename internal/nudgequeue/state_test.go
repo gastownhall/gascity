@@ -1,7 +1,10 @@
 package nudgequeue
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -116,5 +119,47 @@ func TestWithStateBounded_TimesOutInsteadOfBlockingForever(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("withStateBounded blocked far past its wait timeout while the queue lock was held (unbounded wait regression)")
+	}
+}
+
+// TestWithStateBounded_TimeoutIsErrQueueBusy guards ga-fsp5w9: a lock timeout
+// is a typed, retryable refusal, ErrQueueBusy, with the legacy text unchanged.
+func TestWithStateBounded_TimeoutIsErrQueueBusy(t *testing.T) {
+	cityPath := t.TempDir()
+	release := holdQueueLockForTest(t, cityPath)
+	defer release()
+
+	err := withStateBounded(cityPath, 50*time.Millisecond, clock.Real{}, func(_ *State) error {
+		t.Error("fn ran without the lock")
+		return nil
+	})
+	if !errors.Is(err, ErrQueueBusy) {
+		t.Fatalf("err = %v, want ErrQueueBusy", err)
+	}
+	if got, want := err.Error(), "locking nudge queue: timed out waiting 50ms for lock"; got != want {
+		t.Fatalf("err text = %q, want %q", got, want)
+	}
+	if errors.Is(fmt.Errorf("locking nudge queue: %w", syscall.EBADF), ErrQueueBusy) {
+		t.Fatal("a non-timeout lock error must not be ErrQueueBusy")
+	}
+}
+
+// holdQueueLockForTest takes the queue flock on its own descriptor and
+// returns the release.
+func holdQueueLockForTest(t *testing.T, cityPath string) func() {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(LockPath(cityPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockFile, err := os.OpenFile(LockPath(cityPath), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("hold queue lock: %v", err)
+	}
+	return func() {
+		syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+		lockFile.Close()                                   //nolint:errcheck
 	}
 }

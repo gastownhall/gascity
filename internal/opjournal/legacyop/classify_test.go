@@ -50,7 +50,8 @@ func TestMessageResult(t *testing.T) {
 		{false, wrap(errUnavailable), failed(opjournal.ReasonProviderUnavailable)},
 		{false, wrap(errTimeout), failed(opjournal.ReasonDeadlineInFlight)},
 		{false, errors.New("unsupported"), failed(opjournal.ReasonOther)}, // same text, not the sentinel
-		{false, wrap(errStarting), failed(opjournal.ReasonOther)},
+		{false, wrap(errStarting), failed(opjournal.RefusedReasonPrefix + "session_starting")},
+		{false, errors.New("starting"), failed(opjournal.ReasonOther)}, // same text, not the refusal
 	} {
 		got := testSentinels.MessageResult(c.queued, c.err)
 		if got.Outcome != c.want || got.LeaveOpen {

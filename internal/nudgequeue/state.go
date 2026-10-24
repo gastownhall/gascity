@@ -134,6 +134,22 @@ func SortState(state *State) {
 // budget of its own. A waiter can legitimately time out behind either.
 const defaultLockWaitTimeout = 8 * time.Second
 
+// ErrQueueBusy reports that the queue lock was not taken within the wait
+// budget. Nothing was read or written; a retry may succeed.
+var ErrQueueBusy = errors.New("nudge queue busy")
+
+// lockTimeoutError is a lock wait that ran out its budget. Its text is the
+// queue's historical timeout message; errors.Is matches it to ErrQueueBusy.
+type lockTimeoutError struct{ wait time.Duration }
+
+// Error is the historical timeout text.
+func (e lockTimeoutError) Error() string {
+	return fmt.Sprintf("locking nudge queue: timed out waiting %s for lock", e.wait)
+}
+
+// Is classifies the timeout as ErrQueueBusy.
+func (e lockTimeoutError) Is(target error) bool { return target == ErrQueueBusy }
+
 // WithState locks, loads, mutates, and atomically rewrites the queue state.
 // The wait to acquire the lock is bounded to defaultLockWaitTimeout
 // (ga-2kzci3 FR1/FR2); a caller that needs a different budget -- e.g. one
@@ -176,7 +192,7 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 			return fmt.Errorf("locking nudge queue: %w", lockErr)
 		}
 		if !clk.Now().Before(deadline) {
-			return fmt.Errorf("locking nudge queue: timed out waiting %s for lock", waitTimeout)
+			return lockTimeoutError{wait: waitTimeout}
 		}
 		// Deliberately real time while the deadline above is evaluated
 		// against clk: a caller passing a non-advancing clock.Fake against a

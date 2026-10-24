@@ -60,9 +60,12 @@ type Sentinels struct {
 }
 
 // MessageResult maps an async message delivery's legacy result: delivered
-// (queued false) or queued, else the error's outcome. Message ops always
-// close (DES-O0API D10).
+// (queued false) or queued, else the error's outcome. A Refusals match is
+// failed{refused:<why>}. Message ops always close (DES-O0API D10).
 func (s Sentinels) MessageResult(queued bool, err error) Result {
+	if why, ok := s.refusal(err); ok {
+		return Result{Outcome: failed(opjournal.RefusedReasonPrefix + why)}
+	}
 	switch {
 	case err == nil && queued:
 		return Result{Outcome: succeeded(ViaLegacyQueued)}
@@ -104,15 +107,28 @@ func (s Sentinels) SyncResult(kind opjournal.Kind, err error, minted bool) Resul
 		return Result{Outcome: failed(opjournal.RefusedReasonPrefix + RefusedNotASession)}
 	}
 	outcome := failed(opjournal.ReasonOther)
-	switch i := slices.IndexFunc(s.Refusals, func(r Refusal) bool { return r.Err != nil && errors.Is(err, r.Err) }); {
-	case i >= 0:
-		outcome = failed(opjournal.RefusedReasonPrefix + s.Refusals[i].Why)
+	why, refused := s.refusal(err)
+	switch {
+	case refused:
+		outcome = failed(opjournal.RefusedReasonPrefix + why)
 	case matches(err, s.NoBoundary):
 		outcome = failed(opjournal.ReasonNoBoundary)
 	case matches(err, s.ProviderUnavailable):
 		outcome = failed(opjournal.ReasonProviderUnavailable)
 	}
 	return Result{Outcome: outcome, LeaveOpen: !minted}
+}
+
+// refusal returns the reason of the first Refusals entry err matches.
+func (s Sentinels) refusal(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	i := slices.IndexFunc(s.Refusals, func(r Refusal) bool { return r.Err != nil && errors.Is(err, r.Err) })
+	if i < 0 {
+		return "", false
+	}
+	return s.Refusals[i].Why, true
 }
 
 func matches(err error, sentinels []error) bool {

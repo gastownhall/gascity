@@ -70,6 +70,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -83,14 +84,21 @@ import (
 // (DES-O0API §6.3), the API's and the CLI's alike (MessageOpResult). A
 // session whose row or runtime is gone is session_gone. The delivery
 // timeouts of a recorded /messages and of a recorded /submit are reported
-// as context.DeadlineExceeded.
+// as context.DeadlineExceeded. An enqueue that could not take the nudge
+// queue's lock in its budget delivered and queued nothing; a retry may
+// succeed, so it is a refusal (ga-fsp5w9).
 var messageSentinels = legacyop.Sentinels{
 	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
 	ConversationClosed:  []error{session.ErrSessionClosed},
 	SessionGone:         []error{session.ErrSessionNotFound, runtime.ErrSessionNotFound},
 	ProviderUnavailable: []error{runtime.ErrRuntimeUnavailable},
 	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
+	Refusals:            []legacyop.Refusal{{Err: nudgequeue.ErrQueueBusy, Why: RefusedNudgeQueueBusy}},
 }
+
+// RefusedNudgeQueueBusy is the refused:<why> of a message op whose enqueue
+// timed out waiting for the nudge queue's lock.
+const RefusedNudgeQueueBusy = "nudge_queue_busy"
 
 // messageTimeoutError is a recorded /messages' delivery timeout: the legacy
 // event text, classified as context.DeadlineExceeded for the op outcome.

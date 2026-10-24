@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -1846,6 +1847,18 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 	}
 	if res := MessageOpResult(false, errors.New("x"), unfenced); res.Outcome.Degradation != "" {
 		t.Fatalf("a failed delivery carries a degradation: %+v", res.Outcome)
+	}
+}
+
+// A message whose enqueue could not take the nudge queue's lock nothing was
+// delivered or queued and a retry may succeed: it closes
+// failed{refused:nudge_queue_busy}, not failed{other} (ga-fsp5w9).
+func TestMessageOpResultNudgeQueueBusyIsARefusal(t *testing.T) {
+	err := fmt.Errorf("deferring submit: %w", fmt.Errorf("enqueue: %w", nudgequeue.ErrQueueBusy))
+	res := MessageOpResult(false, err, nil)
+	want := opjournal.RefusedReasonPrefix + "nudge_queue_busy"
+	if res.Outcome.Arm != opjournal.ArmFailed || res.Outcome.Reason != want || res.LeaveOpen {
+		t.Fatalf("result = %+v, want failed{%s} closed", res, want)
 	}
 }
 
