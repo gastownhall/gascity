@@ -105,18 +105,16 @@ func setenvWarn(key, value string) {
 //   - OTEL_RESOURCE_ATTRIBUTES — GC context labels (gc.agent, gc.rig, gc.city)
 //     merged into any pre-existing value; previously injected GC labels are
 //     replaced, not duplicated
-//   - BD_OTEL_METRICS_URL      — bd's own metrics var (resolved metrics endpoint)
-//   - BD_OTEL_LOGS_URL         — bd's own logs var   (resolved logs endpoint)
+//   - BD_OTEL_ENABLED=true              — bd's telemetry enable gate
+//   - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT — resolved metrics endpoint
+//   - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT    — resolved logs endpoint
 //   - CLAUDE_CODE_ENABLE_TELEMETRY=1 — enables Claude Code's built-in telemetry
 //
-// Every bd release reads the two legacy BD_OTEL_* names, but bd v1.2.0, v1.2.1
-// and v1.3.0+ deprecate them and warn on stderr while they are set. A bd
-// command internal/beads runs receives them translated to BD_OTEL_ENABLED plus
-// the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names (translateBdLegacyOTELEnv)
-// when a `bd version` probe shows the target bd reads the standard names and
-// BD_OTEL_STDOUT is not true; otherwise, including when the probe fails, they
-// pass unchanged. Any other bd child, such as `gc bd` passthrough or the bd an
-// agent session runs, still sees the legacy names.
+// These are the standard OTel names gated by BD_OTEL_ENABLED that bd v1.2.0,
+// v1.2.1 and v1.3.0+ read. The legacy BD_OTEL_METRICS_URL / BD_OTEL_LOGS_URL
+// names are no longer emitted, so no bd child — `gc bd` passthrough, a runner
+// exec, or a session's own bd command — ever sees a deprecated variable or
+// prints the BD_OTEL_* deprecation warning.
 //
 // Called once at gc startup when telemetry is active.
 // No-op when telemetry is not active — the same activation rule as Init,
@@ -129,10 +127,12 @@ func SetProcessOTELAttrs() {
 	if buildGCResourceAttrs() != "" {
 		setenvWarn("OTEL_RESOURCE_ATTRIBUTES", resourceAttrsForChildren())
 	}
-	// Mirror the resolved endpoints into bd's own var names so bd
-	// subprocesses emit to the same collectors as gc itself.
-	setenvWarn("BD_OTEL_METRICS_URL", metricsURL)
-	setenvWarn("BD_OTEL_LOGS_URL", logsURL)
+	// Mirror the resolved endpoints into the standard OTel endpoint names
+	// gated by bd's enable flag, so bd subprocesses emit to the same
+	// collectors as gc itself without bd's legacy-name deprecation warning.
+	setenvWarn("BD_OTEL_ENABLED", "true")
+	setenvWarn("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", metricsURL)
+	setenvWarn("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", logsURL)
 	// Enable Claude Code's built-in telemetry for agent sessions.
 	setenvWarn("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
 }
@@ -147,8 +147,8 @@ func SetProcessOTELAttrs() {
 // active propagation paths are SetProcessOTELAttrs (inherited process env)
 // and OTELEnvMap (session env merging).
 //
-// It returns bd's legacy BD_OTEL_* names; see SetProcessOTELAttrs for which
-// bd children receive them translated to the standard names.
+// It returns the standard OTel names gated by BD_OTEL_ENABLED (matching
+// SetProcessOTELAttrs); no legacy BD_OTEL_* names are emitted.
 //
 // Returns nil when telemetry is not active — the same activation rule as
 // Init, including the OTEL_EXPORTER_OTLP_ENDPOINT fallback.
@@ -162,8 +162,9 @@ func OTELEnvForSubprocess() []string {
 		env = append(env, "OTEL_RESOURCE_ATTRIBUTES="+attrs)
 	}
 	env = append(env,
-		"BD_OTEL_METRICS_URL="+metricsURL,
-		"BD_OTEL_LOGS_URL="+logsURL,
+		"BD_OTEL_ENABLED=true",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="+metricsURL,
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="+logsURL,
 		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
 	)
 	return env
@@ -172,17 +173,19 @@ func OTELEnvForSubprocess() []string {
 // OTELEnvMap returns OTEL environment variables as a map for Gas City's
 // mergeEnv() pattern. Returns nil when telemetry is not active — the same
 // activation rule as Init, including the OTEL_EXPORTER_OTLP_ENDPOINT fallback.
-// Like SetProcessOTELAttrs it emits bd's legacy BD_OTEL_* names, which reach a
-// session's own bd commands untranslated.
+// Like SetProcessOTELAttrs it emits the standard OTel names gated by
+// BD_OTEL_ENABLED, so a session's own bd commands never see a deprecated
+// legacy BD_OTEL_*_URL name.
 func OTELEnvMap() map[string]string {
 	metricsURL, logsURL, enabled := resolveEndpoints()
 	if !enabled {
 		return nil
 	}
 	m := map[string]string{
-		"BD_OTEL_METRICS_URL":          metricsURL,
-		"BD_OTEL_LOGS_URL":             logsURL,
-		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"BD_OTEL_ENABLED":                     "true",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": metricsURL,
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    logsURL,
+		"CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
 	}
 	if attrs := resourceAttrsForChildren(); attrs != "" {
 		m["OTEL_RESOURCE_ATTRIBUTES"] = attrs

@@ -108,6 +108,32 @@ func TestOTELEnvMap_Disabled(t *testing.T) {
 	}
 }
 
+func TestOTELEnvMap_UsesStandardNamesNotLegacy(t *testing.T) {
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_CITY", "")
+
+	m := OTELEnvMap()
+	for _, legacy := range []string{"BD_OTEL_METRICS_URL", "BD_OTEL_LOGS_URL"} {
+		if _, ok := m[legacy]; ok {
+			t.Errorf("OTELEnvMap must not emit legacy %q (bd warns on its presence)", legacy)
+		}
+	}
+	if m["BD_OTEL_ENABLED"] != "true" {
+		t.Errorf("BD_OTEL_ENABLED = %q, want %q", m["BD_OTEL_ENABLED"], "true")
+	}
+	if m["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] != "http://collector:4318/v1/metrics" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q", m["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"])
+	}
+	if m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "http://collector:4318/v1/logs" {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q", m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"])
+	}
+}
+
 func TestOTELEnvMap_StandardEndpointOnly(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
@@ -121,11 +147,11 @@ func TestOTELEnvMap_StandardEndpointOnly(t *testing.T) {
 	if m == nil {
 		t.Fatal("expected non-nil map when OTEL_EXPORTER_OTLP_ENDPOINT is set")
 	}
-	if want := "http://collector:4318/v1/metrics"; m["BD_OTEL_METRICS_URL"] != want {
-		t.Errorf("BD_OTEL_METRICS_URL = %q, want %q", m["BD_OTEL_METRICS_URL"], want)
+	if want := "http://collector:4318/v1/metrics"; m["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] != want {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q, want %q", m["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"], want)
 	}
-	if want := "http://collector:4318/v1/logs"; m["BD_OTEL_LOGS_URL"] != want {
-		t.Errorf("BD_OTEL_LOGS_URL = %q, want %q", m["BD_OTEL_LOGS_URL"], want)
+	if want := "http://collector:4318/v1/logs"; m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != want {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q, want %q", m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"], want)
 	}
 	if m["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
 		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q", m["CLAUDE_CODE_ENABLE_TELEMETRY"])
@@ -144,11 +170,11 @@ func TestOTELEnvMap_Enabled(t *testing.T) {
 	if m == nil {
 		t.Fatal("expected non-nil map")
 	}
-	if m["BD_OTEL_METRICS_URL"] != "http://localhost:8428/opentelemetry/api/v1/push" {
-		t.Errorf("BD_OTEL_METRICS_URL = %q", m["BD_OTEL_METRICS_URL"])
+	if m["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] != "http://localhost:8428/opentelemetry/api/v1/push" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q", m["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"])
 	}
-	if m["BD_OTEL_LOGS_URL"] != "http://localhost:9428/insert/opentelemetry/v1/logs" {
-		t.Errorf("BD_OTEL_LOGS_URL = %q", m["BD_OTEL_LOGS_URL"])
+	if m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "http://localhost:9428/insert/opentelemetry/v1/logs" {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q", m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"])
 	}
 	if m["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
 		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q", m["CLAUDE_CODE_ENABLE_TELEMETRY"])
@@ -166,8 +192,8 @@ func TestOTELEnvMap_NoLogsURL_FallsBackToDefault(t *testing.T) {
 	t.Setenv("GC_CITY", "")
 
 	m := OTELEnvMap()
-	if got := m["BD_OTEL_LOGS_URL"]; got != DefaultLogsURL {
-		t.Errorf("BD_OTEL_LOGS_URL = %q, want DefaultLogsURL %q", got, DefaultLogsURL)
+	if got := m["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; got != DefaultLogsURL {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q, want DefaultLogsURL %q", got, DefaultLogsURL)
 	}
 }
 
@@ -242,10 +268,11 @@ func TestOTELEnvForSubprocess_StandardEndpointOnly(t *testing.T) {
 		t.Fatal("expected non-nil env when OTEL_EXPORTER_OTLP_ENDPOINT is set")
 	}
 	want := map[string]bool{
-		"BD_OTEL_METRICS_URL=http://collector:4318/v1/metrics":  false,
-		"BD_OTEL_LOGS_URL=http://collector:4318/v1/logs":        false,
-		"OTEL_RESOURCE_ATTRIBUTES=team=platform,gc.agent=mayor": false,
-		"CLAUDE_CODE_ENABLE_TELEMETRY=1":                        false,
+		"BD_OTEL_ENABLED=true": false,
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://collector:4318/v1/metrics": false,
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://collector:4318/v1/logs":       false,
+		"OTEL_RESOURCE_ATTRIBUTES=team=platform,gc.agent=mayor":                false,
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1":                                       false,
 	}
 	for _, e := range env {
 		if _, ok := want[e]; ok {
@@ -272,20 +299,27 @@ func TestOTELEnvForSubprocess_BothURLs(t *testing.T) {
 		t.Fatal("expected non-empty env")
 	}
 
-	hasMetrics, hasLogs := false, false
+	hasMetrics, hasLogs, hasEnabled := false, false, false
 	for _, e := range env {
-		if strings.HasPrefix(e, "BD_OTEL_METRICS_URL=") {
+		switch {
+		case strings.HasPrefix(e, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="):
 			hasMetrics = true
-		}
-		if strings.HasPrefix(e, "BD_OTEL_LOGS_URL=") {
+		case strings.HasPrefix(e, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="):
 			hasLogs = true
+		case e == "BD_OTEL_ENABLED=true":
+			hasEnabled = true
+		case strings.HasPrefix(e, "BD_OTEL_METRICS_URL=") || strings.HasPrefix(e, "BD_OTEL_LOGS_URL="):
+			t.Errorf("legacy name must not appear in subprocess env: %q", e)
 		}
 	}
 	if !hasMetrics {
-		t.Error("expected BD_OTEL_METRICS_URL in subprocess env")
+		t.Error("expected OTEL_EXPORTER_OTLP_METRICS_ENDPOINT in subprocess env")
 	}
 	if !hasLogs {
-		t.Error("expected BD_OTEL_LOGS_URL in subprocess env")
+		t.Error("expected OTEL_EXPORTER_OTLP_LOGS_ENDPOINT in subprocess env")
+	}
+	if !hasEnabled {
+		t.Error("expected BD_OTEL_ENABLED=true in subprocess env")
 	}
 }
 
@@ -293,13 +327,37 @@ func TestSetProcessOTELAttrs_Disabled(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
 	t.Setenv(EnvOTLPEndpoint, "")
-	t.Setenv("BD_OTEL_METRICS_URL", "")
-	t.Setenv("BD_OTEL_LOGS_URL", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 
 	SetProcessOTELAttrs()
 
-	if v := os.Getenv("BD_OTEL_METRICS_URL"); v != "" {
-		t.Errorf("BD_OTEL_METRICS_URL should not be set when telemetry disabled, got %q", v)
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); v != "" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT should not be set when telemetry disabled, got %q", v)
+	}
+}
+
+func TestSetProcessOTELAttrs_NoLegacyNames(t *testing.T) {
+	t.Setenv(EnvMetricsURL, "")
+	t.Setenv(EnvLogsURL, "")
+	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+	t.Setenv("BD_OTEL_ENABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_CITY", "")
+
+	SetProcessOTELAttrs()
+
+	for _, legacy := range []string{"BD_OTEL_METRICS_URL", "BD_OTEL_LOGS_URL"} {
+		if v := os.Getenv(legacy); v != "" {
+			t.Errorf("%s must not be set by gc (bd warns on its presence), got %q", legacy, v)
+		}
+	}
+	if got := os.Getenv("BD_OTEL_ENABLED"); got != "true" {
+		t.Errorf("BD_OTEL_ENABLED = %q, want %q", got, "true")
 	}
 }
 
@@ -307,8 +365,8 @@ func TestSetProcessOTELAttrs_StandardEndpointOnly(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
 	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
-	t.Setenv("BD_OTEL_METRICS_URL", "")
-	t.Setenv("BD_OTEL_LOGS_URL", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "")
@@ -317,11 +375,11 @@ func TestSetProcessOTELAttrs_StandardEndpointOnly(t *testing.T) {
 
 	SetProcessOTELAttrs()
 
-	if got, want := os.Getenv("BD_OTEL_METRICS_URL"), "http://collector:4318/v1/metrics"; got != want {
-		t.Errorf("BD_OTEL_METRICS_URL = %q, want %q", got, want)
+	if got, want := os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"), "http://collector:4318/v1/metrics"; got != want {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q, want %q", got, want)
 	}
-	if got, want := os.Getenv("BD_OTEL_LOGS_URL"), "http://collector:4318/v1/logs"; got != want {
-		t.Errorf("BD_OTEL_LOGS_URL = %q, want %q", got, want)
+	if got, want := os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"), "http://collector:4318/v1/logs"; got != want {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q, want %q", got, want)
 	}
 	if got := os.Getenv("CLAUDE_CODE_ENABLE_TELEMETRY"); got != "1" {
 		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q, want %q", got, "1")
@@ -340,11 +398,11 @@ func TestSetProcessOTELAttrs_Enabled(t *testing.T) {
 
 	SetProcessOTELAttrs()
 
-	if got := os.Getenv("BD_OTEL_METRICS_URL"); got != metricsURL {
-		t.Errorf("BD_OTEL_METRICS_URL = %q, want %q", got, metricsURL)
+	if got := os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); got != metricsURL {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q, want %q", got, metricsURL)
 	}
-	if got := os.Getenv("BD_OTEL_LOGS_URL"); got != logsURL {
-		t.Errorf("BD_OTEL_LOGS_URL = %q, want %q", got, logsURL)
+	if got := os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"); got != logsURL {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q, want %q", got, logsURL)
 	}
 	if got := os.Getenv("CLAUDE_CODE_ENABLE_TELEMETRY"); got != "1" {
 		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q, want %q", got, "1")
@@ -391,8 +449,8 @@ func TestSetProcessOTELAttrs_MergesExistingResourceAttrs(t *testing.T) {
 func TestSetProcessOTELAttrs_RepeatedMergeIsIdempotent(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
-	t.Setenv("BD_OTEL_METRICS_URL", "")
-	t.Setenv("BD_OTEL_LOGS_URL", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "mayor")
@@ -415,8 +473,8 @@ func TestSetProcessOTELAttrs_ThenOTELEnvMap_NoDuplicateLabels(t *testing.T) {
 	// second copy of the GC labels from the already-mutated process env.
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
-	t.Setenv("BD_OTEL_METRICS_URL", "")
-	t.Setenv("BD_OTEL_LOGS_URL", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "mayor")
