@@ -194,12 +194,51 @@ func warnStage1MCPSkip(cityPath, agent string, err error, stderr io.Writer) {
 	warnStage1MCPOnce(cityPath, fmt.Sprintf("skipping MCP projection for agent %q: %v", agent, err), stderr)
 }
 
+// stage1MCPTargets is what a stage-1 pass reconciles: the targets to apply,
+// and the managed keys of agents it skipped. A skipped agent cannot start,
+// but its last projected target is left as it was instead of being cleaned
+// up as an orphan: the skip can be transient (a provider binary missing from
+// the supervisor's PATH), and a session already running may read the file.
+type stage1MCPTargets struct {
+	targets []mcpTargetSpec
+	held    []string
+}
+
 func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr)
+	return set.targets, err
+}
+
+// heldStage1MCPKey returns the managed key of the stage-1 target a skipped
+// agent would reconcile: set when its provider family has an MCP projection
+// and its work dir is its scope root. The family resolves from config alone,
+// since the provider binary may be what is missing.
+func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent) (string, bool) {
+	resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, resolveAnyProviderBinary)
+	if err != nil {
+		return "", false
+	}
+	kind := resolvedProviderLaunchFamily(resolved)
+	if !supportsMCPProviderKind(kind) {
+		return "", false
+	}
+	scopeRoot := agentScopeRoot(agent, cityPath, cfg.Rigs)
+	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, agent.QualifiedName())
+	if err != nil || canonicaliseFilePath(workDir, cityPath) != scopeRoot {
+		return "", false
+	}
+	return managedKey(kind, scopeRoot), true
+}
+
+func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) (stage1MCPTargets, error) {
 	if cfg == nil {
-		return nil, nil
+		return stage1MCPTargets{}, nil
 	}
 	byKey := make(map[string]mcpTargetSpec)
-	var skips mcpSkipGroups
+	var (
+		skips mcpSkipGroups
+		held  []string
+	)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
@@ -210,10 +249,13 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 			// One agent's provider must not fail the whole city: skip it
 			// here. Its own session start still reports the same error.
 			warnStage1MCPSkip(cityPath, agent.QualifiedName(), err, stderr)
+			if key, ok := heldStage1MCPKey(cityPath, cfg, agent); ok {
+				held = append(held, key)
+			}
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
+			return stage1MCPTargets{}, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
 		}
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
@@ -228,7 +270,7 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 		existing, ok := byKey[key]
 		if ok {
 			if existing.Projection.Hash() != view.Projection.Hash() {
-				return nil, fmt.Errorf(
+				return stage1MCPTargets{}, fmt.Errorf(
 					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
 					view.Projection.Target,
 					view.Projection.Provider,
@@ -263,16 +305,19 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 	for _, key := range keys {
 		out = append(out, byKey[key])
 	}
-	return out, nil
+	return stage1MCPTargets{targets: out, held: held}, nil
 }
 
 func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) error {
-	targets, err := buildStage1MCPTargets(cityPath, cfg, lookPath, stderr)
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr)
 	if err != nil {
 		return err
 	}
-	desired := make(map[string]bool, len(targets)) // provider+root keys we still own
-	for _, target := range targets {
+	desired := make(map[string]bool, len(set.targets)+len(set.held)) // provider+root keys we still own
+	for _, key := range set.held {
+		desired[key] = true
+	}
+	for _, target := range set.targets {
 		if err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
 			return fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
 		}

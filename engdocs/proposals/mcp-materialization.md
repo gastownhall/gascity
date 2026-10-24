@@ -574,7 +574,10 @@ Projection is fail-closed.
 - config validation failures are hard errors
 - provider resolution failures for agents with effective MCP are hard errors
   for that agent: its session start fails, while stage 1 skips it with a
-  warning and projects the rest of the city
+  warning and projects the rest of the city. Stage 1 leaves the target a
+  skipped agent last projected as it was, instead of cleaning it up as an
+  orphan: the skip may be transient (a provider binary missing from the
+  supervisor's PATH), and a session already running may read the file.
 - servers an agent's provider cannot receive follow
   [Servers a provider cannot receive](#servers-a-provider-cannot-receive)
 - undeliverable runtime/workdir topologies with effective MCP are hard errors
@@ -595,7 +598,7 @@ What happens depends on the layer the server came from:
 
 | Layer | Who it targets | When the provider cannot receive the server |
 |---|---|---|
-| The agent's own `mcp/` directory | that agent, explicitly | Error for that agent: its session start fails with the reason. Stage 1 skips the agent with a warning; the rest of the city starts. |
+| The agent's own `mcp/` directory | that agent, explicitly | Error for that agent: its session start fails with the reason. Stage 1 skips the agent with a warning and leaves the target it last projected as it was; the rest of the city starts. |
 | Every other layer: the city pack's `mcp/` and pack graph, explicit, implicit and bootstrap imports, the rig pack, rig imports | every agent in its scope | The server is left out of that agent's projection with a warning, and the agent starts without it. |
 
 Shared layers attach their servers to every agent in scope, so a single

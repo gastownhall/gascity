@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -223,5 +224,85 @@ command = "uvx"
 	// Other stage-1 errors still fail the pass.
 	if isProviderResolutionError(errors.New("resolving workdir")) {
 		t.Fatal("isProviderResolutionError matched an unrelated error")
+	}
+}
+
+// A skipped agent cannot start, but stage 1 leaves the target it last
+// projected as it was instead of cleaning it up as an orphan: the skip may be
+// transient, and a session already running may read that file.
+func TestRunStage1MCPProjectionLeavesASkippedAgentsTargetAsItWas(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("codex", "cursor"),
+		Agents: []config.Agent{
+			{Name: "coder", Scope: "city", Provider: "codex"},
+			{Name: "editor", Scope: "city", Provider: "cursor"},
+		},
+	}
+	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, io.Discard); err != nil {
+		t.Fatalf("first runStage1MCPProjection: %v", err)
+	}
+	codexTarget := filepath.Join(cityPath, ".codex", "config.toml")
+	cursorTarget := filepath.Join(cityPath, ".cursor", "mcp.json")
+	before := map[string][]byte{}
+	for _, path := range []string{codexTarget, cursorTarget} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("first pass did not project %s: %v", path, err)
+		}
+		before[path] = data
+	}
+
+	// The codex binary goes missing, and the cursor agent gains an http
+	// server of its own that its provider cannot receive: stage 1 skips
+	// both agents.
+	editorMCP := filepath.Join(cityPath, "agents", "editor", "mcp")
+	writeMCPSource(t, filepath.Join(editorMCP, "private.toml"), `
+name = "private"
+url = "https://mcp.example.test/private"
+`)
+	cfg.Agents[1].MCPDir = editorMCP
+	noCodex := func(name string) (string, error) {
+		if name == "codex" {
+			return "", exec.ErrNotFound
+		}
+		return "/bin/echo", nil
+	}
+	var stderr bytes.Buffer
+	if err := runStage1MCPProjection(cityPath, cfg, noCodex, &stderr); err != nil {
+		t.Fatalf("second runStage1MCPProjection: %v", err)
+	}
+	if strings.Contains(stderr.String(), "cleaned up orphan") {
+		t.Fatalf("a skipped agent's target was cleaned up as an orphan:\n%s", stderr.String())
+	}
+	for path, want := range before {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("skipped agent's target %s is gone: %v", path, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("skipped agent's target %s changed:\n got: %s\nwant: %s", path, got, want)
+		}
+	}
+	for _, provider := range []string{"codex", "cursor"} {
+		if _, err := os.Stat(filepath.Join(cityPath, ".gc", "mcp-managed", provider+".json")); err != nil {
+			t.Fatalf("%s managed marker is gone: %v", provider, err)
+		}
+	}
+
+	// Once nothing claims the target, cleanup removes it as before.
+	cfg.Agents = cfg.Agents[:0]
+	stderr.Reset()
+	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
+		t.Fatalf("third runStage1MCPProjection: %v", err)
+	}
+	if _, err := os.Stat(cursorTarget); !os.IsNotExist(err) {
+		t.Fatalf("orphaned target survived once no agent claims it, stat err = %v", err)
 	}
 }
