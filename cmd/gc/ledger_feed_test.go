@@ -1752,7 +1752,7 @@ func TestLedgerFeedStatusOverTheControllerSocket(t *testing.T) {
 
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
-	go handleControllerConn(server, h.set.cityPath, controllerHostingMode(""), func() {}, nil, nil, nil, nil, nil)
+	go handleControllerConn(server, h.set.cityPath, controllerHostingMode(""), func() {}, nil, nil, nil, nil, nil, nil)
 	if _, err := client.Write([]byte(ledgerFeedStatusCommand + "\n")); err != nil {
 		t.Fatal(err)
 	}

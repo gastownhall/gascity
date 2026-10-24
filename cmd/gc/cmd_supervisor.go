@@ -2409,6 +2409,8 @@ func startOneCity(
 	poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
 	watchTargets := config.WatchTargets(prov, cfg, path)
 	configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
+	nudgeDispatcherActive := &atomic.Bool{}
+	nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(cfg))
 	forceShutdown := &atomic.Bool{}
 	cityCtx, cityCancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -2423,6 +2425,7 @@ func startOneCity(
 			TomlPath:                tomlPath,
 			WatchTargets:            watchTargets,
 			ConfigRev:               configRev,
+			NudgeDispatcherActive:   nudgeDispatcherActive,
 			Cfg:                     cfg,
 			SP:                      sp,
 			Publication:             publication,
@@ -2595,7 +2598,7 @@ func startOneCity(
 	// Start controller socket AFTER the alreadyRunning check so we
 	// never destroy a live city's socket or leak a listener.
 	sockPath := controllerSocketPath(path)
-	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
+	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake, nudgeDispatcherActive)
 	if lisErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 		lock.Close()                                                                               //nolint:errcheck // no socket to race with

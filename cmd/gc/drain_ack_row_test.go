@@ -879,7 +879,7 @@ func TestDrainAckStrictFollowsTheRunningController(t *testing.T) {
 			if tc.wake != nil {
 				_, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
-				lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, &atomic.Bool{}, nil, nil, tc.wake)
+				lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, &atomic.Bool{}, nil, nil, tc.wake, nil)
 				if err != nil {
 					t.Fatalf("startControllerSocket: %v", err)
 				}
@@ -1117,7 +1117,7 @@ func TestDrainAckCityModeFollowsTheRunningControllerOverCityTOML(t *testing.T) {
 			}
 			_, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
-			lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, &atomic.Bool{}, nil, nil, tc.wake)
+			lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, &atomic.Bool{}, nil, nil, tc.wake, nil)
 			if err != nil {
 				t.Fatalf("startControllerSocket: %v", err)
 			}

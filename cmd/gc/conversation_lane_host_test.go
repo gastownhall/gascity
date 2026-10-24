@@ -415,7 +415,7 @@ func laneSocketConn(t *testing.T, cityPath, line string) string {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil)
 	}()
 	if _, err := client.Write([]byte(line + "\n")); err != nil {
 		t.Fatalf("writing %q: %v", line, err)
