@@ -369,7 +369,7 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 						info.CreatedAt = gatherNow.Add(-time.Hour)
 						info.ConfiguredNamedSession, info.ConfiguredNamedMode = mode != "", mode
 						info.SessionOrigin, info.ManualSessionMetadata = manual.SessionOrigin, manual.ManualSessionMetadata
-						if got, want := asleepHealPatch(info), legacyHeal(info); !maps.Equal(got, want) {
+						if got, want := asleepHealPatch(info, gatherNow), legacyHeal(info); !maps.Equal(got, want) {
 							t.Errorf("%s/%q/%+v/%q/%+v: patch %v, legacy %v", state, reason, cont, mode, manual, got, want)
 						}
 					}

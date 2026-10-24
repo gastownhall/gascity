@@ -206,7 +206,7 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 		kept := failureKeepsConversation(row, f)
 		backstop, count := resumeBackstop(failures, kept, f.resume)
 		if !kept || backstop {
-			maps.Copy(patch, session.ConversationResetPatch(true))
+			maps.Copy(patch, session.ConversationResetPatch(true, now))
 			count = 0
 		}
 		maps.Copy(patch, resumeFailuresPatch(row, count))
