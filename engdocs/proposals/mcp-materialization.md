@@ -697,6 +697,8 @@ Projection is fail-closed.
 
 - config validation failures are hard errors
 - provider resolution failures for agents with effective MCP are hard errors
+  for that agent: its session start fails, while stage 1 skips it with a
+  warning and projects the rest of the city
 - servers an agent's provider cannot receive follow
   [Servers a provider cannot receive](#servers-a-provider-cannot-receive)
 - undeliverable runtime/workdir topologies with effective MCP are hard errors

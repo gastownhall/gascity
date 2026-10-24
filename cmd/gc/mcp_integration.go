@@ -206,8 +206,19 @@ func warnStage1MCPOnce(cityPath, message string, stderr io.Writer) {
 	fmt.Fprintf(stderr, "gc: warning: %s\n", message) //nolint:errcheck // best-effort stderr
 }
 
-// warnStage1MCPSkip reports an agent stage 1 does not project at all because
-// its own mcp/ directory declares servers its provider cannot receive.
+// isProviderResolutionError reports whether err says an agent's provider
+// does not resolve: its binary is not installed, or its name is not in the
+// provider catalog. That agent cannot start, and its own session start says
+// why, but it must not stop stage 1 for the rest of the city. A city declares
+// every provider it might use (gc init writes more than one), and each
+// declared provider has an implicit agent that inherits the city's MCP.
+func isProviderResolutionError(err error) bool {
+	return errors.Is(err, config.ErrProviderNotInPATH) || errors.Is(err, config.ErrProviderNotFound)
+}
+
+// warnStage1MCPSkip reports an agent stage 1 does not project at all: its
+// own mcp/ directory declares servers its provider cannot receive, or its
+// provider does not resolve.
 func warnStage1MCPSkip(cityPath, agent string, err error, stderr io.Writer) {
 	warnStage1MCPOnce(cityPath, fmt.Sprintf("skipping MCP projection for agent %q: %v", agent, err), stderr)
 }
@@ -231,7 +242,7 @@ func buildStage1MCPTargetsWith(cityPath string, cfg *config.City, lookPath confi
 			continue
 		}
 		view, err := resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, pathOnly)
-		if isAgentMCPCapabilityError(err) {
+		if isAgentMCPCapabilityError(err) || isProviderResolutionError(err) {
 			// One agent's provider must not fail the whole city: skip it
 			// here. Its own session start still reports the same error.
 			warnStage1MCPSkip(cityPath, agent.QualifiedName(), err, stderr)
