@@ -131,6 +131,11 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: TierAvailability},
 		{name: "workflow root close blocked", err: closeBlockedErr("gsp-p68ch6", "gsp-yl7fpr"), want: TierSemantic},
 		{name: "scope body close blocked", err: closeBlockedErr("pl-pujtf", "pl-mmneh"), want: TierSemantic},
+		// A drain or stop signals the dispatcher's process tree: bd answers a
+		// read it was running with its own "context canceled", and a wait on
+		// the dispatcher's signal context ends with context.Canceled.
+		{name: "finalize read cut short by a stop", err: errors.New("x-1: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled"), want: TierAvailability},
+		{name: "signal context canceled", err: fmt.Errorf("acquiring source workflow lock: %w", context.Canceled), want: TierAvailability},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: TierNone},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: TierNone},
 		// Availability dominates: a refusal read off a store that is also

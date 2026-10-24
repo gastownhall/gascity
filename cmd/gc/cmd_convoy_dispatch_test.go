@@ -1361,6 +1361,47 @@ func TestRoutineControlPending_IsNotBudgetedOrEscalated(t *testing.T) {
 	}
 }
 
+// TestStopCanceledFinalizerStaysOpenForRetry pins the disposition of a
+// finalizer whose outcome read was cut short because its control dispatcher
+// was being drained or stopped: the stop signals the whole process tree, bd
+// answers the read in flight with "context canceled", and the finalizer must
+// stay open for the next dispatcher instead of being quarantined as a hard
+// failure that settles its workflow root with the wrong outcome.
+func TestStopCanceledFinalizerStaysOpenForRetry(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "Finalize workflow",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+	canceled := fmt.Errorf("%s: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled", bead.ID)
+
+	var stderr bytes.Buffer
+	got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, bead, bead.ID, canceled, &stderr)
+	if got == nil || !dispatch.IsTransientControllerError(got) {
+		t.Fatalf("handleControlDispatchError = %v, want the cause returned as a transient error so the serve loop retries it", got)
+	}
+	if strings.Contains(stderr.String(), "quarantined") {
+		t.Fatalf("stderr = %q, want no quarantine for a stop-canceled read", stderr.String())
+	}
+
+	after := mustGetBead(t, store, bead.ID)
+	if after.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open for the next dispatcher", after.Status)
+	}
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("finalizer labels = %v, want no gc:control-quarantined", after.Labels)
+	}
+	if got := after.Metadata[beadmeta.FailureClassMetadataKey]; got != "" {
+		t.Fatalf("%s = %q, want empty", beadmeta.FailureClassMetadataKey, got)
+	}
+}
+
 // TestPendingControlRefusal_FirstRefusalIsNotQuiet keeps the quiet marking from
 // swallowing the first report of a new problem: the sweep that discovers a
 // pending refusal must still count as activity so the serve loop reacts to it.

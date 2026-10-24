@@ -133,6 +133,7 @@ func TestClassifyWorkQueryStoreUnavailable(t *testing.T) {
 		{"marker after an escaped quote in the command text", fmt.Errorf("running work query %q: exit status 1: %s", `bd ready --json --title "x" # dial tcp`, "unknown flag --bogus"), false},
 		{"breaker phrase only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # server appears down, failing fast", "unknown flag --bogus"), false},
 		{"killed-query needle only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # signal: killed", "unknown flag --bogus"), false},
+		{"canceled needle only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # context canceled", "unknown flag --bogus"), false},
 		{"marker behind narrowing runes in the command text", fmt.Errorf("running work query %q: exit status 1: %s", strings.Repeat("\u212a", 10)+" # connection refused", "unknown flag --bogus"), false},
 		{"stderr marker behind a quoted command", fmt.Errorf("running work query %q: exit status 1: %s", `bd ready --json --title "x"`, "Error: dial tcp 127.0.0.1:3307: connection refused"), true},
 		{"stderr marker behind the claim-window note", hookClaimRetryWindowClosed(fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json", "Error: dial tcp 127.0.0.1:3307: connection refused"), &hookClaimOps{}), true},
@@ -144,6 +145,9 @@ func TestClassifyWorkQueryStoreUnavailable(t *testing.T) {
 		{"bd deadline text", errors.New("Error: failed to list ready issues: context deadline exceeded"), true},
 		{"bd timeout text", errors.New("Error: failed to list ready issues: timed out after 30s"), true},
 		{"killed work query", errors.New(`running work query "bd ready --json": signal: killed`), true},
+		// A drain or stop signals bd mid-read; it answers with its own
+		// "context canceled" and the store never answered.
+		{"bd read cut short by a stop", errors.New(`running work query "bd ready --json": exit status 1: Error: failed to list ready issues: context canceled`), true},
 		// Read-phase failures strike once a query is under way, past every
 		// connect-time marker.
 		{"invalid connection", errors.New("Error: failed to list ready issues: invalid connection"), true},
