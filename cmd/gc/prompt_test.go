@@ -987,6 +987,40 @@ func TestPoolWorkerPromptResolvesClaimProtocolFragment(t *testing.T) {
 	}
 }
 
+// TestCoreWorkerPromptsEscalateToConfiguredRecipient pins that a blocked
+// worker mails the city's escalation recipient rather than a hard-coded
+// human, through the same GC_ESCALATION_RECIPIENT that escalate.sh reads;
+// the shell default keeps a city that sets none on the reserved `human` alias.
+func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	const (
+		want      = `gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "BLOCKED: `
+		hardcoded = "gc mail send human"
+	)
+
+	for _, prompt := range []string{"pool-worker.template.md", "graph-worker.md"} {
+		t.Run(prompt, func(t *testing.T) {
+			var stderr strings.Builder
+			got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", filepath.Join(coreDir, "assets", "prompts", prompt),
+				PromptContext{AgentName: "claude"}, "", &stderr, []string{coreDir}, nil, nil)
+			if stderr.Len() != 0 {
+				t.Fatalf("renderPrompt(%s) wrote to stderr: %s", prompt, stderr.String())
+			}
+			if !strings.Contains(got, want) {
+				t.Fatalf("rendered %s missing %q:\n%s", prompt, want, got)
+			}
+			if strings.Contains(got, hardcoded) {
+				t.Fatalf("rendered %s still escalates with %q", prompt, hardcoded)
+			}
+		})
+	}
+}
+
 func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 	chdirToRealPackageDir(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
