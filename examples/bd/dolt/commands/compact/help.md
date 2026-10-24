@@ -110,7 +110,9 @@ author: every commit after the watermark is squashed, whichever city wrote it.
   disk space is never reclaimed. Unlike a bare working-set GC, `--full` rewrites
   `oldgen`, so the orphaned history is actually freed. Refuses any database that
   carries an integrity-quarantine marker and prints the marker evidence plus the
-  safe clear/retry requirements.
+  safe clear/retry requirements. Also refuses, before issuing `DOLT_GC`, when
+  the listener `read_timeout_millis` is below the full-GC bound; see "The full
+  GC and the listener read timeout" below.
 
 - `--only-db <name>` — Restrict the run to the named database. Repeatable, and
   augments `GC_DOLT_COMPACT_ONLY_DBS`. Use this to reclaim a single stranded
@@ -155,6 +157,18 @@ A GC that fails after a flatten leaves a pending-GC marker that retries
 compactor blamed the ceiling, every retry hits the same ceiling until it moves;
 when it said the timeout did not end the GC, raising `read_timeout_millis` is
 not the remedy.
+
+`--gc-only` checks the ceiling before it starts the GC and refuses when the
+ceiling is below the full-GC bound: `GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS`, or
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`) when that is unset. It
+reads the ceiling from the running server's rendered config; with none
+readable it uses `GC_DOLT_READ_TIMEOUT_MILLIS`, and assumes `15000` without
+that either. An explicit external-local target's ceiling comes only from
+`GC_DOLT_CONFIG_FILE`. With stock settings the default bound is above the
+ceiling, so set `GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS` to the longest full GC
+you expect, and raise the ceiling if it is below that. Setting the bound in the
+managed server's start environment also raises the ceiling to it on the next
+start.
 
 To raise the managed server's ceiling, set it in `city.toml` under `[dolt]
 read_timeout_millis` and run `gc dolt restart` before retrying. Keep it under

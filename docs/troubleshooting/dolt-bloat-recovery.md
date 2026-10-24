@@ -152,6 +152,30 @@ live server can give it belongs offline: follow the **Recovery Procedure** above
 with `dolt gc --full --archive-level=1` as step 3, which no listener timeout
 bounds and which also rewrites `oldgen`.
 
+`gc dolt compact --gc-only` checks the ceiling before it starts the GC. It
+refuses when the ceiling is below the full-GC bound, which is
+`GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS`, or `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS`
+(default `1800`) when that is unset:
+
+```
+compact: db=<database> the managed sql-server listener.read_timeout_millis=120000 ceiling (in <runtime>/packs/dolt/dolt-config.yaml) is below the 1800s full-GC bound — DOLT_GC produces no rows until it finishes, so that timeout would cancel the reclaim; refusing to start DOLT_GC. Set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS to the longest full GC you expect, or raise it via city.toml [dolt] read_timeout_millis ...
+```
+
+The ceiling comes from the running server's rendered config. With none
+readable, the check uses `GC_DOLT_READ_TIMEOUT_MILLIS`, and assumes `15000`
+without that either. An explicit external-local target's ceiling comes only
+from `GC_DOLT_CONFIG_FILE`. With stock settings the default bound is above the
+ceiling, so set the bound to the longest full GC you expect, at or under the
+ceiling:
+
+```bash
+GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=60 gc dolt compact --gc-only --only-db <database>
+```
+
+Setting either bound variable in the managed server's start environment also
+raises the ceiling to it on the next start. That ceiling still has to stay under
+half of `write_timeout_millis`.
+
 The tell that you are looking at this and not a real disconnect is the server
 log: the `client connection went away` line that precedes the failure carries
 `i/o timeout`, not `EOF`, and lands exactly `read_timeout_millis` after the
@@ -570,11 +594,31 @@ full GC in the same cycle. Any probe failure, deleted or modified row, drift
 outside the proved set, or any other reason keeps the marker and blocks GC.
 You do not need to clear these by hand — check the compactor log first.
 
+When flatten verify sees a concurrent writer (HEAD moved across the flatten
+window), those table-hash reasons are not written. Compact defers full GC to
+the next run instead. That includes a busy database that both appends rows
+(row-count gain plus hash drift on one table) and updates rows (same-count
+hash drift on another) during the window. Mixed append-plus-update without a
+proven writer still quarantines.
+
 Quarantine markers also carry structured evidence. New markers include the
-database name, the preflight/flatten/post-verify HEADs, preflight and
-postflight database value hashes when available, `integrity_table_drift` for
-table-level row/hash mismatches, `database_value_hash_drift` for aggregate hash
-drift, and `decision=preserve_marker_manual_review_required`.
+database name, the preflight/flatten/post-verify HEADs, the
+`flatten_preflight_ref` evidence branch (`__gc_compact_preflight_<database>`),
+preflight and postflight database value hashes when available,
+`integrity_table_drift` for table-level row/hash mismatches,
+`database_value_hash_drift` for aggregate hash drift, and
+`decision=preserve_marker_manual_review_required`.
+
+Flatten rewrites history: the preflight commit is no longer on HEAD, and
+managed auto-GC can collect it before anyone reviews the marker. Compact pins
+that commit to `flatten_preflight_ref` **before** the reset and keeps the
+branch if it quarantines. Use the branch, not the raw hash, for
+`DOLT_DIFF_STAT` / `DOLT_DIFF`. If the marker has no `flatten_preflight_ref`
+and the recorded preflight hash is not resolvable (`target commit not found`),
+row preservation cannot be proven — **leave the marker in place**. The
+race-class auto-clear proves preservation from the same branch, and compact
+drops the branch itself once preservation is proven (auto-clear, or the next
+flatten whose integrity check passes), so full GC can reclaim the old history.
 
 Alert-cadence bookkeeping is deliberately separate from that evidence. The
 compactor stores `seen_count`, `notify_count`, and last-notified fields under
@@ -593,8 +637,10 @@ Safe marker-clear procedure:
    `bd list --limit 1` in that rig or `gc bd list --rig <rig> --limit 1`.
 4. Read the marker and retain it if the HEAD/hash/table evidence is incomplete
    or points at row loss. For table drift, compare the recorded HEADs with
-   `DOLT_DIFF` / `DOLT_DIFF_STAT`; only clear when the diff proves preflight
-   rows are still reachable and no unexpected table disappeared.
+   `DOLT_DIFF` / `DOLT_DIFF_STAT` against `flatten_preflight_ref` (fall back
+   to `flatten_preflight_head` only if that commit is still resolvable); only
+   clear when the diff proves preflight rows are still reachable and no
+   unexpected table disappeared.
 5. When the evidence proves no data loss, remove only that database's marker:
    `rm .gc/runtime/packs/dolt/compact-quarantine/<database>`.
 6. Retry reclaim with `gc dolt compact --gc-only --only-db <database>`. If the
