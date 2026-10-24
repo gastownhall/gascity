@@ -1605,6 +1605,16 @@ inherits Go's 10m. Raise it on a slow or heavily shared host:
 GO_TEST_TIMEOUT=30m make test-fast-parallel
 ```
 
+The unsharded sweeps, `make test-go` (behind `make check-go`) and
+`make test-mac`, read the same default through
+`scripts/go-test-budget` and take the same override
+(`GO_TEST_TIMEOUT=30m make test-go`). They used to carry their own 15m:
+`cmd/gc` crossed it on a loaded host with every test passing, and
+the gate could only report a red with no failing test to name. When a
+package does hit its budget, `scripts/go-test-observable` prints the test
+binary's own "running tests" header and the count of top-level tests that
+started but never finished, ahead of the goroutine dump.
+
 For one package, shard top-level Go tests directly:
 
 ```bash
