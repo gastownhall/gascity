@@ -134,6 +134,11 @@ func TestWorkflowWritePermissionsAreJobScoped(t *testing.T) {
 			writeJob: "flag-cancelled-while-queued", //nolint:misspell // workflow job ID
 			want:     map[string]string{"checks": "write", "actions": "read"},
 		},
+		{
+			file:     "worker-env-notify-beads-pr.yml",
+			writeJob: "comment",
+			want:     map[string]string{"pull-requests": "write"},
+		},
 	}
 
 	for _, tc := range cases {

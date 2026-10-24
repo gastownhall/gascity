@@ -826,10 +826,8 @@ To re-pin, anyone with write access:
    worker: its measured package list, its dolt, the test `PATH`, the pin.
    rbe-worker's own CI runs the same check against gascity's main, but
    only as information, and it gates nothing here.
-   Make the same change in gastownhall/beads (its
-   `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
-   together: once the pool workers serve the new pin, beads' actions on
-   the old pin don't schedule.
+   gastownhall/beads, which carries a byte-identical copy of both, follows
+   on its own once this merges (below).
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
    bazel.yml lane skips the remote suite. The worker-host job measures
@@ -838,6 +836,23 @@ To re-pin, anyone with write access:
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
+
+Once main's pin moves, beads' copy is out of step, and every beads PR
+fails at `Bazel / execution mode` (its preflight compares the copy with
+gascity's main) until beads' sync PR lands. While a PR moves the pin,
+`worker-env-notify-beads-pr.yml` keeps one comment on it saying so. On the
+push that merges it, `worker-env-notify-beads.yml` sends gastownhall/beads
+the repository dispatch `gascity-worker-env-repinned` (the main commit and
+its pin), and beads' `worker-env-autosync.yml` opens the sync PR within a
+minute or two and auto-merges it once its CI passes. That CI runs fully
+uncached after a re-pin, so it takes about an hour, sometimes more: on
+2026-10-21 (beads#7746) it took 50 minutes, gated by the release
+cross-compile lane (about 24k remote actions), and on beads#7411 and
+beads#7732 that lane's first attempt hit its 90-minute timeout (beads now
+re-runs a failed first attempt once). autosync's 15-minute cron is the
+backstop. If the dispatch fails, its run fails and prints
+`gh workflow run worker-env-autosync.yml -R gastownhall/beads`, which
+starts autosync at once.
 
 A re-pin is a new key for every action. The first runs after it miss
 the cache entirely and re-execute everything on the new host, which is
@@ -877,8 +892,8 @@ manifest pin above). Bumping it is a one-line PR titled
    body: the compare URL, the commit list, and whether the bump touches the
    measurement, isolation or microVM files.
 3. If the bump changes what the worker measures, re-pin the worker host in
-   the same PR ("Re-pinning the RBE worker host" above), and merge the
-   matching beads re-pin right after.
+   the same PR ("Re-pinning the RBE worker host" above); beads follows on
+   its own.
 4. Open the PR and merge it once `worker-host` is green. The canary runs
    on the merge, and new pool runs pick the pin up at their next dispatch.
    Workers already running keep their revision until they retire.
