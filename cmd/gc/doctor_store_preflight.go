@@ -14,7 +14,7 @@ const doctorBeadStorePreflightTimeout = 5 * time.Second
 
 // City + per-rig store checks skipped on outage-shaped preflight; keep in sync with buildDoctorChecks.
 const (
-	doctorCityStoreCheckCount   = 19
+	doctorCityStoreCheckCount   = 20
 	doctorPerRigStoreCheckCount = 3
 )
 
