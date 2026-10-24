@@ -35,7 +35,7 @@ const (
 // whose steps it carries byte for byte). A change here is a change in beads
 // first: copy the files from beads and update these digests in the same PR.
 var setupBazelBeadsDigests = map[string]string{
-	"action.yml":         "381cd349e8691b47ac0bd7aa0d6dcfe6f0c2eaf4f51e467b37da6c89daa302a2",
+	"action.yml":         "7e9b529fe08957bc9029e6349b5cde4e4c0030bc87232b5faa67058e5a238803",
 	"fork-credential.sh": "abd68bbacb42fa5c7a71d06aa652bcf0f2fbe870f00b13b51650fe95c3bef59e",
 	"write-bazelrc.sh":   "ffd2f3ebca5a449e12db342c143b9d082cd1d3d5ab7abc8fac84475d5ed56550",
 }
@@ -116,9 +116,10 @@ func TestSetupBazelBinariesSavedFromTheUnitLane(t *testing.T) {
 		}
 	}
 	var save *multiLaneStep
-	for i, step := range readMultiLaneWorkflow(t).Jobs["lane"].Steps {
-		if step.Name == "Save Bazelisk and Bazel" {
-			save = &readMultiLaneWorkflow(t).Jobs["lane"].Steps[i]
+	lane := readMultiLaneWorkflow(t).Jobs["lane"].Steps
+	for i := range lane {
+		if lane[i].Name == "Save Bazelisk and Bazel" {
+			save = &lane[i]
 		}
 	}
 	if save == nil {
