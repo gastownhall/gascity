@@ -233,7 +233,8 @@ parse_record() {
 	# Printable ASCII and newlines, comments included: no carriage return,
 	# escape or other byte that a log of it could act on (the scaler and
 	# beads refuse the same).
-	if grep -q '[^[:print:]]' "$1"; then
+	# -a: GNU grep would read a NUL as a line break and pass it.
+	if grep -a -q '[^[:print:]]' "$1"; then
 		echo "worker-env-grace: record has a byte that is not printable ASCII" >&2
 		return 1
 	fi
@@ -358,7 +359,8 @@ cmd_publish() {
 		# re-run of an older push's job, must not put back an older one.
 		rgit -C "$repo" fetch -q --no-tags --depth=1 --filter=blob:none origin "+refs/heads/main:refs/main" ||
 			die "cannot read main from $url"
-		main_pin=$(git -C "$repo" show "refs/main:platforms/BUILD.bazel" | pin_of /dev/stdin) || die "cannot read main's pin"
+		# The blob arrives on demand (the fetch above left blobs out).
+		main_pin=$(rgit -C "$repo" show "refs/main:platforms/BUILD.bazel" | pin_of /dev/stdin) || die "cannot read main's pin"
 		if [ "$main_pin" != "$r_pin" ]; then
 			echo "worker-env-grace: main pins $main_pin now, not this record's $r_pin; a later push publishes its own record. Not publishing."
 			return 0

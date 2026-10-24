@@ -82,6 +82,10 @@ func newGraceRepo(t *testing.T) *graceRepo {
 		"WORKER_ENV_GRACE_REMOTE=file://"+g.github)
 	g.git(base, "init", "-q", "-b", "main", g.dir)
 	g.git(base, "init", "-q", "--bare", g.github)
+	// Serve blob-less fetches and later blob requests as GitHub does, so
+	// publish's main check reads main's pin lazily here too.
+	g.git(g.github, "config", "uploadpack.allowFilter", "true")
+	g.git(g.github, "config", "uploadpack.allowAnySHA1InWant", "true")
 	for _, script := range []string{rbeWorkerEnvGrace, rbeWorkerEnvDrift} {
 		writeTestFile(t, filepath.Join(g.dir, script), readFile(t, g.root, script))
 		if err := os.Chmod(filepath.Join(g.dir, script), 0o755); err != nil {
@@ -527,11 +531,13 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 	}
 	// A duplicated key, and a line that is not "key value".
 	for name, text := range map[string]string{
-		"duplicate key": graceRecordText(open...) + "go 1.26.9\n",
-		"bare key":      graceRecordText(open...) + "go\n",
-		"CRLF":          strings.ReplaceAll(graceRecordText(open...), "\n", "\r\n"),
-		"lone CR":       graceRecordText(open...) + "# a comment\r::warning title=injected::x\n",
-		"blank line":    graceRecordText(open...) + "   \n",
+		"duplicate key":  graceRecordText(open...) + "go 1.26.9\n",
+		"bare key":       graceRecordText(open...) + "go\n",
+		"CRLF":           strings.ReplaceAll(graceRecordText(open...), "\n", "\r\n"),
+		"lone CR":        graceRecordText(open...) + "# a comment\r::warning title=injected::x\n",
+		"NUL":            graceRecordText(open...) + "# a\x00b\n",
+		"NUL in a value": strings.Replace(graceRecordText(open...), "version 1\n", "version 1\x00\n", 1),
+		"blank line":     graceRecordText(open...) + "   \n",
 	} {
 		dir := t.TempDir()
 		rec := filepath.Join(dir, "record.txt")
