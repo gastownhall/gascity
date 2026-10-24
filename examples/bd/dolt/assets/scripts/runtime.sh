@@ -181,7 +181,7 @@ managed_runtime_listener_pid() (
     return 0
   fi
 
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+  lsof -b -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)
