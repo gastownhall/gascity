@@ -1152,3 +1152,171 @@ func TestIsComputeTerminalState(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitRecentlyClosedUsageRecoversUnsweptSession(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+		{150, 100, 50},
+	})
+
+	store := beads.NewMemStore()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := time.Now().UTC().Add(-2 * time.Minute)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "closed before open-set sweep",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     "codex-closed-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"closed_at":        closedAt.Format(time.RFC3339),
+			"session_key":      codexSweepSessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-CLOSED",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MemStore.Create always stamps Status=open; close after create.
+	closed := "closed"
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	cr.emitRecentlyClosedUsage(context.Background())
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 1 {
+		t.Fatalf("model facts = %d, want 1 from recently-closed sweep; facts: %+v", got, facts)
+	}
+	if got := kindCount(facts, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1 from recently-closed sweep", got)
+	}
+	// The recovered interval must end at closed_at, not at the recovery pass's
+	// wall clock: ClosePatch never stamps slept_at, so an unadjusted emit would
+	// bill discovery time and inflate wall_seconds by the whole recovery lag.
+	var compute usage.Fact
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute {
+			compute = f
+			break
+		}
+	}
+	wantWall := closedAt.Truncate(time.Second).Sub(start).Seconds()
+	if delta := compute.WallSeconds - wantWall; delta < -1 || delta > 1 {
+		t.Fatalf("compute wall_seconds = %v, want ~%v (interval must end at closed_at, not at recovery time)", compute.WallSeconds, wantWall)
+	}
+	refreshed, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshed.Metadata[usageModelSweptAtKey]; got != start.Format(time.RFC3339) {
+		t.Fatalf("usage_model_swept_at = %q, want %q", got, start.Format(time.RFC3339))
+	}
+}
+
+func TestEmitRecentlyClosedUsageThrottled(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{{150, 100, 50}})
+
+	store := beads.NewMemStore()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "closed unswept",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     "codex-throttled",
+			"awake_started_at": start.Format(time.RFC3339),
+			"closed_at":        time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+			"session_key":      codexSweepSessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-THROTTLE",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{
+		cs:                        cs,
+		cfg:                       cfg,
+		sp:                        runtime.NewFake(),
+		cityName:                  "demo",
+		cityPath:                  cityPath,
+		stderr:                    io.Discard,
+		recentlyClosedUsageNextAt: time.Now().UTC().Add(time.Minute),
+	}
+
+	cr.emitRecentlyClosedUsage(context.Background())
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if got := kindCount(facts, usage.KindModel) + kindCount(facts, usage.KindCompute); got != 0 {
+		t.Fatalf("throttled pass must not emit facts, got %d", got)
+	}
+}
+
+func TestRecentlyClosedUsageCandidate(t *testing.T) {
+	now := time.Now().UTC()
+	start := now.Add(-time.Hour).Format(time.RFC3339)
+	ok := beads.Bead{
+		Status: "closed",
+		Metadata: map[string]string{
+			"awake_started_at": start,
+			"closed_at":        now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	if !recentlyClosedUsageCandidate(ok, now) {
+		t.Fatal("recent closed unswept bead should be a candidate")
+	}
+	ok.Metadata[usageModelSweptAtKey] = start
+	ok.Metadata[usageComputeEmittedAtKey] = start
+	if recentlyClosedUsageCandidate(ok, now) {
+		t.Fatal("fully accounted closed bead must not be a candidate")
+	}
+	stale := beads.Bead{
+		Status: "closed",
+		Metadata: map[string]string{
+			"awake_started_at": start,
+			"closed_at":        now.Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if recentlyClosedUsageCandidate(stale, now) {
+		t.Fatal("closed outside the window must not be a candidate")
+	}
+}
