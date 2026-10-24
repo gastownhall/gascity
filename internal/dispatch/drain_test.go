@@ -737,6 +737,50 @@ func TestProcessDrainSeparateReleasesExclusiveReservationsOnCompletion(t *testin
 	}
 }
 
+// TestProcessDrainSeparateClosesUnitConvoysOnCompletion pins gascity#8173: a
+// completed drain used to leave its "drain unit N for <member>" convoys
+// open forever (nothing in completeDrain ever touched them, only the item
+// roots the manifest tracked), flooding bd ready under sustained
+// decomposition load. closeDrainControl now retires every row's unit
+// convoy alongside the control itself.
+func TestProcessDrainSeparateClosesUnitConvoysOnCompletion(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	manifest := mustDrainManifest(t, drain)
+	for _, row := range manifest.Rows {
+		unit := mustGetBead(t, store, row.UnitConvoyID)
+		if unit.Status == "closed" {
+			t.Fatalf("unit convoy %s closed before drain completed", row.UnitConvoyID)
+		}
+		if err := updateMetadataAndClose(store, row.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain complete): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	for _, row := range manifest.Rows {
+		unit := mustGetBead(t, store, row.UnitConvoyID)
+		if unit.Status != "closed" {
+			t.Fatalf("unit convoy %s status = %q, want closed", row.UnitConvoyID, unit.Status)
+		}
+		if got := unit.Metadata["gc.outcome"]; got != "pass" {
+			t.Fatalf("unit convoy %s gc.outcome = %q, want pass", row.UnitConvoyID, got)
+		}
+	}
+}
+
 func TestProcessDrainSeparateFailsOnNonPassItemOutcome(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
@@ -769,6 +813,17 @@ func TestProcessDrainSeparateFailsOnNonPassItemOutcome(t *testing.T) {
 	manifest = mustDrainManifest(t, drain)
 	if got := manifest.Rows[1].Status; got != "failed" {
 		t.Fatalf("skipped row status = %q, want failed", got)
+	}
+	// gascity#8173: each row's own unit convoy closes with ITS row outcome,
+	// not the drain's overall one — the passing member's unit convoy closes
+	// pass even though the drain as a whole closes fail.
+	passUnit := mustGetBead(t, store, manifest.Rows[0].UnitConvoyID)
+	if passUnit.Status != "closed" || passUnit.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("passing row's unit convoy = status %q outcome %q, want closed/pass", passUnit.Status, passUnit.Metadata["gc.outcome"])
+	}
+	failUnit := mustGetBead(t, store, manifest.Rows[1].UnitConvoyID)
+	if failUnit.Status != "closed" || failUnit.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("failing row's unit convoy = status %q outcome %q, want closed/fail", failUnit.Status, failUnit.Metadata["gc.outcome"])
 	}
 }
 
