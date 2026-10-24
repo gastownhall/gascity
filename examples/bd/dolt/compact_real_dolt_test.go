@@ -3,6 +3,7 @@
 package dolt_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -119,11 +120,22 @@ func runDoltForCompactTest(t *testing.T, doltPath, dir string, args ...string) s
 	// Newer dolt CLIs colorize `dolt log` output even without a TTY; ANSI
 	// escapes would corrupt hash parsing in doltHeadForCompactTest.
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
-	out, err := cmd.CombinedOutput()
+	out, stderr, err := doltStdout(cmd)
 	if err != nil {
-		t.Fatalf("dolt %s failed in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		t.Fatalf("dolt %s failed in %s: %v\n%s%s", strings.Join(args, " "), dir, err, out, stderr)
 	}
-	return string(out)
+	return out
+}
+
+// doltStdout runs cmd and returns its stdout and, apart from it, its stderr. The
+// dolt client writes its warnings (a persisted system variable it could not
+// load, say) to stderr, and the helpers parse stdout by position, so a caller
+// parses stdout and shows stderr only with a failure.
+func doltStdout(cmd *exec.Cmd) (stdout, stderr string, err error) {
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+	err = cmd.Run()
+	return outBuf.String(), errBuf.String(), err
 }
 
 func startRealDoltServerForCompactTest(t *testing.T, doltPath, dataDir string) (int, int) {
@@ -240,15 +252,63 @@ func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, quer
 	)
 	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=", "NO_COLOR=1")
 	cmd.WaitDelay = doltCallWaitDelay
-	out, err := cmd.CombinedOutput()
+	out, stderr, err := doltStdout(cmd)
 	if err != nil {
-		t.Fatalf("query server %q: %v\n%s", query, err, out)
+		t.Fatalf("query server %q: %v\n%s%s", query, err, out, stderr)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) <= 1 {
 		return nil
 	}
 	return lines[1:]
+}
+
+// doltClientWarning is what the dolt 2.x client writes to stderr when the host's
+// global config persists a system variable the client does not define. It is
+// noise to every call, and the helpers parse their calls' stdout by position.
+const doltClientWarning = `time="2026-10-14T04:57:17Z" level=warning msg="persisted system variable br_default_branch was not loaded since its definition does not exist."`
+
+// fakeDoltWithStdout writes a dolt stand-in that prints doltClientWarning to
+// stderr and stdout to stdout, as the real client does, and returns its path.
+// stdout must end in a newline.
+func fakeDoltWithStdout(t *testing.T, stdout string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "dolt")
+	script := "#!/bin/sh\n" +
+		"cat >&2 <<'DOLT_STDERR'\n" + doltClientWarning + "\nDOLT_STDERR\n" +
+		"cat <<'DOLT_STDOUT'\n" + stdout + "DOLT_STDOUT\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return path
+}
+
+// The helpers read a call's answer from its stdout by position: the first
+// field of a log line, the rows after a CSV header. A client warning on stderr
+// is not part of that answer; parsed as one it becomes the value
+// ("remote HEAD = time=...").
+func TestDoltHelpersParseStdoutNotClientWarnings(t *testing.T) {
+	t.Run("log head is the commit hash", func(t *testing.T) {
+		fakeDolt := fakeDoltWithStdout(t, "a1b2c3d4 seed commit\n")
+		if got, want := doltHeadForCompactTest(t, fakeDolt, t.TempDir()), "a1b2c3d4"; got != want {
+			t.Fatalf("doltHeadForCompactTest = %q, want %q: a client warning on stderr reached the parsed output", got, want)
+		}
+	})
+
+	t.Run("server head is the hash row", func(t *testing.T) {
+		fakeDolt := fakeDoltWithStdout(t, "HASHOF('HEAD')\nfeedface\n")
+		if got, want := doltServerHeadForCompactTest(t, fakeDolt, 3306), "feedface"; got != want {
+			t.Fatalf("doltServerHeadForCompactTest = %q, want %q: a client warning on stderr reached the parsed output", got, want)
+		}
+	})
+
+	t.Run("query rows follow the header", func(t *testing.T) {
+		fakeDolt := fakeDoltWithStdout(t, "id,name\n1,a\n2,b\n")
+		rows := doltServerQueryForCompactTest(t, fakeDolt, 3306, "SELECT id, name FROM beads")
+		if got, want := strings.Join(rows, "|"), "1,a|2,b"; got != want {
+			t.Fatalf("doltServerQueryForCompactTest rows = %q, want %q: a client warning on stderr reached the parsed output", got, want)
+		}
+	})
 }
 
 // runCompactScriptForRealDoltTest runs commands/compact/run.sh against a real
