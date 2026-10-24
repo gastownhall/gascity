@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from shared layers: such a `copilot` agent used to fail every session
   start, and now starts without MCP. A server in the agent's own
   `agents/<name>/mcp/` directory still keeps that agent from starting.
-  `gc doctor` (`mcp-config`) and `gc mcp list --agent <name>` ("Not
-  projected") show which agents start without which servers.
+  `gc start`, `gc reload`, `gc doctor` (`mcp-config`) and `gc mcp list
+  --agent <name>` ("Not projected") show which agents start without which
+  servers.
 
 - **An agent whose provider does not resolve no longer stops a city's MCP
   projection.** With MCP servers in scope, an agent whose provider is not
@@ -446,8 +447,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   city does. Agents whose sessions use ACP receive every server in-band, as
   `gc session new` already gave them. `gc mcp list` lists skipped servers
   under "Not projected" (`skipped` in `--json`) instead of as projected, and
-  `gc doctor`, `gc config show` and `gc import add` warn about skipped
-  servers and agents that cannot start.
+  `gc start`, `gc reload`, `gc doctor`, `gc config show` and `gc import add`
+  warn about skipped servers and agents that cannot start. Under a
+  supervisor, `gc start` and `gc reload` work the warnings out on the
+  invoking shell's `PATH`, which can differ from the supervisor's; the
+  supervisor log is authoritative.
 
 - **A config reload now projects MCP config.** Stage-1 MCP projection ran
   only when a city started, so a server added or changed in a running city

@@ -500,6 +500,113 @@ func TestDoImportAddWarnsAboutMCPServersAgentsCannotReceive(t *testing.T) {
 	}
 }
 
+// cursorAgentCitySkipWarning is the stage-1 warning for cursorAgentCity.
+const cursorAgentCitySkipWarning = `gc: warning: city "test-city": agents "editor" (the implicit agent for provider "editor"), "mayor" start without MCP server "search" (http, from the city pack): gc projects only stdio MCP servers for the "cursor" harness`
+
+// requireNoStage1MCPWrites fails the test if cursorAgentCity holds what a
+// stage-1 MCP pass writes there: the cursor target and its managed marker.
+func requireNoStage1MCPWrites(t *testing.T, cityDir string) {
+	t.Helper()
+	for _, rel := range []string{".cursor/mcp.json", ".gc/mcp-managed"} {
+		if _, err := os.Lstat(filepath.Join(cityDir, rel)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after a pass that must write nothing (err=%v)", rel, err)
+		}
+	}
+}
+
+// Under a supervisor, stage 1 runs in the supervisor's process, which prints
+// its warnings only to its log. gc start prints them too, from a pass that
+// writes nothing.
+func TestSupervisorStartPrintsStage1MCPSkipWarnings(t *testing.T) {
+	cityDir := cursorAgentCity(t)
+	t.Setenv("GC_DOLT", "skip")
+	oldAlive, oldRegister, oldDryRun := supervisorAliveHook, registerCityWithSupervisorTestHook, dryRunMode
+	t.Cleanup(func() {
+		supervisorAliveHook, registerCityWithSupervisorTestHook, dryRunMode = oldAlive, oldRegister, oldDryRun
+	})
+	supervisorAliveHook = func() int { return 0 }
+	dryRunMode = false
+	// The supervisor's own start: it would run the real pass.
+	registerCityWithSupervisorTestHook = func(string, string, io.Writer, io.Writer) (bool, int) { return true, 0 }
+
+	var stdout, stderr bytes.Buffer
+	if code := doStart([]string{cityDir}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStart = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), cursorAgentCitySkipWarning) {
+		t.Fatalf("stderr missing\n want: %s\n got: %s", cursorAgentCitySkipWarning, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "City started under supervisor.") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	requireNoStage1MCPWrites(t, cityDir)
+
+	// With --json they go to stderr, and stdout holds only the JSON record.
+	// Another city: each warning prints once per process.
+	jsonCity := cursorAgentCity(t)
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStartJSON([]string{jsonCity}, false, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStartJSON = %d; stderr=%s", code, stderr.String())
+	}
+	requireStage1MCPWarningsOnStderrOnly(t, &stdout, &stderr)
+	requireNoStage1MCPWrites(t, jsonCity)
+}
+
+// requireStage1MCPWarningsOnStderrOnly fails the test unless a --json run
+// printed cursorAgentCity's warning to stderr and one JSON record to stdout.
+func requireStage1MCPWarningsOnStderrOnly(t *testing.T, stdout, stderr *bytes.Buffer) {
+	t.Helper()
+	if !strings.Contains(stderr.String(), cursorAgentCitySkipWarning) {
+		t.Fatalf("stderr missing\n want: %s\n got: %s", cursorAgentCitySkipWarning, stderr.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &record); err != nil || strings.Count(strings.TrimSpace(stdout.String()), "\n") != 0 {
+		t.Fatalf("stdout is not one JSON record (err=%v):\n%s", err, stdout.String())
+	}
+}
+
+// gc reload prints the same warnings once the controller accepts the
+// reload, since the controller's own pass prints them only to its log. A
+// reload it does not accept prints none.
+func TestCmdReloadPrintsStage1MCPSkipWarnings(t *testing.T) {
+	cityDir := cursorAgentCity(t)
+	oldSend, oldUnavailable := sendReloadControlRequestHook, reloadUnavailableMessageHook
+	t.Cleanup(func() { sendReloadControlRequestHook, reloadUnavailableMessageHook = oldSend, oldUnavailable })
+	reply := reloadControlReply{Outcome: reloadOutcomeBusy, Message: "controller is busy"}
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) { return reply, nil }
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{cityDir}, false, false, false, "30s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("busy cmdReload = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "MCP server") {
+		t.Fatalf("a reload the controller did not accept printed MCP warnings:\n%s", stderr.String())
+	}
+
+	reply = reloadControlReply{Outcome: reloadOutcomeApplied, Message: "Config reloaded: 1 agents, 0 rigs (rev abc123def456)"}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdReload([]string{cityDir}, false, false, false, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), cursorAgentCitySkipWarning) {
+		t.Fatalf("stderr missing\n want: %s\n got: %s", cursorAgentCitySkipWarning, stderr.String())
+	}
+	requireNoStage1MCPWrites(t, cityDir)
+
+	// With --json too, on stderr, as gc start --json prints them.
+	jsonCity := cursorAgentCity(t)
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdReload([]string{jsonCity}, false, false, true, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload --json = %d; stderr=%s", code, stderr.String())
+	}
+	requireStage1MCPWarningsOnStderrOnly(t, &stdout, &stderr)
+	requireNoStage1MCPWrites(t, jsonCity)
+}
+
 // writeMCPReloadTestConfig writes a city whose mayor runs on a claude-family
 // provider that resolves in tests (its command is echo).
 func writeMCPReloadTestConfig(t *testing.T, tomlPath string, extra ...string) {

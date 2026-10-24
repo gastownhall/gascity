@@ -276,6 +276,15 @@ url = "https://mcp.example.test/private"
 		}
 		return "/bin/echo", nil
 	}
+	// gc start --dry-run's plan agrees: it does not list their targets for
+	// cleanup.
+	lines, err := planStage1MCPProjection(cityPath, cfg, noCodex, io.Discard)
+	if err != nil {
+		t.Fatalf("planStage1MCPProjection: %v", err)
+	}
+	if plan := strings.Join(lines, "\n"); strings.Contains(plan, "no agent claims it") {
+		t.Fatalf("the plan lists a skipped agent's target for cleanup:\n%s", plan)
+	}
 	var stderr bytes.Buffer
 	if err := runStage1MCPProjection(cityPath, cfg, noCodex, &stderr); err != nil {
 		t.Fatalf("second runStage1MCPProjection: %v", err)
@@ -298,13 +307,48 @@ url = "https://mcp.example.test/private"
 		}
 	}
 
-	// Once nothing claims the target, cleanup removes it as before.
+	// Once nothing claims the target, cleanup removes it as before, and the
+	// plan says so.
 	cfg.Agents = cfg.Agents[:0]
+	lines, err = planStage1MCPProjection(cityPath, cfg, stubLookPath, io.Discard)
+	if err != nil {
+		t.Fatalf("planStage1MCPProjection without agents: %v", err)
+	}
+	if plan := strings.Join(lines, "\n"); !strings.Contains(plan, "remove "+cursorTarget+" (cursor) (no agent claims it)") {
+		t.Fatalf("the plan does not list the unclaimed target for cleanup:\n%s", plan)
+	}
 	stderr.Reset()
 	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
 		t.Fatalf("third runStage1MCPProjection: %v", err)
 	}
 	if _, err := os.Stat(cursorTarget); !os.IsNotExist(err) {
 		t.Fatalf("orphaned target survived once no agent claims it, stat err = %v", err)
+	}
+}
+
+// gc start --dry-run's plan resolves a skipped agent's work dir, to find the
+// target it holds, without creating the directory.
+func TestPlanStage1MCPProjectionLeavesASkippedAgentsWorkDirUncreated(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("codex"),
+		Agents:     []config.Agent{{Name: "coder", Scope: "city", Provider: "codex", WorkDir: "worktrees/coder"}},
+	}
+	noCodex := func(string) (string, error) { return "", exec.ErrNotFound }
+	var stderr bytes.Buffer
+	if _, err := planStage1MCPProjection(cityPath, cfg, noCodex, &stderr); err != nil {
+		t.Fatalf("planStage1MCPProjection: %v", err)
+	}
+	if !strings.Contains(stderr.String(), `agent "coder" cannot start`) {
+		t.Fatalf("the plan did not skip the agent:\n%s", stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, "worktrees")); !os.IsNotExist(err) {
+		t.Fatalf("the plan created the skipped agent's work dir (err=%v)", err)
 	}
 }

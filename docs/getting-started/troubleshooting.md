@@ -516,7 +516,10 @@ leaves it alone. Deleting the snapshots clears the report.
 ## An Agent Starts Without an MCP Server
 
 The supervisor log (`gc supervisor logs`) shows a warning like this one when
-the city starts or reloads its config; `gc start --dry-run` prints it too:
+the city starts or reloads its config; `gc start --dry-run` prints it too.
+`gc start` and `gc reload` print it as well, but they work it out on your
+shell's `PATH`, which can differ from the supervisor's. If they disagree, for
+example about a provider that is not installed, the supervisor log is right:
 
 ```text
 gc: warning: city "my-city": agents "cursor" (the implicit agent for provider "cursor"), "editor" start without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness

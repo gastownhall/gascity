@@ -716,16 +716,13 @@ Projection is fail-closed.
   conflict, a write error) warns, leaves the targets it did not reach as they
   were, and lets the reload apply. A city start still fails on it.
 
-Apart from these exceptions, there is no best-effort warning mode once
-effective MCP exists:
-
-- servers a provider cannot receive (below)
-- agents whose provider does not resolve, which stage 1 skips with a warning
-- a failed projection on reload, which warns and lets the reload apply
-- a provider-native file gc does not manage and would have to drop content
-  from, which is left as it is, with a warning (see "Ownership and
-  cleanup"): that file belongs to a repository or a user, not to gc, and
-  failing would stop every agent in the city over it
+There is no best-effort warning mode once effective MCP exists, apart from
+the warnings above (an agent stage 1 skips, a server its provider cannot
+receive, a failed projection on reload) and one more exception: a
+provider-native file gc does not manage and would have to drop content from
+is left as it is, with a warning (see "Ownership and cleanup"). That file
+belongs to a repository or a user, not to gc, and failing would stop every
+agent in the city over it.
 
 ### Servers a provider cannot receive
 
@@ -763,6 +760,13 @@ A skipped server is visible in every surface that shows MCP:
   skip the same servers, once per process, naming the city; agents that
   cannot start are reported the same way. An implicit agent, which gc adds
   for each declared provider, is named with the provider it stands for
+- under a supervisor, `gc start` and a `gc reload` the controller accepts
+  print the same warnings, since the supervisor's pass prints them only to
+  its log. They come from a pass of the command's own that projects nothing
+  and loads the config without waiting on a busy repo cache. Like
+  `gc start --dry-run`, it resolves providers on the invoking shell's
+  `PATH`, which can differ from the supervisor's, so the supervisor log is
+  authoritative
 - `gc mcp list --agent|--session` lists it under "Not projected" (`skipped` in
   `--json`) instead of with the projected servers
 - `gc doctor` reports it as an `mcp-config` warning
