@@ -86,6 +86,16 @@ Because all three call sites already delegated to `beadOutcomeFailed` (and
 transient/superseded filters), fixing the one shared predicate converges all
 three; no call site needed its own change.
 
+## Follow-up: ralph body members
+
+The finalize scan now treats a failed ralph body member (`gc.ralph_step_id` +
+`gc.attempt`, no `gc.logical_bead_id`) as superseded when its owning ralph
+control closed `gc.outcome=pass`, so a recovered loop no longer fails the
+workflow at finalize. It fails closed: an owner that cannot be resolved, is
+ambiguous, is open, or closed with any other outcome leaves the member
+terminal. The abort path is unchanged; a failed member still aborts its
+iteration, and `beadOutcomeFailed` and `isRetryAttemptSubject` are untouched.
+
 ## Status
 
 Implemented. See `gc-pl7ujz` for the ordering fault report and `gc-yydp6f` for
