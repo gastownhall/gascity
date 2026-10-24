@@ -317,6 +317,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`gc init` pins the gastown pack to registry release 0.1.11.** Fresh
+  cities, `examples/gastown`, and the pinned-import examples in the docs now
+  use `sha:66c672b5ed00af143158b4eac960523c56b977ee`; the 0.1.10 pin
+  (`sha:33d3a430a67d`) is recorded as superseded, so `gc doctor` migrates
+  cities still pinned to it.
+
 - **A suspended rig or city is left cold.** gc no longer touches the bead
   store of a suspended rig, or of any scope of a suspended city. That covers
   cache scans, demand, order-tracking sweeps, the completions sweep,
