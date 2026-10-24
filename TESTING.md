@@ -516,7 +516,11 @@ endpoints, credentials, timeouts, download and parallelism policy.
   contributors and fork PRs read. Fork PRs get `rbe-fork` remote execution
   with a certificate minted for that run, or, when the mint is closed or
   refuses, the read-only cache with execution on the runner; either way
-  every lane runs and gates.
+  every lane runs and gates. A fork repository's own CI (a push to your
+  fork, or a PR within it: `github.repository_owner` is not `gastownhall`)
+  runs in mode `local`, executing on the runner without rbe-cache, so it
+  never spends the farm's anonymous-cache budget; your PRs into gascity are
+  unaffected.
 
 **Pre-push.** `.githooks/pre-push` runs the suite through
 `.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
@@ -698,7 +702,8 @@ does not reach the fork-cache lanes below.
 Lanes on the read-only fork cache (mode `cache`) see no repository
 variables. Mode `cache` covers fork PRs without an rbe-fork certificate,
 `rbe=cache` dispatches, and, while `RBE_WEST_WORKERS` is not `true`, every
-PR, push and merge group (`bazel.yml`'s rbe job). They read the same
+PR, push and merge group (`bazel.yml`'s rbe job), never a fork
+repository's own CI (mode `local`). They read the same
 entries through rbe-cache's anonymous AC and CAS reads, with the same two
 lines, whenever `tools/rbe/cache-rrc-probe.sh` gets a GetCapabilities
 answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
