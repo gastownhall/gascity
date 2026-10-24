@@ -1754,3 +1754,103 @@ func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
 		t.Fatalf("summary must not read as if every database failed, got:\n%s", output)
 	}
 }
+
+// writeSyncGCFixture lays out a city with one database ("app") routed from the
+// city's .beads/routes.jsonl, a fake dolt, a fake gc that reports no rigs (so
+// route discovery stays inside the temp city), and a fake bd that records
+// every invocation as "BEADS_DIR=<dir> <args>". The fake bd answers a forced
+// purge the way a real one does and a bare or --dry-run purge with a preview
+// only, so a sync that forgets --force deletes nothing and says nothing.
+func writeSyncGCFixture(t *testing.T) (cityPath, binDir, bdLog string, port int) {
+	t.Helper()
+
+	port, cleanup := startReachableTCPListener(t)
+	t.Cleanup(cleanup)
+
+	cityPath = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "data", "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"app-","database":"app","path":"."}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	binDir = t.TempDir()
+	_ = writeSyncFakeDolt(t, binDir)
+	bdLog = filepath.Join(binDir, "bd.log")
+
+	if err := os.WriteFile(filepath.Join(binDir, "gc"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write fake gc: %v", err)
+	}
+	fakeBD := `#!/bin/sh
+printf 'BEADS_DIR=%s %s\n' "$BEADS_DIR" "$*" >> "` + bdLog + `"
+case "$*" in
+  "purge --force")
+    printf 'purged 2 closed ephemeral beads\n'
+    ;;
+  *)
+    printf 'would purge 2 closed ephemeral beads (preview; pass --force to delete)\n'
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	return cityPath, binDir, bdLog, port
+}
+
+func runSyncGC(t *testing.T, cityPath, binDir string, port int, args ...string) string {
+	t.Helper()
+	// runSync defaults GC_DOLT_PORT to 1; the later entry in extraEnv wins, so
+	// the script sees the reachable listener and takes the live-SQL path.
+	extraEnv := []string{fmt.Sprintf("GC_DOLT_PORT=%d", port)}
+	out, err := runSync(t, binDir, cityPath, extraEnv, append([]string{"--db", "app"}, args...)...)
+	if err != nil {
+		t.Fatalf("gc dolt sync %v failed: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+// TestSyncGCForcesThePurge pins that --gc actually deletes: bd purge only
+// previews unless it is given --force.
+func TestSyncGCForcesThePurge(t *testing.T) {
+	cityPath, binDir, bdLog, port := writeSyncGCFixture(t)
+
+	out := runSyncGC(t, cityPath, binDir, port, "--gc")
+
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("fake bd was never called by --gc: %v\noutput:\n%s", err, out)
+	}
+	want := "BEADS_DIR=" + filepath.Join(cityPath, ".beads") + " purge --force\n"
+	if string(data) != want {
+		t.Fatalf("bd invocations = %q, want exactly %q\noutput:\n%s", data, want, out)
+	}
+	if !strings.Contains(out, "Purged 1 ephemeral bead(s) from app") {
+		t.Fatalf("output missing the purge report:\n%s", out)
+	}
+}
+
+// TestSyncGCDryRunPreviewsWithoutForce pins that --gc --dry-run never deletes.
+func TestSyncGCDryRunPreviewsWithoutForce(t *testing.T) {
+	cityPath, binDir, bdLog, port := writeSyncGCFixture(t)
+
+	out := runSyncGC(t, cityPath, binDir, port, "--gc", "--dry-run")
+
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("fake bd was never called by --gc --dry-run: %v\noutput:\n%s", err, out)
+	}
+	want := "BEADS_DIR=" + filepath.Join(cityPath, ".beads") + " purge --dry-run\n"
+	if string(data) != want {
+		t.Fatalf("bd invocations = %q, want exactly %q\noutput:\n%s", data, want, out)
+	}
+	if strings.Contains(string(data), "--force") {
+		t.Fatalf("--dry-run must not pass --force to bd purge: %q", data)
+	}
+}
