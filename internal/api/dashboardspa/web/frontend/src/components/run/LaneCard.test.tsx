@@ -79,6 +79,43 @@ describe('LaneCard navigation', () => {
     const link = screen.getByRole('link', { name: /adopt pr #42/i });
     expect(link.getAttribute('href')).toBe('/runs/gc-root');
   });
+
+  it('keeps a separator-led run id under the city basename (GHSA-wrjc-x8rr-h8h6)', () => {
+    // react-router renders a `to` that starts with two separators as a raw
+    // external href, skipping the basename; the encoded id must never form one.
+    const lane: RunLane = {
+      id: '/\\evil.example',
+      title: 'Adopt PR #42',
+      formula: { status: 'known', name: 'mol-adopt-pr-v2' },
+      scope: { status: 'unavailable', error: 'scope unavailable in test' },
+      external: { status: 'unavailable', error: 'external unavailable in test' },
+      phase: 'review',
+      phaseLabel: 'review',
+      statusCounts: { in_progress: 1 },
+      activeAssignees: [],
+      updatedAt: { status: 'available', at: '2026-05-24T12:00:00Z' },
+      stages: [],
+      progress: { status: 'unavailable', error: 'run progress unavailable in test' },
+      formulaStageResolved: false,
+      health: { status: 'unavailable', error: 'run health has not been derived' },
+    };
+
+    render(
+      <MemoryRouter
+        basename="/city/test-city"
+        initialEntries={['/city/test-city/runs']}
+        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+      >
+        <LaneCard lane={lane} now={Date.parse('2026-05-24T12:01:00Z')} />
+      </MemoryRouter>,
+    );
+
+    const href = screen.getByRole('link', { name: /adopt pr #42/i }).getAttribute('href');
+    expect(href).toBe('/city/test-city/runs/%2F%5Cevil.example');
+    expect(new URL(href ?? '', 'http://127.0.0.1:8372/city/test-city/runs').origin).toBe(
+      'http://127.0.0.1:8372',
+    );
+  });
 });
 
 // gascity-dashboard-f4ps: historical lanes ship from the backend with
