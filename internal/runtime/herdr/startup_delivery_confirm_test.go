@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,131 @@ func TestStartupDeliveryPromptsWithConfirmation(t *testing.T) {
 	}
 	if v, _ := p.GetMeta("gastown__witness", metaStartupUnconfirmed); v != "" {
 		t.Fatalf("confirmed delivery recorded an unconfirmed marker: %q", v)
+	}
+}
+
+// A managed agent can render a trust dialog, then the bypass warning, before
+// it is ready to receive its first turn. Herdr must clear that chain before
+// the existing idle wait and confirmed delivery; otherwise either dialog
+// absorbs the startup nudge. This deliberately calls start directly: the fake
+// provider needs no real shared-server socket for provider-local ordering.
+func TestStartAcceptsDialogChainBeforeStartupDelivery(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "dialog_chain")
+
+	cfg := runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Nudge:        "Run gc hook --claim --json now.",
+	}
+	if err := p.start(context.Background(), "gastown__witness", cfg); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	trust := strings.Index(calls, "pane send-keys %5 Enter")
+	trustDown := strings.Index(calls, "pane send-keys %5 Down")
+	bypassDown := strings.LastIndex(calls, "pane send-keys %5 Down")
+	bypassEnter := strings.LastIndex(calls, "pane send-keys %5 Enter")
+	idle := strings.Index(calls, "agent wait ")
+	prompt := strings.Index(calls, "agent prompt ")
+	if trustDown < 0 || trust < trustDown || bypassDown < trust || bypassEnter < bypassDown || idle < bypassEnter || prompt < idle {
+		t.Fatalf("dialog chain was not cleared before readiness and first-turn delivery:\n%s", calls)
+	}
+	if !strings.Contains(calls, "pane read %5 --source visible --lines 120") {
+		t.Fatalf("startup dialog acceptance did not read the visible pane:\n%s", calls)
+	}
+}
+
+func TestStartStartupDialogGateAndEmptyNudge(t *testing.T) {
+	falseValue := false
+	trueValue := true
+	for _, tt := range []struct {
+		name       string
+		cfg        runtime.Config
+		wantDialog bool
+	}{
+		{
+			name: "explicit opt out",
+			cfg: runtime.Config{
+				Command: "claude", ProcessNames: []string{"claude"}, AcceptStartupDialogs: &falseValue,
+			},
+		},
+		{
+			name: "no managed hints",
+			cfg:  runtime.Config{Command: "claude"},
+		},
+		{
+			name: "empty nudge still clears dialogs",
+			cfg: runtime.Config{
+				Command: "claude", AcceptStartupDialogs: &trueValue,
+			},
+			wantDialog: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			setState(t, state, "dialog_chain")
+			if err := p.start(context.Background(), "gastown__witness", tt.cfg); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			gotDialog := strings.Contains(calls, "pane read %5 --source visible --lines 120")
+			if gotDialog != tt.wantDialog {
+				t.Fatalf("dialog acceptance = %v, want %v:\n%s", gotDialog, tt.wantDialog, calls)
+			}
+			keys := strings.Count(calls, "pane send-keys ")
+			if (tt.wantDialog && keys != 4) || (!tt.wantDialog && keys != 0) {
+				t.Fatalf("unexpected dialog keystrokes:\n%s", calls)
+			}
+			if strings.Contains(calls, "agent wait ") || strings.Contains(calls, "agent prompt ") {
+				t.Fatalf("empty nudge should not enter the provisioning tail:\n%s", calls)
+			}
+		})
+	}
+}
+
+func TestStartStartupDialogContextErrorsAreReturnedUnchanged(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ctx  func(t *testing.T) context.Context
+		want error
+	}{
+		{
+			name: "deadline exceeded",
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			want: context.DeadlineExceeded,
+		},
+		{
+			name: "caller canceled",
+			ctx: func(t *testing.T) context.Context {
+				deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				ctx, cancel := context.WithCancel(context.Background())
+				stop := context.AfterFunc(deadlineCtx, cancel)
+				t.Cleanup(func() { stop(); cancel(); deadlineCancel() })
+				return ctx
+			},
+			want: context.Canceled,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			setState(t, state, "dialog_blank")
+			err := p.start(tt.ctx(t), "gastown__witness", runtime.Config{
+				Command: "claude", ProcessNames: []string{"claude"},
+			})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("start error = %v, want exact %v", err, tt.want)
+			}
+			calls := fakeCalls(t, state)
+			if !strings.Contains(calls, "pane read %5 --source visible --lines 120") ||
+				strings.Contains(calls, "agent wait ") || strings.Contains(calls, "agent prompt ") {
+				t.Fatalf("context cancellation did not stop after dialog acceptance:\n%s", calls)
+			}
+		})
 	}
 }
 

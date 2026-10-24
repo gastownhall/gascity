@@ -126,6 +126,51 @@ pane_run)
   : > "$STATE/busy"
   printf '%s' "$4" | sed -e 's|^exec /bin/sh -c ||' -e "s/^'//" -e "s/'\$//" > "$STATE/rawcmd"
   exit 0 ;;
+pane_read)
+  if [ -e "$STATE/dialog_blank" ]; then
+    printf '%s' 'starting up...'
+  elif [ -e "$STATE/dialog_chain" ]; then
+    if [ -e "$STATE/dialog_bypass" ]; then
+      printf '%s' 'Bypass Permissions mode'
+    elif [ -e "$STATE/dialog_ready" ]; then
+      printf '%s' '❯ '
+    elif [ -e "$STATE/dialog_trust_selected" ]; then
+      printf '%s' 'Quick safety check: Is this a project you created or one you trust?
+
+  No, exit
+❯ Yes, I trust this folder
+
+Enter to confirm · Esc to cancel'
+    else
+      # A real Claude trust modal can initially select No, exit. The shared
+      # dialog helper must move to the selected trust row, re-read it, then
+      # send Enter; a blind Enter here would exit the session.
+      printf '%s' 'Quick safety check: Is this a project you created or one you trust?
+
+❯ No, exit
+  Yes, I trust this folder
+
+Enter to confirm · Esc to cancel'
+    fi
+  else
+    printf '%s' '❯ '
+  fi ;;
+pane_send-keys)
+  # The chain changes only after its confirmation Enter. A bypass warning
+  # sends Down before Enter, which must not advance it early.
+  for key in "$@"; do
+    if [ "$key" = Down ] && [ -e "$STATE/dialog_chain" ] && [ ! -e "$STATE/dialog_bypass" ] && [ ! -e "$STATE/dialog_ready" ]; then
+      : > "$STATE/dialog_trust_selected"
+    elif [ "$key" = Enter ] && [ -e "$STATE/dialog_chain" ]; then
+      if [ -e "$STATE/dialog_bypass" ]; then
+        rm -f "$STATE/dialog_bypass"
+        : > "$STATE/dialog_ready"
+      elif [ -e "$STATE/dialog_trust_selected" ]; then
+        : > "$STATE/dialog_bypass"
+      fi
+    fi
+  done
+  exit 0 ;;
 pane_process-info)
   if [ -e "$STATE/pane_gone" ]; then
     printf '%s' '{"error":{"code":"pane_not_found","message":"pane not found"}}'
