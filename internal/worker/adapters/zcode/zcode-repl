@@ -322,7 +322,28 @@ if [[ -r "$sid_path" ]]; then
     if [[ -n "$sid" ]]; then sid_unvalidated=1; fi
 fi
 
-workdir="$(mktemp -d)"
+# This process's scratch: the turn's prompt, reply and stderr, and the decode
+# helper. The TERM and EXIT traps remove it, but a SIGKILL runs no trap, and gc
+# escalates to one when a TERM goes unanswered for its grace period. So the dir
+# is named for the process that owns it, and every adapter start removes the
+# dirs of owners that are no longer running: the process table, not a marker
+# file, says which are stale. A killed seat's prompt and reply then outlive it
+# only until the next adapter starts on this host, whichever seat that is. A
+# pid kill -0 cannot signal (gone, or another user's) is not a live adapter of
+# this state home; a reused pid only defers the sweep. The host is part of the
+# path so a state home shared across hosts never judges another host's pids.
+work_root="$state_home/gascity/zcode/work/$(printf '%s' "${HOSTNAME:-localhost}" | sanitize_component)"
+mkdir -p "$work_root"
+for stale in "$work_root"/*; do
+    owner="${stale##*/}"
+    [[ "$owner" =~ ^[0-9]+$ ]] || continue
+    if [[ "$owner" == "$$" ]] || ! kill -0 "$owner" 2>/dev/null; then rm -rf "$stale"; fi
+done
+workdir="$work_root/$$"
+if ! mkdir -m 700 "$workdir"; then
+    printf '%s: cannot create workdir %s\n' "$PROG" "$workdir" >&2
+    exit 73   # EX_CANTCREAT
+fi
 # Saved here, before the signal traps are armed; see the note at the traps.
 stty_saved=""
 if [[ -t 0 ]]; then stty_saved="$(stty -g 2>/dev/null || true)"; fi
