@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,43 @@ func TestConfigFingerprintIncludesMouseOn(t *testing.T) {
 	}
 	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(off), on); len(got) != 1 || got[0] != "MouseOn" {
 		t.Fatalf("CoreFingerprintDriftFields = %v, want [MouseOn]", got)
+	}
+}
+
+// An operator env change moves the core hash, so the breakdown must name it,
+// added, changed or removed, and the drift detail lists its keys but never
+// its values.
+func TestCoreFingerprintBreakdownNamesOperatorEnv(t *testing.T) {
+	stored := Config{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/old"}}
+	current := Config{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/new-secret"}}
+
+	if CoreFingerprint(stored) == CoreFingerprint(current) {
+		t.Fatal("OperatorEnv should affect core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(stored), current); len(got) != 1 || got[0] != "OperatorEnv" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [OperatorEnv]", got)
+	}
+	raw, err := json.Marshal(CoreFingerprintBreakdown(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	LogCoreFingerprintDrift(&out, "worker", string(raw), current)
+	if !strings.Contains(out.String(), "OperatorEnv keys: [CLAUDE_CONFIG_DIR]") {
+		t.Fatalf("drift detail = %q, want the operator env keys", out.String())
+	}
+	if strings.Contains(out.String(), "/new-secret") || strings.Contains(out.String(), "/old") {
+		t.Fatalf("drift detail = %q, must not print operator env values", out.String())
+	}
+	unset := Config{Command: "claude"}
+	if _, ok := CoreFingerprintBreakdown(unset).Fields["OperatorEnv"]; ok {
+		t.Fatal("an empty OperatorEnv must leave the breakdown without the field, as it leaves the core hash unchanged")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(stored), unset); len(got) != 1 || got[0] != "OperatorEnv" {
+		t.Fatalf("CoreFingerprintDriftFields after removing the operator env = %v, want [OperatorEnv]", got)
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(unset), stored); len(got) != 1 || got[0] != "OperatorEnv" {
+		t.Fatalf("CoreFingerprintDriftFields after adding an operator env = %v, want [OperatorEnv]", got)
 	}
 }
 
@@ -504,6 +542,7 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 		{Command: "claude", PreStart: []string{"echo hi"}},
 		{Command: "claude", SessionSetup: []string{"set -x"}},
 		{Command: "claude", OverlayDir: "/overlay"},
+		{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/x"}},
 	}
 	for i, a := range cfgs {
 		for j, b := range cfgs {
@@ -518,15 +557,9 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 			if coreA == coreB {
 				continue // same core hash, nothing to check
 			}
-			// Core hashes differ — at least one breakdown field must differ.
-			anyDiff := false
-			for field, va := range bdA.Fields {
-				if va != bdB.Fields[field] {
-					anyDiff = true
-					break
-				}
-			}
-			if !anyDiff {
+			// Core hashes differ — at least one breakdown field must differ,
+			// a field only one side carries included.
+			if len(diffBreakdownFields(bdA.Fields, bdB.Fields)) == 0 {
 				t.Errorf("configs %d vs %d: CoreFingerprint differs but no CoreFingerprintBreakdown field differs", i, j)
 			}
 		}
