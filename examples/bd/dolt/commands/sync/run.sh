@@ -22,8 +22,12 @@
 # Remote resolution (per database):
 #   1. GC_DOLT_REMOTE_<DB_UPPER> env var override, naming a configured remote
 #      by name (same key derivation as GC_DOLT_REFSPEC_<DB_UPPER> above). This
-#      pins the remote regardless of scheme — an explicit override is by
-#      definition intentional, so it is honored even for a non-local remote.
+#      pins the remote. A file:// remote needs nothing more. A non-local
+#      remote additionally requires GC_DOLT_SYNC_ALLOW_REMOTE_<DB_UPPER>=1 (the
+#      push-side twin of pull's GC_DOLT_PULL_ALLOW_REMOTE_<DB_UPPER>): pushing
+#      private data to a network remote is the more dangerous direction, so
+#      naming the remote is not by itself enough. Without the flag the
+#      database fails with an error that names it.
 #   2. No override: the first file:// remote in name-sorted order wins,
 #      deterministically and independent of whatever order the database
 #      itself returns candidates in (gc-fqi7kq: an unordered SELECT made
@@ -42,8 +46,10 @@
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
 #   GC_DOLT_REMOTE_<DB>                   (optional) — select which remote to
-#                     push to when a database has several, or to permit
-#                     pushing to a non-file:// remote (see Remote resolution).
+#                     push to when a database has several, or to name a
+#                     non-file:// remote (see Remote resolution).
+#   GC_DOLT_SYNC_ALLOW_REMOTE_<DB>        (optional) — must be exactly 1 for
+#                     GC_DOLT_REMOTE_<DB> to push to a non-file:// remote.
 #   GC_DOLT_SYNC_PUSH_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for SQL-mode remote push. Increase for
 #                     slow links or large first pushes (a multi-GB first push to
@@ -85,7 +91,8 @@ while [ $# -gt 0 ]; do
       echo ""
       echo "Environment:"
       echo "  GC_DOLT_REMOTE_<DB>              Select which remote to push to when a database has several"
-      echo "                                   (also the only way to push to a non-file:// remote)"
+      echo "                                   (a non-file:// remote also needs GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1)"
+      echo "  GC_DOLT_SYNC_ALLOW_REMOTE_<DB>   Set to 1 to let GC_DOLT_REMOTE_<DB> push to a non-file:// remote"
       echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
       echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
       exit 0
@@ -242,6 +249,16 @@ remote_env_value() {
   eval "printf '%s' \"\${GC_DOLT_REMOTE_$key:-}\""
 }
 
+# remote_allow_env_value <db> — emit the GC_DOLT_SYNC_ALLOW_REMOTE_<DB_UPPER>
+# opt-in, if any. select_remote requires it to be exactly "1" before an
+# override may push to a non-local remote; it is the push-side twin of pull's
+# GC_DOLT_PULL_ALLOW_REMOTE_<DB>.
+remote_allow_env_value() {
+  key=$(db_env_key "$1") || return 1
+  [ -z "$key" ] && return 0
+  eval "printf '%s' \"\${GC_DOLT_SYNC_ALLOW_REMOTE_$key:-}\""
+}
+
 warn_refspec_fallback() {
   printf '  %s: WARN: active branch unresolved; falling back to main\n' "$1" >&2
 }
@@ -307,7 +324,8 @@ classify_count() {
 # the winner is identical on every host, not merely stable per-locale) before
 # any policy rule is applied. Returns 1 (with its own stderr message) only when
 # GC_DOLT_REMOTE_<DB> is set but names a remote that is not among the
-# candidates.
+# candidates, or names a non-local remote without
+# GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1.
 select_remote() {
   sr_db="$1"
   sr_pairs="$2"
@@ -322,6 +340,17 @@ select_remote() {
       echo "  $sr_db: ERROR: GC_DOLT_REMOTE override '$sr_override' does not match any configured remote" >&2
       return 1
     fi
+    sr_url=${sr_match#*|}
+    case "$sr_url" in
+      file://*) ;;
+      *)
+        sr_allowed=$(remote_allow_env_value "$sr_db") || return 1
+        if [ "$sr_allowed" != "1" ]; then
+          echo "  $sr_db: ERROR: GC_DOLT_REMOTE names non-local remote '$sr_override' ($sr_url) — set GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 to allow pushing to it" >&2
+          return 1
+        fi
+        ;;
+    esac
     printf '%s\n' "$sr_match"
     return 0
   fi
@@ -444,7 +473,7 @@ resolve_refspec_cli() {
 # last_skip_reason for the order outcome declaration.
 report_remote_skip() {
   if [ "$2" = "AMBIGUOUS" ]; then
-    last_skip_reason="no local remote; set GC_DOLT_REMOTE_$(db_env_key "$1" 2>/dev/null) to push to a non-local remote"
+    last_skip_reason="no local remote; set GC_DOLT_REMOTE_$(db_env_key "$1" 2>/dev/null) and GC_DOLT_SYNC_ALLOW_REMOTE_$(db_env_key "$1" 2>/dev/null)=1 to push to a non-local remote"
   else
     last_skip_reason="no remote"
   fi
