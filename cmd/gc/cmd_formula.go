@@ -904,6 +904,19 @@ store, copy them into the binding with
 						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
+					// --meta applies to the cooked root whether or not --attach is
+					// set (GH#7309): this arm returns before the shared
+					// parseMetadataArgs/SetMetadataBatch block the standalone path
+					// below reaches, which otherwise silently drops it here. store
+					// is correct, not attachStore: past both refusals above this arm
+					// only runs when attachStore == store.
+					if attachRootMeta, err := parseMetadataArgs(metadata); err != nil {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+					} else if len(attachRootMeta) > 0 {
+						if err := store.SetMetadataBatch(result.RootID, attachRootMeta); err != nil {
+							return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("setting root metadata on %s: %w", result.RootID, err))
+						}
+					}
 					if jsonOutput {
 						if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
 							SchemaVersion:  "1",
@@ -969,6 +982,20 @@ store, copy them into the binding with
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
+
+				// --meta applies to the cooked root whether or not --attach is set
+				// (GH#7309): this arm returns before the shared
+				// parseMetadataArgs/SetMetadataBatch block the standalone path below
+				// reaches, which otherwise silently drops it here. attachStore is
+				// correct, not store: molecule.Attach above wrote the root through
+				// attachStore, the store that holds the attach bead.
+				if attachRootMeta, err := parseMetadataArgs(metadata); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				} else if len(attachRootMeta) > 0 {
+					if err := attachStore.SetMetadataBatch(result.RootID, attachRootMeta); err != nil {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("setting root metadata on %s: %w", result.RootID, err))
+					}
+				}
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
