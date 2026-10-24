@@ -475,6 +475,7 @@ func cmdGCIntegrationManifestDrift(manifest, declared []string) []string {
 type integrationShardFixture struct {
 	binDir      string
 	homeDir     string
+	tmpDir      string
 	capturePath string
 }
 
@@ -535,6 +536,7 @@ esac
 	return integrationShardFixture{
 		binDir:      binDir,
 		homeDir:     filepath.Join(tmp, "home"),
+		tmpDir:      tmp,
 		capturePath: capturePath,
 	}
 }
@@ -558,6 +560,7 @@ func (f integrationShardFixture) runShardWithEnv(t *testing.T, shard string, ext
 	cmd.Env = append([]string{
 		"PATH=" + f.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + f.homeDir,
+		"TMPDIR=" + f.tmpDir,
 		"GC_TEST_NO_SLICE=1",
 		"SYS_USR_CGO_FALLBACK=0",
 		"GO_TEST_TIMEOUT=17s",
