@@ -35,7 +35,7 @@ type UsageFact struct {
 	CostUSDEstimate float64 // pricing.Registry.Estimate (pricing.go:214). list-price; decision-support.
 	Unpriced        bool    // true when (provider,model) had no price: tokens still emitted, cost FLAGGED not dropped.
 
-	Provider       string // "anthropic"|"codex"|… (extractor shape differs per family)
+	Provider       string // "anthropic"|"codex"|"grok"|… (extractor shape differs per family)
 	UpstreamReqID  string // provider response id: Anthropic message.id / OpenAI response.id (model);
 	                       // sessionID+awakeEpoch (compute); CONTENT-HASH for codex (NOT positional codex-event-<idx>).
 	At             int64  // unix millis, stamped by emitter
@@ -243,7 +243,7 @@ yet settled.
   payload's `RunID` is wired today, resolved through the shared
   `beadmeta.ResolveRunID` that the compute-fact emitter also uses so a run's model
   and compute facts group together.
-- **Model-fact coverage is per transcript family: claude, codex, opencode.**
+- **Model-fact coverage is per transcript family: claude, codex, opencode, grok.**
   Families outside `invocationUsageSpecs` are skipped before any transcript
   discovery. OpenCode mirrors a session as one JSON export named for its
   `session_key` (`<root>/<session_key>.json`), so it is resolved by that key,
@@ -253,6 +253,18 @@ yet settled.
   and preferred over the price table, since the price table cannot know the
   upstream (for example OpenRouter) a session routed through. A call with no
   reported cost falls back to the registry and is flagged `Unpriced` on a miss.
+  Grok is keyless (the builtin profile passes no session id, so every wake
+  starts a new one): the session directory
+  `~/.grok/sessions/<url.PathEscape(cwd)>/<uuidv7>/` is resolved by work dir and
+  the wake window, like keyless codex, and two wakes in one work dir inside the
+  window are refused as ambiguous. The directory holds no per-call usage, so
+  tokens come from the CLI's one shared `~/.grok/logs/unified.jsonl`
+  (`shell.turn.inference_done` lines filtered to the session id), with the model
+  from that session's latest `model changed` line. That log is an internal CLI
+  file that does not keep full history, so inferences it has dropped are not
+  recovered. Grok records no per-call cost there, so pricing comes from the
+  registry: no default grok rates ship, and facts stay `Unpriced` until a
+  `[[pricing]]` entry names the family and model.
 - **`gc costs` reads the local sink, not the event log** (see the `gc costs`
   section): it reflects facts only under the default `local` provider. The read
   is resilient to a partially corrupt log: a malformed line (a torn mid-append,

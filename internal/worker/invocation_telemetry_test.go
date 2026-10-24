@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/md5" //nolint:gosec // Kimi keys its session store by workdir MD5.
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -971,5 +974,189 @@ func TestMessageWithoutTranscriptEmitsNothing(t *testing.T) {
 	}
 	if got := bead.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; got != "" {
 		t.Fatalf("cursor metadata = %q, want empty", got)
+	}
+}
+
+// grokWorkerUUIDv7At builds a canonical-layout UUIDv7 whose timestamp prefix
+// encodes t — the shape of a grok session directory name.
+func grokWorkerUUIDv7At(t time.Time, tail string) string {
+	hex := fmt.Sprintf("%012x", t.UnixMilli())
+	return fmt.Sprintf("%s-%s-7a61-9780-%s", hex[:8], hex[8:12], tail)
+}
+
+// grokWorkerSessionDir lays out searchBase/sessions/<PathEscape(workDir)>/<sid>/
+// with a summary.json naming workDir, mirroring grok CLI 1.0.52.
+func grokWorkerSessionDir(t *testing.T, searchBase, workDir, sid string) {
+	t.Helper()
+	dir := filepath.Join(searchBase, "sessions", url.PathEscape(filepath.Clean(workDir)), sid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", dir, err)
+	}
+	summary, err := json.Marshal(map[string]any{"info": map[string]any{"cwd": workDir, "model": "grok-4.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), summary, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// grokWorkerUnifiedLogPath returns searchBase/logs/unified.jsonl (the one
+// shared grok log), creating its directory.
+func grokWorkerUnifiedLogPath(t *testing.T, searchBase string) string {
+	t.Helper()
+	dir := filepath.Join(searchBase, "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", dir, err)
+	}
+	return filepath.Join(dir, "unified.jsonl")
+}
+
+func grokWorkerModelChanged(ts, sid, model string) map[string]any {
+	return map[string]any{
+		"ts": ts, "src": "shell", "pid": 1971723, "ver": "1.0.52", "lvl": "info", "sid": sid,
+		"msg": "model changed", "ctx": map[string]any{"model": model},
+	}
+}
+
+func grokWorkerInferenceDone(ts, sid string, prompt, cached, completion, reasoning int) map[string]any {
+	return map[string]any{
+		"ts": ts, "src": "shell", "pid": 1971723, "ver": "1.0.52", "lvl": "info", "sid": sid,
+		"msg": "shell.turn.inference_done",
+		"ctx": map[string]any{
+			"loop_index": 1, "model_elapsed_ms": 8584, "elapsed_since_turn_start_ms": 8614,
+			"ttft_ms": 5889, "itl_p50_ms": 19, "attempts": 1,
+			"prompt_tokens": prompt, "cached_prompt_tokens": cached,
+			"completion_tokens": completion, "reasoning_tokens": reasoning, "tokens_per_sec": 208.2,
+		},
+	}
+}
+
+// TestMessageRecordsGrokInvocationTokens covers the grok branch of the
+// prompt-op seam: the session directory is discovered by cwd + wake window
+// under searchBase/sessions, usage is read from the shared unified log
+// filtered to that sid, and the metrics carry the model named by the sid's
+// "model changed" line with provider "grok".
+func TestMessageRecordsGrokInvocationTokens(t *testing.T) {
+	reader := setupInvocationMetricsReader(t)
+	handle, _, searchBase, workDir := newFamilyTelemetryHandle(t, Profile("grok/tmux-cli"), "grok", "grok", nil)
+
+	sid := grokWorkerUUIDv7At(time.Now(), "c86d67f4a81b")
+	otherSID := grokWorkerUUIDv7At(time.Now().Add(-time.Hour), "c86d67f4a000")
+	grokWorkerSessionDir(t, searchBase, workDir, sid)
+	writeWorkerTestJSONL(t, grokWorkerUnifiedLogPath(t, searchBase), []map[string]any{
+		grokWorkerModelChanged("2026-10-15T05:56:10.000Z", otherSID, "grok-3"),
+		grokWorkerModelChanged("2026-10-15T05:56:12.000Z", sid, "grok-4.7"),
+		grokWorkerInferenceDone("2026-10-15T05:56:20.000Z", otherSID, 9999, 0, 999, 0),
+		grokWorkerInferenceDone("2026-10-15T05:56:24.218Z", sid, 32807, 1664, 561, 361),
+	})
+
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+
+	out := collectInvocationMetrics(t, reader)
+	wantTokens := map[string]int64{
+		"gc.agent.tokens.input":      32807 - 1664,
+		"gc.agent.tokens.output":     561,
+		"gc.agent.tokens.cache_read": 1664,
+	}
+	for name, want := range wantTokens {
+		got, attrSets := invocationInt64Total(out, name)
+		if got != want {
+			t.Errorf("%s = %d, want %d", name, got, want)
+		}
+		if len(attrSets) != 1 {
+			t.Errorf("%s: %d datapoint attribute sets, want 1", name, len(attrSets))
+			continue
+		}
+		attrs := attrSets[0]
+		if got := attrs["agent_name"]; got != "myrig/polecat-1" {
+			t.Errorf("%s: agent_name = %q, want myrig/polecat-1", name, got)
+		}
+		if got := attrs["model"]; got != "grok-4.7" {
+			t.Errorf("%s: model = %q, want grok-4.7 (from this sid's model changed line)", name, got)
+		}
+		if got := attrs["provider"]; got != "grok" {
+			t.Errorf("%s: provider = %q, want grok", name, got)
+		}
+	}
+	if got, _ := invocationInt64Total(out, "gc.agent.tokens.cache_creation"); got != 0 {
+		t.Errorf("gc.agent.tokens.cache_creation = %d, want 0 (grok reports no cache writes)", got)
+	}
+}
+
+func TestGrokCostFlowsWithConfiguredPricing(t *testing.T) {
+	reader := setupInvocationMetricsReader(t)
+	reg := pricing.BuildRegistry([]pricing.ModelPricing{{
+		Provider: "grok",
+		Model:    "grok-4.7",
+		Tier: pricing.Tier{
+			PromptUSDPer1M:     3.00,
+			CompletionUSDPer1M: 15.00,
+			CacheReadUSDPer1M:  0.75,
+		},
+	}}, nil)
+	handle, _, searchBase, workDir := newFamilyTelemetryHandle(t, Profile("grok/tmux-cli"), "grok", "grok", reg)
+
+	sid := grokWorkerUUIDv7At(time.Now(), "c86d67f4a81b")
+	grokWorkerSessionDir(t, searchBase, workDir, sid)
+	writeWorkerTestJSONL(t, grokWorkerUnifiedLogPath(t, searchBase), []map[string]any{
+		grokWorkerModelChanged("2026-10-15T05:56:12.000Z", sid, "grok-4.7"),
+		grokWorkerInferenceDone("2026-10-15T05:56:24.218Z", sid, 32807, 1664, 561, 361),
+	})
+
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+
+	wantCost, ok := reg.Estimate("grok", "grok-4.7", pricing.Usage{
+		PromptTokens:     32807 - 1664,
+		CompletionTokens: 561,
+		CacheReadTokens:  1664,
+	})
+	if !ok {
+		t.Fatal("configured registry has no grok:grok-4.7 entry; fix the test fixture")
+	}
+	out := collectInvocationMetrics(t, reader)
+	gotCost, costDPs := invocationCostTotal(out)
+	if costDPs != 1 {
+		t.Fatalf("gc.agent.invocation.cost_usd: %d datapoints, want 1", costDPs)
+	}
+	if gotCost != wantCost {
+		t.Errorf("gc.agent.invocation.cost_usd = %v, want %v", gotCost, wantCost)
+	}
+}
+
+func TestInvocationUsageFamilyResolvesGrokAliases(t *testing.T) {
+	for provider, want := range map[string]string{
+		"grok":          "grok",
+		"grok/tmux-cli": "grok",
+		"GROK":          "grok",
+		"my-grok":       "grok",
+		"claude":        "claude",
+		"claude-eco":    "claude",
+		"codex":         "codex",
+		"opencode":      "opencode",
+		"gemini":        "",
+		"":              "",
+	} {
+		if got := invocationUsageFamily(provider); got != want {
+			t.Errorf("invocationUsageFamily(%q) = %q, want %q", provider, got, want)
+		}
+	}
+	// A wrapped provider whose raw name carries no grok substring still
+	// resolves through the builtin_ancestor ladder.
+	if got := invocationUsageFamilyFromInfo(sessionpkg.Info{Provider: "mc-wrap", BuiltinAncestor: "grok"}); got != "grok" {
+		t.Fatalf("invocationUsageFamilyFromInfo(wrapped grok) = %q, want grok", got)
+	}
+	// An alias without a family marker in its name (a city-defined "grok-a"
+	// over the builtin grok) resolves through builtin_ancestor too.
+	if got := invocationUsageFamilyFromInfo(sessionpkg.Info{Provider: "grok-a", BuiltinAncestor: "grok"}); got != "grok" {
+		t.Fatalf("invocationUsageFamilyFromInfo(grok-a over grok) = %q, want grok", got)
+	}
+	family, supported := InvocationUsageFamily("grok")
+	if family != "grok" || !supported {
+		t.Fatalf("InvocationUsageFamily(grok) = (%q, %v), want (grok, true)", family, supported)
 	}
 }
