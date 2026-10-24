@@ -2,6 +2,7 @@ package graphv2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -1034,6 +1035,23 @@ func (s depAddFailingStore) DepAdd(fromID, _, _ string) error {
 	return fmt.Errorf("resolving issue ID %s: no issue found matching %q", fromID, fromID)
 }
 
+// closeFailingStore fails every Close with err, simulating a store write that
+// is refused after the pour has already failed.
+type closeFailingStore struct {
+	beads.Store
+	err error
+}
+
+func (s closeFailingStore) Close(string) error { return s.err }
+
+// getFailingStore fails every Get with err.
+type getFailingStore struct {
+	beads.Store
+	err error
+}
+
+func (s getFailingStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
+
 func TestCreateSingleItemInputConvoyClosesConvoyOnTrackFailure(t *testing.T) {
 	mem := beads.NewMemStore()
 	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
@@ -1111,6 +1129,70 @@ title = "Inspect {{issue}}"
 	}
 	if len(open) != 0 {
 		t.Fatalf("open synthetic convoys after failed pour = %d, want 0 (ids: %v)", len(open), open)
+	}
+}
+
+// A failed tracking edge and a refused close of the convoy minted for it are
+// both reported: the close failure means an open synthetic convoy was left
+// behind, and dropping that error would hide the leftover.
+func TestCreateSingleItemInputConvoyReportsConvoyCloseFailure(t *testing.T) {
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("store refused the close")
+	store := closeFailingStore{Store: depAddFailingStore{Store: mem}, err: refused}
+
+	_, err = CreateSingleItemInputConvoy(store, target)
+	if err == nil {
+		t.Fatal("CreateSingleItemInputConvoy succeeded, want tracking failure")
+	}
+	if !strings.Contains(err.Error(), "tracking "+target.ID) {
+		t.Fatalf("err = %q, want the tracking failure", err)
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("err = %q, want the refused convoy close reported beside it", err)
+	}
+}
+
+// The legacy-alias failure path reports a refused close of the synthetic
+// convoy it minted beside the alias error.
+func TestPrepareInvocationReportsSyntheticConvoyCloseFailure(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "legacy.formula.toml", `
+formula = "legacy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+[vars.issue]
+description = "legacy work bead"
+required = true
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{issue}}"
+`)
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	refused := errors.New("store refused the close")
+	store := closeFailingStore{Store: depListFailingStore{Store: mem}, err: refused}
+
+	_, err = PrepareInvocation(context.Background(), store, "legacy", []string{dir}, target.ID, nil)
+	if err == nil {
+		t.Fatal("PrepareInvocation succeeded, want legacy alias resolution failure")
+	}
+	if !strings.Contains(err.Error(), "resolving deprecated issue alias") {
+		t.Fatalf("error = %q, want deprecated issue alias failure", err)
+	}
+	if !errors.Is(err, refused) || !strings.Contains(err.Error(), "closing synthetic input convoy") {
+		t.Fatalf("error = %q, want the refused synthetic convoy close reported beside it", err)
 	}
 }
 

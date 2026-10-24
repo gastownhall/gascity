@@ -171,15 +171,18 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 			// exact leak this guards against — when a cross-store membership
 			// read makes ResolveLegacyIssueAlias fail. A caller-provided convoy
 			// target (convoyID == targetID) is never touched.
-			CloseSyntheticInputConvoy(store, convoyID, targetID)
-			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
+			aliasErr := fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
+			if closeErr := CloseSyntheticInputConvoy(store, convoyID, targetID); closeErr != nil {
+				return Invocation{}, errors.Join(aliasErr, closeErr)
+			}
+			return Invocation{}, aliasErr
 		}
 		inv.Vars[LegacyIssueVar] = memberID
 	}
 	return inv, nil
 }
 
-// CloseSyntheticInputConvoy best-effort-closes the synthetic input convoy that
+// CloseSyntheticInputConvoy closes the synthetic input convoy that
 // PrepareInvocation minted for targetID when a later failure discards the
 // invocation, so an aborted pour does not strand an open claim-attracting bead
 // (the accumulating "input convoy for <bead>" debris this guards against). It is
@@ -188,20 +191,30 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 // `gc formula cook --attach` path. Only the pour's own artifact is closed: a
 // caller-provided convoy target (convoyID == targetID), an empty id, a bead that
 // is not a synthetic convoy, or an already-terminal convoy is left untouched.
-// The pour's original error is the failure to surface, so close errors are
-// ignored.
-func CloseSyntheticInputConvoy(store beads.Store, convoyID, targetID string) {
+// A convoy that no longer exists needs no close and returns nil. A failed read
+// or close returns an error naming the convoy, so the caller can report the
+// leftover open convoy beside the pour's own error instead of losing it.
+func CloseSyntheticInputConvoy(store beads.Store, convoyID, targetID string) error {
 	if store == nil || convoyID == "" || convoyID == targetID {
-		return
+		return nil
 	}
 	b, err := store.Get(convoyID)
-	if err != nil || b.Type != "convoy" || b.Metadata[syntheticMetadataKey] != "true" {
-		return
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("reading synthetic input convoy %s for %s: %w", convoyID, targetID, err)
+	}
+	if b.Type != "convoy" || b.Metadata[syntheticMetadataKey] != "true" {
+		return nil
 	}
 	if convoycore.IsTerminalStatus(b.Status) {
-		return
+		return nil
 	}
-	_ = store.Close(convoyID) //nolint:errcheck // best-effort cleanup of this invocation's own artifact
+	if err := store.Close(convoyID); err != nil {
+		return fmt.Errorf("closing synthetic input convoy %s for %s: %w", convoyID, targetID, err)
+	}
+	return nil
 }
 
 // legacyIssueDeprecations formats deprecation warnings for legacy issue and
@@ -449,9 +462,13 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 		// The convoy was minted for this pour and tracks nothing; leaving it
 		// open would strand a synthetic claim-attracting bead every time a
 		// pour fails here (cross-store dep-adds are the observed trigger).
-		// Best-effort close: the tracking error is the failure to surface.
-		_ = store.Close(created.ID) //nolint:errcheck // best-effort cleanup of this pour's own artifact
-		return beads.Bead{}, fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
+		// The tracking error is the failure to surface; a failed close is
+		// reported beside it rather than dropped.
+		trackErr := fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
+		if closeErr := store.Close(created.ID); closeErr != nil {
+			return beads.Bead{}, errors.Join(trackErr, fmt.Errorf("closing input convoy %s for %s: %w", created.ID, target.ID, closeErr))
+		}
+		return beads.Bead{}, trackErr
 	}
 	return created, nil
 }
