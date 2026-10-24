@@ -208,6 +208,45 @@ func TestNativeDoltStoreGetPropagatesUpstreamError(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreConversionPreservesUpdatedAt(t *testing.T) {
+	createdAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		updatedAt time.Time
+	}{
+		{"updated", createdAt.Add(2*time.Hour + 123*time.Nanosecond)},
+		{"legacy zero", time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead, err := beadFromNativeIssue(&beadslib.Issue{
+				ID:        "gc-updated",
+				CreatedAt: createdAt,
+				UpdatedAt: tc.updatedAt,
+			})
+			if err != nil {
+				t.Fatalf("beadFromNativeIssue: %v", err)
+			}
+			if !bead.UpdatedAt.Equal(tc.updatedAt) {
+				t.Fatalf("UpdatedAt = %s, want %s", bead.UpdatedAt, tc.updatedAt)
+			}
+			data, err := json.Marshal(bead)
+			if err != nil {
+				t.Fatalf("marshal bead: %v", err)
+			}
+			var roundTrip Bead
+			if err := json.Unmarshal(data, &roundTrip); err != nil {
+				t.Fatalf("unmarshal bead: %v", err)
+			}
+			if !roundTrip.UpdatedAt.Equal(tc.updatedAt) {
+				t.Fatalf("JSON UpdatedAt = %s, want %s", roundTrip.UpdatedAt, tc.updatedAt)
+			}
+			if present := bytes.Contains(data, []byte(`"updated_at"`)); present == tc.updatedAt.IsZero() {
+				t.Fatalf("updated_at presence = %v, zero timestamp = %v: %s", present, tc.updatedAt.IsZero(), data)
+			}
+		})
+	}
+}
+
 func TestNativeDoltStoreConvertsDefaultPriorityAsUnset(t *testing.T) {
 	bead, err := beadFromNativeIssue(&beadslib.Issue{
 		ID:        "gc-unset-priority",
