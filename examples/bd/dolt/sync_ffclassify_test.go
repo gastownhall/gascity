@@ -343,9 +343,13 @@ func TestSyncMultiRemotePrefersLocalOverGitHttpsRemote(t *testing.T) {
 	}
 }
 
-// TestSyncRemoteEnvOverridePinsNonLocalRemote verifies that GC_DOLT_REMOTE_<DB>
-// pins remote selection even to a non-local (git+https) remote that the
-// default policy would otherwise skip past in favor of a file:// alternative.
+// TestSyncRemoteEnvOverridePinsNonLocalRemote verifies that
+// GC_DOLT_REMOTE_<DB> together with GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 pins
+// remote selection even to a non-local (git+https) remote that the default
+// policy would otherwise skip past in favor of a file:// alternative. The
+// allow flag is the second, explicit opt-in pull already requires
+// (GC_DOLT_PULL_ALLOW_REMOTE_<DB>): push is the more dangerous direction and
+// must not be gated more weakly than a read.
 func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
 	t.Parallel()
 	binDir := t.TempDir()
@@ -354,12 +358,83 @@ func TestSyncRemoteEnvOverridePinsNonLocalRemote(t *testing.T) {
 		"usb,file:///mnt/usb/beads",
 	})
 
-	out, err := runFFSyncEnv(t, binDir, []string{"GC_DOLT_REMOTE_APP=origin"}, "--db", "app", "--force", "--dry-run")
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_DOLT_REMOTE_APP=origin", "GC_DOLT_SYNC_ALLOW_REMOTE_APP=1"}, "--db", "app", "--force", "--dry-run")
 	if err != nil {
 		t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "-> origin:main (git+https://github.com/gastownhall/beads)") {
-		t.Fatalf("GC_DOLT_REMOTE_APP=origin should pin selection to origin even though usb (file://) is available.\nout:\n%s", out)
+		t.Fatalf("GC_DOLT_REMOTE_APP=origin with the allow flag should pin selection to origin even though usb (file://) is available.\nout:\n%s", out)
+	}
+}
+
+// TestSyncRemoteEnvOverrideNonLocalRequiresAllowFlag is the ga-3ble90 RED
+// test: GC_DOLT_REMOTE_<DB> alone must not be enough to push to a non-local
+// remote. Pull gates the same read behind GC_DOLT_PULL_ALLOW_REMOTE_<DB>=1;
+// sync gated the more dangerous direction behind one flag fewer. The refusal
+// must fail the database, name the missing flag, be attributed to the
+// refusal, and -- run for real, not --dry-run -- never reach DOLT_PUSH.
+func TestSyncRemoteEnvOverrideNonLocalRequiresAllowFlag(t *testing.T) {
+	t.Parallel()
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+		"usb,file:///mnt/usb/beads",
+	})
+
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_DOLT_REMOTE_APP=origin"}, "--db", "app", "--force")
+	if err == nil {
+		t.Fatalf("a non-local override without the allow flag must fail the database.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1") {
+		t.Fatalf("the refusal must name the flag that would permit it.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "remote selection refused") {
+		t.Fatalf("summary must attribute the failure to the refusal.\nout:\n%s", out)
+	}
+	logBytes, readErr := os.ReadFile(filepath.Join(binDir, "dolt.log"))
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logBytes), "DOLT_PUSH") {
+		t.Fatalf("a refused non-local override must never push.\ndolt log:\n%s", logBytes)
+	}
+}
+
+// TestSyncRemoteEnvOverrideAllowFlagMustBeOne mirrors pull's strictness: only
+// the literal value 1 opts in, so a stray "true"/"0"/"yes" cannot arm a push
+// to a network remote.
+func TestSyncRemoteEnvOverrideAllowFlagMustBeOne(t *testing.T) {
+	t.Parallel()
+	for _, val := range []string{"", "0", "true", "yes"} {
+		binDir := t.TempDir()
+		writeSyncFakeDoltMultiRemote(t, binDir, []string{
+			"origin,git+https://github.com/gastownhall/beads",
+			"usb,file:///mnt/usb/beads",
+		})
+		out, err := runFFSyncEnv(t, binDir, []string{"GC_DOLT_REMOTE_APP=origin", "GC_DOLT_SYNC_ALLOW_REMOTE_APP=" + val}, "--db", "app", "--force", "--dry-run")
+		if err == nil || strings.Contains(out, "would") {
+			t.Fatalf("allow flag %q must not opt in to a non-local push (err=%v).\nout:\n%s", val, err, out)
+		}
+	}
+}
+
+// TestSyncRemoteEnvOverrideLocalNeedsNoAllowFlag guards against over-reach:
+// the second flag exists for non-local remotes only. Naming a file:// remote
+// with GC_DOLT_REMOTE_<DB> must keep working on its own.
+func TestSyncRemoteEnvOverrideLocalNeedsNoAllowFlag(t *testing.T) {
+	t.Parallel()
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+		"usb,file:///mnt/usb/beads",
+	})
+
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_DOLT_REMOTE_APP=usb"}, "--db", "app", "--force", "--dry-run")
+	if err != nil {
+		t.Fatalf("a file:// override must not need the allow flag: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "-> usb:main (file:///mnt/usb/beads)") {
+		t.Fatalf("GC_DOLT_REMOTE_APP=usb should select usb without the allow flag.\nout:\n%s", out)
 	}
 }
 
@@ -496,12 +571,35 @@ func TestSyncCLIRemoteOverridePinsNonLocal(t *testing.T) {
 	_ = writeSyncFakeDolt(t, binDir)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
-	out, err := runSync(t, binDir, cityPath, []string{"GC_DOLT_REMOTE_APP=origin"}, "--db", "app", "--dry-run")
+	out, err := runSync(t, binDir, cityPath, []string{"GC_DOLT_REMOTE_APP=origin", "GC_DOLT_SYNC_ALLOW_REMOTE_APP=1"}, "--db", "app", "--dry-run")
 	if err != nil {
 		t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "-> origin:main (git+https://github.com/gastownhall/beads)") {
-		t.Fatalf("GC_DOLT_REMOTE_APP=origin should pin selection to origin even though usb (file://) is available.\nout:\n%s", out)
+		t.Fatalf("GC_DOLT_REMOTE_APP=origin with the allow flag should pin selection to origin even though usb (file://) is available.\nout:\n%s", out)
+	}
+}
+
+// TestSyncCLIRemoteOverrideNonLocalRequiresAllowFlag is the CLI-mode twin of
+// TestSyncRemoteEnvOverrideNonLocalRequiresAllowFlag: both paths share
+// select_remote, so a non-local override without
+// GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 is refused here too.
+func TestSyncCLIRemoteOverrideNonLocalRequiresAllowFlag(t *testing.T) {
+	t.Parallel()
+	cityPath := writeSyncCLIRemotes(t, `{"remotes":[{"name":"origin","url":"git+https://github.com/gastownhall/beads"},{"name":"usb","url":"file:///mnt/usb/beads"}]}`)
+	binDir := t.TempDir()
+	_ = writeSyncFakeDolt(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	out, err := runSync(t, binDir, cityPath, []string{"GC_DOLT_REMOTE_APP=origin"}, "--db", "app", "--dry-run")
+	if err == nil {
+		t.Fatalf("a non-local override without the allow flag must fail the database.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1") {
+		t.Fatalf("the refusal must name the flag that would permit it.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "would") {
+		t.Fatalf("a refused override must never fall back to selecting a remote.\nout:\n%s", out)
 	}
 }
 
