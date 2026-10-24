@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -767,5 +768,227 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 	case <-wakeCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("wakeCh not signaled after enqueue")
+	}
+}
+
+// TestDispatchAllQueuedNudgesACPInLegacyMode (mc-z0og9; staging J34 B, both
+// reconciler modes): in the default legacy dispatcher mode no poller is
+// started for an ACP session (only the controller owns its connection), so
+// the controller's pass delivers its queued nudges as a runtime prompt; a
+// tmux session's queue is left to its poller, untouched, even in a pass an
+// open ACP session runs.
+func TestDispatchAllQueuedNudgesACPInLegacyMode(t *testing.T) {
+	for _, c := range []struct {
+		transport string
+		delivered int
+	}{
+		{"acp", 1},
+		{"", 0}, // tmux: its poller delivers
+	} {
+		t.Run("transport="+c.transport, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			nudges := openNudgeBeadStore(dir)
+			store := nudges.Store
+			if err := enqueueQueuedNudgeWithStore(dir, nudges, newQueuedNudge("worker", "j34 nudge", time.Now().Add(-time.Minute))); err != nil {
+				t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+			}
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+				t.Fatalf("fake.Start: %v", err)
+			}
+			fake.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+			meta := map[string]string{"session_name": "worker-session", "agent_name": "worker", "template": "worker"}
+			if c.transport != "" {
+				meta["transport"] = c.transport
+			}
+			created, err := store.Create(beads.Bead{Title: "Session: worker", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: meta})
+			if err != nil {
+				t.Fatalf("store.Create session bead: %v", err)
+			}
+			// An open ACP session with nothing queued, so the pass runs in both cases.
+			helper, err := store.Create(beads.Bead{
+				Title: "Session: helper", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+				Metadata: map[string]string{"session_name": "helper-session", "agent_name": "helper", "template": "helper", "transport": "acp"},
+			})
+			if err != nil {
+				t.Fatalf("store.Create session bead: %v", err)
+			}
+			legacy := &config.City{Daemon: config.DaemonConfig{}} // the default dispatcher mode
+			delivered, err := dispatchAllQueuedNudges(dir, legacy, store, store, fake, newSessionBeadSnapshot([]beads.Bead{created, helper}), nil)
+			if err != nil {
+				t.Fatalf("dispatchAllQueuedNudges: %v", err)
+			}
+			var prompts []string
+			for _, call := range fake.Calls {
+				if call.Method == "Nudge" {
+					prompts = append(prompts, call.Message)
+				}
+			}
+			pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			switch {
+			case delivered != c.delivered || len(prompts) != c.delivered:
+				t.Fatalf("delivered %d, prompts %q; want %d", delivered, prompts, c.delivered)
+			case c.delivered == 1 && (!strings.Contains(prompts[0], "j34 nudge") || len(pending) != 0):
+				t.Fatalf("prompt %q, pending %d; want the queued text delivered and the queue drained", prompts[0], len(pending))
+			case c.delivered == 0 && len(pending) != 1:
+				t.Fatalf("pending %d; want the poller's item left queued", len(pending))
+			}
+		})
+	}
+}
+
+// blockingNudgeFake is a runtime whose Nudge waits for release, as an ACP
+// nudge waits out a busy agent.
+type blockingNudgeFake struct {
+	*runtime.Fake
+	release chan struct{}
+	nudges  *atomic.Int32
+}
+
+func (f blockingNudgeFake) Nudge(name string, content []runtime.ContentBlock) error {
+	f.nudges.Add(1)
+	<-f.release
+	return f.Fake.Nudge(name, content)
+}
+
+// Kills an ACP delivery that stalls the controller's pass (#7816 review): a
+// delivery to a busy agent is left running past acpDeliveryWait and the pass
+// returns in time; a second pass while it runs starts no second delivery,
+// even for a nudge queued since; once the agent frees, the delivery lands,
+// and the next pass delivers the newer nudge.
+func TestDispatchAllQueuedNudgesBoundsABusyACPDelivery(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	oldWait := acpDeliveryWait
+	acpDeliveryWait = 50 * time.Millisecond
+	t.Cleanup(func() { acpDeliveryWait = oldWait })
+	dir := t.TempDir()
+	nudges := openNudgeBeadStore(dir)
+	store := nudges.Store
+	if err := enqueueQueuedNudgeWithStore(dir, nudges, newQueuedNudge("worker", "busy nudge", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	var count atomic.Int32
+	sp := blockingNudgeFake{Fake: runtime.NewFake(), release: make(chan struct{}), nudges: &count}
+	if err := sp.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+	created, err := store.Create(beads.Bead{
+		Title: "Session: worker", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "template": "worker", "transport": "acp"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{created})
+	legacy := &config.City{Daemon: config.DaemonConfig{}}
+	for pass := range 2 {
+		if pass == 1 { // a nudge queued while the first delivery waits
+			if err := enqueueQueuedNudgeWithStore(dir, nudges, newQueuedNudge("worker", "second nudge", time.Now().Add(-time.Minute))); err != nil {
+				t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+			}
+		}
+		start := time.Now()
+		if delivered, err := dispatchAllQueuedNudges(dir, legacy, store, store, sp, snapshot, nil); err != nil || delivered != 0 {
+			t.Fatalf("pass %d: delivered %d (%v), want none while the agent is busy", pass, delivered, err)
+		}
+		if took := time.Since(start); took > 2*time.Second {
+			t.Fatalf("pass %d took %s: the busy delivery stalled it", pass, took)
+		}
+	}
+	if n := count.Load(); n != 1 {
+		t.Fatalf("Nudge calls = %d, want one delivery running across both passes", n)
+	}
+	close(sp.release)
+	awaitCond(t, func() bool {
+		if _, err := dispatchAllQueuedNudges(dir, legacy, store, store, sp, snapshot, nil); err != nil {
+			t.Fatalf("dispatch after the agent freed: %v", err)
+		}
+		pending, inFlight, _, err := listQueuedNudges(dir, "worker", time.Now())
+		return err == nil && len(pending) == 0 && len(inFlight) == 0
+	}, "both nudges delivered and acked after the agent freed")
+}
+
+// acpTestTarget is a queued nudge for worker and its open ACP session bead,
+// with sp running worker-session idle long enough to deliver.
+func acpTestTarget(t *testing.T, sp runtime.Provider, fake *runtime.Fake) (string, beads.Store, *sessionBeadSnapshot) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	nudges := openNudgeBeadStore(dir)
+	if err := enqueueQueuedNudgeWithStore(dir, nudges, newQueuedNudge("worker", "a nudge", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	if err := sp.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	fake.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+	created, err := nudges.Create(beads.Bead{
+		Title: "Session: worker", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "template": "worker", "transport": "acp"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, nudges.Store, newSessionBeadSnapshot([]beads.Bead{created})
+}
+
+// panickingNudgeFake panics in Nudge, as a provider bug would.
+type panickingNudgeFake struct{ *runtime.Fake }
+
+func (f panickingNudgeFake) Nudge(string, []runtime.ContentBlock) error { panic("acp nudge bug") }
+
+// Kills a panic in the off-pass ACP delivery ending the process (#7816
+// review): safeTick no longer surrounds it, so the goroutine recovers it into
+// the pass's error and frees the target for a later delivery. The test binary
+// dying is the failure.
+func TestDispatchAllQueuedNudgesRecoversAPanickingACPDelivery(t *testing.T) {
+	sp := panickingNudgeFake{Fake: runtime.NewFake()}
+	dir, store, snapshot := acpTestTarget(t, sp, sp.Fake)
+	delivered, err := dispatchAllQueuedNudges(dir, &config.City{}, store, store, sp, snapshot, nil)
+	if delivered != 0 || err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("dispatch = (%d, %v), want none delivered and the recovered panic as its error", delivered, err)
+	}
+	if _, running := acpDeliveries.Load(dir + "\x00worker-session"); running {
+		t.Fatal("the panicked delivery still holds its target")
+	}
+}
+
+// exitingNudgeFake is an ACP agent that exits while a nudge waits for it,
+// which the ACP provider answers with nil (its best-effort contract).
+type exitingNudgeFake struct{ *runtime.Fake }
+
+func (f exitingNudgeFake) Nudge(name string, _ []runtime.ContentBlock) error {
+	return f.Stop(name)
+}
+
+// Kills a queued ACP nudge acked as delivered when its agent exits in the
+// wait (gc stop, gc session kill; #7816 review): the items reached no
+// incarnation, so they go back to pending, unclaimed, for the next one.
+func TestDispatchAllQueuedNudgesKeepsANudgeWhoseACPAgentExitedInTheWait(t *testing.T) {
+	sp := exitingNudgeFake{Fake: runtime.NewFake()}
+	dir, store, snapshot := acpTestTarget(t, sp, sp.Fake)
+	if delivered, err := dispatchAllQueuedNudges(dir, &config.City{}, store, store, sp, snapshot, nil); err != nil || delivered != 0 {
+		t.Fatalf("dispatch = (%d, %v), want none delivered", delivered, err)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue = pending %d, in flight %d, dead %d; want the nudge pending for the next incarnation", len(pending), len(inFlight), len(dead))
 	}
 }

@@ -2431,6 +2431,16 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, relErr)
 	}
+	if target.sessionTransport() == "acp" && !sp.IsRunning(target.sessionName) {
+		// An ACP nudge reports success when its agent exits while the nudge
+		// waits for it to go idle, or before the prompt is written: a gc stop
+		// or a gc session kill landing in the wait of up to 60s. No
+		// incarnation received the items, so they go back to pending for the
+		// next one instead of being acked (#7816 review). An agent that died
+		// just after the write gets them again; that incarnation is gone.
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		return false, errors.Join(bookkeepErr, relErr)
+	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
@@ -2534,10 +2544,9 @@ func startNudgePollerUnlessDispatched(target nudgeTarget) {
 	}
 	// ACP session/prompt delivery requires the process that owns the
 	// in-memory ACP connection. A sidecar `gc nudge poll` process can
-	// observe the control socket but cannot safely deliver prompts. In
-	// legacy mode this leaves warm-idle ACP delivery to hook-drain only;
-	// configure daemon.nudge_dispatcher = "supervisor" for dispatcher-owned
-	// queued delivery.
+	// observe the control socket but cannot safely deliver prompts. The
+	// controller's dispatcher delivers ACP queues in both modes
+	// (dispatchAllQueuedNudges), beside the hook drain.
 	if target.sessionTransport() == "acp" {
 		return
 	}
