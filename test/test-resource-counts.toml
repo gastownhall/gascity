@@ -2757,7 +2757,7 @@ calls = 1
 [[count]]
 path = "scripts/rbe_worker_env_grace_test.go"
 resource = "subprocess"
-calls = 1
+calls = 2
 
 [[count]]
 path = "scripts/rbe_worker_env_test.go"

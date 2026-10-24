@@ -203,7 +203,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write # refs/heads/rbe/worker-env-grace, and nothing else
+      # Any unprotected ref; the publish step writes
+      # refs/heads/rbe/worker-env-grace alone.
+      contents: write
     concurrency:
       group: rbe-worker-env-grace
       cancel-in-progress: false
@@ -211,19 +213,34 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      # main before the push (repin's before) beside the pushed commit. A
-      # before it cannot fetch is no previous host: "previous none".
+      # main before the push (repin's before; empty: there was none) beside
+      # the pushed commit. repin fetched it moments ago, so failing to fetch
+      # it is GitHub's hiccup, not "no previous host": the job fails and
+      # publishes nothing, rather than a record that closes the window.
       - name: Write the grace record
         id: record
         env:
           BEFORE: ${{ needs.repin.outputs.before }}
         run: |
           set -euo pipefail
-          if [[ ${BEFORE:-} =~ ^[0-9a-f]{40}$ ]] && ! git fetch --no-tags --depth=1 origin "$BEFORE"; then
-            echo "::warning title=rbe worker-env grace::cannot fetch $BEFORE, main before this push; no grace window"
-            BEFORE=
+          if [ -n "${BEFORE:-}" ]; then
+            if ! [[ $BEFORE =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error title=rbe worker-env grace::repin's before '$BEFORE' is not a commit"
+              exit 1
+            fi
+            fetched=false
+            for attempt in 1 2 3; do
+              if git fetch --no-tags --depth=1 origin "$BEFORE"; then
+                fetched=true
+                break
+              fi
+              [ "$attempt" -eq 3 ] || sleep 5
+            done
+            if [ "$fetched" != true ]; then
+              echo "::error title=rbe worker-env grace::cannot fetch $BEFORE, main before this push; nothing published (re-run this job)"
+              exit 1
+            fi
           fi
-          [[ ${BEFORE:-} =~ ^[0-9a-f]{40}$ ]] || BEFORE=
           tools/rbe/worker-env-grace record "$BEFORE" HEAD "$(date -u +%s)" >"$RUNNER_TEMP/worker-env-grace.txt"
           cat "$RUNNER_TEMP/worker-env-grace.txt"
           {

@@ -10,9 +10,10 @@
 # scheduler, like rbe-worker-pool.yml's, that serves the PREVIOUS pin. It
 # runs the same pinned rbe-worker on this main's manifest with the previous
 # Go (the record's), checks that its host measures the previous pin, and
-# serves until idle, max age or the window's end. A host that measures
-# anything else never registers: its run fails, and the scaler's breaker
-# for these runs stops dispatching them. There are no drift jobs: a
+# serves until idle, max age or about the window's end. A run with nothing
+# to serve fails: a host that measures anything else (it never registers),
+# no open window, or a record for another main. The scaler's breaker for
+# these runs then stops dispatching them. There are no drift jobs: a
 # previous-pin host is not the pinned host's drift, and a drift issue would
 # cap the pools.
 #
@@ -69,12 +70,14 @@ jobs:
       # Inside its window: this main's manifest with the previous Go, which
       # must hash to the record's previous pin, as the product files the
       # rbe-worker reads (go.mod, platforms/BUILD.bazel,
-      # tools/rbe/worker-env.txt), and a max age that ends at the window's
-      # serve-until. Outside it, or with no window: serve=false, and this
-      # run ends without a worker.
+      # tools/rbe/worker-env.txt), the dispatch's idle minutes (checked:
+      # they reach the worker's shell arithmetic) and a max age that ends
+      # about the window's serve-until. Outside it, or with no window, this
+      # step fails and the run ends without a worker.
       - name: Rebuild the previous host's product files from the grace record
         id: grace
         env:
+          IDLE_MINUTES: ${{ inputs.idle_minutes }}
           MAX_MINUTES: ${{ inputs.max_minutes }}
         run: |
           set -euo pipefail
@@ -93,8 +96,9 @@ jobs:
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       # rbe-worker-pool.yml's worker step, with the previous host's product
-      # files, a max age that ends at the window's serve-until and its own
-      # name (scripts/rbe_worker_env_grace_test.go keeps the rest equal).
+      # files, the checked idle minutes, a max age that ends about the
+      # window's serve-until and its own name
+      # (scripts/rbe_worker_env_grace_test.go keeps the rest equal).
       - name: NativeLink worker for the previous pin until idle or max age
         id: worker
         if: steps.grace.outputs.serve == 'true'
@@ -106,7 +110,7 @@ jobs:
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
           RBE_PRODUCT_ROOT: ${{ steps.grace.outputs.root }}
           WORKER_MODE: pool
-          POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          POOL_IDLE_MINUTES: ${{ steps.grace.outputs.idle-minutes }}
           POOL_MAX_MINUTES: ${{ steps.grace.outputs.max-minutes }}
           WORKER_NAME: gha-legacy-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}

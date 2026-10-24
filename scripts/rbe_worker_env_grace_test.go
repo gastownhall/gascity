@@ -95,8 +95,14 @@ func newGraceRepo(t *testing.T) *graceRepo {
 // config) and returns its trimmed stdout.
 func (g *graceRepo) git(dir string, args ...string) string {
 	g.t.Helper()
+	return g.gitEnv(dir, nil, args...)
+}
+
+// gitEnv is git with env added to the fixture's environment.
+func (g *graceRepo) gitEnv(dir string, env []string, args ...string) string {
+	g.t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = g.env
+	cmd.Env = append(append([]string{}, g.env...), env...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -107,9 +113,20 @@ func (g *graceRepo) git(dir string, args ...string) string {
 }
 
 // commit records name: the worker host's files (manifest, its pin unless
-// pin is given, go.mod's Go) on top of main.
+// pin is given, go.mod's Go) on top of main, committed now.
 func (g *graceRepo) commit(name, manifest, pin, goVersion string) {
 	g.t.Helper()
+	g.commitAt(name, manifest, pin, goVersion, 0)
+}
+
+// commitAt is commit with its author and committer time at unix time at
+// (0: now).
+func (g *graceRepo) commitAt(name, manifest, pin, goVersion string, at int) {
+	g.t.Helper()
+	var env []string
+	if at != 0 {
+		env = []string{"GIT_AUTHOR_DATE=@" + strconv.Itoa(at) + " +0000", "GIT_COMMITTER_DATE=@" + strconv.Itoa(at) + " +0000"}
+	}
 	if pin == "" {
 		pin = sha256Pin(manifest)
 	}
@@ -118,8 +135,15 @@ func (g *graceRepo) commit(name, manifest, pin, goVersion string) {
 	writeTestFile(g.t, filepath.Join(g.dir, "go.mod"), "module github.com/gastownhall/gascity\n\ngo "+goVersion+"\n")
 	writeTestFile(g.t, filepath.Join(g.dir, "commit.txt"), name+"\n")
 	g.git(g.dir, "add", "-A")
-	g.git(g.dir, "commit", "-q", "-m", name)
+	g.gitEnv(g.dir, env, "commit", "-q", "-m", name)
 	g.sha[name] = g.git(g.dir, "rev-parse", "HEAD")
+}
+
+// pushMain makes the "GitHub" repository's main the fixture's main: publish
+// checks that main still pins the record's pin.
+func (g *graceRepo) pushMain() {
+	g.t.Helper()
+	g.git(g.dir, "push", "-q", "--force", g.github, "HEAD:refs/heads/main")
 }
 
 // run runs the grace script in dir with the fixture's environment plus env.
@@ -291,6 +315,39 @@ func TestWorkerEnvGraceRecord(t *testing.T) {
 	}
 }
 
+// TestWorkerEnvGraceRecordStartsAtTheCommit: the window starts at the
+// re-pin commit's time (at most NOW), not when the record is written, so a
+// late or re-run job writes the very same record (publish then skips it)
+// and cannot open a fresh window for a re-pin hours old.
+func TestWorkerEnvGraceRecordStartsAtTheCommit(t *testing.T) {
+	g := newGraceRepo(t)
+	merged := rbeGraceNow - 60
+	g.commitAt("c0", graceManifest("1.26.9", "2.1.8", "2.39"), "", "1.26.9", merged-86400)
+	g.commitAt("c1", graceManifest("1.26.10", "2.1.8", "2.39"), "", "1.26.10", merged)
+	var records []string
+	for _, now := range []int{rbeGraceNow, rbeGraceNow + 3*3600} {
+		out, stderr, err := g.run(g.dir, nil, "record", g.sha["c0"], g.sha["c1"], strconv.Itoa(now))
+		if err != nil {
+			t.Fatalf("record at %d: %v\n%s", now, err, stderr)
+		}
+		r := parseGraceRecord(t, out)
+		if r.fields["since"] != strconv.Itoa(merged) || r.fields["until"] != strconv.Itoa(merged+rbeGraceAcceptS) ||
+			r.fields["serve-until"] != strconv.Itoa(merged+rbeGraceAcceptS+rbeGraceDrainS) {
+			t.Errorf("record written at %d: since %s until %s serve-until %s, want the commit's %d plus 2 h and 3 h", now,
+				r.fields["since"], r.fields["until"], r.fields["serve-until"], merged)
+		}
+		records = append(records, out)
+	}
+	if records[0] != records[1] {
+		t.Errorf("a later run wrote another record:\n%s\nvs\n%s", records[0], records[1])
+	}
+	// A commit time ahead of NOW (a skewed clock) starts at NOW.
+	out, _, err := g.run(g.dir, nil, "record", g.sha["c0"], g.sha["c1"], strconv.Itoa(merged-30))
+	if r := parseGraceRecord(t, out); err != nil || r.fields["since"] != strconv.Itoa(merged-30) {
+		t.Errorf("commit ahead of NOW: %v since %s, want NOW %d", err, r.fields["since"], merged-30)
+	}
+}
+
 // graceCheckout lays out a checkout of main whose pin is manifest's: the two
 // files host reads.
 func graceCheckout(t *testing.T, manifest string) string {
@@ -307,8 +364,12 @@ func graceCheckout(t *testing.T, manifest string) string {
 // tools/rbe/worker-env.txt), and refuses unless they hash to the record's
 // previous pin: the record cannot name a host this main's manifest does not
 // roll back to. Outside the window, or with no window, it serves nothing
-// and succeeds; a record for another main, a forged previous pin or a
-// malformed record fails. max-minutes ends the worker by serve-until.
+// and exits 3 (the scaler dispatched a run gascity has no window for:
+// failing feeds the scaler's breaker for these runs); a record for another
+// main, a forged previous pin or a malformed record fails. The dispatch's
+// minutes reach the worker's shell arithmetic, so anything but whole minutes
+// fails; max-minutes stops the worker about serve-until, its setup and
+// drain included.
 func TestWorkerEnvGraceHost(t *testing.T) {
 	g := newGraceRepo(t)
 	m0 := graceManifest("1.26.9", "2.1.8", "2.39")
@@ -330,7 +391,7 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 		root := filepath.Join(dir, "previous")
 		out, stderr, err := g.run(co, append([]string{"GITHUB_OUTPUT=" + output}, env...), "host", rec, root, strconv.Itoa(now))
 		outputs := map[string]string{}
-		for _, k := range []string{"serve", "root", "previous", "go", "max-minutes"} {
+		for _, k := range []string{"serve", "root", "previous", "go", "idle-minutes", "max-minutes"} {
 			if v, ok := readStepOutput(t, output, k); ok {
 				outputs[k] = v
 			}
@@ -352,42 +413,55 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 	if got := regexp.MustCompile(`(?m)^ *"worker-env": "(sha256:[0-9a-f]{64})",$`).FindAllStringSubmatch(readFile(t, root, rbeWorkerPlatformBuild), -1); len(got) != 1 || got[0][1] != p0 {
 		t.Errorf("previous platforms/BUILD.bazel pins %v, want exactly %s (in the shape worker-env-drift's pin_of reads)", got, p0)
 	}
-	wantOut := map[string]string{"serve": "true", "root": root, "previous": p0, "go": "1.26.9", "max-minutes": "179"}
+	wantOut := map[string]string{"serve": "true", "root": root, "previous": p0, "go": "1.26.9", "idle-minutes": "15", "max-minutes": "171"}
 	if !reflect.DeepEqual(outputs, wantOut) {
 		t.Errorf("outputs %v, want %v", outputs, wantOut)
 	}
 
-	// max-minutes: the dispatch's, unless serve-until comes first.
+	// max-minutes: the dispatch's, unless serve-until (less 8 minutes of
+	// setup and drain) comes first; idle-minutes: the dispatch's.
 	for _, tc := range []struct {
-		now     int
-		max     string
-		want    string
-		refused bool
+		now       int
+		max, idle string
+		want      string
+		wantIdle  string
+		refused   bool
 	}{
-		{now: rbeGraceNow, max: "300", want: "180"},
-		{now: rbeGraceNow, max: "60", want: "60"},
-		{now: rbeGraceNow + rbeGraceAcceptS + rbeGraceDrainS - 30, max: "300", want: "1"},
-		{now: rbeGraceNow, max: "", want: "180"}, // MAX_MINUTES unset: 300
+		{now: rbeGraceNow, max: "300", want: "172", wantIdle: "15"},
+		{now: rbeGraceNow, max: "60", idle: "8", want: "60", wantIdle: "8"},
+		{now: rbeGraceNow + rbeGraceAcceptS + rbeGraceDrainS - 30, max: "300", want: "1", wantIdle: "15"},
+		{now: rbeGraceNow, want: "172", wantIdle: "15"}, // MAX_MINUTES and IDLE_MINUTES unset: 300 and 15
 		{now: rbeGraceNow, max: "0", refused: true},
 		{now: rbeGraceNow, max: "5m", refused: true},
+		{now: rbeGraceNow, idle: "0", refused: true},
+		{now: rbeGraceNow, idle: "8 ", refused: true},
+		// bash arithmetic would run the subscript: never let it reach the worker.
+		{now: rbeGraceNow, idle: "BASH_VERSINFO[$(touch pwned)0]", refused: true},
 	} {
 		env := []string{}
 		if tc.max != "" {
 			env = append(env, "MAX_MINUTES="+tc.max)
 		}
+		if tc.idle != "" {
+			env = append(env, "IDLE_MINUTES="+tc.idle)
+		}
 		_, outputs, out, err := host(open, tc.now, env...)
 		if tc.refused {
-			if err == nil || outputs["serve"] == "true" {
-				t.Errorf("MAX_MINUTES=%q: %v, outputs %v; want a refusal\n%s", tc.max, err, outputs, out)
+			if err == nil || outputs["serve"] == "true" || !strings.Contains(out, "is not whole minutes") {
+				t.Errorf("MAX_MINUTES=%q IDLE_MINUTES=%q: %v, outputs %v; want a refusal\n%s", tc.max, tc.idle, err, outputs, out)
 			}
 			continue
 		}
-		if err != nil || outputs["max-minutes"] != tc.want {
-			t.Errorf("now %d MAX_MINUTES=%q: %v, max-minutes %q, want %s\n%s", tc.now, tc.max, err, outputs["max-minutes"], tc.want, out)
+		if err != nil || outputs["max-minutes"] != tc.want || outputs["idle-minutes"] != tc.wantIdle {
+			t.Errorf("now %d MAX_MINUTES=%q IDLE_MINUTES=%q: %v, max-minutes %q idle-minutes %q, want %s %s\n%s",
+				tc.now, tc.max, tc.idle, err, outputs["max-minutes"], outputs["idle-minutes"], tc.want, tc.wantIdle, out)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(co, "pwned")); !os.IsNotExist(err) {
+		t.Errorf("an IDLE_MINUTES subscript ran a command: %v", err)
+	}
 
-	// No window: serve=false, success, nothing written.
+	// No window: serve=false, exit 3, nothing written.
 	for _, tc := range []struct {
 		name string
 		kv   []string
@@ -400,8 +474,8 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, outputs, out, err := host(tc.kv, tc.now)
-			if err != nil || !reflect.DeepEqual(outputs, map[string]string{"serve": "false"}) {
-				t.Errorf("%v, outputs %v; want success and serve=false alone\n%s", err, outputs, out)
+			if exitCode(err) != 3 || !reflect.DeepEqual(outputs, map[string]string{"serve": "false"}) || !strings.Contains(out, "serves nothing") {
+				t.Errorf("exit %d, outputs %v; want exit 3, serve=false alone, and why\n%s", exitCode(err), outputs, out)
 			}
 			if _, err := os.Stat(root); !os.IsNotExist(err) {
 				t.Errorf("%s was written: %v", root, err)
@@ -437,6 +511,8 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 		"reason with a window":     {append(append([]string{}, open...), "reason", "x"), "a reason with a window"},
 		"none with a window field": {[]string{"version", "1", "pin", p1, "sha", sha, "previous", "none", "reason", "x", "since", "1"}, "previous none with a window"},
 		"none without a reason":    {[]string{"version", "1", "pin", p1, "sha", sha, "previous", "none"}, "previous none without a reason"},
+		"control character reason": {[]string{"version", "1", "pin", p1, "sha", sha, "previous", "none", "reason", "x\x1b[31m"}, "not printable ASCII"},
+		"octal-looking since":      {setRecordField(open, "since", "0"+strconv.Itoa(rbeGraceNow)), "malformed record: since '0"},
 	}
 	for name, tc := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -454,6 +530,8 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 		"duplicate key": graceRecordText(open...) + "go 1.26.9\n",
 		"bare key":      graceRecordText(open...) + "go\n",
 		"CRLF":          strings.ReplaceAll(graceRecordText(open...), "\n", "\r\n"),
+		"lone CR":       graceRecordText(open...) + "# a comment\r::warning title=injected::x\n",
+		"blank line":    graceRecordText(open...) + "   \n",
 	} {
 		dir := t.TempDir()
 		rec := filepath.Join(dir, "record.txt")
@@ -467,15 +545,29 @@ func TestWorkerEnvGraceHost(t *testing.T) {
 
 // TestWorkerEnvGracePublishAndFetch: publish commits the record to
 // refs/heads/rbe/worker-env-grace, one commit per record on top of the last
-// (the branch is the history of windows), and refuses a malformed record;
-// fetch prints the branch's record, nothing (and success) when there is no
-// branch, and fails when the repository cannot be reached.
+// (the branch is the history of windows), only while main still pins the
+// record's pin (a later re-pin's job, or a re-run of an older one, must not
+// put an older record back), not again when the branch already has it, and
+// never a malformed one; a refused push is retried. fetch prints the
+// branch's record, nothing (and success) when there is no branch, and fails
+// when the repository cannot be reached.
 func TestWorkerEnvGracePublishAndFetch(t *testing.T) {
 	g := newGraceRepo(t)
 	m0 := graceManifest("1.26.9", "2.1.8", "2.39")
 	m1 := graceManifest("1.26.10", "2.1.8", "2.39")
-	first := graceRecordText(openRecord(sha256Pin(m1), strings.Repeat("a", 40), sha256Pin(m0), "1.26.9", rbeGraceNow)...)
-	second := graceRecordText("version", "1", "pin", sha256Pin("y\n"), "sha", strings.Repeat("b", 40), "previous", "none", "reason", "an image change")
+	m2 := graceManifest("1.26.11", "2.1.8", "2.39")
+	g.commit("c0", m0, "", "1.26.9")
+	g.commit("c1", m1, "", "1.26.10")
+	g.pushMain()
+	first := graceRecordText(openRecord(sha256Pin(m1), g.sha["c1"], sha256Pin(m0), "1.26.9", rbeGraceNow)...)
+	second := graceRecordText("version", "1", "pin", sha256Pin(m1), "sha", g.sha["c1"], "previous", "none", "reason", "an image change")
+	notMains := graceRecordText(openRecord(sha256Pin("a host main never pinned\n"), strings.Repeat("d", 40), sha256Pin(m1), "1.26.10", rbeGraceNow+600)...)
+
+	// sleep, stubbed: publish pauses between attempts.
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "sleep"), notifyBeadsSleepStub)
+	sleeps := filepath.Join(t.TempDir(), "sleeps")
+	stubbed := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "SLEEP_LOG=" + sleeps}
 
 	fetch := func(env ...string) (string, error) {
 		t.Helper()
@@ -496,13 +588,15 @@ func TestWorkerEnvGracePublishAndFetch(t *testing.T) {
 		t.Helper()
 		rec := filepath.Join(t.TempDir(), "record.txt")
 		writeTestFile(t, rec, text)
-		out, stderr, err := g.run(g.dir, []string{"GH_TOKEN=ghs_never-sent-to-file-urls"}, "publish", rec)
+		out, stderr, err := g.run(g.dir, append([]string{"GH_TOKEN=ghs_never-sent-to-file-urls"}, stubbed...), "publish", rec)
 		return out + stderr, err
 	}
+	tip := func() string { return g.git(g.github, "rev-parse", "refs/heads/"+rbeGraceBranch) }
+
 	if out, err := publish(first); err != nil {
 		t.Fatalf("publish the first record: %v\n%s", err, out)
 	}
-	tip1 := g.git(g.github, "rev-parse", "refs/heads/"+rbeGraceBranch)
+	tip1 := tip()
 	if got := g.git(g.github, "show", tip1+":"+rbeGraceFile); got+"\n" != first {
 		t.Errorf("published record:\n%s\nwant\n%s", got, first)
 	}
@@ -513,10 +607,15 @@ func TestWorkerEnvGracePublishAndFetch(t *testing.T) {
 		t.Errorf("fetch: %v\n%s\nwant\n%s", err, out, first)
 	}
 
+	// The same record again (a re-run): nothing new.
+	if out, err := publish(first); err != nil || tip() != tip1 || !strings.Contains(out, "already has this record") {
+		t.Errorf("republishing the same record: %v, tip %s (was %s)\n%s", err, tip(), tip1, out)
+	}
+
 	if out, err := publish(second); err != nil {
 		t.Fatalf("publish the second record: %v\n%s", err, out)
 	}
-	tip2 := g.git(g.github, "rev-parse", "refs/heads/"+rbeGraceBranch)
+	tip2 := tip()
 	if parent := g.git(g.github, "rev-parse", tip2+"^"); parent != tip1 {
 		t.Errorf("second record's parent %s, want the first record's commit %s", parent, tip1)
 	}
@@ -527,11 +626,60 @@ func TestWorkerEnvGracePublishAndFetch(t *testing.T) {
 		t.Errorf("commit subject %q does not say what the record is", subject)
 	}
 
+	// A record for a pin main no longer has (a newer push re-pinned): main
+	// moves on to c2, so first (for c1's pin) is not published again, and
+	// neither is a record for a pin main never had.
+	g.commit("c2", m2, "", "1.26.11")
+	g.pushMain()
+	for name, text := range map[string]string{"superseded": first, "not main's": notMains} {
+		if out, err := publish(text); err != nil || tip() != tip2 || !strings.Contains(out, "Not publishing") {
+			t.Errorf("%s record: %v, tip %s (was %s); want success, no commit and why\n%s", name, err, tip(), tip2, out)
+		}
+	}
+
 	if out, err := publish("version 1\npin nope\n"); err == nil {
 		t.Errorf("publish of a malformed record succeeded:\n%s", out)
 	}
-	if tip := g.git(g.github, "rev-parse", "refs/heads/"+rbeGraceBranch); tip != tip2 {
-		t.Errorf("a refused record moved the branch to %s", tip)
+	if tip() != tip2 {
+		t.Errorf("a refused record moved the branch to %s", tip())
+	}
+
+	// A push the remote refuses once is retried (after a pause).
+	hook := filepath.Join(g.github, "hooks", "pre-receive")
+	writeExecutable(t, hook, "#!/bin/sh\n[ -e \"$0.refused\" ] && exit 0\ntouch \"$0.refused\"\necho refused once >&2\nexit 1\n")
+	third := graceRecordText(openRecord(sha256Pin(m2), g.sha["c2"], sha256Pin(m1), "1.26.10", rbeGraceNow+900)...)
+	if out, err := publish(third); err != nil || g.git(g.github, "show", tip()+":"+rbeGraceFile)+"\n" != third {
+		t.Errorf("publish after one refused push: %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(sleeps); strings.TrimSpace(string(b)) != "5" {
+		t.Errorf("pauses between attempts %q, want one of 5 s", b)
+	}
+}
+
+// TestWorkerEnvGraceGitHubAuth: publish hands GH_TOKEN to git as an
+// http.extraheader for github.com, through git's environment config alone
+// (never a URL, a command line or a file), and only for a github.com URL.
+func TestWorkerEnvGraceGitHubAuth(t *testing.T) {
+	g := newGraceRepo(t)
+	show := `. "$1"; github_auth "$2"; echo "count=${GIT_CONFIG_COUNT:-} key=${GIT_CONFIG_KEY_0:-} value=${GIT_CONFIG_VALUE_0:-}"`
+	run := func(url, token string) string {
+		t.Helper()
+		cmd := exec.Command("bash", "-c", show, "auth", filepath.Join(g.dir, rbeWorkerEnvGrace), url)
+		cmd.Env = append(append([]string{}, g.env...), "GH_TOKEN="+token)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("github_auth %s: %v\n%s", url, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	want := "count=1 key=http.https://github.com/.extraheader value=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX3NlY3JldA=="
+	if got := run("https://github.com/gastownhall/gascity.git", "ghs_secret"); got != want {
+		t.Errorf("github.com with a token: %q, want %q (base64 of x-access-token:ghs_secret)", got, want)
+	}
+	for _, tc := range [][2]string{{"https://github.com/gastownhall/gascity.git", ""}, {"file:///tmp/github.git", "ghs_secret"}, {"https://evil.example/github.com/x.git", "ghs_secret"}} {
+		if got := run(tc[0], tc[1]); got != "count= key= value=" {
+			t.Errorf("%s with token %q: %q, want no header", tc[0], tc[1], got)
+		}
 	}
 }
 
@@ -545,6 +693,7 @@ func TestWorkerEnvGraceRoundTrip(t *testing.T) {
 	m1 := graceManifest("1.26.10", "2.1.8", "2.39")
 	g.commit("c0", m0, "", "1.26.9")
 	g.commit("c1", m1, "", "1.26.10")
+	g.pushMain()
 	rec := filepath.Join(t.TempDir(), "record.txt")
 	out, stderr, err := g.run(g.dir, nil, "record", g.sha["c0"], g.sha["c1"], strconv.Itoa(rbeGraceNow))
 	if err != nil {
@@ -640,8 +789,9 @@ func TestRBEWorkerLegacyWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(grace.Run, rbeWorkerEnvGrace+` fetch >"$RUNNER_TEMP/worker-env-grace.txt"`) ||
 		!strings.Contains(grace.Run, rbeWorkerEnvGrace+` host "$RUNNER_TEMP/worker-env-grace.txt" "$RUNNER_TEMP/worker-env-previous"`) ||
-		!reflect.DeepEqual(grace.Env, map[string]string{"MAX_MINUTES": "${{ inputs.max_minutes }}"}) || grace.If != "" || grace.ContinueOnError != "" {
-		t.Errorf("grace step %+v, want fetch then host with MAX_MINUTES the dispatch's max_minutes, unconditional", grace)
+		!reflect.DeepEqual(grace.Env, map[string]string{"IDLE_MINUTES": "${{ inputs.idle_minutes }}", "MAX_MINUTES": "${{ inputs.max_minutes }}"}) ||
+		grace.If != "" || grace.ContinueOnError != "" {
+		t.Errorf("grace step %+v, want fetch then host with the dispatch's idle and max minutes, unconditional, failing the job", grace)
 	}
 	const served = "steps.grace.outputs.serve == 'true'"
 	wantMeasure := map[string]string{
@@ -663,10 +813,13 @@ func TestRBEWorkerLegacyWorkflow(t *testing.T) {
 		want[k] = v
 	}
 	want["RBE_PRODUCT_ROOT"] = "${{ steps.grace.outputs.root }}"
+	// The checked minutes: host refuses anything but whole minutes, which
+	// reach the worker's shell arithmetic.
+	want["POOL_IDLE_MINUTES"] = "${{ steps.grace.outputs.idle-minutes }}"
 	want["POOL_MAX_MINUTES"] = "${{ steps.grace.outputs.max-minutes }}"
 	want["WORKER_NAME"] = "gha-legacy-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}"
 	if strings.TrimSpace(serve.Run) != `"$RBE_WORKER_DIR/blacksmith-worker.sh"` || serve.If != served || serve.ContinueOnError != "" || !reflect.DeepEqual(serve.Env, want) {
-		t.Errorf("worker step run %q if %q continue-on-error %q env\n%v\nwant if %s, the pool worker's env but RBE_PRODUCT_ROOT, POOL_MAX_MINUTES and WORKER_NAME:\n%v",
+		t.Errorf("worker step run %q if %q continue-on-error %q env\n%v\nwant if %s, the pool worker's env but RBE_PRODUCT_ROOT, POOL_IDLE_MINUTES, POOL_MAX_MINUTES and WORKER_NAME:\n%v",
 			serve.Run, serve.If, serve.ContinueOnError, serve.Env, served, want)
 	}
 	if strings.Contains(readFile(t, repoRoot(t), rbeWorkerLegacyWorkflow), "upload-artifact") {
@@ -683,6 +836,7 @@ func TestRBEWorkerLegacyGraceStep(t *testing.T) {
 	m1 := graceManifest("1.26.10", "2.1.8", "2.39")
 	g.commit("c0", m0, "", "1.26.9")
 	g.commit("c1", m1, "", "1.26.10")
+	g.pushMain()
 	now := int(time.Now().Unix())
 	rec := filepath.Join(t.TempDir(), "record.txt")
 	out, stderr, err := g.run(g.dir, nil, "record", g.sha["c0"], g.sha["c1"], strconv.Itoa(now))
@@ -707,7 +861,10 @@ func TestRBEWorkerLegacyGraceStep(t *testing.T) {
 	temp := t.TempDir()
 	runner["RUNNER_TEMP"] = temp
 	runner["GITHUB_OUTPUT"] = filepath.Join(temp, "output")
-	runner["MAX_MINUTES"] = interpolateGH(t, step.Env["MAX_MINUTES"], map[string]string{"inputs.max_minutes": "300"})
+	inputs := map[string]string{"inputs.max_minutes": "300", "inputs.idle_minutes": "8"}
+	for k, v := range step.Env {
+		runner[k] = interpolateGH(t, v, inputs)
+	}
 	got, err := runWorkflowStepScript(t, g.dir, step.Run, runner)
 	if err != nil {
 		t.Fatalf("grace step: %v\n%s", err, got)
@@ -718,6 +875,21 @@ func TestRBEWorkerLegacyGraceStep(t *testing.T) {
 	root, _ := readStepOutput(t, runner["GITHUB_OUTPUT"], "root")
 	if root != filepath.Join(temp, "worker-env-previous") || readFile(t, root, rbeWorkerEnvManifest) != m0 {
 		t.Errorf("root %q does not hold the previous manifest\n%s", root, got)
+	}
+	if idle, _ := readStepOutput(t, runner["GITHUB_OUTPUT"], "idle-minutes"); idle != "8" {
+		t.Errorf("idle-minutes %q, want the dispatch's 8", idle)
+	}
+
+	// No grace branch at all: the step fails (the scaler's breaker counts it).
+	empty := t.TempDir()
+	g.git(empty, "init", "-q", "--bare", empty)
+	runner["WORKER_ENV_GRACE_REMOTE"] = "file://" + empty
+	runner["GITHUB_OUTPUT"] = filepath.Join(temp, "output-none")
+	if got, err := runWorkflowStepScript(t, g.dir, step.Run, runner); exitCode(err) != 3 {
+		t.Errorf("grace step with no record: exit %d, want 3\n%s", exitCode(err), got)
+	}
+	if serve, _ := readStepOutput(t, runner["GITHUB_OUTPUT"], "serve"); serve != "false" {
+		t.Errorf("serve %q with no record, want false", serve)
 	}
 }
 
@@ -772,32 +944,56 @@ func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 	g.commit("c0", m0, "", "1.26.9")
 	g.commit("c1", graceManifest("1.26.10", "2.1.8", "2.39"), "", "1.26.10")
 	g.commit("c2", graceManifest("1.26.10", "2.1.8", "2.41"), "", "1.26.10")
+	// Each case pushes its head as the "GitHub" main (publish checks main
+	// still pins the record's pin), checks it out as actions/checkout does
+	// (depth 1: the record step fetches main before the push itself) and
+	// runs both steps. A main before the push that cannot be fetched (repin
+	// fetched it moments ago, so GitHub hiccupped) fails the job before
+	// anything is published, instead of publishing a record with no window.
 	for _, tc := range []struct {
 		name, before, head string
 		previous           string
+		fails              bool
 	}{
 		{name: "Go re-pin", before: g.sha["c0"], head: g.sha["c1"], previous: sha256Pin(m0)},
 		{name: "image change", before: g.sha["c1"], head: g.sha["c2"], previous: "none"},
 		{name: "no main before the push", before: "", head: g.sha["c1"], previous: "none"},
-		{name: "main before the push not fetchable", before: strings.Repeat("e", 40), head: g.sha["c1"], previous: "none"},
+		{name: "main before the push not fetchable", before: strings.Repeat("e", 40), head: g.sha["c1"], fails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			g.git(g.dir, "push", "-q", "--force", g.github, tc.head+":refs/heads/main")
+			tipBefore := ""
+			if refs := g.git(g.github, "for-each-ref", "--format=%(objectname)", "refs/heads/"+rbeGraceBranch); refs != "" {
+				tipBefore = refs
+			}
 			dir := t.TempDir()
 			co := filepath.Join(dir, "checkout")
-			runNotifyBeadsFixture(t, dir, notifyBeadsCheckout, g.dir, co, tc.head)
+			runNotifyBeadsFixture(t, dir, graceCheckoutDepth1, g.dir, co, tc.head)
 			runner := map[string]string{}
 			for _, kv := range g.env {
 				k, v, _ := strings.Cut(kv, "=")
 				runner[k] = v
 			}
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "sleep"), notifyBeadsSleepStub)
+			runner["PATH"] = bin + string(os.PathListSeparator) + runner["PATH"]
+			runner["SLEEP_LOG"] = filepath.Join(dir, "sleeps")
 			runner["RUNNER_TEMP"] = dir
 			runner["GITHUB_STEP_SUMMARY"] = filepath.Join(dir, "summary")
 			ctx := map[string]string{"needs.repin.outputs.before": tc.before, "github.token": "ghs_never-sent-to-file-urls"}
-			for _, s := range []ghStep{record, publish} {
-				env := notifyBeadsEnv(t, wf, s, ctx, runner)
-				if out, err := runWorkflowStepScript(t, co, s.Run, env); err != nil {
-					t.Fatalf("step %s: %v\n%s", s.ID, err, out)
+			out, err := runWorkflowStepScript(t, co, record.Run, notifyBeadsEnv(t, wf, record, ctx, runner))
+			if tc.fails {
+				tipAfter := g.git(g.github, "for-each-ref", "--format=%(objectname)", "refs/heads/"+rbeGraceBranch)
+				if err == nil || !strings.Contains(out, "nothing published") || tipAfter != tipBefore {
+					t.Errorf("record step: %v, branch %s (was %s); want a failure and nothing published\n%s", err, tipAfter, tipBefore, out)
 				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("record step: %v\n%s", err, out)
+			}
+			if out, err := runWorkflowStepScript(t, co, publish.Run, notifyBeadsEnv(t, wf, publish, ctx, runner)); err != nil {
+				t.Fatalf("publish step: %v\n%s", err, out)
 			}
 			got := parseGraceRecord(t, g.git(g.github, "show", "refs/heads/"+rbeGraceBranch+":"+rbeGraceFile)+"\n")
 			if got.fields["previous"] != tc.previous || got.fields["sha"] != tc.head {
@@ -809,3 +1005,15 @@ func TestWorkerEnvNotifyBeadsGraceJob(t *testing.T) {
 		})
 	}
 }
+
+// graceCheckoutDepth1 checks HEAD out of ORIGIN into DIR as the grace job's
+// actions/checkout does: that commit alone (fetch-depth 1), from a remote
+// named origin.
+const graceCheckoutDepth1 = `#!/usr/bin/env bash
+set -euo pipefail
+origin=$1 dir=$2 head=$3
+git init -q "$dir"
+git -C "$dir" remote add origin "$origin"
+git -C "$dir" fetch -q --no-tags --depth=1 origin "$head"
+git -C "$dir" checkout -q --detach "$head"
+`

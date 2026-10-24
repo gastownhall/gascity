@@ -899,21 +899,23 @@ close it by hand.
 A re-pin that moves only the manifest's `go` line (a Go release: gascity#7387
 and #8165 left beads red for 99 and 89 minutes) can be undone on today's
 Blacksmith image, because the pinned rbe-worker installs `go.mod`'s Go. So
-for two hours after such a re-pin, rbe-west serves the previous pin too and
-beads' preflight accepts it, and beads keeps building until its sync PR
-lands:
+after such a re-pin beads' preflight accepts the previous pin for two hours,
+rbe-west serves it for about three (the last hour for the beads runs it
+accepted near the end), and beads keeps building until its sync PR lands:
 
 1. On the push that moves the pin, `worker-env-notify-beads.yml`'s `grace`
    job writes a record (`tools/rbe/worker-env-grace record`) and commits it
    as `worker-env-grace.txt` to the branch `rbe/worker-env-grace`
-   (`publish`; GITHUB_TOKEN's `contents: write`, nothing else). It holds the
-   previous pin, its Go, `since` (the publish time), `until` (`since` + 2 h:
-   beads may pin the previous host until then) and `serve-until` (`until` +
-   1 h: rbe-west serves it until then, for the beads runs it accepted last).
-   Any other re-pin (an image release, a dolt or measurement change, a
-   manifest that does not hash to its pin) gets `previous none` and a
-   reason: the old image cannot be rebuilt, so beads waits for its sync PR
-   as before. The branch's history is the history of windows.
+   (`publish`, with GITHUB_TOKEN's `contents: write`). It holds the previous
+   pin, its Go, `since` (the re-pin commit's time; a merge-queue commit is
+   made a few minutes before it lands), `until` (`since` + 2 h) and
+   `serve-until` (`until` + 1 h). Any other re-pin (an image release, a dolt
+   or measurement change, a manifest that does not hash to its pin) gets
+   `previous none` and a reason: the old host cannot be rebuilt, so beads
+   waits for its sync PR as before. `publish` writes only a record for the
+   pin main has when it runs, and not one the branch already has, so a
+   re-run, or two re-pins in a row, never puts an older record back. The
+   branch's history is the history of windows.
 2. rbe-west's OSS pool scaler reads the record and, while the window is
    open, dispatches `rbe-worker-legacy.yml`: a floor of previous-pin workers
    until `until`, and more while a queue persists that no registered
@@ -923,22 +925,30 @@ lands:
    the previous Go as the product files the rbe-worker reads (`host`),
    refuses unless they hash to the previous pin, measures its host against
    that pin (a host that measures anything else fails and never registers)
-   and serves the previous pin until idle, max age or `serve-until`. It runs
-   the same pinned rbe-worker as the pool. NativeLink keeps one value per
-   platform property per worker, and a host has one Go, so previous-pin
-   workers are separate VMs.
+   and serves the previous pin until idle, max age or about `serve-until`.
+   A run dispatched with no open window fails too, and the scaler's breaker
+   for these runs stops dispatching them. It runs the same pinned
+   rbe-worker as the pool. NativeLink keeps one value per platform property
+   per worker, and a host has one Go, so previous-pin workers are separate
+   VMs.
 3. beads' preflight (its `tools/rbe/worker-env-sync`, `bazel.yml`'s
    `execution mode`) reads the record from the same branch and, in mode
    `remote` while the beads repository variable `RBE_WORKER_ENV_GRACE` is
-   `true`, accepts beads' pin when it is the record's previous pin and
-   gascity main's is the record's pin, until `until`. beads' sync PR still
-   opens and lands as before; its own CI runs on the new pin.
+   `true`, accepts beads' pin from `since` (less 5 minutes of clock skew)
+   until `until` when it is the record's previous pin, gascity main's pin is
+   the record's pin, and the two manifests differ only in the `go` line.
+   beads' sync PR still opens and lands as before; its own CI runs on the
+   new pin.
 
-The record is the one contract between the three; change its format in all
-of them. Rollback: unset `RBE_WORKER_ENV_GRACE` in beads (strict again at
-once), and set `NLPOOL_GRACE_WORKFLOW` empty on rbe-west (no previous-pin
-workers). With neither, records go on being published and nothing reads
-them.
+The record is the one contract between the three: printable ASCII, one
+`key value` per line, the same strict rules in each reader; change it in
+all of them. The two hours are part of it (the scaler and beads refuse a
+longer window): they cover beads' sync PR (about an hour) with room to
+spare, but not a sync PR whose release lane times out (90 minutes) and
+re-runs, after which beads goes red until the sync lands, as before.
+Rollback: unset `RBE_WORKER_ENV_GRACE` in beads (strict again at once), and
+set `NLPOOL_GRACE_WORKFLOW` empty on rbe-west (no previous-pin workers).
+With neither, records go on being published and nothing reads them.
 
 ### Bumping the rbe-worker pin
 

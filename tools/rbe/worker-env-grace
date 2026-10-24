@@ -24,11 +24,19 @@
 #   record BEFORE AFTER NOW   Print the record for a push that moved main's
 #                             pin from BEFORE's to AFTER's (commits in this
 #                             repository; an empty BEFORE is no main before
-#                             the push), published at unix time NOW.
-#                             worker-env-notify-beads.yml's grace job.
+#                             the push), written at unix time NOW. The
+#                             window starts at AFTER's commit time (a merge
+#                             queue's commit is made minutes before it
+#                             lands), at most NOW, so writing it again later
+#                             gives the same record. worker-env-notify-beads.yml's
+#                             grace job.
 #   publish RECORD            Commit RECORD as worker-env-grace.txt to
 #                             refs/heads/rbe/worker-env-grace, on top of the
-#                             branch's last record. GH_TOKEN; the grace job.
+#                             branch's last record, while main still pins the
+#                             record's pin: a record that a later re-pin
+#                             superseded, or one the branch already has, is
+#                             not published (a re-run, two re-pins in a row).
+#                             GH_TOKEN; the grace job.
 #   fetch                     Print the published record; nothing, and
 #                             success, if there is none. rbe-worker-legacy.yml.
 #   host RECORD DIR [NOW]     Check RECORD against this checkout and, inside
@@ -36,34 +44,43 @@
 #                             files to DIR: go.mod, platforms/BUILD.bazel and
 #                             tools/rbe/worker-env.txt, the three files the
 #                             rbe-worker reads (RBE_PRODUCT_ROOT=DIR). Writes
-#                             serve (true/false), root, previous, go and
+#                             serve, root, previous, go, idle-minutes and
 #                             max-minutes to $GITHUB_OUTPUT. Outside the
-#                             window, or with no window: serve=false and
-#                             success. A record for another main, or one
-#                             whose previous pin this main's manifest does not
-#                             roll back to, fails. rbe-worker-legacy.yml.
+#                             window, or with no window, it writes
+#                             serve=false and exits 3: rbe-west's scaler
+#                             dispatched a worker with nothing to serve, and
+#                             failing tells its breaker for these runs. A
+#                             record for another main, or one whose previous
+#                             pin this main's manifest does not roll back to,
+#                             fails too. rbe-worker-legacy.yml.
 #
-# The record, worker-env-grace.txt: one "key value" per line; "#" lines are
-# for people. Each key at most once, no other key:
+# The record, worker-env-grace.txt: printable ASCII and newlines only; one
+# "key value" per line (one space; the value is the rest of the line). Empty
+# lines and lines that start with "#" are for people; any other line is a
+# key, each at most once, no other key:
 #   version 1
 #   pin sha256:<hex>          main's pin after the push
 #   sha <commit>              main after the push
 #   previous sha256:<hex>     main's pin before the push, or "none": no window
 #   go <version>              the previous host's Go       (with a previous pin)
-#   since <unix seconds>      when the record was written  (with a previous pin)
+#   since <unix seconds>      the re-pin commit's time     (with a previous pin)
 #   until <unix seconds>      since + 2 h: beads may pin previous until then
 #   serve-until <unix seconds>  until + 1 h: rbe-west serves previous until
-#                             then, for the beads runs it accepted last
-#   reason <text>             why there is no window       (with "none")
-# Its readers: rbe-worker-legacy.yml (fetch, host), rbe-west's OSS pool
-# scaler (infra nativelink-cas/west/oss-pool-scaler.py) and beads'
+#                             about then, for the beads runs it accepted last
+#   reason <text>             why there is no window (printable ASCII; with "none")
+# Unix seconds are decimal without a leading zero; hex is lowercase. Its
+# readers: rbe-worker-legacy.yml (fetch, host), rbe-west's OSS pool scaler
+# (infra nativelink-cas/west/oss-pool-scaler.py) and beads'
 # tools/rbe/worker-env-sync. Change the format with all three.
 #
 # Env: GITHUB_REPOSITORY, GITHUB_SERVER_URL (fetch, publish); GH_TOKEN
-# (publish); MAX_MINUTES (host: the dispatch's max_minutes, default 300);
-# GITHUB_OUTPUT, GITHUB_STEP_SUMMARY; WORKER_ENV_GRACE_REMOTE (tests: the
-# repository fetch and publish use instead of GitHub's).
+# (publish); IDLE_MINUTES and MAX_MINUTES (host: the dispatch's idle_minutes
+# and max_minutes, default 15 and 300); GITHUB_OUTPUT, GITHUB_STEP_SUMMARY;
+# WORKER_ENV_GRACE_REMOTE (tests: the repository fetch and publish use
+# instead of GitHub's).
 set -euo pipefail
+# [[:print:]] and the other character classes below mean ASCII.
+export LC_ALL=C
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # pin_of, summary, output and BUILD (platforms/BUILD.bazel): sourced, the
@@ -75,16 +92,24 @@ BRANCH=rbe/worker-env-grace
 FILE=worker-env-grace.txt
 MANIFEST=tools/rbe/worker-env.txt
 # The window: beads' sync PR lands about an hour after a re-pin (its CI is
-# uncached; it took 50 minutes on 2026-10-21), so two hours covers it and a
-# retry. rbe-west serves the previous pin one more hour, for the beads runs
+# uncached; 50 minutes on 2026-10-21), so two hours covers that with room to
+# spare. A sync PR whose release lane times out (90 minutes) and re-runs
+# does not fit: beads then goes red for the rest, as before the window. The
+# two hours are a contract: rbe-west's scaler and beads refuse a longer
+# window. rbe-west serves the previous pin one more hour, for the beads runs
 # accepted just before the window closed.
 ACCEPT_S=7200
 DRAIN_S=3600
 # A record written up to this far ahead of a reader's clock is open.
 SKEW_S=300
+# A legacy worker's max age counts from when NativeLink starts, after the
+# worker's setup (about 2 minutes), and its drain at max age takes up to 5:
+# it is asked to stop this much before serve-until.
+SETUP_DRAIN_MIN=8
 PIN_RE='^sha256:[0-9a-f]{64}$'
 GO_RE='^[0-9]+\.[0-9]+(\.[0-9]+)?((rc|beta)[0-9]+)?$'
-UNIX_RE='^[0-9]{1,12}$'
+UNIX_RE='^(0|[1-9][0-9]{0,11})$'
+MINUTES_RE='^[1-9][0-9]{0,4}$'
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -136,7 +161,7 @@ moved_beyond_go() {
 
 cmd_record() {
 	local before=${1-} after=${2:?usage: worker-env-grace record BEFORE AFTER NOW} now=${3:?usage: worker-env-grace record BEFORE AFTER NOW}
-	local sha pin was previous=none reason='' go='' since until serve
+	local sha pin was previous=none reason='' go='' committed since until serve
 	[[ $now =~ $UNIX_RE ]] || die "NOW '$now' is not unix seconds"
 	[ -z "$before" ] || [[ $before =~ ^[0-9a-f]{40}$ ]] || die "BEFORE '$before' is not a commit sha"
 	sha=$(git rev-parse --verify --quiet "$after^{commit}") || die "no commit $after"
@@ -179,7 +204,12 @@ cmd_record() {
 		EOF
 		return 0
 	fi
-	since=$now until=$((now + ACCEPT_S)) serve=$((now + ACCEPT_S + DRAIN_S))
+	# The window opens at the re-pin commit's time, not when this runs: the
+	# same push gives the same record, however late its job runs or reruns.
+	committed=$(git show -s --format=%ct "$sha")
+	[[ $committed =~ $UNIX_RE ]] || die "$sha has no committer time"
+	since=$((committed < now ? committed : now))
+	until=$((since + ACCEPT_S)) serve=$((since + ACCEPT_S + DRAIN_S))
 	cat <<-EOF
 		# rbe-west worker-env grace record (gascity tools/rbe/worker-env-grace; TESTING.md "Grace window for Go re-pins").
 		# beads may pin $previous until $(iso "$until"); rbe-west serves it until $(iso "$serve").
@@ -200,6 +230,13 @@ cmd_record() {
 parse_record() {
 	local line key value seen=' '
 	r_version='' r_pin='' r_sha='' r_previous='' r_go='' r_since='' r_until='' r_serve='' r_reason=''
+	# Printable ASCII and newlines, comments included: no carriage return,
+	# escape or other byte that a log of it could act on (the scaler and
+	# beads refuse the same).
+	if grep -q '[^[:print:]]' "$1"; then
+		echo "worker-env-grace: record has a byte that is not printable ASCII" >&2
+		return 1
+	fi
 	while IFS= read -r line || [ -n "$line" ]; do
 		case $line in '' | '#'*) continue ;; esac
 		key=${line%% *} value=${line#* }
@@ -236,7 +273,7 @@ parse_record() {
 	[[ $r_pin =~ $PIN_RE ]] || flag "pin '$r_pin'"
 	[[ $r_sha =~ ^[0-9a-f]{40}$ ]] || flag "sha '$r_sha'"
 	if [ "$r_previous" = none ]; then
-		[ -n "$r_reason" ] || flag "previous none without a reason"
+		[[ $r_reason =~ ^[[:print:]]+$ ]] || flag "previous none without a reason in printable characters"
 		[ -z "$r_go$r_since$r_until$r_serve" ] || flag "previous none with a window"
 	else
 		[[ $r_previous =~ $PIN_RE ]] || flag "previous '$r_previous'"
@@ -259,12 +296,26 @@ parse_record() {
 # remote: the repository fetch and publish use.
 remote() { echo "${WORKER_ENV_GRACE_REMOTE:-${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?}.git}"; }
 
+# github_auth URL: with GH_TOKEN and a github.com URL, export the token as
+# git's http.extraheader for github.com, through git's environment config:
+# never in a URL, on a command line or in a file.
+github_auth() {
+	if [ -n "${GH_TOKEN:-}" ] && [[ $1 == https://github.com/* ]]; then
+		export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+		GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+		export GIT_CONFIG_VALUE_0
+	fi
+}
+
+# rgit ARGS: git against the network, never prompting, no credential helper,
+# giving up on a stalled transfer.
+rgit() { GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 "$@"; }
+
 # branch_tip REMOTE: the branch's commit, empty if there is no branch.
 # Fails if REMOTE cannot be read.
 branch_tip() {
 	local refs rc=0
-	refs=$(GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
-		ls-remote --exit-code --refs "$1" "refs/heads/$BRANCH") || rc=$?
+	refs=$(rgit ls-remote --exit-code --refs "$1" "refs/heads/$BRANCH") || rc=$?
 	case $rc in
 	0) ;;
 	2) return 0 ;;
@@ -283,36 +334,43 @@ cmd_fetch() {
 		return 0
 	fi
 	git init -q "$repo"
-	GIT_TERMINAL_PROMPT=0 git -C "$repo" -c credential.helper= -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 \
-		fetch -q --no-tags --depth=1 "$url" "+refs/heads/$BRANCH:refs/grace" || die "cannot fetch $BRANCH from $url"
+	rgit -C "$repo" fetch -q --no-tags --depth=1 "$url" "+refs/heads/$BRANCH:refs/grace" || die "cannot fetch $BRANCH from $url"
 	git -C "$repo" show "refs/grace:$FILE"
 }
 
 cmd_publish() {
-	local record=${1:?usage: worker-env-grace publish RECORD} url tip repo=$tmp/publish blob tree commit subject attempt
+	local record=${1:?usage: worker-env-grace publish RECORD} url tip main_pin repo=$tmp/publish blob tree commit subject attempt
 	parse_record "$record" || die "not publishing a malformed record"
 	url=$(remote)
-	# The token travels as an http.extraheader in the environment, never in
-	# a URL or on a command line, and only to github.com.
-	if [ -n "${GH_TOKEN:-}" ] && [[ $url == https://github.com/* ]]; then
-		export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-		GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-		export GIT_CONFIG_VALUE_0
-	fi
+	github_auth "$url"
 	if [ "$r_previous" = none ]; then
 		subject="rbe worker-env grace: no grace window for $r_pin ($r_reason)"
 	else
 		subject="rbe worker-env grace: beads may pin $r_previous until $(iso "$r_until")"
 	fi
 	git init -q "$repo"
+	# A named remote: a blob-less fetch of main then reads one file lazily.
+	git -C "$repo" remote add origin "$url"
 	blob=$(git -C "$repo" hash-object -w "$record")
 	tree=$(printf '100644 blob %s\t%s\n' "$blob" "$FILE" | git -C "$repo" mktree)
 	for attempt in 1 2 3; do
+		# Only main's current pin gets a record: two re-pins in a row, or a
+		# re-run of an older push's job, must not put back an older one.
+		rgit -C "$repo" fetch -q --no-tags --depth=1 --filter=blob:none origin "+refs/heads/main:refs/main" ||
+			die "cannot read main from $url"
+		main_pin=$(git -C "$repo" show "refs/main:platforms/BUILD.bazel" | pin_of /dev/stdin) || die "cannot read main's pin"
+		if [ "$main_pin" != "$r_pin" ]; then
+			echo "worker-env-grace: main pins $main_pin now, not this record's $r_pin; a later push publishes its own record. Not publishing."
+			return 0
+		fi
 		tip=$(branch_tip "$url") || die "cannot read $url"
 		if [ -n "$tip" ]; then
-			GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch -q --no-tags --depth=1 "$url" "+refs/heads/$BRANCH:refs/grace" ||
-				die "cannot fetch $BRANCH from $url"
+			rgit -C "$repo" fetch -q --no-tags --depth=1 origin "+refs/heads/$BRANCH:refs/grace" || die "cannot fetch $BRANCH from $url"
 			tip=$(git -C "$repo" rev-parse refs/grace)
+			if [ "$(git -C "$repo" rev-parse "refs/grace:$FILE" 2>/dev/null)" = "$blob" ]; then
+				echo "worker-env-grace: $BRANCH already has this record ($tip)"
+				return 0
+			fi
 			commit=$(git -C "$repo" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
 				commit-tree "$tree" -p "$tip" -m "$subject" -m "gascity main $r_sha")
 		else
@@ -320,7 +378,7 @@ cmd_publish() {
 				commit-tree "$tree" -m "$subject" -m "gascity main $r_sha")
 		fi
 		# The lease: the branch is where we read it, or still absent.
-		if GIT_TERMINAL_PROMPT=0 git -C "$repo" push -q "$url" "$commit:refs/heads/$BRANCH" "--force-with-lease=refs/heads/$BRANCH:$tip"; then
+		if rgit -C "$repo" push -q origin "$commit:refs/heads/$BRANCH" "--force-with-lease=refs/heads/$BRANCH:$tip"; then
 			echo "worker-env-grace: published $commit on $BRANCH: ${subject#rbe worker-env grace: }"
 			return 0
 		fi
@@ -329,26 +387,26 @@ cmd_publish() {
 	die "could not publish on $BRANCH (it kept moving, or the push was refused)"
 }
 
+# no_window WHY: this run has nothing to serve: say so, serve=false, exit 3.
+no_window() {
+	echo "::error title=rbe worker-env grace::$1, so this previous-pin worker serves nothing. rbe-west's scaler dispatched it with a window gascity does not have: its breaker for these runs stops dispatching them."
+	output serve=false
+	exit 3
+}
+
 cmd_host() {
 	local record=${1:?usage: worker-env-grace host RECORD DIR [NOW]} dir=${2:?usage: worker-env-grace host RECORD DIR [NOW]}
-	local now=${3:-$(date +%s)} max=${MAX_MINUTES:-300} ours left minutes
+	local now=${3:-$(date +%s)} max=${MAX_MINUTES:-300} idle=${IDLE_MINUTES:-15} ours left minutes
 	[[ $now =~ $UNIX_RE ]] || die "NOW '$now' is not unix seconds"
-	[[ $max =~ ^[1-9][0-9]{0,4}$ ]] || die "MAX_MINUTES '$max' is not whole minutes"
-	if [ ! -s "$record" ]; then
-		echo "worker-env-grace: no grace record: no previous pin to serve"
-		output serve=false
-		return 0
-	fi
+	# The dispatch's minutes reach the worker's shell arithmetic: whole
+	# minutes and nothing else.
+	[[ $max =~ $MINUTES_RE ]] || die "MAX_MINUTES '$max' is not whole minutes"
+	[[ $idle =~ $MINUTES_RE ]] || die "IDLE_MINUTES '$idle' is not whole minutes"
+	[ -s "$record" ] || no_window "there is no grace record"
 	parse_record "$record" || exit 1
-	if [ "$r_previous" = none ]; then
-		echo "worker-env-grace: no grace window for $r_pin: $r_reason"
-		output serve=false
-		return 0
-	fi
+	[ "$r_previous" != none ] || no_window "the grace record for $r_pin has no window ($r_reason)"
 	if ((now < r_since - SKEW_S || now >= r_serve)); then
-		echo "worker-env-grace: the window for $r_previous runs from $(iso "$r_since") to $(iso "$r_serve"); it is $(iso "$now"), so this run serves nothing"
-		output serve=false
-		return 0
+		no_window "the window for $r_previous runs from $(iso "$r_since") to $(iso "$r_serve") and it is $(iso "$now")"
 	fi
 	ours=$(pin_of "$BUILD")
 	if [ "$ours" != "$r_pin" ]; then
@@ -373,20 +431,27 @@ cmd_host() {
 		    },
 		)
 	EOF
-	left=$(((r_serve - now + 59) / 60))
+	# The worker stops at its max age plus its setup and drain: ask it to
+	# stop SETUP_DRAIN_MIN early, so it is gone by about serve-until.
+	left=$(((r_serve - now + 59) / 60 - SETUP_DRAIN_MIN))
+	((left >= 1)) || left=1
 	minutes=$((left < max ? left : max))
-	echo "worker-env-grace: serving $r_previous (Go $r_go) for at most $minutes minutes, until $(iso "$r_serve"); beads may pin it until $(iso "$r_until")"
+	echo "worker-env-grace: serving $r_previous (Go $r_go) for at most $minutes minutes, about until $(iso "$r_serve"); beads may pin it until $(iso "$r_until")"
 	{
 		echo "### rbe worker-env grace"
 		echo
-		echo "This worker serves the previous pin \`$r_previous\` (Go $r_go) beside main's \`$r_pin\` until $(iso "$r_serve"). gastownhall/beads may pin it until $(iso "$r_until")."
+		echo "This worker serves the previous pin \`$r_previous\` (Go $r_go) beside main's \`$r_pin\` until about $(iso "$r_serve"). gastownhall/beads may pin it until $(iso "$r_until")."
 	} | summary
 	output serve=true
 	output "root=$dir"
 	output "previous=$r_previous"
 	output "go=$r_go"
+	output "idle-minutes=$idle"
 	output "max-minutes=$minutes"
 }
+
+# Sourced (the tests call the helpers directly): define, don't dispatch.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 sub=${1:-}
 [ $# -eq 0 ] || shift
