@@ -229,11 +229,13 @@ op they parked or fault, and the variable is in the GC_* env-read inventory
 and in `internal/testenv.LeakVectorVars`.
 
 The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
-15-minute waits, and `TestBdDoltArmProvisionsAndRecords`, which keeps the
-bd-dolt arm's provisioning and recording in the gating run) in
-`conversationlane_test`. The full evidence runs in four manual variants, a
-matrix part and a load part on two backends each. The matrix part, the crash
-arms, runs on SQLite and embedded Dolt: every kill-matrix cell at production
+15-minute waits) in `conversationlane_x12_test`, one of the six targets the
+integration build splits the package into
+(`test/conversationlane/BUILD.bazel`); `TestBdDoltArmProvisionsAndRecords`,
+which keeps the bd-dolt arm's provisioning and recording in the gating run,
+runs in `conversationlane_test`. The full evidence runs in four manual
+variants, a matrix part and a load part on two backends each. The matrix
+part, the crash arms, runs on SQLite and embedded Dolt: every kill-matrix cell at production
 timing, waiting out each op's `finish_by`, and, on embedded Dolt, the
 incapable-store arm. The load part runs the six-round fault-free load on
 SQLite and on `bd-dolt`, requires every well-formed request to succeed and

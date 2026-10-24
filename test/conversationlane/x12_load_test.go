@@ -186,7 +186,13 @@ func TestX12FaultFreeLoad(t *testing.T) {
 		t.Parallel()
 	}
 	arm := x12Backend(t, x12PartLoad)
-	baselines := x12Baselines(t)
+	// The evidence learns off's baselines first, alone, so a baseline
+	// failure stops it before rounds that run for up to an hour; the gating
+	// tier reads them only for its final checks.
+	var baselines map[string]x12Shape
+	if x12Evidence() {
+		baselines = x12Baselines(t)
+	}
 	mix := x12LoadMixFor()
 	tier := "gating"
 	if x12Evidence() {
@@ -308,7 +314,12 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	record.P4 = p4
 
 	// P1 and P5 over every request; R1; and every well-formed request
-	// succeeds: the load provokes no fault.
+	// succeeds: the load provokes no fault. Only these checks read off's
+	// baselines, so the gating tier's rounds above do not wait for them:
+	// they run while another X12 test's city learns them (~110 s).
+	if baselines == nil {
+		baselines = x12Baselines(t)
+	}
 	x12Report.eval("R1", len(all))
 	for _, r := range all {
 		c.checkLoadRequest(r, baselines, fail)

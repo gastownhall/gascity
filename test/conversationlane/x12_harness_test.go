@@ -10,8 +10,9 @@ package conversationlane_test
 // of one recorded execution (K1 to K5), and the cell then checks what a
 // same-key retry, the op sweeper or a rerun makes of what the crash left.
 //
-// Two tiers. The gating subset runs in conversationlane_test on SQLite with
-// no 15-minute waits. The evidence variants (BUILD.bazel x12_evidence_*_test,
+// Two tiers. The gating subset runs in conversationlane_x12_test (the
+// integration build's X12 target, BUILD.bazel) on SQLite with no 15-minute
+// waits. The evidence variants (BUILD.bazel x12_evidence_*_test,
 // GC_X12_EVIDENCE=1) run, per backend, every cell at production timing,
 // waiting out every op's finish_by (the matrix part), or the six-round
 // fault-free load (the load part), and write the X12 report
