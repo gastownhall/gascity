@@ -11736,13 +11736,13 @@ export type WorkerOperationEventPayload = {
      */
     latency_ms?: number;
     /**
-     * LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+     * LLM model identifier the session was launched with (best-effort, absent when the provider declares no model option).
      */
     model?: string;
     op_id: string;
     operation: string;
     /**
-     * SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+     * SHA-256 of the rendered prompt template (best-effort, absent when the agent has no prompt template).
      */
     prompt_sha?: string;
     /**
@@ -11750,7 +11750,7 @@ export type WorkerOperationEventPayload = {
      */
     prompt_tokens?: number;
     /**
-     * Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+     * Template version frontmatter (best-effort, absent when the prompt template declares no version).
      */
     prompt_version?: string;
     provider?: string;

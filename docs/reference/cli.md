@@ -280,8 +280,11 @@ agent_name) tuple per session. Lifecycle events get attributed via the
 session id or producer aliases from worker.operation payloads. Sessions
 with worker.operation events but no lifecycle events count toward the
 per-group total — they're the denominator side of crash-rate
-calculations. Model and prompt_version are best-effort dimensions; the
-report warns when the source event stream is missing them.
+calculations. Model and prompt_version are stamped at session start from
+the resolved launch model (the provider-facing id, e.g. "claude-sonnet-5")
+and the prompt template's frontmatter version, so gc analyze reliability
+and gc costs share the provider-facing model id. They are best-effort
+dimensions; the report warns when the source event stream is missing them.
 
 Read-only: this command never writes events or beads.
 

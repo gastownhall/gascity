@@ -104,8 +104,8 @@ type PromptRenderResult struct {
 // A template path that cannot be read also returns empty, after a warning to
 // stderr. On parse or execute error, logs a warning to stderr and returns the
 // raw text (graceful fallback).
-func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
-	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
+func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string) string {
+	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, nil).Text
 }
 
 // renderPromptWithMeta is renderPrompt's variant that additionally returns

@@ -504,7 +504,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			)
 			packDirs := cfg.PackDirsForRig(ctx.RigName)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				packDirs, fragments, nil)
+				packDirs, fragments)
 			if prompt != "" {
 				var budget *promptBudgetJSON
 				if strictMode {
@@ -545,7 +545,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			}
 			if promptFile != "" {
 				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
-					cfg.PackDirsForRig(ctx.RigName), nil, nil)
+					cfg.PackDirsForRig(ctx.RigName), nil)
 				if content != "" {
 					injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)

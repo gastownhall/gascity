@@ -283,6 +283,18 @@ type preparedStart struct {
 	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
+	// launchModel, promptVersion and promptSHA are the launch provenance the
+	// commit stamps for worker.operation events (launch_model /
+	// prompt_version / prompt_sha): the provider-facing model id the launch
+	// pins (resolvedLaunchModel) and the prompt template's frontmatter
+	// version and rendered-template SHA (TemplateParams). Stamped on every
+	// successful commit, not gated on promptDelivered: a resume launches with
+	// the current model flag and re-sends the current rendered prompt in its
+	// restart nudge (restartPromptNudge), so the current values describe what
+	// the resumed conversation runs with.
+	launchModel   string
+	promptVersion string
+	promptSHA     string
 	// capacityTicket is the endpoint capacity admission for this attempt,
 	// nil when the endpoint is unguarded. Every path that holds one resolves
 	// it exactly once (resolveStartCapacity / abandonCapacityTicket).
@@ -1242,16 +1254,21 @@ func buildPreparedStartWithTranscript(
 	// they are dispatch inputs from the current work bead, not durable session
 	// config. Explicit session template_overrides still win per key.
 	dispatchOptions := resolveDispatchOptionOverrides(candidate, cityPath, cfg, store, tp.ResolvedProvider, dispatchSources)
-	if len(dispatchOptions) > 0 {
-		launchOverrides := make(map[string]string, len(dispatchOptions))
-		for k, v := range dispatchOptions {
-			launchOverrides[k] = v
-		}
-		for k, v := range sessionOverrides {
-			launchOverrides[k] = v
-		}
-		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, launchOverrides)
+	// effectiveOverrides is every launch option override in effect — dispatch
+	// inputs overlaid by the session's explicit template_overrides (the same
+	// per-key precedence applySchemaOptionOverridesForLaunch sees) — so the
+	// launch_model stamp names the model the command line actually pins.
+	effectiveOverrides := make(map[string]string, len(dispatchOptions)+len(sessionOverrides))
+	for k, v := range dispatchOptions {
+		effectiveOverrides[k] = v
 	}
+	for k, v := range sessionOverrides {
+		effectiveOverrides[k] = v
+	}
+	if len(dispatchOptions) > 0 {
+		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, effectiveOverrides)
+	}
+	launchModel := resolvedLaunchModel(tp.ResolvedProvider, effectiveOverrides)
 
 	preOverrideWorkDir := agentCfg.WorkDir
 	repairStore := store
@@ -1486,6 +1503,9 @@ func buildPreparedStartWithTranscript(
 		prePolicyLaunchHash:    prePolicyLaunchHash,
 		promptDelivered:        promptDelivered,
 		promptHash:             promptHash,
+		launchModel:            launchModel,
+		promptVersion:          tp.PromptVersion,
+		promptSHA:              tp.PromptSHA,
 		transcriptRoots:        transcriptRoots,
 		conversationReset:      conversationReset,
 		resumed:                resumed,
@@ -3170,6 +3190,9 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 		RuntimeBinding:      prepared.runtimeBinding,
+		LaunchModel:         prepared.launchModel,
+		PromptVersion:       prepared.promptVersion,
+		PromptSHA:           prepared.promptSHA,
 	})
 	// The resume backstop (mc-bm1af): whether this incarnation was launched
 	// as a resume, for a later rapid crash; a fresh launch starts a new
@@ -3637,6 +3660,9 @@ func recoverRunningPendingCreate(
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		LaunchModel:         prepared.launchModel,
+		PromptVersion:       prepared.promptVersion,
+		PromptSHA:           prepared.promptSHA,
 		// The runtime is already live: record the thread it hosts the
 		// session in, as every confirmed start does.
 		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),

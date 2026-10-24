@@ -29,12 +29,12 @@ import (
 // receiving populated fields without the corresponding announcement.
 func TestWorkerOperationPayload1aWiringStatusPin(t *testing.T) {
 	wiredAlready := map[string]string{
-		"agent_name": "session.Info.AgentName with Alias fallback via populateOperationEventIdentity (PR #1272)",
+		"agent_name":     "session.Info.AgentName with Alias fallback via populateOperationEventIdentity (PR #1272)",
+		"model":          "session metadata launch_model stamped by CommitStartedPatch, read by populateOperationEventIdentity",
+		"prompt_version": "session metadata prompt_version stamped by CommitStartedPatch, read by populateOperationEventIdentity",
+		"prompt_sha":     "session metadata prompt_sha stamped by CommitStartedPatch, read by populateOperationEventIdentity",
 	}
 	notWiredYet := map[string]string{
-		"model":                 "follow-up: tail sessionlog at finish() to extract msg.Model",
-		"prompt_version":        "follow-up #1256: propagate promptmeta.FrontMatter.Version through session metadata",
-		"prompt_sha":            "follow-up #1256: propagate promptmeta.SHA through session metadata",
 		"bead_id":               "follow-up: thread operation context through worker.beginOperationEvent",
 		"prompt_tokens":         "follow-up: wire sessionlog/tail.go extraction to operation finish",
 		"completion_tokens":     "follow-up: wire sessionlog/tail.go extraction to operation finish",
