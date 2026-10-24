@@ -258,7 +258,7 @@ exports_files(
 # override that does not resolve fails the test (helpers.RequireBD).
 #
 #   prev     deps.env BD_PREV_VERSION, the minimum-supported release
-#   current  deps.env BD_CURRENT_REF; that commit is the v1.3.1 tag, whose
+#   current  deps.env BD_CURRENT_REF; that commit is the v1.3.2 tag, whose
 #            release binary is @bd_bin_v1_3_2 (scripts/bd_contract_pins_test.go
 #            pins the correspondence)
 BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig)$$"
