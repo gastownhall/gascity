@@ -159,6 +159,7 @@ go_test(
         "residency_halves_agree_test.go",
         "residency_ratchet_test.go",
         "residency_signature_rule_test.go",
+        "review_formulas_shard_balance_test.go",
         "runtime_tmux_manifest_test.go",
         "shard_cgo_test.go",
         "sign_darwin_local_test.go",

@@ -194,8 +194,8 @@ add_integration_jobs() {
   for i in 1 2; do
     add_job "integration-review-formulas-basic-${i}-of-2" "./scripts/test-integration-shard review-formulas-basic-${i}-of-2"
   done
-  for i in 1 2; do
-    add_job "integration-review-formulas-retries-${i}-of-2" "./scripts/test-integration-shard review-formulas-retries-${i}-of-2"
+  for i in 1 2 3; do
+    add_job "integration-review-formulas-retries-${i}-of-3" "./scripts/test-integration-shard review-formulas-retries-${i}-of-3"
   done
   add_job "integration-review-formulas-recovery" "./scripts/test-integration-shard review-formulas-recovery"
   add_job "integration-bdstore" "./scripts/test-integration-shard bdstore"
