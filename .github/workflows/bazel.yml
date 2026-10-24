@@ -712,6 +712,16 @@ jobs:
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
           key: bazel-repo-v4-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+      # Bazelisk and the Bazel binary, which setup-bazel checked against their
+      # pins before running them, under the key it restored (its "Restore
+      # Bazelisk and Bazel"), from the same lane on the same pushes, so the
+      # other lanes download neither.
+      - name: Save Bazelisk and Bazel
+        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.bin-cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bazel-bin
+          key: ${{ steps.bazel.outputs.bin-cache-key }}
 
   # The remote repo contents cache's only writer (ga-vnycm2.25). On a push to
   # main, with the rbe job's rrc not off, run every lane's command with

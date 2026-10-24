@@ -249,6 +249,7 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.lane.steps[ci-analytics].env.PR_HINT":                                  "0",
 	"bazel.yml jobs.lane.steps[Save LLVM archive cache].if":                                "false",       // push to main saves
 	"bazel.yml jobs.lane.steps[Save Bazel runner cache].if":                                "false",       // push to main saves
+	"bazel.yml jobs.lane.steps[Save Bazelisk and Bazel].if":                                "false",       // push to main saves
 	"bazel.yml jobs.gate.steps[Evaluate].env.EVENT":                                        "merge_group", // logged only
 	"bazel.yml jobs.coverage.if":                                                           "false",       // nightly/dispatch only
 	"bazel.yml jobs.coverage.steps[worker-env].env.DEFAULT_BRANCH":                         "main",
