@@ -237,7 +237,8 @@ func (p *decidePass) computePoolDesired() {
 	if standIns := p.inFlightStandIns(); len(standIns) > 0 {
 		rows = append(slices.Clip(p.decidable), standIns...)
 	}
-	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
+	var poolWorkStoreRefs []string
+	p.poolWork, poolWorkStoreRefs = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
 		rows, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, p.in.Now.UTC())
 	poolCfg := p.cfg
 	if len(p.in.SuspendedRigPaths) > 0 {
@@ -250,7 +251,7 @@ func (p *decidePass) computePoolDesired() {
 		}
 		poolCfg = &clone
 	}
-	p.poolStates = computePoolDesiredStatesAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, nil)
+	p.poolStates = computePoolDesiredStatesAt(poolCfg, p.poolWork, poolWorkStoreRefs, p.in.Demand.ReadyAssigned, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
 		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
