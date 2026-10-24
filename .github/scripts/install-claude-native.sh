@@ -60,6 +60,10 @@ case "${version}:${platform}" in
   2.1.123:darwin-x64) expected_sha="ddea227d4c2b2602d650d2c5d5c812f7680701a1504bcaff81e42c165c583ef9" ;;
   2.1.123:linux-arm64) expected_sha="825c526035d1d75ff0bc1eebf18c887f98d07ea49ea80bd312ff416fe61a39b3" ;;
   2.1.123:linux-x64) expected_sha="5a78139b679a86a88a0ac5476c706a64c3105bf6a6d435ba10f3aa3fb635bdb2" ;;
+  2.1.283:darwin-arm64) expected_sha="d8cb1e5c79684cc12a8bfc813e3a2073406921b6245744b3009be3ab5651d21e" ;;
+  2.1.283:darwin-x64) expected_sha="c896d2aee12ff4d95861033d9730d3d22dc19e4f32779134d3399ef3dfb0e77a" ;;
+  2.1.283:linux-arm64) expected_sha="346d294f0103d6fc0de11ac953579b5c62dfa90698a4cfc486b6f927c615e697" ;;
+  2.1.283:linux-x64) expected_sha="1859583ce32920595c61ef868bee52e1b1594f7486db209935e01f1e5e804ae2" ;;
 esac
 
 if [[ -z "$expected_sha" ]]; then

@@ -349,8 +349,11 @@ const (
 	expectedNightlyExecutionHash = "cb54a44e7bfc392a047849ab6cfe695dcbffec56e127b5a84d427e3c1d4bef8c"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
-	// `uses: ./.github/actions/go-mod-download`.
-	expectedSetupActionHash = "910f005f48c629c9bf76c69a007b60c4132a76859183e59c0fe99d642bf6141f"
+	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
+	// input default moves 2.1.123 -> 2.1.283 (Opus 5.5 needs >= 2.1.280);
+	// install-claude-native.sh pins its per-platform SHA-256s. No new step,
+	// input, permission or secret.
+	expectedSetupActionHash = "3446b4fc781027e4cbe18766ea10957afb2e3cfab5040239cc615dbe223fa8d0"
 )
 
 var requiredFilterPaths = map[string][]string{
