@@ -778,6 +778,17 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			},
 		},
 		{
+			name:        "city-stop reason is cleared",
+			state:       StateAsleep,
+			sleepReason: "city-stop",
+			want: MetadataPatch{
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
+			},
+		},
+		{
 			name:        "rate limit reason is cleared",
 			state:       StateAsleep,
 			sleepReason: "rate_limit",

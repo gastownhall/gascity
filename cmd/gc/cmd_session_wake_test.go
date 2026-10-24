@@ -57,6 +57,18 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			wantWakeRequest: "explicit",
 		},
 		{
+			name: "asleep city-stop requests start and clears hold",
+			metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": "city-stop",
+			},
+			wantState:       "asleep",
+			wantSleepReason: "",
+			wantPending:     "",
+			wantWakeRequest: "explicit",
+		},
+		{
 			name: "creating clears quarantine but stays creating",
 			metadata: map[string]string{
 				"template":          "worker",

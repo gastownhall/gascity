@@ -287,7 +287,8 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 
 // ClearWakeBlockersPatch is the lifecycle of clearing a dormant session's
 // blockers so the normal wake path may select it; the holds themselves are
-// the Wake (or Retire) cell's.
+// the Wake (or Retire) cell's. City-stop is one of those blockers: it is a
+// shutdown hold, and an explicit wake must release it.
 func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"wake_attempts":         "0",
@@ -301,7 +302,8 @@ func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) Meta
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonUserHold, SleepReasonWaitHold, SleepReasonQuarantine,
-		SleepReasonContextChurn, SleepReasonRateLimit, SleepReasonDrained:
+		SleepReasonContextChurn, SleepReasonRateLimit, SleepReasonDrained,
+		SleepReasonCityStop:
 		patch["sleep_reason"] = ""
 	}
 	return patch
