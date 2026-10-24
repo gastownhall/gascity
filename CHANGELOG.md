@@ -447,6 +447,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about shared servers and fails on a server in an agent's own `mcp/`
   directory that its provider cannot receive.
 
+- **An agent whose provider is not installed no longer stops the city when
+  MCP servers are in scope.** Every provider a city declares has an implicit
+  agent, and that agent inherits the city's MCP servers. When one declared
+  provider's binary was missing, such as one `gc init` wrote to `city.toml`
+  that was never installed, `gc start` and the supervisor failed the whole
+  city with `agent "codex": provider not found in PATH`. Stage 1 now skips
+  that agent with a warning and projects the rest of the city; the agent's
+  own session start still reports the missing provider.
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run
