@@ -20,6 +20,16 @@ const holdLabelExternalValue = "external"
 // the sole persisted routing key (ga-eld2x); a hold:<value> label with no
 // matching gc.routed_to has silently drifted from its intended route.
 // --fix backfills gc.routed_to from the label value.
+//
+// The comparison is binding-aware. A hold label carries the short,
+// binding-unqualified agent name (hold:mayor), while gc.routed_to on a PackV2
+// city holds the binding-qualified one (gastown.mayor) — the form
+// v2-routed-to-namespace requires and hook/sling queries match on. Comparing
+// the two raw strings makes the same bead unsatisfiable for both checks, and a
+// blanket --fix then rewrites it back and forth on every run. So a
+// gc.routed_to that resolves to the label's agent through this city's bindings
+// counts as a match, and Fix writes the canonical qualified form whenever the
+// label resolves to exactly one.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -59,11 +69,16 @@ type holdRouteTarget struct {
 	label  string
 	store  beads.Store
 	beadID string
-	want   string
-	got    string
+	// want is the hold label's own value, used in the report line.
+	want string
+	got  string
+	// write is the value Fix persists: the binding-qualified form of want
+	// when this city binds it unambiguously, otherwise want itself.
+	write string
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -99,10 +114,19 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 				continue
 			}
 			got := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
-			if got == want {
+			canonicals := aliases[want]
+			if got == want || containsString(canonicals, got) {
 				continue
 			}
-			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})
+			// Backfill the binding-qualified form when the label resolves to
+			// exactly one; an ambiguous label (several bound agents share the
+			// short name) falls back to the label value itself, which
+			// v2-routed-to-namespace likewise leaves for manual resolution.
+			write := want
+			if len(canonicals) == 1 {
+				write = canonicals[0]
+			}
+			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got, write: write})
 		}
 	}
 	return targets, skipped
@@ -134,7 +158,7 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
 	for _, tgt := range targets {
-		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
+		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.write); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
 	}
