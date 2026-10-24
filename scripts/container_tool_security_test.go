@@ -149,6 +149,33 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 }
 
+func TestDockerCityUsesCanonicalSecurityOverrides(t *testing.T) {
+	root := repoRoot(t)
+	dockerfile := readFile(t, root, "contrib/docker/Dockerfile")
+	requireArgsMatchGoMod(t, "contrib/docker/Dockerfile", dockerfile, readFile(t, root, "go.mod"),
+		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
+		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
+		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+	)
+	for _, dependency := range []struct{ module, arg string }{
+		{"google.golang.org/grpc", "GRPC_VERSION"},
+		{"github.com/apache/thrift", "THRIFT_VERSION"},
+		{"golang.org/x/net", "XNET_VERSION"},
+	} {
+		for _, want := range []string{
+			`go get "` + dependency.module + `@v${` + dependency.arg + `}"`,
+			`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep ` + dependency.module + ` v${` + dependency.arg + `} "`,
+		} {
+			if !strings.Contains(dockerfile, want) {
+				t.Errorf("contrib/docker/Dockerfile missing %q", want)
+			}
+		}
+	}
+	if !strings.Contains(dockerfile, "    openssh-client \\\n") {
+		t.Error("city image must install the SSH client for Git-over-SSH")
+	}
+}
+
 func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")

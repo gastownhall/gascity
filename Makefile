@@ -106,6 +106,7 @@ endif
 endif
 
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: docker-city test-docker-city
 .PHONY: check-release-dist-ignore
 .PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
 
@@ -1084,6 +1085,10 @@ test-openclaw-bridge:
 test-docker:
 	$(BAZEL_TEST) --config=integration --test_filter='^TestDockerSession' //test/containerhost:containerhost_test
 
+## test-docker-city: build the single-container city image and smoke it without credentials
+test-docker-city: docker-city bazel-tmpdir
+	$(BAZEL_TEST) //scripts:docker_city_smoke_test
+
 ## test-k8s: run the K8s session adapter against the emulated container host's pod API
 test-k8s:
 	$(BAZEL_TEST) --config=integration --test_filter='^TestK8sSession' //test/containerhost:containerhost_test
@@ -1257,6 +1262,17 @@ docker-controller: check-docker
 		echo "Loading gc-controller:latest into kind cluster '$$cluster'..."; \
 		kind load docker-image gc-controller:latest --name "$$cluster"; \
 	fi
+
+## docker-city: build the single-container city image for the current user (gc, bd, Dolt from docker-base, Claude Code, Codex)
+docker-city: export GC_VERSION := $(VERSION)
+docker-city: docker-base
+	docker build -f contrib/docker/Dockerfile \
+		--build-arg GC_VERSION \
+		--build-arg GC_COMMIT=$(COMMIT)$(DIRTY) \
+		--build-arg GC_DATE=$(BUILD_TIME) \
+		--build-arg UID=$$(id -u) \
+		--build-arg GID=$$(id -g) \
+		-t gascity:latest .
 
 ## k8s-secret: create K8s secret with Claude credentials
 ## Usage: make k8s-secret CLAUDE_CONFIG_SRC=~/.claude [GC_K8S_NAMESPACE=gc]

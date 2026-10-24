@@ -685,7 +685,7 @@ func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
 // rbe-west cannot run, allowing only the path-gated ones to skip.
 func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate"}
+	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate", "docker-city"}
 	for jobName, want := range map[string]struct {
 		name  string
 		needs []string
@@ -709,28 +709,29 @@ func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 		}
 		var allowsPathGatedSkips bool
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, `allow_skipped = {"credential-provider-windows", "pack-gate"}`) {
+			if strings.Contains(step.Run, `allow_skipped = {"credential-provider-windows", "pack-gate", "docker-city"}`) {
 				allowsPathGatedSkips = true
 			}
 		}
 		if !allowsPathGatedSkips {
-			t.Errorf("ci.yml %s must allow exactly the path-gated credential-provider-windows and pack-gate to skip", jobName)
+			t.Errorf("ci.yml %s must allow exactly the path-gated credential-provider-windows, pack-gate and docker-city to skip", jobName)
 		}
 	}
 }
 
-// TestCIWorkflowRunsNoBazelCoveredSuite: every build and test of this tree
-// runs under Bazel (bazel.yml's lanes, bazel-nightly.yml). ci.yml keeps
-// only the jobs rbe-west cannot run -- the Windows credential-provider
-// tests (no Windows workers) and the live upstream probes -- plus routing
-// and the two required fan-ins. A new job here needs a reason it cannot be
-// a Bazel target.
+// TestCIWorkflowRunsNoBazelCoveredSuite: Bazel (bazel.yml's lanes,
+// bazel-nightly.yml) owns the repository suites. ci.yml keeps only the jobs
+// rbe-west cannot run -- the Windows credential-provider tests (no Windows
+// workers), the real-Docker city smoke (needs a Docker daemon), and the live
+// upstream probes -- plus routing and the two required fan-ins. A new job
+// here needs a reason it cannot run in the Bazel lanes.
 func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	want := []string{
 		"runner-policy", "changes", // routing
 		"credential-provider-windows",                     // no Windows workers
 		"pack-gate", "mcp-mail", "contract-radar-bd-head", // live upstream probes
+		"docker-city",          // real image builds and container lifecycle need a Docker daemon
 		"check", "ci-required", // required fan-ins
 	}
 	got := slices.Sorted(maps.Keys(wf.Jobs))
