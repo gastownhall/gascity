@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -321,54 +323,75 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 	return nil
 }
 
-// mcpAdoptionRefusalWarned holds, per city and target, the refusal last
-// reported and the target's modification time and size then
-// (mcpRefusalWarning). A refusal is reported once, and again when its message
-// or the target changes (a work dir checked out afresh, say), or after it
-// cleared: clearMCPAdoptionRefusal forgets the target once gc writes it or
-// finds nothing in its way.
-var mcpAdoptionRefusalWarned sync.Map
+// mcpAdoptionRefusals remembers the refusals reported so far, so a refusal is
+// reported once, and again when it comes back:
+//
+//   - byTarget maps a city and target (mcpRefusalTargetKey) to each refusal
+//     message reported for it, with a hash of the target's content then
+//     (mcpTargetStamp). Agents that share a target are named in messages of
+//     their own, so keying on the message keeps them from evicting each
+//     other's entry.
+//   - A message is reported again when the target's content changes: a team
+//     edits the file, or a session's work dir is checked out with other
+//     content. The content, not the modification time, is what counts, so
+//     gc's own rewrites of the same bytes (overlay staging, for one) do not
+//     report it on every tick. A work dir checked out afresh with the same
+//     content is reported again only after a pass saw the file missing.
+//   - clearMCPAdoptionRefusal forgets every message for a target once gc
+//     writes it or finds nothing in its way, so a refusal that comes back
+//     after it cleared is reported again.
+var mcpAdoptionRefusals = struct {
+	sync.Mutex
+	byTarget map[string]map[string]string
+}{byTarget: map[string]map[string]string{}}
 
-type mcpRefusalWarning struct {
-	message string
-	stamp   string
-}
-
-func mcpRefusalKey(cityPath, target string) string {
+func mcpRefusalTargetKey(cityPath, target string) string {
 	return filepath.Clean(cityPath) + "\x00" + filepath.Clean(target)
 }
 
-// mcpTargetStamp identifies the target's current version by modification
-// time and size; "" when it cannot be read.
+// mcpTargetStamp identifies the target's current content by its SHA-256;
+// "" when it cannot be read.
 func mcpTargetStamp(fs fsys.FS, target string) string {
-	info, err := fs.Lstat(target)
+	data, err := fs.ReadFile(target)
 	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // warnMCPAdoptionRefused reports a target gc will not adopt: who starts
 // without which of gc's servers, why, and what to do about it. It reports a
-// refusal once until it changes or clears (mcpAdoptionRefusalWarned).
+// refusal once until the target's content changes or the refusal clears
+// (mcpAdoptionRefusals).
 func warnMCPAdoptionRefused(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, fs fsys.FS, stderr io.Writer) {
 	if stderr == nil {
 		return
 	}
 	message := describeMCPAdoptionRefused(agents, projection, refused)
-	key := mcpRefusalKey(cityPath, projection.Target)
-	seen := mcpRefusalWarning{message: message, stamp: mcpTargetStamp(fs, projection.Target)}
-	if previous, ok := mcpAdoptionRefusalWarned.Load(key); ok && previous.(mcpRefusalWarning) == seen {
+	key := mcpRefusalTargetKey(cityPath, projection.Target)
+	stamp := mcpTargetStamp(fs, projection.Target)
+	mcpAdoptionRefusals.Lock()
+	reported := mcpAdoptionRefusals.byTarget[key]
+	if previous, seen := reported[message]; seen && previous == stamp {
+		mcpAdoptionRefusals.Unlock()
 		return
 	}
-	mcpAdoptionRefusalWarned.Store(key, seen)
+	if reported == nil {
+		reported = make(map[string]string, 1)
+		mcpAdoptionRefusals.byTarget[key] = reported
+	}
+	reported[message] = stamp
+	mcpAdoptionRefusals.Unlock()
 	fmt.Fprintf(stderr, "gc: warning: %s\n", message) //nolint:errcheck // best-effort stderr
 }
 
-// clearMCPAdoptionRefusal forgets a target's reported refusal, so a refusal
-// that comes back is reported again.
+// clearMCPAdoptionRefusal forgets every refusal reported for a target, so a
+// refusal that comes back is reported again.
 func clearMCPAdoptionRefusal(cityPath, target string) {
-	mcpAdoptionRefusalWarned.Delete(mcpRefusalKey(cityPath, target))
+	mcpAdoptionRefusals.Lock()
+	delete(mcpAdoptionRefusals.byTarget, mcpRefusalTargetKey(cityPath, target))
+	mcpAdoptionRefusals.Unlock()
 }
 
 // warnStage2MCPAdoptionRefusal reports a stage-2 target the session's

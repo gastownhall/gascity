@@ -359,9 +359,12 @@ Adoption and migration rules:
   a pack the rig imports; only a file in one agent's own work dir can take
   that agent's `agents/<name>/mcp/` (see "Shared Target Validation"). It
   says so in:
-  - stage 1's warning, once until the refusal changes (its message, or the
-    file's modification time or size) or clears (gc writes the target, or
-    finds nothing in its way); then again
+  - stage 1's warning, once per agent and target until the target's content
+    changes or the refusal clears (gc writes the target, or finds nothing in
+    its way); then again. gc's own rewrites of the same bytes, such as
+    overlay staging, do not count as a change, and a work dir checked out
+    afresh with the same content is reported again only after a pass saw
+    the file missing
   - the stage-2 pre-start's warning (`gc internal project-mcp`, which still
     exits 0 so the session starts), and, since a runtime discards a
     successful pre-start's output, a warning from template resolution, on

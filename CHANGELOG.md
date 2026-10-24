@@ -38,8 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a checkout of a repository that commits its own `.mcp.json` (or another
     provider file with servers of its own) now start without gc's servers.
     The warning is in the controller log (`gc supervisor logs`) once gc
-    resolves a session whose work dir holds the file, and again whenever the
-    file comes back after it cleared or changes (a fresh checkout, say).
+    resolves a session whose work dir holds the file, once per agent, and
+    again when the file's content changes or the file comes back after gc
+    saw it gone.
     `gc mcp list --session <id>` shows it as "Not delivered". The session's
     own pre-start prints it too, but a runtime does not keep a successful
     pre-start's output.
@@ -483,18 +484,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and they silently stopped working. gc now leaves a file alone when
   adopting it would drop content it does not manage, as listed under
   Upgrading Notes. It warns which agents start without gc's servers there,
-  once until the refusal changes or clears; for a session's own work dir,
-  the warning comes from the controller, since a session's pre-start output
-  is not kept. A parse error names the line and column only, never the
-  file's text, which can hold a secret. `gc start --dry-run`,
-  `gc mcp list` ("Not delivered"), and the new `mcp-adoption` doctor check
-  show these files. The doctor check also lists files an earlier gc took
-  over while they held servers the catalog still does not define, and where
-  their definitions are saved. A provider MCP file that is a symlink, such
-  as a `.cursor/mcp.json` linked to `.mcp.json`, no longer fails the start
-  of a city whose agents use that provider, with or without MCP servers in
-  scope, and an empty Gemini, Cursor, OpenCode, or MiMo Code settings file
-  no longer fails projection.
+  once until the file's content changes or the refusal clears; for a
+  session's own work dir, the warning comes from the controller, since a
+  session's pre-start output is not kept. A parse error names the line and
+  column only, never the file's text, which can hold a secret.
+  `gc start --dry-run`, `gc mcp list` ("Not delivered"), and the new
+  `mcp-adoption` doctor check show these files. The doctor check also lists
+  files an earlier gc took over while they held servers the catalog still
+  does not define, and where their definitions are saved. A provider MCP
+  file that is a symlink, such as a `.cursor/mcp.json` linked to
+  `.mcp.json`, no longer fails the start of a city whose agents use that
+  provider, with or without MCP servers in scope, and an empty Gemini,
+  Cursor, OpenCode, or MiMo Code settings file no longer fails projection.
 
 - **`gc start --dry-run` no longer rewrites MCP config, skill links, or
   `.gitignore` in the city and its rigs.** The preview ran the stage-1

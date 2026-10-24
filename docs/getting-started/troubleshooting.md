@@ -469,7 +469,8 @@ gc's. To see where this applies:
 - The supervisor log shows the warning when the city starts, and when gc
   next resolves an agent whose own work dir holds such a file, such as a
   session's checkout of a repository that commits its own `.mcp.json`. It
-  shows it once, and again if the file changes or comes back.
+  shows it once per agent, and again if the file's content changes or the
+  file comes back after gc saw it gone.
 
 gc also leaves alone a file it cannot read or parse, and a symlinked one.
 

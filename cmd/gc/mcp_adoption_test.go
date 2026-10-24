@@ -95,9 +95,10 @@ command = "team-db-mcp"
 	}
 }
 
-// A refusal is reported once, and again when it comes back: after the file
-// changes (a work dir checked out afresh rewrites it), and after it cleared
-// (gc adopted the file, then the user handed it back).
+// A refusal is reported once, and again when it comes back: after the file's
+// content changes, and after it cleared (gc adopted the file, then the user
+// handed it back). Rewriting the same bytes, as gc's overlay staging does on
+// every tick, is not a change.
 func TestRunStage1MCPProjectionWarnsAgainWhenARefusalComesBack(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityPath, ".mcp.json"), []byte(teamMCPJSON), 0o644); err != nil {
@@ -128,11 +129,24 @@ command = "uvx"
 	pass("unchanged", false)
 
 	later := time.Now().Add(time.Hour)
+	if err := os.WriteFile(target, []byte(teamMCPJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chtimes(target, later, later); err != nil {
 		t.Fatal(err)
 	}
-	pass("file rewritten", true)
+	pass("same bytes rewritten", false)
+
+	// The team changes its own server: the same refusal, other content.
+	if err := os.WriteFile(target, []byte(`{"mcpServers":{"team-db":{"command":"team-db-mcp","args":["--v2"]}}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pass("file edited", true)
 	pass("unchanged again", false)
+	if err := os.WriteFile(target, []byte(teamMCPJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pass("edit reverted", true)
 
 	// The catalog takes the team server over; gc adopts the file.
 	writeMCPSource(t, filepath.Join(cityPath, "mcp", "team-db.toml"), `
@@ -152,6 +166,118 @@ command = "team-db-mcp"
 		t.Fatal(err)
 	}
 	pass("handed back", true)
+}
+
+// Agents may share a stage-2 work dir when they project the same servers.
+// Each is named in a refusal message of its own, and neither message evicts
+// the other, so each is reported once, however many ticks resolve them.
+func TestStage2MCPRefusalWarningsStayBoundedForAgentsSharingAWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	var stderr bytes.Buffer
+	params := stage2RefusalTestParams(t, cityPath, &stderr)
+	workDir := filepath.Join(cityPath, ".gc", "worktrees", "shared")
+	writeTeamGeminiSettings(t, workDir)
+	agents := []*config.Agent{
+		{Name: "worker", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/shared"},
+		{Name: "helper", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/shared"},
+	}
+	for tick := 0; tick < 4; tick++ {
+		for _, agent := range agents {
+			if _, err := resolveTemplate(params, agent, agent.QualifiedName(), nil); err != nil {
+				t.Fatalf("tick %d: resolveTemplate(%s): %v", tick, agent.Name, err)
+			}
+		}
+	}
+	for _, name := range []string{"worker", "helper"} {
+		want := `gc: warning: agent "` + name + `" starts without gc's MCP server "notes": not adopting `
+		if got := strings.Count(stderr.String(), want); got != 1 {
+			t.Fatalf("agent %s warned %d times over 4 ticks, want once:\n%s", name, got, stderr.String())
+		}
+	}
+}
+
+// A pack overlay that ships a provider file the hook installer does not own
+// (here .gemini/settings.json) is merged into the work dir's file on every
+// tick, rewriting the same bytes once merged. gc's own rewrite is not a
+// change: the refusal is reported once.
+func TestStage2MCPRefusalWarningsIgnoreGCsOwnRewrites(t *testing.T) {
+	cityPath := t.TempDir()
+	var stderr bytes.Buffer
+	params := stage2RefusalTestParams(t, cityPath, &stderr)
+	overlayDir := filepath.Join(cityPath, "packs", "ui", "overlay")
+	if err := os.MkdirAll(filepath.Join(overlayDir, ".gemini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, ".gemini", "settings.json"), []byte(`{"ui":{"hideBanner":true}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	params.packOverlayDirs = []string{overlayDir}
+	workDir := filepath.Join(cityPath, ".gc", "worktrees", "worker-1")
+	writeTeamGeminiSettings(t, workDir)
+	target := filepath.Join(workDir, ".gemini", "settings.json")
+	agent := &config.Agent{Name: "worker", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/worker-1"}
+	old := time.Unix(1_000_000, 0)
+	for tick := 0; tick < 4; tick++ {
+		// Backdate the file, so the tick's rewrite shows in its mtime.
+		if err := os.Chtimes(target, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveTemplatePrepared(params, agent, agent.QualifiedName(), nil); err != nil {
+			t.Fatalf("tick %d: resolveTemplatePrepared: %v", tick, err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.ModTime().Equal(old) {
+			t.Fatalf("tick %d: overlay staging did not rewrite %s; the test no longer covers gc's own rewrite", tick, target)
+		}
+	}
+	want := `gc: warning: agent "worker" starts without gc's MCP server "notes": not adopting ` + target
+	if got := strings.Count(stderr.String(), want); got != 1 {
+		t.Fatalf("warned %d times over 4 ticks of overlay rewrites, want once:\n%s", got, stderr.String())
+	}
+}
+
+// stage2RefusalTestParams returns build params for a gemini city whose
+// catalog has one server, writing its warnings to stderr.
+func stage2RefusalTestParams(t *testing.T, cityPath string, stderr *bytes.Buffer) *agentBuildParams {
+	t.Helper()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+	cityCfg := &config.City{
+		Workspace:  config.Workspace{Provider: "gemini"},
+		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+	}
+	return &agentBuildParams{
+		city:            cityCfg,
+		cityName:        "city",
+		cityPath:        cityPath,
+		workspace:       &cityCfg.Workspace,
+		providers:       cityCfg.Providers,
+		lookPath:        stubLookPath,
+		fs:              fsys.OSFS{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          stderr,
+		sessionProvider: "tmux",
+	}
+}
+
+// writeTeamGeminiSettings writes a work dir's own .gemini/settings.json
+// holding a server of the team's, which gc does not manage.
+func writeTeamGeminiSettings(t *testing.T, workDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(workDir, ".gemini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	team := `{"theme":"dark","mcpServers":{"team-db":{"command":"team-db-mcp"}}}`
+	if err := os.WriteFile(filepath.Join(workDir, ".gemini", "settings.json"), []byte(team), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // gc's .gitignore entries cover the files it projects and no others: at a
