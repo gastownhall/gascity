@@ -181,6 +181,7 @@ go_test(
         "init_lifecycle_test.go",
         "integration_selfhost_ux_test.go",
         "mcp_adoption_test.go",
+        "mcp_capability_test.go",
         "migration_regression_test.go",
         "nudge_service_test.go",
         "order_commands_test.go",
