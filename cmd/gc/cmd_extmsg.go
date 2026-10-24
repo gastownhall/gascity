@@ -107,7 +107,9 @@ func extMsgClient(verb string, stderr io.Writer) (*api.Client, string, bool) {
 		fmt.Fprintf(stderr, "gc extmsg %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return nil, "", false
 	}
-	c := apiClient(cityPath)
+	// Conversation bindings have no local fallback, so use the supervisor
+	// fall-through route for managed cities without a standalone [api] port.
+	c, _ := supervisorFallthroughAPIClient(cityPath)
 	if c == nil {
 		fmt.Fprintf(stderr, "gc extmsg %s: requires the city API server (no local fallback for conversation bindings)\n", verb) //nolint:errcheck // best-effort stderr
 		return nil, "", false
