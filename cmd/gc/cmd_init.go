@@ -1687,8 +1687,13 @@ func initFromSkip(relPath string, isDir bool) bool {
 	// the destination. Copying it from a template can carry stale process,
 	// endpoint, and database identity across cities, so the complete .beads
 	// tree is always excluded from --from copies.
-	if top == ".gc" || top == ".beads" {
+	if top == ".gc" {
 		return true
+	}
+	for _, component := range strings.Split(relPath, string(filepath.Separator)) {
+		if component == ".beads" {
+			return true
+		}
 	}
 	if !isDir && strings.HasSuffix(filepath.Base(relPath), "_test.go") {
 		return true
