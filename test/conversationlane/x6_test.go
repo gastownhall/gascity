@@ -35,25 +35,27 @@ var x6Principals = []string{"gc:x6-p0", "gc:x6-p1", "gc:x6-p2", "gc:x6-p3", "gc:
 // link wait (opjournal.DefaultLinkWait), the runtime's next boundary (the
 // 3 s quiescence after the delivery) and the next pass, which the next ring
 // starts within 50 ms of the boundary: measured p99 3.3-3.5 s (max 3.7 s)
-// with the phase alone on its host, which is why the phases run
-// sequentially and the package runs X6 before its parallel tests.
+// with the phase alone in its process, which is why the phases run
+// sequentially and X6 runs before its process's parallel tests (Bazel may
+// still run other actions beside it on the same host).
 const (
 	x6SteadyP99 = 5 * time.Second
 	x6SteadyMax = 7 * time.Second
 )
 
-// x6DrainOver bounds the stream's last injection, which no ring serves: its
-// notices arrive after the previous Take, while the runtime is busy, and
-// the producers have stopped by its boundary. The lane host then finds the
-// boundary on doorbells that are not timed to it: its busy re-probe,
-// laneBusyFirst (2 s, DES-O1 §4.3) after the last ring and every 2 s after
-// that, the anti-entropy scan, a ledger-feed poke. So the last injection
-// lands up to one re-probe period after the boundary, by where the stream
-// ended within the cycle, which a cycle that load stretches moves. On
-// rbe-west (2026-10-24, three runs per length) its notices waited at most
-// 0.2 s longer than the rest's longest wait at 380, 390, 395 and 400
-// notices, and 1.7-1.9 s longer at 385, in every run. They may wait one
-// re-probe period, plus a second for that pass, longer than the rest.
+// x6DrainOver bounds the stream's last injection. Its notices arrive after
+// the previous Take, while the runtime is busy, and the producers usually
+// stop before its boundary comes: then no ring serves it, and the lane host
+// finds the boundary on doorbells not timed to it (its busy re-probe,
+// laneBusyFirst = 2 s, DES-O1 §4.3, after the last ring and every 2 s after
+// that; the anti-entropy scan; a ledger-feed poke). So it lands up to one
+// re-probe period after the boundary, by where the stream ended within the
+// cycle, which host speed moves. On rbe-west (2026-10-24, 3-4 runs at each
+// of 380-400 notices) its notices waited 0-0.2 s or 1.7-1.9 s longer than
+// the rest's longest wait, in about half the runs each. They may wait one
+// re-probe period, plus a second for that pass, longer than the rest; with
+// the rest at x6SteadyMax that allows up to 10 s. A re-probe timed to the
+// predicted boundary (ga-ylpbsy.51.6) would let the p99 cover them again.
 const x6DrainOver = 2*time.Second + time.Second
 
 // x6MinGap is the least spacing of two injections: the quiescence window,
