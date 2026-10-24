@@ -214,7 +214,14 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	if strings.TrimSpace(info.MetadataState) == string(session.StateDraining) {
 		return false
 	}
-	if info.MetadataState == "asleep" {
+	// A restart handoff (restartHandoff) parks the row asleep with its
+	// continuation reset committed so the next wake starts a fresh
+	// conversation: it is neither a crash nor a sleep, and the awake set's
+	// reset-pending arm exists to wake exactly this row. That arm only sees
+	// rows in the desired set, so a pool row must be reused here or nothing
+	// wants it back and it holds the pool's runtime name until the session
+	// sweep closes it.
+	if info.MetadataState == "asleep" && !restartHandedOffInfo(info) {
 		// A one_shot pool's own exit is expected completion, not a crash to
 		// avoid resuming: nothing closes its bead (the reconciler does not
 		// actually implement the "closes orphaned asleep beads" behavior this
@@ -263,6 +270,17 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	return resolvedSessionTemplateInfo(info, reuseTemplateConfig(bp)) == template
+}
+
+// restartHandedOffInfo reports whether an asleep row is a restart handoff
+// still waiting for its fresh start: the committed reset marker
+// (reset_committed_at, written only by RestartRequestPatch) with no sleep
+// reason stamped since.
+func restartHandedOffInfo(info session.Info) bool {
+	if _, _, pending := resetPendingCommittedAtInfo(info); !pending {
+		return false
+	}
+	return strings.TrimSpace(info.SleepReason) == ""
 }
 
 // reusablePoolSessionInfos is the session.Info sibling of reusablePoolSessionBeads.
