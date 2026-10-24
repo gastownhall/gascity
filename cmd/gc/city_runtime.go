@@ -3013,6 +3013,19 @@ func (cr *CityRuntime) reloadConfigTraced(
 		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
 	}
 
+	// Stage-1 MCP projection runs here for the same reason: it otherwise
+	// runs only when a city starts, so an MCP server added or changed by a
+	// live reload changed the agents' fingerprints (draining them) while
+	// their scope-root config kept the old servers, and an agent stage 1
+	// had skipped never got its config once fixed. It runs before this
+	// tick's reconcile restarts drifted sessions, so they start against the
+	// new config. A failure (a target conflict, a write error) leaves the
+	// targets it did not reach as they were and warns; it does not refuse
+	// the reload.
+	if err := runStage1MCPProjection(cr.cityPath, nextCfg, exec.LookPath, cr.stderr); err != nil {
+		appendWarning(fmt.Sprintf("MCP projection: %v", err))
+	}
+
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
 		shortRev(result.Revision))

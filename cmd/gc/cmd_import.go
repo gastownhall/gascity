@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/importsvc"
-	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
@@ -662,6 +661,7 @@ func importSvcDeps() importsvc.Deps {
 
 //nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
+	mcpBefore, mcpBeforeErr := loadMCPCapabilityReport(cityPath)
 	res, err := importsvc.AddImportWith(fs, cityPath, source, nameOverride, versionFlag, importSvcDeps())
 	if err != nil {
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
@@ -672,31 +672,47 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stdout, "Locked to registry release %s\n", res.RegistryRelease) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
-	warnImportMCPCapability(cityPath, res.Name, stderr)
+	warnImportMCPCapability(cityPath, mcpBefore, mcpBeforeErr, stderr)
 	return 0
 }
 
-// warnImportMCPCapability reports, right after gc import add, the agents that
-// will start without MCP servers the new import provides because their
-// provider cannot receive them, and the import's own agents whose mcp/
-// directory declares servers their provider cannot receive. It is advisory:
-// when the import root is not a city or its config does not load, it says
-// nothing and the add still succeeds.
-func warnImportMCPCapability(cityPath, binding string, stderr io.Writer) {
+// errImportRootNotCity marks an import root that is a pack, not a city: it
+// has no agents to check MCP servers against.
+var errImportRootNotCity = errors.New("import root is not a city")
+
+// loadMCPCapabilityReport checks the city's MCP servers against what its
+// agents' providers can receive (collectMCPCapabilityReport).
+func loadMCPCapabilityReport(cityPath string) (mcpCapabilityReport, error) {
 	if !citylayout.HasCityConfig(cityPath) {
-		return
+		return mcpCapabilityReport{}, errImportRootNotCity
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
+		return mcpCapabilityReport{}, err
+	}
+	return collectMCPCapabilityReport(cityPath, cfg), nil
+}
+
+// warnImportMCPCapability reports, right after gc import add, what the new
+// import changed for the city's agents: agents that will start without MCP
+// servers it provides because their provider cannot receive them, and agents
+// it keeps from starting. It compares the city before and after the add, so
+// whichever import a server is attributed to, only the new import's effect is
+// reported. It is advisory: the add has already succeeded.
+func warnImportMCPCapability(cityPath string, before mcpCapabilityReport, beforeErr error, stderr io.Writer) {
+	if errors.Is(beforeErr, errImportRootNotCity) {
 		return
 	}
-	fromImport := func(server materialize.MCPServer) bool {
-		layer, name, ok := strings.Cut(server.Origin, ":")
-		return ok && name == binding && (layer == "import" || layer == "rig-import")
+	after, err := loadMCPCapabilityReport(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import add: note: could not check the city's MCP servers against its agents: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
 	}
-	ofImport := func(agent *config.Agent) bool { return agent.BindingName == binding }
-	warnings, errs := mcpCapabilityFindings(cityPath, cfg, fromImport, ofImport)
-	for _, line := range append(warnings, errs...) {
+	if beforeErr != nil {
+		// No baseline: report everything the city's agents now miss.
+		before = mcpCapabilityReport{}
+	}
+	for _, line := range after.since(before).lines() {
 		fmt.Fprintf(stderr, "gc import add: warning: %s\n", line) //nolint:errcheck // best-effort stderr
 	}
 }

@@ -515,7 +515,8 @@ leaves it alone. Deleting the snapshots clears the report.
 
 ## An Agent Starts Without an MCP Server
 
-`gc start` or the supervisor log prints a warning like this one:
+The supervisor log (`gc supervisor logs`) shows a warning like this one when
+the city starts or reloads its config; `gc start --dry-run` prints it too:
 
 ```text
 gc: warning: agent "editor" starts without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
@@ -532,6 +533,9 @@ agent without it. Every other agent starts as usual.
 | `cursor` | stdio servers only |
 | any other provider, such as `copilot` | no MCP servers |
 
+Agents whose sessions use ACP receive every server through the protocol
+itself, whatever their provider family.
+
 `gc mcp list --agent <name>` lists the skipped servers under **Not
 projected**. `gc doctor`, `gc config show --validate`, and `gc import add`
 report the same warning, so you can see it before the city starts.
@@ -541,8 +545,7 @@ switch the agent to a provider that can receive it.
 
 A server in an agent's own `agents/<name>/mcp/` directory is meant for that
 agent alone. If the agent's provider cannot receive it, that agent does not
-start and its session start reports why; the rest of the city still starts,
-and `gc config show --validate` reports it as an error.
+start, and the warning says `cannot start`; the rest of the city still starts.
 
 ## `gc version` Prints Unexpected Output
 

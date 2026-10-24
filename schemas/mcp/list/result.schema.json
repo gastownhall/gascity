@@ -218,6 +218,12 @@
           "command": {
             "type": "string"
           },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "url": {
             "type": "string"
           },
@@ -229,6 +235,18 @@
           },
           "origin": {
             "type": "string"
+          },
+          "env_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "header_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "reason": {
             "type": "string"

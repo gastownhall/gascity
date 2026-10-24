@@ -680,7 +680,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	// Shared-layer servers the provider cannot receive are left out of
 	// mcpCatalog and mcpProjection (the agent starts without them; stage 1
-	// warns), while agent-local ones fail this agent's start.
+	// warns), while agent-local ones fail this agent's start. An ACP session
+	// receives every server in-band (session/new), whatever its harness's
+	// file projection can carry.
+	mcpInBand := sessionTransport == config.SessionTransportACP
 	mcp, err := resolveAgentMCPProjection(
 		p.cityPath,
 		mcpCity,
@@ -688,6 +691,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		qualifiedName,
 		workDir,
 		resolvedProviderLaunchFamily(resolved),
+		mcpInBand,
 	)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
@@ -701,7 +705,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			qualifiedName, resolvedServers,
 		)
 	}
-	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
+	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
 		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
 		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
@@ -712,6 +716,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
 				warnStage2MCPAdoptionRefusal(p.cityPath, qualifiedName, mcpProjection, p.fs, p.stderr)
 			}
+		case mcpInBand:
+			// No file reaches this session; session/new carries the servers.
 		default:
 			return TemplateParams{}, fmt.Errorf(
 				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
@@ -720,7 +726,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == config.SessionTransportACP {
+	if mcpInBand {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
 

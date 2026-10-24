@@ -137,14 +137,17 @@ type projectedMCPJSON struct {
 }
 
 type projectedMCPSkippedJSON struct {
-	Name      string `json:"name"`
-	Transport string `json:"transport"`
-	Command   string `json:"command,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Source    string `json:"source"`
-	Layer     string `json:"layer,omitempty"`
-	Origin    string `json:"origin,omitempty"`
-	Reason    string `json:"reason"`
+	Name       string   `json:"name"`
+	Transport  string   `json:"transport"`
+	Command    string   `json:"command,omitempty"`
+	Args       []string `json:"args,omitempty"`
+	URL        string   `json:"url,omitempty"`
+	Source     string   `json:"source"`
+	Layer      string   `json:"layer,omitempty"`
+	Origin     string   `json:"origin,omitempty"`
+	EnvKeys    []string `json:"env_keys,omitempty"`
+	HeaderKeys []string `json:"header_keys,omitempty"`
+	Reason     string   `json:"reason"`
 }
 
 type projectedMCPQueryJSON struct {
@@ -244,14 +247,17 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 	var skipped []projectedMCPSkippedJSON
 	for _, skip := range view.Skipped {
 		skipped = append(skipped, projectedMCPSkippedJSON{
-			Name:      skip.Server.Name,
-			Transport: string(skip.Server.Transport),
-			Command:   skip.Server.Command,
-			URL:       skip.Server.URL,
-			Source:    displayMCPSourcePath(cityPath, skip.Server.SourceFile),
-			Layer:     skip.Server.Layer,
-			Origin:    skip.Server.Origin,
-			Reason:    skip.Reason,
+			Name:       skip.Server.Name,
+			Transport:  string(skip.Server.Transport),
+			Command:    skip.Server.Command,
+			Args:       append([]string(nil), skip.Server.Args...),
+			URL:        skip.Server.URL,
+			Source:     displayMCPSourcePath(cityPath, skip.Server.SourceFile),
+			Layer:      skip.Server.Layer,
+			Origin:     skip.Server.Origin,
+			EnvKeys:    sortedMCPKeys(skip.Server.Env),
+			HeaderKeys: sortedMCPKeys(skip.Server.Headers),
+			Reason:     skip.Reason,
 		})
 	}
 	var notAdopted *projectedMCPNotAdoptedJSON
