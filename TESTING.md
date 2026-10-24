@@ -229,12 +229,23 @@ op they parked or fault, and the variable is in the GC_* env-read inventory
 and in `internal/testenv.LeakVectorVars`.
 
 The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
-15-minute waits) in `conversationlane_test`. The full evidence runs in four
-manual variants, a matrix part and a load part per backend: the matrix part
-runs every kill-matrix cell at production timing, waits out each op's
-`finish_by` and, on embedded Dolt, runs the incapable-store arm; the load
-part runs the fault-free load (six rounds on SQLite, three on embedded
-Dolt). Each writes
+15-minute waits, and `TestBdDoltArmProvisionsAndRecords`, which keeps the
+bd-dolt arm's provisioning and recording in the gating run) in
+`conversationlane_test`. The full evidence runs in four manual variants, a
+matrix part and a load part on two backends each. The matrix part, the crash
+arms, runs on SQLite and embedded Dolt: every kill-matrix cell at production
+timing, waiting out each op's `finish_by`, and, on embedded Dolt, the
+incapable-store arm. The load part runs the six-round fault-free load on
+SQLite and on `bd-dolt`, requires every well-formed request to succeed and
+the load to finish within its 90-minute budget, and reports its latency per
+backend and its op-row growth. `bd-dolt` is a workspace the pinned bd's
+`bd init --server` provisioned on a `dolt sql-server` the harness runs
+(automatic GC off, so its growth is what the city wrote), served natively
+through a `beads-workspace` binding: bd runs only to provision it. That is
+the store a city bound directly to a Dolt server gets, not the default
+topology, whose sessions are served through BdStore; with the pinned bd,
+which lacks `--if-revision`, a BdStore makes no conditional writes and
+records no ops (ga-ve3tjw). Each writes
 `x12-report-<backend>-<part>.{json,md}` to the test's undeclared outputs.
 A part takes from 30 minutes to well over an hour, past the remote
 executor's action timeout, so run them locally:
@@ -242,14 +253,20 @@ executor's action timeout, so run them locally:
 ```bash
 bazel test --config=ci --config=integration --strategy=TestRunner=local \
   --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
-  //test/conversationlane:x12_evidence
+  //test/conversationlane:x12_evidence_matrix
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --local_test_jobs=1 \
+  --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+  //test/conversationlane:x12_evidence_load
 ```
 
 `GC_X12_SOURCE` names the source revision in the report; the test-hooks gc
 is not stamped.
 
-Add `--local_test_jobs=1` when the load's latency (R2) should be measured
-with nothing running beside it.
+The load parts run one at a time (`--local_test_jobs=1`): their latency (R2)
+is measured with nothing beside them, and the budget was set from a bd-dolt
+load that ran alone (1h2m14s; the first run, at 1h3m10s, broke the earlier
+50-minute budget). Beside the matrix parts a load can run past it.
 
 ### Git auto-maintenance in test repos
 

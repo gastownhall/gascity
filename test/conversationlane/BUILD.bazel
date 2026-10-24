@@ -18,6 +18,8 @@ go_test(
     name = "conversationlane_test",
     size = "large",
     srcs = [
+        "bddolt_gating_test.go",
+        "harness_bddolt_test.go",
         "harness_test.go",
         "inline_pass_test.go",
         "main_test.go",
@@ -32,15 +34,21 @@ go_test(
         "x6_test.go",
         "x8_test.go",
     ],
+    # The pinned bd and dolt are the bd-dolt arm's (harness_bddolt_test.go):
+    # the releases the integration fixtures run.
     data = select({
         "//:gotags_integration": [
             "//cmd/gc:gc_testhooks",
             "//test/conversationlane/fakeruntime",
+            "@bd_bin_v1_3_1//:bd",
+            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
     env = select({
         "//:gotags_integration": {
+            "GC_LANE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
+            "GC_LANE_DOLT_BIN": "$(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
             "GC_LANE_FAKE_RUNTIME": "$(rootpath //test/conversationlane/fakeruntime)",
             "GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
         },
@@ -56,32 +64,55 @@ go_test(
         "//internal/pathutil",
         "//internal/storebinding/sqlite",
         "//internal/testenv",
+        "//internal/testutil",
+        "//test/toolhome",
+        "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
 
-# X12's evidence (DES-O0API §15 OJ-8, G-X12), per backend in two parts: the
-# matrix part runs every kill-matrix cell at production timing and waits out
-# each op's finish_by (P1-P3, P5) and, on Dolt, the incapable-store arm; the
-# load part runs the fault-free load, six rounds on SQLite and three on
-# embedded Dolt (P4, R1-R3). Each writes
+# X12's evidence (DES-O0API §15 OJ-8, G-X12) in two parts: the matrix part
+# runs every kill-matrix cell at production timing and waits out each op's
+# finish_by (P1-P3, P5) and, on embedded Dolt, the incapable-store arm; the
+# load part runs the six-round fault-free load (P4, R1-R3, every well-formed
+# request succeeding) within its 90-minute budget. The crash arms run on
+# SQLite and embedded Dolt; the load runs on SQLite and on bd-dolt
+# (x12PartArms; the maintainers' 2026-10-23 ruling on #8217): a workspace
+# the pinned bd provisioned on a dolt sql-server, served natively, the store
+# a direct-server city gets. It is not the default real-city topology, whose
+# sessions are served through BdStore and record no ops with the pinned bd
+# (harness_bddolt_test.go, ga-ve3tjw). Each writes
 # x12-report-<backend>-<part>.{json,md} to its undeclared outputs. Manual,
 # outside the integration lane's suite, and local (tagged so: a part runs
-# from 30 minutes on SQLite to well over an hour on embedded Dolt, past the
-# remote executor's 1200 s action cap). Every variant also selects
+# from 30 minutes to well over an hour, past the remote executor's 1200 s
+# action cap). conversationlane_test's TestBdDoltArmProvisionsAndRecords
+# keeps the bd-dolt arm in the gating run. Every variant also selects
 # TestX12EvidenceNeedsTheIntegrationBuild, which fails a run built without
-# --config=integration instead of letting it pass with no test. Run with
+# --config=integration instead of letting it pass with no test. Run the
+# matrix parts together and the load parts one at a time (their R2 latency
+# and their budget are measured with nothing beside them):
 #
 #   bazel test --config=ci --config=integration --strategy=TestRunner=local \
 #     --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
-#     //test/conversationlane:x12_evidence
+#     //test/conversationlane:x12_evidence_matrix
+#   bazel test --config=ci --config=integration --strategy=TestRunner=local \
+#     --local_test_jobs=1 \
+#     --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+#     //test/conversationlane:x12_evidence_load
 #
 # (GC_X12_SOURCE names the source revision in the report: the test-hooks gc
 # is not stamped.)
-# and add --local_test_jobs=1 for R2 latency measured with nothing beside it.
+_X12_PARTS = {
+    "load": "^TestX12(FaultFreeLoad|EvidenceNeedsTheIntegrationBuild)$$",
+    "matrix": "^TestX12(KillMatrix|IncapableStore|EvidenceNeedsTheIntegrationBuild)$$",
+}
+
 [go_variant_test(
-    name = "x12_evidence_%s_%s_test" % (backend, part),
+    name = "x12_evidence_%s_%s_test" % (
+        backend.replace("-", "_"),
+        part,
+    ),
     size = "enormous",
-    args = ["-test.run=" + run],
+    args = ["-test.run=" + _X12_PARTS[part]],
     env = {
         "GC_X12_BACKEND": backend,
         "GC_X12_EVIDENCE": "1",
@@ -93,22 +124,37 @@ go_test(
         "no-remote",
     ],
     test = ":conversationlane_test",
-) for backend in [
-    "sqlite",
-    "dolt",
-] for part, run in [
-    ("matrix", "^TestX12(KillMatrix|IncapableStore|EvidenceNeedsTheIntegrationBuild)$$"),
-    ("load", "^TestX12(FaultFreeLoad|EvidenceNeedsTheIntegrationBuild)$$"),
+) for backend, part in [
+    ("sqlite", "matrix"),
+    ("dolt", "matrix"),
+    ("sqlite", "load"),
+    ("bd-dolt", "load"),
 ]]
+
+test_suite(
+    name = "x12_evidence_matrix",
+    tags = ["manual"],
+    tests = [
+        ":x12_evidence_dolt_matrix_test",
+        ":x12_evidence_sqlite_matrix_test",
+    ],
+)
+
+test_suite(
+    name = "x12_evidence_load",
+    tags = ["manual"],
+    tests = [
+        ":x12_evidence_bd_dolt_load_test",
+        ":x12_evidence_sqlite_load_test",
+    ],
+)
 
 test_suite(
     name = "x12_evidence",
     tags = ["manual"],
     tests = [
-        ":x12_evidence_dolt_load_test",
-        ":x12_evidence_dolt_matrix_test",
-        ":x12_evidence_sqlite_load_test",
-        ":x12_evidence_sqlite_matrix_test",
+        ":x12_evidence_load",
+        ":x12_evidence_matrix",
     ],
 )
 

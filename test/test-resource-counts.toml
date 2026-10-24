@@ -3013,6 +3013,24 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "test/conversationlane/bddolt_gating_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_bddolt_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_bddolt_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "test/conversationlane/harness_test.go"
 resource = "fixed_sleep"
 calls = 2

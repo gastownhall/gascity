@@ -229,7 +229,7 @@ func x12EvidenceCells() [][]x12CellSpec {
 
 func TestX12KillMatrix(t *testing.T) {
 	t.Parallel() // after the load, which measures latency alone
-	arm := x12Backend(t)
+	arm := x12Backend(t, x12PartMatrix)
 	baselines := x12Baselines(t)
 	groups := x12GatingCells()
 	tier := "gating"
@@ -501,9 +501,13 @@ func (c *x12City) checkOriginalAnswer(cell *x12Cell) {
 		// gc session submit through an API that dies. At K1, before it
 		// answers, the local fallback finds the API's op open and exits 0
 		// "accepted" without delivering: only a --key rerun or the sweeper
-		// settles the op. That is pinned as it is; the risk it carries is
-		// ga-qd9p6v item 3(a). At K2 the CLI holds the 202 and loses the
-		// outcome stream it waits on: it exits 1 naming the key to rerun with.
+		// settles the op. That is today's behaviour, pinned as it is by the
+		// maintainers' 2026-10-23 ruling; the risk it carries is ga-qd9p6v
+		// item 3(a), and ga-hap9c0 is the follow-up that makes the CLI exit
+		// non-zero and print the --key to retry with when it cannot confirm
+		// the API took the op (that change flips this case). At K2 the CLI
+		// holds the 202 and loses the outcome stream it waits on: it exits 1
+		// naming the key to rerun with.
 		switch {
 		case point == "k1" && (!cell.orig.ok() || cell.orig.outcome != "accepted" || cell.orig.opID != cell.opID):
 			cell.fail("P2", "k1: the CLI answered %s (outcome %q, op %q), want exit 0 \"accepted\" naming op %s", cell.orig, cell.orig.outcome, cell.orig.opID, cell.opID)
