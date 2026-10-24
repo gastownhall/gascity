@@ -125,6 +125,45 @@ command = "uvx"
 	}
 }
 
+// TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent covers
+// gastownhall/gascity#8267: a city-scoped agent with its own
+// agents/<name>/mcp/ catalog conflicts with its provider's auto-injected
+// implicit agent (no agent-local catalog of its own) at the same scope
+// root. The error should name the agent-local mcp/ directory as the
+// cause and suggest the two documented workarounds, not just report two
+// opaque hashes.
+func TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+	writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+
+	cfg := &config.City{
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: builtinProviderAliasesForTest("claude"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+			{Name: "claude", Scope: "city", Provider: "claude", Implicit: true},
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil {
+		t.Fatal("expected MCP target conflict, got nil")
+	}
+	if !strings.Contains(err.Error(), "MCP target conflict") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "agent-local MCP catalog") {
+		t.Fatalf("error = %v, want it to name the agent-local MCP catalog as the cause", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Dir(agentLocal)) {
+		t.Fatalf("error = %v, want it to name %q", err, filepath.Dir(agentLocal))
+	}
+}
+
 func TestRunStage1MCPProjectionPropagatesManagedDirReadErrors(t *testing.T) {
 	// Permission / corruption errors reading .gc/mcp-managed/ must
 	// surface rather than be silently treated as "nothing to do" —

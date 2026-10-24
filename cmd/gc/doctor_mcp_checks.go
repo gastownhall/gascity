@@ -23,9 +23,10 @@ type mcpSharedTargetDoctorCheck struct {
 }
 
 type mcpTargetConflict struct {
-	Provider string
-	Target   string
-	Agents   []string
+	Provider      string
+	Target        string
+	Agents        []string
+	AgentLocalDir string
 }
 
 func newMCPConfigDoctorCheck(cityPath string, cfg *config.City, lookPath config.LookPathFunc) *mcpConfigDoctorCheck {
@@ -65,6 +66,19 @@ func (c *mcpSharedTargetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 	}
 	details := make([]string, 0, len(conflicts))
 	for _, conflict := range conflicts {
+		if conflict.AgentLocalDir != "" {
+			details = append(details, fmt.Sprintf(
+				"%s (%s): %s — caused by the agent-local MCP catalog at %s, which differs "+
+					"from the provider's shared city-root catalog; give this agent its own "+
+					"work_dir, or move its MCP server definitions into the city's mcp/ "+
+					"directory instead",
+				conflict.Target,
+				conflict.Provider,
+				strings.Join(conflict.Agents, ", "),
+				conflict.AgentLocalDir,
+			))
+			continue
+		}
 		details = append(details, fmt.Sprintf(
 			"%s (%s): %s",
 			conflict.Target,
@@ -87,7 +101,8 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 	}
 
 	type targetState struct {
-		hashes map[string][]string
+		hashes  map[string][]string
+		details map[string][]mcpConflictAgentRef
 	}
 
 	targets := make(map[string]*targetState)
@@ -100,17 +115,37 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			issues = append(issues, fmt.Sprintf("agent %q: %v", agent.QualifiedName(), err))
 			continue
 		}
-		if len(view.Catalog.Servers) == 0 || strings.TrimSpace(view.Projection.Provider) == "" || strings.TrimSpace(view.Projection.Target) == "" {
+		// Mirror buildStage1MCPTargetsWith's own filters exactly (same
+		// delivery stage, same "nothing to project" test with && not
+		// ||), so this check can never pass green on a city gc start is
+		// about to reject. Before this fix the looser `||` here dropped
+		// a provider's zero-server implicit agent out of the
+		// comparison entirely whenever ANY of catalog/provider/target
+		// was empty, so a real conflict against a non-implicit agent's
+		// non-empty catalog at the same target never registered a
+		// second hash group (gastownhall/gascity#8267).
+		if view.Delivery != "stage1" {
+			continue
+		}
+		if view.Projection.Provider == "" && len(view.Catalog.Servers) == 0 {
+			continue
+		}
+		if strings.TrimSpace(view.Projection.Provider) == "" || strings.TrimSpace(view.Projection.Target) == "" {
 			continue
 		}
 		key := view.Projection.Provider + "|" + filepath.Clean(view.Projection.Target)
 		state := targets[key]
 		if state == nil {
-			state = &targetState{hashes: make(map[string][]string)}
+			state = &targetState{hashes: make(map[string][]string), details: make(map[string][]mcpConflictAgentRef)}
 			targets[key] = state
 		}
 		hash := view.Projection.Hash()
 		state.hashes[hash] = append(state.hashes[hash], agent.QualifiedName())
+		state.details[hash] = append(state.details[hash], mcpConflictAgentRef{
+			Name:     agent.QualifiedName(),
+			Implicit: agent.Implicit,
+			MCPDir:   agent.MCPDir,
+		})
 	}
 
 	sort.Strings(issues)
@@ -122,16 +157,24 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		}
 		parts := strings.SplitN(key, "|", 2)
 		agents := make([]string, 0, 4)
+		var allDetails []mcpConflictAgentRef
 		for _, members := range state.hashes {
 			sort.Strings(members)
 			agents = append(agents, members...)
 		}
+		for _, refs := range state.details {
+			allDetails = append(allDetails, refs...)
+		}
 		sort.Strings(agents)
-		conflicts = append(conflicts, mcpTargetConflict{
+		conflict := mcpTargetConflict{
 			Provider: parts[0],
 			Target:   parts[1],
 			Agents:   agents,
-		})
+		}
+		if dir, found := mcpAgentLocalConflictCause(allDetails, nil); found {
+			conflict.AgentLocalDir = dir
+		}
+		conflicts = append(conflicts, conflict)
 	}
 	sort.Slice(conflicts, func(i, j int) bool {
 		if conflicts[i].Target != conflicts[j].Target {

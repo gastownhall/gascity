@@ -141,3 +141,56 @@ url = "https://example.com/deputy"
 		t.Fatalf("details = %#v, want both agents named", result.Details)
 	}
 }
+
+// TestMCPSharedTargetDoctorCheckReportsImplicitAgentLocalConflict covers
+// gastownhall/gascity#8267: a single city-scoped agent with its own
+// agents/<name>/mcp/ catalog collides with its provider's auto-injected
+// implicit agent at the same scope root. Before the fix, the implicit
+// agent's zero-server projection was dropped from comparison entirely
+// (the check's skip condition was broader than buildStage1MCPTargets's),
+// so this check passed green on a city gc start was about to reject.
+func TestMCPSharedTargetDoctorCheckReportsImplicitAgentLocalConflict(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "gemini"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.gemini]
+command = "echo"
+prompt_mode = "none"
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/agent.toml", `
+name = "mayor"
+provider = "gemini"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/mcp/notes.toml", `
+name = "notes"
+command = "npx"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	result := newMCPSharedTargetDoctorCheck(cityDir, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error (mayor's agent-local mcp/ conflicts with the implicit gemini agent)", result.Status)
+	}
+	if len(result.Details) == 0 {
+		t.Fatal("expected target-conflict details")
+	}
+	if !strings.Contains(result.Details[0], "mayor") {
+		t.Fatalf("details = %#v, want mayor named", result.Details)
+	}
+	if !strings.Contains(result.Details[0], "agent-local MCP catalog") {
+		t.Fatalf("details = %#v, want the agent-local-catalog diagnosis naming mayor's mcp/ dir", result.Details)
+	}
+}
