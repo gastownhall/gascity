@@ -52,6 +52,7 @@ pack-runtimes
 prompt-delivery-budget
 mcp-config
 mcp-shared-target
+mcp-adoption
 builtin-pack-imports
 packv2-import-state
 gascity-pack-binding

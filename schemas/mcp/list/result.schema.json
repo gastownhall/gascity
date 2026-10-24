@@ -60,6 +60,49 @@
         },
         "provider_kind": {
           "type": "string"
+        },
+        "not_adopted": {
+          "type": "object",
+          "required": [
+            "reason",
+            "remedy"
+          ],
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "remedy": {
+              "type": "string"
+            },
+            "unmanaged_servers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "redefined_servers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unmanaged_keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "symlink": {
+              "type": "string"
+            },
+            "read_error": {
+              "type": "string"
+            },
+            "parse_error": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true

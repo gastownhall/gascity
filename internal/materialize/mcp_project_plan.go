@@ -2,7 +2,6 @@ package materialize
 
 import (
 	"bytes"
-	"fmt"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -37,6 +36,9 @@ type MCPProjectionPlan struct {
 	// it.
 	Adopt       bool
 	SnapshotDir string
+	// Refused is set instead when Apply would not adopt the target (see
+	// MCPAdoptionRefusedError); Action is then MCPPlanNone.
+	Refused *MCPAdoptionRefusedError
 }
 
 // Plan reports what Apply would do to the target. It reads the filesystem
@@ -47,15 +49,19 @@ func (p MCPProjection) Plan(fs fsys.FS) (MCPProjectionPlan, error) {
 	if err := p.validateProviderContract(); err != nil {
 		return plan, err
 	}
-	if err := ensureNotSymlink(fs, p); err != nil {
+	if len(p.Servers) == 0 && !p.isManaged(fs) {
+		return plan, nil
+	}
+	refused, err := p.adoptionConflict(fs)
+	if err != nil {
 		return plan, err
 	}
-	if len(p.Servers) > 0 && !p.isManaged(fs) {
-		// Apply saves a target it does not manage before replacing it, so
-		// it fails, before anything else, on one it cannot read.
-		if _, err := fs.ReadFile(p.Target); err != nil && !errorsIsNotExist(err) {
-			return plan, fmt.Errorf("reading %s for adoption snapshot: %w", p.Target, err)
-		}
+	if refused != nil {
+		plan.Refused = refused
+		return plan, nil
+	}
+	if err := ensureNotSymlink(fs, p); err != nil {
+		return plan, err
 	}
 	change, err := p.targetChange(fs)
 	if err != nil {

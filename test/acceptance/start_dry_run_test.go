@@ -61,10 +61,11 @@ func TestStartDryRunLeavesARigsCommittedMCPConfigAlone(t *testing.T) {
 		t.Fatalf("gc start --dry-run: %v\n%s", err, out)
 	}
 
-	wantPlan := "adopt " + filepath.Join(rigDir, ".mcp.json") + " (claude): save its current content under " +
-		filepath.Join(rigDir, ".gc", "mcp-adopted", "claude")
+	// The rig's own server keeps gc from adopting its .mcp.json, and the
+	// preview says so.
+	wantPlan := "leave " + filepath.Join(rigDir, ".mcp.json") + ` (claude) as it is: gc does not manage it yet, and adopting it would drop MCP server "team-db"`
 	if !strings.Contains(out, wantPlan) {
-		t.Fatalf("preview does not report the adoption it would perform; want %q in:\n%s", wantPlan, out)
+		t.Fatalf("preview does not report what it would do with the rig's .mcp.json; want %q in:\n%s", wantPlan, out)
 	}
 	if strings.Contains(out, "adopting provider-native MCP") {
 		t.Fatalf("the dry run adopted the rig's MCP config:\n%s", out)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/spf13/cobra"
 )
 
@@ -84,11 +86,20 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if err := projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+				var refused *materialize.MCPAdoptionRefusedError
+				if errors.As(err, &refused) {
+					// The work dir's own MCP config (often committed to the
+					// repository) stays as it is; the session starts without
+					// gc's servers. A pre-start's output is discarded when it
+					// succeeds, so resolveTemplate reports this too.
+					fmt.Fprintf(stderr, "gc internal project-mcp: warning: %s\n", describeMCPAdoptionRefused([]string{identity}, projection, refused)) //nolint:errcheck // best-effort stderr
+					return nil
+				}
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			if len(catalog.Servers) > 0 {
-				ensureMCPGitignoreBestEffort(absWorkdir, stderr)
+				ensureMCPGitignoreBestEffort(absWorkdir, []string{mcpGitignoreEntry(projection)}, stderr)
 				fmt.Fprintf(stdout, "projected %d MCP server(s) into %s\n", len(catalog.Servers), projection.Target) //nolint:errcheck // best-effort stdout
 			}
 			return nil
