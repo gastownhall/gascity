@@ -91,6 +91,11 @@ type ShadowDebt struct {
 	// NotBefore is the lease of a payer working on the debt, or the backoff
 	// after a failed payment. No other payer takes the debt before it.
 	NotBefore time.Time `json:"not_before"`
+	// Leased marks NotBefore as a payer's lease, not a backoff: a payer took
+	// the debt and may be writing the shadow until NotBefore. NotBefore names
+	// the lease: a payer records its payment only while the debt still
+	// carries the NotBefore it took it with.
+	Leased bool `json:"leased,omitempty"`
 	// LastError is the last failed payment's error.
 	LastError string `json:"last_error,omitempty"`
 }

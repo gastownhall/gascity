@@ -169,39 +169,55 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 // queuedNudgeClaimableForTarget).
 type nudgeClaimMatch func(item queuedNudge, liveSessions func() map[string]struct{}) bool
 
+// nudgeClaimFence is a queued item's fence: its id and the session it is
+// fenced to.
+type nudgeClaimFence struct {
+	id        string
+	sessionID string
+}
+
 // nudgeClaimCensus is a claim's Leg-B session census. The census lists the
 // city's sessions, so it is read outside the queue lock, before the claim's
 // locked run (ga-fsp5w9): a run that meets a candidate fenced to another
 // session before the census was read records that it needs it and treats the
-// candidate as not claimable, which is the fail-closed answer. The census
-// answers the locked run only for the candidates a dry run judged with it
-// (judged): a candidate queued after the census was read may be fenced to a
-// session the census predates, so it has no census and fails closed too.
+// candidate as not claimable, which is the fail-closed answer.
+//
+// The census judges only the fences of the snapshot read before it (fences):
+// a session such a fence names existed before the census was read, so the
+// census lists it or saw it gone. A fence first seen after that snapshot, on
+// an item queued or re-fenced since, may name a session the census predates,
+// so it has no census and fails closed too.
 type nudgeClaimCensus struct {
 	read   bool
 	live   map[string]struct{}
 	needed bool
-	judged map[string]struct{}
+	fences map[nudgeClaimFence]struct{}
 }
 
-// liveSessionsFor is the census a run consults for the candidate with ID id:
-// a dry run records the candidates it judged; the locked run gets the census
-// only for those.
-func (c *nudgeClaimCensus) liveSessionsFor(id string, locked bool) map[string]struct{} {
+// recordFences records the fences of the items state serves, as a run that
+// has no census yet sees them.
+func (c *nudgeClaimCensus) recordFences(state *nudgeQueueState) {
+	c.fences = make(map[nudgeClaimFence]struct{})
+	for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+		for _, item := range bucket {
+			if item.SessionID != "" {
+				c.fences[nudgeClaimFence{id: item.ID, sessionID: item.SessionID}] = struct{}{}
+			}
+		}
+	}
+}
+
+// liveSessionsFor is the census a run gives the candidate fenced as fence:
+// none before the census is read, and after, the census only for a fence of
+// the snapshot read before it.
+func (c *nudgeClaimCensus) liveSessionsFor(fence nudgeClaimFence) map[string]struct{} {
 	if !c.read {
 		c.needed = true
 		return nil
 	}
-	if locked {
-		if _, ok := c.judged[id]; !ok {
-			return nil
-		}
-		return c.live
+	if _, ok := c.fences[fence]; !ok {
+		return nil
 	}
-	if c.judged == nil {
-		c.judged = make(map[string]struct{})
-	}
-	c.judged[id] = struct{}{}
 	return c.live
 }
 
@@ -215,7 +231,6 @@ type nudgeClaimRun struct {
 	batchTarget *nudgeTarget
 
 	census  nudgeClaimCensus
-	locked  bool
 	ledger  *nudgeShadowLedger
 	claimed []queuedNudge
 }
@@ -224,12 +239,20 @@ func newNudgeClaimRun(cityPath string, now time.Time, match nudgeClaimMatch, rea
 	return &nudgeClaimRun{cityPath: cityPath, now: now, match: match, readCensus: readCensus, batchTarget: batchTarget, ledger: newNudgeShadowLedger(now)}
 }
 
+// run is the claim's queue callback. Its maintenance budget starts when the
+// run does, not at now: a claim reaches its locked run after a dry run, maybe
+// a census read and a lock wait, and still has its whole budget to recover
+// lapsed leases. now is only the time items are judged at.
 func (r *nudgeClaimRun) run(state *nudgeQueueState) error {
 	r.ledger.reset()
 	r.claimed = nil
-	maintainNudgeQueue(state, r.ledger, r.now, r.now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
+	if !r.census.read {
+		r.census.recordFences(state)
+	}
+	maintainNudgeQueue(state, r.ledger, r.now, time.Now().Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 	r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool {
-		return r.match(item, func() map[string]struct{} { return r.census.liveSessionsFor(item.ID, r.locked) })
+		fence := nudgeClaimFence{id: item.ID, sessionID: item.SessionID}
+		return r.match(item, func() map[string]struct{} { return r.census.liveSessionsFor(fence) })
 	}, r.batchTarget)
 	return nil
 }
@@ -256,9 +279,9 @@ func (r *nudgeClaimRun) dryRun() (bool, error) {
 // claimable item, no maintenance to persist) is answered from a lock-free
 // snapshot and takes no lock; otherwise the claim runs again under the lock,
 // with the census its dry run read, and that run's answer is authoritative. A
-// Leg-B candidate the census-reading dry run did not judge (one that appears
-// only in the locked state) has no census and stays pending for the next
-// pass.
+// Leg-B candidate whose fence is not one of the snapshot read before the
+// census (an item queued or re-fenced since) has no census and stays pending
+// for the next pass.
 func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) ([]queuedNudge, error) {
 	r := newNudgeClaimRun(cityPath, now, match, readCensus, batchTarget)
 	if changed, err := r.dryRun(); err == nil && !changed {
@@ -267,7 +290,6 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch,
 	if nudgeClaimAfterDryRun != nil {
 		nudgeClaimAfterDryRun()
 	}
-	r.locked = true
 	if err := withNudgeQueueState(cityPath, "claim", r.run); err != nil {
 		return nil, err
 	}
@@ -385,23 +407,23 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 
 // listQueuedNudgesForTargetWithClock is the clock-injectable core of
 // listQueuedNudgesForTarget (mirrors enqueueQueuedNudgeWithStoreAndClock's
-// seam). Tests can pass a clock.Fake so the maintenance pass's
-// now.Add(nudgeEnqueueMaintenanceBudget) deadline check is evaluated against
-// a controlled clock instead of real wall-clock time, which otherwise races
-// against this pass's own file I/O under -race.
+// seam). Tests can pass a clock.Fake so the maintenance pass's budget
+// (nudgeEnqueueMaintenanceBudget from the pass's start) is spent against a
+// controlled clock instead of real wall-clock time.
 func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now time.Time, clk clock.Clock) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	return listQueuedNudgesMatching(cityPath, now, clk, target.matchesQueueAgent)
 }
 
 // listQueuedNudgesMatching runs the maintenance pass at now and lists the
-// items whose agent matches, by bucket.
+// items whose agent matches, by bucket. The pass's budget starts when its run
+// does, by clk, so a listing that waited for the lock still maintains.
 func listQueuedNudgesMatching(cityPath string, now time.Time, clk clock.Clock, matches func(agent string) bool) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	ledger := newNudgeShadowLedger(now)
 	var pending, inFlight, dead []queuedNudge
 	err := updateNudgeQueueState(cityPath, "list", func(state *nudgeQueueState) error {
 		ledger.reset()
 		pending, inFlight, dead = nil, nil, nil
-		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clk)
+		maintainNudgeQueue(state, ledger, now, clk.Now().Add(nudgeEnqueueMaintenanceBudget), clk)
 		for _, item := range state.Pending {
 			if matches(item.Agent) {
 				pending = append(pending, item)
@@ -469,7 +491,9 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 		if queuedNudgeExists(state, item.ID) {
 			return nil
 		}
-		dropRetiredDebtsOnShadow(state, item)
+		if err := dropRetiredDebtsOnShadow(state, item, clk.Now()); err != nil {
+			return err
+		}
 		// Supersede pending and in-flight nudges for the same (agent, source, reference).
 		if item.Reference != nil && item.Reference.ID != "" {
 			matchesSupersession := func(existing queuedNudge) bool {
@@ -535,22 +559,48 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	return nil
 }
 
+// errNudgeShadowRetiring refuses to queue an item on the shadow of an earlier,
+// acked item whose payer holds its retired debt: the payer writes the copy it
+// took whatever the queue says, so its terminal write would close the shadow
+// of an item the queue serves. Nothing is queued, and the queue reads busy:
+// once the payer has written, the shadow is closed and a retry saves the item
+// a new one.
+var errNudgeShadowRetiring = fmt.Errorf("an earlier nudge's terminal write to its shadow is in flight: %w", nudgequeue.ErrQueueBusy)
+
 // dropRetiredDebtsOnShadow drops the retired items whose id is item's and whose
 // unpaid debt names item's shadow: Save found that shadow still open and the new
 // item reuses it, so paying the old debt would close the shadow of an item the
-// queue serves. The new item's own exit will terminalize it.
-func dropRetiredDebtsOnShadow(state *nudgeQueueState, item queuedNudge) {
+// queue serves. The new item's own exit will terminalize it. A debt a payer
+// holds at now (nudgeDebtLeased) is not dropped, and the item may not reuse
+// the shadow: dropping it would not stop that payer's write, so it fails with
+// errNudgeShadowRetiring and leaves state unchanged.
+//
+// A payer that wrote and confirmed between the item's Save and this run left
+// no retired item to find, so the item is queued on the shadow that payer
+// closed. That is the window rollbackNudgeShadows describes for a rollback
+// (ga-w68ksk): a Save outside the lock reuses a shadow that a concurrent
+// terminal write closes.
+func dropRetiredDebtsOnShadow(state *nudgeQueueState, item queuedNudge, now time.Time) error {
 	if item.BeadID == "" || len(state.Retired) == 0 {
-		return
+		return nil
+	}
+	onShadow := func(retired queuedNudge) bool {
+		return retired.ID == item.ID && retired.BeadID == item.BeadID
+	}
+	for _, retired := range state.Retired {
+		if onShadow(retired) && nudgeDebtLeased(retired, now) {
+			return fmt.Errorf("queueing nudge %q on shadow %s: %w", item.ID, item.BeadID, errNudgeShadowRetiring)
+		}
 	}
 	filtered := state.Retired[:0]
 	for _, retired := range state.Retired {
-		if retired.ID == item.ID && retired.BeadID == item.BeadID {
+		if onShadow(retired) {
 			continue
 		}
 		filtered = append(filtered, retired)
 	}
 	state.Retired = filtered
+	return nil
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
@@ -1043,6 +1093,9 @@ func fileReleaseQueuedNudgeClaims(cityPath string, ids []string, deliverAfter ti
 // The dead-letter transition is authoritative: each dead letter owes its shadow
 // a failed record, paid after the lock is released, and a failed payment
 // leaves the debt for a later payer instead of rolling the transition back.
+//
+// The maintenance budget starts when the run does: a failure record that
+// waited for the lock, or is a retry after a busy one, still maintains.
 func fileRecordQueuedNudgeFailure(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -1056,7 +1109,7 @@ func fileRecordQueuedNudgeFailure(cityPath string, store beads.NudgesStore, ids 
 	err := updateNudgeQueueState(cityPath, "record_failure", func(state *nudgeQueueState) error {
 		ledger.reset()
 		deadLettered = nil
-		maintainNudgeQueue(state, ledger, now, now.Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
+		maintainNudgeQueue(state, ledger, now, time.Now().Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
 		var requeued []queuedNudge
 		fail := func(item queuedNudge) {
 			updated, deadLetter := failedQueuedNudge(item, cause, now)
@@ -1436,7 +1489,9 @@ func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) (nudgeImportSki
 				return fmt.Errorf("moved nudge %q became importable while the moved shadows were saved; retry the batch", item.ID)
 			}
 			imported[key] = true
-			dropRetiredDebtsOnShadow(state, copied)
+			if err := dropRetiredDebtsOnShadow(state, copied, time.Now()); err != nil {
+				return err
+			}
 			state.Pending = append(state.Pending, copied)
 		}
 		skips = lockedSkips

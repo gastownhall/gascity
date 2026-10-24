@@ -76,12 +76,14 @@ var nudgeBookkeepingBackoff = func(retry int) time.Duration {
 // the caller holds in flight under its own claim (an ack, a release, a
 // failure, a repin), and retries it up to nudgeBookkeepingRetries times while
 // it fails with nudgequeue.ErrQueueBusy. Giving up there after a delivery
-// leaves the items in flight until their lease expires and redelivers them,
-// so the retries, a few seconds at most, are well inside the two-minute
-// lease. Inside a hook, it stops retrying when the backoff would run into the
-// time the hook's deadline leaves, and each attempt's lock wait ends there too
-// (nudgeQueueLockWait). A producer (Enqueue) does not retry: nothing happened,
-// and its op says so.
+// leaves the items in flight until their lease expires and redelivers them.
+// An attempt reads busy only after a whole lock wait (nudgeQueueLockWait), so
+// a lock held throughout costs four waits and the backoffs between them, about
+// 35 s outside a hook: inside the two-minute lease, though the caller waits
+// that long. Inside a hook, it stops retrying when the backoff would run into
+// the time the hook's deadline leaves, and each attempt's lock wait ends there
+// too (nudgeQueueLockWait). A producer (Enqueue) does not retry: nothing
+// happened, and its op says so.
 func retryNudgeBookkeeping(fn func() error) error {
 	err := fn()
 	for retry := 0; retry < nudgeBookkeepingRetries && errors.Is(err, nudgequeue.ErrQueueBusy); retry++ {

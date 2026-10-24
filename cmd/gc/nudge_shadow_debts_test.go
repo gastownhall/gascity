@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -479,22 +483,106 @@ func TestNudgeAckTailInsideAHookEndsBeforeTheDeadline(t *testing.T) {
 	requireShadowStateForTest(t, h, "n-2", "accepted_for_injection")
 }
 
+// closingCallerStore is the store a verb's caller holds and closes once the
+// verb returns. It blocks shadow writes until gate opens, as gatedShadowStore
+// does, and counts the calls that start after its close.
+type closingCallerStore struct {
+	gatedShadowStore
+	closed atomic.Bool
+	late   atomic.Int32
+}
+
+func (s *closingCallerStore) CloseStore() error { //nolint:unparam // the closer interface returns an error; this fake never fails
+	s.closed.Store(true)
+	return nil
+}
+
+func (s *closingCallerStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.countLate()
+	return s.gatedShadowStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *closingCallerStore) Close(id string) error {
+	s.countLate()
+	return s.gatedShadowStore.Close(id)
+}
+
+func (s *closingCallerStore) countLate() {
+	if s.closed.Load() {
+		s.late.Add(1)
+	}
+}
+
+// Inside a hook, a verb given its caller's store pays its debts through a
+// store the tail opens itself: a tail the deadline leaves behind goes on
+// writing after the verb returns, and the caller closes its store then.
+func TestNudgeHookTailPaysThroughAStoreItOpens(t *testing.T) {
+	h := newNQCharHarness(t)
+	enqueueAndClaimForTest(t, h, "n-1")
+	gate := make(chan struct{})
+	own := &gatedShadowStore{Store: h.store(), entered: make(chan struct{}), gate: gate}
+	prevOpen := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		return beads.NudgesStore{Store: own}, own
+	}
+	t.Cleanup(func() { openOwnedNudgeBeadStore = prevOpen })
+	caller := &closingCallerStore{gatedShadowStore: gatedShadowStore{Store: h.store(), entered: make(chan struct{}), gate: gate}}
+	abandoned := make(chan (<-chan struct{}), 1)
+	prevAbandoned := nudgeHookTailAbandoned
+	nudgeHookTailAbandoned = func(done <-chan struct{}) { abandoned <- done }
+	t.Cleanup(func() { nudgeHookTailAbandoned = prevAbandoned })
+	inHookForTest(t, 1500*time.Millisecond)
+
+	dead, err := recordQueuedNudgeFailureDetailed(h.city, beads.NudgesStore{Store: caller}, []string{"n-1"}, errNudgeManualDrop, time.Now())
+	if err != nil || len(dead) != 1 {
+		close(gate)
+		t.Fatalf("drop inside a hook = %v, %v", nqCharItems(dead), err)
+	}
+	var done <-chan struct{}
+	select {
+	case done = <-abandoned:
+	default:
+		close(gate)
+		t.Fatal("the drop's blocked shadow tail was not left behind at the hook deadline")
+	}
+	if err := closeBeadStoreHandle(caller); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	<-done
+	if late := caller.late.Load(); late != 0 {
+		t.Fatalf("the tail made %d store calls through the caller's store after the caller closed it", late)
+	}
+	requireShadowStateForTest(t, h, "n-1", "failed")
+}
+
 // takeAckDebtsForTest acks ids with the pay phase dropped, as a crash after
 // the commit would, and returns the debts the ack took.
 func takeAckDebtsForTest(t *testing.T, h *nqCharHarness, ids ...string) []queuedNudge {
+	t.Helper()
+	taken := takeDebtsForTest(t, func() error {
+		return ackQueuedNudgesWithOutcome(h.city, ids, "injected", "", "provider-nudge-return")
+	})
+	if len(taken) != len(ids) {
+		t.Fatalf("the ack took %d debts, want %d", len(taken), len(ids))
+	}
+	return taken
+}
+
+// takeDebtsForTest runs a verb with its pay phase dropped and returns the
+// debts its commit took: they stay leased to it, as to a payer whose store
+// write is still in flight.
+func takeDebtsForTest(t *testing.T, verb func() error) []queuedNudge {
 	t.Helper()
 	var taken []queuedNudge
 	prev := settleNudgeShadowDebts
 	settleNudgeShadowDebts = func(_ string, _ beads.NudgesStore, debts []queuedNudge, _ time.Duration, _ time.Time) {
 		taken = append(taken, debts...)
 	}
-	err := ackQueuedNudgesWithOutcome(h.city, ids, "injected", "", "provider-nudge-return")
+	err := verb()
 	settleNudgeShadowDebts = prev
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(taken) != len(ids) {
-		t.Fatalf("the ack took %d debts, want %d", len(taken), len(ids))
 	}
 	return taken
 }
@@ -527,13 +615,16 @@ func TestNudgeDebtsAPayerDidNotReachAreReleasedUnpaid(t *testing.T) {
 }
 
 // A payment confirms only the item it paid: an id acked again under a new
-// creation time is a different item, and its debt stays unpaid.
+// creation time is a different item, and its debt stays unpaid, even under a
+// lease that ends when the paid one did.
 func TestNudgeDebtPaymentMatchesTheItemNotTheID(t *testing.T) {
 	now := time.Now().UTC()
-	old := queuedNudge{ID: "n-1", BeadID: "gc-1", CreatedAt: now.Add(-time.Hour), Shadow: &nudgequeue.ShadowDebt{State: "injected"}}
+	lease := nudgequeue.ShadowDebt{State: "injected", NotBefore: now.Add(nudgeShadowPayLease), Leased: true}
+	paidDebt, rebornDebt := lease, lease
+	old := queuedNudge{ID: "n-1", BeadID: "gc-1", CreatedAt: now.Add(-time.Hour), Shadow: &paidDebt}
 	reborn := old
 	reborn.CreatedAt = now
-	reborn.Shadow = &nudgequeue.ShadowDebt{State: "injected"}
+	reborn.Shadow = &rebornDebt
 	state := &nudgeQueueState{Retired: []queuedNudge{reborn}}
 	applyNudgeDebtPayments(state, []nudgeDebtPayment{{item: old, reached: true}}, now)
 	if len(state.Retired) != 1 || state.Retired[0].Shadow.Paid {
@@ -548,7 +639,9 @@ func TestDropRetiredDebtsOnShadowMatchesTheShadow(t *testing.T) {
 		{ID: "n-1", BeadID: "gc-old", Shadow: &nudgequeue.ShadowDebt{State: "injected"}},
 		{ID: "n-1", BeadID: "gc-reused", Shadow: &nudgequeue.ShadowDebt{State: "injected"}},
 	}}
-	dropRetiredDebtsOnShadow(state, queuedNudge{ID: "n-1", BeadID: "gc-reused"})
+	if err := dropRetiredDebtsOnShadow(state, queuedNudge{ID: "n-1", BeadID: "gc-reused"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if len(state.Retired) != 1 || state.Retired[0].BeadID != "gc-old" {
 		t.Fatalf("retired = %+v, want only the debt on gc-old kept", state.Retired)
 	}
@@ -718,6 +811,131 @@ func TestNudgeImportMigratedDropsRetiredDebtsOnTheReusedShadow(t *testing.T) {
 	if err != nil || !open {
 		t.Fatalf("shadow of the imported n-1 = %+v open=%v err=%v, want it open", shadow, open, err)
 	}
+}
+
+// An acked id queued again while the ack's payer holds its retired debt does
+// not reuse the shadow that payer is writing: dropping the debt would not stop
+// the write of the copy the payer took, which would close the shadow of an
+// item the queue serves. The enqueue or import is refused as busy and queues
+// nothing. Once the payer has written and confirmed, the old shadow keeps the
+// ack's outcome and a retry queues the item on a new shadow.
+func TestNudgeReuseOfAShadowAPayerHoldsIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		verb  string
+		queue func(h *nqCharHarness) error
+	}{
+		{"enqueue", func(h *nqCharHarness) error {
+			return enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-1", "alpha", 0, queuedNudgeOptions{}))
+		}},
+		{"import", func(h *nqCharHarness) error {
+			q := &fileNudgeQueue{cityPath: h.city, store: h.shadow(), clk: clock.Real{}}
+			_, err := q.importMigrated([]nudgequeue.Item{h.item("n-1", "alpha", 0, queuedNudgeOptions{})})
+			return err
+		}},
+	} {
+		t.Run(c.verb, func(t *testing.T) {
+			h := newNQCharHarness(t)
+			enqueueAndClaimForTest(t, h, "n-1")
+			taken := takeAckDebtsForTest(t, h, "n-1")
+			held := taken[0].BeadID
+
+			if err := c.queue(h); !errors.Is(err, nudgequeue.ErrQueueBusy) {
+				t.Fatalf("%s while the payer holds the debt: err = %v, want ErrQueueBusy", c.verb, err)
+			}
+			state := loadNudgeStateForTest(t, h.city)
+			if len(state.Pending) != 0 || len(state.Retired) != 1 {
+				t.Fatalf("after the refused %s pending=%v retired=%v, want nothing queued and the debt kept", c.verb, nqCharItems(state.Pending), nqCharItems(state.Retired))
+			}
+
+			payAndConfirmNudgeShadowDebts(h.city, h.shadow(), taken, nudgeEnqueueMaintenanceBudget, time.Now())
+			requireShadowStateForTest(t, h, "n-1", "injected")
+			if err := c.queue(h); err != nil {
+				t.Fatalf("%s after the payer wrote: %v", c.verb, err)
+			}
+			state = loadNudgeStateForTest(t, h.city)
+			if len(state.Pending) != 1 || state.Pending[0].BeadID == "" || state.Pending[0].BeadID == held || len(state.Retired) != 0 {
+				t.Fatalf("after the retried %s pending=%+v retired=%v, want n-1 on a new shadow", c.verb, state.Pending, nqCharItems(state.Retired))
+			}
+			shadow, open, err := nudgeShadows(h.shadow()).Find("n-1")
+			if err != nil || !open || shadow.BeadID != state.Pending[0].BeadID {
+				t.Fatalf("open shadow of the queued n-1 = %+v open=%v err=%v, want %s", shadow, open, err, state.Pending[0].BeadID)
+			}
+		})
+	}
+}
+
+// A payer that confirms after its lease ran out, once the controller has taken
+// the debt under a lease of its own, records nothing, whatever it reports:
+// ending the controller's lease would let an enqueue reuse the shadow while
+// the controller's write to it is in flight, and a late success would settle
+// the debt out from under the controller's confirm. The controller's confirm
+// settles it.
+func TestNudgeLateConfirmLeavesASuccessorsLeaseAlone(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		payment func(item queuedNudge) nudgeDebtPayment
+	}{
+		{"not_reached", func(item queuedNudge) nudgeDebtPayment { return nudgeDebtPayment{item: item} }},
+		{"failed", func(item queuedNudge) nudgeDebtPayment {
+			return nudgeDebtPayment{item: item, reached: true, err: errors.New("store unavailable")}
+		}},
+		{"paid", func(item queuedNudge) nudgeDebtPayment { return nudgeDebtPayment{item: item, reached: true} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newNQCharHarness(t)
+			enqueueAndClaimForTest(t, h, "n-1", "n-2")
+			first := takeAckDebtsForTest(t, h, "n-1")
+			first = append(first, takeDebtsForTest(t, func() error {
+				_, err := recordQueuedNudgeFailureDetailed(h.city, h.shadow(), []string{"n-2"}, errNudgeManualDrop, time.Now())
+				return err
+			})...)
+			successor := takeDebtsForTest(t, func() error {
+				return controllerPassForTest(h, time.Now().Add(nudgeShadowPayLease+time.Second))
+			})
+			if len(first) != 2 || len(successor) != 2 {
+				t.Fatalf("first payers took %v and the controller %v, want n-1 and n-2 each", nqCharItems(first), nqCharItems(successor))
+			}
+			held := loadNudgeStateForTest(t, h.city)
+
+			late := make([]nudgeDebtPayment, 0, len(first))
+			for _, item := range first {
+				late = append(late, c.payment(item))
+			}
+			if err := confirmNudgeShadowDebts(h.city, late, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			state := loadNudgeStateForTest(t, h.city)
+			if !reflect.DeepEqual(state.Retired, held.Retired) || !reflect.DeepEqual(state.Dead, held.Dead) {
+				t.Fatalf("debts after the late confirm: retired %s dead %s; want the controller's leases unchanged: retired %s dead %s",
+					shadowDebtsForTest(state.Retired), shadowDebtsForTest(state.Dead), shadowDebtsForTest(held.Retired), shadowDebtsForTest(held.Dead))
+			}
+			err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-1", "alpha", 0, queuedNudgeOptions{}))
+			if !errors.Is(err, errNudgeShadowRetiring) {
+				t.Fatalf("enqueue reusing the shadow the controller holds: err = %v, want errNudgeShadowRetiring", err)
+			}
+
+			payAndConfirmNudgeShadowDebts(h.city, h.shadow(), successor, nudgeEnqueueMaintenanceBudget, time.Now())
+			state = loadNudgeStateForTest(t, h.city)
+			if len(state.Retired) != 0 || len(state.Dead) != 1 || state.Dead[0].Shadow == nil || !state.Dead[0].Shadow.Paid {
+				t.Fatalf("debts after the controller confirmed: retired %s dead %s; want both settled", shadowDebtsForTest(state.Retired), shadowDebtsForTest(state.Dead))
+			}
+			requireShadowStateForTest(t, h, "n-1", "injected")
+			requireShadowStateForTest(t, h, "n-2", "failed")
+		})
+	}
+}
+
+// shadowDebtsForTest renders each item's id and shadow debt.
+func shadowDebtsForTest(items []queuedNudge) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Shadow == nil {
+			parts = append(parts, item.ID+":<none>")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s:%+v", item.ID, *item.Shadow))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // The controller's pass pays within nudgeControllerPayBudget, seconds, not the

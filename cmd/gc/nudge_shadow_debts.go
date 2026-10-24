@@ -91,6 +91,7 @@ func (l *nudgeShadowLedger) take(item *queuedNudge) {
 	}
 	debt := *item.Shadow
 	debt.NotBefore = l.now.Add(nudgeShadowPayLease).UTC()
+	debt.Leased = true
 	item.Shadow = &debt
 	taken := *item
 	taken.Shadow = &debt
@@ -100,6 +101,13 @@ func (l *nudgeShadowLedger) take(item *queuedNudge) {
 // nudgeDebtPayable reports whether a payer may take item's debt at now.
 func nudgeDebtPayable(item queuedNudge, now time.Time) bool {
 	return item.Shadow != nil && !item.Shadow.Paid && !item.Shadow.NotBefore.After(now)
+}
+
+// nudgeDebtLeased reports whether a payer holds item's debt at now: it took
+// the debt, holds a copy, and may be writing the shadow until its lease runs
+// out. A debt backing off after a failed payment is not held.
+func nudgeDebtLeased(item queuedNudge, now time.Time) bool {
+	return item.Shadow != nil && item.Shadow.Leased && !item.Shadow.Paid && item.Shadow.NotBefore.After(now)
 }
 
 // takeDueNudgeShadowDebts leases up to limit debts whose lease or backoff has
@@ -197,10 +205,24 @@ func confirmNudgeShadowDebts(cityPath string, payments []nudgeDebtPayment, now t
 	})
 }
 
+// nudgeDebtLeaseHeld reports whether item's debt is still under the lease the
+// payer of paid took. A lease is known by its end, NotBefore: a payer takes a
+// debt only once the lease before it has run out, so its lease ends later than
+// any lease it took over, and a payer whose lease ran out finds its
+// successor's NotBefore on the debt, not its own.
+func nudgeDebtLeaseHeld(item, paid queuedNudge) bool {
+	return item.Shadow != nil && paid.Shadow != nil && item.Shadow.Leased &&
+		item.Shadow.NotBefore.Equal(paid.Shadow.NotBefore)
+}
+
 // applyNudgeDebtPayments records payments on state: a paid retired item is
 // removed, a paid dead letter is marked paid, a failed debt backs off, and a
-// debt the payer did not reach is released. An item that is gone, or whose
-// debt is already paid, is skipped.
+// debt the payer did not reach is released. Each ends the payer's lease. A
+// payment is recorded only while its payer still holds the lease it took
+// (nudgeDebtLeaseHeld): an item that is gone, a debt already paid, and a debt
+// another payer took once this payer's lease ran out are skipped. Ending a
+// successor's lease would let an enqueue reuse the shadow while the
+// successor's write to it is in flight (dropRetiredDebtsOnShadow).
 func applyNudgeDebtPayments(state *nudgeQueueState, payments []nudgeDebtPayment, now time.Time) {
 	byKey := make(map[nudgeDebtKey]nudgeDebtPayment, len(payments))
 	for _, payment := range payments {
@@ -208,10 +230,11 @@ func applyNudgeDebtPayments(state *nudgeQueueState, payments []nudgeDebtPayment,
 	}
 	settle := func(item *queuedNudge) (paid bool) {
 		payment, ok := byKey[nudgeDebtKeyOf(*item)]
-		if !ok || item.Shadow == nil || item.Shadow.Paid {
+		if !ok || item.Shadow == nil || item.Shadow.Paid || !nudgeDebtLeaseHeld(*item, payment.item) {
 			return false
 		}
 		debt := *item.Shadow
+		debt.Leased = false
 		switch {
 		case !payment.reached:
 			debt.NotBefore = time.Time{}
@@ -258,7 +281,10 @@ var settleNudgeShadowDebts = payAndConfirmNudgeShadowDebts
 // retired. There the tail pays only while that time remains, confirms only if
 // it still does, and is left behind when it does not end in time, a store call
 // that hangs included. A debt it did not confirm stays leased to it until
-// nudgeShadowPayLease runs out, and then the controller pays it.
+// nudgeShadowPayLease runs out, and then the controller pays it. A tail left
+// behind outlives this call, and the caller closes store once the call
+// returns, so the tail pays through a store it opens and closes itself, never
+// through store.
 func payAndConfirmNudgeShadowDebts(cityPath string, store beads.NudgesStore, taken []queuedNudge, budget time.Duration, now time.Time) {
 	if len(taken) == 0 {
 		return
@@ -279,7 +305,7 @@ func payAndConfirmNudgeShadowDebts(cityPath string, store beads.NudgesStore, tak
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		payAndConfirmNudgeShadowDebtsBy(cityPath, store, taken, payBy, now, hookDeadlineStillLeavesTime)
+		payAndConfirmNudgeShadowDebtsBy(cityPath, beads.NudgesStore{}, taken, payBy, now, hookDeadlineStillLeavesTime)
 	}()
 	timer := time.NewTimer(time.Until(end))
 	defer timer.Stop()

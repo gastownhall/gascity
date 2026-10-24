@@ -268,34 +268,133 @@ func TestNudgeClaimWhoseItemWasTakenAfterTheDryRun(t *testing.T) {
 	}
 }
 
-// A claim adopts only the candidates its census-reading dry run judged. A
-// nudge fenced to a session created after that census read, queued between
-// the dry run and the locked run, has no census of its own: the locked run
-// leaves it pending, though it adopts the candidate the dry run judged.
-func TestNudgeClaimDoesNotAdoptACandidateItsDryRunDidNotJudge(t *testing.T) {
-	h := newNQCharHarness(t)
-	alpha := h.target("s-new", "2")
-	if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-0", "alpha", -time.Minute, queuedNudgeOptions{SessionID: "s-gone"})); err != nil {
-		t.Fatal(err)
-	}
-	nudgeClaimAfterDryRun = func() {
-		nudgeClaimAfterDryRun = nil
-		h.live = map[string]struct{}{"s-new": {}, "s-sib": {}, "s-3": {}}
+// A claim's census judges only the fences of the snapshot read before it
+// (nudgeClaimCensus). A fence first seen after that snapshot, on a nudge
+// queued while the census is read or before the locked run, or on n-0
+// re-fenced before the locked run, may name a session the census predates:
+// the claim leaves that nudge pending, fenced as it is, and adopts only a
+// candidate whose fence the snapshot held.
+func TestNudgeClaimCensusJudgesOnlyFencesItsSnapshotHeld(t *testing.T) {
+	queueN3 := func(h *nqCharHarness) {
 		if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-3", "alpha", -time.Second, queuedNudgeOptions{SessionID: "s-3"})); err != nil {
-			t.Errorf("enqueue n-3: %v", err)
+			h.t.Errorf("enqueue n-3: %v", err)
 		}
 	}
-	t.Cleanup(func() { nudgeClaimAfterDryRun = nil })
-	claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, time.Now())
-	if err != nil {
+	refenceN0 := func(h *nqCharHarness) {
+		if err := withNudgeQueueState(h.city, "test_refence", func(state *nudgeQueueState) error {
+			for i := range state.Pending {
+				if state.Pending[i].ID == "n-0" {
+					state.Pending[i].SessionID = "s-x"
+				}
+			}
+			return nil
+		}); err != nil {
+			h.t.Errorf("re-fencing n-0: %v", err)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		// duringCensus runs while the census is read, after the census saw
+		// its sessions; afterDryRun runs between the dry run and the locked
+		// run.
+		duringCensus, afterDryRun func(h *nqCharHarness)
+		batch                     bool
+		wantClaimed               []string
+		wantPending               map[string]string
+	}{
+		{
+			name: "a nudge queued during the census read", duringCensus: queueN3,
+			wantClaimed: []string{"n-0"}, wantPending: map[string]string{"n-3": "s-3"},
+		},
+		{
+			name: "a nudge queued during the census read, batch claim", duringCensus: queueN3, batch: true,
+			wantClaimed: []string{"n-0"}, wantPending: map[string]string{"n-3": "s-3"},
+		},
+		{
+			name: "a nudge queued after the dry run", afterDryRun: queueN3,
+			wantClaimed: []string{"n-0"}, wantPending: map[string]string{"n-3": "s-3"},
+		},
+		{
+			name: "a candidate re-fenced after the dry run", afterDryRun: refenceN0,
+			wantPending: map[string]string{"n-0": "s-x"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newNQCharHarness(t)
+			alpha := h.target("s-new", "2")
+			if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-0", "alpha", -time.Minute, queuedNudgeOptions{SessionID: "s-gone"})); err != nil {
+				t.Fatal(err)
+			}
+			if c.duringCensus != nil {
+				census := liveNudgeFenceSessionIDs
+				liveNudgeFenceSessionIDs = func(city string) map[string]struct{} {
+					live := census(city)
+					c.duringCensus(h)
+					return live
+				}
+				t.Cleanup(func() { liveNudgeFenceSessionIDs = census })
+			}
+			if c.afterDryRun != nil {
+				nudgeClaimAfterDryRun = func() {
+					nudgeClaimAfterDryRun = nil
+					c.afterDryRun(h)
+				}
+				t.Cleanup(func() { nudgeClaimAfterDryRun = nil })
+			}
+			claim := claimDueQueuedNudgesForTarget
+			if c.batch {
+				claim = claimDueQueuedNudgeBatchForTarget
+			}
+			claimed, err := claim(h.city, alpha, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, item := range claimed {
+				ids = append(ids, item.ID)
+			}
+			if fmt.Sprint(ids) != fmt.Sprint(c.wantClaimed) {
+				t.Fatalf("claimed %v, want %v", nqCharItems(claimed), c.wantClaimed)
+			}
+			pending := map[string]string{}
+			for _, item := range loadNudgeStateForTest(t, h.city).Pending {
+				pending[item.ID] = item.SessionID
+			}
+			if fmt.Sprint(pending) != fmt.Sprint(c.wantPending) {
+				t.Fatalf("pending fences = %v, want %v", pending, c.wantPending)
+			}
+		})
+	}
+}
+
+// The census judges every fence its snapshot held, a member not yet due
+// included: a pinned batch whose drained session fences a due member and one
+// backed off is adopted whole, as one delivery under its key.
+func TestNudgeClaimBatchAdoptsAPinnedBatchWithAMemberNotYetDue(t *testing.T) {
+	h := newNQCharHarness(t)
+	for _, id := range []string{"n-1", "n-2"} {
+		if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item(id, "alpha", -time.Minute, queuedNudgeOptions{SessionID: "s-gone"})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pinned, err := claimDueQueuedNudgeBatchForTarget(h.city, h.target("s-gone", ""), time.Now())
+	if err != nil || len(pinned) != 2 {
+		t.Fatalf("s-gone's batch claim = %v, %v", nqCharItems(pinned), err)
+	}
+	if err := releaseQueuedNudgeClaims(h.city, []string{"n-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(claimed) != 1 || claimed[0].ID != "n-0" {
-		t.Fatalf("claimed %v (census reads %d); want only n-0, the candidate the dry run judged", nqCharItems(claimed), h.census)
+	if err := releaseQueuedNudgeClaimsUntil(h.city, []string{"n-2"}, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
 	}
-	state := loadNudgeStateForTest(t, h.city)
-	if len(state.Pending) != 1 || state.Pending[0].ID != "n-3" || state.Pending[0].SessionID != "s-3" {
-		t.Fatalf("pending = %v; want n-3 still fenced to s-3", nqCharItems(state.Pending))
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, h.target("s-new", "2"), time.Now())
+	if err != nil || len(claimed) != 2 {
+		t.Fatalf("claim of the pinned batch = %v, %v; want n-1 and n-2 adopted whole", nqCharItems(claimed), err)
+	}
+	for _, item := range claimed {
+		if item.DeliveryBatch != pinned[0].DeliveryBatch || item.SessionID != "s-new" {
+			t.Fatalf("claimed %v, want both under the pinned key %s, re-fenced onto s-new", nqCharItems(claimed), pinned[0].DeliveryBatch)
+		}
 	}
 }
 

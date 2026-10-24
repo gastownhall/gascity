@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -221,10 +222,38 @@ func TestNudgeClaimWaitsForTheLockOnlyUntilTheHookDeadline(t *testing.T) {
 	}
 }
 
-// An ack or a release that waited long for the lock still runs its
+// lapseNudgeLeaseForTest makes id's claim lease run out a minute ago.
+func lapseNudgeLeaseForTest(t *testing.T, h *nqCharHarness, id string) {
+	t.Helper()
+	if err := withNudgeQueueState(h.city, "test_lapse_lease", func(state *nudgeQueueState) error {
+		for i := range state.InFlight {
+			if state.InFlight[i].ID == id {
+				state.InFlight[i].LeaseUntil = time.Now().Add(-time.Minute)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireNudgeLeaseRecoveredForTest fails unless id is no longer in flight.
+func requireNudgeLeaseRecoveredForTest(t *testing.T, h *nqCharHarness, id, after string) {
+	t.Helper()
+	state := loadNudgeStateForTest(t, h.city)
+	for _, item := range state.InFlight {
+		if item.ID == id {
+			t.Fatalf("after %s in-flight=%v, want %s's lapsed lease recovered", after, nqCharItems(state.InFlight), id)
+		}
+	}
+}
+
+// An ack, a release or a claim that waited long for the lock still runs its
 // maintenance: its budget starts when its locked run does, so a lapsed lease
-// beside the acked or released item returns to pending.
-func TestNudgeAckAndReleaseMaintainAfterALongLockWait(t *testing.T) {
+// beside the acked, released or claimed items returns to pending. The claim
+// is beta's, which n-2 is not addressed to, so it stays pending once
+// recovered.
+func TestNudgeVerbsMaintainAfterALongLockWait(t *testing.T) {
 	for _, c := range []struct {
 		verb string
 		run  func(city string) error
@@ -235,20 +264,15 @@ func TestNudgeAckAndReleaseMaintainAfterALongLockWait(t *testing.T) {
 		{"release", func(city string) error {
 			return releaseQueuedNudgeClaims(city, []string{"n-1"})
 		}},
+		{"claim", func(city string) error {
+			_, err := claimDueQueuedNudgesForTarget(city, nudgeTarget{cityPath: city, alias: "beta"}, time.Now())
+			return err
+		}},
 	} {
 		t.Run(c.verb, func(t *testing.T) {
 			h := newNQCharHarness(t)
 			enqueueAndClaimForTest(t, h, "n-1", "n-2")
-			if err := withNudgeQueueState(h.city, "test_lapse_lease", func(state *nudgeQueueState) error {
-				for i := range state.InFlight {
-					if state.InFlight[i].ID == "n-2" {
-						state.InFlight[i].LeaseUntil = time.Now().Add(-time.Minute)
-					}
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
+			lapseNudgeLeaseForTest(t, h, "n-2")
 			release := holdNudgeQueueLockForTest(t, h.city)
 			h.lockHeldByTest = true
 			released := make(chan struct{})
@@ -263,12 +287,48 @@ func TestNudgeAckAndReleaseMaintainAfterALongLockWait(t *testing.T) {
 				t.Fatalf("%s after a long lock wait: %v", c.verb, err)
 			}
 			h.lockHeldByTest = false
-			state := loadNudgeStateForTest(t, h.city)
-			for _, item := range state.InFlight {
-				if item.ID == "n-2" {
-					t.Fatalf("after a %s that waited %s for the lock in-flight=%v, want n-2's lapsed lease recovered", c.verb, nudgeEnqueueMaintenanceBudget+500*time.Millisecond, nqCharItems(state.InFlight))
-				}
+			requireNudgeLeaseRecoveredForTest(t, h, "n-2", fmt.Sprintf("a %s that waited %s for the lock", c.verb, nudgeEnqueueMaintenanceBudget+500*time.Millisecond))
+		})
+	}
+}
+
+// A claim, a listing or a failure record whose caller's now is older than the
+// maintenance budget when it runs, as a long census read, lock wait or busy
+// retry leaves it, still maintains: the budget starts when the run does, and
+// now is only the time items are judged at. A lease that lapsed before now
+// returns to pending.
+func TestNudgeVerbsMaintainWhenTheirNowIsStale(t *testing.T) {
+	beta := func(h *nqCharHarness) nudgeTarget { return nudgeTarget{cityPath: h.city, alias: "beta"} }
+	for _, c := range []struct {
+		verb string
+		run  func(h *nqCharHarness, now time.Time) error
+	}{
+		{"claim", func(h *nqCharHarness, now time.Time) error {
+			_, err := claimDueQueuedNudgesForTarget(h.city, beta(h), now)
+			return err
+		}},
+		{"claim_batch", func(h *nqCharHarness, now time.Time) error {
+			_, err := claimDueQueuedNudgeBatchForTarget(h.city, beta(h), now)
+			return err
+		}},
+		{"list", func(h *nqCharHarness, now time.Time) error {
+			_, _, _, err := listQueuedNudgesForTarget(h.city, beta(h), now)
+			return err
+		}},
+		{"record_failure", func(h *nqCharHarness, now time.Time) error {
+			_, err := recordQueuedNudgeFailureDetailed(h.city, h.shadow(), []string{"n-1"}, errors.New("delivery refused"), now)
+			return err
+		}},
+	} {
+		t.Run(c.verb, func(t *testing.T) {
+			h := newNQCharHarness(t)
+			enqueueAndClaimForTest(t, h, "n-1", "n-2")
+			lapseNudgeLeaseForTest(t, h, "n-2")
+			stale := time.Now().Add(-(nudgeEnqueueMaintenanceBudget + time.Second))
+			if err := c.run(h, stale); err != nil {
+				t.Fatalf("%s with a stale now: %v", c.verb, err)
 			}
+			requireNudgeLeaseRecoveredForTest(t, h, "n-2", "a "+c.verb+" whose now is stale")
 		})
 	}
 }
