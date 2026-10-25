@@ -832,6 +832,48 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 	}
 }
 
+// TestDoltRecoveryDocsCarryDataDirAndSchemaRules fails if the manual Dolt
+// recovery docs lose the two gotchas operators hit during a store restore: a
+// damaged store kept inside data_dir crash-loops the managed server, and a
+// fresh clone needs `bd migrate schema`. The runbook is the canonical home;
+// the sibling docs must name the fix and point at the runbook.
+func TestDoltRecoveryDocsCarryDataDirAndSchemaRules(t *testing.T) {
+	root := repoRoot()
+	const runbook = "examples/bd/dolt/docs/journal-corruption-recovery.md"
+	required := map[string][]string{
+		runbook: {
+			"Keep every damaged store outside `<data_dir>`",
+			"root hash doesn't exist",
+			"table not found: leases",
+			"gc bd migrate schema",
+			"Schema already at v<N>",
+			"remote-backed",
+		},
+		"docs/troubleshooting/dolt-bloat-recovery.md": {
+			"outside the Dolt data directory",
+			"gc bd migrate schema",
+			"journal-corruption-recovery.md",
+			"remote-backed",
+		},
+		"engdocs/contributors/dolt-maintenance.md": {
+			"outside `<data_dir>`",
+			"gc bd migrate schema",
+			"table not found: leases",
+		},
+	}
+	for rel, phrases := range required {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		for _, phrase := range phrases {
+			if !strings.Contains(string(data), phrase) {
+				t.Errorf("%s does not contain %q", rel, phrase)
+			}
+		}
+	}
+}
+
 // TestDocDirCoverage fails if a new top-level directory containing markdown
 // files exists that is not listed in docTreeDirs or docTreeIgnored. This
 // prevents silent gaps when new doc directories are added.
