@@ -410,6 +410,79 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 	}
 }
 
+// unscopedTrivyIgnorePathWaivers reports, as ready-to-print messages, every waiver
+// whose reach the path-keyed guards cannot see. Trivy matches each paths entry as a
+// doublestar glob (pkg/result/ignore.go), but those guards compare paths as literal
+// strings, so a pattern such as usr/local/bin/* waives kubectl, bd, dolt and gc
+// together while every guard sees no path it knows. An entry with neither paths nor
+// purls is worse: Trivy applies it to every file in every image.
+func unscopedTrivyIgnorePathWaivers(doc trivyIgnoreDoc) []string {
+	var found []string
+	for _, v := range doc.Vulnerabilities {
+		if len(v.Paths) == 0 && len(v.Purls) == 0 {
+			found = append(found, fmt.Sprintf("%s names no path and no purl, so Trivy waives it for every file in every image; scope it to the literal path of the binary it was reviewed against", v.ID))
+		}
+		for _, p := range v.Paths {
+			if strings.ContainsAny(p, `*?[{\`) {
+				found = append(found, fmt.Sprintf("%s waives path pattern %q; Trivy matches it as a glob that can reach binaries the guards here know only by literal path, so list each binary's literal path instead", v.ID, p))
+			}
+		}
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers drives the path guard with
+// entries the real file does not (and must not) contain, because every path in it is
+// a literal binary path today. Each pattern below reaches usr/local/bin/kubectl under
+// Trivy's doublestar matching without equalling it, so every guard keyed on that
+// literal path misses it; the entry with no path and no purl is waived everywhere.
+func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-90001
+    paths:
+      - "usr/local/bin/*"
+  - id: CVE-2026-90002
+    paths:
+      - "usr/local/bin/kubect?"
+  - id: CVE-2026-90003
+    paths:
+      - "usr/local/bin/[k]ubectl"
+  - id: CVE-2026-90004
+    paths:
+      - "usr/local/bin/{kubectl,bd}"
+  - id: CVE-2026-90005
+    paths:
+      - 'usr/local/bin/kube\ctl'
+  - id: CVE-2026-90006
+    expired_at: 2026-12-07
+  - id: CVE-2026-78667
+    paths:
+      - "usr/local/bin/kubectl"
+  - id: CVE-2026-43871
+    purls:
+      - pkg:golang/github.com/apache/thrift
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := unscopedTrivyIgnorePathWaivers(doc)
+	for _, id := range []string{"CVE-2026-90001", "CVE-2026-90002", "CVE-2026-90003", "CVE-2026-90004", "CVE-2026-90005", "CVE-2026-90006"} {
+		flagged := false
+		for _, f := range found {
+			if strings.HasPrefix(f, id+" ") {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("unscopedTrivyIgnorePathWaivers() did not flag %s; got %q", id, found)
+		}
+	}
+	if len(found) != 6 {
+		t.Errorf("unscopedTrivyIgnorePathWaivers() = %q, want exactly the five patterns and the unscoped entry (the literal kubectl path passes, and the purl entry is the purl guard's)", found)
+	}
+}
+
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
 // 1.26.10 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
@@ -431,6 +504,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	}
 	for _, unreviewed := range unreviewedTrivyIgnorePurlWaivers(doc) {
 		t.Error(unreviewed)
+	}
+	for _, unscoped := range unscopedTrivyIgnorePathWaivers(doc) {
+		t.Error(unscoped)
 	}
 
 	rebuiltPaths := map[string]bool{
@@ -564,7 +640,9 @@ func staleKubectlWaiverStatements(pin string, doc trivyIgnoreDoc) []string {
 // the pin today, so TestTrivyIgnoreKubectlWaiversNameThePinnedRelease cannot
 // demonstrate what it catches. The fixture is the next pin bump done by halves:
 // CVE-2026-78669's statement says what the release ships twice (x/net and Go), and
-// moving only the first clause to the new pin must not pass the guard.
+// moving only the first clause to the new pin must not pass the guard. Nor may
+// CVE-2026-111943's free-form statement, which never says what any release ships
+// and so would never go stale at a pin bump.
 func TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease(t *testing.T) {
 	const waived = `vulnerabilities:
   - id: CVE-2026-78667
@@ -583,6 +661,10 @@ func TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease(t *testing.T) {
     paths:
       - usr/local/bin/kubectl
     statement: Reached through golang.org/x/text (kubectl v1.36.60 ships v0.33.0; fixed in 0.39.0).
+  - id: CVE-2026-111943
+    paths:
+      - usr/local/bin/kubectl
+    statement: Accepted risk; see the kubectl notes.
   - id: CVE-2026-25681
     paths:
       - usr/local/bin/bd
@@ -593,7 +675,7 @@ func TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease(t *testing.T) {
 		t.Fatalf("parsing the fixture: %v", err)
 	}
 	found := staleKubectlWaiverStatements("v1.36.6", doc)
-	for _, id := range []string{"CVE-2026-78669", "CVE-2026-97031", "CVE-2026-56852"} {
+	for _, id := range []string{"CVE-2026-78669", "CVE-2026-97031", "CVE-2026-56852", "CVE-2026-111943"} {
 		flagged := false
 		for _, f := range found {
 			if strings.HasPrefix(f, id+" ") {
