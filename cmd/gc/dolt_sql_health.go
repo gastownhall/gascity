@@ -20,6 +20,8 @@ type managedDoltSQLHealthReport struct {
 	QueryReady      bool
 	ReadOnly        string
 	ConnectionCount string
+	DataReadError   string
+	DataReadWarning string
 }
 
 // managedDoltProbeDatabase is the legacy dedicated probe database name. The

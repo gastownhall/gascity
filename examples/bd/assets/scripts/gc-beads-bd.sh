@@ -4729,6 +4729,14 @@ op_store_bridge() {
     GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
     return $?
 }
+health_data_read_gate() {
+    :
+}
+
+health_store_open_gate() {
+    :
+}
+
 op_health() {
     local conn_count="" read_only_status
 
