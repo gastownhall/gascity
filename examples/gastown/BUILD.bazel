@@ -62,6 +62,7 @@ go_test(
         "//internal/fsys",
         "//internal/molecule",
         "//internal/packman",
+        "//internal/pidutil",
         "//internal/session",
         "//internal/testenv",
         "//test/dolttest",
