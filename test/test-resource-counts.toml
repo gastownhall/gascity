@@ -2309,6 +2309,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/ssh/process_alive_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/ssh/session_env_file_integration_test.go"
 resource = "subprocess"
 calls = 4
