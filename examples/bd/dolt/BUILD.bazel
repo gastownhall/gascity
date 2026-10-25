@@ -102,6 +102,7 @@ go_test(
         "backup_order_test.go",
         "cleanup_test.go",
         "compact_backup_remotes_test.go",
+        "compact_gc_quiescence_test.go",
         "compact_history_protection_real_dolt_test.go",
         "compact_history_protection_test.go",
         "compact_live_database_flatten_test.go",
