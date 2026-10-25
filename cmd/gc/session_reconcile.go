@@ -606,9 +606,11 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
 	}
-	if !exitAccrualHolds(info, sessFront, cityPath) {
+	release, ok := exitAccrualLease(info, sessFront, cityPath)
+	if !ok {
 		return info, true
 	}
+	defer release()
 	// A rapid crash of a resume launch is resume-shaped.
 	info = recordWakeFailure(info, transcriptRoots, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg), resumeFailure{counted: info.ResumeLaunch == "true"}, rec)
 	info = clearLastWokeAt(info, sessFront)
@@ -966,9 +968,11 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, cityPath string, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		if !exitAccrualHolds(info, sessFront, cityPath) {
+		release, ok := exitAccrualLease(info, sessFront, cityPath)
+		if !ok {
 			return info, true
 		}
+		defer release()
 		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
@@ -984,30 +988,48 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 	}
 }
 
-// exitAccrualHolds reports whether the row, read fresh, still carries the
-// facts a rapid-crash or churn accrual was decided on (CONTRACT §12.5: a
-// destructive decision decides on a fresh read), and no live holder has the
-// row's runtime lease. A tick's snapshot read before an operator's `gc session
-// kill` still names the killed wake, and the dead runtime it then observes is
-// the kill, not a crash: accruing it would count the operator's kill against
-// the session (mc-uhvqj). An operator's close stops the runtime under its
-// lease before it commits the close, and writes nothing the facts compare
-// until then: a runtime a live holder's lease covers is that holder's to
-// start or stop, and accruing its death would also move the row's revision
-// under the close's fence, three writes against its three attempts
-// (ga-u2f94s). A moved row, a held lease, or a read or probe that fails
-// accrues nothing; the next tick decides again.
-func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store, cityPath string) bool {
-	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
-	if err != nil || !held {
-		return false
-	}
+// exitAccrualLease takes the row's runtime lease for a rapid-crash or churn
+// accrual and holds it across the accrual's writes; ok is false, and nothing
+// may be written, when the accrual is not decided. The lease is what a
+// starter or stopper holds (I-LEASE): a runtime whose lease a live holder has
+// is that holder's to start or stop, and its death is no crash or churn. An
+// operator's close stops the runtime under its lease and then commits the
+// close fenced on the row's revision; accruing the death it caused would move
+// the revision under that fence, three writes against its three attempts
+// (ga-u2f94s). Held across the writes, the lease also keeps a close from
+// starting between the decision and the last write: the close waits for it.
+//
+// Under the lease the accrual decides again on a fresh read (CONTRACT §12.5).
+// A tick's snapshot read before an operator's `gc session kill` still names
+// the killed wake, and the dead runtime it then observes is the kill, not a
+// crash: accruing it would count the operator's kill against the session
+// (mc-uhvqj). A held lease, a moved or closed row, or a lease or read that
+// fails accrues nothing; the next tick decides again, so a crash under a
+// holder that did not cause it is counted once the holder releases. Failures
+// other than a busy lease or a moved row are logged.
+func exitAccrualLease(info sessionpkg.Info, sessFront *sessionpkg.Store, cityPath string) (release func(), ok bool) {
 	name := strings.TrimSpace(info.SessionName)
 	if name == "" || !filepath.IsAbs(cityPath) {
-		return false
+		fmt.Fprintf(os.Stderr, "session reconciler: deferring the exit accrual of %s: no runtime lease to take (session name %q, city path %q)\n", info.ID, name, cityPath) //nolint:errcheck
+		return nil, false
 	}
-	leased, err := sessionpkg.RuntimeLeaseHeld(sessFront, sessionpkg.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
-	return err == nil && !leased
+	lease, err := sessionpkg.TryRuntimeLease(sessFront, sessionpkg.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID, TTL: sessionpkg.RuntimeLeaseTTL(0)})
+	switch {
+	case errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy), errors.Is(err, sessionpkg.ErrRuntimeLeaseRowClosed):
+		return nil, false
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "session reconciler: deferring the exit accrual of %s: taking runtime %q's lease: %v\n", info.ID, name, err) //nolint:errcheck
+		return nil, false
+	}
+	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "session reconciler: deferring the exit accrual of %s: fresh read: %v\n", info.ID, err) //nolint:errcheck
+	}
+	if err != nil || !held {
+		lease.Release()
+		return nil, false
+	}
+	return lease.Release, true
 }
 
 func isDeliberateSleepReason(reason string) bool {

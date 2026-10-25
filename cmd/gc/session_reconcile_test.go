@@ -1661,10 +1661,11 @@ func TestResumeBackstopOnARapidCrash(t *testing.T) {
 		session := makeBead("b1", maps.Clone(base))
 		session.Metadata["resume_launch"] = launch
 		rec := events.NewFake()
+		city := t.TempDir() // one city: each crash's accrual takes the same runtime lease
 		for crash := 1; crash <= maxResumeFailuresBeforeReset; crash++ {
 			session.Metadata["last_woke_at"] = now.Add(-10 * time.Second).Format(time.RFC3339)
 			store.persistRow(session)
-			if _, stab := checkStability(seedSessionInfo(session), nil, false, newDrainTracker(), sessionFrontDoor(store), t.TempDir(), clk, nil, nil, rec); !stab {
+			if _, stab := checkStability(seedSessionInfo(session), nil, false, newDrainTracker(), sessionFrontDoor(store), city, clk, nil, nil, rec); !stab {
 				t.Fatalf("legacy, launch %q, crash %d: not recorded", launch, crash)
 			}
 			syncBeadFromStore(&session, store)
