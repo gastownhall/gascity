@@ -29,6 +29,11 @@ on:
         required: false
         type: boolean
         default: false
+      go_test_count:
+        description: go test -count for the cmd-gc process shards (soak runs; 1 to 10)
+        required: false
+        type: string
+        default: "1"
   workflow_dispatch:
     inputs:
       suite:
@@ -56,6 +61,11 @@ on:
         description: Pull request head ref for label-dispatched runs
         required: false
         type: string
+      go_test_count:
+        description: go test -count for the cmd-gc process shards (soak runs; 1 to 10)
+        required: false
+        type: string
+        default: "1"
   schedule:
     - cron: "17 3 * * *"
   pull_request:
@@ -312,7 +322,8 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    # A soak (go_test_count above 1) runs each shard's tests that many times.
+    timeout-minutes: ${{ (inputs.go_test_count || '1') == '1' && 20 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -329,7 +340,17 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
-        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
+        env:
+          GO_TEST_COUNT_INPUT: ${{ inputs.go_test_count || '1' }}
+        run: |
+          case "$GO_TEST_COUNT_INPUT" in
+            [1-9] | 10) ;;
+            *) echo "go_test_count must be 1 to 10, got '$GO_TEST_COUNT_INPUT'" >&2; exit 1 ;;
+          esac
+          timeout=20m
+          if [ "$GO_TEST_COUNT_INPUT" != 1 ]; then timeout=80m; fi
+          make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 \
+            CMD_GC_PROCESS_COUNT="$GO_TEST_COUNT_INPUT" CMD_GC_PROCESS_TIMEOUT="$timeout"
       - name: Run product metrics testhook profile
         if: ${{ matrix.shard == 6 }}
         run: make test-productmetrics-testhook

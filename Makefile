@@ -621,10 +621,14 @@ test-productmetrics-testhook:
 
 CMD_GC_PROCESS_SHARD ?= 1
 CMD_GC_PROCESS_TOTAL ?= 6
+# Soak knobs: run each shard's tests CMD_GC_PROCESS_COUNT times (go test
+# -count) under a CMD_GC_PROCESS_TIMEOUT package timeout.
+CMD_GC_PROCESS_COUNT ?= 1
+CMD_GC_PROCESS_TIMEOUT ?= 20m
 CMD_GC_COVER_TOTAL ?= 6
 CMD_GC_COVER_SHARD ?= 1
 test-cmd-gc-process-shard:
-	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
+	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=$(CMD_GC_PROCESS_COUNT) GO_TEST_TIMEOUT=$(CMD_GC_PROCESS_TIMEOUT) ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
 
 ## test-cmd-gc-process-parallel: run all cmd/gc process shards concurrently
 test-cmd-gc-process-parallel:
