@@ -411,9 +411,10 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 // 1.26.10 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
-// rebuild instead of proving the fix holds. The one surviving reviewed waiver is
-// CVE-2026-56852 for kubectl, which is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies. gc's module waivers
+// rebuild instead of proving the fix holds. The surviving reviewed waivers are the
+// three kubectl entries the v1.36.5 pin does not clear (CVE-2026-78667,
+// CVE-2026-78669, CVE-2026-97031); kubectl is an upstream-signed prebuilt this repo
+// installs rather than builds, so nothing here can move its dependencies. gc's module waivers
 // are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
@@ -452,9 +453,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	// Nothing rebuilt from source is waived here any more; only kubectl is, and
 	// kubectl is a prebuilt.
 	reviewedWaivers := map[string]map[string]bool{
-		"CVE-2026-56852": {
-			"usr/local/bin/kubectl": true,
-		},
+		"CVE-2026-78667": {"usr/local/bin/kubectl": true},
+		"CVE-2026-78669": {"usr/local/bin/kubectl": true},
+		"CVE-2026-97031": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
 
@@ -479,6 +480,50 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		for path := range paths {
 			if !foundReviewed[cve][path] {
 				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until its pin moves past the fixed version", cve, path)
+			}
+		}
+	}
+}
+
+// TestTrivyIgnoreKubectlWaiversNameThePinnedRelease keeps every kubectl waiver's
+// statement in step with contrib/k8s/Dockerfile.controller's KUBECTL_VERSION. Each
+// statement records what the pinned release ships ("kubectl vX.Y.Z ships ..."), so
+// a pin bump that leaves a statement naming the old release has not re-checked that
+// waiver against the new binary: either the new release clears it and the entry
+// should go, or it does not and the statement must say what the new release ships.
+func TestTrivyIgnoreKubectlWaiversNameThePinnedRelease(t *testing.T) {
+	root := repoRoot(t)
+
+	pin := ""
+	for _, line := range strings.Split(readFile(t, root, "contrib/k8s/Dockerfile.controller"), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG KUBECTL_VERSION="); ok {
+			pin = strings.TrimSpace(v)
+			break
+		}
+	}
+	if pin == "" {
+		t.Fatal("contrib/k8s/Dockerfile.controller has no ARG KUBECTL_VERSION=; the kubectl pin moved and this guard must follow it")
+	}
+
+	var doc struct {
+		Vulnerabilities []struct {
+			ID        string   `yaml:"id"`
+			Paths     []string `yaml:"paths"`
+			Statement string   `yaml:"statement"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+
+	want := "kubectl " + pin + " ships"
+	for _, v := range doc.Vulnerabilities {
+		for _, p := range v.Paths {
+			if p != "usr/local/bin/kubectl" {
+				continue
+			}
+			if !strings.Contains(v.Statement, want) {
+				t.Errorf("%s waives kubectl but its statement does not say what the pinned %s ships (want %q in it); re-check the waiver against the pinned binary and drop it if the pin clears it", v.ID, pin, want)
 			}
 		}
 	}

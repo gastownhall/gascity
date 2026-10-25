@@ -1,9 +1,7 @@
 vulnerabilities:
-  # Expiry horizon moved 2026-08-17: 2026-08-07 -> 2026-11-07, on a set trimmed
-  # from 45 entries to 12. Every entry is now a kubectl entry on that horizon:
-  # the four reviewed entries main's time-boxed bridge carried on its own
-  # 2026-09-21 horizon were all fixed rather than re-dated, so the bridge is
-  # retired and nothing in this file expires before 2026-11-07.
+  # Expiry horizon moved 2026-10-25: 2026-11-07 -> 2026-12-07, on a set trimmed
+  # from 15 entries to 3 by moving contrib/k8s/Dockerfile.controller's kubectl
+  # pin from v1.36.3 to v1.36.5. Every entry is still a kubectl entry.
   #
   # Every binary this image rebuilds from source now carries patched modules,
   # so none of them is waived for a finding the rebuild clears.
@@ -25,98 +23,41 @@ vulnerabilities:
   #
   # kubectl is all that is left. It is an upstream-signed prebuilt that
   # contrib/k8s/Dockerfile.controller installs rather than builds, so nothing in
-  # this repo can move its dependencies. Bumping the pin from v1.36.0 to v1.36.3
-  # takes its Go stdlib from 1.26.2 to 1.26.5 and clears eight of its findings,
-  # but v1.36.3 still ships x/net v0.49.0 and x/text v0.33.0, which leaves the
-  # fifteen entries below. The first twelve need at most Go 1.26.6, x/net 0.56.0
-  # and x/text 0.39.0, and v1.36.5 meets all three (Go 1.26.8, x/net 0.56.0,
-  # x/text 0.39.0), so moving the pin to it clears them. The last three, from
-  # the 2026-10-08 Go advisories (CVE-2026-78667, CVE-2026-78669,
-  # CVE-2026-97031), need Go 1.26.9 and x/net 0.60.0, and no kubectl release is
-  # built with either yet. Drop each entry as soon as a release clears it.
+  # this repo can move its dependencies. v1.36.5 ships Go 1.26.8, x/net v0.56.0
+  # and x/text v0.39.0 (checked with `go version -m` and a Trivy 0.70.0 scan of
+  # the sha256-verified binary), which clears twelve of the fifteen entries the
+  # v1.36.3 pin needed. The three below, from the 2026-10-08 Go advisories
+  # (CVE-2026-78667, CVE-2026-78669, CVE-2026-97031), need Go 1.26.9 and x/net
+  # 0.60.0, and no kubectl release is built with either yet; v1.37.1 has the
+  # same findings as v1.36.5, so the pin stays on the 1.36 line. All three are
+  # denial-of-service findings in net/http, HTTP/2 and crypto/tls. kubectl in
+  # this image is only a client of the cluster's own API server (attach and the
+  # beads/events exec providers), so the peer that would have to send the
+  # malicious traffic is the API server itself. Drop each entry as soon as a
+  # release clears it. TestTrivyIgnoreKubectlWaiversNameThePinnedRelease keeps
+  # each statement naming the pinned release, so the next pin bump has to
+  # re-check every entry.
   #
-  # br carried ten entries and now produces no findings at all, so it is gone
-  # from this file too.
-  #
-  # The horizon is three months rather than the one month the previous
-  # extensions used. When it was set, nothing in the kubectl set below was
-  # fixable from this repo, so a shorter one bought a re-dating chore instead of
-  # a decision.
-  - id: CVE-2026-25681
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.3 ships v0.49.0; fixed in 0.55.0). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-27136
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.3 ships v0.49.0; fixed in 0.55.0). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-33814
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.3 ships v0.49.0; fixed in 0.53.0). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-33818
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-39821
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.3 ships v0.49.0; fixed in 0.55.0) and Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-46600
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.3 ships v0.49.0; fixed in 0.56.0) and Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-56852
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/text (kubectl v1.36.3 ships v0.33.0; fixed in 0.39.0). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-56853
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-56858
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-56859
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-56860
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  - id: CVE-2026-56862
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
+  # The horizon is one month rather than three. The previous three-month
+  # horizon was set when nothing in the kubectl set was fixable from this repo.
+  # Now the next monthly Kubernetes patch release is expected to be built with
+  # Go >= 1.26.9, so a short horizon makes that release a forced re-check
+  # rather than letting these entries outlive their fix.
   - id: CVE-2026-78667
     paths:
       - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.26.9, 1.27.2). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; the newest releases (v1.36.5, v1.37.1) are still built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
+    expired_at: 2026-12-07
+    statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2). Denial of service via crafted HTTP Range headers, a net/http server-side path; kubectl here is only an HTTP client of the cluster API server. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5, v1.37.1) are both built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
   - id: CVE-2026-78669
     paths:
       - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.3 ships v0.49.0; fixed in 0.60.0) and Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.26.9, 1.27.2). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; the newest releases (v1.36.5, v1.37.1) are still built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
+    expired_at: 2026-12-07
+    statement: Reached through golang.org/x/net (kubectl v1.36.5 ships v0.56.0; fixed in 0.60.0) and Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2). Denial of service via excessive HTTP/2 SETTINGS frames; the only HTTP/2 peer kubectl talks to here is the cluster API server. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5, v1.37.1) are both built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
   - id: CVE-2026-97031
     paths:
       - "usr/local/bin/kubectl"
-    expired_at: 2026-11-07
-    statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.26.9, 1.27.2). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; the newest releases (v1.36.5, v1.37.1) are still built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
+    expired_at: 2026-12-07
+    statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2). Denial of service via multiple ECH outer extension references in crypto/tls; kubectl here only dials the cluster API server and does not terminate TLS. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5, v1.37.1) are both built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
   # main's time-boxed waiver bridge (#5885) is fully retired: its thrift entry
   # went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached 0.24.0 and
   # its GitPython entries went when .github/requirements/mcp-agent-mail.txt
