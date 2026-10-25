@@ -345,8 +345,9 @@ const (
 	// It selected GC_BEADS=sqlite, a provider #3151 removed (gc now
 	// hard-errors on it), so it failed every night; no job may select a
 	// provider now. Reviewed delta: one job removed; no new job, trigger or
-	// permission.
-	expectedNightlyExecutionHash = "cb54a44e7bfc392a047849ab6cfe695dcbffec56e127b5a84d427e3c1d4bef8c"
+	// permission. Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
+	// from hotfix/1.5.1): BD_VERSION env value only.
+	expectedNightlyExecutionHash = "a833f343b8875bf65347fcdbf42a51d20ba65ceaffc37e95e24d596059bec4d4"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

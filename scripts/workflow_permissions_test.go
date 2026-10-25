@@ -139,6 +139,11 @@ func TestWorkflowWritePermissionsAreJobScoped(t *testing.T) {
 			writeJob: "comment",
 			want:     map[string]string{"pull-requests": "write"},
 		},
+		{
+			file:     "worker-env-notify-beads.yml",
+			writeJob: "grace",
+			want:     map[string]string{"contents": "write"},
+		},
 	}
 
 	for _, tc := range cases {

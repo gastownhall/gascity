@@ -1,0 +1,122 @@
+# Previous-pin workers for rbe-west's grace window after a Go re-pin
+# (tools/rbe/worker-env-grace; TESTING.md "Grace window for Go re-pins").
+#
+# A push that moves main's worker-env pin leaves gastownhall/beads, which
+# carries a copy of the manifest and pin, with no worker until its own sync
+# PR lands (about an hour). When the push moved only the manifest's go line,
+# it publishes a grace record (worker-env-notify-beads.yml's grace job), and
+# while that record's window is open the rbe-west OSS pool scaler dispatches
+# this workflow: each run is one NativeLink worker for rbe-west's OSS
+# scheduler, like rbe-worker-pool.yml's, that serves the PREVIOUS pin. It
+# runs the same pinned rbe-worker on this main's manifest with the previous
+# Go (the record's), checks that its host measures the previous pin, and
+# serves until idle, max age or about the window's end. A run with nothing
+# to serve fails: a host that measures anything else (it never registers),
+# no open window, or a record for another main. The scaler's breaker for
+# these runs then stops dispatching them. There are no drift jobs: a
+# previous-pin host is not the pinned host's drift, and a drift issue would
+# cap the pools.
+#
+# Blacksmith donates this compute for workflows of our OSS repos only. These
+# workers register with the OSS scheduler (dedicated rbe-oss-worker cert);
+# developer and agent builds use the default instance and never run here.
+name: rbe-worker-legacy
+# The scaler names its runs as it does the pool's: "(floor, idle Nm)" for
+# the window's floor, burst otherwise. The worker never reads role.
+run-name: ${{ format('rbe-worker-legacy ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_minutes:
+        description: Retire after this many minutes with no action in flight
+        default: "15"
+        type: string
+      max_minutes:
+        description: Retire after this many minutes regardless, or when the grace window ends, whichever comes first
+        default: "300"
+        type: string
+      role:
+        description: floor (the window's standing workers) or burst; the run's name only, the worker never reads it
+        default: burst
+        type: choice
+        options:
+          - burst
+          - floor
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: rbe legacy worker (Blacksmith, OSS scheduler)
+    # Default branch of gastownhall/gascity only: the record is this
+    # repository's, and the worker's local CAS starts from the read-only warm
+    # set, never from a Blacksmith sticky disk (rbe-worker-pool.yml).
+    if: github.repository == 'gastownhall/gascity' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
+          persist-credentials: false
+      # The worker code: gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
+      # the pool's own revision; never the previous re-pin's.
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+      # The record on refs/heads/rbe/worker-env-grace, fetched anonymously.
+      # Inside its window: this main's manifest with the previous Go, which
+      # must hash to the record's previous pin, as the product files the
+      # rbe-worker reads (go.mod, platforms/BUILD.bazel,
+      # tools/rbe/worker-env.txt), the dispatch's idle minutes (checked:
+      # they reach the worker's shell arithmetic) and a max age that ends
+      # about the window's serve-until. Outside it, or with no window, this
+      # step fails and the run ends without a worker.
+      - name: Rebuild the previous host's product files from the grace record
+        id: grace
+        env:
+          IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          MAX_MINUTES: ${{ inputs.max_minutes }}
+        run: |
+          set -euo pipefail
+          tools/rbe/worker-env-grace fetch >"$RUNNER_TEMP/worker-env-grace.txt"
+          tools/rbe/worker-env-grace host "$RUNNER_TEMP/worker-env-grace.txt" "$RUNNER_TEMP/worker-env-previous"
+      # Provision (the previous Go) and measure this host against the
+      # previous pin. Drift fails the job: a host that is not the previous
+      # one serves nothing here.
+      - name: Measure this host against the previous pin
+        id: measure
+        if: steps.grace.outputs.serve == 'true'
+        env:
+          WORKER_MODE: measure
+          RBE_PRODUCT_ROOT: ${{ steps.grace.outputs.root }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+      # rbe-worker-pool.yml's worker step, with the previous host's product
+      # files, the checked idle minutes, a max age that ends about the
+      # window's serve-until and its own name
+      # (scripts/rbe_worker_env_grace_test.go keeps the rest equal).
+      - name: NativeLink worker for the previous pin until idle or max age
+        id: worker
+        if: steps.grace.outputs.serve == 'true'
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+          RBE_PRODUCT_ROOT: ${{ steps.grace.outputs.root }}
+          WORKER_MODE: pool
+          POOL_IDLE_MINUTES: ${{ steps.grace.outputs.idle-minutes }}
+          POOL_MAX_MINUTES: ${{ steps.grace.outputs.max-minutes }}
+          WORKER_NAME: gha-legacy-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}
+          RBE_ACTION_CANARY_EVERY: ${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}
+          RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
+          RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
+          RBE_WARM_URL: ${{ vars.RBE_WARM_URL || '' }}
+          RBE_WARM_EVERY: ${{ vars.RBE_WARM_EVERY || '1' }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'

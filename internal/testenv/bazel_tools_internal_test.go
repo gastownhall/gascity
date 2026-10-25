@@ -9,9 +9,9 @@ import (
 func TestBazelToolPATHPrependsEachToolDirectory(t *testing.T) {
 	srcdir := filepath.FromSlash("/rf")
 	got := bazelToolPATH("/usr/bin:/bin", srcdir, "_main",
-		"../+http_archive+bd_bin_v1_3_1/bd ../+http_archive+dolt_bin_v2_2_0/dolt-linux-amd64/bin/dolt cmd/gc/gc_/gc")
+		"../+http_archive+bd_bin_v1_3_2/bd ../+http_archive+dolt_bin_v2_2_0/dolt-linux-amd64/bin/dolt cmd/gc/gc_/gc")
 	want := strings.Join([]string{
-		filepath.Join(srcdir, "+http_archive+bd_bin_v1_3_1"),
+		filepath.Join(srcdir, "+http_archive+bd_bin_v1_3_2"),
 		filepath.Join(srcdir, "+http_archive+dolt_bin_v2_2_0", "dolt-linux-amd64", "bin"),
 		filepath.Join(srcdir, "_main", "cmd", "gc", "gc_"),
 		"/usr/bin:/bin",

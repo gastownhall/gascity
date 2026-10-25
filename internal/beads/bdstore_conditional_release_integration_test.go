@@ -72,7 +72,7 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 //
 // It is homed on the contract matrix's "current" cell, whose bd is built from
 // deps.env BD_CURRENT_REF. That is a choice, not a capability limit: deps.env
-// BD_VERSION is v1.3.1, which carries the flags, so the shards that
+// BD_VERSION is v1.3.2, which carries the flags, so the shards that
 // install BD_VERSION could run this row too. It stays here as the single home
 // for the contract, and this cell sets requireConditionalReleaseEnv so every
 // exit short of a full run is a failure (conditionalReleaseUnprovable). The

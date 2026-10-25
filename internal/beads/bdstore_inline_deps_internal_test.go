@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -59,10 +60,13 @@ type fakeBdLedger struct {
 	// that cannot testify about its own projection.
 	omitDependencyCount bool
 
+	mu    sync.Mutex // serializes run: a two-tier List runs its two bd reads at once
 	calls [][]string
 }
 
 func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
 	// bd's list and query hide closed rows unless asked for all of them.

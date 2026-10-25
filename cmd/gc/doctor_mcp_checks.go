@@ -42,16 +42,26 @@ func (*mcpConfigDoctorCheck) CanFix() bool                     { return false }
 func (*mcpConfigDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func (c *mcpConfigDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	issues, _ := inspectMCPProjectionHealth(c.cityPath, c.cfg, c.lookPath)
-	if len(issues) == 0 {
+	health := inspectMCPProjectionHealth(c.cityPath, c.cfg, c.lookPath)
+	switch {
+	case len(health.issues) > 0:
+		return &doctor.CheckResult{
+			Name:    c.Name(),
+			Status:  doctor.StatusError,
+			Message: summarizeMCPIssues(health.issues),
+			Details: append(append([]string(nil), health.issues...), health.skips...),
+			FixHint: `fix the reported MCP definitions or provider/runtime settings, then rerun "gc doctor"`,
+		}
+	case len(health.skips) > 0:
+		return &doctor.CheckResult{
+			Name:    c.Name(),
+			Status:  doctor.StatusWarning,
+			Message: summarizeMCPIssues(health.skips),
+			Details: health.skips,
+			FixHint: "these agents start without the named MCP servers; if one needs a server, switch it to a provider that can receive it",
+		}
+	default:
 		return &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK, Message: "MCP definitions and delivery paths are valid"}
-	}
-	return &doctor.CheckResult{
-		Name:    c.Name(),
-		Status:  doctor.StatusError,
-		Message: summarizeMCPIssues(issues),
-		Details: issues,
-		FixHint: `fix the reported MCP definitions or provider/runtime settings, then rerun "gc doctor"`,
 	}
 }
 
@@ -60,7 +70,7 @@ func (*mcpSharedTargetDoctorCheck) CanFix() bool                     { return fa
 func (*mcpSharedTargetDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func (c *mcpSharedTargetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	_, conflicts := inspectMCPProjectionHealth(c.cityPath, c.cfg, c.lookPath)
+	conflicts := inspectMCPProjectionHealth(c.cityPath, c.cfg, c.lookPath).conflicts
 	if len(conflicts) == 0 {
 		return &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK, Message: "no projected MCP target conflicts"}
 	}
@@ -95,9 +105,22 @@ func (c *mcpSharedTargetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 	}
 }
 
-func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath config.LookPathFunc) ([]string, []mcpTargetConflict) {
+// mcpProjectionHealth is what gc doctor reports about MCP projection.
+type mcpProjectionHealth struct {
+	// issues are per-agent errors: broken definitions, undeliverable
+	// targets, and servers in an agent's own mcp/ directory that its
+	// provider cannot receive.
+	issues []string
+	// skips name agents that start without shared-layer servers their
+	// provider cannot receive.
+	skips []string
+	// conflicts are shared targets with diverging payloads.
+	conflicts []mcpTargetConflict
+}
+
+func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath config.LookPathFunc) mcpProjectionHealth {
 	if cfg == nil || len(cfg.Agents) == 0 {
-		return nil, nil
+		return mcpProjectionHealth{}
 	}
 
 	type targetState struct {
@@ -106,7 +129,10 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 	}
 
 	targets := make(map[string]*targetState)
-	var issues []string
+	var (
+		issues []string
+		skips  mcpSkipGroups
+	)
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -115,6 +141,7 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			issues = append(issues, fmt.Sprintf("agent %q: %v", agent.QualifiedName(), err))
 			continue
 		}
+		skips.add(mcpAgentLabel(agent), view.Skipped)
 		// Mirror buildStage1MCPTargetsWith's own filters exactly (same
 		// delivery stage, same "nothing to project" test with && not
 		// ||), so this check can never pass green on a city gc start is
@@ -123,7 +150,10 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		// comparison entirely whenever ANY of catalog/provider/target
 		// was empty, so a real conflict against a non-implicit agent's
 		// non-empty catalog at the same target never registered a
-		// second hash group (gastownhall/gascity#8267).
+		// second hash group (gastownhall/gascity#8267). An ACP session
+		// lands here too: it receives its servers in-band and writes no
+		// provider-native file, so "not stage1" excludes it the same way
+		// as every other delivery that projects nothing to a shared file.
 		if view.Delivery != "stage1" {
 			continue
 		}
@@ -182,7 +212,7 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		}
 		return conflicts[i].Provider < conflicts[j].Provider
 	})
-	return issues, conflicts
+	return mcpProjectionHealth{issues: issues, skips: skips.lines(), conflicts: conflicts}
 }
 
 func summarizeMCPIssues(items []string) string {

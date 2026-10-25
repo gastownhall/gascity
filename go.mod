@@ -8,7 +8,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/danielgtaylor/huma/v2 v2.37.3
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/gastownhall/gascity-packs v0.3.1-0.20260617013242-33d3a430a67d
+	github.com/gastownhall/gascity-packs v0.3.1-0.20261023052836-66c672b5ed00
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -24,7 +24,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/steveyegge/beads v1.3.1
+	github.com/steveyegge/beads v1.3.2
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.21.0

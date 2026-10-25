@@ -18,15 +18,20 @@ import (
 // would extend. It returns the errors that would fail the real pass, so a
 // preview fails where the start would.
 func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]string, error) {
-	targets, err := buildStage1MCPTargetsWith(cityPath, cfg, lookPath, stderr, true)
+	set, err := collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, true)
 	if err != nil {
 		return nil, err
 	}
 	fs := fsys.OSFS{}
 	var lines []string
-	desired := make(map[string]bool, len(targets))
-	gitignoreRoots := make(map[string]bool)
-	for _, target := range targets {
+	// As in the real pass, a skipped agent's target stays claimed: the plan
+	// does not report its cleanup as an orphan.
+	desired := make(map[string]bool, len(set.targets)+len(set.held))
+	for _, key := range set.held {
+		desired[key] = true
+	}
+	gitignore := make(map[string][]string)
+	for _, target := range set.targets {
 		plan, err := target.Projection.Plan(fs)
 		if err != nil {
 			return nil, fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
@@ -34,9 +39,14 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 		if line := describeMCPPlan(plan); line != "" {
 			lines = append(lines, line)
 		}
+		if plan.Refused != nil {
+			// The real pass leaves the target alone: it neither claims it
+			// nor adds it to .gitignore.
+			continue
+		}
 		desired[managedKey(target.Projection.Provider, target.Root)] = true
 		if len(target.Projection.Servers) > 0 {
-			gitignoreRoots[target.Root] = true
+			gitignore[target.Root] = append(gitignore[target.Root], mcpGitignoreEntry(target.Projection))
 		}
 	}
 	orphans, err := planOrphanStage1Targets(cityPath, cfg, desired)
@@ -44,13 +54,8 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 		return nil, err
 	}
 	lines = append(lines, orphans...)
-	roots := make([]string, 0, len(gitignoreRoots))
-	for root := range gitignoreRoots {
-		roots = append(roots, root)
-	}
-	sort.Strings(roots)
-	for _, root := range roots {
-		missing := missingGitignoreEntries(fs, root, managedMCPGitignoreEntries)
+	for _, root := range sortedMapKeys(gitignore) {
+		missing := missingMCPGitignoreEntries(fs, root, gitignore[root])
 		if len(missing) == 0 {
 			continue
 		}
@@ -62,6 +67,28 @@ func planStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.
 		lines = append(lines, fmt.Sprintf("%s %s: add %s", verb, path, strings.Join(missing, ", ")))
 	}
 	return lines, nil
+}
+
+// warnStage1MCPSkips prints, projecting nothing, the warnings a stage-1 MCP
+// pass prints for the city at cityPath: the agents that start without a
+// shared server their provider cannot receive, and the agents stage 1 skips.
+// Under a supervisor, stage 1 runs in the supervisor's process, which prints
+// them only to its log, so gc start and gc reload print them here too. They
+// are worked out on this process's PATH, which can differ from the
+// supervisor's; its log is the authoritative record.
+//
+// It is best effort, on a command that has already done its work, so it
+// loads the config the advisory way: builtin packs as they are on disk, and
+// no waiting on a busy repo cache (a gc import install, or the controller's
+// own fetch on reload). When the config does not load, or the pass would
+// fail, it prints nothing, and the supervisor's own start or reload reports
+// the failure.
+func warnStage1MCPSkips(cityPath string, lookPath config.LookPathFunc, stderr io.Writer) {
+	cfg, err := loadCityConfigAdvisory(cityPath)
+	if err != nil {
+		return
+	}
+	_, _ = collectStage1MCPTargets(cityPath, cfg, lookPath, stderr, true)
 }
 
 // planOrphanStage1Targets reports what cleanupOrphanStage1Targets would do to
@@ -102,6 +129,8 @@ func describeMCPPlan(plan materialize.MCPProjectionPlan) string {
 		servers += "s"
 	}
 	switch {
+	case plan.Refused != nil:
+		return fmt.Sprintf("leave %s (%s) as it is: %s; %s", plan.Target, plan.Provider, plan.Refused.Reason(), plan.Refused.Remedy())
 	case plan.Adopt && plan.Provider == materialize.MCPProviderClaude:
 		return fmt.Sprintf("adopt %s (%s): save its current content under %s, then replace it with %s",
 			plan.Target, plan.Provider, plan.SnapshotDir, servers)

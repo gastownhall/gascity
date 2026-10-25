@@ -50,7 +50,10 @@ type gcSeatHookShape struct {
 // --inject` and `gc mail check --inject` on every prompt, each as the provider
 // overlays run them. Real gc and the pinned bd run against a fresh city whose
 // supervisor holds its stores open, with one bound rig and one live named
-// session on the subprocess provider, from that session's identity.
+// session on the subprocess provider, from that session's identity. The bd on
+// PATH is the pinned bd itself (newIsolatedCommandEnvDirectBD), not the
+// harness shim, which costs every bd call a 120 MB binary's start-up that no
+// production seat pays.
 //
 // As TestGcBdLatencyBudget, it catches gross regressions only: a fixed cost
 // that pushes a hook's fastest call past the budget, the order of a store open
@@ -61,7 +64,7 @@ type gcSeatHookShape struct {
 func TestGcSeatHookLatencyBudget(t *testing.T) {
 	requireDoltIntegration(t)
 
-	env := newIsolatedCommandEnv(t, true)
+	env := newIsolatedCommandEnvDirectBD(t)
 	root, err := os.MkdirTemp("/tmp", "gsh-*")
 	if err != nil {
 		t.Fatalf("mktemp: %v", err)

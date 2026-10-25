@@ -916,12 +916,17 @@ exit %d
 func writeRecordingTimeout(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+	stub := fmt.Sprintf(`#!/bin/sh
 printf 'timeout %%s\n' "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
-`, shellQuote(logPath)))
+`, shellQuote(logPath))
+	// _bounded.sh prefers gtimeout (Homebrew coreutils on macOS) over
+	// timeout, so a host with gtimeout would bypass a timeout-only stub.
+	for _, name := range []string{"timeout", "gtimeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), stub)
+	}
 	return logPath
 }
 

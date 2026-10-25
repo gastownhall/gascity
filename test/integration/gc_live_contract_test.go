@@ -1568,6 +1568,8 @@ func appendLiveContractDefaultQuery(path, pathTemplate string, fx liveContractFi
 		query.Set("limit", "20")
 	case strings.HasSuffix(pathTemplate, "/extmsg/bindings"):
 		query.Set("session_id", fx.sessionID)
+	case strings.HasSuffix(pathTemplate, "/work/active-step"):
+		query.Set("assignee", fx.sessionID)
 	case strings.HasSuffix(pathTemplate, "/extmsg/groups"), strings.HasSuffix(pathTemplate, "/extmsg/transcript"):
 		query = fx.conversation
 	case strings.HasSuffix(pathTemplate, "/readiness") || strings.HasSuffix(pathTemplate, "/provider-readiness"):
@@ -1581,6 +1583,37 @@ func appendLiveContractDefaultQuery(path, pathTemplate string, fx liveContractFi
 		return path
 	}
 	return path + "?" + query.Encode()
+}
+
+// TestLiveContractReadProbes_ActiveStepCarriesAssignee pins the read sweep's
+// query construction for GET /work/active-step: the route requires at least
+// one assignee, so the probe must carry the fixture session identity,
+// URL-encoded, and the route must stay in the sweep (ga-ze0aym0, ga-od4rcxy).
+func TestLiveContractReadProbes_ActiveStepCarriesAssignee(t *testing.T) {
+	const pathTemplate = "/v0/city/{cityName}/work/active-step"
+	specBytes := []byte(`{"paths":{"` + pathTemplate + `":{"get":{}}}}`)
+	// An identity with characters that need escaping proves the value is
+	// encoded rather than spliced into the query verbatim.
+	fx := liveContractFixtures{sessionID: "sess id&x=1+2"}
+
+	probes := collectLiveContractReadProbes(t, specBytes, "live-city", fx)
+	if len(probes) != 1 || probes[0].pathTemplate != pathTemplate {
+		t.Fatalf("probes = %+v, want exactly the %s route kept in the read sweep", probes, pathTemplate)
+	}
+	u, err := url.Parse(probes[0].path)
+	if err != nil {
+		t.Fatalf("parse probe path %q: %v", probes[0].path, err)
+	}
+	if want := "/v0/city/live-city/work/active-step"; u.Path != want {
+		t.Fatalf("probe path = %q, want %q", u.Path, want)
+	}
+	if got := u.Query()["assignee"]; len(got) != 1 || got[0] != fx.sessionID {
+		t.Fatalf("assignee query = %q (raw %q), want exactly [%q]", got, u.RawQuery, fx.sessionID)
+	}
+	wantRaw := url.Values{"assignee": {fx.sessionID}}.Encode()
+	if u.RawQuery != wantRaw {
+		t.Fatalf("raw query = %q, want URL-encoded %q", u.RawQuery, wantRaw)
+	}
 }
 
 func assertLiveContractSpec(t *testing.T, specBytes []byte) {

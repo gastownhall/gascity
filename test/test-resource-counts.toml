@@ -217,7 +217,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 8
 
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
@@ -2309,6 +2309,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/ssh/process_alive_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/ssh/session_env_file_integration_test.go"
 resource = "subprocess"
 calls = 4
@@ -2753,6 +2758,11 @@ calls = 11
 path = "scripts/push_ownership_guard_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "scripts/rbe_worker_env_grace_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "scripts/rbe_worker_env_test.go"

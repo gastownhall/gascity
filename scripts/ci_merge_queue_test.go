@@ -40,6 +40,7 @@ func mergeGroupCtx(extra map[string]string) map[string]string {
 	ctx := map[string]string{
 		"github.event_name":                          "merge_group",
 		"github.repository":                          mergeQueueRepo,
+		"github.repository_owner":                    "gastownhall",
 		"github.actor":                               mergeQueueBotActor,
 		"github.ref":                                 mergeQueueRef,
 		"github.run_id":                              mergeQueueRunID,

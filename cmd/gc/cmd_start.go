@@ -623,6 +623,7 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
+	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
 	if jsonOut {
 		cityName := nameOverride
 		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {

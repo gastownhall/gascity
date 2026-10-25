@@ -88,14 +88,14 @@ go_test(
         "//:gotags_integration": [
             "//cmd/gc:gc_testhooks",
             "//test/conversationlane/fakeruntime",
-            "@bd_bin_v1_3_1//:bd",
+            "@bd_bin_v1_3_2//:bd",
             "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
     env = select({
         "//:gotags_integration": {
-            "GC_LANE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
+            "GC_LANE_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
             "GC_LANE_DOLT_BIN": "$(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
             "GC_LANE_FAKE_RUNTIME": "$(rootpath //test/conversationlane/fakeruntime)",
             "GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",

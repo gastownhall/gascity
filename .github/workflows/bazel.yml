@@ -42,6 +42,11 @@
 #     on the runner with lookups in the anonymous read-only cache. A lane
 #     whose certificate the mint then refuses falls back to that cache too;
 #   - with rbe-west off (vars.RBE_WEST_WORKERS) runs take mode cache as well;
+#   - a fork repository's own CI (github.repository's owner is not
+#     gastownhall: a push to the fork, a PR within it) takes mode local:
+#     lanes execute on the runner with no rbe-cache lookups and no probes.
+#     Fork PRs into gascity are unaffected (their runs have github.repository
+#     gastownhall/gascity), as is a contributor's own --config=fork-cache;
 #   - a fork run mints at most 4 rbe-fork certificates, one per lane:
 #     unit, acceptance, integration-packages and integration-smoke, in
 #     fork-ro and fork-rw alike (the mint allows 12 per run and 160 per PR a
@@ -135,6 +140,14 @@ jobs:
       # merge_group: PULL_REQUEST and FORK are false (no
       # github.event.pull_request on that event), so a queue run takes the
       # same-repo path, mode remote (scripts/ci_merge_queue_test.go).
+      # FORK_REPO: the run is a fork repository's own CI (a push to the fork,
+      # a PR within it, a dispatch there): github.repository's owner is not
+      # gastownhall. It is mode local whatever else holds: no secrets, so it
+      # would otherwise take mode cache and read rbe-cache on every run, at
+      # the farm's cost (rbe-cache's daily request budget shut it on
+      # 2026-10-19, largely on fork CI runs), and it never asks the mint.
+      # Fork PRs into gascity run with github.repository gastownhall/gascity,
+      # so FORK_REPO is false for them and they keep fork-ro/fork-rw/cache.
       - name: Decide remote execution
         id: decide
         env:
@@ -143,15 +156,18 @@ jobs:
           RBE_INPUT_CACHE: ${{ inputs.rbe == 'cache' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
+          FORK_REPO: ${{ github.repository_owner != 'gastownhall' }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK DEPENDABOT HAS_EXECUTOR; do
+          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK FORK_REPO DEPENDABOT HAS_EXECUTOR; do
             case "${!v}" in true|false) ;; *) echo "::error::$v is '${!v}'"; exit 1 ;; esac
           done
           tier=
-          if [ "$RBE_INPUT_OFF" = true ]; then
+          if [ "$FORK_REPO" = true ]; then
+            mode=local
+          elif [ "$RBE_INPUT_OFF" = true ]; then
             mode=local
           elif [ "$RBE_INPUT_CACHE" = true ]; then
             mode=cache
@@ -178,6 +194,9 @@ jobs:
           case "$mode" in remote|fork-ro|fork-rw) enabled=true ;; esac
           { echo "mode=$mode"; echo "enabled=$enabled"; echo "tier=$tier"; } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$FORK_REPO" = true ]; then
+            echo "Fork repository's own CI ($GITHUB_REPOSITORY): local, no rbe-cache" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Bazel's remote repo contents cache on rbe-west (ga-vnycm2.25,
       # engdocs/design/bazel-remote-repo-contents-cache.md): extracted
@@ -1130,9 +1149,10 @@ jobs:
       # Same env as the lane job's "Set up Bazel" step: with no env at all
       # this job ran gazelle and GoStdlib locally on every PR (64 sandboxed
       # actions). Mode remote on the default branch's pin gets the executor
-      # and the mint certificate; every other case gets the read-only fork
-      # cache instead, with no mint certificate, so BUILD files in sync never
-      # needs rbe-fork-mint.
+      # and the mint certificate; mode local (rbe=off, a fork repository's
+      # own CI) neither, nor rbe-cache; every other case gets the read-only
+      # fork cache instead, with no mint certificate, so BUILD files in sync
+      # never needs rbe-fork-mint.
       - name: Set up Bazel
         uses: ./.github/actions/setup-bazel
         env:
@@ -1140,12 +1160,12 @@ jobs:
           RBE_TLS_CERT: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_TLS_CERT || '' }}
           RBE_TLS_KEY: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_INSTANCE: ${{ steps.pin.outputs.remote == 'true' && 'oss' || '' }}
-          BAZEL_FORK_CACHE: ${{ steps.pin.outputs.remote != 'true' && 'true' || '' }}
+          BAZEL_FORK_CACHE: ${{ steps.pin.outputs.remote != 'true' && needs.rbe.outputs.mode != 'local' && 'true' || '' }}
       - name: Restore the LLVM archive
         uses: ./.github/actions/llvm-archive-cache
       - name: BUILD files are in sync (gazelle + repo tree)
         env:
-          BAZEL_SYNC_FLAGS: ${{ steps.pin.outputs.remote == 'true' && '--config=remote-exec' || '--config=fork-cache' }}
+          BAZEL_SYNC_FLAGS: ${{ steps.pin.outputs.remote == 'true' && '--config=remote-exec' || needs.rbe.outputs.mode != 'local' && '--config=fork-cache' || '' }}
         run: |
           make bazel-sync
           git diff --exit-code || {

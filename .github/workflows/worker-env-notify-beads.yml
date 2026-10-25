@@ -17,6 +17,15 @@
 # worker-env-notify-beads-pr.yml tells a re-pin PR's author all this before
 # the merge.
 #
+# GRACE WINDOW: the same push publishes rbe-west's grace record
+# (tools/rbe/worker-env-grace; TESTING.md "Grace window for Go re-pins"):
+# for a re-pin that moved only the manifest's go line, the previous pin and
+# a two-hour window during which rbe-west also serves it
+# (rbe-worker-legacy.yml) and beads' preflight accepts it, so beads keeps
+# building until its sync PR lands; for any other re-pin, "previous none".
+# The grace job commits the record to refs/heads/rbe/worker-env-grace with
+# GITHUB_TOKEN's contents: write, its only grant, and holds no App key.
+#
 # SECURITY MODEL: the gastownhall-autofix App's private key is a secret of
 # the `autofix` environment, whose deployment-branch policy admits main only
 # (docs-autofix.yml uses it too). This workflow runs on pushes to main alone,
@@ -56,6 +65,14 @@ jobs:
       moved: ${{ steps.pin.outputs.moved }}
       pin: ${{ steps.pin.outputs.pin }}
       sha: ${{ steps.pin.outputs.sha }}
+      # main before this push, the push's own before (empty: it has none),
+      # fetched or not: the grace record's previous host. Never the parent
+      # the pin is compared with in its stead.
+      before: ${{ steps.pin.outputs.before }}
+      # true: before names a commit the step could not fetch, so the pin was
+      # compared with the parent instead and moved is a guess (the parent of
+      # a merge-queue group's last commit is not main before the push).
+      unfetched: ${{ steps.pin.outputs.unfetched }}
     steps:
       # The pushed commit and its parent, for a push with no usable before.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -73,8 +90,9 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          prev=
+          prev='' before='' unfetched=false
           if [[ ${BEFORE:-} =~ ^[0-9a-f]{40}$ && $BEFORE != 0000000000000000000000000000000000000000 ]]; then
+            before=$BEFORE
             for attempt in 1 2 3; do
               if git fetch --no-tags --depth=1 origin "$BEFORE"; then
                 prev=$BEFORE
@@ -83,6 +101,7 @@ jobs:
               [ "$attempt" -eq 3 ] || sleep 5
             done
             if [ -z "$prev" ]; then
+              unfetched=true
               echo "::warning title=worker-env notify::cannot fetch $BEFORE, main before this push; comparing with this commit's parent instead"
             fi
           fi
@@ -109,6 +128,8 @@ jobs:
             echo "moved=$moved"
             echo "pin=$pin"
             echo "sha=$sha"
+            echo "before=$before"
+            echo "unfetched=$unfetched"
           } >>"$GITHUB_OUTPUT"
           echo "worker-env: $sha pins $pin; main before this push (${prev:-no commit}) pinned $was; moved=$moved" |
             tee -a "$GITHUB_STEP_SUMMARY"
@@ -177,3 +198,83 @@ jobs:
           msg="$BEADS_REPO was not told that main pins worker-env=$PIN since $SHA. Its $BEADS_AUTOSYNC cron (every 15 minutes) still opens the sync PR; to start it now: gh workflow run $BEADS_AUTOSYNC -R $BEADS_REPO"
           echo "::error title=beads not notified of the worker-env re-pin::$msg"
           echo "$msg" >>"$GITHUB_STEP_SUMMARY"
+
+  # rbe-west's grace record for this re-pin (tools/rbe/worker-env-grace): the
+  # previous pin and its window for a re-pin that moved only the go line,
+  # else "previous none", committed to refs/heads/rbe/worker-env-grace. The
+  # scaler, rbe-worker-legacy.yml and beads' preflight read it from there.
+  # One record at a time, a newer push's after an older one's. It runs too
+  # when repin could not fetch main before the push: repin's moved compares
+  # with the parent then, which can hide a re-pin earlier in the push.
+  grace:
+    name: publish rbe-west's worker-env grace record
+    needs: repin
+    if: needs.repin.outputs.moved == 'true' || needs.repin.outputs.unfetched == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Any unprotected ref; the publish step writes
+      # refs/heads/rbe/worker-env-grace alone.
+      contents: write
+    concurrency:
+      group: rbe-worker-env-grace
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # main before the push (repin's before, the push's own; empty: there
+      # was none) beside the pushed commit; never the parent, whose pin is
+      # not main's before a push of several commits. Failing to fetch it is
+      # GitHub's hiccup, not "no previous host": the job fails and publishes
+      # nothing, rather than a record that closes the window or opens one
+      # for a pin beads never had. If it pins the pushed commit's host (repin
+      # guessed from the parent), there is no record to publish.
+      - name: Write the grace record
+        id: record
+        env:
+          BEFORE: ${{ needs.repin.outputs.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BEFORE:-}" ]; then
+            if ! [[ $BEFORE =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error title=rbe worker-env grace::repin's before '$BEFORE' is not a commit"
+              exit 1
+            fi
+            fetched=false
+            for attempt in 1 2 3; do
+              if git fetch --no-tags --depth=1 origin "$BEFORE"; then
+                fetched=true
+                break
+              fi
+              [ "$attempt" -eq 3 ] || sleep 5
+            done
+            if [ "$fetched" != true ]; then
+              echo "::error title=rbe worker-env grace::cannot fetch $BEFORE, main before this push; nothing published (re-run this job)"
+              exit 1
+            fi
+          fi
+          status=0
+          tools/rbe/worker-env-grace record "$BEFORE" HEAD "$(date -u +%s)" >"$RUNNER_TEMP/worker-env-grace.txt" || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+            echo "worker-env grace: main before this push ($BEFORE) pins this commit's host; nothing to publish" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$status" -eq 0 ] || exit "$status"
+          echo "publish=true" >>"$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/worker-env-grace.txt"
+          {
+            echo "### rbe worker-env grace record"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/worker-env-grace.txt"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Publish it on refs/heads/rbe/worker-env-grace
+        id: publish
+        if: steps.record.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/rbe/worker-env-grace publish "$RUNNER_TEMP/worker-env-grace.txt"

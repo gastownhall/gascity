@@ -443,6 +443,117 @@ The supervisor reconciler restarts sessions automatically after the fingerprint
 changes. Drain the pool first when you need a controlled handoff rather than
 waiting for the next automatic restart.
 
+## Gas City Leaves a Project's Own MCP Config Alone
+
+gc writes the MCP servers from your city's catalog into each provider's
+project config: `.mcp.json`, `.codex/config.toml`, `.gemini/settings.json`,
+`.cursor/mcp.json`, `opencode.json`, or `mimocode.json`, at the city root,
+each rig root, and agent work dirs. When one of those files already holds MCP
+servers the catalog does not define, or defines a server differently, such as
+a team's `.mcp.json` committed to a rig's repository, gc does not take it
+over, since that would replace the team's servers. It leaves the file as it
+is and warns:
+
+```text
+gc: warning: agent "frontend/coder" starts without gc's MCP server "notes": not adopting /src/frontend/.mcp.json: gc does not manage it yet, and adopting it would drop MCP server "team-db"; to let gc manage it, define the servers you still need in gc's MCP catalog (an mcp/ directory) and remove those entries from the file
+```
+
+The agents that read that file keep the team's servers and start without
+gc's. To see where this applies:
+
+- `gc doctor` lists every such file under `mcp-adoption`.
+- `gc start --dry-run` shows a file at the city root or a rig root as
+  `leave ... as it is`, and warns about a file in an agent's own work dir.
+- `gc mcp list --agent <name>`, or `--session <id>` for a pool or worktree
+  session, says "Not delivered" for an agent that reads one.
+- The supervisor log shows the warning when the city starts, and when gc
+  next resolves an agent whose own work dir holds such a file, such as a
+  session's checkout of a repository that commits its own `.mcp.json`. It
+  shows it once per agent, and again if the file's content changes or the
+  file comes back after gc saw it gone.
+
+gc also leaves alone a file it cannot read or parse, a symlinked one, and
+one that is not a regular file (a named pipe, a device) or is larger than
+4 MiB, which it does not read at all.
+
+To give those agents gc's servers too, define the file's servers you still
+need in an `mcp/` catalog that reaches every agent reading the file, one
+`<name>.toml` per server, and remove the file's own entries:
+
+- A file at the city root or a rig root is shared by every agent of that
+  provider there, including the one gc adds for each declared provider.
+  Use the city's `mcp/`, or for a rig root, a pack the rig imports.
+- A file in one agent's own work dir can also take the agent's own
+  `agents/<name>/mcp/`.
+
+gc adopts the file the next time it projects there: at the next city start
+for the city and rig roots, and at the agent's next session start for its
+own work dir. Editing the file does not restart anything. On
+adoption, gc saves the original under `.gc/mcp-adopted/` and writes every
+server from the catalog.
+
+If the repository tracks the file, think twice before letting gc adopt it.
+gc's version can hold secrets expanded from `env` or `headers`, and it shows
+up as a change to the tracked file; `.gitignore` does not hide changes to
+tracked files. gc does not ask before it adopts a tracked file that holds
+no servers of its own, such as a committed `opencode.json` or
+`.gemini/settings.json` with only settings. It notes the adoption on stderr,
+adds gc's servers to the file, keeps its other settings, and rewrites its
+formatting (comments in a `.codex/config.toml` are lost).
+
+gc starts Claude with project MCP servers pre-approved, so the servers in a
+`.mcp.json` gc leaves alone run in its Claude agents without a trust prompt,
+as they do in a city with no MCP catalog. Review a repository's MCP config
+before you add it as a rig.
+
+`gc doctor` also reports files an earlier gc took over while they held
+servers the catalog does not define. Their definitions are in the snapshot
+it names under `.gc/mcp-adopted/`. To hand such a file back, stop the city
+(`gc stop`), restore the file from the snapshot, and delete the marker gc
+keeps for it, `.gc/mcp-managed/<provider>.json` at the same root; gc then
+leaves it alone. Deleting the snapshots clears the report.
+
+## An Agent Starts Without an MCP Server
+
+The supervisor log (`gc supervisor logs`) shows a warning like this one when
+the city starts or reloads its config; `gc start --dry-run` prints it too.
+`gc start` and `gc reload` print it as well, but they work it out on your
+shell's `PATH`, which can differ from the supervisor's. If they disagree, for
+example about a provider that is not installed, the supervisor log is right:
+
+```text
+gc: warning: city "my-city": agents "cursor" (the implicit agent for provider "cursor"), "editor" start without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
+```
+
+An implicit agent is one gc adds for every provider the city declares, so
+work can be slung to that provider without defining an agent; the warning
+names its provider because you never wrote it.
+
+MCP servers from the city's `mcp/` directory, a rig pack, or an import apply
+to every agent in that scope. When an agent's provider cannot receive one of
+them, Gas City leaves that server out of the agent's MCP config and starts the
+agent without it. Every other agent starts as usual.
+
+| Provider family | Receives |
+|---|---|
+| `claude`, `codex`, `gemini`, `opencode`, `mimocode` | stdio and HTTP servers |
+| `cursor` | stdio servers only |
+| any other provider, such as `copilot` | no MCP servers |
+
+Agents whose sessions use ACP receive every server through the protocol
+itself, whatever their provider family.
+
+`gc mcp list --agent <name>` lists the skipped servers under **Not
+projected**. `gc doctor`, `gc config show --validate`, and `gc import add`
+report the same warning, so you can see it before the city starts.
+
+If the agent does not need the server, nothing needs to change. If it does,
+switch the agent to a provider that can receive it.
+
+A server in an agent's own `agents/<name>/mcp/` directory is meant for that
+agent alone. If the agent's provider cannot receive it, that agent does not
+start, and the warning says `cannot start`; the rest of the city still starts.
+
 ## `gc version` Prints Unexpected Output
 
 If `gc version` prints git progress lines (`Enumerating objects...`) instead
