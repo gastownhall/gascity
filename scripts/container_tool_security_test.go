@@ -2,6 +2,8 @@ package scripts_test
 
 import (
 	"fmt"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -347,9 +349,10 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 // never sees it.
 type trivyIgnoreDoc struct {
 	Vulnerabilities []struct {
-		ID    string   `yaml:"id"`
-		Paths []string `yaml:"paths"`
-		Purls []string `yaml:"purls"`
+		ID        string   `yaml:"id"`
+		Paths     []string `yaml:"paths"`
+		Purls     []string `yaml:"purls"`
+		Statement string   `yaml:"statement"`
 	} `yaml:"vulnerabilities"`
 }
 
@@ -494,37 +497,105 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 func TestTrivyIgnoreKubectlWaiversNameThePinnedRelease(t *testing.T) {
 	root := repoRoot(t)
 
-	pin := ""
+	var pins []string
 	for _, line := range strings.Split(readFile(t, root, "contrib/k8s/Dockerfile.controller"), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG KUBECTL_VERSION="); ok {
-			pin = strings.TrimSpace(v)
-			break
+			pins = append(pins, strings.TrimSpace(v))
 		}
 	}
-	if pin == "" {
+	switch {
+	case len(pins) == 0:
 		t.Fatal("contrib/k8s/Dockerfile.controller has no ARG KUBECTL_VERSION=; the kubectl pin moved and this guard must follow it")
+	case len(pins) > 1:
+		t.Fatalf("contrib/k8s/Dockerfile.controller declares ARG KUBECTL_VERSION= %d times %q; a later declaration overrides the earlier one for every instruction after it; keep exactly one so this guard reads the release the build installs", len(pins), pins)
 	}
+	pin := pins[0]
 
-	var doc struct {
-		Vulnerabilities []struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			Statement string   `yaml:"statement"`
-		} `yaml:"vulnerabilities"`
-	}
+	var doc trivyIgnoreDoc
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
 	}
+	for _, stale := range staleKubectlWaiverStatements(pin, doc) {
+		t.Error(stale)
+	}
+}
 
+// kubectlShipsClause matches the "kubectl <release> ships" clause a kubectl
+// waiver's statement uses to record what a release ships, capturing the release.
+var kubectlShipsClause = regexp.MustCompile(`kubectl (v\S+) ships`)
+
+// staleKubectlWaiverStatements reports every usr/local/bin/kubectl waiver whose
+// statement does not describe the pinned release, as a ready-to-print message:
+// one that never says what the pin ships, and one that names the pin but still
+// says what another release ships in some other clause.
+func staleKubectlWaiverStatements(pin string, doc trivyIgnoreDoc) []string {
+	var found []string
 	want := "kubectl " + pin + " ships"
 	for _, v := range doc.Vulnerabilities {
-		for _, p := range v.Paths {
-			if p != "usr/local/bin/kubectl" {
-				continue
+		if !slices.Contains(v.Paths, "usr/local/bin/kubectl") {
+			continue
+		}
+		if !strings.Contains(v.Statement, want) {
+			found = append(found, fmt.Sprintf("%s waives kubectl but its statement does not say what the pinned %s ships (want %q in it); re-check the waiver against the pinned binary and drop it if the pin clears it", v.ID, pin, want))
+			continue
+		}
+		for _, clause := range kubectlShipsClause.FindAllStringSubmatch(v.Statement, -1) {
+			if clause[1] != pin {
+				found = append(found, fmt.Sprintf("%s waives kubectl but its statement still says what kubectl %s ships next to the pinned %s; re-check that clause against the pinned binary and restate it for %s", v.ID, clause[1], pin, pin))
 			}
-			if !strings.Contains(v.Statement, want) {
-				t.Errorf("%s waives kubectl but its statement does not say what the pinned %s ships (want %q in it); re-check the waiver against the pinned binary and drop it if the pin clears it", v.ID, pin, want)
+		}
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease drives the kubectl
+// statement guard itself, because the file it guards is (correctly) in step with
+// the pin today, so TestTrivyIgnoreKubectlWaiversNameThePinnedRelease cannot
+// demonstrate what it catches. The fixture is the next pin bump done by halves:
+// CVE-2026-78669's statement says what the release ships twice (x/net and Go), and
+// moving only the first clause to the new pin must not pass the guard.
+func TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-78667
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through Go stdlib (kubectl v1.36.6 ships 1.26.8; fixed in 1.26.9, 1.27.2).
+  - id: CVE-2026-78669
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through golang.org/x/net (kubectl v1.36.6 ships v0.56.0; fixed in 0.60.0) and Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2).
+  - id: CVE-2026-97031
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2).
+  - id: CVE-2026-56852
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through golang.org/x/text (kubectl v1.36.60 ships v0.33.0; fixed in 0.39.0).
+  - id: CVE-2026-25681
+    paths:
+      - usr/local/bin/bd
+    statement: Not a kubectl waiver, so it may name whatever kubectl v1.36.5 ships.
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := staleKubectlWaiverStatements("v1.36.6", doc)
+	for _, id := range []string{"CVE-2026-78669", "CVE-2026-97031", "CVE-2026-56852"} {
+		flagged := false
+		for _, f := range found {
+			if strings.HasPrefix(f, id+" ") {
+				flagged = true
 			}
+		}
+		if !flagged {
+			t.Errorf("staleKubectlWaiverStatements() did not flag %s; got %q", id, found)
+		}
+	}
+	for _, f := range found {
+		if strings.HasPrefix(f, "CVE-2026-78667 ") || strings.HasPrefix(f, "CVE-2026-25681 ") {
+			t.Errorf("staleKubectlWaiverStatements() flagged an entry it must accept: %q", f)
 		}
 	}
 }
