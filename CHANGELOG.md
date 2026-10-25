@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, CI, the agent base image
+  (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
+  requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
+  2.6.0, the first Dolt release patched for the eMudhra CA distrust. Dolt
+  2.6.0 changes behaviour: `dolt_merge()` walks the full commit graph, so a
+  merge can now report conflicts that 2.2.0 resolved silently; the default
+  `sql_mode` is MySQL 8.0 strict (NO_ZERO_IN_DATE, NO_ZERO_DATE,
+  ERROR_FOR_DIVISION_BY_ZERO); and the server may migrate its on-disk storage
+  on first start. That migration is forward-only, so back up the data
+  directory before upgrading a server: going back means restoring that
+  backup, not reverting the image. The minimum supported Dolt is unchanged.
+
 - **An agent now starts without a shared MCP server its provider cannot
   receive.** A server from the city's `mcp/` directory, a pack, or an
   import reaches every agent in its scope. An agent whose provider cannot

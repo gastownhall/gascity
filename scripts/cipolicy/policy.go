@@ -346,8 +346,10 @@ const (
 	// hard-errors on it), so it failed every night; no job may select a
 	// provider now. Reviewed delta: one job removed; no new job, trigger or
 	// permission. Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
-	// from hotfix/1.5.1): BD_VERSION env value only.
-	expectedNightlyExecutionHash = "a833f343b8875bf65347fcdbf42a51d20ba65ceaffc37e95e24d596059bec4d4"
+	// from hotfix/1.5.1): BD_VERSION env value only. Then Dolt 2.2.0 -> 2.6.0
+	// (the first patched Dolt release for the eMudhra CA distrust):
+	// the workflow DOLT_VERSION env value only.
+	expectedNightlyExecutionHash = "56ab9f58ed4e8b418c22d7890cd3372de3f276bdf37956322e2f1a69911205e4"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
