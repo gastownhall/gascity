@@ -52,6 +52,11 @@ command = "echo"
 [beads]
 provider = "file"
 
+# The one-shot reconcile is legacy's: a sqlite-beads split with the key unset
+# resolves to v2, which has none (mc-dpo2b).
+[daemon]
+session_reconciler = "legacy"
+
 [storage.classes]
 work = "work"
 graph = "infra"
@@ -218,6 +223,11 @@ command = "echo"
 
 [beads]
 provider = "file"
+
+# The one-shot reconcile is legacy's: a sqlite-beads split with the key unset
+# resolves to v2, which has none (mc-dpo2b).
+[daemon]
+session_reconciler = "legacy"
 
 [storage.classes]
 work = "work"

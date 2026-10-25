@@ -98,7 +98,6 @@ type expandedAgent struct {
 	rig           string
 	pool          string
 	suspended     bool
-	provider      string
 	description   string
 }
 
@@ -127,7 +126,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		}}, nil
 	}
@@ -159,7 +157,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -177,7 +174,6 @@ func configuredPoolRow(a config.Agent) expandedAgent {
 		rig:           a.Dir,
 		pool:          qn,
 		suspended:     a.Suspended,
-		provider:      a.Provider,
 		description:   a.Description,
 	}
 }
@@ -246,7 +242,6 @@ func discoverUnlimitedPoolChecked(a config.Agent, poolName, cityName, sessTmpl s
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -584,6 +579,31 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 	return provider, strings.ToUpper(provider[:1]) + provider[1:]
 }
 
+// agentProviderName is the provider an agent's sessions run under: its own,
+// else the workspace default. The SDK's control dispatcher
+// (config.IsDeterministicControlDispatcher) is providerless by design — its
+// start_command runs `gc convoy control --serve` — so it inherits none.
+func agentProviderName(a *config.Agent, cfg *config.City) string {
+	if config.IsDeterministicControlDispatcher(a) {
+		return ""
+	}
+	if a.Provider != "" {
+		return a.Provider
+	}
+	return cfg.Workspace.Provider
+}
+
+// agentProviderInfo is resolveProviderInfo for a configured agent, applying
+// agentProviderName: an agent without a provider reports none, and no
+// provider binary gates its availability.
+func agentProviderInfo(a *config.Agent, cfg *config.City) (provider, displayName string) {
+	provider = agentProviderName(a, cfg)
+	if provider == "" {
+		return "", ""
+	}
+	return resolveProviderInfo(provider, cfg)
+}
+
 // computeAgentState derives the state enum from existing agent data.
 func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
 	if suspended {
@@ -649,11 +669,7 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	}
 	count := 0
 	for _, a := range cfg.Agents {
-		provider := a.Provider
-		if provider == "" {
-			provider = cfg.Workspace.Provider
-		}
-		if provider == "claude" {
+		if agentProviderName(&a, cfg) == "claude" {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false

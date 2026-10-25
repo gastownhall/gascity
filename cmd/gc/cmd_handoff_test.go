@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -368,6 +370,101 @@ func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
 	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("open beads = %d, want handoff mail still created", len(all))
+	}
+}
+
+func TestDoHandoffAutoDeduplicatesPendingMailPerSession(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	var firstOut, secondOut, stderr bytes.Buffer
+
+	if code := doHandoffAuto(store, store, rec, "session-a", []string{"context cycle"}, "codex", &firstOut, &stderr); code != 0 {
+		t.Fatalf("first code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	first := listOpenMessagesBothTiers(t, store)
+	if len(first) != 1 {
+		t.Fatalf("messages after first call = %d, want 1", len(first))
+	}
+	if got, want := first[0].Metadata[mail.DedupKeyMetadataKey], "auto-handoff:session-a"; got != want {
+		t.Fatalf("dedup key = %q, want %q", got, want)
+	}
+
+	stderr.Reset()
+	if code := doHandoffAuto(store, store, rec, "session-a", []string{"context cycle"}, "codex", &secondOut, &stderr); code != 0 {
+		t.Fatalf("second code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	second := listOpenMessagesBothTiers(t, store)
+	if len(second) != 1 {
+		t.Fatalf("messages after second call = %d, want 1", len(second))
+	}
+	want := fmt.Sprintf("Handoff: auto mail %s already pending.", first[0].ID)
+	if !strings.Contains(secondOut.String(), want) {
+		t.Fatalf("second hook output = %q, want %q", secondOut.String(), want)
+	}
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(secondOut.Bytes(), &payload); err != nil {
+		t.Fatalf("second hook output is not JSON: %v", err)
+	}
+	if payload.HookSpecificOutput.HookEventName != "PreCompact" {
+		t.Fatalf("hook event = %q, want PreCompact", payload.HookSpecificOutput.HookEventName)
+	}
+	if payload.HookSpecificOutput.AdditionalContext != want {
+		t.Fatalf("additional context = %q, want %q", payload.HookSpecificOutput.AdditionalContext, want)
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("mail events = %d, want 1", len(rec.Events))
+	}
+}
+
+func TestDoHandoffAutoCreatesMailAfterArchive(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	if code := doHandoffAuto(store, store, rec, "session-a", nil, "codex", &stdout, &stderr); code != 0 {
+		t.Fatalf("first code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	first := listOpenMessagesBothTiers(t, store)
+	if len(first) != 1 {
+		t.Fatalf("messages after first call = %d, want 1", len(first))
+	}
+	if err := beadmail.New(store).Archive(first[0].ID); err != nil {
+		t.Fatalf("archive first mail: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doHandoffAuto(store, store, rec, "session-a", nil, "codex", &stdout, &stderr); code != 0 {
+		t.Fatalf("second code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	second := listOpenMessagesBothTiers(t, store)
+	if len(second) != 1 {
+		t.Fatalf("messages after archive and resend = %d, want 1", len(second))
+	}
+	if second[0].ID == first[0].ID {
+		t.Fatalf("resend id = %q, want a new message", second[0].ID)
+	}
+}
+
+func TestDoHandoffAutoDoesNotDeduplicateDifferentSessions(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	for _, sessionAddress := range []string{"session-a", "session-b"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := doHandoffAuto(store, store, rec, sessionAddress, nil, "codex", &stdout, &stderr); code != 0 {
+			t.Fatalf("%s code = %d, want 0; stderr=%s", sessionAddress, code, stderr.String())
+		}
+	}
+	if got := len(listOpenMessagesBothTiers(t, store)); got != 2 {
+		t.Fatalf("messages = %d, want 2", got)
 	}
 }
 

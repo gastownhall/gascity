@@ -1,6 +1,10 @@
 # Canonical linux/amd64 top-level test inventory for
 # go test -tags=integration ./internal/runtime/tmux.
 # Checked source-first by runtime_tmux_manifest_test.go; keep this order exact.
+# To add a test: insert its name where discovery orders it (files by name, then
+# declaration order in each file); there is no count to edit. A new
+# //go:build integration test file also needs one line, in sorted position, in
+# runtime-tmux-integration-files.manifest.
 TestPokeActivityRealTmux
 TestDiscountPokeActivity
 TestPokePriorBaseline
@@ -412,6 +416,11 @@ TestNudgeSubmitKeySequenceForFamilyHonorsTableEntry
 TestPaneShowsIdlePrompt
 TestFindRuntimesBySessionIDReportsTrackingFailure
 TestTerminateRuntimeBindsKillToScannedIdentity
+TestRespondFencedRealTmuxAnswersOnlyItsIncarnation
+TestRespondRealTmuxBackToBackIdenticalPrompts
+TestRespondRefusalsNameWhy
+TestProviderResponseFencingIsAtomic
+TestRespondFencedTypesTheAnswerUnderThePaneGuard
 TestTmuxRuntimeInventory_RealTmuxEmptyTrailingMarker
 TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach
 TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID

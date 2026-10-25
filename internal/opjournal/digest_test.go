@@ -34,6 +34,25 @@ func TestRequestDigestGolden(t *testing.T) {
 	}
 }
 
+// TestCompanionDigestGolden pins the digest ProposeWith stores for an op
+// proposed with a companion: every same-key retry of a held op compares
+// against it, so a change would make each one stored before it a 409.
+func TestCompanionDigestGolden(t *testing.T) {
+	const want = "927209c0b3aa7b6d2055421bb308709a0303349132e5e5e75c4fbd7002ce4f9d"
+	req := baseMessage()
+	spec, err := Lookup(req.Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := normalizeRequest(req, spec, time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("normalizeRequest: %v", err)
+	}
+	if got := companionDigest(op, "content_hold"); got != want {
+		t.Fatalf("companion digest = %s, want %s", got, want)
+	}
+}
+
 func TestRequestDigestDefaultsHashAlike(t *testing.T) {
 	explicit := baseMessage()
 	explicit.Policy = Policy{

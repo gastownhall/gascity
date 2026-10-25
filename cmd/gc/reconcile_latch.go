@@ -38,9 +38,6 @@ var v2SessionRuntimesAdmitted = map[string]bool{
 // never a store, so the latch and the doctor dry run agree.
 func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []latchRefusal {
 	var out []latchRefusal
-	if cfg.Daemon.SessionCircuitBreaker {
-		out = append(out, latchRefusal{"the identity circuit breaker", "[daemon] session_circuit_breaker = true", "PAR-BRK"})
-	}
 	var dependsOn, maxAge []string
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
@@ -62,17 +59,39 @@ func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []
 			out = append(out, latchRefusal{c.feature, fmt.Sprintf("agent %s on %s", c.key, strings.Join(c.agents, ", ")), c.parityPR})
 		}
 	}
-	if cfg.Session.ProgressStallTimeoutDuration() > 0 {
-		out = append(out, latchRefusal{"progress-stall recycling", "[session] progress_stall_timeout", "PAR-STALL-1"})
-	}
-	if cfg.Session.ClaimHolderStallTimeoutDuration() > 0 {
-		out = append(out, latchRefusal{"claim-holder stall recycling", "[session] claim_holder_stall_timeout", "PAR-STALL-2"})
-	}
 	if cfg.ChatSessions.IdleTimeoutDuration() > 0 {
 		out = append(out, latchRefusal{"chat auto-suspend", "[chat_sessions] idle_timeout", "PAR-CHAT"})
 	}
 	if r, ok := v2ProviderSwapRefusal(cfg, lookupEnv); ok {
 		out = append(out, r)
+	}
+	return out
+}
+
+// v2IgnoredSettings lists the composed-config settings v2 accepts and ignores,
+// in a fixed order: the identity circuit breaker (PAR-BRK) and the two stall
+// recyclers (PAR-STALL-1, PAR-STALL-2), which the work ladder replaces, or,
+// under [daemon] work_ladder = "off", the v2 backstops it replaced. Legacy
+// keeps honoring them. Each entry is the deprecation the controller logs at
+// boot and doctor reports.
+func v2IgnoredSettings(cfg *config.City) []string {
+	var keys []string
+	if cfg.Daemon.SessionCircuitBreaker {
+		keys = append(keys, "[daemon] session_circuit_breaker")
+	}
+	if cfg.Session.ProgressStallTimeoutDuration() > 0 {
+		keys = append(keys, "[session] progress_stall_timeout")
+	}
+	if cfg.Session.ClaimHolderStallTimeoutDuration() > 0 {
+		keys = append(keys, "[session] claim_holder_stall_timeout")
+	}
+	replacement := "the work ladder replaces it"
+	if !cfg.Daemon.WorkLadderEnabled() {
+		replacement = `with [daemon] work_ladder = "off", v2's idle-claim, continuation and execution backstops pace work instead`
+	}
+	out := make([]string, len(keys))
+	for i, key := range keys {
+		out[i] = key + " is deprecated under v2 and ignored: " + replacement + "; remove it, or set session_reconciler = \"legacy\" to keep it"
 	}
 	return out
 }

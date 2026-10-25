@@ -228,7 +228,10 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 	k := key.row
 	defer x.wg.Done()
 	// Run's context is released when Run returns, not at the settlement, so
-	// an effect abandoned at its deadline sees DeadlineExceeded.
+	// an effect abandoned at its deadline sees DeadlineExceeded. The
+	// settlement waits on that context too: its deadline is armed before Run
+	// starts, at the deadline itself, whatever the clock does after
+	// (ga-9xg0y13).
 	ctx, stopDeadline := x.clock.WithDeadline(base, e.Deadline)
 	result := make(chan settlement, 1)
 	x.spawn(func() {
@@ -250,15 +253,12 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 		}()
 		result <- e.Run(ctx)
 	})
-	timer := x.clock.NewTimer(e.Deadline.Sub(x.clock.Now()))
-	defer timer.Stop()
 	var s settlement
 	returned := false
 	select {
 	case s = <-result:
 		returned = true
-	case <-timer.C():
-	case <-base.Done():
+	case <-ctx.Done(): // its deadline, or base's end (a provider swap's cancel, the stop's deadline)
 	}
 	if !returned {
 		select {

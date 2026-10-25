@@ -504,6 +504,31 @@ func buildDesiredStateWithSessionBeads(
 	)
 }
 
+// buildDesiredStatePreview is buildDesiredState for gc start --dry-run: it
+// resolves the agents that would start without a store and without the
+// side effects a real build performs on each agent's work dir (overlay
+// staging, hook installation, work dir creation, Claude settings projection,
+// skill snapshots). The result is for display only.
+func buildDesiredStatePreview(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	stderr io.Writer,
+) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAtOpts(
+		cityName, cityPath, beaconTime, time.Now(), cfg, sp, nil, nil, nil, nil, stderr,
+		desiredStateOptions{readOnly: true},
+	)
+}
+
+// desiredStateOptions adjusts one desired-state build.
+type desiredStateOptions struct {
+	// readOnly resolves every agent with read-only build params
+	// (agentBuildParams.readOnly): the build writes nothing.
+	readOnly bool
+}
+
 func buildDesiredStateWithSessionBeadsAt(
 	cityName, cityPath string,
 	beaconTime, poolDecisionTime time.Time,
@@ -515,12 +540,31 @@ func buildDesiredStateWithSessionBeadsAt(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAtOpts(
+		cityName, cityPath, beaconTime, poolDecisionTime, cfg, sp, store, rigStores, sessionBeads, trace, stderr,
+		desiredStateOptions{},
+	)
+}
+
+func buildDesiredStateWithSessionBeadsAtOpts(
+	cityName, cityPath string,
+	beaconTime, poolDecisionTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+	opts desiredStateOptions,
+) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.readOnly = opts.readOnly
 	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
@@ -7289,7 +7333,11 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}
-	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	if !bp.readOnly {
+		// A read-only resolution stages nothing; resolveTemplate keeps it a
+		// pure read too.
+		prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	}
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
 }
 
@@ -7346,7 +7394,7 @@ func validateAgentSessionTransport(
 // whose resolved provider is not Claude but which opt in explicitly via
 // install_agent_hooks = ["claude"] still flow through hooks.Install here.
 func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	if bp != nil && bp.planOnly {
+	if bp != nil && (bp.planOnly || bp.readOnly) {
 		return
 	}
 	// Install provider hooks (idempotent filesystem side effect). Route

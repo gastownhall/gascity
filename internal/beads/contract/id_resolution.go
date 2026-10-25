@@ -12,7 +12,7 @@ import "strings"
 // internal/utils.ResolvePartialID), which is the collision gc's exact-ID write
 // guard reads for (gcy-g4o).
 //
-// gc pins beads v1.3.1, which predates both changes, so no bd-contract cell
+// gc pins beads v1.3.2, which predates both changes, so no bd-contract cell
 // pins this resolution yet.
 var exactIDBackends = map[BackendName]struct{}{
 	"http": {},

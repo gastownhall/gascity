@@ -3071,6 +3071,17 @@ func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *co
 	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs)
 }
 
+// resolveWorkDirPathForQualifiedName is resolveWorkDirForQualifiedName
+// without creating the directory.
+func resolveWorkDirPathForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
+	cityName := loadedCityName(cfg, cityPath)
+	var rigs []config.Rig
+	if cfg != nil {
+		rigs = cfg.Rigs
+	}
+	return resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, agent, rigs)
+}
+
 func sessionExplicitNameForNewSession(cityPath, cityName string, rigs []config.Rig, agent *config.Agent, alias string) (string, error) {
 	if agent == nil {
 		return "", nil

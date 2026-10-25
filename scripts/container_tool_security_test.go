@@ -67,9 +67,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c"
-		bdSourceSHA256 = "1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8"
-		bdBuild        = "c1c4b642ac1"
+		bdSourceRef    = "9b65b9e198acbcc98e7fd3a87a5d55baa065a572"
+		bdSourceSHA256 = "f176a649d688893026de5a7f4b74af51cf7737ad69fd4fcde3295b123407928f"
+		bdBuild        = "9b65b9e198a"
 		bdBranch       = "HEAD"
 	)
 
@@ -154,9 +154,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
 		"gitpython>=3.1.62",
-		"aiohttp>=3.14.3",
+		"aiohttp>=3.14.4",
 		"anyio>=4.14.2",
-		"pillow>=12.3.0",
+		"pillow>=13.0.0",
+		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
 		"litellm>=1.89.7",
@@ -178,10 +179,11 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
 		"gitpython==3.1.62 \\",
-		"aiohttp==3.14.3 \\",
+		"aiohttp==3.14.4 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
-		"pillow==12.3.0 \\",
+		"pillow==13.0.0 \\",
+		"mcp==1.30.0 \\",
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
@@ -272,6 +274,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
 	)
 
 	// gh needs x/text, x/net and x/mod. Its pinned source selects x/crypto v0.53.0, below
@@ -282,12 +285,16 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/text": "XTEXT_VERSION",
 		"golang.org/x/net":  "XNET_VERSION",
 		"golang.org/x/mod":  "XMOD_VERSION",
+		// Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6,
+		// Dolt v1.18.0), which CVE-2026-63209 affects.
+		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	doltModules := map[string]string{
-		"golang.org/x/crypto":      "XCRYPTO_VERSION",
-		"golang.org/x/net":         "XNET_VERSION",
-		"golang.org/x/text":        "XTEXT_VERSION",
-		"github.com/apache/thrift": "THRIFT_VERSION",
+		"golang.org/x/crypto":           "XCRYPTO_VERSION",
+		"golang.org/x/net":              "XNET_VERSION",
+		"golang.org/x/text":             "XTEXT_VERSION",
+		"github.com/apache/thrift":      "THRIFT_VERSION",
+		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
 	// override verbatim, so a file-wide search lets one stand in for the other and a

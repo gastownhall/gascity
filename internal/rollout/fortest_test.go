@@ -7,8 +7,8 @@ import "testing"
 func TestForTestDefaults(t *testing.T) {
 	t.Parallel()
 	f := ForTest()
-	if f.BeadsConditionalWrites() != Off {
-		t.Errorf("default beads = %q, want off", f.BeadsConditionalWrites())
+	if f.BeadsConditionalWrites() != Auto {
+		t.Errorf("default beads = %q, want auto", f.BeadsConditionalWrites())
 	}
 	if !f.FormulaV2() {
 		t.Errorf("default formula_v2 = false, want true")

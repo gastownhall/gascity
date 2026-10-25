@@ -559,6 +559,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		collapsedIdentity,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
+	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
@@ -568,7 +569,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:                queryEnv,
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
-			StrictDrainAck:     drainAckStrictConfig(cfg),
+			StrictDrainAck:     strictDrainAck,
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 			// The process env, as the pre-claim fence reads the token:
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.
@@ -578,7 +579,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
-	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, drainAckStrictConfig(cfg)), city.claimOps(), runner, stdout, stderr, hookVisibility{
+	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -1415,7 +1416,7 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 // shares with --claim. The drain-ack fence matches a started claim's assignee
 // against the seat's identities, on this door as on --claim, so they travel
 // here too.
-func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCommandOptions, strict bool) hookClaimOptions {
+func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCommandOptions, strict func() bool) hookClaimOptions {
 	return hookClaimOptions{
 		Assignee:           assignee,
 		IdentityCandidates: identities,

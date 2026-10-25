@@ -500,7 +500,7 @@ func TestOrphanCloseCompletesOverStrandedClaims(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newCloseOrphanEnv(t)
-			if err := beads.StampOpenedStore(env.store, "MemStore", gate.Auto, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(env.store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 				t.Fatal(err) // the stamp is a fenced write
 			}
 			if err := env.store.SetMetadataBatch(env.work.ID, tc.meta); err != nil {
@@ -537,7 +537,7 @@ func TestKilledSingletonSeatClosesOverAStrandedClaim(t *testing.T) {
 	agent := persistentWorker()
 	agent.MaxActiveSessions = intPtr(1)
 	e := newKilledSeatEnv(t, agent)
-	if err := beads.StampOpenedStore(e.mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(e.mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err) // the stamp is a fenced write
 	}
 	work := e.addWork(t, "open", e.seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
@@ -887,7 +887,7 @@ func TestStrandedStampUnderConditionalWrites(t *testing.T) {
 	for _, mode := range []gate.Mode{gate.Require, gate.Auto} {
 		t.Run(string(mode), func(t *testing.T) {
 			store := beads.NewMemStore()
-			if err := beads.StampOpenedStore(store, "MemStore", mode, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(store, "MemStore", mode, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			cfg := &config.City{Workspace: config.Workspace{Name: "probe-town"}, Agents: []config.Agent{persistentWorker()}}
@@ -926,7 +926,7 @@ func TestStrandedStampUnderConditionalWrites(t *testing.T) {
 func incapableMemStore(t *testing.T, mode gate.Mode) *beads.MemStore {
 	t.Helper()
 	store := beads.NewMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", mode, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", mode, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	store.DisableConditionalWrites = true
@@ -1031,7 +1031,7 @@ func TestStampStrandedFencesANeverUpdatedSQLiteClaim(t *testing.T) {
 			t.Fatalf("OpenSQLiteStore: %v", err)
 		}
 		t.Cleanup(func() { _ = store.(*beads.SQLiteStore).CloseStore() })
-		if err := beads.StampOpenedStore(store, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(store, "SQLiteStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		return store
@@ -1076,7 +1076,7 @@ func TestStampStrandedFencesARevisionZeroClaim(t *testing.T) {
 			ID: "gc-1", Title: "claim", Type: "task", Status: "in_progress", Assignee: "repo/ada",
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"},
 		}}, nil)
-		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := store.Get("gc-1"); err != nil || got.Revision != 0 {

@@ -2311,7 +2311,9 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	var reconcilerBoot strings.Builder
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
 		recordInitFailure(cityName, wiringErr.Error())
@@ -2501,7 +2503,7 @@ func startOneCity(
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
 		cs.startOpSweep(cityCtx)
-		cs.startConversationLaneHost(cityCtx)
+		cs.startConversationLaneHost(cityCtx, wiring.mode)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
@@ -2539,6 +2541,9 @@ func startOneCity(
 	// where an early panic deletes a non-existent entry, leaving a
 	// zombie after the post-launch insertion.
 	alreadyRunning := publishManagedCity(cr, path, mc)
+	if !alreadyRunning {
+		forgetSupervisorReconcilerBoot(path)
+	}
 	if alreadyRunning {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,

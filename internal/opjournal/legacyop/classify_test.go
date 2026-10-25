@@ -50,7 +50,22 @@ func TestMessageResult(t *testing.T) {
 		{false, wrap(errUnavailable), failed(opjournal.ReasonProviderUnavailable)},
 		{false, wrap(errTimeout), failed(opjournal.ReasonDeadlineInFlight)},
 		{false, errors.New("unsupported"), failed(opjournal.ReasonOther)}, // same text, not the sentinel
-		{false, wrap(errStarting), failed(opjournal.ReasonOther)},
+		{false, wrap(errStarting), failed(opjournal.RefusedReasonPrefix + "session_starting")},
+		{false, errors.New("starting"), failed(opjournal.ReasonOther)}, // same text, not the refusal
+		// A definitive answer outranks a refusal joined to it: the refusal
+		// is a side failure (a rollback), not what happened to the message.
+		{false, errors.Join(wrap(errGone), wrap(errStarting)), failed(opjournal.ReasonSessionGone)},
+		{false, errors.Join(wrap(errClosed), wrap(errStarting)), skipped(opjournal.ReasonConversationClosed)},
+		// A refusal outranks a retryable answer, as in SyncResult.
+		{false, errors.Join(wrap(errUnavailable), wrap(errStarting)), failed(opjournal.RefusedReasonPrefix + "session_starting")},
+		// An unavailable runtime whose wait ended on a deadline (an
+		// observation that went unanswered) never sent the message: it is
+		// provider_unavailable, not a delivery in flight.
+		{false, fmt.Errorf("observation unanswered: %w: %w", errUnavailable, errTimeout), failed(opjournal.ReasonProviderUnavailable)},
+		{false, errors.Join(wrap(errTimeout), wrap(errUnavailable)), failed(opjournal.ReasonProviderUnavailable)},
+		// A delivery in flight outranks a refusal joined to it: the message
+		// may have been delivered.
+		{false, errors.Join(wrap(errTimeout), wrap(errStarting)), failed(opjournal.ReasonDeadlineInFlight)},
 	} {
 		got := testSentinels.MessageResult(c.queued, c.err)
 		if got.Outcome != c.want || got.LeaveOpen {

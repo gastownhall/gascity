@@ -1021,7 +1021,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// and the control-dispatcher arm selects on a nil channel.
 	controlDispatcherCh := cr.controlDispatcherSignal()
 	if cr.runsV2() && cr.cfg.Daemon.TickDebounceDuration() > 0 {
-		fmt.Fprintf(cr.stderr, "%s: warning: [daemon] tick_debounce is ignored under session_reconciler=v2; the planner paces its own passes\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: warning: [daemon] tick_debounce is ignored under the v2 session reconciler; the planner paces its own passes\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
 	}
 
 	for {
@@ -2294,6 +2294,13 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
+	// Run the nudge queue's maintenance first: it pays the shadow debts other
+	// payers left (a crash, a failing store), so a legacy-dispatcher city
+	// converges with only the controller running. The supervisor dispatcher
+	// runs the same maintenance every pass.
+	if _, err := openNudgeQueue(cr.cityPath, nudgeStore).Queue.Maintain(context.Background(), now); err != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: nudge queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real
 	// read/parse failure: fail closed and skip this sweep rather than sweeping
@@ -3004,6 +3011,19 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
 	} else {
 		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	}
+
+	// Stage-1 MCP projection runs here for the same reason: it otherwise
+	// runs only when a city starts, so an MCP server added or changed by a
+	// live reload changed the agents' fingerprints (draining them) while
+	// their scope-root config kept the old servers, and an agent stage 1
+	// had skipped never got its config once fixed. It runs before this
+	// tick's reconcile restarts drifted sessions, so they start against the
+	// new config. A failure (a target conflict, a write error) leaves the
+	// targets it did not reach as they were and warns; it does not refuse
+	// the reload.
+	if err := runStage1MCPProjection(cr.cityPath, nextCfg, exec.LookPath, cr.stderr); err != nil {
+		appendWarning(fmt.Sprintf("MCP projection: %v", err))
 	}
 
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",

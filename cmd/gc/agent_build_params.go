@@ -112,6 +112,9 @@ type agentBuildParams struct {
 	// named create (AM-N3): the work dir is resolved without mkdir, Claude
 	// settings are validated and pointed at, never projected, and skill
 	// snapshots are not written. Start and adopt resolve side-effecting.
+	// A read-only desired-state build (gc start --dry-run) also skips
+	// overlay staging and hook installation (resolveTemplatePrepared,
+	// installAgentSideEffects).
 	readOnly bool
 
 	// realizeProbe times and counts pool realization for the realize_pools

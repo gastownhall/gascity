@@ -8,8 +8,8 @@ vulnerabilities:
   # Every binary this image rebuilds from source now carries patched modules,
   # so none of them is waived for a finding the rebuild clears.
   # contrib/k8s/Dockerfile.base forces golang.org/x/crypto, golang.org/x/net,
-  # golang.org/x/text and github.com/apache/thrift forward in the gh and Dolt
-  # builds the same way it already forced google.golang.org/grpc, and each
+  # golang.org/x/text, github.com/apache/thrift and github.com/klauspost/compress
+  # forward in the gh and Dolt builds the same way it already forced google.golang.org/grpc, and each
   # build asserts the versions it embedded. contrib/k8s/Dockerfile.agent
   # rebuilds bd from a source ref whose go.mod pins x/net 0.58.0, which
   # CVE-2026-78669 affects, so it forces grpc, thrift and x/net forward itself

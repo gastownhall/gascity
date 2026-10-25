@@ -130,6 +130,7 @@ const (
 	drainReminderHoldUnreadable    = "activity_unreadable"
 	drainReminderHoldExhausted     = "attempts_exhausted"
 	drainReminderHoldAckUnknown    = "ack_unreadable"
+	drainReminderHoldContentHeld   = "content_held"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -202,6 +203,11 @@ func maybeRemindDrainingSession(
 		return announceDrainReminderExhausted(store, info, name, due, stdout)
 	}
 
+	if drainReminderContentHeld(due) {
+		noteDrainReminderHold(store, info, drainReminderHoldContentHeld)
+		return drainReminderHeld
+	}
+
 	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now); !proceed {
 		return outcome
 	}
@@ -224,8 +230,8 @@ func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info session
 const drainReminderNoticePurpose = "drain-reminder"
 
 // laneDrainNoticeClass is the drain reminder's notice op as the conversation
-// lane's content class: the one content a draining row admits (I7's
-// exemption, session.GateContentDrainNotice). It matches the policy
+// lane's content class: the one content a draining or stop-requested row
+// admits (I7's exemption, session.GateContentDrainNotice). It matches the policy
 // plannerNoticeRequest gives every planner notice, from this purpose's
 // principal.
 var laneDrainNoticeClass = opjournal.ContentClass{
@@ -463,6 +469,18 @@ func settleLastDrainReminder(store beads.Store, info sessions.Info, name string,
 	return failed, true
 }
 
+// drainReminderContentHeld reports whether due's row, as loaded, holds its
+// conversation's content (session.ContentHeldInfo; SESSION-RUNTIME-027). The
+// reminder is content that hold keeps: the lane holds its notice until its
+// start_by, and a direct nudge would type past the hold. So a held row is not
+// reminded and no attempt is spent; the budget, and the drain-ack escalation
+// it paces (drainRemindersSpent), wait for the hold to clear. The gate runs
+// after the exhaustion check, so a budget spent before the hold is still
+// announced.
+func drainReminderContentHeld(due drainReminderDue) bool {
+	return sessions.ContentHeldInfo(sessionInfoFromBead(due.row))
+}
+
 // drainReminderQuietHold runs the liveness and quiet gates that can still stop a
 // due reminder before delivery: the stop finally took, a human is at the pane,
 // or the activity signal is unreadable or too recent (an agent in the middle of
@@ -498,8 +516,8 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // can type into the session, the reminder is a planner notice op
 // (proposeDrainReminderNotice) that the lane delivers at the session's
 // boundary: the lane's content gate admits the drain reminder's notice into
-// a draining row (session.GateContentDrainNotice), and nothing else. A row
-// the gate holds the notice from for a reason other than draining (an idle
+// a draining or stop-requested row (session.GateContentDrainNotice), and
+// nothing else. A row the gate holds the notice from for another reason (an idle
 // drain's latch, which the drain-ack stop-pending mark keeps, reads
 // stop_pending) is nudged directly, as it is with the lane off: a notice
 // there would only wait out its start_by.
@@ -572,9 +590,12 @@ func nudgeDrainReminder(sp runtime.Provider, name string, info sessions.Info) er
 // drainReminderNoticeBlock is why the lane's content gate would hold the
 // drain reminder's notice from due's row now, or "": the gate the lane
 // executor asks (session.ContentGate for GateContentDrainNotice), over the
-// row as loaded, whose runtime the quiet hold has just seen running.
+// row as loaded, whose runtime the quiet hold has just seen running. The
+// drain notice passes a stop request as it passes draining (I7's
+// exemption), so no reading of the row's stop request could change the
+// answer: the reminder reads none and asks with the zero StopRequest.
 func drainReminderNoticeBlock(due drainReminderDue) string {
-	return sessions.ContentGate(sessionInfoFromBead(due.row), true, due.now, sessions.GateContentDrainNotice)
+	return sessions.ContentGate(sessionInfoFromBead(due.row), sessions.StopRequest{}, true, due.now, sessions.GateContentDrainNotice)
 }
 
 // drainReminderNotice is attempt of due's reminder as a planner notice: keyed

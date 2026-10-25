@@ -43,11 +43,20 @@ package main
 // reaching the next incarnation.
 //
 // The drain reminder is a planner notice too, though its audience is a row
-// in state=draining, which the lane's content gate (I7, session.ContentGate)
-// holds all other content from: the gate admits the drain reminder's notice
+// in drain (state=draining, or v2's stop request at its generation), which
+// the lane's content gate (I7, session.ContentGate) holds all other content
+// from: the gate admits the drain reminder's notice
 // (session.GateContentDrainNotice, laneDrainNoticeClass) and nothing else. A
 // row the gate holds the notice from for another reason is nudged directly
 // (deliverDrainReminder).
+//
+// A conversation an operator holds (its content_hold cell,
+// session.ContentHeldInfo) holds every notice, the drain reminder's included
+// (SESSION-RUNTIME-027), so the backstops and the drain reminder do not
+// remind it by either route: a backstop that would act on it spends no
+// attempt and takes no terminal action (runNudgeBackstop), and a due drain
+// reminder spends no attempt (drainReminderContentHeld), until the hold
+// clears.
 
 import (
 	"errors"

@@ -303,38 +303,59 @@ func (h *RuntimeHandle) lookupDelivery(ctx context.Context, key string) (runtime
 // the provider's InterruptTurn and WaitTurnEnded, and is refused, nothing
 // sent, on any other provider, and with an input fence, which a protocol
 // turn interrupt cannot carry (runtime.ErrInputFenceUnsupported).
-func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
+func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) error {
+	_, err := h.interrupt(ctx, nil, req)
+	return err
+}
+
+// InterruptAs is Interrupt; by is unused, since a bare runtime is never
+// restarted: an OnFailure restart is refused, nothing sent, with
+// ErrInterruptRestartUnsupported, and a ForReplacement interrupt with
+// session.ErrTurnInterruptUnsupported (a bare runtime has no deliver-now,
+// its Replace is none).
+func (h *RuntimeHandle) InterruptAs(ctx context.Context, by sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	return h.interrupt(ctx, &by, req)
+}
+
+// interrupt is InterruptAs for by, nil for no actor.
+func (h *RuntimeHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (result InterruptResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
-	if req.Turn != "" {
-		if !req.Fence.IsZero() {
-			if err = req.Fence.Validate(); err != nil {
-				return err
-			}
+	if err = req.validate(by); err != nil {
+		return InterruptResult{}, err
+	}
+	switch {
+	case req.OnFailure == InterruptOnFailureRestart:
+		err = fmt.Errorf("interrupting %s: %w", h.sessionName, ErrInterruptRestartUnsupported)
+		return InterruptResult{}, err
+	case req.ForReplacement:
+		err = replacementRefusal(TurnReplaceNone, h.sessionName)
+		return InterruptResult{}, err
+	case req.Turn != "":
+		if !req.Fence.IsZero() && req.AllowUnfenced && h.turnCapabilities().Source == TurnSourceProtocol {
+			req.Fence, result.Unfenced = runtime.InputFence{}, true
 		}
 		err = h.interruptTurn(ctx, req.Turn, req.Fence)
-		return err
+		return result, err
 	}
-	if !req.Fence.IsZero() {
-		if err = req.Fence.Validate(); err != nil {
-			return err
-		}
-		if runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
+	if !req.Fence.IsZero() && runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
+		if !req.AllowUnfenced {
 			err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
-			return err
+			return InterruptResult{}, err
 		}
+		req.Fence, result.Unfenced = runtime.InputFence{}, true
 	}
 	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
 		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
-		return err
+		return InterruptResult{}, err
 	}
 	if !req.Fence.IsZero() {
 		err = runtime.InterruptWithContext(runtime.WithInputFence(ctx, req.Fence), h.provider, h.sessionName)
-		return err
+		return result, err
 	}
 	err = h.provider.Interrupt(h.sessionName)
-	return err
+	return result, err
 }
 
 // interruptTurn is the turn-scoped interrupt from the provider alone: its
@@ -533,18 +554,26 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	return obs, nil
 }
 
-// Respond resolves a blocking interaction through the runtime provider.
-func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) error {
+// Respond resolves a blocking interaction through the runtime provider, only
+// in the incarnation req.Fence names when it is set.
+func (h *RuntimeHandle) Respond(ctx context.Context, req InteractionResponse) error {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
 		return runtime.ErrInteractionUnsupported
 	}
-	return runtimeInteractionError(ip.Respond(h.sessionName, runtime.InteractionResponse{
+	response := runtime.InteractionResponse{
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
 		Metadata:  cloneStringMap(req.Metadata),
-	}))
+	}
+	if !req.Fence.IsZero() {
+		if err := req.Fence.Validate(); err != nil {
+			return err
+		}
+		return runtimeInteractionError(runtime.RespondFencedVia(ctx, h.provider, h.sessionName, req.Fence, response))
+	}
+	return runtimeInteractionError(ip.Respond(h.sessionName, response))
 }
 
 // runtimeInteractionError reports the runtime's interaction refusals in the
@@ -558,7 +587,8 @@ func runtimeInteractionError(err error) error {
 	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
 		return fmt.Errorf("%w: %w", sessionpkg.ErrPendingInteraction, err)
 	case errors.Is(err, runtime.ErrInteractionResponseInvalid),
-		errors.Is(err, runtime.ErrInteractionActionUnavailable):
+		errors.Is(err, runtime.ErrInteractionActionUnavailable),
+		errors.Is(err, runtime.ErrInteractionGone):
 		return fmt.Errorf("%w: %w", sessionpkg.ErrInteractionMismatch, err)
 	}
 	return err

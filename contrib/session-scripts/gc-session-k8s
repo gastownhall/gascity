@@ -11,7 +11,7 @@
 # to the local tmux provider — real terminal scrollback, keystroke
 # nudge, interactive attach.
 #
-# See docs/exec-session-protocol.md for the full protocol specification.
+# See docs/reference/exec-session-provider.md for the full protocol specification.
 #
 # Dependencies: kubectl, jq, bash
 # Container requirements: tmux, bash

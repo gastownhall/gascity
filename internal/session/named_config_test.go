@@ -1465,6 +1465,8 @@ func TestDemandOnlySingletonWakeRefused(t *testing.T) {
 		{"drained", true},
 		{"active", false},
 		{"awake", false},
+		{"creating", false},
+		{"start-pending", true},
 	} {
 		info := Info{Template: "worker", PoolManaged: true, MetadataState: tt.state}
 		if got := DemandOnlySingletonWakeRefused(cfg, agent, info); got != tt.want {

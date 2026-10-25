@@ -159,7 +159,8 @@ func TestFencedGoneAndNoServerNeverSucceed(t *testing.T) {
 			m := claudeModel("draft")()
 			c.set(m)
 			err := op(fenceModelProvider(m))
-			if !c.check(err) {
+			// A miss and a lost server say so, never as ErrInputNotSent.
+			if !c.check(err) || errors.Is(err, runtime.ErrInputNotSent) {
 				t.Errorf("%s with %s: err = %v", name, c.fault, err)
 			}
 			if _, events, _ := m.snapshot(); len(events) != 0 {
@@ -569,7 +570,9 @@ func TestFencedSwallowedNoServerIsUnavailable(t *testing.T) {
 // Partial counts only what carries the operation's effect: a nudge's text
 // (and what follows it), and any key of a keys, interrupt or ctx-fenced
 // operation. A copy-mode exit, a composer clear or a dialog key before a
-// nudge's text never makes a miss partial.
+// nudge's text never makes a miss partial. ErrInputNotSent counts the same
+// way: text that fails to stage before the effect sent nothing, and text
+// that fails after it makes no such claim.
 func TestFencePartialCountsOnlyEffectInput(t *testing.T) {
 	t.Run("nudge miss after the composer clear", func(t *testing.T) {
 		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
@@ -623,6 +626,43 @@ func TestFencePartialCountsOnlyEffectInput(t *testing.T) {
 		var miss *runtime.FenceMismatchError
 		if !errors.As(err, &miss) || miss.Partial {
 			t.Fatalf("err = %v, want a non-partial miss", err)
+		}
+	})
+	loadErr := errors.New("load-buffer: no space left on device")
+	t.Run("nudge text fails to stage after the composer clear", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.env["GC_PROVIDER"] = "opencode"
+		m.screen = staticShellScreen
+		m.inMode, m.detached = true, true
+		m.failLoad = map[int]error{1: loadErr}
+		err := fenceModelProvider(m).NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+		_, events, _ := m.snapshot()
+		if !errors.Is(err, runtime.ErrInputNotSent) || !errors.Is(err, loadErr) {
+			t.Fatalf("err = %v (events %q), want ErrInputNotSent wrapping the staging failure", err, events)
+		}
+		if !slices.Equal(events, []string{"copy:cancel", "key:C-u"}) {
+			t.Fatalf("events %q, want the copy-mode exit and the clear, no text", events)
+		}
+	})
+	t.Run("text fails to stage after the effect", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.failLoad = map[int]error{2: loadErr}
+		p := fenceModelProvider(m)
+		g := newPaneGuard(fenceModelSession, testFence.Digest(), false)
+		ctx := withPaneGuard(context.Background(), g)
+		if err := g.verify(ctx, p.tm); err != nil {
+			t.Fatal(err)
+		}
+		target := fakeAgentPane(fenceModelSession)
+		if _, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "a"); err != nil {
+			t.Fatal(err)
+		}
+		_, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "b")
+		if !errors.Is(err, loadErr) || errors.Is(err, runtime.ErrInputNotSent) {
+			t.Fatalf("err = %v, want the staging failure, not ErrInputNotSent", err)
+		}
+		if _, events, _ := m.snapshot(); !slices.Equal(events, []string{"text:a"}) {
+			t.Fatalf("events %q, want the first text only", events)
 		}
 	})
 }

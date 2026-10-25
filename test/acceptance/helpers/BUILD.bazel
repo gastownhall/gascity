@@ -4,6 +4,7 @@ go_library(
     name = "helpers",
     srcs = [
         "bd_init_diagnostics.go",
+        "bd_proxy_open_stall.go",
         "bd_schema_parity.go",
         "bd_time.go",
         "beads_topology.go",
@@ -40,6 +41,7 @@ go_test(
     name = "helpers_test",
     srcs = [
         "bd_init_diagnostics_test.go",
+        "bd_proxy_open_stall_test.go",
         "bd_schema_parity_test.go",
         "bd_time_test.go",
         "beads_topology_test.go",

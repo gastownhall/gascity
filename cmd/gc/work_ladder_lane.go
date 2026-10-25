@@ -489,9 +489,12 @@ func ladderSeed(meta map[string]string, t ladderTarget) (workladder.StartSource,
 
 // ladderGate is open, or held by what owns the seat for now: a stop request
 // (a drain, at the row's generation), a kill, a start in flight, a restart
-// request, an operator's suspend or an agent's wait, a quarantine, or an
-// agent's heartbeat (WL5). Every hold is one the row clears when it ends, so
-// none can silence a seat for good.
+// request, an operator's content hold on the conversation, an operator's
+// suspend or an agent's wait, a quarantine, or an agent's heartbeat (WL5).
+// Every hold but the content hold is one the row clears when it ends, so
+// none can silence a seat for good. A content hold stands until a resume
+// clears it (SESSION-RUNTIME-027): meanwhile the ladder nudges, recycles and
+// releases nothing for the seat, so a hold nobody clears keeps its claim.
 func ladderGate(info session.Info, meta map[string]string, now time.Time) workladder.Gate {
 	held := func(reason string) workladder.Gate { return workladder.Gate{Held: true, Reason: reason} }
 	state := session.State(strings.TrimSpace(info.MetadataState))
@@ -505,6 +508,8 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 		return held("starting")
 	case strings.TrimSpace(info.RestartRequested) != "":
 		return held("restart_pending")
+	case session.ContentHeldInfo(info):
+		return held("content_held")
 	}
 	d := session.DecodeDisposition(meta)
 	switch {

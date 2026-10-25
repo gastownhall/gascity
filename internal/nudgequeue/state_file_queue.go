@@ -18,7 +18,7 @@ type StateFileQueue struct {
 // writes no shadow and does not check for a duplicate id: a deferred submit
 // mints a fresh id for every message.
 func (q StateFileQueue) EnqueueDeferred(item Item) error {
-	return WithState(q.CityPath, func(state *State) error {
+	return WithStateFor(q.CityPath, "enqueue_deferred", func(state *State) error {
 		state.Pending = append(state.Pending, item)
 		SortState(state)
 		return nil

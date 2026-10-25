@@ -70,9 +70,10 @@ func (m *Manager) StopTurnFenced(ctx context.Context, id string, f runtime.Input
 // stopFindsNoTurn reports whether a stop of sessName finds no turn to
 // interrupt and, if so, what the stop returns. A suspended row has no turn:
 // the stop returns nil, or under an input fence in ctx a miss finding it
-// absent. Unfenced and unchecked, a runtime the provider's IsRunning reads
+// absent. Unfenced and not fresh, a runtime the provider's IsRunning reads
 // not running has no turn either, and the stop returns nil. Under a fence,
-// or for a checked stop (fresh), a fresh liveness read decides instead,
+// or for a fresh stop (a checked one, or one with a restart on failure or a
+// replacement: StopTurnWith), a fresh liveness read decides instead,
 // because the tmux state cache can read a live session not running: a read
 // that does not find the agent alive is no turn, and the stop returns its
 // runtime.LivenessFenceMiss under a fence, else nil. Unfenced, a read that

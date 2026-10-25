@@ -24,7 +24,7 @@ BINARY_BY_PROVIDER = {
 # the engine's own adapter. "Installing" it means copying the vendored script
 # onto PATH.
 ZCODE_ADAPTER_RELPATH = ("internal", "worker", "adapters", "zcode", "zcode-repl")
-CLAUDE_CODE_VERSION = "2.1.123"
+CLAUDE_CODE_VERSION = "2.1.308"
 KIMI_CLI_VERSION = "1.42.0"
 PI_OLLAMA_CLOUD_VERSION = "0.4.1"
 

@@ -121,13 +121,68 @@ args = ["notes-mcp"]
 		}
 	})
 
-	t.Run("unsupported provider hard errors when MCP exists", func(t *testing.T) {
+	t.Run("unsupported provider starts without shared MCP", func(t *testing.T) {
 		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "copilot"}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		for key := range tp.FPExtra {
+			if strings.HasPrefix(key, "mcp:") {
+				t.Fatalf("unexpected MCP fingerprint entry %q for an agent that receives no MCP", key)
+			}
+		}
+	})
+
+	t.Run("unsupported provider hard errors on its own MCP", func(t *testing.T) {
+		agentMCP := filepath.Join(cityPath, "agents", "worker", "mcp")
+		writeMCPSource(t, filepath.Join(agentMCP, "private.toml"), `
+name = "private"
+command = "uvx"
+`)
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "copilot", MCPDir: agentMCP}
 		_, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
 		if err == nil {
 			t.Fatal("expected unsupported provider error, got nil")
 		}
 		if !strings.Contains(err.Error(), `runs on the "copilot" harness, which cannot receive MCP`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("cursor provider starts without a shared http server", func(t *testing.T) {
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "cursor"}
+		stdioOnly, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		search := filepath.Join(cityPath, "mcp", "search.toml")
+		writeMCPSource(t, search, `
+name = "search"
+url = "https://mcp.example.test/search"
+`)
+		defer os.Remove(search) //nolint:errcheck // test cleanup
+		withHTTP, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate with a shared http server: %v", err)
+		}
+		if got := withHTTP.FPExtra["mcp:cursor"]; got == "" || got != stdioOnly.FPExtra["mcp:cursor"] {
+			t.Fatalf("cursor fingerprint = %q, want the stdio-only projection %q", got, stdioOnly.FPExtra["mcp:cursor"])
+		}
+	})
+
+	t.Run("cursor provider hard errors on its own http server", func(t *testing.T) {
+		agentMCP := filepath.Join(cityPath, "agents", "editor", "mcp")
+		writeMCPSource(t, filepath.Join(agentMCP, "private.toml"), `
+name = "private"
+url = "https://mcp.example.test/private"
+`)
+		agent := &config.Agent{Name: "editor", Scope: "city", Provider: "cursor", MCPDir: agentMCP}
+		_, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err == nil {
+			t.Fatal("expected unsupported transport error, got nil")
+		}
+		if !strings.Contains(err.Error(), `gc projects only stdio MCP servers for the "cursor" harness`) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})

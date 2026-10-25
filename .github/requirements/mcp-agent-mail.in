@@ -13,9 +13,12 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # mcp-agent-mail upstream pins GitPython>=3.1.62 itself.
 gitpython>=3.1.62
 
-# Security floor: CVE-2026-69244 affects aiohttp < 3.14.3. Keep this explicit
-# until mcp-agent-mail's transitive requirements carry the fixed release.
-aiohttp>=3.14.3
+# Security floor: CVE-2026-69244 affects aiohttp < 3.14.3; GHSA-494j-54xm-rwp3,
+# GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5, GHSA-9xw5-w5jj-pvcg,
+# GHSA-pqxq-w44r-73xw, GHSA-6cjc-53gc-5rqm, GHSA-gx76-c99x-2c96 and
+# GHSA-f9xw-jh8m-3mwq affect aiohttp < 3.14.4. Keep this explicit until
+# mcp-agent-mail's transitive requirements carry the fixed release.
+aiohttp>=3.14.4
 
 # Security floor: CVE-2026-63374 (CRITICAL, TLSStream IDNA 2003 host name
 # encoding enables host name confusion) in anyio < 4.14.2. anyio arrives
@@ -25,9 +28,14 @@ aiohttp>=3.14.3
 anyio>=4.14.2
 
 # Security floor: Pillow < 12.3.0 has multiple HIGH-severity image parsing
-# vulnerabilities reported by the image gate. Drop this line once transitive
+# vulnerabilities reported by the image gate; Pillow < 13.0.0 adds
+# GHSA-8g5g-8vmr-9782 (CRITICAL), GHSA-c6hw-5grf-ff96, GHSA-462x-pgg6-55fp,
+# GHSA-p4wg-p73j-c528, GHSA-pchr-8j38-3x4p, GHSA-q45j-58j2-45rg,
+# GHSA-vx6w-vv9f-6gvg, GHSA-65qm-jvmh-6pqg and GHSA-58r4-6rv3-gfh8.
+# mcp-agent-mail declares pillow>=10.4.0 and only uses Image.open/convert and
+# WebP save, none of which changed in 13.0. Drop this line once transitive
 # constraints carry the patched version themselves.
-pillow>=12.3.0
+pillow>=13.0.0
 
 # Security floor: urllib3 < 2.7.0 has GHSA-mf9v-mfxr-j63j (HIGH,
 # decompression-bomb safeguards bypassed in parts of the streaming API)
@@ -70,10 +78,11 @@ joserfc>=1.6.8
 # transports serve session requests without verifying the authenticated
 # session, and experimental task handlers are reachable by any client) and
 # CVE-2026-59950 (HIGH, fixed 1.28.1 — WebSocket transport lacks Host/Origin
-# validation) in the mcp Python SDK < 1.28.1. mcp arrives transitively via
-# fastmcp-slim (mcp<2.0,>=1.24.0); floor at 1.28.1 to clear all three. Drop
-# once fastmcp-slim's transitive constraint carries the patched version itself.
-mcp>=1.28.1
+# validation) in the mcp Python SDK < 1.28.1, and GHSA-84m7-p3x7-pcfv in
+# mcp < 1.30.0. mcp arrives transitively via fastmcp-slim (mcp<2.0,>=1.24.0);
+# floor at 1.30.0 to clear all four. Drop once fastmcp-slim's transitive
+# constraint carries the patched version itself.
+mcp>=1.30.0
 
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail

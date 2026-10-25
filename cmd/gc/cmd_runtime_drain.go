@@ -261,7 +261,7 @@ func newRuntimeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+"gc runtime undrain" to cancel. Under the v2 session reconciler it also
 marks the session row, so the agent's drain-ack stops the session even on a
 min_active_sessions floor.`,
 		Args: cobra.ArbitraryArgs,
@@ -427,7 +427,7 @@ func newRuntimeUndrainCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack and
+the v2 session reconciler it also clears the session row's drain-ack and
 its operator drain mark.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -852,7 +852,7 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-Under session_reconciler = "v2" the ack is first written to the session
+Under the v2 session reconciler the ack is first written to the session
 row, bound to its current incarnation. A session acking itself must
 carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
@@ -1409,9 +1409,9 @@ func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
 const drainAckRefused = 2
 
 // drainAckCityMode reports whether the city at cityPath runs the v2 session
-// reconciler, the only reader of the row ack, and returns the config it read.
-// A path that is not a city, a config that does not load, or a mode the
-// controller would refuse to latch is legacy.
+// reconciler, the only reader of the row ack (cityRunsV2), and returns the
+// config it read. A path that is not a city or a config that does not load is
+// legacy.
 func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if strings.TrimSpace(cityPath) == "" {
 		return nil, false
@@ -1423,13 +1423,55 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if err != nil || cfg == nil {
 		return nil, false
 	}
-	return cfg, drainAckStrictConfig(cfg)
+	return cfg, cityRunsV2(cityPath, cfg)
 }
 
-// drainAckStrictConfig reports whether cfg latches the v2 reconciler.
+// cityRunsV2 reports whether the city at cityPath runs the v2 reconciler:
+// the mode its running controller latched, when its identify reply tells
+// (controllerLatchedReconcilerMode), else the mode cfg resolves to
+// (drainAckStrictConfig), which the next controller start latches; legacy
+// with neither. The running controller wins because the mode is
+// boot-latched: a config edit that resolves the other way only takes effect
+// at restart, and until then the drain marks, acks and wake verdicts must be
+// the ones the running reconciler reads.
+func cityRunsV2(cityPath string, cfg *config.City) bool {
+	if mode, ok := controllerLatchedReconcilerMode(cityPath, cfg); ok {
+		return mode == reconcilerV2
+	}
+	return cfg != nil && drainAckStrictConfig(cfg)
+}
+
+// drainAckStrictConfig reports whether cfg latches the v2 reconciler, as the
+// controller latches it; a mode it would refuse to latch is legacy.
 func drainAckStrictConfig(cfg *config.City) bool {
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv) // as the controller latches it
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	return err == nil && mode == reconcilerV2
+}
+
+// controllerLatchedReconcilerMode asks the city's running controller which
+// session reconciler it latched (probeControllerIdentity). ok is false when
+// no controller's identify reply parses: none runs, or only the ping fallback
+// answered, as a current controller that missed the identify deadline does
+// too, so a ping alone says nothing about the latch. A controller whose
+// identify parsed without the mode predates both the field and the v2
+// default, so with an unset key (or anything but an explicit "v2") it latched
+// legacy; under an explicit v2 the answer is left to cfg's resolution. A var
+// so tests can stand in a controller; tests that swap it MUST NOT call
+// t.Parallel().
+var controllerLatchedReconcilerMode = func(cityPath string, cfg *config.City) (reconcilerMode, bool) {
+	identity := probeControllerIdentity(cityPath)
+	switch identity.SessionReconciler {
+	case config.SessionReconcilerV2:
+		return reconcilerV2, true
+	case config.SessionReconcilerLegacy:
+		return reconcilerLegacy, true
+	}
+	if identity.HostingMode.known() && cfg != nil {
+		if mode, _, ok := cfg.Daemon.SessionReconcilerMode(); !ok || mode != config.SessionReconcilerV2 {
+			return reconcilerLegacy, true
+		}
+	}
+	return reconcilerLegacy, false
 }
 
 // checkDrainAckRowAt is the v2 ack's incarnation check (CONTRACT v5.7 D5),

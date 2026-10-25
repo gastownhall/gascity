@@ -24,9 +24,10 @@ import (
 // real stores. A non-zero count is a warning under v2 and OK under legacy,
 // whose demand pass applies these repairs itself every tick.
 type v2DemandMigrationsCheck struct {
-	cfg      *config.City
-	cityPath string
-	newStore func(string) (beads.Store, error)
+	cfg       *config.City
+	cityPath  string
+	newStore  func(string) (beads.Store, error)
+	lookupEnv func(string) (string, bool) // nil reads reconcilerModeLookupEnv
 }
 
 func newV2DemandMigrationsCheck(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) *v2DemandMigrationsCheck {
@@ -77,9 +78,10 @@ func (c *v2DemandMigrationsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	if len(s.problems) > 0 {
 		msg += fmt.Sprintf("; %d read problem(s), counts are a lower bound", len(s.problems))
 	}
-	mode, _, _ := c.cfg.Daemon.SessionReconcilerMode()
+	mode, resolved := doctorReconcilerMode(c.cfg, c.lookupEnv)
+	details = append(details, resolved)
 	switch {
-	case len(s.problems) > 0, total > 0 && mode == config.SessionReconcilerV2:
+	case len(s.problems) > 0, total > 0 && mode == reconcilerV2:
 		return warnCheck(c.Name(), msg, "run gc doctor --check v2-demand-migrations --fix", details)
 	case total > 0:
 		msg += " (the legacy demand pass applies these every tick)"

@@ -337,6 +337,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+		register(newMCPAdoptionDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))

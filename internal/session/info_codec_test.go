@@ -135,6 +135,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		CurrentClaimBeadID:             b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey],
 		WorkStartedRaw:                 b.Metadata[WorkStartedKey],
 		WorkLadderRaw:                  b.Metadata[WorkLadderKey],
+		ContentHoldRaw:                 b.Metadata[ContentHoldKey],
 		ExecutionClaimStarted:          b.Metadata["execution_claim_started"],
 		CoreHashBreakdown:              b.Metadata["core_hash_breakdown"],
 		StartedProvisionHash:           b.Metadata["started_provision_hash"],

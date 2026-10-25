@@ -55,7 +55,11 @@ const (
 	ReasonSessionGone         = "session_gone"
 	ReasonClosedExternally    = "closed_externally"
 	ReasonOther               = "other"
-	RefusedReasonPrefix       = "refused:"
+	// ReasonReplacementNotPrepared is a deliver-now unit's interrupt whose
+	// turn settled but whose session could not be prepared for the message
+	// (X11 D11): the replacement did not complete.
+	ReasonReplacementNotPrepared = "replacement_not_prepared"
+	RefusedReasonPrefix          = "refused:"
 )
 
 // MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and
@@ -76,7 +80,7 @@ const (
 var knownFailedReasons = []string{
 	ReasonExpiredBeforeStart, ReasonDeadlineInFlight, ReasonNoBoundary, ReasonProviderUnavailable,
 	ReasonAmbiguousDelivery, ReasonPoison, ReasonUnsupported, ReasonUnauthorized, ReasonCreateFailed,
-	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther,
+	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther, ReasonReplacementNotPrepared,
 }
 
 var knownSkippedReasons = []string{
@@ -110,12 +114,6 @@ const (
 )
 
 var whens = []When{WhenBoundary, WhenAfterTurn, WhenInterrupt, WhenIfIdle, WhenNow, WhenSteer}
-
-// LaneLowered reports whether this build's conversation lane lowers a
-// message of mode w to a delivery. now and interrupt are not lowered yet: a
-// lane parks such a message (WaitNowUnlowered) until it expires, so a
-// producer that cannot tell its caller so refuses them before writing.
-func (w When) LaneLowered() bool { return w != WhenNow && w != WhenInterrupt }
 
 // Wake says whether a message may wake its conversation.
 type Wake string
@@ -263,8 +261,8 @@ type KillPolicy struct {
 }
 
 // Scope is an op's validity scope: the conversation, one context epoch, or
-// one session generation (with a turn for interrupt, an interaction for
-// respond).
+// one session generation (with a turn for interrupt, an interaction
+// occurrence for respond).
 type Scope struct {
 	Kind        ScopeKind
 	Epoch       int64

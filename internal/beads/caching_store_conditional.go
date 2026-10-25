@@ -287,7 +287,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	}
 	_, endWrite := c.beginLocalWrite(id)
 	defer endWrite()
-	deleted, haveDeleted := c.snapshotBeadBeforeDelete(id)
+	deleted := c.snapshotBeadBeforeDelete(id)
 	if err := writer.DeleteIfMatch(id, expectedRevision); err != nil {
 		c.applyConditionalWriteFailure(id, err)
 		return err
@@ -300,9 +300,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	if haveDeleted {
-		c.notifyChange(ChangeLocal, "bead.deleted", deleted)
-	}
+	c.notifyChange(ChangeLocal, "bead.deleted", deleted)
 	return nil
 }
 

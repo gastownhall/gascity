@@ -2542,7 +2542,7 @@ gc mail
 | [gc mail count](#gc-mail-count) | Show total/unread message count |
 | [gc mail delete](#gc-mail-delete) | Delete one or more messages (closes the beads) |
 | [gc mail inbox](#gc-mail-inbox) | List unread messages (defaults to your inbox) |
-| [gc mail mark-read](#gc-mail-mark-read) | Mark a message as read |
+| [gc mail mark-read](#gc-mail-mark-read) | Mark one or more messages as read |
 | [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread |
 | [gc mail peek](#gc-mail-peek) | Show a message without marking it as read |
 | [gc mail read](#gc-mail-read) | Read a message and mark it as read |
@@ -2649,10 +2649,14 @@ gc mail inbox [session] [flags]
 
 ## gc mail mark-read
 
-Mark a message as read without displaying it. The message will no longer appear in inbox results.
+Mark one or more messages as read without displaying them. They will no
+longer appear in inbox results. When multiple IDs are passed (as separate
+arguments, or as one whitespace-separated argument such as an unsplit "$IDS"),
+each is marked in input order; a failure on one is reported and the rest are
+still marked.
 
 ```
-gc mail mark-read <id> [flags]
+gc mail mark-read <id>... [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2844,7 +2848,12 @@ gc mcp
 
 ## gc mcp list
 
-Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
+Show the precedence-resolved MCP servers that Gas City would project into the
+provider-native config for one agent or session target.
+
+Servers from a shared layer (the city or rig pack, or an import) that the
+target's provider cannot receive are listed separately under "Not projected",
+with the reason: the agent starts without them.
 
 ```
 gc mcp list [flags]
@@ -4084,7 +4093,7 @@ Signal a session to drain — wind down its current work gracefully.
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+"gc runtime undrain" to cancel. Under the v2 session reconciler it also
 marks the session row, so the agent's drain-ack stops the session even on a
 min_active_sessions floor.
 
@@ -4105,7 +4114,7 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-Under session_reconciler = "v2" the ack is first written to the session
+Under the v2 session reconciler the ack is first written to the session
 row, bound to its current incarnation. A session acking itself must
 carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
@@ -4212,7 +4221,7 @@ Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack and
+the v2 session reconciler it also clears the session row's drain-ack and
 its operator drain mark.
 
 ```
@@ -4931,7 +4940,7 @@ gc supervisor run
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--allow-supervisor-mismatch` | bool |  | start even when the running supervisor is a different gc installation than this binary |
-| `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
+| `-n`, `--dry-run` | bool |  | preview the agents that would start and the MCP config, skill links, and .gitignore entries gc would write, without starting or writing them |
 | `--json` | bool |  | emit JSONL summary |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
 | `--verbose` | bool |  | disable warning deduplication and print every supervisor warning |
@@ -5034,6 +5043,17 @@ refuses such a city and names this command.
 
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
+
+Last, on the converged binding, each open deliver-now unit the copy carried in
+is re-lowered under the binding's id prefix: its derived interrupt is re-created
+at the id a lowering there gives it, with its state, and the old row is closed
+as a pointer to it, one all-or-nothing write per unit. A unit in flight or that
+may have run, one with more than one open derived interrupt, and one whose id
+there another row already holds are left as they are and named; their lanes run
+each one as a unit by identity. A message not yet lowered, or whose unit is
+over, is not a unit to move, and is not named. A city whose binding holds no
+lowered deliver-now message skips the step and prints nothing for it. A step
+that did not finish exits non-zero, and running this command again finishes it.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that

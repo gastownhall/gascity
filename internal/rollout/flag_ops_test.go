@@ -176,7 +176,7 @@ func TestOpsGatesAreIndependent(t *testing.T) {
 		t.Errorf("content/control/lifecycle = %q/%q/%q, want auto/require/auto",
 			f.OpsContent(), f.OpsControl(), f.OpsLifecycle())
 	}
-	if f.BeadsConditionalWrites() != Off || f.BeadsGuardedRelease() != Off {
+	if f.BeadsConditionalWrites() != Auto || f.BeadsGuardedRelease() != Off {
 		t.Errorf("ops gates leaked into the beads gates: %q/%q", f.BeadsConditionalWrites(), f.BeadsGuardedRelease())
 	}
 }

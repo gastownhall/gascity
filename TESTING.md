@@ -200,6 +200,79 @@ GC_* env-read inventory and in `internal/testenv.LeakVectorVars`, so a shell
 value never reaches a test's gc child; a test sets it on the child it means
 to kill.
 
+### Op recording failpoints
+
+`GC_OPS_FAILPOINT=<surface>:<point>[:<kind>][:<n>]` acts at one crash point of
+one recorded legacy execution (`legacyop.CrashPoint`), so the X12 kill matrix
+can show what a crash there leaves behind and how a same-key retry, the op
+sweeper or a rerun settles it. Only `//test/conversationlane` uses it.
+
+- `surface` is `api`, the controller's or supervisor's API, or `cli`, a CLI
+  verb's recorder. A gc that records for the other surface never fires.
+- `point` is `k1` (the op row is durable and nothing has run: kill), `k2`
+  (`api` only: the 202 is answered and the delivery has not started: the
+  request parks, and the test kills the process holding the 202), `k3` (the
+  effect ran and nothing about the op is written: kill), `k4` (the close
+  landed and nothing is answered: kill) or `k5` (`api` only: every close of
+  one op fails, foreground and background, so the client holds its answer
+  while the op stays open).
+- `kind`, optional, counts only ops of that kind (`message`, `kill`, ...).
+- `n`, optional and last, fires on the n-th op of that surface (and kind) to
+  reach the point in the process; it defaults to 1. For `k5` it is the n-th
+  distinct op to reach a close attempt.
+
+It is gated, announced and scrubbed like `GC_LANE_FAILPOINT`: only the
+`//cmd/gc:gc_testhooks` link honors it, an armed value prints one
+`gc: WARNING: GC_OPS_FAILPOINT=...: TEST HOOK ACTIVE: ...` line when the
+process first builds a recorder, `k2` and `k5` print one more line naming the
+op they parked or fault, and the variable is in the GC_* env-read inventory
+and in `internal/testenv.LeakVectorVars`.
+
+The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
+15-minute waits) in `conversationlane_x12_test`, one of the six targets the
+integration build splits the package into
+(`test/conversationlane/BUILD.bazel`); `TestBdDoltArmProvisionsAndRecords`,
+which keeps the bd-dolt arm's provisioning and recording in the gating run,
+runs in `conversationlane_test`. The full evidence runs in four manual
+variants, a matrix part and a load part on two backends each. The matrix
+part, the crash arms, runs on SQLite and embedded Dolt: every kill-matrix cell at production
+timing, waiting out each op's `finish_by`, and, on embedded Dolt, the
+incapable-store arm. The load part runs the six-round fault-free load on
+SQLite and on `bd-dolt`, requires every well-formed request to succeed and
+the load to finish within its 90-minute budget, and reports its latency per
+backend and its op-row growth. `bd-dolt` is a workspace the pinned bd's
+`bd init --server` provisioned on a `dolt sql-server` the harness runs
+(automatic GC and the stats workers off, so its growth is what the city
+wrote), served natively through a `beads-workspace` binding: bd runs only to
+provision it. That is the store a city bound directly to a Dolt server gets,
+not the default topology, whose sessions are served through BdStore; with
+the pinned bd, which lacks `--if-revision`, a BdStore makes no conditional
+writes and records no ops (ga-ve3tjw). So `bd-dolt` stands in for the load
+arm the maintainers' 2026-10-23 ruling on #8217 asked for, a bd-served Dolt
+arm on the topology real cities run, until a maintainer accepts the
+substitute or ga-ve3tjw adds that arm. Each part writes
+`x12-report-<backend>-<part>.{json,md}` to the test's undeclared outputs.
+A part takes from 30 minutes to well over an hour, past the remote
+executor's action timeout, so run them locally:
+
+```bash
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+  //test/conversationlane:x12_evidence_matrix
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --local_test_jobs=1 \
+  --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+  //test/conversationlane:x12_evidence_load
+```
+
+`GC_X12_SOURCE` names the source revision in the report; the test-hooks gc
+is not stamped.
+
+The load parts run one at a time (`--local_test_jobs=1`): their latency (R2)
+is measured with nothing beside them, and the 90-minute budget leaves about
+16 minutes over the slowest bd-dolt load that ran alone (1h13m49s). Beside
+the matrix parts a load can run past it, so no suite runs the two together.
+
 ### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after
@@ -247,14 +320,13 @@ used: the test binary panics at init, naming the directory to remove.
 
 ### Merge queue
 
-The required-check workflows are merge-queue ready but the queue is off: it
-starts working only when a maintainer adds a `merge_queue` rule to the main
-ruleset. `bazel.yml`, `ci.yml` and `codeql.yml` run on
+The main ruleset's `merge_queue` rule sends every merge to `main` through
+the queue. `bazel.yml`, `ci.yml` and `codeql.yml` run on
 `merge_group: [checks_requested]`, so every required check reports on a
 queue entry's merge-group commit: `Check` and `CI / required` (`ci.yml`),
-the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
-`code_scanning` rule), `bazel test (side-by-side)` and `BUILD files in sync`
-(`bazel.yml`). `scripts/ci_merge_queue_test.go` pins this:
+the four `Analyze (...)` (`codeql.yml`), `bazel test (side-by-side)` and
+`BUILD files in sync` (`bazel.yml`). `scripts/ci_merge_queue_test.go` pins
+this:
 
 - **Same-repo trust.** A merge group has no `github.event.pull_request`, so
   the `rbe` job takes the same-repo path (mode `remote`, no mint), whoever
@@ -271,13 +343,23 @@ the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
   group's concurrency group on its own `gh-readonly-queue/*` ref, which is
   unique per entry and base, with `cancel-in-progress` false. A PR's runs,
   keyed on its number, never share a queue entry's group.
+- **CodeQL reports without analyzing.** Each `Analyze (...)` leg of a merge
+  group runs one step, on a 2 vCPU runner, that says why: each queued pull
+  request's own run analyzed it, and the ruleset's `code_scanning` rule
+  gated it there (GitHub applies that rule to pull requests, never to merge
+  queue groups); the push to `main` analyzes the merged commit
+  (`scripts/codeql_merge_group_test.go`). What a group gives up is a CodeQL
+  run on the combined commit (up to five pull requests over a `main` that
+  may have moved) before it merges: an alert only that combination creates
+  surfaces on the push to `main`, after the merge. The `code_scanning` rule
+  is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
   any other run. The `integration` lane can later be gated on `merge_group`
   only (G3).
 
-**Recommended queue settings** (for 60-70 merges a day, with a peak of 7 an
-hour from 2026-10-05 to 10-07). A queue run costs about what a push run
+**Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
+2026-10-05 to 10-07). A queue run costs about what a push run
 does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 
 | Setting | Value | Why |
@@ -290,9 +372,8 @@ does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 | Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |
 | Required checks | the ruleset's 7 contexts, unchanged | Classic branch protection keeps `CI / required`, which also reports on `merge_group` |
 
-Repository auto-merge is already on, so `gh pr merge --auto` queues a PR.
-After enabling the queue, watch the first day's `merge_group` run times, then
-adjust the build concurrency.
+Repository auto-merge is on, so `gh pr merge --auto` queues a PR. Watch
+`merge_group` run times when changing the build concurrency.
 
 **Security.** A queue run executes the queued commit's own workflows with
 CI secrets, including the rbe-west executor credentials. Queueing a fork PR
@@ -445,7 +526,11 @@ endpoints, credentials, timeouts, download and parallelism policy.
   contributors and fork PRs read. Fork PRs get `rbe-fork` remote execution
   with a certificate minted for that run, or, when the mint is closed or
   refuses, the read-only cache with execution on the runner; either way
-  every lane runs and gates.
+  every lane runs and gates. A fork repository's own CI (a push to your
+  fork, or a PR within it: `github.repository_owner` is not `gastownhall`)
+  runs in mode `local`, executing on the runner without rbe-cache, so it
+  never spends the farm's anonymous-cache budget; your PRs into gascity are
+  unaffected.
 
 **Pre-push.** `.githooks/pre-push` runs the suite through
 `.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
@@ -627,7 +712,8 @@ does not reach the fork-cache lanes below.
 Lanes on the read-only fork cache (mode `cache`) see no repository
 variables. Mode `cache` covers fork PRs without an rbe-fork certificate,
 `rbe=cache` dispatches, and, while `RBE_WEST_WORKERS` is not `true`, every
-PR, push and merge group (`bazel.yml`'s rbe job). They read the same
+PR, push and merge group (`bazel.yml`'s rbe job), never a fork
+repository's own CI (mode `local`). They read the same
 entries through rbe-cache's anonymous AC and CAS reads, with the same two
 lines, whenever `tools/rbe/cache-rrc-probe.sh` gets a GetCapabilities
 answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
@@ -692,17 +778,14 @@ pin" below). An action runs only on a worker whose toolchain is the pinned
 one. gastownhall/beads shares the pools and carries a byte-identical copy of
 the manifest and the same pin.
 
-The pool workers also advertise `worker-env-base`, the sha256 of the
-manifest without its `go` and `dolt` lines, but only while action isolation
-is on (rbe-reexecution-design.md (c)). beads' actions send `worker-env-base`
-alone: beads builds with its own `go_sdk` and tests with a hermetic dolt, and
-rbe-west's action launcher hides the host's go and dolt from such an action
-(exit 127). So a gascity re-pin that moves only the `go` or `dolt` line
-leaves every beads key, and beads' pin, unchanged. gascity's platform keeps
-the full `worker-env` (`scripts/rbe_worker_env_base_policy_test.go`): its
-tests run the host go and dolt. To see whether a re-pin moves beads too,
-compare `grep -v -E '^(go|dolt) ' tools/rbe/worker-env.txt | sha256sum`
-before and after.
+beads' actions send the full `worker-env` too, so every re-pin moves
+beads' pin. (rbe-reexecution-design.md (c) has the pool workers also
+advertise `worker-env-base`, the manifest without its `go` and `dolt`
+lines, for beads alone; rbe-worker reverted it before any gascity pin
+carried it, rbe-worker#7, until it can canary.) gascity's platform keeps the
+full `worker-env` (`scripts/rbe_worker_env_base_policy_test.go`): its tests
+run the host go and dolt. A re-pin that moves only the `go` line gets a
+grace window for beads ("Grace window for Go re-pins" below).
 
 The manifest records what can change an action's result, and nothing else.
 We don't control the Blacksmith image, and it takes Ubuntu security updates
@@ -775,10 +858,8 @@ To re-pin, anyone with write access:
    worker: its measured package list, its dolt, the test `PATH`, the pin.
    rbe-worker's own CI runs the same check against gascity's main, but
    only as information, and it gates nothing here.
-   Make the same change in gastownhall/beads (its
-   `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
-   together: once the pool workers serve the new pin, beads' actions on
-   the old pin don't schedule.
+   gastownhall/beads, which carries a byte-identical copy of both, follows
+   on its own once this merges (below).
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
    bazel.yml lane skips the remote suite. The worker-host job measures
@@ -787,6 +868,25 @@ To re-pin, anyone with write access:
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
+
+Once main's pin moves, beads' copy is out of step, and every beads PR
+fails at `Bazel / execution mode` (its preflight compares the copy with
+gascity's main) until beads' sync PR lands, unless the re-pin moved only
+the Go ("Grace window for Go re-pins" below). While a PR moves the pin,
+`worker-env-notify-beads-pr.yml` keeps one comment on it saying so. On the
+push that merges it, `worker-env-notify-beads.yml` sends gastownhall/beads
+the repository dispatch `gascity-worker-env-repinned` (the main commit and
+its pin), and beads' `worker-env-autosync.yml` opens the sync PR within a
+minute or two of the merge. It lands as soon as its CI passes (auto-merge)
+or after beads' automated review. Its CI runs fully uncached after a
+re-pin, so it takes about an hour, sometimes more: on 2026-10-21
+(beads#7746) it took 50 minutes, gated by the release cross-compile lane
+(about 24k remote actions), and on beads#7411 and beads#7732 that lane's
+first attempt hit its 90-minute timeout (beads now re-runs a failed first
+attempt once). autosync's 15-minute cron is the backstop. If the dispatch
+fails, its run fails and prints
+`gh workflow run worker-env-autosync.yml -R gastownhall/beads`, which
+starts autosync at once.
 
 A re-pin is a new key for every action. The first runs after it miss
 the cache entirely and re-execute everything on the new host, which is
@@ -799,6 +899,65 @@ re-pin.
 If an issue stays open for the current pin while hosts match again,
 close it by hand.
 
+### Grace window for Go re-pins
+
+A re-pin that moves only the manifest's `go` line (a Go release: gascity#7387
+and #8165 left beads red for 99 and 89 minutes) can be undone on today's
+Blacksmith image, because the pinned rbe-worker installs `go.mod`'s Go. So
+after such a re-pin beads' preflight accepts the previous pin for two hours,
+rbe-west serves it for about three (the last hour for the beads runs it
+accepted near the end), and beads keeps building until its sync PR lands:
+
+1. On the push that moves the pin, `worker-env-notify-beads.yml`'s `grace`
+   job writes a record (`tools/rbe/worker-env-grace record`) and commits it
+   as `worker-env-grace.txt` to the branch `rbe/worker-env-grace`
+   (`publish`, with GITHUB_TOKEN's `contents: write`). It holds the previous
+   pin, its Go, `since` (the re-pin commit's time; a merge-queue commit is
+   made a few minutes before it lands), `until` (`since` + 2 h) and
+   `serve-until` (`until` + 1 h). Any other re-pin (an image release, a dolt
+   or measurement change, a manifest that does not hash to its pin) gets
+   `previous none` and a reason: the old host cannot be rebuilt, so beads
+   waits for its sync PR as before. The previous pin is that of main before
+   the push (`github.event.before`), never of the pushed commit's parent: in
+   a merge-queue group the two differ. If main before the push cannot be
+   fetched, the job fails and publishes nothing (re-run it). `publish`
+   writes only a record for the pin main has when it runs, and not one the
+   branch already has, so a re-run, or two re-pins in a row, never puts an
+   older record back. The branch's history is the history of windows.
+2. rbe-west's OSS pool scaler reads the record and, while the window is
+   open, dispatches `rbe-worker-legacy.yml`: a floor of previous-pin workers
+   until `until`, and more while a queue persists that no registered
+   current-pin worker can take, until `serve-until` (infra
+   `nativelink-cas/west`, README "Pool scalers: worker-env grace window").
+   Each run fetches the record (`fetch`), writes this main's manifest with
+   the previous Go as the product files the rbe-worker reads (`host`),
+   refuses unless they hash to the previous pin, measures its host against
+   that pin (a host that measures anything else fails and never registers)
+   and serves the previous pin until idle, max age or about `serve-until`.
+   A run dispatched with no open window fails too, and the scaler's breaker
+   for these runs stops dispatching them. It runs the same pinned
+   rbe-worker as the pool. NativeLink keeps one value per platform property
+   per worker, and a host has one Go, so previous-pin workers are separate
+   VMs.
+3. beads' preflight (its `tools/rbe/worker-env-sync`, `bazel.yml`'s
+   `execution mode`) reads the record from the same branch and, in mode
+   `remote` while the beads repository variable `RBE_WORKER_ENV_GRACE` is
+   `true`, accepts beads' pin from `since` (less 5 minutes of clock skew)
+   until `until` when it is the record's previous pin, gascity main's pin is
+   the record's pin, and the two manifests differ only in the `go` line.
+   beads' sync PR still opens and lands as before; its own CI runs on the
+   new pin.
+
+The record is the one contract between the three: printable ASCII, one
+`key value` per line, the same strict rules in each reader; change it in
+all of them. The two hours are part of it (the scaler and beads refuse a
+longer window): they cover beads' sync PR (about an hour) with room to
+spare, but not a sync PR whose release lane times out (90 minutes) and
+re-runs, after which beads goes red until the sync lands, as before.
+Rollback: unset `RBE_WORKER_ENV_GRACE` in beads (strict again at once), and
+set `NLPOOL_GRACE_WORKFLOW` empty on rbe-west (no previous-pin workers).
+With neither, records go on being published and nothing reads them.
+
 ### Bumping the rbe-worker pin
 
 The worker code the pools run (`blacksmith-worker.sh`, `worker-env`, the
@@ -806,7 +965,7 @@ farm half of `worker-env-drift` and the `rbe-action-*` launcher) lives in
 [`gastownhall/rbe-worker`](https://github.com/gastownhall/rbe-worker)
 under `worker/`, with its own tests. gascity keeps no copy. Its pool and
 canary workflows (`rbe-worker-pool.yml`, `rbe-fork-pool.yml`,
-`rbe-worker-env-canary.yml`) are shims: each job fetches the commit named in
+`rbe-worker-legacy.yml`, `rbe-worker-env-canary.yml`) are shims: each job fetches the commit named in
 `.github/actions/rbe-worker/pin` anonymously, from `refs/heads/main` only,
 verifies that the commit is in main's history, and runs `worker/` from it.
 gascity keeps only the product side of the contract: `go.mod`,
@@ -826,8 +985,8 @@ manifest pin above). Bumping it is a one-line PR titled
    body: the compare URL, the commit list, and whether the bump touches the
    measurement, isolation or microVM files.
 3. If the bump changes what the worker measures, re-pin the worker host in
-   the same PR ("Re-pinning the RBE worker host" above), and merge the
-   matching beads re-pin right after.
+   the same PR ("Re-pinning the RBE worker host" above); beads follows on
+   its own.
 4. Open the PR and merge it once `worker-host` is green. The canary runs
    on the merge, and new pool runs pick the pin up at their next dispatch.
    Workers already running keep their revision until they retire.

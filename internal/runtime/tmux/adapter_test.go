@@ -182,6 +182,7 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if !processAlive(secondPanePID) {
 		t.Fatalf("stubborn second-pane process %s is not alive before certified stop", secondPanePID)
 	}
+	stubbornTarget := mustSnapshotTarget(t, mustProcessSnapshot(t), mustPID(t, secondPanePID))
 	// A second provider instance owns the real hidden PTY. It is therefore
 	// untracked by p, exactly like a human client from the certifier's point of
 	// view; p must observe it without closing or detaching it.
@@ -245,9 +246,12 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if has, err := p.tm.HasSession(name); err != nil || has {
 		t.Fatalf("certified stop left session present: has=%v err=%v", has, err)
 	}
-	if processAlive(secondPanePID) {
-		t.Fatalf("certified stop left stubborn second-pane process %s alive", secondPanePID)
-	}
+	// The stop returns once it has sent SIGKILL, before the stubborn process
+	// has exited and before tmux, its parent, has reaped it; kill(0) reads both
+	// states as alive. Wait for its start identity to go instead. It ignores HUP
+	// and TERM, so a stop that never sent the KILL still leaves it running past
+	// the deadline.
+	waitForProcessTargetsGone(t, []processTarget{stubbornTarget}, testutil.ExecRaceTimeout)
 
 	if err := p.TeardownServer(); err != nil {
 		t.Fatalf("tear down exact named tmux server: %v", err)
