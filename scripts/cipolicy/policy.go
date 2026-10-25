@@ -311,7 +311,16 @@ const (
 	// gets `token: ''`, so pull requests diff with git instead of calling the
 	// pulls/files API on the shared github.token budget. Reviewed delta: one
 	// `with` input; no new job, step command or permission.
-	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
+	//
+	// Bumped again (MCP mail conformance on lock bumps): the changes job's
+	// mail filter adds .github/requirements/mcp-agent-mail.in, .overrides.txt
+	// and .txt. The mcp-mail job installs mcp_agent_mail from that lock and
+	// runs TestMCPMailConformanceLive, the only live gc <-> mcp_agent_mail
+	// test, yet #8307 (GitPython, filelock, fastmcp and opentelemetry-api
+	// bumps) merged without it running. requiredFilterPaths pins the three
+	// paths. Reviewed delta: three filter paths; no new job, step command or
+	// permission.
+	expectedCIExecutionHash     = "97af365879b1ea3c6a86cfdb6e9cc662a2cef31bc50463f833f57eef7067d6a9"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -362,7 +371,13 @@ const (
 )
 
 var requiredFilterPaths = map[string][]string{
-	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
+	"mail": {
+		"internal/mail/**",
+		"contrib/mail-scripts/**",
+		".github/requirements/mcp-agent-mail.in",
+		".github/requirements/mcp-agent-mail.overrides.txt",
+		".github/requirements/mcp-agent-mail.txt",
+	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",
