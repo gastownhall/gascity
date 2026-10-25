@@ -352,6 +352,7 @@ type trivyIgnoreDoc struct {
 		ID        string   `yaml:"id"`
 		Paths     []string `yaml:"paths"`
 		Purls     []string `yaml:"purls"`
+		ExpiredAt string   `yaml:"expired_at"`
 		Statement string   `yaml:"statement"`
 	} `yaml:"vulnerabilities"`
 }
@@ -415,9 +416,11 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
-// three kubectl entries the v1.36.5 pin does not clear (CVE-2026-78667,
-// CVE-2026-78669, CVE-2026-97031); kubectl is an upstream-signed prebuilt this repo
-// installs rather than builds, so nothing here can move its dependencies. gc's module waivers
+// five kubectl entries the v1.36.5 pin does not clear (CVE-2026-78667,
+// CVE-2026-78669, CVE-2026-97031, and the owner-approved CVE-2026-56851 and
+// CVE-2026-111943); kubectl is an upstream-signed prebuilt this repo installs
+// rather than builds, so nothing here can move its dependencies, and a kubectl
+// waiver outside that reviewed set fails here too. gc's module waivers
 // are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
@@ -459,6 +462,11 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"CVE-2026-78667": {"usr/local/bin/kubectl": true},
 		"CVE-2026-78669": {"usr/local/bin/kubectl": true},
 		"CVE-2026-97031": {"usr/local/bin/kubectl": true},
+		// Owner-approved 2026-10-25 (code-scanning alerts #481 and #490): no kubectl
+		// release ships x/text >= 0.41.0 or Go >= 1.26.10 yet. Each statement in
+		// .trivyignore.yaml carries the reasoning.
+		"CVE-2026-56851":  {"usr/local/bin/kubectl": true},
+		"CVE-2026-111943": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
 
@@ -476,6 +484,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			}
 			if rebuiltPaths[p] {
 				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc, thrift and x/net forward, so move the module forward in that build instead of waiving the path", v.ID, p)
+			}
+			if p == "usr/local/bin/kubectl" {
+				t.Errorf("%s waives kubectl but is not a reviewed kubectl waiver; check the finding against the pinned binary and add it to reviewedWaivers with its reasoning, or move the pin past it", v.ID)
 			}
 		}
 	}
@@ -597,6 +608,94 @@ func TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease(t *testing.T) {
 		if strings.HasPrefix(f, "CVE-2026-78667 ") || strings.HasPrefix(f, "CVE-2026-25681 ") {
 			t.Errorf("staleKubectlWaiverStatements() flagged an entry it must accept: %q", f)
 		}
+	}
+}
+
+// TestTrivyIgnoreKubectlWaiversStayScopedAndTimeBoxed holds every kubectl waiver to
+// the kubectl binary alone and to one shared expiry. The waivers are reviewed
+// against the pinned binary as a set, at each pin bump, so they expire together; a
+// waiver that also named another path or a purl would hide its finding wherever
+// else it turned up, including in the binaries this image rebuilds from source.
+func TestTrivyIgnoreKubectlWaiversStayScopedAndTimeBoxed(t *testing.T) {
+	root := repoRoot(t)
+
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, problem := range kubectlWaiverScopeProblems(doc) {
+		t.Error(problem)
+	}
+}
+
+// kubectlWaiverScopeProblems reports, as ready-to-print messages, every
+// usr/local/bin/kubectl waiver that also names another path or a purl, and the
+// kubectl waivers' expiries when they are not all one date.
+func kubectlWaiverScopeProblems(doc trivyIgnoreDoc) []string {
+	var found []string
+	expiries := map[string][]string{}
+	for _, v := range doc.Vulnerabilities {
+		if !slices.Contains(v.Paths, "usr/local/bin/kubectl") {
+			continue
+		}
+		if len(v.Paths) != 1 || len(v.Purls) != 0 {
+			found = append(found, fmt.Sprintf("%s waives kubectl together with paths %q and purls %q; scope a kubectl waiver to usr/local/bin/kubectl alone", v.ID, v.Paths, v.Purls))
+		}
+		expiries[v.ExpiredAt] = append(expiries[v.ExpiredAt], v.ID)
+	}
+	if len(expiries) > 1 {
+		found = append(found, fmt.Sprintf("kubectl waivers expire on %d different dates %v; they are re-checked together at each kubectl pin bump, so keep them on one horizon", len(expiries), expiries))
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsMisscopedKubectlWaivers drives kubectlWaiverScopeProblems
+// with entries the real file does not (and must not) contain: a kubectl waiver that
+// also waives a rebuilt binary, one that adds a purl, and one off the shared horizon.
+func TestTrivyIgnoreRejectsMisscopedKubectlWaivers(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-78667
+    paths:
+      - usr/local/bin/kubectl
+    expired_at: 2026-12-07
+  - id: CVE-2026-56851
+    paths:
+      - usr/local/bin/kubectl
+      - usr/local/bin/bd
+    expired_at: 2026-12-07
+  - id: CVE-2026-111943
+    paths:
+      - usr/local/bin/kubectl
+    purls:
+      - pkg:golang/stdlib
+    expired_at: 2026-12-07
+  - id: CVE-2026-97031
+    paths:
+      - usr/local/bin/kubectl
+    expired_at: 2027-03-07
+  - id: CVE-2026-25681
+    paths:
+      - usr/local/bin/dolt
+    expired_at: 2027-06-07
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := kubectlWaiverScopeProblems(doc)
+	for _, want := range []string{"CVE-2026-56851 ", "CVE-2026-111943 ", "kubectl waivers expire on 2 different dates"} {
+		flagged := false
+		for _, f := range found {
+			if strings.HasPrefix(f, want) {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("kubectlWaiverScopeProblems() did not report %q; got %q", want, found)
+		}
+	}
+	if len(found) != 3 {
+		t.Errorf("kubectlWaiverScopeProblems() = %q, want exactly the two misscoped entries and the split horizon (the dolt entry is not a kubectl waiver)", found)
 	}
 }
 

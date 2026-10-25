@@ -1,7 +1,9 @@
 vulnerabilities:
   # Expiry horizon moved 2026-10-25: 2026-11-07 -> 2026-12-07, on a set trimmed
   # from 15 entries to 3 by moving contrib/k8s/Dockerfile.controller's kubectl
-  # pin from v1.36.3 to v1.36.5. Every entry is still a kubectl entry.
+  # pin from v1.36.3 to v1.36.5, plus the two owner-approved entries for the
+  # findings no kubectl release fixes yet (CVE-2026-56851, CVE-2026-111943).
+  # Every entry is still a kubectl entry.
   #
   # Every binary this image rebuilds from source now carries patched modules,
   # so none of them is waived for a finding the rebuild clears.
@@ -38,23 +40,25 @@ vulnerabilities:
   # each statement naming the pinned release, so the next pin bump has to
   # re-check every entry.
   #
-  # The scan still reports two more HIGH findings for kubectl v1.36.5. They are
-  # deliberately not waived here, pending a human triage decision, so the
-  # gc-controller image scan stays red on them. CVE-2026-56851 (code-scanning
-  # alert #481) is fixed in x/text 0.41.0, and CVE-2026-111943 (alert #490) in
-  # Go 1.26.10 and 1.27.3; v1.37.1, on x/text v0.40.0 and Go 1.26.8, clears
-  # neither. The denial-of-service rationale above does not cover
-  # CVE-2026-111943: it is a client-side flaw in crypto/x509's
-  # Certificate.Verify, which accepts compromised intermediate certificates
-  # when checking the API server's chain, so the attacker is whoever can sit
-  # between kubectl and the API server, not the API server itself. Do not
-  # waive either one by copying a statement below.
+  # The scan reports two more HIGH findings for kubectl v1.36.5, and the repo
+  # owner decided on 2026-10-25 to waive both on the same horizon rather than
+  # keep the gc-controller image scan red until a fixed kubectl ships.
+  # CVE-2026-56851 (code-scanning alert #481) is fixed in x/text 0.41.0 and
+  # CVE-2026-111943 (alert #490) in Go 1.26.10 and 1.27.3; v1.37.1, on x/text
+  # v0.40.0 and Go 1.26.8, clears neither. The denial-of-service rationale above
+  # covers neither, so each carries its own reasoning in its statement:
+  # CVE-2026-56851's vulnerable package is not compiled into kubectl at all, and
+  # CVE-2026-111943 is a client-side certificate-verification flaw that cannot
+  # change a trust decision kubectl makes in this image, because kubectl trusts
+  # only the cluster's own CA here.
   #
   # The horizon is one month rather than three. The previous three-month
   # horizon was set when nothing in the kubectl set was fixable from this repo.
   # Now the next monthly Kubernetes patch release is expected to be built with
-  # Go >= 1.26.9, so a short horizon makes that release a forced re-check
+  # Go >= 1.26.10, so a short horizon makes that release a forced re-check
   # rather than letting these entries outlive their fix.
+  # TestTrivyIgnoreKubectlWaiversStayScopedAndTimeBoxed keeps every kubectl
+  # entry scoped to the kubectl binary alone and on this one horizon.
   - id: CVE-2026-78667
     paths:
       - "usr/local/bin/kubectl"
@@ -70,6 +74,16 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-12-07
     statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2). Denial of service via multiple ECH outer extension references in crypto/tls; kubectl here only dials the cluster API server and does not terminate TLS. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5, v1.37.1) are both built with Go 1.26.8 and x/net v0.56.0/v0.57.0, so none clears it yet; drop this entry once one ships that does.
+  - id: CVE-2026-56851
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-12-07
+    statement: Reached through golang.org/x/text (kubectl v1.36.5 ships v0.39.0; fixed in 0.41.0). GO-2026-6629 is a panic on crafted input in the golang.org/x/text/secure/precis Nickname profile, and that package is not compiled into kubectl. Kubernetes v1.36.5 does not vendor it, and the binary's function table (pclntab) has no precis function and no precis symbol name, so Trivy matches only the module version recorded in the build info. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5 on x/text v0.39.0, v1.37.1 on v0.40.0) are both below 0.41.0, so none clears it yet; drop this entry once one ships that does.
+  - id: CVE-2026-111943
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-12-07
+    statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.10, 1.27.3). GO-2026-6809 is a client-side crypto/x509 flaw, in that Certificate.Verify lacks the fixed releases' denylist of compromised publicly trusted intermediate certificates, so it matters only when a chain is verified against public roots. kubectl in this image runs in the gc-controller pod with no kubeconfig (contrib/session-scripts/gc-controller-k8s mounts none and sets no context), so client-go uses its in-cluster config and verifies the API server against the service-account ca.crt alone. client-go builds that trust pool from the CA file and never adds system roots, so a chain through one of the denylisted public intermediates cannot verify there, and the missing denylist cannot change a trust decision kubectl makes here; kubectl's only TLS peer is the API server, since apply and replace read their manifests from stdin. The residual risk returns only if an operator points kubectl at a kubeconfig whose API server presents a publicly issued certificate, which contrib/k8s does not do. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5, v1.37.1) are both built with Go 1.26.8, so none clears it yet; drop this entry once one ships that does.
   # main's time-boxed waiver bridge (#5885) is fully retired: its thrift entry
   # went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached 0.24.0 and
   # its GitPython entries went when .github/requirements/mcp-agent-mail.txt
