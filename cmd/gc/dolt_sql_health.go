@@ -262,6 +262,12 @@ func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (manage
 	if count, err := managedDoltConnectionCount(host, port, user); err == nil {
 		report.ConnectionCount = count
 	}
+	// A data-read failure is reported, never returned: dolt_recover_managed.go
+	// treats a health-check error as a failed recovery and terminates the server,
+	// which would turn unreadable data into an outage.
+	dataRead := managedDoltDataReadProbeFn(host, port, user)
+	report.DataReadError = dataRead.Err
+	report.DataReadWarning = dataRead.Warning
 	return report, nil
 }
 
@@ -269,11 +275,21 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 	if !report.QueryReady {
 		return []string{"query_ready\tfalse"}
 	}
-	return []string{
+	fields := []string{
 		"query_ready\ttrue",
 		"read_only\t" + report.ReadOnly,
 		"connection_count\t" + report.ConnectionCount,
 	}
+	// Emitted only when present so consumers of the exact field set are
+	// unaffected on a healthy server. Values are single-line: a driver message
+	// must not break the one-field-per-line protocol.
+	if report.DataReadError != "" {
+		fields = append(fields, "data_read_error\t"+strings.Join(strings.Fields(report.DataReadError), " "))
+	}
+	if report.DataReadWarning != "" {
+		fields = append(fields, "data_read_warning\t"+strings.Join(strings.Fields(report.DataReadWarning), " "))
+	}
+	return fields
 }
 
 func managedDoltPassword() string {

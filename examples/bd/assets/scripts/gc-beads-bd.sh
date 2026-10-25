@@ -2359,6 +2359,8 @@ load_health_check_from_gc() {
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATA_READ_ERROR=""
+    GC_HEALTH_DATA_READ_WARNING=""
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             query_ready)
@@ -2369,6 +2371,12 @@ load_health_check_from_gc() {
                 ;;
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
+                ;;
+            data_read_error)
+                GC_HEALTH_DATA_READ_ERROR="$value"
+                ;;
+            data_read_warning)
+                GC_HEALTH_DATA_READ_WARNING="$value"
                 ;;
         esac
     done <<EOF
@@ -4729,12 +4737,29 @@ op_store_bridge() {
     GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
     return $?
 }
+# health_data_read_gate fails the health check when the gc helper's data-read
+# probe could not read a pre-existing dolt-ignored table (a lost chunk: catalog
+# queries and the probe's own table stay green while bd's tables are unreadable).
+# An inconclusive read only warns. Only the gc helper path reports this; the
+# shell-native fallback has no data-read probe.
 health_data_read_gate() {
-    :
+    if [ -n "${GC_HEALTH_DATA_READ_ERROR:-}" ]; then
+        die "dolt data read probe failed: $GC_HEALTH_DATA_READ_ERROR"
+    fi
+    if [ -n "${GC_HEALTH_DATA_READ_WARNING:-}" ]; then
+        echo "warning: dolt data read probe inconclusive: $GC_HEALTH_DATA_READ_WARNING" >&2
+    fi
 }
 
+# health_store_open_gate exercises bd's own store-open path (bd ping opens the
+# store and runs a trivial query): a server that answers SQL can still hand bd a
+# store it cannot open.
 health_store_open_gate() {
-    :
+    local out
+    [ -d "$GC_CITY_PATH/.beads" ] || return 0
+    if ! out=$(run_bd_pinned "$GC_CITY_PATH" ping 2>&1); then
+        die "bd store-open probe failed (bd ping): $out"
+    fi
 }
 
 op_health() {
@@ -4755,6 +4780,7 @@ op_health() {
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "unknown" ]; then
             echo "warning: dolt read-only probe inconclusive" >&2
         fi
+        health_data_read_gate
         conn_count="$GC_HEALTH_CONNECTION_COUNT"
     else
         # Query probe.
@@ -4783,6 +4809,8 @@ op_health() {
         # Connection capacity warning (non-fatal, single query).
         conn_count=$(get_connection_count 2>/dev/null) || conn_count=""
     fi
+
+    health_store_open_gate
 
     if [ -n "$conn_count" ] && [ "$conn_count" -ge 800 ] 2>/dev/null; then
         echo "warning: connection count ($conn_count) near capacity (80% of 1000)" >&2
