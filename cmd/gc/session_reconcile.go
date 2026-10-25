@@ -17,6 +17,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -598,14 +599,14 @@ func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, cl
 // transcriptRoots is the wake failure's conversation probe roots:
 // launchTranscriptRoots of the row's template.
 // rec records a committed manual conversation's resume-failed reset.
-func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string, rec events.Recorder) (sessionpkg.Info, bool) {
+func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, cityPath string, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string, rec events.Recorder) (sessionpkg.Info, bool) {
 	if next, handled, err := checkRateLimitStability(info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return next, true
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
 	}
-	if !exitAccrualHolds(info, sessFront) {
+	if !exitAccrualHolds(info, sessFront, cityPath) {
 		return info, true
 	}
 	// A rapid crash of a resume launch is resume-shaped.
@@ -962,10 +963,10 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 // advanced by every write on either exit path (front-door migration Step 6d,
 // write-returns-Info, STEP6-PREPASS-AUDIT group 5). The default (rapid-crash)
 // path writes nothing and returns the input Info unchanged.
-func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, bool) {
+func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, cityPath string, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		if !exitAccrualHolds(info, sessFront) {
+		if !exitAccrualHolds(info, sessFront, cityPath) {
 			return info, true
 		}
 		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
@@ -985,14 +986,28 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 
 // exitAccrualHolds reports whether the row, read fresh, still carries the
 // facts a rapid-crash or churn accrual was decided on (CONTRACT §12.5: a
-// destructive decision decides on a fresh read). A tick's snapshot read before
-// an operator's `gc session kill` still names the killed wake, and the dead
-// runtime it then observes is the kill, not a crash: accruing it would count
-// the operator's kill against the session (mc-uhvqj). A moved row, or a failed
-// read, accrues nothing; the next tick decides again.
-func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store) bool {
+// destructive decision decides on a fresh read), and no live holder has the
+// row's runtime lease. A tick's snapshot read before an operator's `gc session
+// kill` still names the killed wake, and the dead runtime it then observes is
+// the kill, not a crash: accruing it would count the operator's kill against
+// the session (mc-uhvqj). An operator's close stops the runtime under its
+// lease before it commits the close, and writes nothing the facts compare
+// until then: a runtime a live holder's lease covers is that holder's to
+// start or stop, and accruing its death would also move the row's revision
+// under the close's fence, three writes against its three attempts
+// (ga-u2f94s). A moved row, a held lease, or a read or probe that fails
+// accrues nothing; the next tick decides again.
+func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store, cityPath string) bool {
 	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
-	return err == nil && held
+	if err != nil || !held {
+		return false
+	}
+	name := strings.TrimSpace(info.SessionName)
+	if name == "" || !filepath.IsAbs(cityPath) {
+		return false
+	}
+	leased, err := sessionpkg.RuntimeLeaseHeld(sessFront, sessionpkg.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
+	return err == nil && !leased
 }
 
 func isDeliberateSleepReason(reason string) bool {
