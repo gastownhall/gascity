@@ -27,7 +27,6 @@ go_test(
     srcs = [
         "docker_session_test.go",
         "docker_test.go",
-        "host_test.go",
         "k8s_session_test.go",
         "kubectl_test.go",
         "main_test.go",

@@ -151,7 +151,7 @@ func (h *Host) BuildImage(name string, spec ImageSpec, self string) error {
 	for _, tool := range spec.Tools {
 		target := self
 		if tool != "pgrep" {
-			found, err := lookPathOrGNU(tool)
+			found, err := exec.LookPath(tool)
 			if err != nil {
 				return fmt.Errorf("image %s: host tool %q: %w", ref, tool, err)
 			}
@@ -176,21 +176,6 @@ func (h *Host) BuildImage(name string, spec ImageSpec, self string) error {
 	}
 	img := Image{Name: ref, Root: root, Env: []string{"PATH=" + bin}}
 	return writeJSON(root+".json", img)
-}
-
-// lookPathOrGNU finds tool on the host, falling back to its g-prefixed name.
-// An emulated image is a Linux image, whose GNU tools (timeout) a macOS host
-// has only as Homebrew coreutils' gtimeout and friends. It reports the error
-// for the unprefixed name when neither is found.
-func lookPathOrGNU(tool string) (string, error) {
-	found, err := exec.LookPath(tool)
-	if err == nil {
-		return found, nil
-	}
-	if gnu, gnuErr := exec.LookPath("g" + tool); gnuErr == nil {
-		return gnu, nil
-	}
-	return "", err
 }
 
 // LookupImage returns the stored image, or ok=false.

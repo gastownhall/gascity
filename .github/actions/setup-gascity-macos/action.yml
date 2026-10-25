@@ -28,7 +28,7 @@ inputs:
     required: false
     default: "2.1.308"
   install-system-deps:
-    description: Whether to run brew to install tmux, jq, flock, and coreutils
+    description: Whether to run brew to install tmux, jq, and flock
     required: false
     default: "true"
 
@@ -95,10 +95,7 @@ runs:
         # its caches on an exotic failure).
         lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
         mkdir -p "$(dirname "$lock_file")"
-        # coreutils installs only g-prefixed tools (gtimeout), so the BSD
-        # tools stay the ones under test; test/containerhost links gtimeout
-        # into its emulated Linux images as timeout.
-        pkgs=(tmux jq flock coreutils)
+        pkgs=(tmux jq flock)
         install_missing() {
           local missing=()
           for pkg in "${pkgs[@]}"; do
@@ -117,7 +114,7 @@ runs:
           flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
           install_missing
         ) 9>"$lock_file"
-        for cmd in tmux jq flock lsof gtimeout; do
+        for cmd in tmux jq flock lsof; do
           command -v "$cmd" >/dev/null 2>&1 || {
             echo "Required command '$cmd' missing after install" >&2
             exit 1
