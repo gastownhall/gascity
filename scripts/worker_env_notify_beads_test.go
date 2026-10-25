@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -134,7 +135,7 @@ const notifyBeadsGHStub = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$GH_LOG"
 printf '%s\n' "${GH_TOKEN:-}" >>"$GH_TOKENS"
-n=$(wc -l <"$GH_LOG")
+n=$(($(wc -l <"$GH_LOG")))
 unexpected() { echo "$*" >>"$GH_DIR/unexpected"; echo "gh stub: $*" >&2; exit 2; }
 [ "${1:-}" = api ] || unexpected "not gh api: $*"
 shift
@@ -155,7 +156,7 @@ case "$method $endpoint" in
 "POST repos/"*/dispatches)
 	cp "$input" "$GH_DIR/dispatch.$n.json"
 	status=$(sed -n 1p "$GH_STATUSES")
-	sed -i 1d "$GH_STATUSES"
+	tail -n +2 "$GH_STATUSES" >"$GH_STATUSES.next" && mv -f "$GH_STATUSES.next" "$GH_STATUSES"
 	if [ "$status" = none ]; then
 		echo "error connecting to api.github.com" >&2
 		exit 1
@@ -823,6 +824,49 @@ func TestWorkerEnvNotifyBeadsDispatch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestNotifyBeadsGHStubRunsUnderBSDTools: the gh stub runs on the macOS
+// runners too (make test-mac runs scripts/), where wc pads its count to eight
+// columns and sed -i takes its next argument as the backup suffix. Shims with
+// that BSD behavior run first on PATH here, so Linux pins the portability.
+func TestNotifyBeadsGHStubRunsUnderBSDTools(t *testing.T) {
+	realWC, err := exec.LookPath("wc")
+	if err != nil {
+		t.Skipf("no wc on PATH: %v", err)
+	}
+	realSed, err := exec.LookPath("sed")
+	if err != nil {
+		t.Skipf("no sed on PATH: %v", err)
+	}
+	bsd := t.TempDir()
+	for name, content := range map[string]string{
+		"wc":  "#!/bin/sh\n'" + realWC + `' "$@" | awk '{ printf "%8d", $1; for (i = 2; i <= NF; i++) printf " %s", $i; printf "\n" }'` + "\n",
+		"sed": "#!/bin/sh\nif [ \"$1\" = -i ]; then echo \"sed: 1: \\\"$3\\\": invalid command code\" >&2; exit 1; fi\nexec '" + realSed + "' \"$@\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bsd, name), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gh := newNotifyBeadsGH(t)
+	gh.write(gh.statuses, "204\n500\n")
+	input := filepath.Join(t.TempDir(), "payload.json")
+	gh.write(input, `{"event_type":"x"}`)
+	env := gh.env()
+	env["PATH"] = bsd + string(os.PathListSeparator) + env["PATH"]
+	for i, wantOK := range []bool{true, false} {
+		out, err := runWorkflowStepScript(t, t.TempDir(), "gh api --include --method POST repos/o/r/dispatches --input '"+input+"'\n", env)
+		if (err == nil) != wantOK {
+			t.Fatalf("call %d: exit %v, want success %v\n%s", i+1, err, wantOK, out)
+		}
+	}
+	gh.checkNoUnexpected()
+	if saved := gh.saved("dispatch"); len(saved) != 2 {
+		t.Errorf("stub saved %d dispatch payloads, want 2", len(saved))
+	}
+	if left := gh.lines(gh.statuses); len(left) != 0 {
+		t.Errorf("statuses left unconsumed: %q", left)
 	}
 }
 

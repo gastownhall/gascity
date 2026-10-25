@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -704,6 +705,8 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		return []DoltProcInfo{leaked}, nil
 	}
 	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	var diag bytes.Buffer
+	g.diag = &diag
 
 	code := g.runWith(
 		func() int { return 0 },
@@ -724,6 +727,11 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 	}
 	if !registeredReaped {
 		t.Fatal("registered process reaper was not called after leak detection")
+	}
+	// The report goes to the guard's diagnostics writer, not the test
+	// binary's stderr, where it would read as a real leak in a CI log.
+	if got := diag.String(); !strings.Contains(got, "leaked 1 dolt sql-server process(es)") || !strings.Contains(got, fmt.Sprintf("pid=%d", leaked.PID)) {
+		t.Fatalf("guard diagnostics = %q, want the leak report for PID %d", got, leaked.PID)
 	}
 }
 
@@ -849,6 +857,8 @@ func TestDoltLeakGuardedTestingMRunWithFailsOnFinalScanError(t *testing.T) {
 		return nil, scanErr // every final-scan poll fails
 	}
 	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	var diag bytes.Buffer
+	g.diag = &diag
 
 	var reapedLeaks []DoltProcInfo
 	code := g.runWith(
@@ -867,6 +877,11 @@ func TestDoltLeakGuardedTestingMRunWithFailsOnFinalScanError(t *testing.T) {
 	}
 	if len(reapedLeaks) != 0 {
 		t.Fatalf("reaped leaks = %#v, want none: an enumeration failure carries no process list to reap", reapedLeaks)
+	}
+	// The injected failure is reported to the guard's diagnostics writer,
+	// not the test binary's stderr, where it reads as a real scan failure.
+	if got, want := diag.String(), "cmd/gc test dolt leak guard: final scan failed: reading /proc: permission denied\n"; got != want {
+		t.Fatalf("guard diagnostics = %q, want %q", got, want)
 	}
 }
 

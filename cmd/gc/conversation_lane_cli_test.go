@@ -49,8 +49,16 @@ func newCLILaneCityOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt)
 	f := newLaneFixtureOver(t, store, opts...)
 	f.cfg.Ops.Authoritative = []string{string(opjournal.KindMessage)}
 	c := &cliLaneCity{laneFixture: f, env: map[string]string{}, ringReply: "ok"}
-	oldClock, oldLookup, oldRing := cliOpClock, cliOpLookupEnv, cliLaneRing
-	t.Cleanup(func() { cliOpClock, cliOpLookupEnv, cliLaneRing = oldClock, oldLookup, oldRing })
+	oldClock, oldLookup, oldRing, oldOpen := cliOpClock, cliOpLookupEnv, cliLaneRing, openNudgeWorkStore
+	t.Cleanup(func() {
+		cliOpClock, cliOpLookupEnv, cliLaneRing, openNudgeWorkStore = oldClock, oldLookup, oldRing, oldOpen
+	})
+	// The legacy path queues a nudge through the city's nudges store. The
+	// fixture's city is a bare directory, so the real opener resolves the
+	// default bd provider and starts a dolt sql-server that outlives the test.
+	// Every nudge store opened from here is the fixture's own (lane tests run
+	// serially, as the seam requires).
+	openNudgeWorkStore = func(string, string) (beads.Store, error) { return store, nil }
 	cliOpClock = f.clk
 	cliOpLookupEnv = func(k string) (string, bool) { v, ok := c.env[k]; return v, ok }
 	// No controller answers by default: the mode is unknown.
@@ -236,8 +244,18 @@ func TestSessionNudgeLaneRoutesUnservedSessionsLegacy(t *testing.T) {
 				t.Fatalf("lane op %+v for an unserved protocol runtime", op)
 			}
 		}
-		if c.queuedItems(t) != 1 {
-			t.Fatal("the legacy path did not queue the nudge")
+		pending, _, _, err := listQueuedNudgesForTarget(c.dir, c.target, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("listing queued nudges: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("the legacy path queued %d nudges, want 1", len(pending))
+		}
+		// The queue's shadow bead lands in the fixture's store, never in a
+		// store a real provider would open (and start a server for).
+		shadow, open, err := nudgeShadows(beads.NudgesStore{Store: c.store}).Find(pending[0].ID)
+		if err != nil || !open || shadow.BeadID != pending[0].BeadID {
+			t.Fatalf("queued nudge %s's shadow in the fixture store = %+v (open %v, err %v), want bead %q", pending[0].ID, shadow, open, err, pending[0].BeadID)
 		}
 	})
 	t.Run("no session row", func(t *testing.T) {

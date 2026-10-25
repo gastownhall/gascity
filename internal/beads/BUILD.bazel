@@ -176,6 +176,7 @@ go_test(
         "lookup_limit_error_test.go",
         "membership_test.go",
         "membership_vocabulary_test.go",
+        "memstore_created_order_internal_test.go",
         "memstore_honor_ids_test.go",
         "memstore_test.go",
         "metadata_cas_operation_test.go",
