@@ -311,7 +311,12 @@ const (
 	// gets `token: ''`, so pull requests diff with git instead of calling the
 	// pulls/files API on the shared github.token budget. Reviewed delta: one
 	// `with` input; no new job, step command or permission.
-	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
+	//
+	// Bumped again (contract radar toolchain): beads main's go.mod requires a
+	// newer Go than ours and setup-go pins GOTOOLCHAIN=local. Reviewed delta:
+	// one step env (GOTOOLCHAIN=auto) on contract-radar-bd-head's Build bd
+	// step; no new job, trigger, step command or permission.
+	expectedCIExecutionHash     = "a02a545e86ac8e77f50a64381f8a784e72a734b14bbd547f0c8c7ca467ef10fe"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

@@ -173,6 +173,10 @@ jobs:
           cache: false
       - uses: ./.github/actions/go-mod-download
       - name: Build bd from beads main HEAD
+        # setup-go exports GOTOOLCHAIN=local; beads main's go.mod can require a
+        # newer toolchain than ours, so let this one build fetch it.
+        env:
+          GOTOOLCHAIN: auto
         run: |
           set -euo pipefail
           src="${RUNNER_TEMP}/beads-src"
