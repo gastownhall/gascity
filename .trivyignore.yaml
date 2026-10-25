@@ -21,22 +21,34 @@ vulnerabilities:
   # enforces that, and its reviewedWaivers now names only the kubectl prebuilt,
   # so a rebuilt path cannot be waived without a deliberate edit there.
   #
-  # kubectl is all that is left. It is an upstream-signed prebuilt that
+  # Only kubectl is still waived. It is an upstream-signed prebuilt that
   # contrib/k8s/Dockerfile.controller installs rather than builds, so nothing in
   # this repo can move its dependencies. v1.36.5 ships Go 1.26.8, x/net v0.56.0
   # and x/text v0.39.0 (checked with `go version -m` and a Trivy 0.70.0 scan of
   # the sha256-verified binary), which clears twelve of the fifteen entries the
   # v1.36.3 pin needed. The three below, from the 2026-10-08 Go advisories
   # (CVE-2026-78667, CVE-2026-78669, CVE-2026-97031), need Go 1.26.9 and x/net
-  # 0.60.0, and no kubectl release is built with either yet; v1.37.1 has the
-  # same findings as v1.36.5, so the pin stays on the 1.36 line. All three are
-  # denial-of-service findings in net/http, HTTP/2 and crypto/tls. kubectl in
-  # this image is only a client of the cluster's own API server (attach and the
-  # beads/events exec providers), so the peer that would have to send the
+  # 0.60.0, and no stable kubectl release is built with either yet; v1.37.1 has
+  # the same findings as v1.36.5, so the pin stays on the 1.36 line. All three
+  # are denial-of-service findings in net/http, HTTP/2 and crypto/tls. kubectl
+  # in this image is only a client of the cluster's own API server (attach and
+  # the beads/events exec providers), so the peer that would have to send the
   # malicious traffic is the API server itself. Drop each entry as soon as a
   # release clears it. TestTrivyIgnoreKubectlWaiversNameThePinnedRelease keeps
   # each statement naming the pinned release, so the next pin bump has to
   # re-check every entry.
+  #
+  # The scan still reports two more HIGH findings for kubectl v1.36.5. They are
+  # deliberately not waived here, pending a human triage decision, so the
+  # gc-controller image scan stays red on them. CVE-2026-56851 (code-scanning
+  # alert #481) is fixed in x/text 0.41.0, and CVE-2026-111943 (alert #490) in
+  # Go 1.26.10 and 1.27.3; v1.37.1, on x/text v0.40.0 and Go 1.26.8, clears
+  # neither. The denial-of-service rationale above does not cover
+  # CVE-2026-111943: it is a client-side flaw in crypto/x509's
+  # Certificate.Verify, which accepts compromised intermediate certificates
+  # when checking the API server's chain, so the attacker is whoever can sit
+  # between kubectl and the API server, not the API server itself. Do not
+  # waive either one by copying a statement below.
   #
   # The horizon is one month rather than three. The previous three-month
   # horizon was set when nothing in the kubectl set was fixable from this repo.
