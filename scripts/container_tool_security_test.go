@@ -153,7 +153,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.62",
+		"gitpython>=3.2.1",
 		"aiohttp>=3.14.4",
 		"anyio>=4.14.2",
 		"pillow>=13.0.0",
@@ -161,6 +161,8 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
 		"litellm>=1.89.7",
+		"filelock>=4.2.1",
+		"opentelemetry-api>=1.45.1",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -170,6 +172,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	for _, want := range []string{
 		"cryptography>=50.0.0",
 		"pyjwt>=2.15.0",
+		"fastmcp>=3.4.10",
 	} {
 		if !strings.Contains(overrides, want) {
 			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
@@ -178,7 +181,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.62 \\",
+		"gitpython==3.2.1 \\",
 		"aiohttp==3.14.4 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
@@ -188,6 +191,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
 		"litellm==1.89.7 \\",
+		"fastmcp==3.4.10 \\",
+		"fastmcp-slim==3.4.10 \\",
+		"filelock==4.2.1 \\",
+		"opentelemetry-api==1.45.1 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",

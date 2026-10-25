@@ -7,11 +7,12 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # CVE-2026-78676 (CRITICAL, remote code execution); < 3.1.60 adds
 # CVE-2026-87817 (HIGH, remote code execution) and CVE-2026-87819 (HIGH,
 # regular-expression denial of service); <= 3.1.61 adds GHSA-59cr-6r3x-644w
-# (MEDIUM, submodule update path traversal writes outside the repository).
+# (MEDIUM, submodule update path traversal writes outside the repository);
+# <= 3.2.0 adds GHSA-83vg-56qc-22m7 / CVE-2026-114145 (HIGH).
 # Pinning the floor ensures the resolver picks the patched version even if
 # mcp-agent-mail's transitive constraint allows older. Drop this line once
-# mcp-agent-mail upstream pins GitPython>=3.1.62 itself.
-gitpython>=3.1.62
+# mcp-agent-mail upstream pins GitPython>=3.2.1 itself.
+gitpython>=3.2.1
 
 # Security floor: CVE-2026-69244 affects aiohttp < 3.14.3; GHSA-494j-54xm-rwp3,
 # GHSA-5wr8-gcqf-gqf3, GHSA-2g87-pp6c-29x5, GHSA-9xw5-w5jj-pvcg,
@@ -83,6 +84,19 @@ joserfc>=1.6.8
 # floor at 1.30.0 to clear all four. Drop once fastmcp-slim's transitive
 # constraint carries the patched version itself.
 mcp>=1.30.0
+
+# Security floor: GHSA-v4x8-3wr5-3wq8 / CVE-2026-112940 (HIGH),
+# GHSA-567q-5qvw-pf92 and GHSA-9vhv-jxww-xfm5 (LOW) in filelock <= 4.2.0.
+# filelock arrives via mcp-agent-mail (filelock>=3.16.0) and huggingface-hub
+# (filelock>=3.10.0); 4.x keeps the SoftFileLock/FileLock/Timeout API and the
+# ThreadLocalFileContext.lock_file_fd internals mcp-agent-mail's storage layer
+# touches. Drop once transitive constraints carry the patched release.
+filelock>=4.2.1
+
+# Security floor: GHSA-xcq7-p3pf-p88h / CVE-2026-114603 (MEDIUM) in
+# opentelemetry-api <= 1.45.0. It arrives via fastmcp-slim; drop once
+# fastmcp-slim's constraint carries the patched release itself.
+opentelemetry-api>=1.45.1
 
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
