@@ -12,9 +12,9 @@ import (
 
 // fanOutFixture is a city whose city scope and every rig scope are
 // provider-owned. The provider script appends "<op> <scope root>" to a log for
-// every run and fails `health` for a scope while <scope>/unhealthy exists, so a
-// test chooses which scopes are unhealthy and reads back exactly which scope ops
-// a call started.
+// every run, fails `health` for a scope while <scope>/unhealthy exists and fails
+// `recover` while <scope>/recover-fails exists, so a test chooses which scopes
+// are unhealthy and reads back exactly which scope ops a call started.
 type fanOutFixture struct {
 	t      *testing.T
 	city   string
@@ -44,6 +44,9 @@ func newFanOutFixture(t *testing.T, rigs int) *fanOutFixture {
 scope=$(dirname "$BEADS_DIR")
 printf '%%s %%s\n' "$1" "$scope" >> %q
 if [ "$1" = health ] && [ -e "$scope/unhealthy" ]; then
+  exit 1
+fi
+if [ "$1" = recover ] && [ -e "$scope/recover-fails" ]; then
   exit 1
 fi
 `, fx.log)
@@ -194,6 +197,23 @@ func (fx *fanOutFixture) notProbed(err error) []string {
 	}
 	fx.t.Fatalf("error %q does not name the scopes that were not probed", err)
 	return nil
+}
+
+// A recover that fails does not cost its siblings their confirming probes:
+// every started recover, failed or not, is probed again.
+func TestProviderOwnedFailedRecoverDoesNotSkipSiblingConfirmations(t *testing.T) {
+	fx := newFanOutFixture(t, 1)
+	fx.setUnhealthy(0, 1)
+	if err := os.WriteFile(filepath.Join(fx.scopes[0], "recover-fails"), nil, 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	installFanOutClock(t, fx, time.Second)
+
+	ops, err := fx.health()
+	assertOps(t, ops, []string{"health s0", "health s1", "recover s0", "recover s1", "health s0", "health s1"})
+	if want := fmt.Sprintf("provider-owned scope %q recover", fx.scopes[0]); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to report the failed recover (%s)", err, want)
+	}
 }
 
 // One call must not start a probe-recover-confirm ladder for every unhealthy

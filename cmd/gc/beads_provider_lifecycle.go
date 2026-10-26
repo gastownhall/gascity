@@ -1505,18 +1505,17 @@ func runProviderOwnedScopeRootsLifecycleOp(parent context.Context, cityPath stri
 }
 
 // recoverUnhealthyProviderOwnedScopes recovers only the scopes whose health
-// failed and then re-checks only those that it recovered. It returns the joined
-// error of whatever is still unhealthy, including a scope whose recovery was
-// skipped by its cooldown or the call's fan-out budget, and a sweep that left
-// scopes unprobed.
+// failed and then re-checks only those that it recovered. Every started
+// recover, whether it failed or succeeded, gets its confirming probe. It
+// returns the joined error of whatever is still unhealthy, including a scope
+// whose recover failed or whose recovery was skipped by its cooldown or the
+// call's fan-out budget, and a sweep that left scopes unprobed.
 func recoverUnhealthyProviderOwnedScopes(ctx context.Context, cityPath string, unhealthy []string) error {
 	fan := providerFanOutFor(ctx, "health")
 	started, skips, failures := startProviderOwnedRecovers(ctx, cityPath, unhealthy, fan)
-	if len(failures) > 0 {
-		return errors.Join(append(failures, skips...)...)
-	}
 	confirmErr := runProviderOwnedScopeRootsLifecycleOp(ctx, cityPath, started, "health")
-	return errors.Join(append(append(skips, confirmErr), fan.incompleteErr())...)
+	errs := append(append(failures, skips...), confirmErr, fan.incompleteErr())
+	return errors.Join(errs...)
 }
 
 // hasProviderOwnedRigScope reports whether any non-city scope op would visit
