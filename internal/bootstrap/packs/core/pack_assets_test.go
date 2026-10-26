@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -291,5 +293,97 @@ func TestClaimProtocolFragmentIsEmbedded(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("embedded claim-protocol fragment missing %q", want)
 		}
+	}
+}
+
+// coreWorkerPrompts are the core pack prompts that tell a blocked worker how
+// to escalate.
+var coreWorkerPrompts = []string{
+	"assets/prompts/graph-worker.md",
+	"assets/prompts/pool-worker.template.md",
+}
+
+// promptSection returns the body of the "## <heading>" section of a Markdown
+// prompt, up to the next level-two heading.
+func promptSection(t *testing.T, body, heading string) string {
+	t.Helper()
+	marker := "\n## " + heading + "\n"
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatalf("prompt has no %q section", "## "+heading)
+	}
+	section := body[start+len(marker):]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end+1]
+	}
+	return section
+}
+
+// singleBashBlock returns the contents of the only fenced bash block in a
+// prompt section.
+func singleBashBlock(t *testing.T, section string) string {
+	t.Helper()
+	const open, closing = "```bash\n", "\n```"
+	if n := strings.Count(section, open); n != 1 {
+		t.Fatalf("section has %d fenced bash blocks, want exactly 1:\n%s", n, section)
+	}
+	start := strings.Index(section, open) + len(open)
+	end := strings.Index(section[start:], closing)
+	if end < 0 {
+		t.Fatalf("section's bash block is not closed:\n%s", section)
+	}
+	return section[start:start+end] + "\n"
+}
+
+// TestCoreWorkerPromptsEscalateToConfiguredRecipient runs each core worker
+// prompt's shipped BLOCKED command against a fake gc and pins that it mails
+// $GC_ESCALATION_RECIPIENT with --notify, as escalate.sh does, so a
+// configured triage agent is woken instead of the mail landing in the
+// sessionless human inbox.
+func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "set", env: []string{"GC_ESCALATION_RECIPIENT=triage-agent"}, want: "triage-agent"},
+		{name: "qualified", env: []string{"GC_ESCALATION_RECIPIENT=myrig/triage"}, want: "myrig/triage"},
+		{name: "spaces", env: []string{"GC_ESCALATION_RECIPIENT=ops desk"}, want: "ops desk"},
+	}
+	for _, path := range coreWorkerPrompts {
+		t.Run(path, func(t *testing.T) {
+			data, err := fs.ReadFile(PackFS, path)
+			if err != nil {
+				t.Fatalf("reading %s: %v", path, err)
+			}
+			block := singleBashBlock(t, promptSection(t, string(data), "Escalation"))
+			scriptPath := filepath.Join(t.TempDir(), "escalation-block.sh")
+			if err := os.WriteFile(scriptPath, []byte(block), 0o644); err != nil {
+				t.Fatalf("write escalation block: %v", err)
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					binDir, _ := fakeGCBin(t, `printf '%s\n' "$@" > "$ARGV_LOG"`)
+					argvPath := filepath.Join(t.TempDir(), "argv")
+					out, err := runPackScript(t, scriptPath, binDir, escalationEnvKeys,
+						append(tc.env, "ARGV_LOG="+argvPath))
+					if err != nil {
+						t.Fatalf("escalation block failed: %v\n%s", err, out)
+					}
+					logged, err := os.ReadFile(argvPath)
+					if err != nil {
+						t.Fatalf("escalation block never ran gc: %v\n%s", err, out)
+					}
+					got := strings.Split(strings.TrimSuffix(string(logged), "\n"), "\n")
+					want := []string{
+						"mail", "send", tc.want, "--notify",
+						"-s", "BLOCKED: Brief description", "-m", "Details of the issue",
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("gc argv = %q, want %q", got, want)
+					}
+				})
+			}
+		})
 	}
 }
