@@ -379,3 +379,53 @@ func TestCascadeNudgeWakesRoutedPoolMember(t *testing.T) {
 		}
 	})
 }
+
+// TestCascadeNudgeKeepsAssigneePath pins the assigned-dependent delivery the
+// order has always done: an open dependent with an assignee is nudged at
+// that assignee with the unchanged message — whether or not it also carries
+// gc.routed_to, since a claimed bead belongs to its session and the route is
+// history — and without a pool lookup.
+func TestCascadeNudgeKeepsAssigneePath(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+
+	cases := []struct {
+		name string
+		row  string
+	}{
+		{"assignee only", `{"id":"ga-dep","status":"open","assignee":"worker-1"}`},
+		{"assignee wins over a route", `{"id":"ga-dep","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"gascity/pool"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stateDir := filepath.Join(dir, "state")
+			binDir, logPath := fakeGCBin(t, cascadeFake{
+				eventsPath: writeCascadeCloseEvent(t, "ga-blk"),
+				depJSON:    "[" + tc.row + "]",
+				members:    map[string][]string{"gascity/pool": {"pool-1"}},
+				failDir:    dir,
+			}.body())
+			if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+				t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+			}
+			got, logged := countNudges(t, logPath)
+			if got != 1 {
+				t.Fatalf("nudges = %d, want exactly 1 to the assignee; gc calls:\n%s", got, logged)
+			}
+			if !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed — your dependent ga-dep may be unblocked") {
+				t.Fatalf("the assigned dependent must keep the assignee nudge and message; gc calls:\n%s", logged)
+			}
+			if strings.Contains(logged, "gc session list") {
+				t.Fatalf("an assigned dependent needs no pool lookup; gc calls:\n%s", logged)
+			}
+			if strings.Contains(logged, "gc session nudge pool-1") {
+				t.Fatalf("a claimed bead belongs to its session; the route must not fire; gc calls:\n%s", logged)
+			}
+			if !cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep") {
+				t.Fatal("the (blocker, dependent) pair must be recorded")
+			}
+		})
+	}
+}
