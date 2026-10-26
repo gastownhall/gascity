@@ -20,8 +20,8 @@ import (
 // The check never infers that an import needs a credential: offline it cannot
 // tell a public import from a private one, so an import no rule matches is
 // reported as information, not a warning. Authentication is classified when a
-// fetch runs (gc import install), which prints the credential remediation for
-// an auth-classified failure.
+// fetch runs (gc import install, gc doctor --fix), which reports the credential
+// remediation for an auth-classified failure.
 type PackCredentialsCheck struct {
 	imports map[string]config.Import
 }

@@ -1465,6 +1465,60 @@ func TestMigrateLegacySystemPacksManifestPreservesImportOptions(t *testing.T) {
 // work this check did not own would turn an advisory warning into a hard
 // "gc doctor --fix" failure whenever an unrelated import is momentarily
 // unresolvable.
+// stubBuiltinImportFixSync stubs step 3 of the builtin-pack-imports Fix so
+// syncImports returns syncErr (or installLockedImports returns installErr).
+func stubBuiltinImportFixSync(t *testing.T, syncErr, installErr error) {
+	t.Helper()
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		if syncErr != nil {
+			return nil, syncErr
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		if installErr != nil {
+			return nil, installErr
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+}
+
+func TestBuiltinImportDoctorCheck_FixAuthErrorReportsCredentialHint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		matched bool
+		sync    bool
+	}{
+		{name: "sync unmatched", matched: false, sync: true},
+		{name: "sync matched", matched: true, sync: true},
+		{name: "install unmatched", matched: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+			authErr := authErrorSeam(tc.matched)
+			if tc.sync {
+				stubBuiltinImportFixSync(t, authErr, nil)
+			} else {
+				stubBuiltinImportFixSync(t, nil, authErr)
+			}
+			res := runDoctorFix(t, newBuiltinImportDoctorCheck(dir), dir)
+			if res.FixError != authErr.Error() {
+				t.Errorf("FixError = %q, want the unchanged error %q", res.FixError, authErr.Error())
+			}
+			if want := wantDoctorCredentialFixHint(tc.matched); res.FixHint != want {
+				t.Errorf("FixHint = %q, want the gc import install credential hint %q", res.FixHint, want)
+			}
+		})
+	}
+}
+
 func TestBuiltinImportDoctorCheck_FixSkipsResyncWhenNoOwnedMutation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
