@@ -8889,9 +8889,12 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 
 // Kills launchTranscriptRoots pinning a value the probe cannot resolve as the
 // provider does: only an absolute CLAUDE_CONFIG_DIR pins it; a relative or ~
-// one, or none, falls back to the city roots.
+// one, or none, falls back to the city roots. An absolute one the launch is
+// only handed (tp.Env) adds its projects after the city roots, never instead
+// of them (#6677); gc's own environment is not read.
 func TestLaunchTranscriptRoots(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", "")
 	observed := &config.City{}
 	observed.Daemon.ObservePaths = []string{"/observed"}
@@ -8908,6 +8911,29 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		if got := launchTranscriptRoots(observed, TemplateParams{OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": c.dir}}); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("CLAUDE_CONFIG_DIR %q: roots %v, want %v", c.dir, got, c.want)
 		}
+	}
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "/ambient/a") // gc's own env: never read
+	dir := func(d string) map[string]string { return map[string]string{"CLAUDE_CONFIG_DIR": d} }
+	city := sessionTranscriptSearchPaths(observed)
+	for _, c := range []struct {
+		name     string
+		cfg      *config.City
+		env      map[string]string
+		operator map[string]string
+		want     []string
+	}{
+		{"an absolute passed-through dir", observed, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(observed), "/cfg/claude-a/projects")},
+		{"the default root's own dir", observed, dir(filepath.Join(home, ".claude")), nil, city},
+		{"no city", nil, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects")},
+		{"no passed-through dir", observed, map[string]string{}, nil, city},
+	} {
+		if got := launchTranscriptRoots(c.cfg, TemplateParams{Env: c.env, OperatorEnv: c.operator}); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
+		}
+	}
+	if want := []string{"/observed"}; !reflect.DeepEqual(observed.Daemon.ObservePaths, want) {
+		t.Errorf("observe_paths after resolving = %v, want %v untouched", observed.Daemon.ObservePaths, want)
 	}
 }
 
