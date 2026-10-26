@@ -8927,6 +8927,7 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		{"the default root's own dir", observed, dir(filepath.Join(home, ".claude")), nil, city},
 		{"no city", nil, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects")},
 		{"no passed-through dir", observed, map[string]string{}, nil, city},
+		{"the operator's absolute dir over a passed-through one", observed, dir("/cfg/claude-a"), dir("/cfg/claude-b"), []string{"/cfg/claude-b/projects"}},
 	} {
 		if got := launchTranscriptRoots(c.cfg, TemplateParams{Env: c.env, OperatorEnv: c.operator}); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
