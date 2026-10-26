@@ -1031,3 +1031,25 @@ func TestMergeSettingsJSON_WrapBareHooks_TwinDropsWhenMatcherlessCopyExists(t *t
 	}
 	assertCanonicalEqual(t, arr[0], `{"hooks":[{"type":"command","command":"pack"}]}`)
 }
+
+func TestMergeSettingsJSON_NoWrap_KeepsDuplicateBaseEntries(t *testing.T) {
+	// The duplicate collapse and bare-entry wrap are Claude-settings behavior
+	// for #3862. Codex and Cursor hooks.json must keep the merge's additive
+	// behavior: without WithWrapBareHooks byte-identical base entries survive
+	// and bare overlay entries stay bare.
+	base := `{"hooks":{"PreToolUse":[{"command":"same"},{"command":"same"}]}}`
+	over := `{"hooks":{"PreToolUse":[{"command":"new"},{"bash":"also-new"}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 4 {
+		t.Fatalf("PreToolUse entries = %d, want 4 (no-wrap path must be unchanged):\n%s", len(arr), result)
+	}
+	assertCanonicalEqual(t, arr[0], `{"command":"same"}`)
+	assertCanonicalEqual(t, arr[1], `{"command":"same"}`)
+	assertCanonicalEqual(t, arr[2], `{"command":"new"}`)
+	assertCanonicalEqual(t, arr[3], `{"bash":"also-new"}`)
+}
