@@ -326,12 +326,29 @@ func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 type lateAsyncStartListProvider struct {
 	*gatedStartProvider
 	listCalls int
+	// startReturnDelay holds Start open after the runtime is up, the window
+	// a loaded machine opens between the runtime appearing and the async
+	// start committing its session bead.
+	startReturnDelay time.Duration
+	// waitStartDone blocks until the async start has finished, its session
+	// bead committed. A runtime that shows running is not enough: the start
+	// commits the bead after the provider's Start returns, and until then
+	// the session still reads creating, which no stop may suspend.
+	waitStartDone func()
 }
 
 func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
 	return &lateAsyncStartListProvider{
 		gatedStartProvider: newGatedStartProvider(),
 	}
+}
+
+func (p *lateAsyncStartListProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	err := p.gatedStartProvider.Start(ctx, name, cfg)
+	if p.startReturnDelay > 0 {
+		time.Sleep(p.startReturnDelay)
+	}
+	return err
 }
 
 func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error) {
@@ -343,10 +360,7 @@ func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error
 	running, err := p.Fake.ListRunning(prefix)
 	if call == 1 {
 		p.release("worker")
-		deadline := time.Now().Add(2 * time.Second)
-		for !p.IsRunning("worker") && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
+		p.waitStartDone()
 	}
 	return running, err
 }
@@ -2833,6 +2847,20 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 }
 
 func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	runForceShutdownRelistsLateAsyncStart(t, 0)
+}
+
+// TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate holds the
+// provider's Start open after the runtime is up, so the async start commits
+// its session bead well after the runtime appears. The late relist must still
+// stop the runtime: its fixture waits for the start to finish, not only for
+// the runtime to show.
+func TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate(t *testing.T) {
+	runForceShutdownRelistsLateAsyncStart(t, 200*time.Millisecond)
+}
+
+func runForceShutdownRelistsLateAsyncStart(t *testing.T, startReturnDelay time.Duration) {
+	t.Helper()
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
@@ -2854,6 +2882,8 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp := newLateAsyncStartListProvider()
+	sp.startReturnDelay = startReturnDelay
+	stderr := newSyncBuffer()
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 		Agents: []config.Agent{{Name: "worker"}},
@@ -2869,7 +2899,12 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		forceStopShutdown:   forceStop,
 		logPrefix:           "gc test",
 		stdout:              ioDiscard{},
-		stderr:              ioDiscard{},
+		stderr:              stderr,
+	}
+	sp.waitStartDone = func() {
+		if err := cr.asyncStarts.waitLaunchedStarts(context.Background(), hangBudget); err != nil {
+			t.Errorf("waiting for the async start to finish: %v", err)
+		}
 	}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
@@ -2885,7 +2920,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		events.Discard,
 		time.Minute,
 		ioDiscard{},
-		ioDiscard{},
+		stderr,
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
@@ -2898,10 +2933,10 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 	cr.shutdown()
 
 	if sp.IsRunning("worker") {
-		t.Fatal("force shutdown missed late async-started runtime")
+		t.Fatalf("force shutdown missed late async-started runtime; stderr:\n%s", stderr.String())
 	}
 	if sp.listCalls < 2 {
-		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup; stderr:\n%s", sp.listCalls, stderr.String())
 	}
 }
 
