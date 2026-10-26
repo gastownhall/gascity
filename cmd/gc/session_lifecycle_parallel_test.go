@@ -8891,25 +8891,49 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 
 // Kills launchTranscriptRoots pinning a value the probe cannot resolve as the
 // provider does: only an absolute CLAUDE_CONFIG_DIR pins it; a relative or ~
-// one, or none, falls back to the city roots.
+// one, or none, falls back to the city roots. An absolute value in the
+// launch's own env (tp.Env) never pins: it is merged in beside the city
+// roots, deduplicated, because a wrapper may set its own.
 func TestLaunchTranscriptRoots(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", "")
 	observed := &config.City{}
 	observed.Daemon.ObservePaths = []string{"/observed"}
+	cityRoots := sessionTranscriptSearchPaths(observed)
 	for _, c := range []struct {
-		dir  string
-		want []string
+		name     string
+		env      string // tp.Env: passthrough and upstreams, what the child sees
+		operator string // tp.OperatorEnv: workspace, provider and agent env
+		want     []string
 	}{
-		{"", sessionTranscriptSearchPaths(observed)},
-		{"  ", sessionTranscriptSearchPaths(observed)},
-		{"/cfg/claude-b", []string{"/cfg/claude-b/projects"}},
-		{"~/.claude-b", sessionTranscriptSearchPaths(observed)}, // the provider resolves it, not the probe
-		{"cfg/claude-b", sessionTranscriptSearchPaths(observed)},
+		{"no config dir", "", "", cityRoots},
+		{"a blank operator dir", "", "  ", cityRoots},
+		{"an absolute operator dir", "", "/cfg/claude-b", []string{"/cfg/claude-b/projects"}},
+		{"a ~ operator dir", "", "~/.claude-b", cityRoots}, // the provider resolves it, not the probe
+		{"a relative operator dir", "", "cfg/claude-b", cityRoots},
+		{"an env dir beside the city roots", "/cfg/claude-a", "", append(sessionTranscriptSearchPaths(observed), "/cfg/claude-a/projects")},
+		{"the default root's own dir in the env", filepath.Join(home, ".claude"), "", cityRoots},
 	} {
-		if got := launchTranscriptRoots(observed, TemplateParams{OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": c.dir}}); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("CLAUDE_CONFIG_DIR %q: roots %v, want %v", c.dir, got, c.want)
+		tp := TemplateParams{}
+		if c.env != "" {
+			tp.Env = map[string]string{"CLAUDE_CONFIG_DIR": c.env}
 		}
+		if c.operator != "" {
+			tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": c.operator}
+		}
+		if got := launchTranscriptRoots(observed, tp); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
+		}
+	}
+	// A nil city keeps the defaults, with the launch's dir merged in.
+	if got, want := launchTranscriptRoots(nil, TemplateParams{Env: map[string]string{"CLAUDE_CONFIG_DIR": "/cfg/claude-a"}}),
+		append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects"); !reflect.DeepEqual(got, want) {
+		t.Errorf("a nil city: roots %v, want %v", got, want)
+	}
+	// Merging never writes into the city's observed roots.
+	if !reflect.DeepEqual(observed.Daemon.ObservePaths, []string{"/observed"}) {
+		t.Errorf("observe_paths mutated to %v", observed.Daemon.ObservePaths)
 	}
 }
 
