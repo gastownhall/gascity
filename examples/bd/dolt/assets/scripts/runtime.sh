@@ -168,6 +168,64 @@ pid_is_running() (
   return 1
 )
 
+# managed_runtime_listener_pids PORT prints every PID holding a LISTEN socket
+# on PORT, ascending and once each.
+#
+# On Linux the answer comes from the kernel's listener tables and the link
+# text of each /proc/<pid>/fd entry (socket:[inode]). find -lname reads the
+# link without following it, so a stalled FUSE mount held open by any process
+# cannot block the probe. lsof stats every fd target before it filters
+# sockets and blocks uninterruptibly on such a mount, so it is never consulted
+# while the tables are readable: no matching LISTEN row means no listener.
+# lsof answers only on hosts without procfs tables (macOS).
+#
+# GC_DOLT_PROC_ROOT replaces /proc for tests.
+managed_runtime_listener_pids() (
+  port="$1"
+
+  case "$port" in
+    ''|*[!0-9]*)
+      return 0
+      ;;
+  esac
+
+  proc_root="${GC_DOLT_PROC_ROOT:-/proc}"
+  set --
+  for table in "$proc_root/net/tcp" "$proc_root/net/tcp6"; do
+    [ -r "$table" ] && set -- "$@" "$table"
+  done
+
+  if [ "$#" -eq 0 ]; then
+    command -v lsof >/dev/null 2>&1 || return 0
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null
+    return 0
+  fi
+
+  port_hex=$(printf '%04X' "$port")
+  inodes=$(awk -v want="$port_hex" '
+    NF >= 10 && $4 == "0A" && $10 ~ /^[1-9][0-9]*$/ {
+      local_port = $2
+      sub(/.*:/, "", local_port)
+      if (local_port == want) print $10
+    }
+  ' "$@" 2>/dev/null)
+  [ -n "$inodes" ] || return 0
+
+  set --
+  for inode in $inodes; do
+    [ "$#" -eq 0 ] || set -- "$@" -o
+    set -- "$@" -lname "socket:\\[$inode\\]"
+  done
+
+  find "$proc_root" -mindepth 3 -maxdepth 3 -path "$proc_root/[0-9]*/fd/[0-9]*" \
+    \( "$@" \) 2>/dev/null \
+    | while IFS= read -r fd_path; do
+        holder_dir="${fd_path%/fd/*}"
+        printf '%s\n' "${holder_dir##*/}"
+      done \
+    | sort -n -u
+)
+
 managed_runtime_listener_pid() (
   port="$1"
 
@@ -177,11 +235,7 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  if ! command -v lsof >/dev/null 2>&1; then
-    return 0
-  fi
-
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+  managed_runtime_listener_pids "$port" \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)

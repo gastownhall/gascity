@@ -9,10 +9,13 @@
 package dolt_test
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,4 +206,266 @@ sys.exit(3)
 	if !strings.Contains(out, "to-stdout") || !strings.Contains(out, "to-stderr") {
 		t.Fatalf("child output not passed through; got:\n%s", out)
 	}
+}
+
+// skipWithoutProcNet skips a test that needs the real kernel's
+// /proc/net/tcp listener table (absent on macOS).
+func skipWithoutProcNet(t *testing.T) {
+	t.Helper()
+	f, err := os.Open("/proc/net/tcp")
+	if err != nil {
+		t.Skipf("/proc/net/tcp unreadable (%v); the procfs listener probe does not apply", err)
+	}
+	_ = f.Close()
+}
+
+// listenLocal opens a TCP listener on 127.0.0.1 for the test process and
+// returns its port.
+func listenLocal(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// writeRecordingLsof installs a PATH lsof shim in binDir that appends
+// its argv to the returned marker file on every invocation and prints
+// output. The marker is absent until the shim runs.
+func writeRecordingLsof(t *testing.T, binDir, output string) string {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "lsof-invocations")
+	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(marker)+"\nprintf '%s' "+shellQuote(output)+"\n")
+	return marker
+}
+
+// assertLsofNeverRan fails when the recording lsof shim was executed.
+func assertLsofNeverRan(t *testing.T, marker string) {
+	t.Helper()
+	data, err := os.ReadFile(marker)
+	if err == nil {
+		t.Fatalf("lsof shim ran, want the procfs probe to answer without lsof; invocations:\n%s", data)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reading lsof marker: %v", err)
+	}
+}
+
+// runtimeShellEnv returns the environment for sourcing runtime.sh from a
+// fresh city with binDir ahead of the host PATH, so find, awk, sort and ps
+// stay visible to the probe.
+func runtimeShellEnv(t *testing.T, cityPath, binDir string, extra ...string) []string {
+	t.Helper()
+	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+repoRoot(t),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	return append(env, extra...)
+}
+
+// runRuntimeShell sources runtime.sh in sh, then runs script, and returns
+// its stdout.
+func runRuntimeShell(t *testing.T, env []string, script string) string {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; `+script)
+	cmd.Env = env
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sh -c %q: %v\nstdout:\n%s\nstderr:\n%s", script, err, out, stderr.String())
+	}
+	return string(out)
+}
+
+// reapedPID returns the PID of a child process that has already exited
+// and been reaped, so pid_is_running reports it as not running.
+func reapedPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running true: %v", err)
+	}
+	return cmd.ProcessState.Pid()
+}
+
+// TestManagedRuntimeListenerPIDReadsProcNotLsof is the regression guard
+// for gascity#7553: on a stalled FUSE mount lsof blocks in uninterruptible
+// sleep before it filters sockets, so on Linux the listener holder must
+// come from /proc/net/tcp and fd link text without ever running lsof.
+func TestManagedRuntimeListenerPIDReadsProcNotLsof(t *testing.T) {
+	testManagedRuntimeListenerPIDReadsProc(t)
+}
+
+// TestManagedRuntimeListenerPIDDoesNotHangOnStalledMount is the triage
+// name for the same guard.
+func TestManagedRuntimeListenerPIDDoesNotHangOnStalledMount(t *testing.T) {
+	testManagedRuntimeListenerPIDReadsProc(t)
+}
+
+func testManagedRuntimeListenerPIDReadsProc(t *testing.T) {
+	skipWithoutProcNet(t)
+	port := listenLocal(t)
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+
+	env := runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406")
+	got := strings.TrimSpace(runRuntimeShell(t, env, "managed_runtime_listener_pid "+strconv.Itoa(port)))
+	if want := strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("managed_runtime_listener_pid %d = %q, want the listening test process %s", port, got, want)
+	}
+	assertLsofNeverRan(t, marker)
+}
+
+func TestManagedRuntimeListenerPIDFindsIPv6Holder(t *testing.T) {
+	skipWithoutProcNet(t)
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+
+	env := runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406")
+	got := strings.TrimSpace(runRuntimeShell(t, env, "managed_runtime_listener_pid "+strconv.Itoa(port)))
+	if want := strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("managed_runtime_listener_pid %d = %q, want the listening test process %s", port, got, want)
+	}
+	assertLsofNeverRan(t, marker)
+}
+
+func TestManagedRuntimeListenerPIDIgnoresBadPort(t *testing.T) {
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+	env := runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406", "GC_DOLT_PROC_ROOT="+t.TempDir())
+	for _, port := range []string{"''", "abc", "33x7"} {
+		if got := runRuntimeShell(t, env, "managed_runtime_listener_pid "+port); got != "" {
+			t.Fatalf("managed_runtime_listener_pid %s = %q, want nothing", port, got)
+		}
+	}
+	assertLsofNeverRan(t, marker)
+}
+
+// procNetTCPFixture mirrors internal/pidutil/listener_test.go: listeners on
+// 127.0.0.1:3307 (inode 4242001) and 0.0.0.0:22 (inode 17), an ESTABLISHED
+// row on 3307 (inode 4242002), a TIME_WAIT row with inode 0, and a
+// truncated row.
+const procNetTCPFixture = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0CEB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242001 1 0000000000000000 100 0 0 10 0
+   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 17 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:0CEB 0100007F:D431 01 00000000:00000000 00:00000000 00000000  1000        0 4242002 1 0000000000000000 20 4 30 10 -1
+   3: 0100007F:0CEB 0100007F:D432 06 00000000:00000000 03:00000F9E 00000000     0        0 0 3 0000000000000000
+   4: 0100007F:0CEB 00000000:0000 0A
+`
+
+// procNetTCP6Fixture holds a [::]:3307 listener (inode 4242003) and a row
+// whose port is not hex (inode 4242004).
+const procNetTCP6Fixture = `  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:0CEB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242003 1 0000000000000000 100 0 0 10 0
+   1: 00000000000000000000000000000000:ZZZZ 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242004 1 0000000000000000 100 0 0 10 0
+`
+
+// writeProcFixture builds a fake procfs root with the fixture listener
+// tables and, for each pid, fd entries that are dangling symlinks to
+// socket:[inode], the link text the kernel prints for a socket fd.
+func writeProcFixture(t *testing.T, fds map[int][]string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(procNetTCPFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "net", "tcp6"), []byte(procNetTCP6Fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for pid, inodes := range fds {
+		fdDir := filepath.Join(root, strconv.Itoa(pid), "fd")
+		if err := os.MkdirAll(fdDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for i, inode := range inodes {
+			if err := os.Symlink("socket:["+inode+"]", filepath.Join(fdDir, strconv.Itoa(i+3))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return root
+}
+
+func TestManagedRuntimeListenerPIDsReadsFixtureTables(t *testing.T) {
+	procRoot := writeProcFixture(t, map[int][]string{
+		700: {"4242001", "4242001"},
+		500: {"4242003"},
+		800: {"4242002"},
+		900: {"17"},
+		950: {"4242004"},
+	})
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "800\n900\n")
+
+	env := runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406", "GC_DOLT_PROC_ROOT="+procRoot)
+	if got, want := runRuntimeShell(t, env, "managed_runtime_listener_pids 3307"), "500\n700\n"; got != want {
+		t.Fatalf("managed_runtime_listener_pids 3307 = %q, want %q (LISTEN holders only, sorted, once each)", got, want)
+	}
+	if got := runRuntimeShell(t, env, "managed_runtime_listener_pids 3308"); got != "" {
+		t.Fatalf("managed_runtime_listener_pids 3308 = %q, want nothing for a port with no LISTEN row", got)
+	}
+	assertLsofNeverRan(t, marker)
+}
+
+func TestManagedRuntimeListenerPIDSkipsHoldersNotRunning(t *testing.T) {
+	dead := reapedPID(t)
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+
+	live := writeProcFixture(t, map[int][]string{dead: {"4242001"}, os.Getpid(): {"4242003"}})
+	env := runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406", "GC_DOLT_PROC_ROOT="+live)
+	if got, want := strings.TrimSpace(runRuntimeShell(t, env, "managed_runtime_listener_pid 3307")), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("managed_runtime_listener_pid 3307 = %q, want the running holder %s", got, want)
+	}
+
+	deadOnly := writeProcFixture(t, map[int][]string{dead: {"4242001"}})
+	env = runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406", "GC_DOLT_PROC_ROOT="+deadOnly)
+	if got := runRuntimeShell(t, env, "managed_runtime_listener_pid 3307"); got != "" {
+		t.Fatalf("managed_runtime_listener_pid 3307 = %q, want nothing when every holder has exited", got)
+	}
+	assertLsofNeverRan(t, marker)
+}
+
+func TestHealthScriptReportsServerPIDWithoutLsof(t *testing.T) {
+	skipWithoutProcNet(t)
+	port := listenLocal(t)
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 0\n")
+
+	env := append(runtimeShellEnv(t, t.TempDir(), binDir),
+		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+	out, err := newHealthScriptCmd(repoRoot(t), env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health --json: %v\n%s", err, out)
+	}
+	var report struct {
+		Server struct {
+			PID int `json:"pid"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parsing health JSON: %v\n%s", err, out)
+	}
+	if report.Server.PID != os.Getpid() {
+		t.Fatalf("server.pid = %d, want the listening test process %d\n%s", report.Server.PID, os.Getpid(), out)
+	}
+	assertLsofNeverRan(t, marker)
 }
