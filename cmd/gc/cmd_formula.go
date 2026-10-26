@@ -911,6 +911,14 @@ store, copy them into the binding with
 						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
+					// Stamped outside the lock closure: an error returned from
+					// inside it closes the input convoy of a workflow that is
+					// already wired to the attach bead. Here it also covers the
+					// root an idempotent repeat cook adopted, so a retry
+					// converges on the requested metadata.
+					if err := stampFormulaCookRootMetadata(store, result.RootID, rootMeta); err != nil {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+					}
 					if jsonOutput {
 						if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
 							SchemaVersion:  "1",
