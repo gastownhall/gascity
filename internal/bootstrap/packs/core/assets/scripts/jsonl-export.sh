@@ -982,10 +982,16 @@ if [ ! -d "$ARCHIVE_REPO/.git" ]; then
         archive_parent=$(dirname "$ARCHIVE_REPO")
         mkdir -p "$archive_parent"
         archive_init=$(mktemp -d "$archive_parent/.jsonl-archive-init.XXXXXX") || archive_init=""
+        # Something may create the archive path between the check and the
+        # mv; POSIX mv then moves the staging repo inside it (macOS mv has no
+        # -T to refuse). Such a nested staging repo is removed, and the run
+        # falls back to the in-place init.
         if [ -n "$archive_init" ] && git -C "$archive_init" init -q 2>/dev/null \
-            && [ ! -e "$ARCHIVE_REPO" ] && mv "$archive_init" "$ARCHIVE_REPO"; then
+            && [ ! -e "$ARCHIVE_REPO" ] && mv "$archive_init" "$ARCHIVE_REPO" \
+            && [ ! -e "$ARCHIVE_REPO/$(basename "$archive_init")" ]; then
             :
         else
+            [ -n "$archive_init" ] && rm -rf "${ARCHIVE_REPO:?}/$(basename "$archive_init")"
             [ -n "$archive_init" ] && rm -rf "$archive_init"
             mkdir -p "$ARCHIVE_REPO"
             git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true

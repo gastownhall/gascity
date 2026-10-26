@@ -12750,3 +12750,58 @@ func TestOrphanSweepReadsAZeroPaddedGateBudgetInBaseTen(t *testing.T) {
 		t.Fatalf("dead local claim was not released under an 8s budget\n%s", run.context())
 	}
 }
+
+// TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
+// between the first run's "archive path absent" check and its rename of the
+// staging repo into place: another exporter (or anything else) can create
+// the archive path in it. POSIX mv then moves the staging repo INSIDE the
+// directory that appeared, and macOS mv has no -T to refuse that. A mv shim
+// creates the archive path right before the rename. The run must not leave
+// the staging repo nested in the archive path. It falls back to the
+// in-place init, so the archive is still a repo.
+func TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "packs", "core", "jsonl-archive")
+	raceLog := filepath.Join(t.TempDir(), "mv-race.log")
+
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+	realMv, err := exec.LookPath("mv")
+	if err != nil {
+		t.Skip("mv not on PATH")
+	}
+	shim := "#!/bin/sh\n" +
+		"for last in \"$@\"; do :; done\n" +
+		"case \"$1\" in\n" +
+		"  */.jsonl-archive-init.*)\n" +
+		"    if [ \"$last\" = \"$ARCHIVE_PROBE\" ] && [ ! -e \"$ARCHIVE_PROBE\" ]; then mkdir -p \"$ARCHIVE_PROBE\"; echo raced >>\"$RACE_LOG\"; fi ;;\n" +
+		"esac\n" +
+		"exec " + realMv + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mv"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["ARCHIVE_PROBE"] = archiveRepo
+	env["RACE_LOG"] = raceLog
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	if data, err := os.ReadFile(raceLog); err != nil || !strings.Contains(string(data), "raced") {
+		t.Fatalf("the mv shim never created the archive path before the rename (%q, %v)", data, err)
+	}
+	nested, err := filepath.Glob(filepath.Join(archiveRepo, ".jsonl-archive-init.*"))
+	if err != nil || len(nested) != 0 {
+		t.Fatalf("staging repo moved inside the archive path: %v (%v)", nested, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(archiveRepo), ".jsonl-archive-init.*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("init staging dirs left behind: %v (%v)", leftovers, err)
+	}
+	if _, err := os.Stat(filepath.Join(archiveRepo, ".git")); err != nil {
+		t.Fatalf("archive repo not initialized after the race: %v", err)
+	}
+}
