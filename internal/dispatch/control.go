@@ -285,8 +285,11 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
 // runs the check script. An iteration that failed hard closes the control as a
-// hard failure without running the check; a GatePass closes the control;
-// anything else spawns the next iteration or exhausts.
+// hard failure without running the check; a GatePass closes the control; a
+// gate run that produced no verdict (a timeout or an infra-blind read)
+// re-runs attempt-free against the same iteration, charged to the shared
+// maxCheckInfraRetries budget (#6947); anything else spawns the next
+// iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
@@ -314,6 +317,29 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	checkResult, err := runRalphCheck(store, reloaded, iteration, iterationNum, opts)
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
+	}
+	// A gate run that produced no verdict must not spend the iteration
+	// (#6947): a timeout, or a blind read (exit 75 / a typed infrastructure
+	// marker on stderr, ga-pqlgh), charges the shared maxCheckInfraRetries
+	// budget and re-runs against this same iteration via the benign
+	// ErrControlPending path — the same protection the kind=check lane has in
+	// processRalphCheck. GateError is NOT charged here: on this lane the gate
+	// runs on context.Background (see runRalphCheck), so a parent cancel
+	// cannot produce one and GateError is always a failed start, which spends
+	// the attempt like any failure (formula-spec-v2 §3.1 — see
+	// TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld). Unlike the
+	// check lane a blind read is not reclassified: once the budget is spent
+	// the attempt log records the outcome the gate actually reported.
+	infra := checkResult.Outcome == convergence.GateTimeout
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph control-check-infra-blind bead=%s iteration=%d reason=%s exit=%s",
+			bead.ID, iterationNum, reason, formatGateExitCode(checkResult.ExitCode))
+		infra = true
+	}
+	if infra {
+		if err := spendCheckInfraRetry(store, reloaded, checkResult.Outcome, iterationNum, opts); err != nil {
+			return attemptEvaluation{}, err
+		}
 	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
 	if checkResult.Outcome == convergence.GatePass {
