@@ -20,6 +20,8 @@ type testParentWatchdogFixture struct {
 	parentDone chan struct{}
 	server     *exec.Cmd
 	serverDone chan struct{}
+	// config is the --config path on the server's command line.
+	config string
 }
 
 func startTestParentWatchdogFixture(t *testing.T) *testParentWatchdogFixture {
@@ -31,11 +33,13 @@ func startTestParentWatchdogFixture(t *testing.T) *testParentWatchdogFixture {
 	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 0.1; done\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	config := filepath.Join(dir, "dolt-config.yaml")
 	f := &testParentWatchdogFixture{
 		parent:     exec.Command("sleep", "300"),
 		parentDone: make(chan struct{}),
-		server:     exec.Command(fakeDolt, "sql-server", "--config", filepath.Join(dir, "dolt-config.yaml")),
+		server:     exec.Command(fakeDolt, "sql-server", "--config", config),
 		serverDone: make(chan struct{}),
+		config:     config,
 	}
 	for _, c := range []struct {
 		cmd  *exec.Cmd
@@ -61,11 +65,12 @@ func startTestParentWatchdogFixture(t *testing.T) *testParentWatchdogFixture {
 }
 
 // runTestParentWatchdog runs start_dolt_test_parent_watchdog from
-// gc-beads-bd.sh for the fixture's server. It fails the test if the function
+// gc-beads-bd.sh for the fixture's server pid, armed with configFile as the
+// server's config path. It fails the test if the function
 // does not return promptly with its output pipes released: a watchdog that
 // kept them would hold the provider script's caller until the test parent
 // exits.
-func runTestParentWatchdog(t *testing.T, f *testParentWatchdogFixture, testMode bool) {
+func runTestParentWatchdog(t *testing.T, f *testParentWatchdogFixture, configFile string, testMode bool) {
 	t.Helper()
 	scriptBytes, err := os.ReadFile(gcBinGuardScriptPath(t))
 	if err != nil {
@@ -87,7 +92,7 @@ func runTestParentWatchdog(t *testing.T, f *testParentWatchdogFixture, testMode 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", fnSrc+"\nstart_dolt_test_parent_watchdog \"$1\"\n", "watchdog", strconv.Itoa(f.server.Process.Pid))
+	cmd := exec.CommandContext(ctx, "sh", "-c", fnSrc+"\nstart_dolt_test_parent_watchdog \"$1\" \"$2\"\n", "watchdog", strconv.Itoa(f.server.Process.Pid), configFile)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
@@ -116,7 +121,7 @@ func waitClosed(ch <-chan struct{}, d time.Duration) bool {
 func TestGCBeadsBDTestParentWatchdogStopsServerWhenParentExits(t *testing.T) {
 	t.Parallel()
 	f := startTestParentWatchdogFixture(t)
-	runTestParentWatchdog(t, f, true)
+	runTestParentWatchdog(t, f, f.config, true)
 
 	if waitClosed(f.serverDone, 2500*time.Millisecond) {
 		t.Fatal("server stopped while its test parent was still running")
@@ -135,7 +140,7 @@ func TestGCBeadsBDTestParentWatchdogStopsServerWhenParentExits(t *testing.T) {
 func TestGCBeadsBDTestParentWatchdogOffOutsideTestMode(t *testing.T) {
 	t.Parallel()
 	f := startTestParentWatchdogFixture(t)
-	runTestParentWatchdog(t, f, false)
+	runTestParentWatchdog(t, f, f.config, false)
 
 	if err := f.parent.Process.Kill(); err != nil {
 		t.Fatalf("kill parent: %v", err)
@@ -143,6 +148,42 @@ func TestGCBeadsBDTestParentWatchdogOffOutsideTestMode(t *testing.T) {
 	<-f.parentDone
 	if waitClosed(f.serverDone, 2500*time.Millisecond) {
 		t.Fatal("server stopped outside managed-Dolt test mode")
+	}
+}
+
+// TestGCBeadsBDTestParentWatchdogSparesOtherDoltServer covers pid reuse: the
+// server the watchdog was armed for dies while its test parent runs, and its
+// pid goes to another dolt sql-server (a parallel test's, or the host's own
+// city server) before the next poll. When the test parent exits, the watchdog
+// must leave that server alone, because its --config is not the one it was
+// armed with.
+func TestGCBeadsBDTestParentWatchdogSparesOtherDoltServer(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		config func(f *testParentWatchdogFixture) string
+	}{
+		{"other config path", func(f *testParentWatchdogFixture) string {
+			return filepath.Join(filepath.Dir(f.config), "other", "dolt-config.yaml")
+		}},
+		// A plain substring match would take "<config>.other" for "<config>".
+		{"config path is a prefix of the server's", func(f *testParentWatchdogFixture) string {
+			return strings.TrimSuffix(f.config, ".yaml")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := startTestParentWatchdogFixture(t)
+			runTestParentWatchdog(t, f, tc.config(f), true)
+
+			if err := f.parent.Process.Kill(); err != nil {
+				t.Fatalf("kill parent: %v", err)
+			}
+			<-f.parentDone
+			if waitClosed(f.serverDone, 4*time.Second) {
+				t.Fatal("watchdog stopped a dolt sql-server whose --config is not the one it was armed with")
+			}
+		})
 	}
 }
 
@@ -154,8 +195,8 @@ func TestGCBeadsBDShellStartArmsTestParentWatchdog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read script: %v", err)
 	}
-	launch := regexp.MustCompile(`(?m)^\s*nohup sh -c '[^']*exec dolt sql-server[^\n]*&\n\s*local server_pid=\$!\n\s*start_dolt_test_parent_watchdog "\$server_pid"\n`)
+	launch := regexp.MustCompile(`(?m)^\s*nohup sh -c '[^']*exec dolt sql-server[^\n]*&\n\s*local server_pid=\$!\n\s*start_dolt_test_parent_watchdog "\$server_pid" "\$CONFIG_FILE"\n`)
 	if !launch.Match(scriptBytes) {
-		t.Fatal(`gc-beads-bd.sh: the shell dolt sql-server launch is not followed by start_dolt_test_parent_watchdog "$server_pid"`)
+		t.Fatal(`gc-beads-bd.sh: the shell dolt sql-server launch is not followed by start_dolt_test_parent_watchdog "$server_pid" "$CONFIG_FILE"`)
 	}
 }
