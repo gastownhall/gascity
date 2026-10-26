@@ -55,7 +55,7 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 // so a busy city (whose sequence advances every poll) still hits the cache
 // instead of rebuilding the O(store-size) body on every request. Recording an
 // event must NOT bust the /status cache within the TTL window — unlike the
-// index-keyed endpoints (see TestHandleAgentListCachesUntilIndexChanges).
+// index-keyed endpoints (see TestHandleOrdersFeedCachesUntilIndexChanges).
 func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// Pin a wide TTL so every request in this test lands in the same time
 	// bucket; this isolates the "index churn must not bust the cache" property
@@ -517,7 +517,15 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	}
 }
 
-func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
+// TestHandleAgentListCachesAcrossIndexChanges pins the gascity#7149 fix:
+// GET /agents keys its response cache on the time bucket, not the event
+// sequence, so a busy city (whose sequence advances between polls) keeps
+// hitting the cache instead of paying the per-agent rebuild on every request.
+func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
@@ -529,25 +537,21 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second agents = %d, want 200", rec.Code)
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
 	}
 
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
-	}
-
-	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("third agents = %d, want 200", rec.Code)
-	}
-	if store.listByAssigneeCalls != 4 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("agents after event %d = %d, want 200", i, rec.Code)
+		}
+		if store.listByAssigneeCalls != perBuild {
+			t.Fatalf("assignee lookups after event %d = %d, want %d (one build; the cache must survive sequence churn)", i, store.listByAssigneeCalls, perBuild)
+		}
 	}
 }
 

@@ -24,6 +24,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 	index := s.latestIndex()
+	bucket := responseCacheTimeBucket(time.Now())
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -43,12 +44,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// The list projects the config, whose swaps do not advance the
 		// event index, so the key also carries the config generation.
 		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
-		// A hit needs the exact index captured above, before any state was
-		// read, so the cached body reflects every change up to index and
-		// returning this request's index with it is safe. A key that can hit
-		// across index changes (the time bucket /status uses) must cache the
-		// build index with the body instead (indexedResponse).
-		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
+		// The entry is keyed on the time bucket, not the event index: on a
+		// busy city the sequence advances between polls, so an index-keyed
+		// entry missed on nearly every request and paid the per-agent
+		// rebuild (gascity#7149, the class #3186 fixed for /status).
+		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, bucket); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
 				Body:  body,
@@ -256,7 +256,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// A partial list reflects a transient backend failure; don't serve it
 	// from cache once the backend recovers.
 	if cacheKey != "" && !body.Partial {
-		s.storeResponse(cacheKey, index, body)
+		s.storeResponse(cacheKey, bucket, body)
 	}
 
 	return &ListOutput[agentResponse]{
