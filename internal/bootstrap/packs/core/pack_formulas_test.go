@@ -450,8 +450,11 @@ type molDoWorkCloseCase struct {
 	env        []string // extra environment for the run
 	wantUpdate string   // the exact update line required on a pass
 	wantFail   bool     // the block must exit non-zero and write nothing
-	wantOut    string   // substring the combined output must contain
-	forbidLog  string   // substring the gc log must not contain
+	// allowAttemptedUpdate admits, on a wantFail run, the one update whose
+	// write gc refused; every other failure path must write nothing.
+	allowAttemptedUpdate bool
+	wantOut              string // substring the combined output must contain
+	forbidLog            string // substring the gc log must not contain
 }
 
 // molDoWorkFakeVerb renders one verb of the fake gc: print out, print errText
@@ -617,6 +620,50 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 	workBead.wantOut = "current claim ga-work is not this session's in-progress do-work step"
 	cases = append(cases, workBead)
 
+	convoyFails := pass("fail_loudly_when_the_convoy_read_fails")
+	convoyFails.convoyOut = ""
+	convoyFails.convoyRC = "1"
+	convoyFails.convoyErr = "gc convoy status failed (simulated)"
+	convoyFails.wantUpdate = ""
+	convoyFails.wantFail = true
+	convoyFails.wantOut = "gc convoy status failed (simulated)"
+	convoyFails.forbidLog = "hook current"
+	cases = append(cases, convoyFails)
+
+	convoyTwo := pass("fail_loudly_when_the_convoy_has_two_children")
+	convoyTwo.convoyOut = `{"children":[{"id":"ga-work"},{"id":"ga-other-work"}]}`
+	convoyTwo.wantUpdate = ""
+	convoyTwo.wantFail = true
+	convoyTwo.wantOut = "cannot derive the work bead"
+	convoyTwo.forbidLog = "hook current"
+	cases = append(cases, convoyTwo)
+
+	convoyZero := pass("fail_loudly_when_the_convoy_has_no_children")
+	convoyZero.convoyOut = `{"children":[]}`
+	convoyZero.wantUpdate = ""
+	convoyZero.wantFail = true
+	convoyZero.wantOut = "cannot derive the work bead"
+	convoyZero.forbidLog = "hook current"
+	cases = append(cases, convoyZero)
+
+	showFails := pass("fail_loudly_when_the_bd_show_read_fails")
+	showFails.showOut = ""
+	showFails.showRC = "1"
+	showFails.showErr = "gc bd show failed (simulated)"
+	showFails.wantUpdate = ""
+	showFails.wantFail = true
+	showFails.wantOut = "gc bd show failed (simulated)"
+	cases = append(cases, showFails)
+
+	updateFails := pass("fail_loudly_when_the_closing_update_fails")
+	updateFails.updateRC = "1"
+	updateFails.updateErr = "gc bd update failed (simulated)"
+	updateFails.wantUpdate = ""
+	updateFails.wantFail = true
+	updateFails.wantOut = "gc bd update failed (simulated)"
+	updateFails.allowAttemptedUpdate = true
+	cases = append(cases, updateFails)
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir, logPath := fakeGCBin(t, molDoWorkGCFakeBody(tc))
@@ -644,7 +691,7 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 				if runErr == nil {
 					t.Fatalf("close-step block exited 0; it must fail loudly instead:\nblock:\n%s\noutput:\n%s\ngc calls:\n%s", block, out, logged)
 				}
-				if len(updates) != 0 {
+				if !tc.allowAttemptedUpdate && len(updates) != 0 {
 					t.Errorf("a failed close must not issue a gc bd update; got:\n%s", logged)
 				}
 			} else {
