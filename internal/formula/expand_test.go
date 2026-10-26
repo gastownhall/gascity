@@ -490,6 +490,7 @@ func TestApplyExpansionsPreservesOversizedDescriptionFileStubPath(t *testing.T) 
 		assetPath,
 		len(largeContent),
 		map[string]*VarDef{"audience": {}},
+		nil,
 	)
 	wantDescription = strings.ReplaceAll(wantDescription, "{{audience}}", "security reviewers")
 	if result[0].Description != wantDescription {
@@ -505,7 +506,7 @@ func TestExpandStepPreservesProtectedStubThroughTargetDescription(t *testing.T) 
 	target := &Step{
 		ID:                          "contract",
 		Title:                       "Contract",
-		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, nil),
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, nil, nil),
 		DescriptionFileResolvedPath: resolvedPath,
 	}
 
@@ -524,6 +525,7 @@ func TestExpandStepPreservesProtectedStubThroughTargetDescription(t *testing.T) 
 		"../assets/security.md",
 		resolvedPath,
 		5000,
+		nil,
 		nil,
 	)
 	if first[0].Description != wantWrapped {
@@ -558,7 +560,7 @@ func TestExpandStepPreservesFormulaVarsThroughTargetDescription(t *testing.T) {
 	varDefs := map[string]*VarDef{"audience": {}}
 	target := &Step{
 		ID:                          "contract",
-		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, varDefs),
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, varDefs, nil),
 		DescriptionFileResolvedPath: resolvedPath,
 	}
 
@@ -578,6 +580,7 @@ func TestExpandStepPreservesFormulaVarsThroughTargetDescription(t *testing.T) {
 		resolvedPath,
 		5000,
 		varDefs,
+		nil,
 	)
 	want = strings.ReplaceAll(want, "{{audience}}", "security reviewers")
 	if result[0].Description != want {

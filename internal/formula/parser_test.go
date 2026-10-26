@@ -516,6 +516,75 @@ description_file = "operator.md"
 	}
 }
 
+// TestParseFileOversizedDescriptionFileIncludesUndeclaredReferencedVars
+// covers gastownhall/gascity#8311: an oversized description_file's stub
+// must list a placeholder for every {{name}} the prompt text references,
+// not only the formula's declared [vars] — otherwise a value supplied at
+// runtime (--var, rig formula_vars, or routing vars) for an undeclared name
+// has no {{pack_root}}-shaped token left in the stub for the later
+// substitution pass to fill in, and stays permanently literal.
+func TestParseFileOversizedDescriptionFileIncludesUndeclaredReferencedVars(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "operator.md")
+	filler := strings.Repeat("large prompt body\n", descriptionFileInlineMaxBytes/16+128)
+	largePrompt := "Run `{{pack_root}}/assets/scripts/tool.py --repo {{repo}}`.\n" + filler
+	if len([]byte(largePrompt)) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test prompt length = %d, want > %d", len([]byte(largePrompt)), descriptionFileInlineMaxBytes)
+	}
+	if err := os.WriteFile(promptPath, []byte(largePrompt), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "oversized-undeclared.toml"), []byte(`
+formula = "oversized-undeclared"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+repo = "acme/widgets"
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "operator.md"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	loaded, err := NewParser(dir).LoadByName("oversized-undeclared")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	step := loaded.Steps[0]
+
+	// pack_root is not declared in [vars], but the prompt text references
+	// it, so the stub must carry a {{pack_root}} placeholder for the later
+	// substitution pass to fill in -- same as the declared var repo does.
+	for _, want := range []string{
+		`repo="{{repo}}"`,
+		`pack_root="{{pack_root}}"`,
+	} {
+		if !strings.Contains(step.Description, want) {
+			t.Fatalf("Description missing %q:\n%s", want, step.Description)
+		}
+	}
+
+	// End-to-end: the runtime substitution pass (molecule.substituteStepDescription,
+	// via formula.Substitute) must actually render the undeclared name once a
+	// real value for it is supplied, exactly as it already does for a declared
+	// one -- confirming the stub's placeholder, not just its text, is live.
+	rendered := Substitute(step.Description, map[string]string{
+		"repo":      "acme/widgets",
+		"pack_root": "/opt/packs/repro",
+	})
+	if strings.Contains(rendered, "{{pack_root}}") {
+		t.Fatalf("pack_root placeholder was not substituted:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `pack_root="/opt/packs/repro"`) {
+		t.Fatalf("rendered stub missing substituted pack_root value:\n%s", rendered)
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
