@@ -88,9 +88,11 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute
 
 Without --strict, a prompt_template that cannot be read is reported on
-stderr and the default prompt is output.
+stderr and the default prompt is output; one that fails to parse or
+execute is reported on stderr and its raw unrendered text is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
@@ -127,7 +129,7 @@ to empty output from valid conditional logic, or on suspended states
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
-	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or a prompt_template that cannot be read or rendered instead of falling back")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
 }
@@ -224,7 +226,7 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 
 // doPrimeWithMode's strict-mode contract: only states that would indicate
 // a user mistake (missing city config, no agent name, unknown agent name,
-// unreadable prompt_template file) error out. Supported minimal configs
+// a prompt_template that cannot be read, parsed, or executed) error out. Supported minimal configs
 // (agent with no prompt_template at all, or a template that legitimately
 // renders to empty output via conditional logic) and intentional quiet
 // states (suspended city/agent) remain silent even under --strict —
@@ -433,10 +435,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
 			return 1, nil
 		}
-		// A prompt_template that cannot be read or parsed is a strict failure;
-		// an empty render from valid template logic is not. Render once here,
-		// silently and with the same recipe as the output below, so the
-		// failure lands before hook side effects and before any stdout write.
+		// A prompt_template that cannot be read, parsed, or executed is a
+		// strict failure; an empty render from valid template logic is not.
+		// Render once here, silently and with the same recipe as the output
+		// below, so the failure lands before hook side effects and before any
+		// stdout write.
 		for _, a := range resolvedAgents {
 			if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 				continue

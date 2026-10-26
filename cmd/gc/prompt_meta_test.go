@@ -166,6 +166,7 @@ func TestRenderPromptWithMeta_ErrReportsFallbacks(t *testing.T) {
 	}{
 		{name: "missing file", path: "prompts/missing.template.md", wantErr: true, wantErrIs: fs.ErrNotExist},
 		{name: "parse error", path: "prompts/p.template.md", body: "---\nversion: v1\n---\nHello {{base_branch}}\n", wantErr: true, wantText: "Hello {{base_branch}}\n"},
+		{name: "execute error", path: "prompts/p.template.md", body: `Hello {{template "no-such-fragment" .}}`, wantErr: true, wantText: `Hello {{template "no-such-fragment" .}}`},
 		{name: "valid template", path: "prompts/p.template.md", body: "Hello {{.AgentName}}", wantText: "Hello worker"},
 		{name: "valid template renders empty", path: "prompts/p.template.md", body: "{{if .RigName}}rig{{end}}", wantText: ""},
 		{name: "plain markdown is not executed", path: "prompts/p.md", body: "Hello {{base_branch}}", wantText: "Hello {{base_branch}}"},

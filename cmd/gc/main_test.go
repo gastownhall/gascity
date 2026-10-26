@@ -6868,6 +6868,44 @@ func TestDoPrimeStrictTemplateParseErrorFails(t *testing.T) {
 	}
 }
 
+// TestDoPrimeStrictTemplateExecuteErrorFails verifies that --strict fails on
+// a prompt_template that parses but fails to execute. {{.BogusField}} is not
+// such a template: missingkey=zero renders an absent key as empty.
+func TestDoPrimeStrictTemplateExecuteErrorFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "undefined fragment", body: `Hello {{template "no-such-fragment" .}}`, wantErr: `template "no-such-fragment" not defined`},
+		{name: "field of string", body: `{{.AgentName.Foo}}`, wantErr: `can't evaluate field Foo`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			setupStrictPrimeTemplateCity(t, tt.body)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+			if code == 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, execute error) = 0, want non-zero; stdout: %q; stderr: %q", stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty on strict template failure", stdout.String())
+			}
+			for _, want := range []string{
+				`gc prime: prompt_template "prompts/worker.template.md" for agent "worker": `,
+				tt.wantErr,
+			} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
 // TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess verifies that
 // strict+hook success no longer writes the legacy provider hook sidecar.
 func TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess(t *testing.T) {
