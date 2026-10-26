@@ -2148,16 +2148,19 @@ const (
 // what leaves the host is the shipper's job.
 type EventsMirrorConfig struct {
 	// Path is the absolute path of the mirror file, outside the city's .gc
-	// directory. Its directory must already exist: gc creates only the file
-	// and never creates or changes the directory. Empty disables the mirror.
-	// Read when the controller opens the city's event log: a change takes
-	// effect at the next controller start.
+	// directory. Its directory must already exist and be writable only by
+	// the city's user: gc creates only the file and never creates or changes
+	// the directory. gc writes only a regular file there: it does not follow
+	// a symbolic link at the path. Empty disables the mirror. Read when the
+	// controller opens the city's event log: a change takes effect at the
+	// next controller start.
 	Path string `toml:"path,omitempty"`
-	// Mode is the octal permission of the mirror file, for example "0640".
-	// gc creates the file with it and sets it on every open. Defaults to
-	// "0640". The file's group follows the directory's: give the directory
-	// the shipper's group with the setgid bit (mode 2750) so the file
-	// inherits it.
+	// Mode is the octal permission of the mirror file as a quoted string,
+	// for example "0640"; an unquoted TOML integer (0o640) is a type error
+	// that stops the config from loading. gc creates the file with it and
+	// sets it on every open. Defaults to "0640". The file's group follows
+	// the directory's: give the directory the shipper's group with the
+	// setgid bit (mode 2750) so the file inherits it.
 	Mode string `toml:"mode,omitempty" jsonschema:"default=0640"`
 	// MaxSizeBytes is the size at which the mirror is renamed to <path>.1
 	// (replacing the previous one) and a new file is started, so it stays

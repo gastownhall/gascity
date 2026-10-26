@@ -455,6 +455,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rotation that stops after renaming the event log no longer hides its
+  events from the log's head or from a resuming watcher.** A rotation renames
+  `.gc/events.jsonl` to an `events.jsonl.rotating-*` file and then writes the
+  fresh log's first event; when that write fails (a full disk), the fresh log
+  stays empty until the next event. Meanwhile `gc events --seq` reported a
+  head below the rotated events, and a watcher resuming from a seq among
+  them, such as `gc events --follow --after <seq>`, skipped the rest. The
+  head now counts the rotating file, and a resume replays it, with or without
+  an active log.
+
 - **An MCP server one agent's provider cannot receive no longer stops the
   city.** Servers from the city's `mcp/` directory, a rig pack, or an import
   reach every agent in that scope. When one agent's provider could not

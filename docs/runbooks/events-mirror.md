@@ -32,6 +32,10 @@ does without the feature.
   log and appends each event to the mirror. So the mirror holds every event,
   including those written by CLI commands and agents, a fraction of a second
   after they reach the canonical log. A lock in `.gc` keeps it to one writer.
+  When the controller stops, it first copies every event the canonical log
+  holds at that moment, waiting a few seconds at most. A standalone
+  controller records `controller.stopped` before that, so its mirror ends with
+  it; a city the supervisor runs records no event when it stops.
 - **Content.** Each mirror line is the canonical event line, in the same JSON
   encoding, with no added fields. The canonical log's rotation anchors
   (`events.rotated`) are mirrored too. Nothing is redacted: event subjects and
@@ -40,8 +44,9 @@ does without the feature.
 - **Resuming.** After a restart or a failure the controller continues after
   the last event the mirror already holds (reading `<path>` or, right after a
   rotation, `<path>.1`), so it neither duplicates nor skips events the
-  canonical log still has. A new, empty mirror starts with the events
-  recorded since the controller opened the log; older history is not
+  canonical log still has, as long as one of those two files still holds the
+  mirror's last event (see Size, below). A new, empty mirror starts with the
+  events recorded since the controller opened the log; older history is not
   replayed.
 - **Failures never reach the city.** If the directory is missing, permission
   is denied or the disk is full, gc reports it on the controller's stderr
@@ -53,7 +58,11 @@ does without the feature.
   `max_size_bytes = 0` gc never rotates the mirror and you may rotate it with
   logrotate, either `create` (rename it away; gc reopens the path) or
   `copytruncate` (gc appends with `O_APPEND`, so writes continue at the new
-  end).
+  end). Either way the previous file must stay at `<path>.1`, uncompressed:
+  use `nodateext`, and `delaycompress` with `compress`. After a restart that
+  finds `<path>` empty, gc resumes from `<path>.1`'s last event; without it,
+  gc starts at the canonical log's tail, and the events recorded while the
+  controller was down are not mirrored.
 - **Changes** to `[events.mirror]` take effect at the next controller start.
 
 ## Permissions
@@ -64,15 +73,26 @@ changes the directory's owner or mode, so provision the directory first:
 - give it the shipper's group and the setgid bit (mode `2750`), so every file
   created in it, including `<path>.1` and a fresh file after rotation, gets
   the shipper's group;
+- make it, and every directory above it, writable only by the city's user
+  (or root). Whoever can write the directory can replace the mirror files,
+  and `<path>.1` decides where gc resumes;
 - every directory above it must be traversable (`x`) by the shipper.
 
 gc creates the file with `mode` (default `0640`: owner read-write, group
 read) and sets that mode on each open, whatever the umask. gc does not
 `chown`; the group comes from the setgid directory.
 
-`path` must be absolute and outside the canonical log's directory. An
-invalid `[events.mirror]` is a config warning: the mirror is disabled and the
-city runs normally.
+gc writes the mirror only as a regular file with no other name. Each time it
+opens `path`, it refuses a symbolic link (it does not follow one), a FIFO, a
+device, and a file with another hard link, such as the canonical log: it
+reports the refusal like any other failure, retries, and never removes what
+is there. Back up the mirror by copying it, not by hard-linking it.
+
+`path` must be absolute and outside the canonical log's directory: not in
+`.gc` or anywhere under it. `mode` is a quoted string (`mode = "0640"`): an
+unquoted TOML integer such as `0o640` is a type error that stops the config
+from loading. Any other invalid `[events.mirror]` value is a config warning:
+the mirror is disabled and the city runs normally.
 
 ## Example: OpenTelemetry Collector on a Shared Host
 

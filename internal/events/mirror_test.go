@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -27,8 +30,35 @@ func mirrorTestDirs(t *testing.T) (canonical, mirrorDir string) {
 	return canonical, mirrorDir
 }
 
+// fastMirror returns mirror options that retry quickly. Its StopTimeout is a
+// safety bound only: Close waits that long solely for a copier that catches
+// up or exits (a test stalls only if one never does).
 func fastMirror(path string) MirrorOptions {
-	return MirrorOptions{Path: path, RetryInterval: 20 * time.Millisecond, LogInterval: time.Hour}
+	return MirrorOptions{Path: path, RetryInterval: 20 * time.Millisecond, LogInterval: time.Hour, StopTimeout: 15 * time.Second}
+}
+
+// plainRecordN records n events onto the log at canonical through a
+// short-lived writer that never mirrors, as a CLI process does.
+func plainRecordN(t *testing.T, canonical string, n int) {
+	t.Helper()
+	plain, err := NewFileRecorder(canonical, io.Discard, WithMaxSize(0), WithoutStartupSweep())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordMirrorN(t, plain, 1, n)
+	if err := plain.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fileLines returns the lines of path, without their newlines.
+func fileLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
 func recordMirrorN(t *testing.T, r *FileRecorder, from, n int) {
@@ -504,6 +534,10 @@ func TestMirrorSecondCopierDoesNotDuplicate(t *testing.T) {
 	if !strings.Contains(stderrB.String(), "another process is mirroring") {
 		t.Fatalf("second copier stderr = %q, want a note that it waits", stderrB.String())
 	}
+	// The wait's report is not left as the copier's last word.
+	if !strings.Contains(stderrB.String(), "took the mirror lock") {
+		t.Fatalf("second copier stderr = %q, want a note that it took over", stderrB.String())
+	}
 }
 
 func TestMirrorRejectsUnsafePaths(t *testing.T) {
@@ -512,6 +546,9 @@ func TestMirrorRejectsUnsafePaths(t *testing.T) {
 		"relative":            "log/events.jsonl",
 		"canonical directory": filepath.Join(filepath.Dir(canonical), "mirror.jsonl"),
 		"canonical file":      canonical,
+		// Deeper under .gc, which the shipper can never read.
+		"under the canonical directory": filepath.Join(filepath.Dir(canonical), "export", "events.jsonl"),
+		"the canonical directory":       filepath.Dir(canonical),
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stderr lockedBuffer
@@ -544,5 +581,433 @@ func TestLastSeqInFileSkipsTornTail(t *testing.T) {
 	}
 	if got, err := lastSeqInFile(filepath.Join(t.TempDir(), "absent")); err != nil || got != 0 {
 		t.Fatalf("lastSeqInFile(absent) = %d, %v; want 0, nil", got, err)
+	}
+}
+
+// TestMirrorCloseCopiesTheTail pins that Close lets the copier catch up: the
+// events recorded just before Close (a run's last ones, controller.stopped
+// among them) reach the mirror in that run, whether the copier had not begun
+// tailing yet or was waiting between two polls of the canonical log.
+func TestMirrorCloseCopiesTheTail(t *testing.T) {
+	for name, betweenPolls := range map[string]bool{
+		"copier still starting": false,
+		"copier between polls":  true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			canonical, mirrorDir := mirrorTestDirs(t)
+			mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+			probe := newMirrorProbe()
+			r, err := NewFileRecorder(canonical, io.Discard, WithMirror(probe.opts(mirrorPath)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if betweenPolls {
+				recordMirrorN(t, r, 1, 2)
+				probe.waitWrote(t, 2)
+				recordMirrorN(t, r, 3, 1)
+			} else {
+				recordMirrorN(t, r, 1, 3)
+			}
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if got := fileSeqs(t, mirrorPath); !equalSeqs(got, mirrorSeqRange(1, 3)) || !equalSeqs(got, fileSeqs(t, canonical)) {
+				t.Fatalf("mirror seqs right after Close = %v, want the canonical log's 1..3", got)
+			}
+		})
+	}
+}
+
+// TestMirrorCloseCopiesAnUnanchoredRotation pins the stop drain across a
+// rotation that renamed the canonical log and then failed to write its anchor:
+// the events the copier lacks sit only in the rotating-* file and the active
+// log is empty, and Close must still let the copier copy them. It runs in a
+// synctest bubble so the copier lags deterministically: it sleeps until its
+// next poll of the log, and the bubble's clock stands still while the test
+// records, rotates and calls Close.
+func TestMirrorCloseCopiesAnUnanchoredRotation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		canonical, mirrorDir := mirrorTestDirs(t)
+		mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+		probe := newMirrorProbe()
+		r, err := NewFileRecorder(canonical, io.Discard, WithMirror(probe.opts(mirrorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close() //nolint:errcheck // stops the copier if the test fails early
+		recordMirrorN(t, r, 1, 1)
+		probe.waitWrote(t, 1)
+		synctest.Wait() // the copier sleeps until its next poll
+		recordMirrorN(t, r, 2, 2)
+
+		// The rotation renames the log and reopens it, but the fresh log's
+		// handle cannot write, so the anchor fails as it would on a full disk.
+		restore := openEventLog
+		stubOpenEventLog(t, func(path string) (*os.File, error) {
+			openEventLog = restore
+			return os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644)
+		})
+		if _, err := r.ForceRotate(); err == nil || !strings.Contains(err.Error(), "anchor") {
+			t.Fatalf("ForceRotate = %v, want its anchor write to fail", err)
+		}
+
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if got := fileSeqs(t, mirrorPath); !equalSeqs(got, mirrorSeqRange(1, 3)) {
+			t.Fatalf("mirror seqs right after Close = %v, want 1..3, the last two copied from the rotating file", got)
+		}
+	})
+}
+
+// TestMirrorCloseIsBoundedWhileTheCopierIsBlocked pins that Close does not
+// wait without bound for a copier stuck in a system call (a write to a hung
+// network filesystem): it gives up on the catch-up and then on the exit after
+// StopTimeout each, says so, and returns.
+func TestMirrorCloseIsBoundedWhileTheCopierIsBlocked(t *testing.T) {
+	canonical, mirrorDir := mirrorTestDirs(t)
+	var stderr lockedBuffer
+	blocked, release, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var block sync.Once
+	opts := fastMirror(filepath.Join(mirrorDir, "events.jsonl"))
+	opts.StopTimeout = 50 * time.Millisecond
+	opts.Observe = func(step MirrorProgress) {
+		switch step.Kind {
+		case MirrorWatching:
+			// Stands in for a system call that does not return: the copier
+			// holds the mirror lock and makes no progress until released.
+			block.Do(func() {
+				close(blocked)
+				<-release
+			})
+		case MirrorStopped:
+			close(stopped)
+		}
+	}
+	r, err := NewFileRecorder(canonical, &stderr, WithMirror(opts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitClosed(t, blocked, "the tailing copier's signal")
+	recordMirrorN(t, r, 1, 1)
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close is still waiting on a blocked copier")
+	}
+	for _, want := range []string{"stopping before it copied seq 1", "still blocked"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	// The copier exits on its own once its system call returns.
+	close(release)
+	waitClosed(t, stopped, "the released copier's exit signal")
+}
+
+// TestMirrorRefusesUnsafeFiles pins that the copier writes only a regular
+// file with no other name. Neither a symbolic link nor a hard link at the
+// mirror path lets whoever can write the mirror's directory have gc chmod and
+// append to another file, the canonical log included; a FIFO blocks neither
+// the copier nor Close. Each is a failure the copier reports and retries, and
+// nothing is removed.
+func TestMirrorRefusesUnsafeFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		place   func(canonical, victim, mirrorPath string) error
+		wantErr string
+	}{
+		{
+			name:    "symlink to the canonical log",
+			place:   func(canonical, _, mirrorPath string) error { return os.Symlink(canonical, mirrorPath) },
+			wantErr: "symbolic link",
+		},
+		{
+			name:    "symlink to another file",
+			place:   func(_, victim, mirrorPath string) error { return os.Symlink(victim, mirrorPath) },
+			wantErr: "symbolic link",
+		},
+		{
+			name:    "hard link to the canonical log",
+			place:   func(canonical, _, mirrorPath string) error { return os.Link(canonical, mirrorPath) },
+			wantErr: "canonical event log",
+		},
+		{
+			name:    "hard link to another file",
+			place:   func(_, victim, mirrorPath string) error { return os.Link(victim, mirrorPath) },
+			wantErr: "hard links",
+		},
+		{
+			name:    "FIFO",
+			place:   func(_, _, mirrorPath string) error { return syscall.Mkfifo(mirrorPath, 0o600) },
+			wantErr: "not a regular file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			canonical, mirrorDir := mirrorTestDirs(t)
+			mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+			plainRecordN(t, canonical, 2)
+			// A file of the city's user that the mirror must never touch.
+			victim := filepath.Join(t.TempDir(), "secret")
+			if err := os.WriteFile(victim, []byte("do not touch\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.place(canonical, victim, mirrorPath); err != nil {
+				t.Fatal(err)
+			}
+			canonBefore, err := os.Stat(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			probe := newMirrorProbe()
+			r, err := NewFileRecorder(canonical, io.Discard, WithMirror(probe.opts(mirrorPath)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			recordMirrorN(t, r, 3, 1)
+			if got := probe.waitKind(t, MirrorFailed); !strings.Contains(got.Err.Error(), tc.wantErr) {
+				t.Fatalf("copier failed with %v, want an error naming %q", got.Err, tc.wantErr)
+			}
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := fileSeqs(t, canonical); !equalSeqs(got, mirrorSeqRange(1, 3)) {
+				t.Fatalf("canonical seqs = %v, want 1..3 once each", got)
+			}
+			canonAfter, err := os.Stat(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if canonAfter.Mode() != canonBefore.Mode() {
+				t.Fatalf("canonical log mode = %v, want it unchanged at %v", canonAfter.Mode(), canonBefore.Mode())
+			}
+			if data, err := os.ReadFile(victim); err != nil || string(data) != "do not touch\n" {
+				t.Fatalf("victim file = %q (err %v), want it untouched", data, err)
+			}
+			victimInfo, err := os.Stat(victim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if victimInfo.Mode().Perm() != 0o600 {
+				t.Fatalf("victim mode = %v, want 0600", victimInfo.Mode())
+			}
+			if _, err := os.Lstat(mirrorPath); err != nil {
+				t.Fatalf("what was at the mirror path is gone: %v", err)
+			}
+		})
+	}
+}
+
+// TestMirrorResumesFromTheRotatedFile pins the resume fallback: a restart that
+// finds the mirror empty, because it was just rotated, continues after the
+// last event in <path>.1 instead of at the canonical log's tail.
+func TestMirrorResumesFromTheRotatedFile(t *testing.T) {
+	canonical, mirrorDir := mirrorTestDirs(t)
+	mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+	plainRecordN(t, canonical, 5)
+	// The previous run mirrored 1..3, then the mirror was rotated.
+	if err := os.WriteFile(mirrorPath+".1", []byte(strings.Join(fileLines(t, canonical)[:3], "\n")+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mirrorPath, nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := newMirrorProbe()
+	r, err := NewFileRecorder(canonical, io.Discard, WithMirror(probe.opts(mirrorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close() //nolint:errcheck
+	if got := probe.waitKind(t, MirrorWatching); got.Seq != 3 {
+		t.Fatalf("copier resumed after seq %d, want 3 (the last in %s.1)", got.Seq, mirrorPath)
+	}
+	probe.waitWrote(t, 5)
+	if got := fileSeqs(t, mirrorPath); !equalSeqs(got, mirrorSeqRange(4, 5)) {
+		t.Fatalf("mirror seqs = %v, want 4..5", got)
+	}
+}
+
+// TestMirrorFollowsARestartedCanonicalLog pins the resume cap: when the
+// canonical log restarted its seqs below the mirror's last (it was removed and
+// recreated), the copier follows it from its tail instead of waiting for a seq
+// past the mirror's.
+func TestMirrorFollowsARestartedCanonicalLog(t *testing.T) {
+	canonical, mirrorDir := mirrorTestDirs(t)
+	mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+	plainRecordN(t, canonical, 5)
+	data, err := os.ReadFile(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mirrorPath, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(canonical); err != nil {
+		t.Fatal(err)
+	}
+	plainRecordN(t, canonical, 2)
+	if got := fileSeqs(t, canonical); !equalSeqs(got, mirrorSeqRange(1, 2)) {
+		t.Fatalf("recreated canonical seqs = %v, want them restarted at 1..2", got)
+	}
+
+	probe := newMirrorProbe()
+	r, err := NewFileRecorder(canonical, io.Discard, WithMirror(probe.opts(mirrorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close() //nolint:errcheck
+	if got := probe.waitKind(t, MirrorWatching); got.Seq != 2 {
+		t.Fatalf("copier resumed after seq %d, want 2 (the canonical tail)", got.Seq)
+	}
+	recordMirrorN(t, r, 3, 1)
+	probe.waitWrote(t, 3)
+	if got := fileSeqs(t, mirrorPath); !equalSeqs(got, append(mirrorSeqRange(1, 5), 3)) {
+		t.Fatalf("mirror seqs = %v, want 1..5 then the restarted log's 3", got)
+	}
+}
+
+// TestMirrorResumesInsideAnUnanchoredRotation pins the resume point while a
+// rotation's window sits only in its rotating-* file, the canonical log
+// renamed and its anchor never written. A copier that starts then, as one
+// retrying after a failure does, continues after the mirror's last event: it
+// neither copies the window again nor skips the part of it the mirror lacks.
+func TestMirrorResumesInsideAnUnanchoredRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		holds int // the mirror already holds seqs 1..holds
+	}{
+		{name: "mirror holds the window", holds: 3},
+		{name: "mirror lags the window", holds: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			canonical, mirrorDir := mirrorTestDirs(t)
+			mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+			plainRecordN(t, canonical, 3)
+			lines := fileLines(t, canonical)
+			if err := os.WriteFile(mirrorPath, []byte(strings.Join(lines[:tc.holds], "\n")+"\n"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			renameWithoutAnchor(t, canonical, 1, 3, true)
+
+			// No startup sweep: it would archive the rotating file, as the
+			// owner's restart does, and so close the window.
+			probe := newMirrorProbe()
+			r, err := NewFileRecorder(canonical, io.Discard, WithMaxSize(0), WithoutStartupSweep(), WithMirror(probe.opts(mirrorPath)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close() //nolint:errcheck
+			if got := probe.waitKind(t, MirrorWatching); got.Seq != uint64(tc.holds) {
+				t.Fatalf("copier resumed after seq %d, want %d (the mirror's last)", got.Seq, tc.holds)
+			}
+			recordMirrorN(t, r, 4, 1)
+			probe.waitWrote(t, 4)
+			if got := fileSeqs(t, mirrorPath); !equalSeqs(got, mirrorSeqRange(1, 4)) {
+				t.Fatalf("mirror seqs = %v, want 1..4 once each", got)
+			}
+		})
+	}
+}
+
+// TestMirrorTerminatesATornLine pins that a mirror whose last line was cut
+// short (a write interrupted by a crash) gets a newline before the next event,
+// so that event lands on its own parseable line.
+func TestMirrorTerminatesATornLine(t *testing.T) {
+	canonical, mirrorDir := mirrorTestDirs(t)
+	mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+	plainRecordN(t, canonical, 3)
+	lines := fileLines(t, canonical)
+	torn := lines[1][:len(lines[1])/2]
+	if err := os.WriteFile(mirrorPath, []byte(lines[0]+"\n"+torn), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := newMirrorProbe()
+	r, err := NewFileRecorder(canonical, io.Discard, WithMirror(probe.opts(mirrorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := probe.waitKind(t, MirrorWatching); got.Seq != 1 {
+		t.Fatalf("copier resumed after seq %d, want 1 (the last complete line)", got.Seq)
+	}
+	probe.waitWrote(t, 3)
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{lines[0], torn, lines[1], lines[2]}
+	if got := fileLines(t, mirrorPath); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("mirror lines =\n%s\nwant the torn line closed and each event on its own line:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestMirrorWriteFailureIsReportedOnce pins the failure report for a mirror
+// that opens but cannot be written (here its rotation fails, because a
+// directory stands at <path>.1; a full disk behaves the same): it is reported
+// once per LogInterval with no false "recovered" at each retry's open, and
+// "recovered" comes once a write succeeds.
+func TestMirrorWriteFailureIsReportedOnce(t *testing.T) {
+	canonical, mirrorDir := mirrorTestDirs(t)
+	mirrorPath := filepath.Join(mirrorDir, "events.jsonl")
+	plainRecordN(t, canonical, 2)
+	// The mirror holds seq 1, so the copier resumes from it and its next
+	// write, of seq 2, must rotate the mirror first.
+	if err := os.WriteFile(mirrorPath, []byte(fileLines(t, canonical)[0]+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mirrorPath+".1", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	var stderr lockedBuffer
+	probe := newMirrorProbe()
+	opts := probe.opts(mirrorPath)
+	opts.MaxSize = 1
+	r, err := NewFileRecorder(canonical, &stderr, WithMirror(opts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close() //nolint:errcheck
+
+	// Each retry opens the mirror and watches the log, then fails to write.
+	for i := 0; i < 5; i++ {
+		if got := probe.waitKind(t, MirrorFailed); !strings.Contains(got.Err.Error(), "rotating") {
+			t.Fatalf("copier failed with %v, want the rotation's failure", got.Err)
+		}
+	}
+	if n := strings.Count(stderr.String(), "retrying every"); n != 1 {
+		t.Fatalf("stderr reported the failure %d times, want once (rate-limited):\n%s", n, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "recovered") {
+		t.Fatalf("stderr reports a recovery while every write fails:\n%s", stderr.String())
+	}
+
+	if err := os.Remove(mirrorPath + ".1"); err != nil {
+		t.Fatal(err)
+	}
+	probe.waitWrote(t, 2)
+	if n := strings.Count(stderr.String(), "recovered"); n != 1 {
+		t.Fatalf("stderr reported the recovery %d times, want once:\n%s", n, stderr.String())
+	}
+}
+
+// TestMirrorChmodWarningIsRateLimited pins that a chmod the copier cannot make
+// (a pre-created file another user owns) is warned about once per
+// LogInterval, not at every reopen.
+func TestMirrorChmodWarningIsRateLimited(t *testing.T) {
+	var stderr lockedBuffer
+	m := &eventMirror{opts: MirrorOptions{Path: "/var/log/gascity/hq/events.jsonl", Mode: 0o640, LogInterval: time.Hour}, stderr: &stderr}
+	for i := 0; i < 3; i++ {
+		m.warnChmod(os.ErrPermission)
+	}
+	if n := strings.Count(stderr.String(), "chmod 0640"); n != 1 {
+		t.Fatalf("stderr warned about the chmod %d times, want once:\n%s", n, stderr.String())
 	}
 }

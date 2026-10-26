@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 func TestEventsMirrorOptionsUnsetAddsNothing(t *testing.T) {
@@ -263,4 +267,151 @@ func otherGroupForTest(t *testing.T) int {
 	}
 	t.Skip("process has no supplementary group to test setgid inheritance with")
 	return 0
+}
+
+// TestSupervisorClosesTheCityRecorderWhenTheRuntimeFails pins that a city
+// whose runtime cannot be built (city_runtime_failed) closes the recorder it
+// opened. Left open, that rotation owner's [events.mirror] copier would hold
+// the mirror lock for the life of the supervisor, and every retry's copier,
+// including the one that would apply a corrected [events.mirror], would wait
+// on it.
+func TestSupervisorClosesTheCityRecorderWhenTheRuntimeFails(t *testing.T) {
+	reg, cityPath := newWedgedInitCity(t)
+	mirrorPath := filepath.Join(t.TempDir(), "events.jsonl")
+	cityTOML, err := os.OpenFile(filepath.Join(cityPath, "city.toml"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(cityTOML, "\n[events.mirror]\npath = %q\n", mirrorPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := cityTOML.Close(); err != nil {
+		t.Fatal(err)
+	}
+	steps := observeEventsMirror(t)
+
+	cr := newCityRegistry()
+	var stdout, stderr bytes.Buffer
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	if count := initFailureCount(cr, canonicalTestPath(cityPath)); count != 1 {
+		t.Fatalf("init failure count = %d, want 1: the city must fail inside newCityRuntime (stderr: %s)", count, stderr.String())
+	}
+
+	// Close waits for the copier to exit, so a closed recorder's copier has
+	// already reported its last step.
+	requireMirrorStopped(t, steps, "the failed city's", &stderr)
+}
+
+// TestSupervisorClosesTheRecorderOfACityCanceledInPlace pins that a city
+// canceled in place, as its controller socket's stop and stop-force cancel it,
+// closes its recorder when it exits. No stop removed such a city from the
+// registry, so none closes the recorder through mc.closer; left open, its
+// [events.mirror] copier would hold the mirror lock for the life of the
+// supervisor, and the restarted city's copier would wait on it.
+func TestSupervisorClosesTheRecorderOfACityCanceledInPlace(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := shortSocketTempDir(t, "gc-mirror-city-")
+	cleanupManagedDoltTestCity(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mirrorPath := filepath.Join(t.TempDir(), "events.jsonl")
+	cityToml := fmt.Sprintf(`[workspace]
+name = "mirror-city"
+
+[orders]
+skip = ["beads-health", "cross-rig-deps", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
+
+[session]
+provider = "fake"
+
+[daemon]
+shutdown_timeout = "100ms"
+
+[events.mirror]
+path = %q
+`, mirrorPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := writeSpyScript(t, filepath.Join(t.TempDir(), "ops.log"))
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "mirror-city"); err != nil {
+		t.Fatal(err)
+	}
+	steps := observeEventsMirror(t)
+
+	cr := newCityRegistry()
+	path := canonicalTestPath(cityPath)
+	// The started city keeps logging while this test reads.
+	var stdout, stderr lockedBuffer
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	t.Cleanup(func() {
+		if done := cr.CancelCity(path); done != nil {
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				t.Error("city goroutine did not exit in time")
+			}
+		}
+	})
+	waitMirrorWatching(t, steps, &stderr)
+
+	done := cr.CancelCity(path)
+	if done == nil {
+		t.Fatalf("the city is not running (stderr: %s)", stderr.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the city canceled in place did not exit (stderr: %s)", stderr.String())
+	}
+	// The city closes its recorder before it reports done.
+	requireMirrorStopped(t, steps, "the canceled city's", &stderr)
+
+	// The city is still registered, so the next reconcile restarts it, and
+	// its copier takes the mirror lock instead of waiting on it.
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	waitMirrorWatching(t, steps, &stderr)
+}
+
+// requireMirrorStopped fails unless a mirror copier has already reported its
+// last step, MirrorStopped. whose names the copier's city in the failure.
+func requireMirrorStopped(t *testing.T, steps <-chan events.MirrorProgress, whose string, stderr fmt.Stringer) {
+	t.Helper()
+	var seen []events.MirrorProgressKind
+	for {
+		select {
+		case step := <-steps:
+			if step.Kind == events.MirrorStopped {
+				return
+			}
+			seen = append(seen, step.Kind)
+		default:
+			t.Fatalf("%s mirror copier is still running (steps so far %v): its recorder was never closed\nstderr: %s", whose, seen, stderr)
+		}
+	}
+}
+
+// waitMirrorWatching waits for a mirror copier to start tailing the canonical
+// log, failing if one reports a failure first.
+func waitMirrorWatching(t *testing.T, steps <-chan events.MirrorProgress, stderr fmt.Stringer) {
+	t.Helper()
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case step := <-steps:
+			switch step.Kind {
+			case events.MirrorWatching:
+				return
+			case events.MirrorFailed:
+				t.Fatalf("the mirror copier failed: %v\nstderr: %s", step.Err, stderr)
+			}
+		case <-deadline.C:
+			t.Fatalf("no mirror copier started tailing the event log\nstderr: %s", stderr)
+		}
+	}
 }

@@ -983,6 +983,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		if frErr == nil {
 			recorder = fr
 			eventProv = fr
+			// Closed before the controller lock is released: Close lets the
+			// [events.mirror] copier catch up, so the mirror gets this run's
+			// last events, controller.stopped included.
+			defer fr.Close() //nolint:errcheck // best-effort at exit
 		}
 	}
 
