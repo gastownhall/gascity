@@ -280,3 +280,41 @@ func TestManagedRuntimeListenerPIDReadsProcTables(t *testing.T) {
 		})
 	}
 }
+
+// TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcTables pins the
+// path for hosts without procfs TCP tables (darwin): lsof answers, and its
+// first pid that pid_is_running confirms is the listener.
+func TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcTables(t *testing.T) {
+	fakeBin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "lsof-ran")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+echo not-a-pid
+echo %d
+`, shellQuote(marker), os.Getpid()))
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", "-c",
+		`. "$GC_PACK_DIR/assets/scripts/runtime.sh"; managed_runtime_listener_pid 4406`)
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "GC_DOLT_PROC_ROOT", "PATH"),
+		"GC_CITY_PATH="+t.TempDir(),
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_PORT=4406",
+		"GC_DOLT_PROC_ROOT="+t.TempDir(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("managed_runtime_listener_pid: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("managed_runtime_listener_pid = %q, want lsof's live pid %q", got, want)
+	}
+	args, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("lsof did not run without proc TCP tables: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(args)), "-nP -t -iTCP:4406 -sTCP:LISTEN"; got != want {
+		t.Fatalf("lsof args = %q, want %q", got, want)
+	}
+}
