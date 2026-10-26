@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -657,6 +658,90 @@ func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
 	}
 	if want := 2 * perBuild; store.listByAssigneeCalls != want {
 		t.Fatalf("assignee lookups after second blocking request = %d, want %d (blocking must bypass the cache)", store.listByAssigneeCalls, want)
+	}
+}
+
+// pinAgentListCacheWide holds every agent-list cache tier open for the test,
+// so a list the handler stored would deterministically be served again.
+func pinAgentListCacheWide(t *testing.T) {
+	t.Helper()
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+}
+
+func decodeAgentList(t *testing.T, rec *httptest.ResponseRecorder) agentListWire {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /agents status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp agentListWire
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode agents: %v", err)
+	}
+	return resp
+}
+
+// TestHandleAgentListDoesNotCachePartialList pins that a partial list, which
+// reflects a transient backend failure, is never served from the cache once
+// the backend recovers, even with no event or config change in between.
+func TestHandleAgentListDoesNotCachePartialList(t *testing.T) {
+	pinAgentListCacheWide(t)
+
+	state := onDemandPoolState(t)
+	h := newTestCityHandlerWith(t, state, New(state))
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+
+	// SessionProvider() re-reads state.sp per request, and the config
+	// generation is unchanged, so both requests compute the same key.
+	good := state.sp
+	state.sp = runtime.NewFailFake()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if resp := decodeAgentList(t, rec); !resp.Partial {
+		t.Fatalf("Partial = false with a failing session provider, want true; items = %+v", resp.Items)
+	}
+
+	state.sp = good
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	resp := decodeAgentList(t, rec)
+	if resp.Partial {
+		t.Fatalf("Partial = true after the provider recovered, want false (a partial list must not be cached); errors = %q", resp.PartialErrors)
+	}
+	if _, ok := agentByNameIn(resp.Items, "myrig/claude"); !ok {
+		t.Fatalf("myrig/claude missing after the provider recovered; items = %+v", resp.Items)
+	}
+}
+
+// TestHandleAgentListPeekBypassesCache pins that ?peek=true always reads live
+// pane output instead of a cached list.
+func TestHandleAgentListPeekBypassesCache(t *testing.T) {
+	pinAgentListCacheWide(t)
+
+	state := newFakeState(t)
+	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatalf("start myrig--worker: %v", err)
+	}
+	h := newTestCityHandlerWith(t, state, New(state))
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?peek=true"), nil)
+
+	for _, want := range []string{"one", "two"} {
+		state.sp.SetPeekOutput("myrig--worker", want)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		worker, ok := agentByNameIn(decodeAgentList(t, rec).Items, "myrig/worker")
+		if !ok {
+			t.Fatal("myrig/worker missing from the peek list")
+		}
+		if worker.LastOutput != want {
+			t.Fatalf("last_output = %q, want %q (?peek=true must not be served from the cache)", worker.LastOutput, want)
+		}
 	}
 }
 
