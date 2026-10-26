@@ -613,11 +613,14 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 //
 // On bd, --ready alongside --status in_progress needs bd 1.3.1 (beads #5924):
 // older bd forces status open under --ready, and this tier would serve open
-// rows and never an in_progress one. That bd also excludes deferred beads and
-// children of a blocked or deferred parent, the same set `bd ready` excludes.
-// The federated reader computes blocked_by itself (cmd/gc/cmd_ready.go). Both
-// sit behind [beads] bd_list_ready_status so that, unset, every generated query
-// is byte-identical to the one already deployed.
+// rows and never an in_progress one. bd's --ready also drops deferred and
+// pinned beads and children of a blocked or deferred parent, the same set
+// `bd ready` excludes, so those in_progress beads leave this tier too. The
+// federated reader (gc ready --ready, cmd/gc/cmd_ready.go) filters direct
+// blockers only: it drops a row with a non-closed blocker and keeps deferred,
+// pinned and parent-blocked rows. Both sit behind [beads]
+// bd_list_ready_status so that, unset, every generated query is
+// byte-identical to the one already deployed.
 func inProgressWorkableFilterArgs(topo QueryTopology) string {
 	if !topo.Beads.UsesBDListReadyStatus() {
 		return ""
