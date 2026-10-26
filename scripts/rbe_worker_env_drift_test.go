@@ -851,6 +851,15 @@ func TestBazelLaneWorkerEnvStepStaleBase(t *testing.T) {
 	git(seed, "checkout", "--quiet", "main")
 	s1 := commit(seed, "S1", map[string]string{"platforms/BUILD.bazel": buildWithPin(p1), "tools/rbe/worker-env.txt": "p1\n"})
 	git(seed, "push", "--quiet", "origin", "main", "pr:pr", "repin:repin")
+	// A commit with no platforms/BUILD.bazel at all, and a PR on it that adds
+	// the file: the merged-onto file is absent at an existing commit, which
+	// reads as an empty file and not as a read error.
+	git(seed, "checkout", "--quiet", "-b", "nofile", s0)
+	git(seed, "rm", "--quiet", "platforms/BUILD.bazel")
+	sNoFile := commit(seed, "S-nofile", map[string]string{"README.md": "no platforms file\n"})
+	git(seed, "checkout", "--quiet", "-b", "addfile")
+	hAddFile := commit(seed, "H-addfile", map[string]string{"platforms/BUILD.bazel": buildWithPin(p0)})
+	git(seed, "push", "--quiet", "origin", "nofile:nofile", "addfile:addfile")
 
 	// checkout makes a fresh clone whose tree is head merged onto onto (or
 	// onto alone), as fresh-merge (or a push event's checkout) leaves it.
@@ -879,6 +888,7 @@ func TestBazelLaneWorkerEnvStepStaleBase(t *testing.T) {
 		{name: "push event, no base-sha", onto: s0, mode: "remote", moved: "true", measure: "true", wantOut: "::warning title=rbe worker-env pin moved::"},
 		{name: "a PR that re-pins", onto: s0, head: h2, baseSHA: s0, mode: "remote", moved: "true", measure: "true", wantOut: "::warning title=rbe worker-env pin moved::"},
 		{name: "base-sha is not a commit", onto: s0, head: h, baseSHA: strings.Repeat("ab", 20), mode: "remote", fail: true},
+		{name: "file absent at base-sha is empty", onto: sNoFile, head: hAddFile, baseSHA: sNoFile, mode: "remote", moved: "true", measure: "true", wantOut: "::warning title=rbe worker-env pin moved::"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := checkout(tc.onto, tc.head)
