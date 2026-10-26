@@ -612,6 +612,10 @@ the runtime's state cache has gone stale. While it is open, automatic starts
 are limited to a probe at a time until a started session stays up. User
 initiated starts (attach, new, nudge) are never gated.
 
+The breaker guards the legacy session reconciler only. A city that runs the
+v2 reconciler is not covered: its starts are never gated, and these commands
+say the breaker does not apply.
+
 The breaker is in-memory in the running controller, so these commands need a
 running controller. Disable it with [daemon] fleet_start_breaker = false.
 

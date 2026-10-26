@@ -43,6 +43,29 @@ func TestSortCandidatesByFleetProbeRotation(t *testing.T) {
 	}
 }
 
+// Failures that count toward a trip but have not tripped the breaker yet are
+// already in the guard's attempt counts. A closed breaker must still leave the
+// wake fairness order alone: the rotation is a probe-selection rule, not a
+// general penalty for sessions that failed once.
+func TestSortCandidatesByFleetProbeRotation_ClosedBreakerIgnoresPreTripFailures(t *testing.T) {
+	r := newFleetProbeRun(t, "")
+	failFleetStart(t, r.g, r.cands[0].info.ID, "w0")
+	failFleetStart(t, r.g, r.cands[1].info.ID, "w1")
+	if got := fleetState(r.g); got != resilience.StateClosed {
+		t.Fatalf("premise: state = %v, want closed (two failed sessions are below the trip)", got)
+	}
+	if got := r.g.episodeFailures(r.cands[0].info.ID); got != 1 {
+		t.Fatalf("premise: episodeFailures(w0) = %d, want 1", got)
+	}
+	cands := append([]startCandidate(nil), r.cands...)
+	sortCandidatesByFleetProbeRotation(cands, r.g)
+	for i, c := range cands {
+		if c.name() != r.cands[i].name() {
+			t.Fatalf("closed breaker reordered candidate %d: got %s, want %s", i, c.name(), r.cands[i].name())
+		}
+	}
+}
+
 // The failure count of an episode is reset when the breaker closes, and an
 // operator reset forgets it too, so a later episode starts even.
 func TestFleetGuard_EpisodeFailureCountsEndWithTheEpisode(t *testing.T) {

@@ -38,6 +38,13 @@ func fleetControlCity(t *testing.T, guard *fleetStartGuard) string {
 // controller socket the way the controller loop does.
 func serveFleetBreakerSocket(t *testing.T, cityDir string) {
 	t.Helper()
+	serveFleetBreakerSocketAs(t, cityDir, false)
+}
+
+// serveFleetBreakerSocketAs is serveFleetBreakerSocket for a controller that
+// latched the v2 session reconciler when runsV2 is set.
+func serveFleetBreakerSocketAs(t *testing.T, cityDir string, runsV2 bool) {
+	t.Helper()
 	startFakeUnixSocket(t, controllerSocketPath(cityDir), func(line string) string {
 		command, ok := strings.CutPrefix(line, fleetBreakerCommandPrefix)
 		if !ok {
@@ -46,7 +53,7 @@ func serveFleetBreakerSocket(t *testing.T, cityDir string) {
 		server, client := net.Pipe()
 		defer client.Close() //nolint:errcheck
 		go func() {
-			handleFleetBreakerSocketCmd(server, cityDir, command)
+			handleFleetBreakerSocketCmd(server, cityDir, command, runsV2)
 			server.Close() //nolint:errcheck
 		}()
 		reply, _ := io.ReadAll(client)
@@ -74,13 +81,21 @@ func openFleetGuard(t *testing.T) *fleetStartGuard {
 	return g
 }
 
-// fleetSocketReply runs handleFleetBreakerSocketCmd over a pipe.
+// fleetSocketReply runs handleFleetBreakerSocketCmd over a pipe, as a
+// controller that latched the legacy session reconciler.
 func fleetSocketReply(t *testing.T, cityDir, command string) fleetBreakerReply {
+	t.Helper()
+	return fleetSocketReplyAs(t, cityDir, command, false)
+}
+
+// fleetSocketReplyAs is fleetSocketReply for a controller that latched the v2
+// session reconciler when runsV2 is set.
+func fleetSocketReplyAs(t *testing.T, cityDir, command string, runsV2 bool) fleetBreakerReply {
 	t.Helper()
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
 	go func() {
-		handleFleetBreakerSocketCmd(server, cityDir, command)
+		handleFleetBreakerSocketCmd(server, cityDir, command, runsV2)
 		server.Close() //nolint:errcheck
 	}()
 	var reply fleetBreakerReply
@@ -213,6 +228,49 @@ func TestHandleFleetBreakerSocketCmd_ResetReportsThePostResetState(t *testing.T)
 	})
 }
 
+// The v2 session reconciler never consults the fleet start breaker, so a v2
+// controller must not answer as if it did: not "disabled" (the kill switch is
+// not off), not "closed" from a guard nothing reads, and a reset must not
+// pretend to clear one.
+func TestHandleFleetBreakerSocketCmd_V2ControllerReportsTheBreakerDoesNotApply(t *testing.T) {
+	t.Run("legacy replies name their mode", func(t *testing.T) {
+		dir := fleetControlCity(t, nil)
+		reply := fleetSocketReply(t, dir, fleetBreakerStatusCommand)
+		if reply.ReconcilerMode != reconcilerLegacy.String() || reply.unguardedByMode() {
+			t.Fatalf("legacy status with no guard = %+v, want reconciler_mode %q and a breaker that applies", reply, reconcilerLegacy)
+		}
+	})
+
+	t.Run("status without a guard", func(t *testing.T) {
+		dir := fleetControlCity(t, nil)
+		reply := fleetSocketReplyAs(t, dir, fleetBreakerStatusCommand, true)
+		if reply.Outcome != "ok" || reply.Enabled || reply.ReconcilerMode != reconcilerV2.String() || !reply.unguardedByMode() {
+			t.Fatalf("v2 status with no guard = %+v, want ok, not enabled, reconciler_mode %q", reply, reconcilerV2)
+		}
+	})
+
+	t.Run("status with a closed guard published", func(t *testing.T) {
+		g, _ := newFleetTestGuard(t)
+		dir := fleetControlCity(t, g)
+		reply := fleetSocketReplyAs(t, dir, fleetBreakerStatusCommand, true)
+		if reply.Enabled || reply.State != "" || !reply.unguardedByMode() {
+			t.Fatalf("v2 status with a published guard = %+v, want the guard not reported: no controller path reads it", reply)
+		}
+	})
+
+	t.Run("reset leaves the guard alone", func(t *testing.T) {
+		g := openFleetGuard(t)
+		dir := fleetControlCity(t, g)
+		reply := fleetSocketReplyAs(t, dir, fleetBreakerResetCommand, true)
+		if reply.Outcome != "ok" || reply.Enabled || reply.WasOpen || !reply.unguardedByMode() {
+			t.Fatalf("v2 reset = %+v, want ok, not enabled, not was_open, reconciler_mode %q", reply, reconcilerV2)
+		}
+		if got := fleetState(g); got != resilience.StateOpen {
+			t.Fatalf("guard after a v2 reset = %v, want it untouched (open): the reply must not claim a clear that did not happen", got)
+		}
+	})
+}
+
 func TestFleetBreakerReplyDescribe(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -275,6 +333,23 @@ func TestCmdBreakerStatus(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "disabled ([daemon] fleet_start_breaker = false)") {
 			t.Fatalf("stdout = %q, want the kill-switch line", stdout.String())
+		}
+	})
+
+	t.Run("v2 controller", func(t *testing.T) {
+		g, _ := newFleetTestGuard(t)
+		dir := fleetControlCity(t, g)
+		serveFleetBreakerSocketAs(t, dir, true)
+		var stdout, stderr bytes.Buffer
+		if rc := cmdBreakerStatus(false, &stdout, &stderr); rc != 0 {
+			t.Fatalf("cmdBreakerStatus = %d (stderr %q), want 0", rc, stderr.String())
+		}
+		got := stdout.String()
+		if !strings.Contains(got, "not applicable") || !strings.Contains(got, "v2") {
+			t.Fatalf("stdout = %q, want a line saying the breaker does not apply to the v2 reconciler", got)
+		}
+		if strings.Contains(got, "disabled") || strings.Contains(got, "closed") {
+			t.Fatalf("stdout = %q, must not read as disabled (the kill switch is on) or closed (nothing consults it)", got)
 		}
 	})
 
@@ -343,6 +418,23 @@ func TestCmdBreakerReset(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "disabled; nothing to reset") {
 			t.Fatalf("stdout = %q, want the disabled line", stdout.String())
+		}
+	})
+
+	t.Run("v2 controller", func(t *testing.T) {
+		g := openFleetGuard(t)
+		dir := fleetControlCity(t, g)
+		serveFleetBreakerSocketAs(t, dir, true)
+		var stdout, stderr bytes.Buffer
+		if rc := cmdBreakerReset(&stdout, &stderr); rc != 0 {
+			t.Fatalf("cmdBreakerReset = %d (stderr %q), want 0", rc, stderr.String())
+		}
+		got := stdout.String()
+		if !strings.Contains(got, "not applicable") || !strings.Contains(got, "v2") {
+			t.Fatalf("stdout = %q, want a line saying there is nothing to reset on the v2 reconciler", got)
+		}
+		if strings.Contains(got, "resumed") || strings.Contains(got, "disabled") || strings.Contains(got, "already closed") {
+			t.Fatalf("stdout = %q, must not claim a reset, a disabled breaker or a closed one", got)
 		}
 	})
 
@@ -493,6 +585,27 @@ func TestFleetBreakerDoctorCheck_Run(t *testing.T) {
 		}
 	})
 
+	t.Run("v2 city is not reported closed", func(t *testing.T) {
+		var asked string
+		c := &fleetBreakerDoctorCheck{
+			query: func(string) (fleetBreakerReply, error) {
+				t.Fatal("the check queried a breaker the v2 reconciler does not use")
+				return fleetBreakerReply{}, nil
+			},
+			runsV2: func(cityPath string, _ *config.City) bool { asked = cityPath; return true },
+		}
+		r := c.Run(ctx)
+		if asked != ctx.CityPath {
+			t.Fatalf("runsV2 asked about %q, want the city under check %q", asked, ctx.CityPath)
+		}
+		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "not applicable") || !strings.Contains(r.Message, "v2") {
+			t.Fatalf("Run = %+v, want OK and not applicable to v2", r)
+		}
+		if strings.Contains(r.Message, "closed") {
+			t.Fatalf("Run message = %q, must not report a breaker nothing consults as closed", r.Message)
+		}
+	})
+
 	t.Run("closed breaker is fine", func(t *testing.T) {
 		c := &fleetBreakerDoctorCheck{query: reply("closed", "")}
 		r := c.Run(ctx)
@@ -503,6 +616,9 @@ func TestFleetBreakerDoctorCheck_Run(t *testing.T) {
 
 	t.Run("static surface", func(t *testing.T) {
 		c := newFleetBreakerDoctorCheck(nil)
+		if c.runsV2 == nil {
+			t.Fatal("newFleetBreakerDoctorCheck left runsV2 unset: gc doctor would report the breaker closed on a v2 city")
+		}
 		if c.Name() != "fleet-start-breaker" || c.CanFix() || c.WarmupEligible() || c.Fix(nil) != nil {
 			t.Fatalf("check surface = (%q, canfix %v, warmup %v), want fleet-start-breaker, no fix, not warmup eligible", c.Name(), c.CanFix(), c.WarmupEligible())
 		}

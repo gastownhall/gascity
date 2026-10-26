@@ -2965,9 +2965,10 @@ type DaemonConfig struct {
 	// FleetStartBreaker controls the fleet start breaker: when automatic
 	// session starts keep failing across several sessions and templates, the
 	// controller pauses automatic starts, probes with one start at a time, and
-	// resumes once a probe's session stays alive. Default: ENABLED. Set false
-	// to restore unguarded automatic starts. Read the effective value via
-	// FleetStartBreakerEnabled(), never the field.
+	// resumes once a probe's session stays alive. It guards the legacy session
+	// reconciler only; a city that runs the v2 reconciler is not covered.
+	// Default: ENABLED. Set false to restore unguarded automatic starts. Read
+	// the effective value via FleetStartBreakerEnabled(), never the field.
 	FleetStartBreaker *bool `toml:"fleet_start_breaker,omitempty" jsonschema:"default=true"`
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated

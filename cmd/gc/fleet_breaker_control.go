@@ -28,8 +28,13 @@ const (
 type fleetBreakerReply struct {
 	Outcome string `json:"outcome"`
 	Error   string `json:"error,omitempty"`
-	// Enabled is false when the kill switch is off or the controller runs no
-	// guard; the remaining fields are then zero.
+	// ReconcilerMode names the session reconciler the controller latched. The
+	// breaker guards the legacy reconciler only, so a v2 reply is never
+	// Enabled and never reports a state.
+	ReconcilerMode string `json:"reconciler_mode,omitempty"`
+	// Enabled is false when the kill switch is off, the controller runs no
+	// guard, or the controller latched the v2 reconciler; the remaining fields
+	// are then zero.
 	Enabled       bool   `json:"enabled"`
 	State         string `json:"state,omitempty"`
 	Reason        string `json:"reason,omitempty"`
@@ -70,36 +75,49 @@ func publishedFleetGuard(cityPath string) *fleetStartGuard {
 	return fleetGuardDirectory.guards[normalizePathForCompare(cityPath)]
 }
 
-// fleetBreakerReplyFor reads guard's status into a reply. A nil guard replies
-// disabled.
-func fleetBreakerReplyFor(guard *fleetStartGuard) fleetBreakerReply {
+// unguardedByMode reports that the replying controller latched the v2 session
+// reconciler, which never consults the breaker.
+func (r fleetBreakerReply) unguardedByMode() bool {
+	return r.ReconcilerMode == reconcilerV2.String()
+}
+
+// fleetBreakerReplyFor reads guard's status into a reply. A controller that
+// latched the v2 reconciler replies not applicable, whatever guard is
+// published: nothing reads it. A nil guard otherwise replies disabled.
+func fleetBreakerReplyFor(guard *fleetStartGuard, runsV2 bool) fleetBreakerReply {
+	if runsV2 {
+		return fleetBreakerReply{Outcome: "ok", ReconcilerMode: reconcilerV2.String()}
+	}
 	if guard == nil {
-		return fleetBreakerReply{Outcome: "ok"}
+		return fleetBreakerReply{Outcome: "ok", ReconcilerMode: reconcilerLegacy.String()}
 	}
 	st := guard.Status()
 	return fleetBreakerReply{
-		Outcome:       "ok",
-		Enabled:       true,
-		State:         st.State.String(),
-		Reason:        st.Reason,
-		Trips:         st.Trips,
-		BackoffCapMs:  st.BackoffCap.Milliseconds(),
-		NextProbeAt:   traceTime(st.NextProbeAt),
-		OpenSince:     traceTime(st.OpenSince),
-		ProbeInFlight: st.ProbeInFlight,
+		Outcome:        "ok",
+		ReconcilerMode: reconcilerLegacy.String(),
+		Enabled:        true,
+		State:          st.State.String(),
+		Reason:         st.Reason,
+		Trips:          st.Trips,
+		BackoffCapMs:   st.BackoffCap.Milliseconds(),
+		NextProbeAt:    traceTime(st.NextProbeAt),
+		OpenSince:      traceTime(st.OpenSince),
+		ProbeInFlight:  st.ProbeInFlight,
 	}
 }
 
-// handleFleetBreakerSocketCmd serves one fleet breaker command. A reset queues
-// the close transition; the next reconcile tick emits its event and log line.
-func handleFleetBreakerSocketCmd(conn net.Conn, cityPath, command string) {
+// handleFleetBreakerSocketCmd serves one fleet breaker command; runsV2 is the
+// session reconciler the controller latched. A reset queues the close
+// transition; the next reconcile tick emits its event and log line. Under v2 a
+// reset clears nothing, since no guard is consulted.
+func handleFleetBreakerSocketCmd(conn net.Conn, cityPath, command string, runsV2 bool) {
 	guard := publishedFleetGuard(cityPath)
 	switch command {
 	case fleetBreakerStatusCommand:
-		writeJSONLine(conn, fleetBreakerReplyFor(guard))
+		writeJSONLine(conn, fleetBreakerReplyFor(guard, runsV2))
 	case fleetBreakerResetCommand:
-		wasOpen := guard.Reset()
-		reply := fleetBreakerReplyFor(guard)
+		wasOpen := !runsV2 && guard.Reset()
+		reply := fleetBreakerReplyFor(guard, runsV2)
 		reply.WasOpen = wasOpen
 		writeJSONLine(conn, reply)
 	default:
@@ -116,6 +134,10 @@ func sendFleetBreakerCommand(cityPath, command string) (fleetBreakerReply, error
 	resp, err := sendControllerCommand(cityPath, fleetBreakerCommandPrefix+command)
 	return decodeFleetBreakerReply(command, resp, err)
 }
+
+// fleetBreakerV2Line is what the commands and doctor say about a city whose
+// controller runs the v2 session reconciler.
+const fleetBreakerV2Line = "Fleet start breaker: not applicable (the v2 session reconciler does not use it)"
 
 // Bounds on the courtesy breaker query gc status and gc doctor make: a
 // controller that does not answer promptly must not stall them.
@@ -174,6 +196,10 @@ different sessions fail to start (or stay up) within a short window, or when
 the runtime's state cache has gone stale. While it is open, automatic starts
 are limited to a probe at a time until a started session stays up. User
 initiated starts (attach, new, nudge) are never gated.
+
+The breaker guards the legacy session reconciler only. A city that runs the
+v2 reconciler is not covered: its starts are never gated, and these commands
+say the breaker does not apply.
 
 The breaker is in-memory in the running controller, so these commands need a
 running controller. Disable it with [daemon] fleet_start_breaker = false.`,
@@ -239,6 +265,10 @@ func cmdBreakerStatus(jsonOut bool, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	if reply.unguardedByMode() {
+		fmt.Fprintln(stdout, fleetBreakerV2Line) //nolint:errcheck
+		return 0
+	}
 	if !reply.Enabled {
 		fmt.Fprintln(stdout, "Fleet start breaker: disabled ([daemon] fleet_start_breaker = false)") //nolint:errcheck
 		return 0
@@ -267,6 +297,8 @@ func cmdBreakerReset(stdout, stderr io.Writer) int {
 		return 1
 	}
 	switch {
+	case reply.unguardedByMode():
+		fmt.Fprintln(stdout, fleetBreakerV2Line+"; nothing to reset") //nolint:errcheck
 	case !reply.Enabled:
 		fmt.Fprintln(stdout, "Fleet start breaker is disabled; nothing to reset") //nolint:errcheck
 	case reply.WasOpen:
@@ -305,10 +337,13 @@ func fleetBreakerNote(ctrl ControllerJSON, cityPath string) string {
 type fleetBreakerDoctorCheck struct {
 	cfg   *config.City
 	query func(cityPath string) (fleetBreakerReply, error)
+	// runsV2 reports whether the city runs the v2 session reconciler; nil
+	// means legacy.
+	runsV2 func(cityPath string, cfg *config.City) bool
 }
 
 func newFleetBreakerDoctorCheck(cfg *config.City) *fleetBreakerDoctorCheck {
-	return &fleetBreakerDoctorCheck{cfg: cfg, query: queryFleetBreakerStatus}
+	return &fleetBreakerDoctorCheck{cfg: cfg, query: queryFleetBreakerStatus, runsV2: cityRunsV2}
 }
 
 // Name returns the check's identifier.
@@ -334,6 +369,10 @@ func (c *fleetBreakerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckRes
 	}
 	if ctx == nil || ctx.CityPath == "" {
 		r.Message = "fleet start breaker: not checked"
+		return r
+	}
+	if c.runsV2 != nil && c.runsV2(ctx.CityPath, c.cfg) {
+		r.Message = "fleet start breaker: not applicable (the v2 session reconciler does not use it)"
 		return r
 	}
 	reply, err := c.query(ctx.CityPath)

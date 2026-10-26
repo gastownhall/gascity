@@ -1508,7 +1508,7 @@
         },
         "fleet_start_breaker": {
           "type": "boolean",
-          "description": "FleetStartBreaker controls the fleet start breaker: when automatic\nsession starts keep failing across several sessions and templates, the\ncontroller pauses automatic starts, probes with one start at a time, and\nresumes once a probe's session stays alive. Default: ENABLED. Set false\nto restore unguarded automatic starts. Read the effective value via\nFleetStartBreakerEnabled(), never the field.",
+          "description": "FleetStartBreaker controls the fleet start breaker: when automatic\nsession starts keep failing across several sessions and templates, the\ncontroller pauses automatic starts, probes with one start at a time, and\nresumes once a probe's session stays alive. It guards the legacy session\nreconciler only; a city that runs the v2 reconciler is not covered.\nDefault: ENABLED. Set false to restore unguarded automatic starts. Read\nthe effective value via FleetStartBreakerEnabled(), never the field.",
           "default": true
         },
         "auto_reap_closed_bead_worktrees": {

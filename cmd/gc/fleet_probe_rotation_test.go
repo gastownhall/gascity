@@ -143,3 +143,29 @@ func (r *fleetProbeRun) startCounts() map[string]int {
 	}
 	return m
 }
+
+// With the breaker closed, the executor attempts sessions in wake fairness
+// order even when some of them already failed a start inside the trip window:
+// the oldest session goes first, failed or not. Only an open episode rotates
+// the probe.
+func TestExecutePlannedStarts_ClosedBreakerKeepsWakeOrderAfterPreTripFailures(t *testing.T) {
+	r := newFleetProbeRun(t, "")
+	failFleetStart(t, r.g, r.cands[0].info.ID, "w0")
+	failFleetStart(t, r.g, r.cands[1].info.ID, "w1")
+	if got := fleetState(r.g); got != resilience.StateClosed {
+		t.Fatalf("premise: state = %v, want closed", got)
+	}
+	r.tick(t)
+	// The tick attempts sessions oldest first until the third distinct failure
+	// trips the breaker. A sort that demoted the sessions which failed before
+	// the trip would attempt w2, w3 and w4 first and leave w0 untried.
+	counts := r.startCounts()
+	if counts["w0"] != 1 {
+		t.Fatalf("Start calls after one tick = %v, want the oldest session w0 attempted although it failed before the trip", counts)
+	}
+	for _, n := range r.names[3:] {
+		if counts[n] != 0 {
+			t.Fatalf("Start calls after one tick = %v, want %s untried: sessions behind the oldest three must wait their turn", counts, n)
+		}
+	}
+}
