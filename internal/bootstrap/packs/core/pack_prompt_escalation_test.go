@@ -101,6 +101,11 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 		{name: "set", env: []string{"GC_ESCALATION_RECIPIENT=triage-agent"}, want: "triage-agent"},
 		{name: "qualified", env: []string{"GC_ESCALATION_RECIPIENT=myrig/triage"}, want: "myrig/triage"},
 		{name: "spaces", env: []string{"GC_ESCALATION_RECIPIENT=ops desk"}, want: "ops desk"},
+		// The default route stays human: unset and empty both resolve to the
+		// reserved mailbox (`:-`, not `-`), with --notify along for the ride
+		// as the pinned no-op gc already skips for human.
+		{name: "unset", want: "human"},
+		{name: "empty", env: []string{"GC_ESCALATION_RECIPIENT="}, want: "human"},
 	}
 	for _, path := range coreWorkerPromptPaths {
 		t.Run(path, func(t *testing.T) {
