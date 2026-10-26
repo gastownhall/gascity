@@ -2029,6 +2029,45 @@ func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
 	}
 }
 
+// TestActiveBeadLookupForSuspendedRigReadsNoStore: a rig-scoped lookup that
+// names a suspended rig (the agents list and agent detail pass the agent's
+// rig) must return nothing and read no store at all, on either path — above
+// all it must not fall back to searching every other rig (#8162).
+func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{
+		{"cached", false},
+		{"live", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, alpha, beta := newActiveBeadTwoRigState(t)
+			suspendRigAtRuntime(t, state, "alpha")
+			addActiveWork(t, alpha, "sess-1")
+			addActiveWork(t, beta, "sess-1")
+
+			s := New(state)
+			var got string
+			if tc.live {
+				got = s.findLiveActiveBeadForAssignees("alpha", "sess-1")
+			} else {
+				got = s.findActiveBeadForAssignees("alpha", "sess-1")
+			}
+
+			if got != "" {
+				t.Fatalf("active bead = %q, want none for a suspended rig", got)
+			}
+			if n := alpha.listCalls.Load(); n != 0 {
+				t.Errorf("suspended rig alpha List calls = %d, want 0", n)
+			}
+			if n := beta.listCalls.Load(); n != 0 {
+				t.Errorf("other rig beta List calls = %d, want 0: a suspended rig's lookup must not fall back to every rig", n)
+			}
+		})
+	}
+}
+
 // TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias: in legacy
 // shared-file mode every rig aliases one store, and sortedRigNames keeps only
 // the alphabetically first alias. The cold-rig filter must run before that

@@ -411,7 +411,8 @@ func (s *Server) loadCacheColdRigs() map[string]bool {
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
-// searched. Returns "" if no match.
+// searched. A rig suspended in runtime state is not searched at all. Returns
+// "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
 }
@@ -419,6 +420,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
 // lower-frequency detail views where external reassignment freshness matters.
+// A rig suspended in runtime state is not searched at all.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
@@ -427,22 +429,25 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // highest-priority identity: identity order first, then store order, then
 // newest first within a store. Cached reads use a targeted ListQuery with
 // Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores.
+// through findLiveActiveBeadInStores. A rig suspended in runtime state is not
+// searched, on either path.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
-	stores := s.state.BeadStores()
 	// A rig suspended in runtime state (what `gc rig suspend` records) gets
 	// no background cache (rigStoreBackgroundRefresh), so a List on its
 	// store goes to bd and restarts its retired proxy and Dolt — the rule
-	// statusWorkCounts already follows. Cached and live lookups leave those
-	// stores unread (#8162).
+	// statusWorkCounts already follows. Both lookup paths leave those stores
+	// unread, and a rig-scoped lookup naming one returns nothing rather than
+	// falling back to every other rig (#8162).
 	cold := s.loadCacheColdRigs()
-	filtered := make(map[string]beads.Store, len(stores))
-	for name, store := range stores {
+	if cold[rig] {
+		return ""
+	}
+	stores := make(map[string]beads.Store)
+	for name, store := range s.state.BeadStores() {
 		if !cold[name] {
-			filtered[name] = store
+			stores[name] = store
 		}
 	}
-	stores = filtered
 	var rigNames []string
 	if rig != "" {
 		if _, ok := stores[rig]; ok {
