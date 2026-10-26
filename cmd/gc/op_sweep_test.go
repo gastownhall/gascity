@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -1317,4 +1319,93 @@ func TestOpSweepDefaultAutoNonSQLiteStoreSweepsLeftoversThenIdles(t *testing.T) 
 	if d := explicit.degraded(); len(d) != 0 {
 		t.Fatalf("explicit auto: degrades = %+v, want none", d)
 	}
+}
+
+// The builtin auto default must see through every production wrapper around a
+// split city's SQLite sessions store: the controller's cache, the CLI's
+// emitting wrapper, and the stores the sweeper and doctor open. A wrapper that
+// stops pointing at what it wraps would quietly turn recording off by default.
+
+// opSweepSplitRoutes opens the production split routes (sqlite-beads binding
+// for every infra class) the way storage boot does.
+func opSweepSplitRoutes(t *testing.T, root string, cfg *config.City) *storageRoutes {
+	t.Helper()
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan: %v", err)
+	}
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+	if err != nil {
+		t.Fatalf("openStorageRoutes: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	return routes
+}
+
+func TestOpsBuiltinDefaultRecordsOnARealSplitCity(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	work := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+
+	// Controller composition: CachingStore over the stamped SQLite engine.
+	ctlRoutes := opSweepSplitRoutes(t, root, cfg).withControllerCache(context.Background(), nil)
+	ctlSess := beads.SessionStore{Store: resolveSessionStore(ctlRoutes, work, cfg, root, nil)}
+	if b := beads.ResolveConditionalWritesBackend(ctlSess); !b.SQLite {
+		t.Fatalf("controller split sessions store resolves to %+v (%T), want SQLite", b, ctlSess.Store)
+	}
+	if err := opjournal.CheckRecordsByDefault(ctlSess); err != nil {
+		t.Fatalf("controller split sessions store: CheckRecordsByDefault = %v", err)
+	}
+	if _, err := opjournal.NewStore(ctlSess, clock.Real{}); err != nil {
+		t.Fatalf("controller split sessions store: NewStore = %v", err)
+	}
+
+	// Sweeper over a controllerState that routes sessions to that cache.
+	cs := &controllerState{cityBeadStore: work, storageRoutes: ctlRoutes, cfg: cfg, cityPath: root, rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	if got := cs.SessionsBeadStore().Store; got != ctlSess.Store {
+		t.Fatalf("cs.SessionsBeadStore = %T, want the routed cache", got)
+	}
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("pass panicked")
+	}
+	if !h.s.hasStore() || h.s.incapableNow() {
+		t.Fatalf("sweeper under the builtin default did not open the op store over the split SQLite sessions store; logs=%q", h.logLines(""))
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrades = %+v", d)
+	}
+
+	// CLI composition: the funnel's emitting wrapper over the engine, then
+	// withMainStoreEmission (cliSessionStore's shape).
+	cliRoutes := opSweepSplitRoutes(t, root, cfg).withCLIEmission(root)
+	cliSess := withMainStoreEmission(resolveSessionStore(cliRoutes, work, cfg, root, nil), root)
+	if b := beads.ResolveConditionalWritesBackend(beads.SessionStore{Store: cliSess}); !b.SQLite {
+		t.Fatalf("CLI split sessions store resolves to %+v (%T), want SQLite", b, cliSess)
+	}
+	h2 := newCLIOpHarness(t, nil)
+	h2.opStore = nil
+	cliOpenOpStore = func(s beads.Store) (*opjournal.Store, error) {
+		h2.opens++
+		return opjournal.NewStore(beads.SessionStore{Store: s}, cliOpClock)
+	}
+	op := newCLIOp(&config.City{}, cliSess, cliOpRequest{verb: "gc session wake", kind: opjournal.KindWake, stderr: new(strings.Builder)})
+	if op.rec.Mode != rollout.Auto || !op.rec.QuietCannotRecord {
+		t.Fatalf("recorder mode=%s quiet=%t, want builtin auto", op.rec.Mode, op.rec.QuietCannotRecord)
+	}
+	st, err := op.rec.Open()
+	if err != nil || st == nil {
+		t.Fatalf("CLI builtin default over the split SQLite sessions store: Open = %v, %v", st, err)
+	}
+
+	// Doctor over the CLI composition.
+	c := newOpsRecordingDoctorCheck(root, cfg, rollout.ForTest(), nil)
+	c.open = func() (beads.Store, error) { return work, nil }
+	c.sessions = func(beads.Store) beads.Store { return cliSess }
+	c.clk = &clock.Fake{Time: opSweepT0}
+	r := c.Run(&doctor.CheckContext{})
+	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "can record ops") {
+		t.Fatalf("doctor = %v %q, want OK recording", r.Status, r.Message)
+	}
+	t.Logf("doctor: %s", r.Message)
 }

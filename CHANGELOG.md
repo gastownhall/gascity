@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     request (open and close). In the X12 load test the added p50 latency on
     the API's 202 path was about 8 ms on SQLite, and on a bd-provisioned
     Dolt server read natively it went from about 145 ms with `off` to 313 to
-    318 ms (about +150 to +170 ms, 2.1x). Most of that is the beads
+    318 ms (about +170 ms, 2.1x). Most of that is the beads
     library's per-write cost on Dolt: an op create runs 38 SQL statements,
     about half its time in two no-op `is_blocked` recomputes. Op rows are
     already no-history: they land in bd's `dolt_ignore`d wisps table and
