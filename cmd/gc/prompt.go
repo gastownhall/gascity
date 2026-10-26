@@ -91,6 +91,14 @@ type PromptRenderResult struct {
 	Text    string
 	Version string
 	SHA     string
+	// Err is non-nil when the declared template could not be used as
+	// written: the file could not be read (Text is empty) or it failed to
+	// parse or execute (Text is the raw body — the graceful fallback). It is
+	// not set for warnings that leave the main render intact (shared /
+	// template-fragments load failures, a missing or failing inject
+	// fragment). Strict callers fail on Err; every other caller keeps
+	// using Text.
+	Err error
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -103,7 +111,8 @@ type PromptRenderResult struct {
 // the output after rendering. Returns empty string if templatePath is empty.
 // A template path that cannot be read also returns empty, after a warning to
 // stderr. On parse or execute error, logs a warning to stderr and returns the
-// raw text (graceful fallback).
+// raw text (graceful fallback). Callers that must tell a fallback from a
+// clean render use renderPromptWithMeta and check its Err field.
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
 	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
 }
@@ -127,7 +136,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 		} else {
 			fmt.Fprintf(stderr, "gc: prompt_template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		}
-		return PromptRenderResult{}
+		return PromptRenderResult{Err: err}
 	}
 	raw := string(data)
 	fm, body := promptmeta.Parse(raw)
@@ -203,6 +212,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 

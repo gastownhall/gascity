@@ -224,11 +224,12 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 
 // doPrimeWithMode's strict-mode contract: only states that would indicate
 // a user mistake (missing city config, no agent name, unknown agent name,
-// unreadable prompt_template file) error out. Supported minimal configs
-// (agent with no prompt_template at all, or a template that legitimately
-// renders to empty output via conditional logic) and intentional quiet
-// states (suspended city/agent) remain silent even under --strict —
-// strict is a debugging aid, not a stricter mode for the whole command.
+// a prompt_template that cannot be read, parsed, or executed) error out.
+// Supported minimal configs (agent with no prompt_template at all, or a
+// template that legitimately renders to empty output via conditional logic)
+// and intentional quiet states (suspended city/agent) remain silent even
+// under --strict — strict is a debugging aid, not a stricter mode for the
+// whole command.
 //
 // Hook-mode side effects under --strict are deferred until we know the
 // invocation is not a strict failure, so a failing --strict cannot update
@@ -433,9 +434,13 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
 			return 1, nil
 		}
-		// renderPrompt returns "" both when the template file cannot be read
-		// and when a valid template legitimately renders empty. Readability is
-		// the strict precondition, so check it before hook side effects.
+		// A prompt_template that cannot be read, parsed, or executed is a
+		// strict failure; a template that legitimately renders empty through
+		// valid logic is not (renderPrompt returns "" for both). Validate by
+		// rendering — the same render the output path below performs, pack
+		// dirs and fragments included — with stderr discarded so the success
+		// path's diagnostics come from the output render alone. Still ahead
+		// of the hook side effects and the nudge poller.
 		for _, a := range resolvedAgents {
 			if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 				continue
@@ -443,8 +448,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if a.PromptTemplate == "" {
 				continue
 			}
-			if _, fErr := os.ReadFile(promptTemplateSourcePath(cityPath, a.PromptTemplate)); fErr != nil {
-				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
+			ctx := primeAgentPromptContext(cityPath, cityName, cfg, &a, io.Discard)
+			if res := renderPrimeAgentPrompt(cityPath, cityName, cfg, &a, ctx, io.Discard); res.Err != nil {
+				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, res.Err) //nolint:errcheck
 				return 1, nil
 			}
 		}
@@ -490,21 +496,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
-			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
-			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
+			ctx = primeAgentPromptContext(cityPath, cityName, cfg, &a, stderr)
 		}
 		if a.PromptTemplate != "" {
-			fragments := effectivePromptFragments(
-				cfg.Workspace.GlobalFragments,
-				a.InjectFragments,
-				a.AppendFragments,
-				a.InheritedAppendFragments,
-				cfg.AgentDefaults.AppendFragments,
-			)
-			packDirs := cfg.PackDirsForRig(ctx.RigName)
-			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				packDirs, fragments, nil)
+			prompt := renderPrimeAgentPrompt(cityPath, cityName, cfg, &a, ctx, stderr).Text
 			if prompt != "" {
 				var budget *promptBudgetJSON
 				if strictMode {
@@ -562,6 +557,36 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
+}
+
+// primeAgentPromptContext builds the prompt render context for one agent in
+// a gc prime invocation: the session-aware prime context plus the resolved
+// provider identity fields. Shared by the --strict validation render and
+// the output render so the two cannot disagree about what a template sees.
+func primeAgentPromptContext(cityPath, cityName string, cfg *config.City, a *config.Agent, stderr io.Writer) PromptContext {
+	ctx := buildPrimeContextFor(cityPath, cityName, a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
+	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &cfg.Workspace, cfg.Providers)
+	ctx.InstructionsFile = instructionsFileForAgent(a, &cfg.Workspace, cfg.Providers)
+	return ctx
+}
+
+// renderPrimeAgentPrompt renders an agent's prompt_template exactly as the
+// prime output path renders it — same fragment layering, same rig-scoped
+// pack dirs — returning the full PromptRenderResult so callers can tell the
+// raw-text fallback (Err set) from a clean render. Shared by the --strict
+// validation render and the output render so validation cannot check a
+// different render than the one shipped.
+func renderPrimeAgentPrompt(cityPath, cityName string, cfg *config.City, a *config.Agent, ctx PromptContext, stderr io.Writer) PromptRenderResult {
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		a.InjectFragments,
+		a.AppendFragments,
+		a.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	packDirs := cfg.PackDirsForRig(ctx.RigName)
+	return renderPromptWithMeta(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
+		packDirs, fragments, nil)
 }
 
 func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {

@@ -6684,6 +6684,60 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+// TestDoPrimeStrictTemplateParseErrorFails verifies --strict fails when the
+// agent's prompt_template file exists but cannot be parsed, instead of
+// reporting the parse error on stderr and emitting the raw template text
+// with exit 0 (#8149).
+func TestDoPrimeStrictTemplateParseErrorFails(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte("Hello {{base_branch}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, template parse error) = 0, want non-zero; stdout: %q; stderr: %q", stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on strict failure", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `prompt_template "prompts/worker.template.md" for agent "worker"`) {
+		t.Errorf("stderr = %q, want to name the template path and agent", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `function "base_branch" not defined`) {
+		t.Errorf("stderr = %q, want the underlying parse error", stderr.String())
+	}
+}
+
 // TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar verifies
 // that when --strict fails because the agent isn't found, hook-mode side
 // effects do not recreate the legacy provider hook sidecar.

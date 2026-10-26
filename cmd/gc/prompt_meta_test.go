@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -133,6 +135,135 @@ func TestRenderPromptWithMeta_TemplateParseErrorPreservesVersion(t *testing.T) {
 	}
 	if res.SHA == "" {
 		t.Error("SHA should still be populated on parse error fallback")
+	}
+}
+
+// TestRenderPromptWithMeta_ErrReportsFallbacks pins which render outcomes
+// carry Err: a declared template that cannot be used as written (unreadable,
+// unparseable) sets Err — with the raw body as Text for a parse failure —
+// while every legitimate outcome (clean render, legitimately-empty render,
+// verbatim plain markdown, no template at all, a missing inject fragment)
+// leaves Err nil.
+func TestRenderPromptWithMeta_ErrReportsFallbacks(t *testing.T) {
+	tests := []struct {
+		name         string
+		setup        func(f *fsys.Fake)
+		templatePath string
+		inject       []string
+		check        func(t *testing.T, res PromptRenderResult, stderr *strings.Builder)
+	}{
+		{
+			name:         "missing file",
+			templatePath: "prompts/missing.template.md",
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if !errors.Is(res.Err, fs.ErrNotExist) {
+					t.Errorf("Err = %v, want fs.ErrNotExist", res.Err)
+				}
+				if res.Text != "" {
+					t.Errorf("Text = %q, want empty on read failure", res.Text)
+				}
+			},
+		},
+		{
+			name:         "parse error",
+			templatePath: "prompts/bad.template.md",
+			setup: func(f *fsys.Fake) {
+				f.Files["/city/prompts/bad.template.md"] = []byte("---\nversion: v1\n---\nHello {{base_branch}}\n")
+			},
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if res.Err == nil {
+					t.Fatal("Err = nil, want the parse error")
+				}
+				if want := "Hello {{base_branch}}\n"; res.Text != want {
+					t.Errorf("Text = %q, want raw body %q", res.Text, want)
+				}
+				if res.Version != "v1" {
+					t.Errorf("Version = %q, want v1 kept on parse error", res.Version)
+				}
+			},
+		},
+		{
+			name:         "valid template",
+			templatePath: "prompts/ok.template.md",
+			setup: func(f *fsys.Fake) {
+				f.Files["/city/prompts/ok.template.md"] = []byte("Hello {{.AgentName}}\n")
+			},
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if res.Err != nil {
+					t.Errorf("Err = %v, want nil for a clean render", res.Err)
+				}
+				if res.Text != "Hello mayor\n" {
+					t.Errorf("Text = %q, want rendered output", res.Text)
+				}
+			},
+		},
+		{
+			name:         "valid template renders legitimately empty",
+			templatePath: "prompts/empty.template.md",
+			setup: func(f *fsys.Fake) {
+				f.Files["/city/prompts/empty.template.md"] = []byte("{{if .RigName}}rig {{.RigName}}{{end}}")
+			},
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if res.Err != nil {
+					t.Errorf("Err = %v, want nil for a legitimately-empty render", res.Err)
+				}
+				if res.Text != "" {
+					t.Errorf("Text = %q, want empty", res.Text)
+				}
+			},
+		},
+		{
+			name:         "plain markdown is verbatim and never executed",
+			templatePath: "prompts/plain.md",
+			setup: func(f *fsys.Fake) {
+				f.Files["/city/prompts/plain.md"] = []byte("Hello {{base_branch}}\n")
+			},
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if res.Err != nil {
+					t.Errorf("Err = %v, want nil for plain markdown", res.Err)
+				}
+				if want := "Hello {{base_branch}}\n"; res.Text != want {
+					t.Errorf("Text = %q, want verbatim body %q", res.Text, want)
+				}
+			},
+		},
+		{
+			name:         "empty path",
+			templatePath: "",
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if res.Err != nil {
+					t.Errorf("Err = %v, want nil when no template is declared", res.Err)
+				}
+			},
+		},
+		{
+			name:         "missing inject fragment warns without Err",
+			templatePath: "prompts/ok.template.md",
+			setup: func(f *fsys.Fake) {
+				f.Files["/city/prompts/ok.template.md"] = []byte("Hello {{.AgentName}}\n")
+			},
+			inject: []string{"no-such-fragment"},
+			check: func(t *testing.T, res PromptRenderResult, stderr *strings.Builder) {
+				if res.Err != nil {
+					t.Errorf("Err = %v, want nil for a missing inject fragment", res.Err)
+				}
+				if !strings.Contains(stderr.String(), `inject_fragment "no-such-fragment"`) {
+					t.Errorf("stderr = %q, want the inject_fragment warning", stderr.String())
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := fsys.NewFake()
+			if tt.setup != nil {
+				tt.setup(f)
+			}
+			var stderr strings.Builder
+			res := renderPromptWithMeta(f, "/city", "", tt.templatePath,
+				PromptContext{AgentName: "mayor"}, "", &stderr, nil, tt.inject, nil)
+			tt.check(t, res, &stderr)
+		})
 	}
 }
 
