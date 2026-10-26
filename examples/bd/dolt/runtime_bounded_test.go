@@ -309,3 +309,38 @@ func TestManagedRuntimeListenerPIDReadsProcNotLsof(t *testing.T) {
 func TestManagedRuntimeListenerPIDDoesNotHangOnStalledMount(t *testing.T) {
 	assertListenerPIDAnsweredFromProc(t)
 }
+
+// TestRuntimeScriptPortResolutionFindsHolderWithoutLsof is AC-2 of the
+// gascity#7553 fix: sourcing runtime.sh with managed state recording the
+// test process as the live holder resolves GC_DOLT_PORT from the kernel
+// socket tables without running lsof.
+func TestRuntimeScriptPortResolutionFindsHolderWithoutLsof(t *testing.T) {
+	skipUnlessProcNetTCPReadable(t)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	cityPath := t.TempDir()
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "lsof-ran")
+	writeLsofRecordingShim(t, bin)
+	writeManagedRuntimeStateForScript(t, cityPath, port)
+
+	code, out := runRuntimeScriptShell(t, cityPath, bin,
+		`printf '%s\n' "$GC_DOLT_PORT"`,
+		"LSOF_MARKER="+marker,
+	)
+	if code != 0 {
+		t.Fatalf("runtime.sh exited %d; managed state names this process as the live holder, so the port must resolve\n%s", code, out)
+	}
+	if got, want := strings.TrimSpace(out), strconv.Itoa(port); got != want {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q\n%s", got, want, out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("lsof ran during port resolution; the holder must come from the kernel socket tables (gascity#7553)\n%s", out)
+	}
+}
