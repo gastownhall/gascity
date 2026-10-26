@@ -814,10 +814,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// folded in; the residue of an interrupted run of this repair passes it.
 	// When the binding does not hold the id it is stranded, and moves.
 	//
-	// An unbounded legacy entry (infra_copy_manifest.go) the binding still
-	// holds goes the unrecorded way too: proven equal, it is recorded with its
-	// created_at, which is what lets the clear act on it. One the binding no
-	// longer holds keeps the id-only reading.
+	// An unbounded legacy entry (infra_copy_manifest.go) is never counted as
+	// removed since cutover here: nothing proves the row is the bead the copy
+	// carried. One the binding still holds goes the unrecorded way (proven
+	// equal, it is recorded with its created_at); one the binding no longer
+	// holds is MOVED like a stranded row and recorded the same way. Either way
+	// the clear can then act on it — leaving it unbounded made the clear refuse
+	// and this command say "next: clear", a loop with no exit. Re-importing a
+	// row the binding's own GC once collected is safe: it is the work store's
+	// row, carried with its id, and the binding's GC collects it again.
 	for _, b := range rows {
 		match := manifest.Match(b)
 		if resolvable[b.ID] {
@@ -826,7 +831,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			}
 			continue
 		}
-		if match == infraManifestCarried || match == infraManifestLegacyUnbounded {
+		if match == infraManifestCarried {
 			removedSinceCutover++
 			continue
 		}
@@ -1185,7 +1190,10 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// they are cleared. This command only ever adds, so it names the one that
 	// clears rather than doing it.
 	if len(residual.Retained) > 0 {
-		fmt.Fprintf(stdout, "next: the work store still holds %d cop(ies) of beads the binding now owns; clear them with `%s`\n", len(residual.Retained), storageClearInstruction()) //nolint:errcheck // best-effort stdout
+		// Retained counts every carried row, including the ones whose binding
+		// copy the binding's own GC has since collected; name the two apart.
+		held := len(residual.Retained) - residual.RemovedSinceCutover
+		fmt.Fprintf(stdout, "next: the work store still holds %d retained cop(ies) (%d of beads the binding holds, %d the binding has since collected); clear them with `%s`\n", len(residual.Retained), held, residual.RemovedSinceCutover, storageClearInstruction()) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }

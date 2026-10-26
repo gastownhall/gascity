@@ -570,3 +570,111 @@ func TestAnnotatedManifestStaysReadableByTheLegacyParser(t *testing.T) {
 		t.Error("an id written without created_at read back with one")
 	}
 }
+
+// Re-review probe P5 (and mutant N32): an unbounded legacy entry whose binding
+// copy the binding's GC collected used to loop — boot said retained, the clear
+// refused and named recover-stranded, recover-stranded counted it removed
+// since cutover and named the clear. Recover now moves and records it, and
+// the clear then proceeds.
+func TestRecoverMovesAnUnboundedEntryTheBindingCollected(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id := carriedMessageID(t, source)
+	if err := openMigratedDestination(t, target).Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	var announce bytes.Buffer
+	var unbounded *infraUnboundedLegacyRows
+	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); !errors.As(err, &unbounded) {
+		t.Fatalf("precondition: clear = %v, want the unbounded refusal", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code != 0 {
+		t.Fatalf("recover exited %d: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := openMigratedDestination(t, target).Get(id); err != nil {
+		t.Errorf("recover did not move the unbounded entry %s the binding had collected: %v", id, err)
+	}
+	manifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manifest.Created[id]; !ok {
+		t.Errorf("recover did not record %s with its created_at", id)
+	}
+	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); err != nil {
+		t.Errorf("after recover-stranded the clear still refuses (no exit): %v", err)
+	}
+}
+
+// Every annotated write bounds the bare ids: with no legacy entries the
+// bound is the write time, so a bare id an OLDER build's recover-stranded
+// appends later is judged (reused when younger, carried when older) instead
+// of unbounded.
+func TestAnnotatedWriteAlwaysBoundsLaterBareIDs(t *testing.T) {
+	target := infraBindingTarget{Root: t.TempDir()}
+	created := time.Now().Add(-time.Hour)
+	before := time.Now()
+	if err := writeInfraCopyManifestRecord(target, []string{"mc-1"}, map[string]time.Time{"mc-1": created}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(target.ManifestPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), infraManifestLegacyWrittenPrefix) {
+		t.Fatalf("an all-annotated write carries no legacy bound:\n%s", contents)
+	}
+	// What an older build's superset rewrite does: keep every line, append a
+	// bare id.
+	if err := os.WriteFile(target.ManifestPath(), append(contents, []byte("mc-old\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.LegacyBound.Before(before.Add(-time.Second)) {
+		t.Errorf("legacy bound = %s, want the write time (~%s)", m.LegacyBound, before)
+	}
+	if got := m.Match(beads.Bead{ID: "mc-old", CreatedAt: before.Add(-time.Minute)}); got != infraManifestCarried {
+		t.Errorf("an older bare id = %d, want carried", got)
+	}
+	if got := m.Match(beads.Bead{ID: "mc-old", CreatedAt: time.Now().Add(time.Hour)}); got != infraManifestReusedID {
+		t.Errorf("a younger bare id = %d, want reused", got)
+	}
+}
+
+// Mutant N33: the clock slack applies to the unlisted-row rule — a row created
+// within the slack after the write is not younger than the manifest.
+func TestCreatedAfterWriteHonorsTheClockSlack(t *testing.T) {
+	written := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	m := infraCopyManifest{WrittenAt: written}
+	if m.createdAfterWrite(beads.Bead{ID: "x", CreatedAt: written.Add(infraManifestClockSlack / 2)}) {
+		t.Error("a row inside the clock slack reads as younger than the manifest")
+	}
+	if !m.createdAfterWrite(beads.Bead{ID: "x", CreatedAt: written.Add(2 * infraManifestClockSlack)}) {
+		t.Error("a row past the clock slack does not read as younger")
+	}
+}
+
+// Mutant N35: infraRetainedIDs (the list a refusal names) takes the read-only
+// reading, so an unbounded legacy entry is listed as retained.
+func TestInfraRetainedIDsListsUnboundedLegacyEntries(t *testing.T) {
+	cityPath, _, source, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := infraRetainedIDs(cityPath, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id := carriedMessageID(t, source); !slices.Contains(ids, id) {
+		t.Errorf("retained ids %v omit the unbounded legacy entry %s", ids, id)
+	}
+}

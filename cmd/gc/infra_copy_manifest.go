@@ -61,6 +61,12 @@ import (
 // without -t, or touched, and a bound that moves later re-opens bare-id
 // matching for every id reused in between — and the clear deletes on it.
 //
+//   - The bound is an UPPER bound on when a legacy entry's bead was copied,
+//     never a lower one: a row created after it was certainly not copied,
+//     while a reused id minted between the copy and the bound still reads as
+//     carried. It is as tight as the evidence allows; on maintainer-city the
+//     marker may record a time up to ~2.5 h after the copy, and no row in its
+//     work store falls in that window today.
 //   - A legacy manifest (no #gc:written) takes its bound from the convergence
 //     marker beside it: the migration writes the manifest and then the marker,
 //     and the marker's CONTENT carries the time to the second (every build
@@ -238,7 +244,8 @@ func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, creat
 	}
 	lines := make([]string, 0, 2*len(ids)+1)
 	lines = append(lines, ids...)
-	lines = append(lines, infraManifestWrittenPrefix+time.Now().UTC().Format(time.RFC3339Nano))
+	writtenAt := time.Now().UTC()
+	lines = append(lines, infraManifestWrittenPrefix+writtenAt.Format(time.RFC3339Nano))
 	annotated := make([]string, 0, len(ids))
 	legacyEntries := false
 	for _, id := range ids {
@@ -248,8 +255,20 @@ func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, creat
 			legacyEntries = true
 		}
 	}
-	if legacyEntries && !legacyBound.IsZero() {
+	// Always bound the bare ids, so none is ever unbounded by accident. With
+	// legacy entries in the file the bound is theirs, unchanged (or none when
+	// it is unknown: they stay unbounded rather than gain a later bound). With
+	// none, it is this write's time: a bare id an OLDER build appends later
+	// (its recover-stranded superset rewrite carries these lines through and
+	// adds ids without created_at) is then judged against when this manifest
+	// was written — a row younger than that reads as reused and is named
+	// stranded, which this build's recover-stranded resolves by proving and
+	// recording it, instead of reading as unbounded.
+	switch {
+	case legacyEntries && !legacyBound.IsZero():
 		lines = append(lines, infraManifestLegacyWrittenPrefix+legacyBound.UTC().Format(time.RFC3339Nano))
+	case !legacyEntries:
+		lines = append(lines, infraManifestLegacyWrittenPrefix+writtenAt.Format(time.RFC3339Nano))
 	}
 	sort.Strings(annotated)
 	lines = append(lines, annotated...)
