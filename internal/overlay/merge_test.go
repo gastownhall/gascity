@@ -1064,3 +1064,30 @@ func TestMergeSettingsJSON_WrapBareHooks_PackHookCoexistsWithCoreCommands(t *tes
 		t.Errorf("pack command = %q, want agent-mail --check", got)
 	}
 }
+
+func TestMergeSettingsJSON_WrapBareHooks_DistinctBareHooksCoexistAcrossTicks(t *testing.T) {
+	// Two distinct bare hooks in one event are two different pack features:
+	// each must key on its own inner command content, so repeated projection
+	// keeps exactly one copy of each — they neither multiply per tick nor
+	// collapse into a single entry.
+	otherBare := `{"type":"command","command":"gascity-lint --staged --format=json"}`
+	over := []byte(`{"hooks":{"PreToolUse":[` + ubsBareEntry + `,` + otherBare + `]}}`)
+	merged := []byte(`{}`)
+	for i := 0; i < 10; i++ {
+		var err error
+		merged, err = MergeSettingsJSON(merged, over, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("merge tick %d: %v", i, err)
+		}
+	}
+	arr := preToolUse(t, merged)
+	if len(arr) != 2 {
+		t.Fatalf("PreToolUse entries after 10 ticks = %d, want 2 (one copy of each hook)\n%s", len(arr), merged)
+	}
+	if got := innerCommand(t, arr[0]); got != `if echo "$TOOL_INPUT" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi` {
+		t.Errorf("first command = %q, want the ubs command", got)
+	}
+	if got := innerCommand(t, arr[1]); got != "gascity-lint --staged --format=json" {
+		t.Errorf("second command = %q, want the lint command", got)
+	}
+}
