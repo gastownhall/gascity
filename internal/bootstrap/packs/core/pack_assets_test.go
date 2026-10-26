@@ -293,3 +293,34 @@ func TestClaimProtocolFragmentIsEmbedded(t *testing.T) {
 		}
 	}
 }
+
+// readPoolWorkerPrompt returns the shipped pool-worker prompt with
+// backslash-continued lines joined and whitespace runs collapsed, so a
+// multi-line fenced command reads as the one-line command it runs.
+func readPoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	data, err := fs.ReadFile(PackFS, "assets/prompts/pool-worker.template.md")
+	if err != nil {
+		t.Fatalf("reading pool-worker prompt: %v", err)
+	}
+	return strings.Join(strings.Fields(strings.ReplaceAll(string(data), "\\\n", " ")), " ")
+}
+
+// TestPoolWorkerPromptStatesStepPassClose pins issue #7678: every
+// retry-managed workflow step is judged by its gc.outcome, and a bare
+// `gc bd close` counts as missing_outcome, so the default pool-worker prompt
+// must close a step bead with gc.outcome=pass and never with a bare close.
+func TestPoolWorkerPromptStatesStepPassClose(t *testing.T) {
+	prompt := readPoolWorkerPrompt(t)
+	for _, want := range []string{
+		"gc.step_ref",
+		"gc bd update <id> --set-metadata gc.outcome=pass --status closed",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("pool-worker prompt does not state %q", want)
+		}
+	}
+	if strings.Contains(prompt, "gc bd close <step-id>") {
+		t.Error("pool-worker prompt tells the worker to close a step with a bare `gc bd close <step-id>`; the retry evaluator judges that missing_outcome")
+	}
+}
