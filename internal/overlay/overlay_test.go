@@ -508,3 +508,39 @@ func TestCopyDirForProviders_ClaudeBareHookStableAcrossTicks(t *testing.T) {
 		t.Errorf("wrapped command = %v, want the ubs command", got)
 	}
 }
+
+func TestCopyDirForProviders_ClaudeLegacyBloatHealsInOneTick(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"), ubsPackSettings)
+	legacy := `{"matcher":"","hooks":[` + ubsBareEntry + `]}`
+	bloat := make([]string, 40)
+	for i := range bloat {
+		bloat[i] = legacy
+	}
+	writeFile(t, filepath.Join(dst, ".claude", "settings.json"), `{"hooks":{"PreToolUse":[`+joinJSON(bloat)+`]}}`)
+
+	if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProvidersWithSkip: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dst, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("reading settings: %v", err)
+	}
+	var doc struct {
+		Hooks map[string][]map[string]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	arr := doc.Hooks["PreToolUse"]
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1 (40 legacy copies must heal)", len(arr))
+	}
+	if _, hasMatcher := arr[0]["matcher"]; hasMatcher {
+		t.Errorf("surviving entry carries matcher %v, want matcherless wrapper", arr[0]["matcher"])
+	}
+	if !bytes.Contains(data, []byte("ubs --staged")) {
+		t.Errorf("surviving entry lost the ubs command:\n%s", data)
+	}
+}
