@@ -17,6 +17,16 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// agentListResponseTTLFloor lets a non-blocking agent list reuse a body
+// built within the floor after its time-bucket entry has rolled over. The
+// list fans out per agent (active-bead lookups, environment reads), and on a
+// loaded city the build outlasts a bucket (8.19s in #7149). Such a body is
+// stored under a bucket no later request computes, so this age bound,
+// measured from when the build finished, is what serves it. Same value and
+// rationale as statusResponseTTLFloor (#1896). Blocking requests bypass it.
+// Var, not const, so tests can pin each cache tier.
+var agentListResponseTTLFloor = 3 * time.Second
+
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
 func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput) (*ListOutput[agentResponse], error) {
 	bp := input.toBlockingParams()
@@ -53,6 +63,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// never this request's index: X-GC-Index tells a client where to
 		// resume or block (docs/reference/api.md "Snapshot index").
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[agentResponse]]](s, cacheKey, bucket); ok {
+			return &ListOutput[agentResponse]{Index: hit.Index, Body: hit.Body}, nil
+		}
+		// A build that outlasts its start bucket is stored under a bucket no
+		// later request computes; the age floor still serves it.
+		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[ListBody[agentResponse]]](s, cacheKey, agentListResponseTTLFloor); ok {
 			return &ListOutput[agentResponse]{Index: hit.Index, Body: hit.Body}, nil
 		}
 	}

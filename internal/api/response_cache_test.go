@@ -522,9 +522,17 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 // sequence, so a busy city (whose sequence advances between polls) keeps
 // hitting the cache instead of paying the per-agent rebuild on every request.
 func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
+	// One bucket for the whole test, and the TTL floor off, so the bucket
+	// tier alone carries the assertion; the floor is covered by
+	// TestHandleAgentListServesRecentBodyAfterBucketRollover.
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Hour
-	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = 0
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
@@ -558,6 +566,52 @@ func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
 		if got := responseIndex(t, rec); got != builtIndex {
 			t.Fatalf("X-GC-Index after event %d = %d, want the build index %d on a bucket hit", i, got, builtIndex)
 		}
+	}
+}
+
+// TestHandleAgentListServesRecentBodyAfterBucketRollover pins the TTL-floor
+// tier: a loaded city's build outlasts its start bucket (8.19s in #7149), so
+// its body is stored under a bucket no later request computes. A repeat inside
+// agentListResponseTTLFloor of that build must still be served from the cache,
+// carrying the build index rather than the live head.
+func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour // only the TTL floor can hit
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+	}
+	builtIndex := responseIndex(t, rec)
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second agents = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != perBuild {
+		t.Fatalf("assignee lookups = %d, want %d: the repeat was rebuilt instead of served from the TTL floor", store.listByAssigneeCalls, perBuild)
+	}
+	if got := responseIndex(t, rec); got != builtIndex {
+		t.Fatalf("X-GC-Index = %d, want the build index %d on a TTL-floor hit", got, builtIndex)
 	}
 }
 
