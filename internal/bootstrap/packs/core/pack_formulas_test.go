@@ -410,7 +410,7 @@ func molDoWorkCloseStepBlock(t *testing.T) string {
 // closeStepCase is one session shell the do-work close block runs in. The fake
 // gc answers `hook current --id-only` with hookOut/hookRC, `convoy status` with
 // convoy and `bd show` with show (an empty convoy or show fails the read), and
-// exits updateRC for `bd update`. A refused case's diagnostic must name
+// exits updateRC for `bd update`; like gc, each failure reports on stderr. A refused case's diagnostic must name
 // wantNamed.
 type closeStepCase struct {
 	name      string
@@ -445,11 +445,11 @@ var closeStepEnvKeys = map[string]struct{}{
 }
 
 func (c closeStepCase) fakeGC() string {
-	convoy := "exit 1"
+	convoy := "echo 'gc: convoy status failed' >&2; exit 1"
 	if c.convoy != "" {
 		convoy = fmt.Sprintf("printf '%%s\\n' '%s'", c.convoy)
 	}
-	show := "exit 1"
+	show := "echo 'gc: bd show failed' >&2; exit 1"
 	if c.show != "" {
 		show = fmt.Sprintf("printf '%%s\\n' '%s'", c.show)
 	}
@@ -457,7 +457,7 @@ func (c closeStepCase) fakeGC() string {
 "hook current --id-only") printf '%%s\n' '%s'; exit %d ;;
 "convoy status cv-1 --json") %s ;;
 "bd show "*" --json") %s ;;
-"bd update "*) exit %d ;;
+"bd update "*) [ %[5]d -eq 0 ] || echo 'gc: bd update failed' >&2; exit %[5]d ;;
 *) echo "unexpected gc command: $*" >&2; exit 64 ;;
 esac
 `, c.hookOut, c.hookRC, convoy, show, c.updateRC)
@@ -536,6 +536,21 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 		with("AC-3 hook names the work bead", func(c *closeStepCase) {
 			c.hookOut, c.wantClose, c.wantNamed = "ga-work", false, "ga-work"
 			c.show = `[{"id":"ga-work","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}]`
+		}),
+		with("AC-4 convoy read fails", func(c *closeStepCase) {
+			c.convoy, c.wantClose = "", false
+		}),
+		with("AC-4 convoy has two children", func(c *closeStepCase) {
+			c.convoy, c.wantClose, c.wantNamed = `{"children":[{"id":"ga-work"},{"id":"ga-more"}]}`, false, "cv-1"
+		}),
+		with("AC-4 convoy has no children", func(c *closeStepCase) {
+			c.convoy, c.wantClose, c.wantNamed = `{"children":[]}`, false, "cv-1"
+		}),
+		with("AC-4 bd show fails", func(c *closeStepCase) {
+			c.show, c.wantClose = "", false
+		}),
+		with("AC-4 closing update fails", func(c *closeStepCase) {
+			c.updateRC, c.wantClose = 1, false
 		}),
 	}
 	for _, tc := range cases {
