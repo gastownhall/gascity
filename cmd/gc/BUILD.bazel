@@ -1533,6 +1533,7 @@ go_test(
         "hook_cross_store_test.go",
         "hook_deadline_test.go",
         "hook_defer_blocked_test.go",
+        "hook_drain_fence_refusal_test.go",
         "hook_identity_test.go",
         "hook_inject_identity_guard_test.go",
         "hook_invocation_cost_test.go",

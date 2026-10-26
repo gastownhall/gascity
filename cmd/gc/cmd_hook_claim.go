@@ -526,8 +526,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
 		pending, err := ops.DrainPending(sessionID)
 		switch {
+		case hookDrainProbeFailsClosed(err):
+			// A standing storage refusal fails CLOSED; see
+			// hookDrainProbeFailsClosed for why it is not a transient.
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
+			return hookClaimResult{terminal: true, code: reportHookDrainFenceClosed("gc hook --claim", sessionID, err, stderr)}
 		case err != nil:
-			// Fail open. This probe is one store read on every agent turn in the
+			// Fail open on a transient fault. This probe is one store read on every agent turn in the
 			// city, so a store hiccup here must not idle every healthy seat; the
 			// drain lanes remain the backstop exactly as they are today. Name the
 			// fault without the alarming refusal wording, the same shape the

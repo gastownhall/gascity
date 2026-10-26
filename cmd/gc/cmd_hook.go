@@ -1457,8 +1457,13 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
 		pending, err := ops.DrainPending(sessionID)
 		switch {
+		case hookDrainProbeFailsClosed(err):
+			// A standing storage refusal fails CLOSED; see
+			// hookDrainProbeFailsClosed for why it is not a transient.
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
+			return reportHookDrainFenceClosed("gc hook", sessionID, err, stderr)
 		case err != nil:
-			// Fail open, and say so off-pane — same posture and same reasoning as
+			// Fail open on a transient fault, and say so off-pane — same posture and same reasoning as
 			// the claim door: a blind probe must not stop a healthy fleet finding
 			// work, and must not go inert quietly.
 			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck

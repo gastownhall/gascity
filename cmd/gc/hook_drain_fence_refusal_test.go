@@ -1,0 +1,129 @@
+package main
+
+import (
+	"errors"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
+)
+
+// The drain fence on a city the storage gate refuses (prod-evidence item 1).
+//
+// On 2026-10-18 a gc binary without the five-store gate ran `gc hook` on
+// maintainer-city, whose retained work store held 790 infrastructure beads the
+// binding could not read. Every class store refused ("this city converged on
+// binding "infra", and the retained work store holds 790 infrastructure
+// bead(s) ..."), the drain-pending probe failed, and the fence failed OPEN:
+// draining seats went on claiming. That refusal is not a store hiccup that
+// clears on the next poll — it holds until an operator recovers the city — so
+// failing open there switches the fence off fleet-wide for as long as the city
+// stays refused. It must fail CLOSED. A transient store fault still fails open.
+
+// strandedSplitCity is a converged split city whose retained work store holds an
+// infrastructure bead the binding does not: the exact shape the storage gate
+// refuses on every one-shot command until `gc storage recover-stranded` runs.
+func strandedSplitCity(t *testing.T) string {
+	t.Helper()
+	cityPath, _ := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the work store: %v", err)
+	}
+	if _, err := work.Create(beads.Bead{Title: "auto-handoff", Type: "message", Labels: []string{"gc:message"}}); err != nil {
+		t.Fatalf("planting the stranded infra bead: %v", err)
+	}
+	_ = closeBeadStoreHandle(work)
+	return cityPath
+}
+
+func TestHookDrainPendingProbeCarriesTheStorageGateRefusal(t *testing.T) {
+	strandedSplitCity(t)
+
+	pending, err := hookSessionDrainPending(drainPendingTestSessionID)
+	if err == nil {
+		t.Fatalf("the probe answered pending=%v on a city the storage gate refuses", pending)
+	}
+	if !storeref.IsStandingRefusal(err) {
+		t.Fatalf("the probe's error lost the standing-refusal mark, so the fence cannot tell it from a hiccup: %v", err)
+	}
+	if !strings.Contains(err.Error(), "infrastructure bead") {
+		t.Errorf("the probe's error is not the storage gate's refusal: %v", err)
+	}
+}
+
+func TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
+	strandedSplitCity(t)
+	var emitted []error
+	old := hookEmitDrainFenceUnavailable
+	hookEmitDrainFenceUnavailable = func(_ io.Writer, _, _ string, err error) { emitted = append(emitted, err) }
+	t.Cleanup(func() { hookEmitDrainFenceUnavailable = old })
+
+	e := newDrainPendingClaimEnv()
+	ops := e.ops()
+	ops.DrainPending = hookSessionDrainPending
+
+	code := doHookClaim("query", "/rig", e.opts(true), ops, &e.stdout, &e.stderr)
+
+	if code != hookExitWorkQueryFailed {
+		t.Errorf("code = %d, want %d (fence failed closed: unknown, not empty and not drained); stderr=%s", code, hookExitWorkQueryFailed, e.stderr.String())
+	}
+	if e.queries != 0 || len(e.claimed) != 0 {
+		t.Errorf("a refused city's seat ran %d work queries and claimed %v; the fence must fail closed", e.queries, e.claimed)
+	}
+	if e.drainAcked {
+		t.Error("a storage refusal acknowledged a drain; the seat's row was never read, so it is not known to be draining")
+	}
+	if !strings.Contains(e.stderr.String(), hookStoreUnavailableToken) || !strings.Contains(e.stderr.String(), "infrastructure bead") {
+		t.Errorf("stderr = %q, want the store-unavailable token and the gate's refusal", e.stderr.String())
+	}
+	if len(emitted) != 1 || !storeref.IsStandingRefusal(emitted[0]) {
+		t.Errorf("emitted %v, want one fence event carrying the refusal", emitted)
+	}
+}
+
+func TestHookDiscoveryDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
+	strandedSplitCity(t)
+	var emitted int
+	old := hookEmitDrainFenceUnavailable
+	hookEmitDrainFenceUnavailable = func(io.Writer, string, string, error) { emitted++ }
+	t.Cleanup(func() { hookEmitDrainFenceUnavailable = old })
+
+	e := newDiscoveryDrainEnv()
+	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=" + drainPendingTestSessionID, "GC_TEMPLATE=beads--gc__run-operator"}}
+	ops := hookClaimOps{DrainPending: hookSessionDrainPending}
+
+	code := doHookDiscovery("bd ready", "/rig", false, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
+
+	if code != hookExitWorkQueryFailed {
+		t.Errorf("code = %d, want %d (fence failed closed); stderr=%s", code, hookExitWorkQueryFailed, e.stderr.String())
+	}
+	if e.queries != 0 || e.stdout.Len() != 0 {
+		t.Errorf("discovery ran %d queries and printed %q on a refused city; the fence must fail closed", e.queries, e.stdout.String())
+	}
+	if !strings.Contains(e.stderr.String(), hookStoreUnavailableToken) {
+		t.Errorf("stderr = %q, want the store-unavailable token", e.stderr.String())
+	}
+	if emitted != 1 {
+		t.Errorf("emitted %d fence events, want 1", emitted)
+	}
+}
+
+// The event says which way the fence went: an operator reading it must not be
+// told "failed open" about a fence that refused every claim.
+func TestDrainFenceUnavailableReasonNamesTheDirection(t *testing.T) {
+	transient := drainFenceUnavailableReason(errors.New("database is locked"))
+	if !strings.Contains(transient, "failed open") {
+		t.Errorf("transient reason = %q, want failed open", transient)
+	}
+	refused := drainFenceUnavailableReason(standingStorageRefusal{err: errors.New("retained work store holds 1 infrastructure bead(s)")})
+	if !strings.Contains(refused, "failed closed") || strings.Contains(refused, "failed open") {
+		t.Errorf("refusal reason = %q, want failed closed", refused)
+	}
+}
