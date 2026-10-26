@@ -2,6 +2,8 @@
 
 **Verdict:** **PASS**
 
+Scope: applies to the legacy session reconciler; v2's never-started expiry (allocator_decide.go) does not consult the memo — tracked separately.
+
 Bead: `ga-3gbrxuq`. Review: `ga-dls0s49`; original build: `ga-n2bzsx`.
 Evaluated: 2026-10-25T16:14:41.408736+00:00. No waiver; no source rebase, history rewrite or live deployment.
 
