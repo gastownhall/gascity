@@ -17,7 +17,10 @@ import (
 //
 // Shapes are listed in their canonical spelling, one per type and label the
 // owned predicates name, so adding a type or label there without a class here
-// fails this test.
+// fails this test. One owned label is deliberately absent: a bare order-run:
+// label is owned for WRITES (gc bd may not stamp it onto a run record) but
+// classifies as work, because agents file real work that inherits it from the
+// patrol that found it. TestOrderRunLabelAloneIsWork pins that exception.
 func TestEveryOwnedShapeClassifiesOffWork(t *testing.T) {
 	shapes := []struct {
 		name string
@@ -38,7 +41,6 @@ func TestEveryOwnedShapeClassifiesOffWork(t *testing.T) {
 		{"nudge shadow", beads.Bead{Type: "chore", Labels: []string{labelNudge}}},
 		{"nudge queue", beads.Bead{Type: "chore", Labels: []string{labelNudgeQueue}}},
 		{"order tracking", beads.Bead{Type: "task", Labels: []string{labelOrderTracking}}},
-		{"order run", beads.Bead{Type: "task", Labels: []string{labelOrderRunPrefix + "digest"}}},
 		{"extmsg row", beads.Bead{Type: "task", Labels: []string{labelExtmsgPrefix + "binding"}}},
 	}
 	for _, s := range shapes {
@@ -71,5 +73,18 @@ func TestStartupHealthEpisodeWriterOutputClassifiesAsSessions(t *testing.T) {
 	}
 	if got := Classify(rows[0]); got != ClassSessions {
 		t.Errorf("Classify(startup-health episode as written) = %s, want sessions", got)
+	}
+}
+
+// TestOrderRunLabelAloneIsWork pins the one owned label that stays work: run
+// records are matched by order-tracking, and a bead carrying only the run
+// label is a patrol-filed bug, handoff or task.
+func TestOrderRunLabelAloneIsWork(t *testing.T) {
+	b := beads.Bead{Type: "bug", Labels: []string{labelOrderRunPrefix + "technical-health-patrol", "technical-health"}}
+	if !CoordinationOwned(b) {
+		t.Fatal("the order-run label is no longer write-owned; revisit this exception")
+	}
+	if got := Classify(b); got != ClassWork {
+		t.Errorf("Classify(patrol-filed bug with order-run label) = %s, want work", got)
 	}
 }

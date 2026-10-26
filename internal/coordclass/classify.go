@@ -204,15 +204,19 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassGraph
 	case beadType == typeConvergence:
 		return ClassGraph
-	// The two coordination-owned shapes that carry no class label of their
-	// own (CoordinationOwnedLabel). Both come AFTER every graph arm on
-	// purpose: an order-poured workflow or wisp root carries the order-run
-	// label too, and a graph gate step can carry a session label, and those
-	// stay graph. What reaches here is the row only its owning route writes.
+	// A coordination-owned session wait that carries no class label of its
+	// own (CoordinationOwnedLabel). AFTER every graph arm on purpose: a graph
+	// gate step can carry a session label, and it stays graph.
+	//
+	// There is deliberately NO arm for a bare order-run: label. Order run
+	// records also carry order-tracking (the orders arm above), roots poured
+	// by an order are graph, and agents file real work that inherits the
+	// label from the patrol that found it — 150 work beads across four
+	// single-store cities in production (or-l50geh, pl-vm0tw, tr-b6glw). An
+	// arm would move them to orders and make `gc bd create` refuse them on a
+	// split city.
 	case isOwnSessionWait(beadType, labels, metadata):
 		return ClassSessions
-	case hasLabelPrefix(labels, labelOrderRunPrefix):
-		return ClassOrders
 	default:
 		return ClassWork
 	}

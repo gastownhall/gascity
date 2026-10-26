@@ -97,9 +97,13 @@ func TestClassifyGoldenTable(t *testing.T) {
 		{"graph gate step with a session label stays graph", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1", beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
 
 		// ---- ORDERS (order-dispatch tracking) ----
-		// An order's run label alone (no order-tracking, no graph marker) is an
-		// order-owned row only order dispatch writes (CoordinationOwned).
-		{"order run label alone", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent"}}, ClassOrders},
+		// An order's run label alone (no order-tracking, no graph marker) is
+		// WORK: agents file real bugs, handoffs and tasks that inherit it from
+		// the patrol that found them (150 such beads in production single-store
+		// cities, e.g. or-l50geh, pl-vm0tw, tr-b6glw). Run records are matched
+		// by order-tracking; order-poured roots are graph (rows below).
+		{"order run label alone stays work", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent"}}, ClassWork},
+		{"patrol-filed bug with an inherited order-run label stays work", beads.Bead{Type: "bug", Labels: []string{"order-run:technical-health-patrol", "technical-health"}}, ClassWork},
 		{"order-poured workflow root stays graph", beads.Bead{Type: "molecule", Labels: []string{"order-run:rig/agent"}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}}, ClassGraph},
 		{"order-poured wisp root stays graph", beads.Bead{Type: "molecule", Labels: []string{"order-run:rig/agent"}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}}, ClassGraph},
 		{"order-tracking bead", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking"}, NoHistory: true}, ClassOrders},
