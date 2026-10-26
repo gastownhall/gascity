@@ -4296,6 +4296,11 @@ func parsePaneProcessState(output, target string) (paneProcessState, error) {
 		return paneProcessState{}, fmt.Errorf("%w for target %s", errEmptyPaneProcessState, target)
 	}
 	fields := strings.Fields(output)
+	// tmux 3.8 prints an empty #{pane_pid} for a dead pane ("\t1"); the
+	// executor trims the leading tab, so a lone "1" is a dead pane with no PID.
+	if len(fields) == 1 && fields[0] == "1" {
+		return paneProcessState{Dead: true}, nil
+	}
 	if len(fields) != 2 {
 		return paneProcessState{}, fmt.Errorf("unexpected pane process state %q for target %s", output, target)
 	}
