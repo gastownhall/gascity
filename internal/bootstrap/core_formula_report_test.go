@@ -216,6 +216,50 @@ func TestCorePoolWorkerPromptClosesWorkBeadWithReason(t *testing.T) {
 	}
 }
 
+// TestCoreMolScopedWorkAttemptsStateOutcomeContract checks the text of the
+// attempt beads a worker actually claims: every retry-managed mol-scoped-work
+// step must tell the worker how to close it with gc.outcome, and must name the
+// step bead through `gc hook current --id-only`, because $GC_BEAD_ID is never
+// set in a session shell.
+func TestCoreMolScopedWorkAttemptsStateOutcomeContract(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	recipe, err := formula.Compile(context.Background(), "mol-scoped-work", coreFormulaSearchPaths(t), map[string]string{
+		"convoy_id":   "gc-convoy",
+		"base_branch": "main",
+	})
+	if err != nil {
+		t.Fatalf("compile mol-scoped-work: %v", err)
+	}
+	steps := []string{"load-context", "workspace-setup", "preflight-tests", "implement", "self-review", "submit", "cleanup-worktree"}
+	for _, step := range steps {
+		t.Run(step, func(t *testing.T) {
+			id := "mol-scoped-work." + step + ".attempt.1"
+			attempt := recipe.StepByID(id)
+			if attempt == nil {
+				t.Fatalf("compiled mol-scoped-work has no attempt bead %q; is %s still retry-managed?", id, step)
+			}
+			for _, want := range []string{
+				"gc.outcome=pass",
+				"gc.outcome=fail",
+				"gc.failure_class=",
+				"gc.failure_reason=",
+				"--status=closed",
+				"$(gc hook current --id-only) || exit 1",
+			} {
+				if !strings.Contains(attempt.Description, want) {
+					t.Errorf("%s description does not contain %q; a close without gc.outcome fails the step as missing_outcome", id, want)
+				}
+			}
+			if strings.Contains(attempt.Description, "GC_BEAD_ID") {
+				t.Errorf("%s description names GC_BEAD_ID, which is never set in a session shell; use gc hook current --id-only", id)
+			}
+		})
+	}
+}
+
 // readCorePoolWorkerPrompt returns the stock pool-worker prompt template.
 func readCorePoolWorkerPrompt(t *testing.T) string {
 	t.Helper()
