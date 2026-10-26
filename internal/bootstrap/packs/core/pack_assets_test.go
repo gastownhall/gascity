@@ -324,3 +324,46 @@ func TestPoolWorkerPromptStatesStepPassClose(t *testing.T) {
 		t.Error("pool-worker prompt tells the worker to close a step with a bare `gc bd close <step-id>`; the retry evaluator judges that missing_outcome")
 	}
 }
+
+// promptStepUpdates returns every `gc bd update` command in a normalized
+// prompt, each cut at its `--status closed` or at the end of its code span.
+func promptStepUpdates(prompt string) []string {
+	var commands []string
+	for rest := prompt; ; {
+		start := strings.Index(rest, "gc bd update")
+		if start < 0 {
+			return commands
+		}
+		rest = rest[start:]
+		end := len(rest)
+		if i := strings.Index(rest, "--status closed"); i >= 0 {
+			end = i + len("--status closed")
+		}
+		if i := strings.IndexAny(rest, "`"); i >= 0 && i < end {
+			end = i
+		}
+		commands = append(commands, rest[:end])
+		rest = rest[end:]
+	}
+}
+
+// TestPoolWorkerPromptStatesStepFailureCloses pins the failure half of the
+// step close contract: a failed step closes with gc.outcome=fail plus a
+// failure class and reason, and no close pairs gc.outcome=pass with failure
+// metadata, which the retry evaluator treats as a contract violation.
+func TestPoolWorkerPromptStatesStepFailureCloses(t *testing.T) {
+	prompt := readPoolWorkerPrompt(t)
+	for _, class := range []string{"transient", "hard"} {
+		want := "gc bd update <id> --set-metadata gc.outcome=fail --set-metadata gc.failure_class=" + class +
+			" --set-metadata gc.failure_reason=<short_reason> --status closed"
+		if !strings.Contains(prompt, want) {
+			t.Errorf("pool-worker prompt does not state the %s failure close %q", class, want)
+		}
+	}
+	for _, command := range promptStepUpdates(prompt) {
+		if strings.Contains(command, "gc.outcome=pass") &&
+			(strings.Contains(command, "gc.failure_class") || strings.Contains(command, "gc.failure_reason")) {
+			t.Errorf("pool-worker prompt pairs gc.outcome=pass with failure metadata: %s", command)
+		}
+	}
+}
