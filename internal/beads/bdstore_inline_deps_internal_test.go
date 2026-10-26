@@ -747,9 +747,18 @@ func TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T
 
 // closedReadsAreOneListAndOneQuery reports whether reads are the closed-row
 // budget of one two-tier read: a `bd list --all` and a wisp-tier `bd query
-// --all`.
+// --all`, in either order: BdStore.listTierPair issues them concurrently.
 func closedReadsAreOneListAndOneQuery(reads [][]string) bool {
-	return len(reads) == 2 && reads[0][1] == "list" && reads[1][1] == "query"
+	var lists, queries int
+	for _, read := range reads {
+		switch read[1] {
+		case "list":
+			lists++
+		case "query":
+			queries++
+		}
+	}
+	return len(reads) == 2 && lists == 1 && queries == 1
 }
 
 // TestClosedReadsAreOneListAndOneQueryInEitherOrder pins the cost invariant
