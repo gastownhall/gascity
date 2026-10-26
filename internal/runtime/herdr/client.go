@@ -957,13 +957,15 @@ func (c *client) socketPath() string {
 // $XDG_CONFIG_HOME/herdr, else $HOME/.config/herdr, else <temp dir>/herdr.
 // os.UserConfigDir() is not that rule: on macOS it ignores XDG_CONFIG_HOME
 // and returns $HOME/Library/Application Support, a directory herdr never
-// uses (#5770). An empty variable counts as unset (XDG Base Directory spec;
-// also what os.UserConfigDir() does on Linux today).
+// uses (#5770). herdr reads each variable with std::env::var, so a variable
+// that is set counts even when it is empty or relative (filepath.Join("",
+// "herdr") is "herdr", as PathBuf::from("").join("herdr") is); startServer
+// refuses the relative socket path that results.
 func herdrConfigDir() string {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+	if dir, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {
 		return filepath.Join(dir, "herdr")
 	}
-	if home := os.Getenv("HOME"); home != "" {
+	if home, ok := os.LookupEnv("HOME"); ok {
 		return filepath.Join(home, ".config", "herdr")
 	}
 	return filepath.Join(os.TempDir(), "herdr")
@@ -995,7 +997,16 @@ func (c *client) removeStaleSocket() {
 
 // startServer launches the headless herdr server for this session (detached)
 // and waits for it to accept connections. Idempotent — no-op if already live.
+//
+// It refuses a relative socket path before dialing, unlinking or launching
+// anything. Each process resolves such a path against its own working
+// directory: the server against the city root, gc and every herdr CLI call
+// against gc's ($HOME or / under the supervisor). The server would bind a
+// socket gc never dials, and every retry would launch another server.
 func (c *client) startServer() error {
+	if sock := c.socketPath(); !filepath.IsAbs(sock) {
+		return c.relativeSocketError(sock)
+	}
 	c.serverMu.Lock()
 	defer c.serverMu.Unlock()
 	if c.serverAlive() {
@@ -1029,7 +1040,23 @@ func (c *client) startServer() error {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return fmt.Errorf("herdr server for session %q did not become ready", c.session)
+	return fmt.Errorf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
+}
+
+// relativeSocketError is startServer's refusal of the relative socket path
+// sock. It names both working directories and the variables to fix.
+func (c *client) relativeSocketError(sock string) error {
+	gcDir, err := os.Getwd()
+	if err != nil {
+		gcDir = fmt.Sprintf("unknown (%v)", err)
+	}
+	serverDir := c.cityRoot
+	if serverDir == "" {
+		serverDir = gcDir // city-less construction: the server inherits gc's cwd
+	}
+	return fmt.Errorf("herdr server for session %q: socket path %q is relative because XDG_CONFIG_HOME, or HOME when XDG_CONFIG_HOME is unset, is set but not absolute; "+
+		"herdr would resolve it against the server's working directory %q and gc against its own, %q: set XDG_CONFIG_HOME to an absolute directory, or unset it and set HOME to one",
+		c.session, sock, serverDir, gcDir)
 }
 
 // stopServer stops this session's server (best-effort; tolerates not-running).
