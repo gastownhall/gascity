@@ -6802,6 +6802,72 @@ prompt_template = "prompts/does-not-exist.md"
 	}
 }
 
+// setupStrictPrimeTemplateCity writes a city whose agent "worker" uses
+// prompts/worker.template.md with the given body, then chdirs into it and
+// points GC_CITY_PATH at it. The .template.md suffix matters: a plain .md
+// prompt_template is returned verbatim and never executed.
+func setupStrictPrimeTemplateCity(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", dir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+}
+
+// TestDoPrimeStrictTemplateParseErrorFails verifies that --strict fails on a
+// prompt_template that does not parse, instead of warning on stderr and
+// emitting the raw template text with exit 0 (issue #8149).
+func TestDoPrimeStrictTemplateParseErrorFails(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	setupStrictPrimeTemplateCity(t, "Hello {{base_branch}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, parse error) = 0, want non-zero; stdout: %q; stderr: %q", stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on strict template failure", stdout.String())
+	}
+	for _, want := range []string{
+		`gc prime: prompt_template "prompts/worker.template.md" for agent "worker": `,
+		`function "base_branch" not defined`,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+}
+
 // TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess verifies that
 // strict+hook success no longer writes the legacy provider hook sidecar.
 func TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess(t *testing.T) {
