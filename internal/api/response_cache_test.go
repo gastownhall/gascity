@@ -55,7 +55,7 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 // so a busy city (whose sequence advances every poll) still hits the cache
 // instead of rebuilding the O(store-size) body on every request. Recording an
 // event must NOT bust the /status cache within the TTL window — unlike the
-// index-keyed endpoints (see TestHandleAgentListCachesUntilIndexChanges).
+// index-keyed endpoints (see TestHandleOrdersFeedCachesUntilIndexChanges).
 func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// Pin a wide TTL so every request in this test lands in the same time
 	// bucket; this isolates the "index churn must not bust the cache" property
@@ -517,7 +517,26 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	}
 }
 
-func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
+// TestHandleAgentListCachesAcrossIndexChanges pins the gascity#7149 fix: the
+// agent list keys its response cache on a wall-clock TTL bucket, not the
+// event sequence, so a busy city (whose sequence advances several times a
+// second) still hits the cache instead of rebuilding the per-agent body — an
+// active-bead lookup plus an environment read per agent — on every request.
+func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
+	// Pin a wide TTL so every request in this test lands in the same time
+	// bucket; this isolates the "index churn must not bust the cache"
+	// property from wall-clock bucket-boundary timing. The TTL floor is
+	// pinned off so the bucket cache alone carries the assertion, as in
+	// TestHandleStatusCachesAcrossIndexChanges.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = 0
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
@@ -529,25 +548,32 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents build issued no assignee-scoped List calls; the cache-hit assertions below would be vacuous")
+	}
+	builtIndex := responseIndex(t, rec)
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second agents = %d, want 200", rec.Code)
+	// A moving event sequence — the busy-city scenario from #7149 — must
+	// keep hitting the time-bucketed cache, not force a rebuild per poll.
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("agents after event %d = %d, want 200", i, rec.Code)
+		}
+		if got := store.listByAssigneeCalls; got != perBuild {
+			t.Fatalf("assignee List calls after %d index changes = %d, want %d (time-bucketed cache must survive sequence churn)", i+1, got, perBuild)
+		}
 	}
 
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
-	}
-
-	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("third agents = %d, want 200", rec.Code)
-	}
-	if store.listByAssigneeCalls != 4 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
+	// A cache hit reports the index its body was built at, not the live
+	// sequence: the body predates the recorded events, so a long-poll or
+	// stream resume after the live head would skip them
+	// (docs/reference/api.md "Snapshot index").
+	if got := responseIndex(t, rec); got != builtIndex {
+		t.Fatalf("X-GC-Index = %d, want the build index %d on a cache hit", got, builtIndex)
 	}
 }
 

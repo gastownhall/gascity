@@ -17,10 +17,21 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// agentListResponseTTLFloor lets a non-blocking agent list reuse a body
+// built within the floor after its time-bucket entry has rolled over. The
+// list fans out per agent (active-bead lookups, environment reads), and on a
+// loaded city the build outlasts a bucket (8.19s in #7149). Such a body is
+// stored under a bucket no later request computes, so this age bound,
+// measured from when the build finished, is what serves it. Same value and
+// rationale as statusResponseTTLFloor (#1896). Blocking requests bypass it.
+// Var, not const, so tests can pin each cache tier.
+var agentListResponseTTLFloor = 3 * time.Second
+
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
 func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput) (*ListOutput[agentResponse], error) {
 	bp := input.toBlockingParams()
-	if bp.isBlocking() {
+	blocking := bp.isBlocking()
+	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 	index := s.latestIndex()
@@ -36,22 +47,33 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// back to the patch-presence heuristic.
 	rawCfg := s.rawConfig()
 
+	// The agent list keys its response cache on a TIME bucket, not the event
+	// index: on a busy city the sequence advances several times a second, so
+	// an index-keyed entry missed on nearly every request and every poll paid
+	// the full per-agent rebuild — an active-bead lookup per agent plus an
+	// environment read per running agent (gascity#7149; the class of miss
+	// #3186 fixed for /status). The bucket changes only once per
+	// timeBucketResponseCacheTTL, so high-frequency polls reuse the built
+	// body. A hit reports the index its body was built at (indexedResponse),
+	// never this request's live head: X-GC-Index names the sequence the body
+	// reflects, and a head newer than the body would skip the changes the
+	// body lacks (docs/reference/api.md "Snapshot index").
+	//
+	// Strict-freshness callers (blocking ?index=&wait=) bypass this cache so
+	// the body they receive reflects the event they waited for, never a body
+	// built before it. The key still carries the config generation: config
+	// swaps do not advance the event index (configGeneration in
+	// response_cache.go, TestHandleAgentListCacheMissesAfterConfigSwap). The
+	// key is derived from input struct tags — adding a new query param to
+	// AgentListInput automatically participates in the key.
 	cacheKey := ""
-	if !wantPeek {
-		// Cache key derived from input struct tags — adding a new query
-		// param to AgentListInput automatically participates in the key.
-		// The list projects the config, whose swaps do not advance the
-		// event index, so the key also carries the config generation.
+	bucket := responseCacheTimeBucket(time.Now())
+	if !wantPeek && !blocking {
 		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
-		// A hit needs the exact index captured above, before any state was
-		// read, so the cached body reflects every change up to index and
-		// returning this request's index with it is safe. A key that can hit
-		// across index changes (the time bucket /status uses) must cache the
-		// build index with the body instead (indexedResponse).
-		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
+		if hit, ok := cachedResponseAs[indexedResponse[ListBody[agentResponse]]](s, cacheKey, bucket); ok {
 			return &ListOutput[agentResponse]{
-				Index: index,
-				Body:  body,
+				Index: hit.Index,
+				Body:  hit.Body,
 			}, nil
 		}
 	}
@@ -256,7 +278,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// A partial list reflects a transient backend failure; don't serve it
 	// from cache once the backend recovers.
 	if cacheKey != "" && !body.Partial {
-		s.storeResponse(cacheKey, index, body)
+		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[agentResponse]]{Index: index, Body: body})
 	}
 
 	return &ListOutput[agentResponse]{
