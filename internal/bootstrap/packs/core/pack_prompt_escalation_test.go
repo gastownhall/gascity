@@ -87,11 +87,14 @@ func runWorkerEscalationBlock(t *testing.T, block string, extraEnv []string) []s
 // TestCoreWorkerPromptsEscalateToConfiguredRecipient pins the escalation
 // contract of the core worker prompts. A blocked worker mails
 // GC_ESCALATION_RECIPIENT — the routing every other core escalation path
-// (escalate.sh, the human-gate scripts) already honors — and the pinned
-// command wakes the recipient with --notify, which gc already treats as a
-// no-op for the sessionless human alias. Hard-coding `gc mail send human`,
-// as these prompts did, lands worker escalations in an inbox nothing
-// watches while the configured recipient never hears them (issue #7154).
+// (escalate.sh, the human-gate scripts) already honors — defaulting to the
+// reserved human inbox, and the pinned command wakes an agent recipient with
+// --notify, which gc already treats as a no-op for the sessionless human
+// alias. Hard-coding `gc mail send human`, as these prompts did, lands
+// worker escalations in an inbox nothing watches while the configured
+// recipient never hears them (issue #7154). The section carries no template
+// action, so rendering leaves the command verbatim, and the two prompts'
+// sections stay byte-identical so the copies cannot drift.
 func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 	cases := []struct {
 		name string
@@ -107,6 +110,7 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 		{name: "unset", want: "human"},
 		{name: "empty", env: []string{"GC_ESCALATION_RECIPIENT="}, want: "human"},
 	}
+	var sections []string
 	for _, path := range coreWorkerPromptPaths {
 		t.Run(path, func(t *testing.T) {
 			data, err := fs.ReadFile(PackFS, path)
@@ -114,6 +118,23 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 				t.Fatalf("core pack missing %s: %v", path, err)
 			}
 			section := workerEscalationSection(t, path, string(data))
+			sections = append(sections, section)
+
+			if strings.Contains(section, "gc mail send human") {
+				t.Errorf("%s: Escalation hard-codes the human recipient; BLOCKED mail must route through ${GC_ESCALATION_RECIPIENT:-human} like every other core escalation path", path)
+			}
+			if strings.Contains(section, "mail that instead") || strings.Contains(section, "coordinator") {
+				t.Errorf("%s: Escalation offers a coordinator alternative; recipient routing is configuration (GC_ESCALATION_RECIPIENT), not model judgment", path)
+			}
+			if !strings.Contains(section, "GC_ESCALATION_RECIPIENT") {
+				t.Errorf("%s: Escalation section does not name GC_ESCALATION_RECIPIENT", path)
+			}
+			if !strings.Contains(section, "`human`") {
+				t.Errorf("%s: Escalation section does not document the human fallback", path)
+			}
+			if strings.Contains(section, "{{") {
+				t.Errorf("%s: Escalation section contains a template action; the pinned command must survive rendering verbatim", path)
+			}
 
 			block := workerEscalationBashBlock(t, path, section)
 			for _, tc := range cases {
@@ -130,5 +151,8 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 				})
 			}
 		})
+	}
+	if sections[0] != sections[1] {
+		t.Errorf("the Escalation sections of %s and %s must stay byte-identical; they have drifted", coreWorkerPromptPaths[0], coreWorkerPromptPaths[1])
 	}
 }
