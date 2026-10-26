@@ -177,3 +177,106 @@ func lsofFallbackProcRootEnv(t *testing.T) string {
 	t.Helper()
 	return "GC_DOLT_PROC_ROOT=" + filepath.Join(t.TempDir(), "missing")
 }
+
+// TestManagedRuntimeListenerPIDReadsProcTables pins how the procfs lookup
+// picks the listener: the first candidate holding a LISTEN socket for the
+// port, otherwise the lowest holding pid, and nothing when no LISTEN row
+// matches. lsof never runs while the tables are readable.
+func TestManagedRuntimeListenerPIDReadsProcTables(t *testing.T) {
+	const port = 4406
+	listen := func(table, inode string) procTCPRow {
+		return procTCPRow{table: table, port: port, state: "0A", inode: inode}
+	}
+	spoofed := []string{
+		"/tmp/x 9 -> socket:[7001]",
+		"/tmp/a\nlrwx------ 1 0 0 64 Oct 26 12:00 9 -> socket:[7001]",
+	}
+	tests := []struct {
+		name string
+		rows []procTCPRow
+		fds  map[string][]string
+		args []string
+		want string
+	}{
+		{
+			name: "candidate holding the socket wins over a lower holder",
+			rows: []procTCPRow{listen("tcp", "7001")},
+			fds:  map[string][]string{"200": {"socket:[7001]"}, "300": {"/dev/null", "socket:[7001]"}},
+			args: []string{"300"},
+			want: "300",
+		},
+		{
+			name: "candidate holding nothing falls back to the lowest holder",
+			rows: []procTCPRow{listen("tcp", "7001")},
+			fds:  map[string][]string{"150": {"/dev/null"}, "200": {"socket:[7001]"}, "300": {"socket:[7001]"}},
+			args: []string{"150"},
+			want: "200",
+		},
+		{
+			name: "lowest of several holders by number",
+			rows: []procTCPRow{listen("tcp", "7001"), listen("tcp", "7002")},
+			fds:  map[string][]string{"1000": {"socket:[7001]"}, "999": {"/dev/null", "socket:[7002]"}},
+			want: "999",
+		},
+		{
+			name: "listener only in tcp6",
+			rows: []procTCPRow{listen("tcp6", "7001")},
+			fds:  map[string][]string{"4242": {"/dev/null", "socket:[7001]"}},
+			want: "4242",
+		},
+		{
+			name: "non-listen row and zero inode match nothing",
+			rows: []procTCPRow{
+				{table: "tcp", port: port, state: "01", inode: "7001"},
+				{table: "tcp6", port: port, state: "0A", inode: "0"},
+			},
+			fds: map[string][]string{"200": {"socket:[7001]", "socket:[0]"}},
+		},
+		{
+			name: "listeners only on other ports",
+			rows: []procTCPRow{{table: "tcp", port: port + 1, state: "0A", inode: "7001"}},
+			fds:  map[string][]string{"200": {"socket:[7001]"}},
+		},
+		{
+			name: "spoofed fd target names are not holders",
+			rows: []procTCPRow{listen("tcp", "7001")},
+			fds:  map[string][]string{"100": spoofed, "500": {"socket:[7001]"}},
+			want: "500",
+		},
+		{
+			name: "spoofed candidate is not a holder",
+			rows: []procTCPRow{listen("tcp", "7001")},
+			fds:  map[string][]string{"100": spoofed, "500": {"socket:[7001]"}},
+			args: []string{"100"},
+			want: "500",
+		},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			procRoot := writeFakeProcRoot(t, tt.rows, tt.fds)
+			fakeBin, marker := writeLsofTripwire(t)
+			cmd := exec.Command("sh", append([]string{
+				"-c",
+				`. "$GC_PACK_DIR/assets/scripts/runtime.sh"; managed_runtime_listener_pid "$@"`,
+				"sh", strconv.Itoa(port),
+			}, tt.args...)...)
+			cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "GC_DOLT_PROC_ROOT", "PATH"),
+				"GC_CITY_PATH="+t.TempDir(),
+				"GC_PACK_DIR="+root,
+				"GC_DOLT_PORT="+strconv.Itoa(port),
+				"GC_DOLT_PROC_ROOT="+procRoot,
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("managed_runtime_listener_pid: %v\n%s", err, out)
+			}
+			assertLsofNotRun(t, marker)
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Fatalf("managed_runtime_listener_pid %d %v = %q, want %q", port, tt.args, got, tt.want)
+			}
+		})
+	}
+}

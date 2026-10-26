@@ -225,13 +225,15 @@ managed_runtime_socket_holder() (
       '
 )
 
-# managed_runtime_listener_pid PORT prints the pid holding PORT's TCP
-# listener. Where the procfs TCP tables are readable it reads them and the
-# fd directories and never runs lsof, which hangs on a stalled FUSE mount;
-# it prints nothing when no LISTEN row matches. Without them (darwin) it
-# asks lsof.
+# managed_runtime_listener_pid PORT [CANDIDATE...] prints the pid holding
+# PORT's TCP listener. Where the procfs TCP tables are readable it reads
+# them and the fd directories and never runs lsof, which hangs on a stalled
+# FUSE mount: it prints the first CANDIDATE holding the socket, otherwise
+# the lowest holding pid, and nothing when no LISTEN row matches. Without
+# them (darwin) it asks lsof and ignores the candidates.
 managed_runtime_listener_pid() (
   port="$1"
+  shift
 
   case "$port" in
     ''|*[!0-9]*)
@@ -242,6 +244,18 @@ managed_runtime_listener_pid() (
   if inodes=$(managed_runtime_listen_inodes "$port"); then
     [ -n "$inodes" ] || return 0
     cd "$DOLT_PROC_ROOT" || return 0
+    for candidate in "$@"; do
+      case "$candidate" in
+        ''|*[!0-9]*)
+          continue
+          ;;
+      esac
+      holder_pid=$(managed_runtime_socket_holder "$inodes" "$candidate/fd")
+      if [ -n "$holder_pid" ]; then
+        printf '%s\n' "$holder_pid"
+        return 0
+      fi
+    done
     managed_runtime_socket_holder "$inodes" [0-9]*/fd
     return 0
   fi
@@ -319,7 +333,7 @@ managed_runtime_port() (
   fi
   pid_is_running "$pid" || return 0
 
-  holder_pid=$(managed_runtime_listener_pid "$port" || true)
+  holder_pid=$(managed_runtime_listener_pid "$port" "$pid" || true)
   if [ -n "$holder_pid" ]; then
     [ "$holder_pid" = "$pid" ] || return 0
     printf '%s\n' "$port"
