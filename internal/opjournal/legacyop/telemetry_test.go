@@ -431,3 +431,30 @@ func TestHealthyIsToldOfEachAnsweredClose(t *testing.T) {
 		check(t, healthy)
 	})
 }
+
+// TestDegradeStoreCannotRecord pins which degrades name a store that cannot
+// record ops at all: an open that failed for want of conditional writes or a
+// namespace. A store fault, contention, an unregistered type, or a
+// capability gap at a later stage (a store that opened and then lost it) is
+// not one.
+func TestDegradeStoreCannotRecord(t *testing.T) {
+	cases := []struct {
+		stage, reason string
+		want          bool
+	}{
+		{StageOpen, DegradeConditionalWritesUnsupported, true},
+		{StageOpen, DegradeNoNamespace, true},
+		{StageOpen, DegradeStoreError, false},
+		{StageOpen, DegradeContention, false},
+		{StageOpen, DegradeTypeUnregistered, false},
+		{StagePropose, DegradeTypeUnregistered, false},
+		{StageClose, DegradeConditionalWritesUnsupported, false},
+		{StageSweep, DegradeNoNamespace, false},
+	}
+	for _, c := range cases {
+		d := Degrade{Stage: c.stage, Reason: c.reason}
+		if got := d.StoreCannotRecord(); got != c.want {
+			t.Errorf("Degrade{%s, %s}.StoreCannotRecord() = %t, want %t", c.stage, c.reason, got, c.want)
+		}
+	}
+}

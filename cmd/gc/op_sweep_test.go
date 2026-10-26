@@ -709,6 +709,62 @@ func TestOpSweepGatesOffIncapableStoreStops(t *testing.T) {
 	}
 }
 
+// TestOpSweepDefaultAutoIncapableStoreStops proves the builtin default (every
+// ops gate auto, none set) over a store that cannot record ops runs as if
+// every gate were off: no degrade event, no ticker, one log line saying why.
+// An explicit auto over the same store degrades and keeps ticking.
+func TestOpSweepDefaultAutoIncapableStoreStops(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		store  beads.Store
+		reason string
+	}{
+		{"no conditional writes", incapableStore{beads.NewMemStore()}, legacyop.DegradeConditionalWritesUnsupported},
+		{"no namespace", &beads.MemStore{HonorExplicitIDs: true}, legacyop.DegradeNoNamespace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &controllerState{cityBeadStore: tc.store, rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+			h := newOpSweepHarness(cs)
+			waitOpSweep(t, runOpSweep(context.Background(), h))
+			if n := h.tickers.Load(); n != 0 {
+				t.Fatalf("started %d ticker(s) under the builtin default over an incapable store, want none", n)
+			}
+			if d := h.degraded(); len(d) != 0 {
+				t.Fatalf("degrade hook heard %+v, want nothing under the builtin default", d)
+			}
+			if l := h.logLines("auto by default"); len(l) != 1 || !strings.Contains(l[0], tc.reason) {
+				t.Fatalf("log lines = %q, want one naming %s", l, tc.reason)
+			}
+
+			explicit := newOpSweepHarness(newOpSweepCS(tc.store, rollout.WithOpsContent(rollout.Auto)))
+			explicit.s.safePass()
+			if d := explicit.degraded(); len(d) != 1 || d[0].Reason != tc.reason {
+				t.Fatalf("explicit auto: degrades = %+v, want one %s", d, tc.reason)
+			}
+			if !explicit.s.wantsTicker() {
+				t.Fatal("explicit auto: the sweeper stopped ticking")
+			}
+		})
+	}
+}
+
+// TestOpSweepDefaultAutoCapableStoreTicks proves the builtin default over a
+// store that can record ops keeps the sweeper's ticker, as an explicit auto
+// does.
+func TestOpSweepDefaultAutoCapableStoreTicks(t *testing.T) {
+	cs := &controllerState{cityBeadStore: newOpSweepStore(), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("the pass panicked")
+	}
+	if !h.s.wantsTicker() {
+		t.Fatal("the builtin default over a capable store stopped ticking")
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrades = %+v, want none", d)
+	}
+}
+
 // TestOpSweepGatesOffNilStoreRetries is the boot whose best-effort city-store
 // open failed (cityBeadStore nil): with every gate off the boot pass neither
 // panics nor ends the loop, and once a reload installs the store the next

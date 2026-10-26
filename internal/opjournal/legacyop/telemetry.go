@@ -81,6 +81,21 @@ type Degrade struct {
 	Err     error
 }
 
+// CannotRecord reports whether a degrade of reason is a store that cannot
+// record ops at all as it is set up: no conditional writes, or no namespace.
+// A store error, contention or an unregistered op type is a fault, not that.
+func CannotRecord(reason string) bool {
+	return reason == DegradeConditionalWritesUnsupported || reason == DegradeNoNamespace
+}
+
+// StoreCannotRecord reports whether d is an op store that did not open
+// because the store cannot record ops at all (CannotRecord). A gate that is
+// auto only by its builtin default treats that store as off: its surfaces
+// stay quiet, as beads.conditional_writes does under its auto default.
+func (d Degrade) StoreCannotRecord() bool {
+	return d.Stage == StageOpen && CannotRecord(d.Reason)
+}
+
 // surface is the telemetry surface of an executor: api, cli, or the
 // executor itself for anything else.
 func surface(e opjournal.ExecutorKind) string {

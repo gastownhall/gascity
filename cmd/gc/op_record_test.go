@@ -584,3 +584,54 @@ func TestCLIOpWakeConflictReasonIsAlwaysAValidToken(t *testing.T) {
 		}
 	}
 }
+
+// Under the builtin default (no [ops] gate, no GC_OPS_* override) the gate is
+// auto, but a store that cannot record ops is treated as off: the wake runs
+// unrecorded and prints nothing, as every released bd lacks --if-revision.
+func TestSessionWakeOpDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	f := newCLIOpWakeFixture(t)
+	f.deps.store = cliOpIncapableStore{f.rec}
+	code, stdout, stderr := f.run(t, "", true)
+	if code != 0 {
+		t.Fatalf("wake = %d; stderr=%s", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want nothing under the builtin default over an incapable store", stderr)
+	}
+	if _, ok := cliOpJSON(t, []byte(stdout))["op_id"]; ok {
+		t.Fatalf("JSON %s carries op_id for an unrecorded run", stdout)
+	}
+	b, _ := f.rec.Get(f.id)
+	if b.Metadata["state"] == "suspended" {
+		t.Fatal("the wake did not run")
+	}
+}
+
+// A --key under the builtin default still warns over a store that cannot
+// record ops: the run asked for a dedup the journal cannot give.
+func TestSessionWakeOpDefaultAutoWarnsForAKeyOnAnIncapableStore(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	f := newCLIOpWakeFixture(t)
+	f.deps.store = cliOpIncapableStore{f.rec}
+	code, _, stderr := f.run(t, "k-1", false)
+	if code != 0 {
+		t.Fatalf("wake = %d; stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: op journal open failed (conditional_writes_unsupported)") {
+		t.Fatalf("stderr = %q, want the open warning for a --key run", stderr)
+	}
+}
+
+// The builtin default records on a store that can record ops.
+func TestSessionWakeOpDefaultAutoRecordsOnACapableStore(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	f := newCLIOpWakeFixture(t)
+	if code, _, stderr := f.run(t, "", false); code != 0 || stderr != "" {
+		t.Fatalf("wake = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
+	}
+	op := cliOpOnly(t, f.rec)
+	if op.Status != opjournal.StatusClosed {
+		t.Fatalf("op = %+v, want closed", op)
+	}
+}

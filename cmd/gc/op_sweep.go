@@ -34,6 +34,15 @@ package main
 // row is submitted (opjournal.HasSubmittedOps, one keyed read of one row),
 // and only then opens the op store, so a city that never recorded an op does
 // not pay NewStore's capability probe at every controller start.
+//
+// Gates that are auto only by their builtin default (none set in [ops] or
+// through GC_OPS_*) treat a sessions store that cannot record ops at all (no
+// conditional writes, no namespace) as off: a pass that finds the store so
+// logs that once and runs as a gates-off pass, so it raises no
+// ops.recording_degraded event and the loop stops once nothing is left.
+// Every released bd lacks --if-revision, so a default bd city would otherwise
+// degrade on every pass for the controller's life. An explicit auto or
+// require stays loud.
 
 import (
 	"context"
@@ -92,6 +101,10 @@ type opSweeper struct {
 	st     *opjournal.Store
 	stOver beads.Store
 	booted bool
+	// incapable reports that the last open found a store that cannot record
+	// ops at all under gates that are auto only by their builtin default, so
+	// passes run as if every gate were off (effectiveMode).
+	incapable bool
 	// leftWork reports that the last pass left something a later pass can
 	// finish; with every gate off it keeps the ticker running.
 	leftWork bool
@@ -125,14 +138,7 @@ func (cs *controllerState) newOpSweeper() *opSweeper {
 // gate that records.
 func (s *opSweeper) reportDegrade(d legacyop.Degrade) {
 	s.logDegrade(d)
-	for _, g := range []struct {
-		key  string
-		mode rollout.Mode
-	}{
-		{rollout.KeyOpsContent, s.flags.OpsContent()},
-		{rollout.KeyOpsControl, s.flags.OpsControl()},
-		{rollout.KeyOpsLifecycle, s.flags.OpsLifecycle()},
-	} {
+	for _, g := range opsGateModes(s.flags) {
 		if g.mode == rollout.Off {
 			continue
 		}
@@ -177,7 +183,52 @@ func (s *opSweeper) wantsTicker() bool {
 	s.mu.Lock()
 	booted, leftWork := s.booted, s.leftWork
 	s.mu.Unlock()
-	return !booted || leftWork || s.strongestMode() != rollout.Off
+	return !booted || leftWork || s.effectiveMode() != rollout.Off
+}
+
+// effectiveMode is the mode a pass runs under: the strongest gate, or off
+// once a store that cannot record ops was found under gates that are auto
+// only by their builtin default.
+func (s *opSweeper) effectiveMode() rollout.Mode {
+	s.mu.Lock()
+	incapable := s.incapable
+	s.mu.Unlock()
+	if incapable {
+		return rollout.Off
+	}
+	return s.strongestMode()
+}
+
+// opsGatesBuiltinDefaultOnly reports whether every ops gate that is on under
+// flags is auto only by its builtin default, and at least one is on. Such
+// gates treat a store that cannot record ops at all as off.
+func opsGatesBuiltinDefaultOnly(flags rollout.Flags) bool {
+	on := false
+	for _, g := range opsGateModes(flags) {
+		if g.mode == rollout.Off || g.mode == rollout.ModeUnset {
+			continue
+		}
+		if !flags.BuiltinAuto(g.key) {
+			return false
+		}
+		on = true
+	}
+	return on
+}
+
+// opsGateMode is one ops gate's key and resolved mode.
+type opsGateMode struct {
+	key  string
+	mode rollout.Mode
+}
+
+// opsGateModes lists the three ops gates with their modes under flags.
+func opsGateModes(flags rollout.Flags) []opsGateMode {
+	return []opsGateMode{
+		{rollout.KeyOpsContent, flags.OpsContent()},
+		{rollout.KeyOpsControl, flags.OpsControl()},
+		{rollout.KeyOpsLifecycle, flags.OpsLifecycle()},
+	}
 }
 
 // strongestMode is the strongest of the three ops gates: require over auto
@@ -226,7 +277,7 @@ func (s *opSweeper) pass() {
 	s.mu.Lock()
 	s.booted, s.leftWork = true, false
 	s.mu.Unlock()
-	left := s.sweep(s.strongestMode())
+	left := s.sweep(s.effectiveMode())
 	s.mu.Lock()
 	s.leftWork = left
 	s.mu.Unlock()
@@ -249,9 +300,22 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 	st, err := s.store()
 	if err != nil {
 		reason := legacyop.DegradeReason(err)
+		if mode != rollout.Off && legacyop.CannotRecord(reason) && opsGatesBuiltinDefaultOnly(s.flags) {
+			s.mu.Lock()
+			s.incapable = true
+			s.mu.Unlock()
+			if s.logDue(opSweepLogKey{stage: legacyop.StageOpen, reason: "default:" + reason}) {
+				s.logf("op-sweep: the ops gates are auto by default, but the sessions store cannot record ops (%s: %v); "+
+					"sweeping as if every gate were off", reason, err)
+			}
+			return s.sweep(rollout.Off)
+		}
 		s.fail(mode, legacyop.StageOpen, reason, err)
 		return opSweepRetryable(reason)
 	}
+	s.mu.Lock()
+	s.incapable = false
+	s.mu.Unlock()
 	s.healthy(legacyop.StageOpen)
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)

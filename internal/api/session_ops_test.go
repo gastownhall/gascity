@@ -1674,6 +1674,40 @@ func TestSessionContentOpsDegradeRaisesALatchedEvent(t *testing.T) {
 	}
 }
 
+// opsIncapableStore hides the conditional-write family of the store it
+// wraps, as a bd without --if-revision does.
+type opsIncapableStore struct{ beads.Store }
+
+// A store that cannot record ops raises ops.recording_degraded under an
+// explicit auto, and nothing under the builtin default, which treats that
+// store as off. Both run the request.
+func TestSessionContentOpsDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	for _, c := range []struct {
+		mode   string
+		events int
+	}{{"", 0}, {"auto", 1}} {
+		t.Run("mode="+c.mode, func(t *testing.T) {
+			e := newOpsEnv(t, c.mode)
+			e.fs.cityBeadStore = opsIncapableStore{e.store}
+			e.restart(t)
+			info := e.session(t, "Incapable")
+			rec := e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if acc.Op != nil {
+				t.Fatalf("an incapable store recorded: %+v", acc.Op)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+			if len(evs) != c.events {
+				t.Fatalf("degrade events = %d, want %d", len(evs), c.events)
+			}
+		})
+	}
+}
+
 // §6.4: a configured named session with no row runs unrecorded in auto and
 // is materialized, then recorded, in require.
 func TestSessionContentOpsUnmaterializedNamedTarget(t *testing.T) {

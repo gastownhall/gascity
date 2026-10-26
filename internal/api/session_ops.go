@@ -424,18 +424,26 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 
 // newRecorder is the API's recorder for the ops gate gateKey under mode: it
 // records through s's op store and its city's in-flight registry, and reports
-// degrades and health to its city's reporter under gateKey.
+// degrades and health to its city's reporter under gateKey. A gate that is
+// auto only by its builtin default treats a store that cannot record ops at
+// all as off: that degrade raises no event (legacyop.Degrade.StoreCannotRecord).
 func (o *serverOps) newRecorder(s *Server, gateKey string, mode gate.Mode) *legacyop.Recorder {
 	city := o.city
+	quietIncapable := s.bootFlags.BuiltinAuto(gateKey)
 	return &legacyop.Recorder{
 		Mode:     mode,
 		Executor: legacyop.ExecutorAPI,
 		Open:     s.openOpStore,
 		Inflight: city.inflight,
 		Clock:    o.clk,
-		Degraded: func(d legacyop.Degrade) { city.degraded.Report(gateKey, d) },
-		Healthy:  func(stage string) { o.healthyGate(gateKey, stage) },
-		Done:     city.done,
+		Degraded: func(d legacyop.Degrade) {
+			if quietIncapable && d.StoreCannotRecord() {
+				return
+			}
+			city.degraded.Report(gateKey, d)
+		},
+		Healthy: func(stage string) { o.healthyGate(gateKey, stage) },
+		Done:    city.done,
 
 		CrashPoints: o.crashPoints,
 	}

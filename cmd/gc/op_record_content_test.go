@@ -1261,3 +1261,24 @@ func TestSessionSubmitThroughTheAPIUnrecordedKeyWarns(t *testing.T) {
 		}
 	}
 }
+
+// A broadcast notify under the builtin default over a store that cannot
+// record ops prints no op-journal warning, for any recipient.
+func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	c := newContentOpCity(t, "")
+	c.h.opStore = cliOpIncapableStore{c.h.opStore}
+	var warn bytes.Buffer
+	nudgeWarningWriter = &warn
+	mp := beadmail.New(beads.NewMemStore())
+	nf := func(_, messageID string) (string, error) {
+		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
+	}
+	recipients := map[string]bool{"human": true, "a": true, "b": true, "c": true}
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"hello"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("send --all = %d; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(warn.String()+stderr.String(), "op journal") {
+		t.Fatalf("warnings = %q, stderr = %q; want no op-journal warning under the builtin default", warn.String(), stderr.String())
+	}
+}

@@ -248,6 +248,10 @@ type cliOp struct {
 	openErr error
 	adm     *legacyop.Admission
 	warned  map[string]bool
+	// quietIncapable is set when the op's gate is auto only by its builtin
+	// default: a store that cannot record ops at all then runs the request
+	// unrecorded without a warning, as if the gate were off (warnDegrade).
+	quietIncapable bool
 	// closedWith is the outcome finish closed the op with; nil until then.
 	closedWith *opjournal.Outcome
 	// restartedAs is the generation a kill's session restarted as since the
@@ -629,6 +633,7 @@ func (o *cliOp) mode(cfg *config.City) rollout.Mode {
 	case opjournal.ClassControl:
 		key, mode = rollout.KeyOpsControl, flags.OpsControl()
 	}
+	o.quietIncapable = flags.BuiltinAuto(key)
 	for _, n := range flags.Notices() {
 		if n.Kind == rollout.NoticeInvalidEnvIgnored && n.FlagKey == key {
 			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %s\n", o.req.verb, n.Message) //nolint:errcheck // best-effort stderr
@@ -733,9 +738,17 @@ func (o *cliOp) writeFailure(code, message, opID, key string) {
 }
 
 // warnDegrade prints one warning per stage for a store failure the recorder
-// degraded past. A require-mode refusal is reported by refuse instead.
+// degraded past. A require-mode refusal is reported by refuse instead. Under
+// a gate that is auto only by its builtin default, a store that cannot record
+// ops at all (a bd without --if-revision, a store with no id prefix) is
+// treated as off and warns nothing, unless the run asked for a --key, whose
+// dedup it then cannot give: every released bd lacks --if-revision, so a
+// warning there would print on every recorded command of a default city.
 func (o *cliOp) warnDegrade(d legacyop.Degrade) {
 	if d.Mode == rollout.Require && (d.Stage == legacyop.StageOpen || d.Stage == legacyop.StagePropose) {
+		return
+	}
+	if o.quietIncapable && o.req.key == "" && d.StoreCannotRecord() {
 		return
 	}
 	if o.warned[d.Stage] {
