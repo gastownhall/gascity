@@ -1091,3 +1091,19 @@ func TestMergeSettingsJSON_WrapBareHooks_DistinctBareHooksCoexistAcrossTicks(t *
 		t.Errorf("second command = %q, want the lint command", got)
 	}
 }
+
+func TestMergeSettingsJSON_NoWrap_KeepsDuplicateBaseEntries(t *testing.T) {
+	// The duplicate collapse is a Claude-settings self-heal for #3862. Codex and
+	// Cursor hooks.json must keep the merge's documented additive behavior, so
+	// without WithWrapBareHooks even byte-identical base entries survive.
+	base := `{"hooks":{"PreToolUse":[{"command":"same"},{"command":"same"}]}}`
+	over := `{"hooks":{"PreToolUse":[]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if got := len(preToolUse(t, result)); got != 2 {
+		t.Errorf("PreToolUse entries = %d, want 2 (no-wrap path must be unchanged)", got)
+	}
+}
