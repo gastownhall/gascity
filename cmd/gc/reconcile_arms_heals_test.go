@@ -382,12 +382,28 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 	keeps := map[session.SleepReason]bool{
 		session.SleepReasonIdle: true, session.SleepReasonIdleTimeout: true, session.SleepReasonNoWakeReason: true,
 		session.SleepReasonConfigDrift: true, session.SleepReasonDrained: true, session.SleepReasonCityStop: true,
-		session.SleepReasonUserHold: true, session.SleepReasonWaitHold: true, session.SleepReasonRateLimit: true,
+		session.SleepReasonKilled: true, session.SleepReasonUserHold: true, session.SleepReasonWaitHold: true, session.SleepReasonRateLimit: true,
 		session.SleepReasonRuntimeMissing: true,
 	}
 	for _, reason := range reasons {
 		if got := session.SleepReasonKeepsContinuation(string(reason)); got != keeps[reason] {
 			t.Errorf("SleepReasonKeepsContinuation(%q) = %v, want %v", reason, got, keeps[reason])
+		}
+	}
+}
+
+// Kills the v2 dead-runtime heal discarding the conversation of a row an
+// operator killed (#7308): a killed active or creating row keeps its
+// continuation and heals to a bare asleep.
+func TestAsleepHealPatchKeepsKilledContinuation(t *testing.T) {
+	for _, state := range []string{"creating", "active"} {
+		info := session.Info{
+			ID: "gc-1", MetadataState: state, SleepReason: string(session.SleepReasonKilled),
+			SessionKey: "resume-key", StartedConfigHash: "config-hash", CreatedAt: gatherNow.Add(-time.Hour),
+		}
+		want := session.MetadataPatch{"state": string(session.StateAsleep)}
+		if got := asleepHealPatch(info); !maps.Equal(got, want) {
+			t.Errorf("%s: patch %v, want %v", state, got, want)
 		}
 	}
 }
