@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -174,5 +175,108 @@ func TestOperationEventPayloadShapeIsStable(t *testing.T) {
 	}
 	if roundtripped.CostUSDEstimate != 0.0123 {
 		t.Errorf("CostUSDEstimate lost: got %v", roundtripped.CostUSDEstimate)
+	}
+}
+
+// TestOperationEventCarriesLaunchProvenanceFromMetadata pins that the
+// launch_model / prompt_version / prompt_sha stamps CommitStartedPatch writes
+// into session metadata surface on EVERY worker.operation payload the session
+// records — start, nudge and message alike — because finish re-runs
+// populateOperationEventIdentity.
+func TestOperationEventCarriesLaunchProvenanceFromMetadata(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	handle, _, _, _ := newTestSessionHandleWithRecorder(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "polecat",
+		Title:    "Polecat",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Metadata: map[string]string{
+			sessionpkg.LaunchModelMetadataKey:   "claude-sonnet-5",
+			sessionpkg.PromptVersionMetadataKey: "v3",
+			sessionpkg.PromptSHAMetadataKey:     "abc",
+		},
+	}, recorder)
+
+	actor := handleActor(t, handle, sessionpkg.ActorAgent)
+	if err := handle.Start(context.Background(), actor); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := handle.Nudge(context.Background(), actor, NudgeRequest{Text: "go"}); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if _, err := handle.Message(context.Background(), actor, MessageRequest{Text: "hello"}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+
+	var ops []string
+	for _, event := range recorder.events {
+		if event.Type != events.WorkerOperation {
+			continue
+		}
+		var payload operationEventPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		ops = append(ops, payload.Operation)
+		t.Logf("worker.operation %s payload: %s", payload.Operation, event.Payload)
+		if payload.Model != "claude-sonnet-5" {
+			t.Errorf("%s: Model = %q, want claude-sonnet-5", payload.Operation, payload.Model)
+		}
+		if payload.PromptVersion != "v3" {
+			t.Errorf("%s: PromptVersion = %q, want v3", payload.Operation, payload.PromptVersion)
+		}
+		if payload.PromptSHA != "abc" {
+			t.Errorf("%s: PromptSHA = %q, want abc", payload.Operation, payload.PromptSHA)
+		}
+	}
+	for _, want := range []string{"nudge", "message"} {
+		found := false
+		for _, op := range ops {
+			if op == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no worker.operation %q recorded; got %v", want, ops)
+		}
+	}
+	if len(ops) < 3 {
+		t.Fatalf("expected start, nudge and message operations, got %v", ops)
+	}
+}
+
+// TestOperationEventOmitsLaunchProvenanceWhenAbsent confirms a session whose
+// start stamped no provenance (no model option, no prompt template) leaves
+// the three fields off the wire rather than emitting empty strings.
+func TestOperationEventOmitsLaunchProvenanceWhenAbsent(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	handle, _, _, _ := newTestSessionHandleWithRecorder(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	}, recorder)
+
+	actor := handleActor(t, handle, sessionpkg.ActorAgent)
+	if err := handle.Start(context.Background(), actor); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := handle.Nudge(context.Background(), actor, NudgeRequest{Text: "go"}); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	for _, event := range recorder.events {
+		if event.Type != events.WorkerOperation {
+			continue
+		}
+		raw := string(event.Payload)
+		for _, field := range []string{"model", "prompt_version", "prompt_sha"} {
+			if strings.Contains(raw, `"`+field+`"`) {
+				t.Errorf("payload carries %q without a session stamp; expected omitempty: %s", field, raw)
+			}
+		}
 	}
 }

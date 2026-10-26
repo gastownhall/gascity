@@ -136,7 +136,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		packDirs := c.cfg.PackDirsForRig(ctx.RigName)
 
 		var renderErrs bytes.Buffer
-		prompt := renderPrompt(fsys.OSFS{}, c.cityPath, cityName, a.PromptTemplate, ctx, c.cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments, nil)
+		prompt := renderPrompt(fsys.OSFS{}, c.cityPath, cityName, a.PromptTemplate, ctx, c.cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments)
 		// Measure the startup prompt launch would send: the beacon is
 		// prepended exactly as resolveTemplate does. Its timestamp is
 		// fixed-width, so the zero time yields the same byte count. The

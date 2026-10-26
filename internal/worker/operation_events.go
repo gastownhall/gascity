@@ -168,6 +168,21 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		if strings.TrimSpace(payload.AgentName) == "" {
 			payload.AgentName = strings.TrimSpace(info.Alias)
 		}
+		// Launch provenance stamped by session.CommitStartedPatch
+		// (launch_model / prompt_version / prompt_sha). finish re-runs this
+		// populate, so every operation on the session — start_resolved,
+		// nudge, message, kill, history — carries the tuple; a session whose
+		// start never stamped them (no model option, no template) leaves the
+		// fields absent on the wire.
+		if strings.TrimSpace(payload.Model) == "" {
+			payload.Model = strings.TrimSpace(pr.Metadata[sessionpkg.LaunchModelMetadataKey])
+		}
+		if strings.TrimSpace(payload.PromptVersion) == "" {
+			payload.PromptVersion = strings.TrimSpace(pr.Metadata[sessionpkg.PromptVersionMetadataKey])
+		}
+		if strings.TrimSpace(payload.PromptSHA) == "" {
+			payload.PromptSHA = strings.TrimSpace(pr.Metadata[sessionpkg.PromptSHAMetadataKey])
+		}
 		// Per-operation run-root resolution off the session bead's own run chain
 		// (workflow_id || molecule_id || gc.root_bead_id-or-self || bead id ||
 		// session id for manual chat), shared with the compute-fact emitter via

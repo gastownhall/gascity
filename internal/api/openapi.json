@@ -30476,7 +30476,7 @@
             "type": "integer"
           },
           "model": {
-            "description": "LLM model identifier (best-effort, may be absent until follow-up wiring lands).",
+            "description": "LLM model identifier the session was launched with (best-effort, absent when the provider declares no model option).",
             "type": "string"
           },
           "op_id": {
@@ -30486,7 +30486,7 @@
             "type": "string"
           },
           "prompt_sha": {
-            "description": "SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).",
+            "description": "SHA-256 of the rendered prompt template (best-effort, absent when the agent has no prompt template).",
             "type": "string"
           },
           "prompt_tokens": {
@@ -30495,7 +30495,7 @@
             "type": "integer"
           },
           "prompt_version": {
-            "description": "Template version frontmatter (best-effort, currently always absent; #1256 follow-up).",
+            "description": "Template version frontmatter (best-effort, absent when the prompt template declares no version).",
             "type": "string"
           },
           "provider": {

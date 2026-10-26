@@ -11449,18 +11449,18 @@ type WorkerOperationEventPayload struct {
 	// LatencyMs LLM invocation wall-clock latency (best-effort, currently always absent — no source).
 	LatencyMs *int64 `json:"latency_ms,omitempty"`
 
-	// Model LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+	// Model LLM model identifier the session was launched with (best-effort, absent when the provider declares no model option).
 	Model     *string `json:"model,omitempty"`
 	OpId      string  `json:"op_id"`
 	Operation string  `json:"operation"`
 
-	// PromptSha SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+	// PromptSha SHA-256 of the rendered prompt template (best-effort, absent when the agent has no prompt template).
 	PromptSha *string `json:"prompt_sha,omitempty"`
 
 	// PromptTokens Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
 	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
 
-	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+	// PromptVersion Template version frontmatter (best-effort, absent when the prompt template declares no version).
 	PromptVersion *string `json:"prompt_version,omitempty"`
 	Provider      *string `json:"provider,omitempty"`
 	Queued        *bool   `json:"queued,omitempty"`

@@ -937,3 +937,54 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 			patch["close_reason"], len(trimmed))
 	}
 }
+
+// TestCommitStartedPatchStampsLaunchProvenance pins the worker.operation
+// provenance stamp: non-empty LaunchModel / PromptVersion / PromptSHA land
+// under their keys verbatim, and empty values emit no key at all (so a resume
+// or recovery that resolved nothing never erases a prior start's stamp).
+func TestCommitStartedPatchStampsLaunchProvenance(t *testing.T) {
+	now := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+
+	t.Run("non-empty values land verbatim", func(t *testing.T) {
+		patch := CommitStartedPatch(CommitStartedPatchInput{
+			CoreHash:      "c",
+			Now:           now,
+			LaunchModel:   "claude-opus-5-5",
+			PromptVersion: "v3",
+			PromptSHA:     "abc123",
+		})
+		for key, want := range map[string]string{
+			LaunchModelMetadataKey:   "claude-opus-5-5",
+			PromptVersionMetadataKey: "v3",
+			PromptSHAMetadataKey:     "abc123",
+		} {
+			if got := patch[key]; got != want {
+				t.Errorf("%s = %q, want %q", key, got, want)
+			}
+		}
+		if got := patch["started_config_hash"]; got != "c" {
+			t.Errorf("started_config_hash = %q, want c (provenance must not perturb the hash)", got)
+		}
+	})
+
+	t.Run("empty values emit no keys", func(t *testing.T) {
+		patch := CommitStartedPatch(CommitStartedPatchInput{CoreHash: "c", Now: now})
+		for _, key := range []string{LaunchModelMetadataKey, PromptVersionMetadataKey, PromptSHAMetadataKey} {
+			if v, ok := patch[key]; ok {
+				t.Errorf("%s = %q present; an empty value must emit no key (it would clear a prior stamp)", key, v)
+			}
+		}
+	})
+
+	t.Run("partial provenance stamps only what resolved", func(t *testing.T) {
+		patch := CommitStartedPatch(CommitStartedPatchInput{CoreHash: "c", Now: now, LaunchModel: "grok-4.7"})
+		if got := patch[LaunchModelMetadataKey]; got != "grok-4.7" {
+			t.Errorf("launch_model = %q, want grok-4.7", got)
+		}
+		for _, key := range []string{PromptVersionMetadataKey, PromptSHAMetadataKey} {
+			if _, ok := patch[key]; ok {
+				t.Errorf("%s present without a value", key)
+			}
+		}
+	})
+}

@@ -426,12 +426,13 @@ type WorkerOperationEventPayload struct {
 	// 1a fields. All omitempty; consumers must treat the field set as
 	// best-effort. See the consumer contract on the type doc above.
 
-	// Model is the LLM model identifier observed in this operation
-	// (e.g. "claude-opus-4-8"). Sourced from session metadata.
+	// Model is the provider-facing LLM model identifier the session was
+	// launched with (e.g. "claude-opus-4-8"). Sourced from session metadata.
 	//
-	// Wired: TODO — follow-up will tail sessionlog at finish() to
-	// extract msg.Model.
-	Model string `json:"model,omitempty" doc:"LLM model identifier (best-effort, may be absent until follow-up wiring lands)."`
+	// Wired: YES — session metadata launch_model / prompt_version /
+	// prompt_sha stamped by CommitStartedPatch, read by
+	// populateOperationEventIdentity.
+	Model string `json:"model,omitempty" doc:"LLM model identifier the session was launched with (best-effort, absent when the provider declares no model option)."`
 	// AgentName is the agent identity that ran this operation
 	// (e.g. "rig/polecat-1"). Distinct from SessionName which carries
 	// the canonical session identity.
@@ -442,17 +443,18 @@ type WorkerOperationEventPayload struct {
 	// PromptVersion is the human-readable template version label from
 	// frontmatter (`version:` field). Surfaced in dashboards for grouping.
 	//
-	// Wired: TODO — promptmeta.FrontMatter is computed (PR #1272) but
-	// not propagated through session metadata into operation events
-	// yet. Currently always absent on the wire.
-	PromptVersion string `json:"prompt_version,omitempty" doc:"Template version frontmatter (best-effort, currently always absent; #1256 follow-up)."`
+	// Wired: YES — session metadata launch_model / prompt_version /
+	// prompt_sha stamped by CommitStartedPatch, read by
+	// populateOperationEventIdentity.
+	PromptVersion string `json:"prompt_version,omitempty" doc:"Template version frontmatter (best-effort, absent when the prompt template declares no version)."`
 	// PromptSHA is the SHA-256 hex digest of the rendered prompt.
 	// Distinguishes two runs that share PromptVersion but differ in
 	// rendered bytes (unbumped template edit).
 	//
-	// Wired: TODO — promptmeta.SHA is computed (PR #1272) but not
-	// propagated through session metadata yet. Currently always absent.
-	PromptSHA string `json:"prompt_sha,omitempty" doc:"SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up)."`
+	// Wired: YES — session metadata launch_model / prompt_version /
+	// prompt_sha stamped by CommitStartedPatch, read by
+	// populateOperationEventIdentity.
+	PromptSHA string `json:"prompt_sha,omitempty" doc:"SHA-256 of the rendered prompt template (best-effort, absent when the agent has no prompt template)."`
 	// BeadID is the work bead this operation is acting on, when one
 	// exists. Empty for operations not tied to a bead (e.g. lifecycle
 	// transitions).

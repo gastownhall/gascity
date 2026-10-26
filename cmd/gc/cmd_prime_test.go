@@ -137,7 +137,7 @@ func TestBuildPrimeContextRendersBindingQualifiedRoute(t *testing.T) {
 		t.Fatalf("BindingPrefix = %q, want gastown.", ctx.BindingPrefix)
 	}
 	var stderr bytes.Buffer
-	got := renderPrompt(fsys.OSFS{}, cityPath, "test-city", "prompts/polecat.template.md", ctx, "", &stderr, nil, nil, nil)
+	got := renderPrompt(fsys.OSFS{}, cityPath, "test-city", "prompts/polecat.template.md", ctx, "", &stderr, nil, nil)
 	want := "route=demo/gastown.refinery\nbinding=gastown\n"
 	if got != want {
 		t.Fatalf("rendered prompt = %q, want %q; stderr=%q", got, want, stderr.String())

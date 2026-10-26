@@ -59,6 +59,16 @@ type TemplateParams struct {
 	Command string
 	// Prompt is the fully rendered prompt (with beacon).
 	Prompt string
+	// PromptVersion is the prompt template's frontmatter `version:` label,
+	// empty when the agent has no template or the template declares none.
+	// Stamped into session metadata at start (prompt_version) for
+	// worker.operation provenance.
+	PromptVersion string
+	// PromptSHA is promptmeta.SHA of the rendered TEMPLATE text (before the
+	// beacon and skills appendix are composed in), so it is distinct from the
+	// S19 prompt_hash which hashes Prompt as delivered. Empty without a
+	// template.
+	PromptSHA string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
 	// OperatorEnv carries only the operator-authored environment layers —
@@ -368,6 +378,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 9: Render prompt with beacon.
 	var prompt string
+	var promptVersion, promptSHA string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
 	// per-agent append_fragments, imported-pack [agent_defaults].append_fragments,
 	// then city-level [agent_defaults].append_fragments.
@@ -404,7 +415,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// The controller's own routes are the right source; threading them into
 	// this plumbing is a change to controller wiring, not part of swapping
 	// the reader, so it stays with the claim-routing slice (ga-601v2).
-	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+	rendered := renderPromptWithMeta(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
 		TemplateName:            cfgAgent.Name,
@@ -426,6 +437,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ConfigDir:               configDir,
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
+	prompt = rendered.Text
+	promptVersion = rendered.Version
+	promptSHA = rendered.SHA
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
 	// The prime instruction tells a non-hook agent to go fetch its context.
@@ -765,6 +779,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
+		PromptVersion:    promptVersion,
+		PromptSHA:        promptSHA,
 		Env:              env,
 		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,

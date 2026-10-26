@@ -507,7 +507,8 @@ var registry = slices.Concat([]Field{
 		"pool_alias_conflict_count", "pool_alias_conflict_at"),
 	same(ClassAdvisory, false, sites(op("internal/session/waits.go", "StampWaitLookupCapMetadata")),
 		"wait_lookup_capped_at", "wait_lookup_capped_label", "wait_lookup_capped_limit", "wait_lookup_capped_source"),
-	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey),
+	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey,
+		LaunchModelMetadataKey, PromptVersionMetadataKey, PromptSHAMetadataKey),
 	// The thread a runtime hosts the session in (runtime.SessionBinding):
 	// recorded at each confirmed start (create, resume, pending-create
 	// recovery), read by no decision.
