@@ -71,6 +71,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -93,10 +94,20 @@ var cliStorageStderr io.Writer = os.Stderr
 type cliStorageRoutesEntry struct {
 	once   sync.Once
 	routes *storageRoutes
-	// unsettled marks an answer that must not be memoized: the city's config
-	// failed to load, so the refusal is about the moment, not the city.
+	// unsettled marks an answer that must not be memoized for the process:
+	// the city's config failed to load, or the gate could not read what it
+	// needed, so the answer is about the moment, not the city. It is reused
+	// until expires and then resolved again.
 	unsettled bool
+	expires   time.Time
 }
+
+// cliStorageRoutesUnsettledTTL is how long an unsettled answer is reused. A
+// one-shot command reaches a class resolver many times within milliseconds;
+// without this, each would reload the config (and re-run the builtin
+// readiness retry) and repeat the refusal on stderr. A long-lived process sees
+// a fix within this window. A var so a test can make every call re-resolve.
+var cliStorageRoutesUnsettledTTL = 2 * time.Second
 
 var (
 	cliStorageRoutesMu     sync.Mutex
@@ -118,16 +129,52 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 		return nil
 	}
 	clean := filepath.Clean(cityPath)
+	resolve := func(entry *cliStorageRoutesEntry) {
+		entry.once.Do(func() {
+			entry.routes, entry.unsettled = resolveCLIStorageRoutes(cityPath)
+			if entry.unsettled {
+				entry.expires = time.Now().Add(cliStorageRoutesUnsettledTTL)
+			}
+		})
+	}
 	entry := cliStorageRoutesEntryFor(clean)
-	entry.once.Do(func() { entry.routes, entry.unsettled = resolveCLIStorageRoutes(cityPath) })
-	if entry.unsettled {
+	resolve(entry)
+	if entry.unsettled && !time.Now().Before(entry.expires) {
 		forgetCLIStorageRoutesEntry(clean, entry)
+		entry = cliStorageRoutesEntryFor(clean)
+		resolve(entry)
 	}
 	return entry.routes
 }
 
-// forgetCLIStorageRoutesEntry drops a memo slot whose answer must not outlive
-// the call that took it — a refusal because city.toml did not load. The next
+// cliStorageRefusalsPrinted holds every refusal this process has already put
+// on stderr, so a re-resolution that reaches the same refusal does not repeat
+// it.
+var (
+	cliStorageRefusalsMu      sync.Mutex
+	cliStorageRefusalsPrinted map[string]bool
+)
+
+// printCLIStorageRefusal writes a refusal to cliStorageStderr once per
+// process (per distinct message).
+func printCLIStorageRefusal(refusal error) {
+	msg := refusal.Error()
+	cliStorageRefusalsMu.Lock()
+	if cliStorageRefusalsPrinted[msg] {
+		cliStorageRefusalsMu.Unlock()
+		return
+	}
+	if cliStorageRefusalsPrinted == nil {
+		cliStorageRefusalsPrinted = make(map[string]bool, 1)
+	}
+	cliStorageRefusalsPrinted[msg] = true
+	cliStorageRefusalsMu.Unlock()
+	fmt.Fprintln(cliStorageStderr, msg) //nolint:errcheck // best-effort stderr
+}
+
+// forgetCLIStorageRoutesEntry drops a memo slot whose unsettled answer has
+// expired — a refusal because city.toml did not load, or because the gate
+// could not read what it needed. The next
 // resolution for the city starts over and reads the config again, so a
 // long-lived process sees the operator's fix instead of the refusal it took
 // while the edit was half-finished. Only the slot this call resolved is
@@ -238,7 +285,7 @@ func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled 
 				// memoized — the repaired config may add a [storage].
 				return nil, true
 			}
-			fmt.Fprintln(cliStorageStderr, refusal) //nolint:errcheck // best-effort stderr
+			printCLIStorageRefusal(refusal)
 			return refusingStorageRoutes("", refusal), true
 		}
 	}
@@ -263,7 +310,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 	if cfg == nil {
 		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, cliStorageStderr)
 		if err != nil {
-			fmt.Fprintln(cliStorageStderr, err) //nolint:errcheck // best-effort stderr
+			printCLIStorageRefusal(err)
 			return refusingStorageRoutes("", err), isTransientStorageGateFault(err)
 		}
 		return routes, false
@@ -272,7 +319,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 	// attach is never opened, and never created, in the box (DES-CN §4.4,
 	// invariant 6). It is a standing refusal: work ids still resolve to work.
 	if refusal := workerSiteStorageRefusal(cityPath, cfg.EffectiveStorage()); refusal != nil {
-		fmt.Fprintln(cliStorageStderr, refusal) //nolint:errcheck // best-effort stderr
+		printCLIStorageRefusal(refusal)
 		_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
 		return refusingStorageRoutes(binding, refusal), false
 	}
@@ -287,7 +334,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
-	fmt.Fprintln(cliStorageStderr, err) //nolint:errcheck // best-effort stderr
+	printCLIStorageRefusal(err)
 	_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
 	return refusingStorageRoutes(binding, err), isTransientStorageGateFault(err)
 }
@@ -340,6 +387,9 @@ func closeCLIStorageRoutes() error {
 	cliStorageRoutesByCity = nil
 	cliStorageRoutesMu.Unlock()
 	resetCLIResidencyBindings()
+	cliStorageRefusalsMu.Lock()
+	cliStorageRefusalsPrinted = nil
+	cliStorageRefusalsMu.Unlock()
 
 	var errs []error
 	for _, entry := range entries {

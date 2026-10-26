@@ -1,12 +1,10 @@
 package main
 
 import (
-	"errors"
+	"bytes"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -28,14 +26,20 @@ import (
 //
 //   - the city has served a split, or cleared its work store (the durable
 //     notes storageBootGate already holds a revert with);
-//   - the root city.toml, the city pack.toml, or one of the fragments either
-//     of them includes cannot be read, or is remote;
-//   - any of those files declares a [storage] table. A file that does not
-//     parse as TOML is scanned as text for a storage table or key instead:
-//     the commonest load failure is a syntax error, and a syntax error in a
-//     city that never declared [storage] says nothing about where its classes
-//     live. (The served-binding note above is the stronger signal anyway:
-//     every city that has ever served a split carries it.)
+//   - city.toml, or a fragment its include list names, cannot be read or is
+//     remote;
+//   - any of those files declares a storage table or key;
+//   - city.toml does not parse, so its include list is unknown — unless its
+//     text names neither "include" nor "storage" at all, in which case there
+//     is no list to hide and no table to miss. (A bare-word scan, so it errs
+//     toward refusing: a comment mentioning either word is enough.) The
+//     commonest load failure is a syntax error in a single-store city, and
+//     that exemption is what keeps it working.
+//   - a fragment that does not parse counts as declaring storage when its text
+//     mentions storage at all (fragments cannot include further fragments).
+//
+// [pack] includes in pack.toml are NOT scanned: they name pack directories,
+// which compose through pack expansion, and a pack cannot declare [storage].
 //
 // Only a city that is provably single-store keeps the old answer, which for it
 // is the right one: the work store is where its classes have always lived, and
@@ -61,85 +65,60 @@ func cityMayRelocateClasses(cityPath string) bool {
 	if _, present, err := readInfraClearedNote(cityPath); present || err != nil {
 		return true
 	}
-	root, verdict := scanConfigFile(filepath.Join(cityPath, "city.toml"))
-	if verdict != configFileSilent {
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
 		return true
 	}
-	var includes []string
-	if root != nil {
-		var ok bool
-		if includes, ok = tomlStrings(root["include"]); !ok {
-			return true
-		}
+	data = stripUTF8BOM(data)
+	root := map[string]any{}
+	if _, err := toml.Decode(string(data), &root); err != nil {
+		text := strings.ToLower(string(data))
+		return strings.Contains(text, "include") || strings.Contains(text, "storage")
 	}
-	packPath := filepath.Join(cityPath, "pack.toml")
-	if _, err := os.Stat(packPath); err == nil {
-		pack, verdict := scanConfigFile(packPath)
-		if verdict != configFileSilent {
-			return true
-		}
-		if section, isTable := pack["pack"].(map[string]any); isTable {
-			packIncludes, ok := tomlStrings(section["includes"])
-			if !ok {
-				return true
-			}
-			includes = append(includes, packIncludes...)
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	if _, declared := root["storage"]; declared {
+		return true
+	}
+	includes, ok := tomlStrings(root["include"])
+	if !ok {
 		return true
 	}
 	for _, inc := range includes {
 		if remotesource.IsRemote(inc) || strings.Contains(inc, "://") {
 			return true
 		}
-		if _, verdict := scanConfigFile(localIncludePath(inc, cityPath)); verdict != configFileSilent {
+		if fragmentMayDeclareStorage(localIncludePath(inc, cityPath)) {
 			return true
 		}
 	}
 	return false
 }
 
-// configFileVerdict is what one config file says about [storage].
-type configFileVerdict int
-
-const (
-	// configFileSilent: the file was read and declares no storage.
-	configFileSilent configFileVerdict = iota
-	// configFileDeclaresStorage: the file declares a storage table or key.
-	configFileDeclaresStorage
-	// configFileUnknown: the file could not be read.
-	configFileUnknown
-)
-
-// storageDeclarationText matches a storage table header ([storage],
-// [storage.classes], [[storage...]]) or a dotted/inline storage key at the
-// start of a line, for a file that does not parse as TOML.
-var storageDeclarationText = regexp.MustCompile(`(?m)^[ \t]*(\[\[?[ \t]*["']?storage["']?[ \t]*[\].]|["']?storage["']?[ \t]*[.=])`)
-
-// scanConfigFile reads one config file and reports whether it declares
-// storage. A file that parses returns its decoded table; one that does not is
-// scanned as text and returns a nil table.
-func scanConfigFile(path string) (map[string]any, configFileVerdict) {
+// fragmentMayDeclareStorage reports whether one include fragment declares, or
+// may declare, a storage table: unreadable, or parsed with a storage key, or
+// unparseable with storage anywhere in its text.
+func fragmentMayDeclareStorage(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, configFileUnknown
+		return true
 	}
+	data = stripUTF8BOM(data)
 	table := map[string]any{}
 	if _, err := toml.Decode(string(data), &table); err != nil {
-		if storageDeclarationText.Match(data) {
-			return nil, configFileDeclaresStorage
-		}
-		return nil, configFileSilent
+		return strings.Contains(strings.ToLower(string(data)), "storage")
 	}
-	if _, declared := table["storage"]; declared {
-		return table, configFileDeclaresStorage
-	}
-	return table, configFileSilent
+	_, declared := table["storage"]
+	return declared
+}
+
+// stripUTF8BOM drops a leading UTF-8 byte-order mark, which an editor may
+// write and which would otherwise hide the first table header from a scan.
+func stripUTF8BOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte("\ufeff"))
 }
 
 // localIncludePath resolves a local include the way config composition does:
 // "//x" is city-root relative, an absolute path is itself, anything else is
-// relative to the city root (where city.toml and pack.toml both live).
+// relative to the city root.
 func localIncludePath(inc, cityPath string) string {
 	if strings.HasPrefix(inc, "//") {
 		return filepath.Join(cityPath, strings.TrimPrefix(inc, "//"))

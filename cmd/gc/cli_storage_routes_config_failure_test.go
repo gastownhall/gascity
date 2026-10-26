@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -85,7 +86,17 @@ func TestCLIStorageRoutesRefuseWhenCityConfigFailsToLoad(t *testing.T) {
 	}
 }
 
+// expireUnsettledCLIRoutesImmediately makes every unsettled answer expire at
+// once, so a test can repair and re-resolve without waiting out the TTL.
+func expireUnsettledCLIRoutesImmediately(t *testing.T) {
+	t.Helper()
+	prev := cliStorageRoutesUnsettledTTL
+	cliStorageRoutesUnsettledTTL = 0
+	t.Cleanup(func() { cliStorageRoutesUnsettledTTL = prev })
+}
+
 func TestCLIStorageRoutesDoNotMemoizeAConfigLoadFailure(t *testing.T) {
+	expireUnsettledCLIRoutesImmediately(t)
 	cityPath, _ := migratedOneShotCLICity(t)
 	captureCLIStorageStderr(t)
 	if err := closeCLIStorageRoutes(); err != nil {
@@ -240,8 +251,18 @@ func TestCityMayRelocateClassesEvidence(t *testing.T) {
 		{"fragment is missing", map[string]string{"city.toml": "include = [\"missing.toml\"]\n"}, true},
 		{"fragment does not parse, declares storage", map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "[[[\n[storage]\n"}, true},
 		{"remote fragment", map[string]string{"city.toml": "include = [\"https://example.invalid/x.toml\"]\n"}, true},
-		{"pack fragment declares storage", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", "pack.toml": "[pack]\nname = \"c\"\nincludes = [\"frag.toml\"]\n", "frag.toml": storage}, true},
-		{"pack is unreadable", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", "pack.toml/": ""}, true},
+		// [pack] includes name pack directories, and a pack cannot declare
+		// [storage] (review probe D: a directory include over-refused).
+		{"pack includes a pack directory", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", "pack.toml": "[pack]\nname = \"c\"\nschema = 1\nincludes = [\"packs/maint\"]\n", "packs/maint/pack.toml": "[pack]\nname = \"maint\"\nschema = 1\n"}, false},
+		{"pack.toml does not parse", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", "pack.toml": "[pack\n"}, false},
+		// Review probe C: an unparseable root hides its include list.
+		{"root does not parse, names an include", map[string]string{"city.toml": "include = [\"storage.toml\"]\n[workspace]\nname = \"x\"\nthis is not toml\n", "storage.toml": storage}, true},
+		{"root does not parse, include of a silent fragment", map[string]string{"city.toml": "include = [\"frag.toml\"]\nthis is not toml\n", "frag.toml": "[workspace]\nname = \"c\"\n"}, true},
+		// Review probe E: a UTF-8 BOM before the first header.
+		{"BOM before [storage] in a broken root", map[string]string{"city.toml": "\ufeff[storage.classes]\ngraph = \"infra\"\n[workspace\n"}, true},
+		{"BOM before [storage] in a parsing root", map[string]string{"city.toml": "\ufeff[storage.classes]\ngraph = \"infra\"\n"}, true},
+		{"BOM before [storage] in a fragment", map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "\ufeff[storage]\n"}, true},
+		{"fragment does not parse, no storage text", map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "[[[\n"}, false},
 		{"served-binding note", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/storage-served-binding.json": `{"binding":"infra","provider":"sqlite-beads","location":"/x"}`}, true},
 	}
 	for _, tc := range cases {
@@ -267,5 +288,45 @@ func TestCityMayRelocateClassesEvidence(t *testing.T) {
 				t.Errorf("cityMayRelocateClasses = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Review nit: within the unsettled window a one-shot command's many class
+// resolvers reuse one answer (one config load, one refusal on stderr), and
+// after it the answer is resolved again.
+func TestCLIStorageRoutesReuseAnUnsettledAnswerBriefly(t *testing.T) {
+	cityPath, _ := migratedOneShotCLICity(t)
+	stderr := captureCLIStorageStderr(t)
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	prev := cliStorageRoutesUnsettledTTL
+	cliStorageRoutesUnsettledTTL = time.Hour
+	t.Cleanup(func() { cliStorageRoutesUnsettledTTL = prev })
+	repair := breakSplitCityConfig(t, cityPath)
+
+	first := cliStorageRoutes(cityPath)
+	for i := 0; i < 5; i++ {
+		if again := cliStorageRoutes(cityPath); again != first {
+			t.Fatalf("call %d re-resolved inside the unsettled window", i)
+		}
+	}
+	if n := strings.Count(stderr.String(), "refusing to route"); n != 1 {
+		t.Errorf("the refusal was printed %d times, want once:\n%s", n, stderr.String())
+	}
+
+	repair()
+	cliStorageRoutesUnsettledTTL = 0
+	clean := filepath.Clean(cityPath)
+	cliStorageRoutesMu.Lock()
+	if entry := cliStorageRoutesByCity[clean]; entry != nil {
+		entry.expires = time.Now().Add(-time.Second)
+	}
+	cliStorageRoutesMu.Unlock()
+	if after := cliStorageRoutes(cityPath); after == first {
+		t.Error("an expired unsettled answer was reused")
+	}
+	if _, err := cliSessionStore(beads.NewMemStore(), nil, cityPath).List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Errorf("after the window and the repair the session class still refuses: %v", err)
 	}
 }

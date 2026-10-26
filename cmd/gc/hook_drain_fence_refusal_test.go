@@ -134,6 +134,7 @@ func TestDrainFenceUnavailableReasonNamesTheDirection(t *testing.T) {
 // the drain fence keeps its fail-open contract and the refusal is not
 // memoized: the next resolution, after the store answers, serves.
 func TestHookDrainFenceFailsOpenOnATransientGateFault(t *testing.T) {
+	expireUnsettledCLIRoutesImmediately(t)
 	cityPath, _ := migratedOneShotCLICity(t)
 	captureCLIStorageStderr(t)
 	if err := closeCLIStorageRoutes(); err != nil {
