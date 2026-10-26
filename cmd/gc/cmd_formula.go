@@ -661,7 +661,10 @@ With --attach on a v2 formula — one declaring
 [requires] formula_compiler = ">=2.0.0" — the invocation runs under a
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
-conflicting live workflow from the same source is an error.
+conflicting live workflow from the same source is an error. A repeat
+cook still writes its --meta pairs to the workflow root it reuses, under
+the same lock, so the pairs of the last cook to take the lock are the
+ones that stay.
 
 On a city that serves the graph class from its own [storage] binding, most
 of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
@@ -838,6 +841,11 @@ store, copy them into the binding with
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
 					var syntheticInputConvoyID string
+					// wired is set once the attach bead blocks on a live workflow
+					// root. From then on this invocation has started a workflow,
+					// so a later failure (the --meta stamp) must not close the
+					// input convoy that workflow tracks.
+					wired := false
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
@@ -873,7 +881,8 @@ store, copy them into the binding with
 						}
 						if existing != nil {
 							result = existing
-							return ensureFormulaCookAttachDep(store, attach, result.RootID)
+							wired, err = wireFormulaCookGraphV2AttachRoot(store, attach, result.RootID, rootMeta)
+							return err
 						}
 						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
 							return err
@@ -908,24 +917,19 @@ store, copy them into the binding with
 							return err
 						}
 						emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
-						return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						wired, err = wireFormulaCookGraphV2AttachRoot(store, attach, result.RootID, rootMeta)
+						return err
 					})
 					if err != nil {
-						// A post-prepare failure discards the invocation; close the
-						// synthetic input convoy it minted (the success path threads the
-						// convoy into the started workflow, so err == nil never reaches here).
-						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
-						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-					}
-					// The --meta stamp runs outside the closure: an error returned
-					// from inside it is handled above and closes the synthetic input
-					// convoy of a workflow that is already instantiated and wired,
-					// which a failed stamp must not do. Out here it also covers the
-					// `existing != nil` adopt return, so a repeat cook converges on
-					// the requested metadata. Past the attachStore != store refusal
-					// above, attachStore IS store, and the root was instantiated
-					// through store.
-					if err := stampFormulaCookRootMetadata(store, result.RootID, rootMeta); err != nil {
+						// A failure before the workflow is wired discards the
+						// invocation: close the synthetic input convoy it minted (the
+						// success path threads the convoy into the started workflow,
+						// so err == nil never reaches here). A failed --meta stamp
+						// comes after the wiring, when the live workflow tracks that
+						// convoy, so it stays open.
+						if !wired {
+							graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
+						}
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
@@ -999,6 +1003,9 @@ store, copy them into the binding with
 				// root and a stamp addressed there fails after the graft already
 				// exists.
 				if err := stampFormulaCookRootMetadata(attachStore, result.RootID, rootMeta); err != nil {
+					// This arm has no idempotency key, so a caller that retries
+					// the failed cook grafts a second sub-DAG.
+					err = fmt.Errorf("sub-DAG %s is attached to %s, but --meta was not applied; cooking again attaches another sub-DAG, so set it with gc bd update %s --set-metadata: %w", result.RootID, attach, result.RootID, err)
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 
@@ -1235,6 +1242,22 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	// MetadataOnly mirrors the no-session default binding).
 	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+}
+
+// wireFormulaCookGraphV2AttachRoot makes the attach bead block on the graph.v2
+// workflow root, then stamps the --meta pairs on that root. Its caller holds the
+// per-source workflow lock, so overlapping cooks of one source stamp in the
+// order they held it and the last cook's pairs are the ones that stay. wired
+// reports that the blocking dependency is in place: the workflow is live from
+// then on, and a failed stamp leaves it attached.
+func wireFormulaCookGraphV2AttachRoot(store beads.Store, attachBeadID, rootID string, meta map[string]string) (wired bool, err error) {
+	if err := ensureFormulaCookAttachDep(store, attachBeadID, rootID); err != nil {
+		return false, err
+	}
+	if err := stampFormulaCookRootMetadata(store, rootID, meta); err != nil {
+		return true, fmt.Errorf("workflow %s is attached to %s, but --meta was not applied; set it with gc bd update %s --set-metadata: %w", rootID, attachBeadID, rootID, err)
+	}
+	return true, nil
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {

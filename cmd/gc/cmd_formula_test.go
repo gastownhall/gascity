@@ -12,10 +12,12 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -1251,6 +1253,201 @@ func TestFormulaCookAttachGraphV2StampsMetaOnTheWorkflowRoot(t *testing.T) {
 			t.Errorf("attach bead %s carries %d blocking deps after two cooks, want 1", target.ID, got)
 		}
 	})
+}
+
+// TestFormulaCookAttachGraphV2StampsMetaUnderTheSourceWorkflowLock pins where
+// the graph.v2 --attach arm writes --meta: inside the per-source workflow lock,
+// on both results that arm returns. That lock is what orders overlapping cooks
+// of one source, so a stamp written after its release can land after a later
+// cook's and put the earlier cook's values back on the live root (#7309). The
+// probe is the lock file itself: a non-blocking flock through a fresh
+// descriptor is refused while the cook's descriptor holds the lock.
+func TestFormulaCookAttachGraphV2StampsMetaUnderTheSourceWorkflowLock(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		targetType string
+		cooks      int
+	}{
+		{name: "fresh workflow", targetType: "task", cooks: 1},
+		// A convoy target keeps the graph root key stable, so the second cook
+		// adopts the live workflow through the `existing != nil` return.
+		{name: "adopted live workflow", targetType: "convoy", cooks: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			seedCLIStorageRoutes(t, cityDir, nil)
+			work, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open work store: %v", err)
+			}
+			target, err := work.Create(beads.Bead{Title: "attach target", Type: tc.targetType})
+			if err != nil {
+				t.Fatalf("create attach bead: %v", err)
+			}
+			var lockHeld []bool
+			hookFormulaCookMetaStamp(t, "handoff", func(string) error {
+				lockHeld = append(lockHeld, sourceWorkflowLockHeld(t, cityDir))
+				return nil
+			})
+
+			var res formulaCookJSONResult
+			for i := range tc.cooks {
+				res = cookFormula(t, "graph-work", "--attach", target.ID, "--meta", fmt.Sprintf("handoff=cook-%d", i))
+			}
+
+			if len(lockHeld) != tc.cooks {
+				t.Fatalf("saw %d --meta stamps over %d cooks, want one per cook", len(lockHeld), tc.cooks)
+			}
+			for i, held := range lockHeld {
+				if !held {
+					t.Errorf("cook %d stamped --meta after releasing the source-workflow lock on %s; an overlapping cook of the same source can stamp in between, and the later cook's values are lost", i, target.ID)
+				}
+			}
+			root, err := work.Get(res.RootID)
+			if err != nil {
+				t.Fatalf("workflow root %s: %v", res.RootID, err)
+			}
+			if want := fmt.Sprintf("cook-%d", tc.cooks-1); root.Metadata["handoff"] != want {
+				t.Errorf("workflow root %s: handoff = %q, want %q", res.RootID, root.Metadata["handoff"], want)
+			}
+		})
+	}
+}
+
+// TestFormulaCookAttachFailedMetaStampReportsTheLiveGraft pins what a failed
+// --meta stamp leaves on each --attach arm. The stamp runs once the graft is
+// committed, so the cook fails with the graft in place: the root is open and
+// the attach bead blocks on it. The error says so, because a caller that reads
+// the failure as "nothing happened" and cooks again grafts a second sub-DAG on
+// the v1 arm, which has no idempotency key. On the graph.v2 arm the synthetic
+// input convoy the live workflow tracks also stays open: closing it is the
+// cleanup for an invocation that never started a workflow.
+func TestFormulaCookAttachFailedMetaStampReportsTheLiveGraft(t *testing.T) {
+	for _, tc := range []struct {
+		formula           string
+		kind              string
+		tracksInputConvoy bool
+	}{
+		{formula: "legacy-work", kind: "sub-DAG"},
+		{formula: "graph-work", kind: "workflow", tracksInputConvoy: true},
+	} {
+		t.Run(tc.formula, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			seedCLIStorageRoutes(t, cityDir, nil)
+			work, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open work store: %v", err)
+			}
+			target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+			if err != nil {
+				t.Fatalf("create attach bead: %v", err)
+			}
+			stampErr := errors.New("injected --meta stamp failure")
+			var rootID string
+			hookFormulaCookMetaStamp(t, "handoff", func(id string) error {
+				rootID = id
+				return stampErr
+			})
+
+			out, err := cookFormulaErr(t, tc.formula, "--attach", target.ID, "--meta", "handoff=v")
+
+			if err == nil {
+				t.Fatalf("gc formula cook %s succeeded although its --meta stamp failed: %s", tc.formula, out)
+			}
+			if rootID == "" {
+				t.Fatalf("the cook failed before it tried the --meta stamp: %s", out)
+			}
+			for _, want := range []string{
+				tc.kind + " " + rootID + " is attached to " + target.ID + ", but --meta was not applied",
+				"gc bd update " + rootID + " --set-metadata",
+				stampErr.Error(),
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output %q does not contain %q", out, want)
+				}
+			}
+			root, err := work.Get(rootID)
+			if err != nil {
+				t.Fatalf("attached root %s: %v", rootID, err)
+			}
+			if root.Status == "closed" {
+				t.Errorf("attached root %s was closed by the failed --meta stamp", rootID)
+			}
+			if got := blockingDepCount(t, work, target.ID); got != 1 {
+				t.Errorf("attach bead %s carries %d blocking deps after the failed stamp, want 1 on %s", target.ID, got, rootID)
+			}
+			if !tc.tracksInputConvoy {
+				return
+			}
+			convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+			if convoyID == "" || convoyID == target.ID {
+				t.Fatalf("fixture premise: workflow root %s names input convoy %q, want the synthetic convoy minted for task %s", rootID, convoyID, target.ID)
+			}
+			convoy, err := work.Get(convoyID)
+			if err != nil {
+				t.Fatalf("input convoy %s: %v", convoyID, err)
+			}
+			if convoy.Status == "closed" {
+				t.Errorf("the failed --meta stamp closed input convoy %s, which the live workflow %s tracks", convoyID, rootID)
+			}
+		})
+	}
+}
+
+// hookFormulaCookMetaStamp runs onStamp in front of every metadata batch that
+// carries key, through each store opened after this call. The cook tests pass
+// key only as a --meta pair, so onStamp sees exactly the --meta stamps; an
+// error from it fails that write.
+func hookFormulaCookMetaStamp(t *testing.T, key string, onStamp func(rootID string) error) {
+	t.Helper()
+	prev := observeOpenedStore
+	observeOpenedStore = func(_ string, store beads.Store) beads.Store {
+		return &formulaCookMetaStampStore{Store: store, key: key, onStamp: onStamp}
+	}
+	t.Cleanup(func() { observeOpenedStore = prev })
+}
+
+type formulaCookMetaStampStore struct {
+	beads.Store
+	key     string
+	onStamp func(rootID string) error
+}
+
+func (s *formulaCookMetaStampStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[s.key]; ok {
+		if err := s.onStamp(id); err != nil {
+			return err
+		}
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// sourceWorkflowLockHeld reports whether the one source-workflow lock under
+// cityPath is held right now. A non-blocking flock through a fresh descriptor
+// of its lock file is refused while any other descriptor holds it, in this
+// process or another: the exclusion the lock gives overlapping cooks.
+func sourceWorkflowLockHeld(t *testing.T, cityPath string) bool {
+	t.Helper()
+	names := sourceWorkflowLockFiles(t, cityPath)
+	if len(names) != 1 {
+		t.Fatalf("source-workflow lock files under %s = %v, want exactly the one the cook takes", cityPath, names)
+	}
+	f, err := os.OpenFile(filepath.Join(citylayout.RuntimeDataDir(cityPath), "sling-source-locks", names[0]), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("opening source-workflow lock %s: %v", names[0], err)
+	}
+	defer f.Close() //nolint:errcheck // test cleanup
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return true
+	}
+	if err != nil {
+		t.Fatalf("probing source-workflow lock %s: %v", names[0], err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("releasing the probe's hold on source-workflow lock %s: %v", names[0], err)
+	}
+	return false
 }
 
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {
