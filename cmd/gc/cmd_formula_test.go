@@ -1612,3 +1612,64 @@ func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
 		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
 	}
 }
+
+// TestFormulaCookRefusesMalformedMetaBeforeWriting pins that a malformed
+// --meta item refuses the cook before any bead write, on every arm: no root,
+// step, synthetic input convoy or blocking dependency, and the attach bead
+// stays unblocked.
+func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
+	for _, attach := range []bool{false, true} {
+		for _, formulaName := range []string{"legacy-work", "graph-work"} {
+			for _, item := range []string{"novalue", "=v"} {
+				mode := "standalone"
+				if attach {
+					mode = "attach"
+				}
+				t.Run(mode+"/"+formulaName+"/"+item, func(t *testing.T) {
+					cityDir := oneShotCookCity(t)
+					seedCLIStorageRoutes(t, cityDir, nil)
+					store, err := openStoreAtForCity(cityDir, cityDir)
+					if err != nil {
+						t.Fatalf("open store: %v", err)
+					}
+					var want []string
+					args := []string{"--meta", item}
+					var target beads.Bead
+					if attach {
+						target, err = store.Create(beads.Bead{Title: "attach target", Type: "task"})
+						if err != nil {
+							t.Fatalf("create attach bead: %v", err)
+						}
+						want = []string{target.ID}
+						args = append([]string{"--attach", target.ID}, args...)
+					}
+
+					out, err := cookFormulaErr(t, formulaName, args...)
+					if err == nil {
+						t.Fatalf("cook with --meta %q succeeded, want an invalid metadata refusal: %s", item, out)
+					}
+					if !strings.Contains(out, "invalid metadata") {
+						t.Fatalf("cook output = %q, want it to name invalid metadata", out)
+					}
+
+					items, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+					if err != nil {
+						t.Fatalf("list beads: %v", err)
+					}
+					var got []string
+					for _, b := range items {
+						got = append(got, b.ID)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("store holds %v after the refused cook, want %v", got, want)
+					}
+					if attach {
+						if n := blockingDepCount(t, store, target.ID); n != 0 {
+							t.Errorf("attach bead %s carries %d blocking deps after the refused cook, want 0", target.ID, n)
+						}
+					}
+				})
+			}
+		}
+	}
+}
