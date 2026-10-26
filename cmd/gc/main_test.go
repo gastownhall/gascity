@@ -6975,6 +6975,44 @@ func TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata(t *tes
 	}
 }
 
+// TestDoPrimeBrokenTemplateWithoutStrictFallsBackToRawText pins the
+// non-strict contract the strict check must not change: a prompt_template
+// that fails to parse or execute is reported on stderr and its raw text is
+// output with exit 0, in both plain and hook mode.
+func TestDoPrimeBrokenTemplateWithoutStrictFallsBackToRawText(t *testing.T) {
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{name: "parse error", body: "Hello {{base_branch}}"},
+		{name: "execute error", body: `Hello {{template "no-such-fragment" .}}`},
+	}
+	for _, b := range bodies {
+		for _, hookMode := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/hook=%t", b.name, hookMode), func(t *testing.T) {
+				clearGCEnv(t)
+				disableManagedDoltRecoveryForTest(t)
+				setupStrictPrimeTemplateCity(t, b.body)
+
+				var stdout, stderr bytes.Buffer
+				code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, hookMode, false)
+				if code != 0 {
+					t.Fatalf("doPrimeWithMode(strict=false, hook=%t, %s) = %d, want 0; stderr: %s", hookMode, b.name, code, stderr.String())
+				}
+				if !strings.Contains(stdout.String(), b.body) {
+					t.Errorf("stdout = %q, want the raw template text %q", stdout.String(), b.body)
+				}
+				if want := `gc: prompt template "prompts/worker.template.md": `; !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+				if strings.Contains(stderr.String(), "gc prime: prompt_template") {
+					t.Errorf("stderr = %q, want no strict failure line without --strict", stderr.String())
+				}
+			})
+		}
+	}
+}
+
 // TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess verifies that
 // strict+hook success no longer writes the legacy provider hook sidecar.
 func TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess(t *testing.T) {
