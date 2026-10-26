@@ -697,8 +697,11 @@ func TestMergeSettingsJSON_WrapBareHooks_NormalizesOverlayBareEntry(t *testing.T
 		t.Fatalf("PreToolUse entries = %d, want 1", len(arr))
 	}
 	entry := arr[0].(map[string]any)
-	if entry["matcher"] != "" {
-		t.Errorf("matcher = %v, want empty string", entry["matcher"])
+	if _, hasMatcher := entry["matcher"]; hasMatcher {
+		// The wrapped form omits "matcher" so the entry keys on its inner
+		// command content — a matcher-"" stamp would collide with the core
+		// hooks' matcher-"" identity slot and with other bare pack hooks.
+		t.Errorf("wrapped entry carries matcher %v, want matcherless wrapper", entry["matcher"])
 	}
 	if got := innerCommand(t, entry); got != "scan" {
 		t.Errorf("inner command = %q, want scan", got)
@@ -783,5 +786,28 @@ func TestMergeSettingsJSON_NoWrap_LeavesBareEntries(t *testing.T) {
 	}
 	if _, wrapped := arr[0].(map[string]any)["hooks"]; wrapped {
 		t.Errorf("bare entry was wrapped without WithWrapBareHooks: %v", arr[0])
+	}
+}
+
+// ubsBareEntry is the bare {type,command} shape the ubs pack ships. Reconcile
+// re-projects it into .claude/settings.json on every tick (#3862).
+const ubsBareEntry = `{"type":"command","command":"if echo \"$TOOL_INPUT\" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi"}`
+
+func TestMergeSettingsJSON_WrapBareHooks_BareOverlayIdempotentAcrossTicks(t *testing.T) {
+	// #3862: each reconcile tick merges the pack's bare entry into the file the
+	// previous tick wrote. The bare shape and its wrapped on-disk form must
+	// share an identity, or the file grows by one entry per tick without bound
+	// (observed: 5,760 identical entries / 1.4 MB on a 5-day session).
+	over := []byte(`{"hooks":{"PreToolUse":[` + ubsBareEntry + `]}}`)
+	merged := []byte(`{}`)
+	for i := 0; i < 25; i++ {
+		var err error
+		merged, err = MergeSettingsJSON(merged, over, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("merge tick %d: %v", i, err)
+		}
+	}
+	if got := len(preToolUse(t, merged)); got != 1 {
+		t.Errorf("PreToolUse entries after 25 ticks = %d, want 1 (idempotent re-projection)", got)
 	}
 }

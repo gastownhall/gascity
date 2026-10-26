@@ -428,6 +428,47 @@ func TestCopyDir_MergePreservesPermissions(t *testing.T) {
 	}
 }
 
+func TestCopyDirForProviders_ClaudeBareHookStableAcrossTicks(t *testing.T) {
+	// #3862 end to end: the per-tick staging path re-projects a pack overlay's
+	// bare Claude hook into the agent workdir. Every tick after the first must
+	// leave the file byte-identical, with the hook present exactly once as a
+	// matcherless wrapper.
+	src := t.TempDir()
+	dst := t.TempDir()
+	mkdirAll(t, filepath.Join(src, ".claude"))
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"),
+		`{"hooks":{"PreToolUse":[`+ubsBareEntry+`]}}`)
+
+	var stderr bytes.Buffer
+	var first []byte
+	for tick := 0; tick < 25; tick++ {
+		if err := CopyDirForProvidersWithSkip(src, dst, nil, nil, &stderr); err != nil {
+			t.Fatalf("staging tick %d: %v", tick, err)
+		}
+		got, err := os.ReadFile(filepath.Join(dst, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("reading staged settings after tick %d: %v", tick, err)
+		}
+		if first == nil {
+			first = got
+			continue
+		}
+		if !bytes.Equal(first, got) {
+			t.Fatalf("staging tick %d changed the file bytes:\nfirst:\n%s\ntick %d:\n%s", tick, first, tick, got)
+		}
+	}
+	arr := preToolUse(t, first)
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries after 25 staging ticks = %d, want 1", len(arr))
+	}
+	if _, hasMatcher := arr[0].(map[string]any)["matcher"]; hasMatcher {
+		t.Errorf("wrapped entry carries matcher %v, want matcherless wrapper", arr[0].(map[string]any)["matcher"])
+	}
+	if got := innerCommand(t, arr[0]); got != `if echo "$TOOL_INPUT" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi` {
+		t.Errorf("inner command = %q, want the ubs command", got)
+	}
+}
+
 // helpers
 
 func writeFile(t *testing.T, path, content string) {
