@@ -339,7 +339,8 @@ func singleBashBlock(t *testing.T, section string) string {
 // prompt's shipped BLOCKED command against a fake gc and pins that it mails
 // $GC_ESCALATION_RECIPIENT with --notify, as escalate.sh does, so a
 // configured triage agent is woken instead of the mail landing in the
-// sessionless human inbox.
+// sessionless human inbox. Unset and empty both fall back to human, for which
+// --notify is a no-op.
 func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 	cases := []struct {
 		name string
@@ -349,6 +350,8 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 		{name: "set", env: []string{"GC_ESCALATION_RECIPIENT=triage-agent"}, want: "triage-agent"},
 		{name: "qualified", env: []string{"GC_ESCALATION_RECIPIENT=myrig/triage"}, want: "myrig/triage"},
 		{name: "spaces", env: []string{"GC_ESCALATION_RECIPIENT=ops desk"}, want: "ops desk"},
+		{name: "unset", want: "human"},
+		{name: "empty", env: []string{"GC_ESCALATION_RECIPIENT="}, want: "human"},
 	}
 	for _, path := range coreWorkerPrompts {
 		t.Run(path, func(t *testing.T) {
