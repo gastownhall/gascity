@@ -293,6 +293,48 @@ func TestPoolWorkerPromptStatesStepOutcomeContract(t *testing.T) {
 	}
 }
 
+// TestCoreFormulasRetryStepsStateOutcomeContract is the generic guard behind
+// #7678: internal/dispatch classifies a closed attempt bead without
+// gc.outcome as missing_outcome, so a retry-managed core step
+// ([steps.retry]) whose description never tells the worker to record
+// gc.outcome hard-fails on success. Every retry-managed step description
+// must state the full outcome contract: pass, fail, and the failure class
+// and reason.
+func TestCoreFormulasRetryStepsStateOutcomeContract(t *testing.T) {
+	entries, err := fs.ReadDir(PackFS, "formulas")
+	if err != nil {
+		t.Fatalf("reading core formulas: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		data, err := fs.ReadFile(PackFS, "formulas/"+entry.Name())
+		if err != nil {
+			t.Fatalf("reading formulas/%s: %v", entry.Name(), err)
+		}
+		var parsed formulaFile
+		if _, err := toml.Decode(string(data), &parsed); err != nil {
+			t.Fatalf("decoding formulas/%s: %v", entry.Name(), err)
+		}
+		for _, step := range parsed.Steps {
+			if step.Retry == nil {
+				continue
+			}
+			checked++
+			for _, want := range []string{"gc.outcome=pass", "gc.outcome=fail", "gc.failure_class", "gc.failure_reason"} {
+				if !strings.Contains(step.Description, want) {
+					t.Errorf("formulas/%s step %q is retry-managed but its description never states %q; a worker closing on instructions alone hard-fails as missing_outcome", entry.Name(), step.ID, want)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no retry-managed steps in the core formulas; guard pattern is stale")
+	}
+}
+
 // TestClaimProtocolFragmentIsEmbedded pins the go:embed inclusion of
 // template-fragments/. The fragment render tests in cmd/gc read the on-disk
 // source tree, but production cities hydrate the core pack from PackFS —
