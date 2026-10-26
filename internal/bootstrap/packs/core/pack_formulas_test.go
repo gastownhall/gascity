@@ -410,7 +410,8 @@ func molDoWorkCloseStepBlock(t *testing.T) string {
 // closeStepCase is one session shell the do-work close block runs in. The fake
 // gc answers `hook current --id-only` with hookOut/hookRC, `convoy status` with
 // convoy and `bd show` with show (an empty convoy or show fails the read), and
-// exits updateRC for `bd update`.
+// exits updateRC for `bd update`. A refused case's diagnostic must name
+// wantNamed.
 type closeStepCase struct {
 	name      string
 	env       []string
@@ -420,6 +421,7 @@ type closeStepCase struct {
 	show      string
 	updateRC  int
 	wantClose bool
+	wantNamed string
 }
 
 const (
@@ -510,6 +512,31 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 			c.hookOut, c.wantClose = "", false
 			c.env = []string{"GC_BEAD_ID=ga-step"}
 		}),
+		with("AC-3 step is closed", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"closed","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}`), false, "ga-step"
+		}),
+		with("AC-3 step is open", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"open","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}`), false, "ga-step"
+		}),
+		with("AC-3 step belongs to another session", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"in_progress","assignee":"gcg-session-other","metadata":{"gc.step_ref":"mol-do-work.do-work"}`), false, "ga-step"
+		}),
+		with("AC-3 step is unassigned and no alias is set", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"in_progress","assignee":"","metadata":{"gc.step_ref":"mol-do-work.do-work"}`), false, "ga-step"
+		}),
+		with("AC-3 step is the drain step", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.drain"}`), false, "ga-step"
+		}),
+		with("AC-3 step has no step ref", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"in_progress","assignee":"gcg-session-me","metadata":{}`), false, "ga-step"
+		}),
+		with("AC-3 step ref only ends in the do-work ref", func(c *closeStepCase) {
+			c.show, c.wantClose, c.wantNamed = claimed(`"status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"x.mol-do-work.do-work"}`), false, "ga-step"
+		}),
+		with("AC-3 hook names the work bead", func(c *closeStepCase) {
+			c.hookOut, c.wantClose, c.wantNamed = "ga-work", false, "ga-work"
+			c.show = `[{"id":"ga-work","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}]`
+		}),
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -551,6 +578,9 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 			}
 			if strings.TrimSpace(out) == "" {
 				t.Fatal("block failed without a diagnostic")
+			}
+			if !strings.Contains(out, tc.wantNamed) {
+				t.Fatalf("diagnostic does not name %s:\n%s", tc.wantNamed, out)
 			}
 		})
 	}
