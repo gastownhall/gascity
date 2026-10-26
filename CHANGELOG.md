@@ -354,6 +354,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
+  for a log shipper that may not enter `.gc` (which gc keeps at `0700`). The
+  city's controller tails `.gc/events.jsonl` and appends every event line to
+  `path` (absolute, in an operator-provisioned directory gc never creates or
+  changes), with `mode` (default `0640`), renaming it to `<path>.1` at
+  `max_size_bytes` (default 100 MiB; `0` for external logrotate). It resumes
+  after the last event the mirror holds, and a failing mirror is reported at a
+  bounded rate and never blocks event recording. Unset, nothing changes. See
+  the "Ship the Event Log" runbook.
+
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

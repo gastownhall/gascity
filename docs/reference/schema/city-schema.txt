@@ -1655,11 +1655,36 @@
         "rotation": {
           "$ref": "#/$defs/EventsRotationConfig",
           "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
+        },
+        "mirror": {
+          "$ref": "#/$defs/EventsMirrorConfig",
+          "description": "Mirror configures an optional second copy of the city's event log,\nwritten outside .gc so a log shipper can read it. Absent or with an\nempty path, nothing is mirrored."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "EventsConfig holds events provider settings."
+    },
+    "EventsMirrorConfig": {
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path is the absolute path of the mirror file, outside the city's .gc\ndirectory. Its directory must already exist: gc creates only the file\nand never creates or changes the directory. Empty disables the mirror.\nRead when the controller opens the city's event log: a change takes\neffect at the next controller start."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Mode is the octal permission of the mirror file, for example \"0640\".\ngc creates the file with it and sets it on every open. Defaults to\n\"0640\". The file's group follows the directory's: give the directory\nthe shipper's group with the setgid bit (mode 2750) so the file\ninherits it.",
+          "default": "0640"
+        },
+        "max_size_bytes": {
+          "type": "integer",
+          "description": "MaxSizeBytes is the size at which the mirror is renamed to \u003cpath\u003e.1\n(replacing the previous one) and a new file is started, so it stays\nunder about twice this on disk. 0 turns gc's mirror rotation off for an\nexternal logrotate, which may rename the file away or copytruncate it.\nDefaults to 104857600 (100 MiB).",
+          "default": 104857600
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsMirrorConfig configures the events mirror: a JSONL file outside the city's .gc directory that receives a copy of every line of .gc/events.jsonl, for a log shipper that may not enter .gc (which gc keeps at 0700)."
     },
     "EventsRotationConfig": {
       "properties": {

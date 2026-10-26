@@ -426,6 +426,17 @@ EventsConfig holds events provider settings.
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the events backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: file-backed JSONL). |
 | `rotation` | EventsRotationConfig |  |  | Rotation configures file-backed JSONL rotation. Defaults are applied by EventsRotationConfig helper methods when this table is absent. |
+| `mirror` | EventsMirrorConfig |  |  | Mirror configures an optional second copy of the city's event log, written outside .gc so a log shipper can read it. Absent or with an empty path, nothing is mirrored. |
+
+## EventsMirrorConfig
+
+EventsMirrorConfig configures the events mirror: a JSONL file outside the city's .gc directory that receives a copy of every line of .gc/events.jsonl, for a log shipper that may not enter .gc (which gc keeps at 0700).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `path` | string |  |  | Path is the absolute path of the mirror file, outside the city's .gc directory. Its directory must already exist: gc creates only the file and never creates or changes the directory. Empty disables the mirror. Read when the controller opens the city's event log: a change takes effect at the next controller start. |
+| `mode` | string |  | `0640` | Mode is the octal permission of the mirror file, for example "0640". gc creates the file with it and sets it on every open. Defaults to "0640". The file's group follows the directory's: give the directory the shipper's group with the setgid bit (mode 2750) so the file inherits it. |
+| `max_size_bytes` | integer |  | `104857600` | MaxSizeBytes is the size at which the mirror is renamed to &lt;path&gt;.1 (replacing the previous one) and a new file is started, so it stays under about twice this on disk. 0 turns gc's mirror rotation off for an external logrotate, which may rename the file away or copytruncate it. Defaults to 104857600 (100 MiB). |
 
 ## EventsRotationConfig
 

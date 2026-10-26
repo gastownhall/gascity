@@ -271,11 +271,18 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 }
 
 // ValidateEventsRotation returns non-fatal warnings for risky but intentional
-// events rotation settings.
+// events rotation settings, and for an [events.mirror] that gc will skip.
 func ValidateEventsRotation(cfg *City) []string {
 	if cfg == nil {
 		return nil
 	}
+	if problem := cfg.Events.Mirror.Problem(); problem != "" {
+		return append([]string{"events.mirror: warning: " + problem + "; the events mirror is disabled"}, validateEventsRotationRetainAge(cfg)...)
+	}
+	return validateEventsRotationRetainAge(cfg)
+}
+
+func validateEventsRotationRetainAge(cfg *City) []string {
 	raw := cfg.Events.Rotation.ArchiveRetainAge
 	if raw == "" {
 		return nil

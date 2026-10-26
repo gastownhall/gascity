@@ -94,6 +94,11 @@ type FileRecorder struct {
 	// directory regardless. Crash recovery of orphaned rotating files is
 	// unchanged: the long-lived recorder still sweeps.
 	skipSweep bool
+
+	// mirrorOpts configures the event-log mirror (WithMirror); mirror is its
+	// running copier, nil when no mirror is configured.
+	mirrorOpts MirrorOptions
+	mirror     *eventMirror
 }
 
 // FileRecorderOption customizes a FileRecorder at construction time.
@@ -255,6 +260,13 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 	r.file = file
 	r.lock = lock
 	r.seq = maxSeq
+	if r.mirrorOpts.Path != "" {
+		if err := validateMirrorOptions(path, r.mirrorOpts); err != nil {
+			fmt.Fprintf(stderr, "events: mirror disabled: %v\n", err) //nolint:errcheck // best-effort stderr
+		} else {
+			r.mirror = startMirror(path, r.mirrorOpts, maxSeq, stderr)
+		}
+	}
 	return r, nil
 }
 
@@ -976,8 +988,13 @@ func (r *FileRecorder) Close() error {
 	r.file = nil
 	lock := r.lock
 	r.lock = nil
+	mirror := r.mirror
+	r.mirror = nil
 	r.mu.Unlock()
 
+	if mirror != nil {
+		mirror.stop()
+	}
 	r.rotations.Wait()
 
 	var lockErr error
