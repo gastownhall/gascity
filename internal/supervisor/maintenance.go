@@ -67,12 +67,16 @@ type MaintenanceRun struct {
 	SnapshotPath string
 }
 
-// DoltOps is the minimal SQL surface the maintenance loop needs to run
-// CALL DOLT_GC() and the post-gc smoke test. NewSQLDoltOps wraps *sql.DB
+// DoltOps is the minimal SQL surface the maintenance loop needs to gate and
+// run CALL DOLT_GC() and the post-gc smoke test. NewSQLDoltOps wraps *sql.DB
 // and tests supply fakes; the controller does not attach a DoltOps to
 // the production loop yet, so it runs observe-only. Close must release
 // the underlying connection exactly once per cycle.
 type DoltOps interface {
+	// LiveSessions returns the number of other sessions connected to the
+	// database CALL DOLT_GC() will collect, excluding the caller's own
+	// connection. runDoltGC skips GC when it is nonzero.
+	LiveSessions(ctx context.Context) (int, error)
 	// ExecGC runs CALL DOLT_GC() with the supplied context's deadline.
 	ExecGC(ctx context.Context) error
 	// SmokeCount runs SELECT COUNT(*) FROM issues against the current
@@ -800,12 +804,20 @@ func (m *StoreMaintenanceLoop) appendHistoryLocked(r MaintenanceRun) {
 // Returns nil on success. A non-nil return is a *MaintenanceError
 // whose Stage classifies the failing phase:
 //
-//   - "gc": factory error, SQL error from CALL DOLT_GC(), or the
-//     configured GCTimeout elapsed.
+//   - "gc": factory error, live-session probe error, SQL error from
+//     CALL DOLT_GC(), or the configured GCTimeout elapsed.
 //   - "smoke-test": SQL error on SELECT COUNT(*), the 5 s smoke
 //     deadline elapsed, or the query returned 0 rows (which indicates
 //     either a corrupted schema or a wiped table and is never a
 //     healthy post-gc state for a running city).
+//
+// GC is skipped, logged, and reported as nil when other sessions are connected
+// to the target database: Dolt's GC makes a separate, unprotected pass over
+// dolt_ignore'd tables and the working set, so collecting under live writers
+// can destroy them (ga-vrq5pu). A probe error fails closed rather than GCing
+// blind. The probe is a point-in-time check, not a lock: a session can connect
+// and write between the probe and CALL DOLT_GC(), so the gate narrows the
+// hazard window and does not make GC safe.
 //
 // When openDoltOps is nil, runDoltGC returns nil.
 func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
@@ -817,6 +829,15 @@ func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
 		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("open dolt conn: %w", err)}
 	}
 	defer ops.Close() //nolint:errcheck // best-effort cleanup; underlying pool manages lifecycle
+
+	live, err := ops.LiveSessions(ctx)
+	if err != nil {
+		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("probe live sessions: %w", err)}
+	}
+	if live > 0 {
+		fmt.Fprintf(m.stderr, "store-maintenance: %d live session(s) on the target database; skipping CALL DOLT_GC()\n", live) //nolint:errcheck
+		return nil
+	}
 
 	gcCtx, cancelGC := context.WithTimeout(ctx, m.cfg.GCTimeoutOrDefault())
 	defer cancelGC()
@@ -857,6 +878,20 @@ func NewSQLDoltOps(open func(ctx context.Context) (*sql.DB, error)) DoltOpsFacto
 // Close closes the pool.
 type sqlDoltOps struct {
 	db *sql.DB
+}
+
+// liveSessionsQuery counts the other connections on the connection's current
+// database, the one CALL DOLT_GC() collects. Same information_schema.processlist
+// surface as cmd/gc's cleanup probe, narrowed to one database and minus this
+// connection (the pool is per-cycle, so the probe's connection is its only one).
+const liveSessionsQuery = "SELECT COUNT(*) FROM information_schema.processlist WHERE db = DATABASE() AND id <> CONNECTION_ID()"
+
+func (s *sqlDoltOps) LiveSessions(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, liveSessionsQuery).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *sqlDoltOps) ExecGC(ctx context.Context) error {
