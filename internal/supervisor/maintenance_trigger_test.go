@@ -185,6 +185,10 @@ type gatedDoltOps struct {
 	proceed chan struct{}
 }
 
+func (g *gatedDoltOps) LiveSessions(context.Context) (int, error) {
+	return 0, nil
+}
+
 func (g *gatedDoltOps) ExecGC(ctx context.Context) error {
 	g.once.Do(func() { close(g.opened) })
 	select {
