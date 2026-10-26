@@ -1,12 +1,14 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convergence"
 )
 
 // TestProcessRalphCheckInfraTimeoutDoesNotBurnAttempt is the regression for the
@@ -137,4 +139,55 @@ func assertRalphControlInfraRetryPending(t *testing.T, store beads.Store, contro
 	if n := countAllBeads(t, store); n != wantBeads {
 		t.Errorf("bead count = %d, want %d (no successor iteration may be spawned)", n, wantBeads)
 	}
+}
+
+// TestProcessRalphControlInfraRetryThenPassClosesSameIteration pins that the
+// attempt-free re-run grades the same iteration: once the check that timed out
+// passes, the control closes pass on iteration 1 with a single attempt-log
+// entry and no successor iteration.
+func TestProcessRalphControlInfraRetryThenPassClosesSameIteration(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "flaky-check.sh", "#!/bin/sh\nsleep 30\n")
+	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	if err := store.SetMetadata(control.ID, beadmeta.CheckTimeoutMetadataKey, "100ms"); err != nil {
+		t.Fatalf("set check timeout: %v", err)
+	}
+	beadsBefore := countAllBeads(t, store)
+	opts := ProcessOptions{CityPath: cityPath}
+
+	if _, err := ProcessControl(store, mustGet(t, store, control.ID), opts); !errors.Is(err, ErrControlPending) {
+		t.Fatalf("first ProcessControl error = %v, want ErrControlPending", err)
+	}
+
+	writeCheckScript(t, cityPath, "flaky-check.sh", "#!/bin/sh\nexit 0\n")
+	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl after the check recovered: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("control status=%q outcome=%q, want closed pass", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	entries := decodeAttemptLog(t, got)
+	if len(entries) != 1 || entries[0]["attempt"] != "1" || entries[0]["outcome"] != convergence.GatePass {
+		t.Errorf("gc.attempt_log = %q, want one attempt-1 pass entry", got.Metadata[beadmeta.AttemptLogMetadataKey])
+	}
+	if n := countAllBeads(t, store); n != beadsBefore {
+		t.Errorf("bead count = %d, want %d (no successor iteration may be spawned)", n, beadsBefore)
+	}
+}
+
+// decodeAttemptLog returns the entries of bead's gc.attempt_log.
+func decodeAttemptLog(t *testing.T, bead beads.Bead) []map[string]string {
+	t.Helper()
+	var entries []map[string]string
+	if err := json.Unmarshal([]byte(bead.Metadata[beadmeta.AttemptLogMetadataKey]), &entries); err != nil {
+		t.Fatalf("decode gc.attempt_log %q: %v", bead.Metadata[beadmeta.AttemptLogMetadataKey], err)
+	}
+	return entries
 }
