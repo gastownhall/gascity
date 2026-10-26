@@ -10,9 +10,11 @@ package dolt_test
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,4 +205,107 @@ sys.exit(3)
 	if !strings.Contains(out, "to-stdout") || !strings.Contains(out, "to-stderr") {
 		t.Fatalf("child output not passed through; got:\n%s", out)
 	}
+}
+
+// skipUnlessProcNetTCPReadable skips a test that drives runtime.sh's
+// listener probe against the kernel's socket tables when they are not
+// readable (no procfs): there the probe answers via lsof instead, so the
+// kernel-table assertions cannot hold.
+func skipUnlessProcNetTCPReadable(t *testing.T) {
+	t.Helper()
+	if _, err := os.ReadFile("/proc/net/tcp"); err != nil {
+		t.Skip("/proc/net/tcp unreadable; the listener probe's kernel-table path is Linux-only")
+	}
+}
+
+// runRuntimeScriptShell sources runtime.sh in a fresh /bin/sh and then runs
+// body, returning the shell's exit code and combined output. binDir is
+// prepended to PATH so test shims win while the host tools the probe itself
+// needs (find, awk, sort, ps) stay visible; cityPath provides GC_CITY_PATH.
+func runRuntimeScriptShell(t *testing.T, cityPath, binDir, body string, extraEnv ...string) (int, string) {
+	t.Helper()
+	root := repoRoot(t)
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; `+body)
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH", "LSOF_MARKER"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out)
+	}
+	exitErr := &exec.ExitError{}
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), string(out)
+	}
+	t.Fatalf("running runtime.sh shell: %v\noutput:\n%s", err, out)
+	return 0, ""
+}
+
+// writeLsofRecordingShim installs an lsof shim into binDir that records each
+// invocation at $LSOF_MARKER and prints PID 1 — running as far as
+// pid_is_running's ps fallback is concerned, and never the holder a
+// kernel-table probe is expected to find.
+func writeLsofRecordingShim(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "lsof"), `#!/bin/sh
+touch "${LSOF_MARKER:?}"
+printf '1\n'
+`)
+}
+
+// assertListenerPIDAnsweredFromProc holds the AC-1 contract of the
+// gascity#7553 fix: with readable kernel socket tables,
+// managed_runtime_listener_pid must print the listening process's PID from
+// those tables and must never execute lsof, whose unfiltered /proc walk
+// parks it in uninterruptible sleep when any FUSE mount on the host stalls
+// (leaving dolt orders to time out with unkillable leftover processes).
+func assertListenerPIDAnsweredFromProc(t *testing.T) {
+	t.Helper()
+	skipUnlessProcNetTCPReadable(t)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	want := strconv.Itoa(os.Getpid())
+
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "lsof-ran")
+	writeLsofRecordingShim(t, bin)
+
+	code, out := runRuntimeScriptShell(t, t.TempDir(), bin,
+		"managed_runtime_listener_pid "+strconv.Itoa(port),
+		"GC_DOLT_PORT=4406",
+		"LSOF_MARKER="+marker,
+	)
+	if code != 0 {
+		t.Fatalf("managed_runtime_listener_pid exited %d\n%s", code, out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("lsof ran; with readable kernel socket tables the listener probe must answer without it (gascity#7553)\noutput:\n%s", out)
+	}
+	if got := strings.TrimSpace(out); got != want {
+		t.Fatalf("managed_runtime_listener_pid = %q, want %q (the process holding the listener)\noutput:\n%s", got, want, out)
+	}
+}
+
+// TestManagedRuntimeListenerPIDReadsProcNotLsof is AC-1 of the gascity#7553
+// fix: the listener probe answers from the kernel socket tables, not lsof.
+func TestManagedRuntimeListenerPIDReadsProcNotLsof(t *testing.T) {
+	assertListenerPIDAnsweredFromProc(t)
+}
+
+// TestManagedRuntimeListenerPIDDoesNotHangOnStalledMount is the recorded
+// repro name for gascity#7553 and holds the same contract as
+// TestManagedRuntimeListenerPIDReadsProcNotLsof: an lsof-backed probe hangs
+// on a stalled FUSE mount, so the holder lookup must never reach lsof while
+// the kernel socket tables are readable.
+func TestManagedRuntimeListenerPIDDoesNotHangOnStalledMount(t *testing.T) {
+	assertListenerPIDAnsweredFromProc(t)
 }
