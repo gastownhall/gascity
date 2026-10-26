@@ -456,3 +456,60 @@ func TestCascadeNudgeKeepsAssigneePath(t *testing.T) {
 		})
 	}
 }
+
+// TestCascadeNudgeRetriesFailedRoutedNudge pins the failure contract for the
+// routed wake-up. An undeliverable nudge must not abort the run (a sibling
+// dependent of the same blocker still gets theirs), must not be recorded as
+// nudged, and is retried exactly once on the next run.
+func TestCascadeNudgeRetriesFailedRoutedNudge(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	failMarker := filepath.Join(dir, "a-1")
+	binDir, logPath := fakeGCBin(t, cascadeFake{
+		eventsPath: writeCascadeCloseEvent(t, "ga-blk"),
+		depJSON: `[` + strings.Join([]string{
+			`{"id":"ga-dep-a","status":"open","assignee":"","metadata":{"gc.routed_to":"gascity/pool-a"}}`,
+			`{"id":"ga-dep-b","status":"open","assignee":"","metadata":{"gc.routed_to":"gascity/pool-b"}}`,
+		}, ",") + `]`,
+		members: map[string][]string{
+			"gascity/pool-a": {"a-1"},
+			"gascity/pool-b": {"b-1"},
+		},
+		failDir: dir,
+	}.body())
+
+	if err := os.WriteFile(failMarker, nil, 0o644); err != nil {
+		t.Fatalf("write fail marker: %v", err)
+	}
+	if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+		t.Fatalf("run 1 must absorb the failed nudge and exit 0: %v\n%s", err, out)
+	}
+	if n := countNudgesTo(t, logPath, "b-1"); n != 1 {
+		t.Errorf("run 1: nudges to b-1 = %d, want 1; a failed nudge must not block the sibling dependent", n)
+	}
+	if cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep-a") {
+		t.Error("the failed pair must not be recorded as nudged")
+	}
+	if !cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep-b") {
+		t.Error("the delivered pair must be recorded")
+	}
+
+	if err := os.Remove(failMarker); err != nil {
+		t.Fatalf("remove fail marker: %v", err)
+	}
+	if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+		t.Fatalf("run 2: cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+	}
+	if n := countNudgesTo(t, logPath, "a-1"); n != 2 {
+		t.Errorf("nudges to a-1 = %d, want 2 (one failed attempt, one retry)", n)
+	}
+	if n := countNudgesTo(t, logPath, "b-1"); n != 1 {
+		t.Errorf("nudges to b-1 = %d, want 1; the recorded pair must not be re-nudged", n)
+	}
+	if !cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep-a") {
+		t.Error("the retried pair must be recorded once delivered")
+	}
+}
