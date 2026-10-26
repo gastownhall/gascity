@@ -731,6 +731,17 @@ store, copy them into the binding with
 
 			cookVars := parseFormulaVars(vars)
 
+			// Parse --meta before any bead write, whichever arm runs: a
+			// malformed pair must fail the cook before a root, its steps or
+			// an attach bead's blocking dep exist. The standalone arm used to
+			// reject the same garbage only after the molecule was poured,
+			// leaving an orphaned workflow behind a non-zero exit, and the
+			// attach arms never parsed it at all (#7309).
+			rootMeta, err := parseMetadataArgs(metadata)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
+
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 				if err != nil {
@@ -1076,10 +1087,6 @@ store, copy them into the binding with
 				}
 			}
 
-			rootMeta, err := parseMetadataArgs(metadata)
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-			}
 			if len(rootMeta) > 0 {
 				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
 					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)

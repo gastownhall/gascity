@@ -1588,6 +1588,58 @@ title = "Do work for {{convoy_id}}"
 	}
 }
 
+// TestFormulaCookRejectsMalformedMetaBeforeWriting pins the --meta parse
+// contract for every cook arm (#7309): a pair with no "=" or with an empty
+// key fails the command before any bead write, so a malformed stamp can
+// leave neither a cooked root behind a non-zero exit (the standalone arm's
+// old shape) nor a successful graft that drops the pairs silently (the
+// attach arms never parsed --meta at all).
+func TestFormulaCookRejectsMalformedMetaBeforeWriting(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		formula string
+		attach  bool
+		meta    string
+	}{
+		{name: "v1 standalone", formula: "legacy-work", meta: "no-equals"},
+		{name: "v1 attach", formula: "legacy-work", attach: true, meta: "no-equals"},
+		{name: "v1 attach empty key", formula: "legacy-work", attach: true, meta: "=v"},
+		{name: "graph.v2 standalone", formula: "graph-work", meta: "no-equals"},
+		{name: "graph.v2 attach", formula: "graph-work", attach: true, meta: "no-equals"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			seedCLIStorageRoutes(t, cityDir, nil)
+			work, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open work store: %v", err)
+			}
+			target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+			if err != nil {
+				t.Fatalf("create target: %v", err)
+			}
+
+			args := []string{"--meta", tc.meta}
+			if tc.attach {
+				args = append(args, "--attach", target.ID)
+			}
+			out, err := cookFormulaErr(t, tc.formula, args...)
+			if err == nil {
+				t.Fatalf("gc formula cook %s with --meta %q succeeded: %s", tc.formula, tc.meta, out)
+			}
+			if want := fmt.Sprintf("invalid metadata %q (want key=value)", tc.meta); !strings.Contains(out, want) {
+				t.Errorf("cook output %q does not report %q", out, want)
+			}
+			if got := beadIDs(allBeads(t, work)); len(got) != 1 || got[0] != target.ID {
+				t.Errorf("the store holds %v after a rejected cook, want only %s — a malformed --meta must fail before any bead is written", got, target.ID)
+			}
+			if got := blockingDepCount(t, work, target.ID); got != 0 {
+				t.Errorf("target %s carries %d blocking deps after a rejected cook, want 0", target.ID, got)
+			}
+		})
+	}
+}
+
 // TestFormulaCookAttachHelpDoesNotClaimParentChild pins the #2392 fix:
 // --attach only ever creates a "blocks" dependency back to the attached
 // bead (ensureFormulaCookAttachDep / molecule.Attach both call
