@@ -834,3 +834,65 @@ func assertCanonicalEqual(t *testing.T, got any, want string) {
 		t.Errorf("entry = %s, want %s", gotJSON, wantJSON)
 	}
 }
+
+func TestMergeSettingsJSON_WrapBareHooks_CoreHookSurvivesBarePackHook(t *testing.T) {
+	// A category can hold both a core gc hook (matcher "") and a pack's bare
+	// hook. The bare entry must not claim the matcher-"" identity slot: the
+	// core hook survives, the pack hook lands exactly once across re-projection,
+	// and a later core upgrade still replaces the core entry in place.
+	base := []byte(`{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}]}}`)
+	pack := []byte(`{"hooks":{"Stop":[{"type":"command","command":"pack-cleanup.sh"}]}}`)
+
+	result := base
+	for i := 0; i < 4; i++ {
+		var err error
+		result, err = MergeSettingsJSON(result, pack, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("pack merge %d: %v", i, err)
+		}
+	}
+	arr := stopEntries(t, result)
+	if len(arr) != 2 {
+		t.Fatalf("Stop entries after 4 pack merges = %d, want 2 (core + pack):\n%s", len(arr), result)
+	}
+	assertCanonicalEqual(t, arr[0], `{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}`)
+	assertCanonicalEqual(t, arr[1], `{"hooks":[{"type":"command","command":"pack-cleanup.sh"}]}`)
+
+	upgrade := []byte(`{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject --v2"}]}]}}`)
+	result, err := MergeSettingsJSON(result, upgrade, WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("upgrade merge: %v", err)
+	}
+	arr = stopEntries(t, result)
+	if len(arr) != 2 {
+		t.Fatalf("Stop entries after core upgrade = %d, want 2 (upgraded core + pack):\n%s", len(arr), result)
+	}
+	assertCanonicalEqual(t, arr[0], `{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject --v2"}]}`)
+	assertCanonicalEqual(t, arr[1], `{"hooks":[{"type":"command","command":"pack-cleanup.sh"}]}`)
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_CoreMatcherReplacedOnUpgrade(t *testing.T) {
+	// The core gc hooks in internal/hooks/config/claude.json occupy the
+	// matcher-"" slot (PreCompact, UserPromptSubmit) and reach the merge with
+	// WithWrapBareHooks via installClaude. When a release changes the command,
+	// the new entry must replace the old one rather than append beside it.
+	// TestMergeSettingsJSON_SameMatcherReplacement covers the no-wrap path only.
+	base := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --old"}]}]}}`
+	over := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --new"}]}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	arr := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("UserPromptSubmit entries = %d, want 1 (stale core hook must not linger)", len(arr))
+	}
+	if got := innerCommand(t, arr[0]); got != "gc nudge drain --new" {
+		t.Errorf("command = %q, want gc nudge drain --new", got)
+	}
+}
