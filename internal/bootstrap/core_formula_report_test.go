@@ -263,6 +263,48 @@ func TestCorePoolWorkerPromptRecordsOutcomeBeforeClose(t *testing.T) {
 	}
 }
 
+// TestCorePoolWorkerPromptStatesStepFailureContract pins the failure half of
+// the retry contract: a workflow step (one carrying gc.step_ref) that cannot
+// succeed is closed with gc.outcome=fail, a failure class and a reason so the
+// retry evaluator can decide, and no success instruction carries failure
+// metadata, which the evaluator retries as pass_with_failure_metadata.
+func TestCorePoolWorkerPromptStatesStepFailureContract(t *testing.T) {
+	prompt := readCorePoolWorkerPrompt(t)
+	for _, want := range []string{"gc.step_ref", "gc.failure_class=transient", "gc.failure_class=hard"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("pool-worker.template.md never mentions %q", want)
+		}
+	}
+
+	failWrites := 0
+	closeAfterFail := false
+	for _, cmd := range joinShellContinuations(prompt) {
+		if failWrites > 0 && strings.Contains(cmd, "gc bd close <") {
+			closeAfterFail = true
+		}
+		if !strings.Contains(cmd, "gc bd update <") {
+			continue
+		}
+		hasFailureMetadata := strings.Contains(cmd, "gc.failure_class=") || strings.Contains(cmd, "gc.failure_reason=")
+		if strings.Contains(cmd, "gc.outcome=pass") && hasFailureMetadata {
+			t.Errorf("pool-worker.template.md: a pass that carries gc.failure_class or gc.failure_reason is retried:\n%s", cmd)
+		}
+		if !strings.Contains(cmd, "gc.outcome=fail") {
+			continue
+		}
+		failWrites++
+		if !strings.Contains(cmd, "gc.failure_class=") || !strings.Contains(cmd, "gc.failure_reason=") {
+			t.Errorf("pool-worker.template.md: a gc.outcome=fail write must also set gc.failure_class and gc.failure_reason:\n%s", cmd)
+		}
+	}
+	if failWrites == 0 {
+		t.Fatal("pool-worker.template.md never tells the worker to record gc.outcome=fail on a step that cannot succeed")
+	}
+	if !closeAfterFail {
+		t.Error("pool-worker.template.md records gc.outcome=fail but never closes the step afterwards; the retry evaluator only reads closed attempts")
+	}
+}
+
 // joinShellContinuations folds backslash-continued lines into one logical
 // command line so multi-line bd invocations are checked as a whole.
 func joinShellContinuations(text string) []string {
