@@ -234,6 +234,10 @@ var parityFindings = map[string]parityEntry{
 		"C6b2 (A4, v5 D5; owner to add a §12.2 row)", "legacy signals and finalizes a drain through the runtime's drain env (SetMeta GC_DRAIN_ACK, then RemoveMeta GC_DRAIN and GC_DRAIN_ACK, also on a runtime already gone); v2's acks and signal are row-bound (D1, D5), so its stop verb writes and removes no drain env",
 		nil,
 	},
+	"overlay-pool-display-name": {
+		"POOL-059 (the session overlay; v2's overlay step)", "legacy names a pool row the session overlay keeps by its session name (resolveDiscoveredSessionTemplate's InstanceName for an ephemeral row); v2 by its qualified instance (the overlay's QualifiedInstance), so that row's start records session.woke under another subject. §12.2 does not list it",
+		nil,
+	},
 
 	"wait-sleep-lag": {
 		"C6b1, C6b2 (A20, A4; owner to add a §12.2 row)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch and delivers the wait's nudge with the start; v2 drains and restarts it the same way, a pass or more later (drain-stop-lag)",
@@ -1099,6 +1103,26 @@ func parityFixtures() []parityFixture {
 		cfg.Agents[0].MinActiveSessions = intPtr(1)
 		return cfg
 	}
+	// cityCapOne is the worker city capped at one session city-wide, with
+	// further agents; readyPinBehind is gc-1's ready P3 pin (its blocker gb-1
+	// closed) behind gc-2's claimed P2 work, routed to live.
+	cityCapOne := func(agents ...string) func() *config.City {
+		return func() *config.City {
+			cfg := workerCity(3)
+			cfg.Workspace.MaxActiveSessions = intPtr(1)
+			for _, name := range agents {
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: name, StartCommand: "true", MaxActiveSessions: intPtr(3)})
+			}
+			return cfg
+		}
+	}
+	readyPinBehind := func(live string) []parityRow {
+		return []parityRow{
+			{ID: "gw-2", Title: "gw-2", Type: "task", Status: "in_progress", Assignee: "gc-2", Priority: intPtr(2), Metadata: map[string]string{"gc.routed_to": live}},
+			{ID: "gb-1", Title: "gb-1", Type: "task", Status: "closed"},
+			{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Priority: intPtr(3), Metadata: map[string]string{"gc.routed_to": "worker"}},
+		}
+	}
 	drifted := runtime.FingerprintVersion + ":drifted"
 	// driftDrained is legacy finishing the drift drain in its ticks (the
 	// signal, the stop, the drained seat's retirement and its replacement),
@@ -1237,6 +1261,43 @@ func parityFixtures() []parityFixture {
 			},
 			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
 			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
+		},
+		{
+			// A parked seat whose pin turns ready at a full city cap competes
+			// for its one slot with a live seat by bead priority, and its P3
+			// pin loses to the live seat's P2 work. The live seat is of its own
+			// template, which the pass still selects, so the overlay keeps the
+			// seat: both copies wake it for its pin, past the cap.
+			Name: "a parked seat whose ready pin loses a full city cap to its own template still wakes", Behaviors: []string{"SESS-624"},
+			City: cityCapOne(),
+			Rows: []parityRow{
+				poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour)),
+				poolRow("gc-2", "worker", 2, "awake", "instance_token", "tok-gc-2", "last_woke_at", at(-time.Hour)),
+			},
+			Work:     readyPinBehind("worker"),
+			Deps:     []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Runtimes: []simRuntime{{id: "gc-2", epoch: "1", token: "tok-gc-2"}},
+			Explain: started("gc-1", "s-gc-1", "worker-1", map[string]string{
+				"row:gc-2:*policy":               "sleep-policy-keys",
+				"event:session.woke s-gc-1 []":   "overlay-pool-display-name",
+				"event:session.woke worker-1 []": "overlay-pool-display-name",
+			}),
+		},
+		{
+			// The same contest lost to a live seat of another template: the
+			// pass selects no row of the parked seat's template, so nothing
+			// selects the seat, and both copies close it as an orphan and
+			// return its pin to the pool (SESS-082).
+			Name: "a parked seat whose ready pin loses a full city cap to another template closes as an orphan", Behaviors: []string{"SESS-081", "SESS-082"},
+			City: cityCapOne("other"),
+			Rows: []parityRow{
+				poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour)),
+				poolRow("gc-2", "other", 1, "awake", "instance_token", "tok-gc-2", "last_woke_at", at(-time.Hour)),
+			},
+			Work:     readyPinBehind("other"),
+			Deps:     []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Runtimes: []simRuntime{{id: "gc-2", epoch: "1", token: "tok-gc-2"}},
+			Explain:  map[string]string{"row:gc-2:*policy": "sleep-policy-keys"},
 		},
 		{
 			// A seat an earlier pass stranded (a full pool's fallback) that

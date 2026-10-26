@@ -65,6 +65,50 @@ func TestComputePoolDesiredStatesParkedSeatTakesNoCap(t *testing.T) {
 	})
 }
 
+// A parked seat's pin turned ready competes for a full city cap with the
+// other existing seats' requests by bead priority, a tie keeping the pass's
+// order. The seat that loses has no request at all; whether the session
+// overlay still keeps it turns on its template
+// (TestAllocator_ReadyPinCompetesForAFullCityCap).
+func TestComputePoolDesiredStatesReadyPinCompetesForAFullCap(t *testing.T) {
+	wsMax := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents:    []config.Agent{poolAgent("claude", "", nil, 0)},
+	}
+	sessions := sessionInfosFromBeads([]beads.Bead{sessionBead("sess-1", "open"), sessionBead("sess-2", "open")})
+	// sess-1 parked on pin-1, which is ready now: the pass's verdict is
+	// eligible, not parked. sess-2 is a live seat on its claimed w-2 (P2),
+	// which holds the city's one slot.
+	unparked := parkedSeats{"sess-1": {Eligible: true}}
+	for _, tc := range []struct {
+		name        string
+		pinPriority int
+		pinFirst    bool
+		want        string
+	}{
+		{name: "a pin that outranks the live seat's work takes the slot", pinPriority: 1, want: "sess-1"},
+		{name: "a pin the live seat's work outranks loses, whatever the order", pinPriority: 3, pinFirst: true, want: "sess-2"},
+		{name: "a tie goes to the earlier request, the live seat's", pinPriority: 2, want: "sess-2"},
+		{name: "a tie goes to the earlier request, the pin's", pinPriority: 2, pinFirst: true, want: "sess-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := []beads.Bead{workBead("w-2", "claude", "sess-2", "in_progress", 2), workBead("pin-1", "claude", "sess-1", "open", tc.pinPriority)}
+			if tc.pinFirst {
+				work[0], work[1] = work[1], work[0]
+			}
+			states := computePoolDesiredStatesParkedAt(cfg, work, sessions, nil, nil, parkNow, unparked, nil)
+			parked, counted := parkedRequests(states)
+			if len(parked) != 0 || len(counted) != 1 || counted[0].SessionBeadID != tc.want || counted[0].Tier != "resume" {
+				t.Fatalf("parked %+v counted %+v, want only %s's resume in the city's one slot", parked, counted, tc.want)
+			}
+			if got := PoolDesiredCounts(states)["claude"]; got != 1 {
+				t.Fatalf("pool desired = %d, want 1: the cap holds", got)
+			}
+		})
+	}
+}
+
 func TestComputePoolDesiredStatesParkedSeatsAreNotPoolDemand(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", nil, 0)}}
 	work := []beads.Bead{

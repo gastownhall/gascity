@@ -52,6 +52,74 @@ func TestAllocator_ReadyPinWakesTheParkedSeatInPlace(t *testing.T) {
 	}
 }
 
+// A ready pin at a full city cap is a counted resume that competes with the
+// live seat holding the cap's one slot, by bead priority (P1 outranks the live
+// seat's P2 work, P3 does not; ties are the planner test's). The cap counts
+// requests, not seats: a request it rejects selects no seat, but the overlay
+// keeps every open row of a template the pass still selects. So a seat that
+// loses to a seat of its own template stays selected, and wakes for its work
+// past the cap. One whose template keeps no selected row drops out: a parked
+// seat's ready pin that loses leaves an orphan Drain holding the pin, which
+// A21's orphan close releases (SESS-082); a live seat the pin displaces is a
+// Drain holding its claimed work, which keeps it running until that work is
+// done (SESS-074).
+func TestAllocator_ReadyPinCompetesForAFullCityCap(t *testing.T) {
+	decide := func(t *testing.T, liveTemplate string, pinPriority int) allocDecision {
+		wsMax := 1
+		cfg := &config.City{Workspace: config.Workspace{MaxActiveSessions: &wsMax}, Agents: []config.Agent{{Name: "worker"}}}
+		if liveTemplate != "worker" {
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: liveTemplate})
+		}
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", ago(time.Hour)),
+			poolRow("gc-2", liveTemplate, 2, "active"),
+		).alive("s-gc-2", InventoryAttrs{})
+		claimed, pinned := 2, pinPriority
+		f.in.Demand.AssignedWork = []beads.Bead{
+			{ID: "w-2", Type: "task", Status: "in_progress", Assignee: "gc-2", Priority: &claimed, Metadata: map[string]string{"gc.routed_to": liveTemplate}},
+			{ID: "pin-1", Type: "task", Status: "open", Assignee: "gc-1", Priority: &pinned, Metadata: map[string]string{"gc.routed_to": "worker"}},
+		}
+		f.in.Demand.AssignedStoreRefs = []string{"", ""}
+		f.in.Demand.ReadyAssigned = map[storeScopedBeadKey]bool{{StoreRef: "", ID: "pin-1"}: true}
+		return f.decide()
+	}
+	wakes := func(t *testing.T, d allocDecision, id, work string) {
+		t.Helper()
+		if e := entryOf(t, d, id); !e.InDesired || e.Desired != desireWake || e.Reason != reasonAssignedWork || e.AssignedWork == nil || e.AssignedWork.BeadID != work {
+			t.Fatalf("%s = %s/%s in desired %v work %+v, want selected and woken for %s", id, e.Desired, e.Reason, e.InDesired, e.AssignedWork, work)
+		}
+	}
+	drains := func(t *testing.T, d allocDecision, id, work string) {
+		t.Helper()
+		if e := entryOf(t, d, id); e.InDesired || e.Desired != desireDrain || e.DrainReason != drainOrphaned || e.OpenWork == nil || e.OpenWork.BeadID != work {
+			t.Fatalf("%s = %s/%s in desired %v drain %q open work %+v, want an orphan drain holding %s", id, e.Desired, e.Reason, e.InDesired, e.DrainReason, e.OpenWork, work)
+		}
+	}
+	t.Run("a pin that loses to its own template still wakes past the cap", func(t *testing.T) {
+		d := decide(t, "worker", 3)
+		if e := entryOf(t, d, "gc-1"); e.Park.Parked || !e.Park.Eligible {
+			t.Fatalf("gc-1 verdict %+v, want eligible and not parked: its pin is ready", e.Park)
+		}
+		wakes(t, d, "gc-1", "pin-1")
+		wakes(t, d, "gc-2", "w-2")
+	})
+	t.Run("a live seat of the pin's template it outranks keeps running past the cap", func(t *testing.T) {
+		d := decide(t, "worker", 1)
+		wakes(t, d, "gc-1", "pin-1")
+		wakes(t, d, "gc-2", "w-2")
+	})
+	t.Run("a pin that loses with no selected row of its template is an orphan drain", func(t *testing.T) {
+		d := decide(t, "other", 3)
+		drains(t, d, "gc-1", "pin-1")
+		wakes(t, d, "gc-2", "w-2")
+	})
+	t.Run("a live seat of another template the pin outranks drains holding its work", func(t *testing.T) {
+		d := decide(t, "other", 1)
+		wakes(t, d, "gc-1", "pin-1")
+		drains(t, d, "gc-2", "w-2")
+	})
+}
+
 func TestAllocator_ParkedSeatPastItsBoundIsNotParked(t *testing.T) {
 	f := parkedAllocFixture(t, parkedWorkMaxHold+time.Minute)
 	e := entryOf(t, f.decide(), "gc-1")

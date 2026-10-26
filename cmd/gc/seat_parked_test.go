@@ -82,6 +82,7 @@ func TestParkSeatsClassifiesOneSeat(t *testing.T) {
 		{name: "another seat's pin is not this seat's work", row: parkedRow("s1"), work: []beads.Bead{pin("w1", "s2")}, ready: []bool{false}, wantEligible: true},
 		{name: "a workless seat is not parked", row: parkedRow("s1"), ready: []bool{}, wantEligible: true},
 		{name: "a runtime that died holding a pin (runtime-missing) is not a voluntary sleep", row: parkedRow("s1", func(i *session.Info) { i.SleepReason = string(session.SleepReasonRuntimeMissing) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
+		{name: "an idle-timeout stop is not the seat's own: only sleep_reason idle parks (D4)", row: parkedRow("s1", func(i *session.Info) { i.SleepReason = string(session.SleepReasonIdleTimeout) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 		{name: "a killed seat takes B1", row: parkedRow("s1", func(i *session.Info) { i.SleepReason = string(session.SleepReasonKilled) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 		{name: "a terminal provider error is not a voluntary sleep", row: parkedRow("s1", func(i *session.Info) { i.SleepReason = string(session.SleepReasonProviderTerminalError) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 		{name: "a quarantined seat is not parked", row: parkedRow("s1", func(i *session.Info) {
