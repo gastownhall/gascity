@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -60,18 +61,68 @@ func TestPackCredentialsCheckInsecurePermsError(t *testing.T) {
 	}
 }
 
-func TestPackCredentialsCheckUnmatchedRemoteWarns(t *testing.T) {
-	ctx := credCtx(t)
-	writeCityCred(t, ctx.CityPath, "[[credential]]\nmatch=\"gitlab.com\"\nhelper=\"x\"\n", 0o600)
+// assertPublicImportClean runs the check for a single public import and
+// asserts it reports OK with no FixHint and never echoes secret.
+func assertPublicImportClean(t *testing.T, ctx *CheckContext, source, secret string) {
+	t.Helper()
 	imports := map[string]config.Import{
-		"tools": {Source: "https://github.com/gascity/tools", Version: "^1.0"},
+		"public": {Source: source, Version: "^1.0"},
 	}
 	r := NewPackCredentialsCheck(imports).Run(ctx)
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %v, want Warning; msg=%q", r.Status, r.Message)
+	if r.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg=%q fix=%q details=%v", r.Status, r.Message, r.FixHint, r.Details)
 	}
-	if r.FixHint == "" {
-		t.Fatalf("expected a FixHint for the unmatched remote")
+	if r.FixHint != "" {
+		t.Fatalf("FixHint = %q, want empty (a public import needs no credential)", r.FixHint)
+	}
+	if secret == "" {
+		return
+	}
+	for _, line := range append([]string{r.Message, r.FixHint}, r.Details...) {
+		if strings.Contains(line, secret) {
+			t.Fatalf("secret leaked into output: %q", line)
+		}
+	}
+}
+
+// An unmatched networked remote is not evidence that a credential is
+// required (issue #5894): offline, a public import is authored exactly like a
+// private one, so a rule for some other host or namespace must not change the
+// import's status or FixHint.
+func TestPackCredentialsCheckUnmatchedPublicRemoteOK(t *testing.T) {
+	const source = "https://github.com/gastownhall/gascity-packs"
+	for _, tc := range []struct{ name, rule string }{
+		{name: "zero rules"},
+		{name: "unrelated host rule", rule: "gitlab.com/acme"},
+		{name: "same-host unrelated namespace rule", rule: "github.com/acme-private"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := credCtx(t)
+			if tc.rule != "" {
+				writeCityCred(t, ctx.CityPath, "[[credential]]\nmatch=\""+tc.rule+"\"\nhelper=\"x\"\n", 0o600)
+			}
+			assertPublicImportClean(t, ctx, source, "")
+		})
+	}
+}
+
+// A public HTTPS import that clones anonymously must stay healthy when an
+// unrelated private-host rule is added (issue #5894): absence of a matching
+// rule is not evidence that a credential is required.
+func TestPackCredentialsCheckPublicImportWithUnrelatedRuleOK(t *testing.T) {
+	ctx := credCtx(t)
+	imports := map[string]config.Import{
+		"public": {Source: "https://github.com/gastownhall/gascity-packs", Version: "^1.0"},
+	}
+	before := NewPackCredentialsCheck(imports).Run(ctx)
+	if before.Status != StatusOK {
+		t.Fatalf("zero rules: status = %v, want OK; msg=%q", before.Status, before.Message)
+	}
+	writeCityCred(t, ctx.CityPath, "[[credential]]\nmatch=\"git.private.example.com\"\nhelper=\"x\"\n", 0o600)
+	after := NewPackCredentialsCheck(imports).Run(ctx)
+	if after.Status != StatusOK {
+		t.Fatalf("unrelated rule: status = %v, want OK (public import needs no credential); msg=%q fix=%q details=%v",
+			after.Status, after.Message, after.FixHint, after.Details)
 	}
 }
 
