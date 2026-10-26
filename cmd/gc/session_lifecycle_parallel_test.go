@@ -8914,6 +8914,8 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		{"a relative operator dir", "", "cfg/claude-b", cityRoots},
 		{"an env dir beside the city roots", "/cfg/claude-a", "", append(sessionTranscriptSearchPaths(observed), "/cfg/claude-a/projects")},
 		{"the default root's own dir in the env", filepath.Join(home, ".claude"), "", cityRoots},
+		{"the operator dir over an env dir", "/cfg/claude-a", "/cfg/claude-b", []string{"/cfg/claude-b/projects"}},
+		{"a ~ operator dir over the same ambient value", "~/.claude-b", "~/.claude-b", cityRoots},
 	} {
 		tp := TemplateParams{}
 		if c.env != "" {
