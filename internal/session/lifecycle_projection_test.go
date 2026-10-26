@@ -395,6 +395,22 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReconciledState: StateAsleep,
 		},
 		{
+			// #7308: a kill is a deliberate operator stop, so a killed row
+			// keeps its resume identity when its runtime is found missing.
+			name: "dead active runtime with killed reason preserves resume identity",
+			input: LifecycleInput{
+				Status:            "open",
+				StoredState:       "active",
+				SessionKey:        "provider-conversation",
+				StartedConfigHash: "config",
+				SleepReason:       string(SleepReasonKilled),
+				Runtime:           RuntimeFacts{Observed: true, Alive: false},
+				Now:               now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status:             "open",

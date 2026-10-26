@@ -860,17 +860,19 @@ func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason s
 
 // SleepReasonKeepsContinuation reports whether a session that slept for
 // reason keeps its continuation when its runtime is found missing: the
-// heal resets session_key and started_config_hash otherwise. This list
-// deliberately diverges from IsDeliberateSleepReason's near-identical list
-// (this one has "runtime-missing" and lacks "failed-create"): that one
-// decides churn suppression, this one decides continuation reset on wake —
-// do not merge the lists.
+// heal resets session_key and started_config_hash otherwise. "killed" is
+// the gc session kill operator stop (SleepReasonKilled, kill_fence.go), a
+// deliberate stop that keeps the continuation like drained or city-stop.
+// This list deliberately diverges from IsDeliberateSleepReason's
+// near-identical list (this one has "runtime-missing" and lacks
+// "failed-create"): that one decides churn suppression, this one decides
+// continuation reset on wake — do not merge the lists.
 func SleepReasonKeepsContinuation(reason string) bool {
 	switch SleepReason(strings.TrimSpace(reason)) {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
-		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
-		SleepReasonRuntimeMissing:
+		SleepReasonUserHold, SleepReasonKilled, SleepReasonWaitHold,
+		SleepReasonRateLimit, SleepReasonRuntimeMissing:
 		return true
 	}
 	return false

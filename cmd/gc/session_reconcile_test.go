@@ -3960,3 +3960,35 @@ func TestRecordFailure_ManualConversationKeepsIdentityAndAccrues(t *testing.T) {
 		})
 	}
 }
+
+// TestHealState_KilledRuntimeExitPreservesResumeIdentity reproduces #7308: a
+// session put to sleep by `gc session kill` (sleep_reason=killed) that is
+// healed alive and then found dead must keep its resume identity, as an
+// operator kill is deliberate like drained or city-stop.
+func TestHealState_KilledRuntimeExitPreservesResumeIdentity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+	session := makeBead("b1", map[string]string{
+		"state":               "asleep",
+		"sleep_reason":        "killed",
+		"session_key":         "resume-key",
+		"started_config_hash": "config-hash",
+	})
+
+	for k, v := range healStatePatchFromBead(session, true, clk, 0) {
+		session.Metadata[k] = v
+	}
+	if got := session.Metadata["state"]; got != "awake" {
+		t.Fatalf("after alive heal: state = %q, want awake", got)
+	}
+
+	dead := healStatePatchFromBead(session, false, clk, 0)
+	if v, ok := dead["session_key"]; ok && v == "" {
+		t.Errorf("dead heal cleared session_key; patch = %v", dead)
+	}
+	if v, ok := dead["started_config_hash"]; ok && v == "" {
+		t.Errorf("dead heal cleared started_config_hash; patch = %v", dead)
+	}
+	if dead["continuation_reset_pending"] == "true" {
+		t.Errorf("dead heal set continuation_reset_pending; patch = %v", dead)
+	}
+}
