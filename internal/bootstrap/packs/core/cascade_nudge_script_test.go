@@ -334,3 +334,38 @@ func TestCascadeNudgeRoutedRowEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// TestCascadeNudgeKeepsAssigneePath pins that an assigned dependent belongs to
+// its session: even with gc.routed_to still set, the order nudges the assignee
+// with the assignee message and never looks up the routed pool.
+func TestCascadeNudgeKeepsAssigneePath(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	for _, tc := range []struct{ name, deps string }{
+		{"assignee only", `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`},
+		{"assignee and gc.routed_to", `[{"id":"ga-dep","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"gascity/pool"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newCascadeFake(t, cascadeFake{
+				events:  blkClosedEvent,
+				deps:    tc.deps,
+				members: map[string][]string{"gascity/pool": {"pool-1"}},
+			})
+			if out, err := runCascadeNudge(t, run.binDir, filepath.Join(t.TempDir(), "state")); err != nil {
+				t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+			}
+			logged, err := os.ReadFile(run.logPath)
+			if err != nil {
+				t.Fatalf("read gc log: %v", err)
+			}
+			if strings.Contains(string(logged), "gc session list") {
+				t.Fatalf("assigned dependent must not trigger a pool lookup; gc calls:\n%s", logged)
+			}
+			want := "gc session nudge worker-1 blocker ga-blk closed — your dependent ga-dep may be unblocked"
+			if nudges := run.nudgeLines(t); len(nudges) != 1 || nudges[0] != want {
+				t.Fatalf("nudges = %q, want exactly [%q]", nudges, want)
+			}
+		})
+	}
+}
