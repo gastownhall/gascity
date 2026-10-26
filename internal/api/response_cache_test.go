@@ -624,6 +624,52 @@ func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
 	}
 }
 
+// TestHandleAgentListBlockingBypassesTimeCache verifies the preserved
+// strict-freshness path: a blocking ?index=&wait= request must rebuild the
+// list (reflecting the event it waited for) instead of being served a
+// time-bucketed or TTL-floor cache entry — including one an identical
+// blocking request stored.
+func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
+	// Pin a wide TTL and floor so a mutant that read the cache would hit
+	// deterministically.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	// Advance the head past 0 so ?index=0 returns without waiting.
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
+	blockReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?index=0&wait=1s"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, blockReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first blocking agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first blocking agents build issued no assignee-scoped List calls")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, blockReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second blocking agents = %d, want 200", rec.Code)
+	}
+	if got := store.listByAssigneeCalls; got != 2*perBuild {
+		t.Fatalf("assignee List calls after second blocking request = %d, want %d (blocking must bypass the time cache)", got, 2*perBuild)
+	}
+}
+
 // listCallsPerFeedBuild is how many store List calls one workflow-projection
 // build costs: listActiveWorkflowProjectionBeads issues one Live,
 // status-scoped read per active status, because bd is the only reader that can
