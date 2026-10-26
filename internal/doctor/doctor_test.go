@@ -276,6 +276,22 @@ func TestDoctor_FixHintErrorReplacesHint(t *testing.T) {
 	}
 }
 
+func TestDoctor_PlainFixErrorKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: errors.New("lockfile write")})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	res := r.Results[0]
+	if res.FixError != "lockfile write" || res.FixHint != "run the sync" {
+		t.Errorf("FixError/FixHint = %q/%q, want %q/%q", res.FixError, res.FixHint, "lockfile write", "run the sync")
+	}
+	if out := buf.String(); strings.Contains(out, "credential") {
+		t.Errorf("non-auth fix failure printed a credential hint: %q", out)
+	}
+}
+
 func TestDoctor_FixHintErrorEmptyHintKeepsHint(t *testing.T) {
 	d := &Doctor{}
 	d.Register(&hintedFixCheck{fixErr: &FixHintError{Err: errors.New("sync failed")}})

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -239,6 +241,35 @@ func TestImportStateDoctorCheckFixAuthErrorReportsCredentialHint(t *testing.T) {
 			}
 			if want := wantDoctorCredentialFixHint(tc.matched); res.FixHint != want {
 				t.Errorf("FixHint = %q, want the gc import install credential hint %q", res.FixHint, want)
+			}
+		})
+	}
+}
+
+func TestImportStateDoctorCheckFixNonAuthErrorKeepsHint(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		syncErr, installErr error
+		lockErr             error
+	}{
+		{name: "sync network timeout", syncErr: fmt.Errorf("git ls-remote: %w", context.DeadlineExceeded)},
+		{name: "install non-128 git exit", installErr: errors.New("git fetch: exit status 1")},
+		{name: "lockfile write", lockErr: errors.New("writing packs.lock: permission denied")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupImportStateFixFailure(t, tc.syncErr, tc.installErr)
+			if tc.lockErr != nil {
+				prevWrite := writeImportLockfile
+				t.Cleanup(func() { writeImportLockfile = prevWrite })
+				writeImportLockfile = func(_ fsys.FS, _ string, _ *packman.Lockfile) error { return tc.lockErr }
+			}
+			want := errors.Join(tc.syncErr, tc.installErr, tc.lockErr).Error()
+			res := runDoctorFix(t, newImportStateDoctorCheck(cityDir), cityDir)
+			if res.FixError != want {
+				t.Errorf("FixError = %q, want %q", res.FixError, want)
+			}
+			if res.FixHint != importStateSyncFixHint {
+				t.Errorf("FixHint = %q, want the pre-fix hint %q", res.FixHint, importStateSyncFixHint)
 			}
 		})
 	}
