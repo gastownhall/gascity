@@ -6812,6 +6812,78 @@ prompt_template = "prompts/worker.template.md"
 	}
 }
 
+// TestDoPrimeBrokenTemplateWithoutStrictFallsBackToRawText verifies the
+// non-strict contract is unchanged by the strict render validation: with a
+// prompt_template that fails to parse or execute, plain and hook-mode
+// gc prime still exit 0, output the raw template text, and report the
+// failure through the existing stderr warning.
+func TestDoPrimeBrokenTemplateWithoutStrictFallsBackToRawText(t *testing.T) {
+	rows := []struct {
+		name string
+		body string
+	}{
+		{name: "parse error", body: "Hello {{base_branch}}"},
+		{name: "execute error", body: `Hello {{template "no-such-fragment" .}}`},
+	}
+	modes := []struct {
+		name     string
+		hookMode bool
+	}{
+		{name: "plain", hookMode: false},
+		{name: "hook", hookMode: true},
+	}
+	for _, row := range rows {
+		for _, mode := range modes {
+			t.Run(mode.name+" "+row.name, func(t *testing.T) {
+				clearGCEnv(t)
+				disableManagedDoltRecoveryForTest(t)
+
+				dir := t.TempDir()
+				gcDir := filepath.Join(dir, ".gc")
+				if err := os.MkdirAll(gcDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				promptDir := filepath.Join(dir, "prompts")
+				if err := os.MkdirAll(promptDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte(row.body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`
+				if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+
+				orig, _ := os.Getwd()
+				t.Cleanup(func() { _ = os.Chdir(orig) })
+				if err := os.Chdir(dir); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("GC_CITY_PATH", dir)
+
+				var stdout, stderr bytes.Buffer
+				code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, mode.hookMode, false)
+				if code != 0 {
+					t.Fatalf("doPrimeWithMode(hook=%t, non-strict, %s) = %d, want 0; stderr: %s", mode.hookMode, row.name, code, stderr.String())
+				}
+				if !strings.Contains(stdout.String(), row.body) {
+					t.Errorf("stdout = %q, want the raw template text %q", stdout.String(), row.body)
+				}
+				if !strings.Contains(stderr.String(), `gc: prompt template "prompts/worker.template.md"`) {
+					t.Errorf("stderr = %q, want the existing render warning", stderr.String())
+				}
+			})
+		}
+	}
+}
+
 // TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar verifies
 // that when --strict fails because the agent isn't found, hook-mode side
 // effects do not recreate the legacy provider hook sidecar.
