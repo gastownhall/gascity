@@ -51,41 +51,56 @@ func countNudges(t *testing.T, logPath string) (int, string) {
 // the process that closed the bead and from the controller's cache when its
 // read saw the close first. When the copies land on either side of an order
 // evaluation the order runs once per copy, and the second run's lookback
-// window holds both. The dependent's assignee must still be nudged once.
+// window holds both. The dependent's owner — its assignee, or the routed
+// pool's member for an unassigned routed dependent — must still be nudged once.
 func TestCascadeNudgeAbsorbsDuplicateCloseEvents(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
 	}
-	dir := t.TempDir()
-	eventsPath := filepath.Join(dir, "events.jsonl")
-	binDir, logPath := fakeGCBin(t, `case "$1" in
-events) cat '`+eventsPath+`' ;;
-bd) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
-esac
-exit 0
-`)
-	stateDir := filepath.Join(dir, "state")
+	cases := []struct {
+		name, deps, want string
+	}{{
+		name: "assigned dependent",
+		deps: `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
+		want: "gc session nudge worker-1 blocker ga-blk closed",
+	}, {
+		name: "routed unassigned dependent",
+		deps: `[{"id":"ga-dep","status":"open","metadata":{"gc.routed_to":"gascity/pool"}}]`,
+		want: "gc session nudge pool-1 blocker ga-blk closed",
+	}}
 	copies := []string{
 		`{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
 		`{"seq":8,"type":"bead.closed","actor":"cache-reconcile","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
 	}
-
-	var events strings.Builder
-	for i, line := range copies {
-		events.WriteString(line + "\n")
-		if err := os.WriteFile(eventsPath, []byte(events.String()), 0o644); err != nil {
-			t.Fatalf("write events: %v", err)
-		}
-		if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
-			t.Fatalf("run %d: cascade-nudge-on-blocker-close.sh failed: %v\n%s", i+1, err, out)
-		}
-		if got, logged := countNudges(t, logPath); got != 1 {
-			t.Fatalf("after run %d: nudges = %d, want 1 for one close delivered twice; gc calls:\n%s", i+1, got, logged)
-		}
-	}
-	_, logged := countNudges(t, logPath)
-	if !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed") {
-		t.Fatalf("the nudge must reach the dependent's assignee and name the blocker; gc calls:\n%s", logged)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newCascadeFake(t, cascadeFake{
+				deps:    tc.deps,
+				members: map[string][]string{"gascity/pool": {"pool-1"}},
+			})
+			stateDir := filepath.Join(t.TempDir(), "state")
+			var events strings.Builder
+			for i, line := range copies {
+				events.WriteString(line + "\n")
+				if err := os.WriteFile(run.eventsPath, []byte(events.String()), 0o644); err != nil {
+					t.Fatalf("write events: %v", err)
+				}
+				if out, err := runCascadeNudge(t, run.binDir, stateDir); err != nil {
+					t.Fatalf("run %d: cascade-nudge-on-blocker-close.sh failed: %v\n%s", i+1, err, out)
+				}
+				nudges := run.nudgeLines(t)
+				want := 0
+				if i == 0 {
+					want = 1
+				}
+				if len(nudges) != want {
+					t.Fatalf("run %d: nudges = %q, want %d for one close delivered twice", i+1, nudges, want)
+				}
+				if want == 1 && !strings.HasPrefix(nudges[0], tc.want) {
+					t.Fatalf("the nudge must reach the dependent's owner and name the blocker: got %q, want prefix %q", nudges[0], tc.want)
+				}
+			}
+		})
 	}
 }
 
