@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // coldCacheStore models a rig store whose cache runs no background refresh:
@@ -80,5 +83,37 @@ func TestStatusWorkCountsStillReportsReadyFailureForRefreshingRigs(t *testing.T)
 	}
 	if got := cold.readyCalls.Load(); got != 1 {
 		t.Errorf("ready reads = %d, want 1 — a refreshing rig must still be asked", got)
+	}
+}
+
+// TestCacheColdRigNames pins the one skip set: every cfg rig suspended by
+// effective state — runtime override first, else the authored
+// suspended_on_start / legacy suspended default — and nothing else.
+// Agent-level suspension is not rig suspension, and a nil config yields an
+// empty (non-nil) map.
+func TestCacheColdRigNames(t *testing.T) {
+	if got := cacheColdRigNames(nil, suspensionstate.State{}); got == nil || len(got) != 0 {
+		t.Fatalf("cacheColdRigNames(nil, zero) = %#v, want empty non-nil", got)
+	}
+
+	resumed := false
+	suspended := true
+	st := suspensionstate.State{
+		City: suspensionstate.Override{Suspended: &suspended},
+		Agents: map[string]suspensionstate.Override{
+			"beta/worker": {Suspended: &suspended},
+		},
+	}
+	suspensionstate.SetRig(&st, "resumed", &resumed)
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "cold-start", SuspendedOnStart: true},
+		{Name: "legacy", Suspended: true},
+		{Name: "resumed", SuspendedOnStart: true},
+		{Name: "warm"},
+	}}
+
+	want := map[string]bool{"cold-start": true, "legacy": true}
+	if got := cacheColdRigNames(cfg, st); !maps.Equal(got, want) {
+		t.Fatalf("cacheColdRigNames = %v, want %v", got, want)
 	}
 }

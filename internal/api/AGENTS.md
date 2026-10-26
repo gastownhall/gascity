@@ -94,6 +94,11 @@ concrete session's work wins over a template fallback. Stop reading stores once
 the first identity (the session id, when known) has a match, and keep a store's
 partial rows instead of dropping the store.
 
+The lookup never reads a rig suspended by effective state (the `cacheColdRigs`
+set `statusWorkCounts` skips), on either the cached or the live path; a
+rig-scoped lookup naming such a rig returns nothing rather than falling back
+to every rig.
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves

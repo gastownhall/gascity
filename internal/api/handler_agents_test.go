@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1964,12 +1965,23 @@ func (c *listCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return c.Store.List(q)
 }
 
-// suspendRigAtRuntime records the runtime override `gc rig suspend` writes.
-func suspendRigAtRuntime(t *testing.T, state *fakeState, rig string) {
+// suspendAlphaAtRuntime records the runtime override `gc rig suspend`
+// writes for rig alpha.
+func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
 	t.Helper()
 	suspended := true
-	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, rig, &suspended); err != nil {
-		t.Fatalf("suspend rig %s: %v", rig, err)
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "alpha", &suspended); err != nil {
+		t.Fatalf("suspend alpha: %v", err)
+	}
+}
+
+// resumeAlphaAtRuntime records the runtime resume override `gc rig resume`
+// writes for rig alpha, which wins over suspended_on_start.
+func resumeAlphaAtRuntime(t *testing.T, state *fakeState) {
+	t.Helper()
+	resumed := false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "alpha", &resumed); err != nil {
+		t.Fatalf("resume alpha: %v", err)
 	}
 }
 
@@ -2007,7 +2019,7 @@ func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state, alpha, beta := newActiveBeadTwoRigState(t)
-			suspendRigAtRuntime(t, state, "alpha")
+			suspendAlphaAtRuntime(t, state)
 			alphaWork := addActiveWork(t, alpha, "sess-1")
 			betaWork := addActiveWork(t, beta, "sess-1")
 
@@ -2043,7 +2055,7 @@ func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state, alpha, beta := newActiveBeadTwoRigState(t)
-			suspendRigAtRuntime(t, state, "alpha")
+			suspendAlphaAtRuntime(t, state)
 			addActiveWork(t, alpha, "sess-1")
 			addActiveWork(t, beta, "sess-1")
 
@@ -2068,6 +2080,157 @@ func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
 	}
 }
 
+// TestActiveBeadLookupUsesEffectiveRigSuspension: the lookup skips the same
+// rigs statusWorkCounts skips — effective state, where a runtime resume
+// overrides suspended_on_start and the legacy suspended flag still counts.
+func TestActiveBeadLookupUsesEffectiveRigSuspension(t *testing.T) {
+	cases := []struct {
+		name        string
+		alphaCfg    config.Rig
+		runtime     func(t *testing.T, state *fakeState)
+		wantSkipped bool
+	}{
+		{
+			name:        "suspended_on_start only",
+			alphaCfg:    config.Rig{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+			wantSkipped: true,
+		},
+		{
+			name:     "suspended_on_start resumed at runtime",
+			alphaCfg: config.Rig{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+			runtime: func(t *testing.T, state *fakeState) {
+				resumeAlphaAtRuntime(t, state)
+			},
+		},
+		{
+			name:        "legacy suspended flag",
+			alphaCfg:    config.Rig{Name: "alpha", Path: "/tmp/alpha", Suspended: true},
+			wantSkipped: true,
+		},
+		{
+			name:     "runtime suspend over suspended_on_start false",
+			alphaCfg: config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+			runtime: func(t *testing.T, state *fakeState) {
+				suspendAlphaAtRuntime(t, state)
+			},
+			wantSkipped: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state, alpha, beta := newActiveBeadTwoRigState(t)
+			state.cfg.Rigs = []config.Rig{tc.alphaCfg, {Name: "beta", Path: "/tmp/beta"}}
+			if tc.runtime != nil {
+				tc.runtime(t, state)
+			}
+			addActiveWork(t, alpha, "sess-1")
+			betaWork := addActiveWork(t, beta, "sess-1")
+
+			got := New(state).findActiveBeadForAssignees("", "sess-1")
+
+			if tc.wantSkipped {
+				if n := alpha.listCalls.Load(); n != 0 {
+					t.Fatalf("rig alpha List calls = %d, want 0: effective state suspends it", n)
+				}
+				if got != betaWork {
+					t.Fatalf("active bead = %q, want beta's %q", got, betaWork)
+				}
+				return
+			}
+			if n := alpha.listCalls.Load(); n == 0 {
+				t.Fatal("rig alpha List calls = 0, want a read: effective state says it runs")
+			}
+		})
+	}
+}
+
+// TestActiveBeadLookupCorruptSuspensionStateStillAppliesConfigDefaults: a
+// corrupt state file fails Load; the lookup logs that, keeps the zero state,
+// and still applies authored defaults — never fails open to reading every
+// store, never skips wholesale (#8162).
+func TestActiveBeadLookupCorruptSuspensionStateStillAppliesConfigDefaults(t *testing.T) {
+	state, alpha, beta := newActiveBeadTwoRigState(t)
+	state.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+		{Name: "beta", Path: "/tmp/beta"},
+	}
+	if err := os.MkdirAll(filepath.Dir(citylayout.SuspensionStateFile(state.cityPath)), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(citylayout.SuspensionStateFile(state.cityPath), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	addActiveWork(t, alpha, "sess-1")
+	betaWork := addActiveWork(t, beta, "sess-1")
+
+	got := New(state).findActiveBeadForAssignees("", "sess-1")
+
+	if n := alpha.listCalls.Load(); n != 0 {
+		t.Errorf("suspended_on_start rig alpha List calls = %d, want 0 despite the corrupt state file", n)
+	}
+	if got != betaWork {
+		t.Fatalf("active bead = %q, want beta's %q", got, betaWork)
+	}
+}
+
+// TestActiveBeadLookupEmptyCityPathReadsNoStateFile: with no city path there
+// is no suspension file to read; the lookup must not fall back to a relative
+// .gc/runtime/suspension-state.json under the process's working directory.
+func TestActiveBeadLookupEmptyCityPathReadsNoStateFile(t *testing.T) {
+	// A suspension file in the working directory that suspends beta: if the
+	// lookup read it, beta's work would disappear.
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, ".gc", "runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	stateFile := filepath.Join(runtimeDir, "suspension-state.json")
+	if err := os.WriteFile(stateFile, []byte(`{"rigs":{"beta":{"suspended":true}}}`), 0o644); err != nil {
+		t.Fatalf("write decoy state: %v", err)
+	}
+	t.Chdir(dir)
+
+	state, _, beta := newActiveBeadTwoRigState(t)
+	state.cityPath = ""
+	betaWork := addActiveWork(t, beta, "sess-1")
+
+	got := New(state).findActiveBeadForAssignees("", "sess-1")
+
+	if got != betaWork {
+		t.Fatalf("active bead = %q, want %q: an empty city path must not read a suspension file", got, betaWork)
+	}
+}
+
+// TestFindActiveBeadForAssigneesSkipsSuspendedRigs: a rig suspended by
+// effective state has no cache (rigStoreBackgroundRefresh), so every List on
+// its store goes to bd and restarts its retired proxy and Dolt. The session
+// list's active-bead lookup must leave it untouched, the same rule
+// statusWorkCounts follows (#8162).
+func TestFindActiveBeadForAssigneesSkipsSuspendedRigs(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		state := newFakeState(t)
+		state.cfg.Rigs = []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+			{Name: "frozen", Path: "/tmp/frozen", Suspended: true},
+		}
+		frozen := &listCountingStore{Store: beads.NewMemStore()}
+		state.stores = map[string]beads.Store{
+			"myrig":  beads.NewMemStore(),
+			"frozen": frozen,
+		}
+		s := &Server{state: state}
+
+		got := s.findActiveBeadForAssigneesWithFreshness("", live, "sess-1", "worker")
+
+		if got != "" {
+			t.Fatalf("live=%v: active bead = %q, want none", live, got)
+		}
+		if n := frozen.listCalls.Load(); n != 0 {
+			t.Errorf("live=%v: suspended rig store List calls = %d, want 0", live, n)
+		}
+	}
+}
+
 // TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias: in legacy
 // shared-file mode every rig aliases one store, and sortedRigNames keeps only
 // the alphabetically first alias. The cold-rig filter must run before that
@@ -2081,7 +2244,7 @@ func TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias(t *testing.T) {
 	}
 	shared := &listCountingStore{Store: beads.NewMemStore()}
 	state.stores = map[string]beads.Store{"alpha": shared, "beta": shared}
-	suspendRigAtRuntime(t, state, "alpha")
+	suspendAlphaAtRuntime(t, state)
 	work := addActiveWork(t, shared, "sess-1")
 
 	got := New(state).findActiveBeadForAssignees("", "sess-1")
