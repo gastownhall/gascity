@@ -22,22 +22,28 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
-// maxCheckInfraRetries bounds how many times a ralph check gate may be re-run
-// because it could not EXECUTE (GateError/GateTimeout) before that infra error
-// is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
+// maxCheckInfraRetries bounds how many times a ralph gate may be re-run
+// because it produced no verdict before that infra outcome is treated as a
+// genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
 // transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
 // green PR (maintainer-city incident: 3 attempts burned in one outage). The
 // bound guarantees a gate that launches but never yields a verdict (a
 // perpetual timeout, exit 75 forever) still terminates the workflow instead of
 // pending forever; an unlaunchable script never reaches this budget and is
-// held open on the drift-pending lane instead (see runRalphCheck). Each lane
-// keeps the counter (gc.check_infra_retry) where it spans the whole loop: the
-// legacy kind=check lane charges GateError and GateTimeout and clones the
-// counter into each next check bead; the compiled kind=ralph lane charges
-// GateTimeout and blind reads on the control itself, where a GateError is a failed start that
-// spends an attempt (formula-spec-v2 §3.1). Either way it is the loop's total
-// infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
-// outage.
+// held open on the drift-pending lane instead (see runRalphCheck).
+//
+// Which outcomes charge the budget differs by lane, because GateError means
+// different things there. The kind=check lane (processRalphCheck) charges
+// GateError, GateTimeout, and blind reads (exit 75 / typed stderr, which it
+// normalizes to GateError); its counter lives on each check bead and is
+// cloned into the next one, so the loop's total budget is preserved. The
+// compiled kind=ralph lane (evaluateRalphIteration) charges GateTimeout and
+// blind reads only: its GateError is a failed start (the gate runs on
+// context.Background, so a parent cancel cannot produce it), and a failed
+// start spends an iteration each time (formula-spec-v2 §3.1). Its counter
+// lives on the control bead, which spans every iteration, and nothing resets
+// it (iteration metadata propagates only non-gc keys). At a ~15s reconcile
+// cadence the budget rides a multi-minute outage.
 const maxCheckInfraRetries = 20
 
 // spendCheckInfraRetry charges one gate run that produced no verdict to the
