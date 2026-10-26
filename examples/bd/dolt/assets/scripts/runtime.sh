@@ -32,6 +32,8 @@ else
   DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
 fi
 DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
+# Procfs root for the listener lookup; tests point it at a fake tree.
+DOLT_PROC_ROOT="${GC_DOLT_PROC_ROOT:-/proc}"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 
@@ -168,6 +170,66 @@ pid_is_running() (
   return 1
 )
 
+# managed_runtime_listen_inodes PORT prints the socket inode of every LISTEN
+# row for PORT in $DOLT_PROC_ROOT/net/tcp and net/tcp6, the same fields
+# pidutil.ListeningSocketInodes reads. It returns 1 when neither table is
+# readable (no procfs, e.g. darwin).
+managed_runtime_listen_inodes() (
+  port="$1"
+  readable=1
+  for table in "$DOLT_PROC_ROOT/net/tcp" "$DOLT_PROC_ROOT/net/tcp6"; do
+    [ -r "$table" ] || continue
+    readable=0
+    awk -v port="$port" '
+      BEGIN { want = sprintf("%04X", port + 0) }
+      $4 == "0A" && $10 != "0" {
+        local_port = $2
+        sub(/.*:/, "", local_port)
+        if (toupper(local_port) == want) print $10
+      }
+    ' "$table"
+  done
+  return "$readable"
+)
+
+# managed_runtime_socket_holder INODES FDDIR... prints the lowest pid whose
+# <pid>/fd directory, named relative to the current directory, holds one of
+# the whitespace-separated socket INODES.
+#
+# One `ls -ln` lists every directory. ls -l only lstats and readlinks each
+# fd link and never stats its target, so an fd open on a stalled FUSE mount
+# cannot block it the way it blocks lsof (gascity#7553); a [ -e "$fd" ] test
+# would follow the link and block. A matching line has exactly 11 fields
+# ending in `N -> socket:[INODE]`; escape quoting keeps a crafted file name
+# from forging one.
+managed_runtime_socket_holder() (
+  # Unquoted on purpose: split the inode list into words.
+  # shellcheck disable=SC2086
+  wanted="$(printf ' %s' $1) "
+  shift
+  single_pid=""
+  if [ "$#" -eq 1 ]; then
+    single_pid="${1%/fd}"
+  fi
+  LC_ALL=C TIME_STYLE=locale QUOTING_STYLE=escape ls -ln "$@" 2>/dev/null \
+    | awk -v wanted="$wanted" -v pid="$single_pid" '
+        /^[0-9]+\/fd:$/ {
+          pid = substr($0, 1, length($0) - 4)
+          next
+        }
+        NF == 11 && $9 ~ /^[0-9]+$/ && $10 == "->" && $11 ~ /^socket:\[[0-9]+\]$/ {
+          inode = substr($11, 9, length($11) - 9)
+          if (pid ~ /^[0-9]+$/ && index(wanted, " " inode " ") && (best == "" || pid + 0 < best + 0)) best = pid
+        }
+        END { if (best != "") print best }
+      '
+)
+
+# managed_runtime_listener_pid PORT prints the pid holding PORT's TCP
+# listener. Where the procfs TCP tables are readable it reads them and the
+# fd directories and never runs lsof, which hangs on a stalled FUSE mount;
+# it prints nothing when no LISTEN row matches. Without them (darwin) it
+# asks lsof.
 managed_runtime_listener_pid() (
   port="$1"
 
@@ -176,6 +238,13 @@ managed_runtime_listener_pid() (
       return 0
       ;;
   esac
+
+  if inodes=$(managed_runtime_listen_inodes "$port"); then
+    [ -n "$inodes" ] || return 0
+    cd "$DOLT_PROC_ROOT" || return 0
+    managed_runtime_socket_holder "$inodes" [0-9]*/fd
+    return 0
+  fi
 
   if ! command -v lsof >/dev/null 2>&1; then
     return 0

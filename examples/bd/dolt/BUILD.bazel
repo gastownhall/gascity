@@ -125,6 +125,7 @@ go_test(
         "requires_backend_test.go",
         "restart_test.go",
         "runtime_bounded_test.go",
+        "runtime_listener_test.go",
         "sql_test.go",
         "stale_db_close_reason_real_bd_test.go",
         "stale_db_formula_test.go",

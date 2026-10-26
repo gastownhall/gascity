@@ -671,6 +671,7 @@ exit 1
 			cmd.Env = append(cmd.Env,
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
+				lsofFallbackProcRootEnv(t),
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 			)
 			out, err := cmd.CombinedOutput()
@@ -767,6 +768,7 @@ exit 1
 			cmd.Env = append(cmd.Env,
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
+				lsofFallbackProcRootEnv(t),
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 			)
 			out, err := cmd.CombinedOutput()
@@ -839,6 +841,9 @@ func reachableServerEnv(t *testing.T, root, cityPath string) []string {
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
 	fakeBin := t.TempDir()
+	// A readable proc root with no LISTEN rows: the listener pid lookup
+	// finds nothing, whatever the host itself listens on.
+	procRoot := writeFakeProcRoot(t, nil, nil)
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 host="$2"
@@ -858,6 +863,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 }
@@ -876,7 +882,8 @@ func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
 	cityPath := t.TempDir()
 	root := repoRoot(t)
 
-	out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").CombinedOutput()
+	env := append(reachableServerEnv(t, root, cityPath), lsofFallbackProcRootEnv(t))
+	out, err := newHealthScriptCmd(root, env, "--json").CombinedOutput()
 	if err != nil {
 		t.Fatalf("health.sh failed: %v\n%s", err, out)
 	}
@@ -1422,17 +1429,10 @@ func runHealthScriptZombieScanExcludesRigLocalServers(t *testing.T, rigConfig st
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, rigPID, zombiePID))
 
-	// Fake lsof: maps ports to PIDs.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID, rigPort, rigPID))
+	// Fake proc root: maps ports to PIDs. lsof must not run while it is
+	// readable, so the lsof on PATH fails.
+	procRoot := writeFakeProcListeners(t, map[string]string{mainPort: mainPID, rigPort: rigPID})
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 
 	// Fake ps: handles pid_is_running (`-p <pid> -o pid=`) and the zombie
 	// scan's single process-table pass (`ps -eo pid=,stat=,args=`, #2482).
@@ -1467,6 +1467,7 @@ exit 1
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -1576,16 +1577,10 @@ func TestHealthScriptZombieScanExcludesForeignManagedServers(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, foreignPID, zombiePID))
 
-	// Fake lsof: maps main port to mainPID.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID))
+	// Fake proc root: maps main port to mainPID. lsof must not run while it
+	// is readable, so the lsof on PATH fails.
+	procRoot := writeFakeProcListeners(t, map[string]string{mainPort: mainPID})
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 
 	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
 	// foreign PID's args line WITH `--config <path>` so the awk pass extracts
@@ -1620,6 +1615,7 @@ exit 1
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -1686,15 +1682,8 @@ func TestHealthScriptZombieScanFlagsMismatchedForeignPidFile(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\n", mainPID, suspectPID))
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID))
+	procRoot := writeFakeProcListeners(t, map[string]string{mainPort: mainPID})
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 	// Bounded `ps -eo` pass: the suspect PID carries `--config <path>` but
 	// its sibling dolt.pid records a different PID, so the foreign-managed
 	// check must NOT exclude it.
@@ -1722,6 +1711,7 @@ exit 1
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -1786,16 +1776,10 @@ func TestHealthScriptZombieScanExcludesExternallyManagedServers(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, externalPID, zombiePID))
 
-	// Fake lsof: maps main port to mainPID.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID))
+	// Fake proc root: maps main port to mainPID. lsof must not run while it
+	// is readable, so the lsof on PATH fails.
+	procRoot := writeFakeProcListeners(t, map[string]string{mainPort: mainPID})
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 
 	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
 	// external PID's args line WITH `--config <path>` so the awk pass extracts
@@ -1830,6 +1814,7 @@ exit 1
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -1892,9 +1877,10 @@ func TestHealthScriptZombieScanIsBoundedFork(t *testing.T) {
 
 	// gc fails -> metadata_files falls back to find (no rigs here).
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	// lsof maps the city port to the server PID so server_pid resolves.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -iTCP:%s) echo %s; exit 0 ;; esac; done\nexit 1\n", mainPort, serverPID))
+	// The fake proc root maps the city port to the server PID so server_pid
+	// resolves; lsof must not run while it is readable.
+	procRoot := writeFakeProcListeners(t, map[string]string{mainPort: serverPID})
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
 
@@ -1927,6 +1913,7 @@ exit 1
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -2105,6 +2092,7 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	out, err := newHealthScriptCmd(root, env, "--json").Output()
@@ -2266,6 +2254,7 @@ func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte)
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	out, err := newHealthScriptCmd(root, env, "--json").Output()

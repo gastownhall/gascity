@@ -68,6 +68,7 @@ func proxiedScopeEnv(t *testing.T, root, cityPath string) []string {
 	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		lsofFallbackProcRootEnv(t),
 		"PATH="+hostileToolPath(t),
 	)
 }
