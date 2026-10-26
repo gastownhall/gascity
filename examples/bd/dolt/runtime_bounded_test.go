@@ -439,6 +439,86 @@ func TestManagedRuntimeListenerPIDSkipsHoldersNotRunning(t *testing.T) {
 	assertLsofNeverRan(t, marker)
 }
 
+// TestRuntimeScriptPortResolutionFindsHolderWithoutLsof covers source-time
+// port resolution: live managed state whose PID holds the port resolves
+// GC_DOLT_PORT from the procfs probe, never running lsof.
+func TestRuntimeScriptPortResolutionFindsHolderWithoutLsof(t *testing.T) {
+	skipWithoutProcNet(t)
+	port := listenLocal(t)
+	cityPath := t.TempDir()
+	writeManagedRuntimeStateForScript(t, cityPath, port)
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+
+	got := strings.TrimSpace(runRuntimeShell(t, runtimeShellEnv(t, cityPath, binDir), `printf '%s\n' "$GC_DOLT_PORT"`))
+	if want := strconv.Itoa(port); got != want {
+		t.Fatalf("GC_DOLT_PORT = %q, want managed port %s", got, want)
+	}
+	assertLsofNeverRan(t, marker)
+}
+
+func TestRuntimeScriptPortResolutionRejectsForeignHolder(t *testing.T) {
+	skipWithoutProcNet(t)
+	port := listenLocal(t)
+	cityPath := t.TempDir()
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, 1)
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, "1\n")
+
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+	cmd.Env = runtimeShellEnv(t, cityPath, binDir)
+	out, err := cmd.CombinedOutput()
+	assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
+	assertLsofNeverRan(t, marker)
+}
+
+func TestRuntimeScriptPortResolutionWithoutListenRowUsesReachability(t *testing.T) {
+	skipWithoutProcNet(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		reachable bool
+	}{
+		{name: "reachable port accepted", reachable: true},
+		{name: "unreachable port rejected", reachable: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeManagedRuntimeStateForScript(t, cityPath, port)
+			binDir := t.TempDir()
+			marker := writeRecordingLsof(t, binDir, "1\n")
+			ncExit := "1"
+			if tt.reachable {
+				ncExit = "0"
+			}
+			writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit "+ncExit+"\n")
+
+			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+			cmd.Env = runtimeShellEnv(t, cityPath, binDir)
+			out, err := cmd.CombinedOutput()
+			if tt.reachable {
+				if err != nil {
+					t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+				}
+				if got, want := strings.TrimSpace(string(out)), strconv.Itoa(port); got != want {
+					t.Fatalf("GC_DOLT_PORT = %q, want %s", got, want)
+				}
+			} else {
+				assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
+			}
+			assertLsofNeverRan(t, marker)
+		})
+	}
+}
+
 func TestHealthScriptReportsServerPIDWithoutLsof(t *testing.T) {
 	skipWithoutProcNet(t)
 	port := listenLocal(t)
