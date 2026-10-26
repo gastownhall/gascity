@@ -915,6 +915,15 @@ store, copy them into the binding with
 						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
+					// Stamp the caller's --meta outside the lock: an error returned
+					// from inside the closure would reach CloseSyntheticInputConvoy
+					// above and close the input convoy of the workflow this cook just
+					// started, and SetMetadataBatch is a by-id upsert the lock does not
+					// protect (#7309). The class-binding refusal above guarantees
+					// store is the store that holds the root, fresh or adopted.
+					if err := setFormulaCookRootMetadata(store, result.RootID, rootMeta); err != nil {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+					}
 					if jsonOutput {
 						if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
 							SchemaVersion:  "1",

@@ -1714,6 +1714,56 @@ func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
 			t.Errorf("the work ledger also holds v1 sub-DAG root %s; the stamp must not move the graft", res.RootID)
 		}
 	})
+
+	t.Run("graph.v2 single-store fresh root", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+		if err != nil {
+			t.Fatalf("create target: %v", err)
+		}
+
+		res := cookFormula(t, "graph-work", append([]string{"--attach", target.ID}, metaArgs...)...)
+
+		assertRootMeta(t, work, res.RootID)
+		target, err = work.Get(target.ID)
+		if err != nil {
+			t.Fatalf("get target %s: %v", target.ID, err)
+		}
+		for key := range wantMeta {
+			if got, ok := target.Metadata[key]; ok {
+				t.Errorf("attach target %s gained metadata[%q] = %q; --meta belongs on the root", target.ID, key, got)
+			}
+		}
+	})
+
+	t.Run("graph.v2 convoy re-cook adopts and still stamps", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("create target: %v", err)
+		}
+
+		first := cookFormula(t, "graph-work", "--attach", target.ID)
+		second := cookFormula(t, "graph-work", append([]string{"--attach", target.ID}, metaArgs...)...)
+
+		if first.RootID != second.RootID {
+			t.Fatalf("re-cook minted a second root (%s then %s); the adopt is the bead the stamp must land on", first.RootID, second.RootID)
+		}
+		assertRootMeta(t, work, second.RootID)
+		if got := blockingDepCount(t, work, target.ID); got != 1 {
+			t.Errorf("attach bead %s carries %d blocking deps after two cooks, want 1", target.ID, got)
+		}
+	})
 }
 
 // TestFormulaCookAttachHelpDoesNotClaimParentChild pins the #2392 fix:
