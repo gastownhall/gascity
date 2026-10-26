@@ -433,9 +433,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
 			return 1, nil
 		}
-		// renderPrompt returns "" both when the template file cannot be read
-		// and when a valid template legitimately renders empty. Readability is
-		// the strict precondition, so check it before hook side effects.
+		// A prompt_template that cannot be read or parsed is a strict failure;
+		// an empty render from valid template logic is not. Render once here,
+		// silently and with the same recipe as the output below, so the
+		// failure lands before hook side effects and before any stdout write.
 		for _, a := range resolvedAgents {
 			if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 				continue
@@ -443,8 +444,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if a.PromptTemplate == "" {
 				continue
 			}
-			if _, fErr := os.ReadFile(promptTemplateSourcePath(cityPath, a.PromptTemplate)); fErr != nil {
-				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
+			ctx := primeAgentPromptContext(cityPath, cityName, cfg, &a, io.Discard)
+			if res := renderPrimeAgentPrompt(cityPath, cityName, cfg, &a, ctx, io.Discard); res.Err != nil {
+				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, res.Err) //nolint:errcheck
 				return 1, nil
 			}
 		}
@@ -490,21 +492,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
-			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
-			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
+			ctx = primeAgentPromptContext(cityPath, cityName, cfg, &a, stderr)
 		}
 		if a.PromptTemplate != "" {
-			fragments := effectivePromptFragments(
-				cfg.Workspace.GlobalFragments,
-				a.InjectFragments,
-				a.AppendFragments,
-				a.InheritedAppendFragments,
-				cfg.AgentDefaults.AppendFragments,
-			)
-			packDirs := cfg.PackDirsForRig(ctx.RigName)
-			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				packDirs, fragments, nil)
+			prompt := renderPrimeAgentPrompt(cityPath, cityName, cfg, &a, ctx, stderr).Text
 			if prompt != "" {
 				var budget *promptBudgetJSON
 				if strictMode {
@@ -1057,6 +1048,30 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
 	return buildPrimeContextFor(cityPath, cityName, a, rigs, config.QueryTopology{}, stderr)
+}
+
+// primeAgentPromptContext builds the PromptContext gc prime renders an
+// agent's prompt_template with, including the agent's provider identity.
+func primeAgentPromptContext(cityPath, cityName string, cfg *config.City, a *config.Agent, stderr io.Writer) PromptContext {
+	ctx := buildPrimeContextFor(cityPath, cityName, a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
+	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &cfg.Workspace, cfg.Providers)
+	ctx.InstructionsFile = instructionsFileForAgent(a, &cfg.Workspace, cfg.Providers)
+	return ctx
+}
+
+// renderPrimeAgentPrompt renders an agent's prompt_template with the
+// fragments and rig-scoped pack dirs gc prime uses. The --strict validation
+// and the prompt output share it so they resolve the same fragments.
+func renderPrimeAgentPrompt(cityPath, cityName string, cfg *config.City, a *config.Agent, ctx PromptContext, stderr io.Writer) PromptRenderResult {
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		a.InjectFragments,
+		a.AppendFragments,
+		a.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	return renderPromptWithMeta(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
+		cfg.PackDirsForRig(ctx.RigName), fragments, nil)
 }
 
 func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
