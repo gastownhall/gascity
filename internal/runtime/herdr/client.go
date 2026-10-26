@@ -930,28 +930,43 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // ── shared session-server lifecycle ──────────────────────────────────────────
 
 // socketPath is the unix socket for this client's herdr session. Must match
-// wherever the herdr binary itself resolves its config/state directory —
-// confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
-// "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
-// unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
-// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
-// plain os.UserHomeDir()+".config" join (the prior implementation) silently
-// ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
-// environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
-// this fleet's agent sandboxes do exactly that. The result: this client
-// dials a socket no herdr process ever binds, so serverAlive() reads false
-// against a perfectly healthy server ("did not become ready"), and every
-// retry launches a redundant herdr server contending for the same pane
-// ("agent_pane_busy") — ga-nqlb8q.
+// wherever the herdr binary itself binds the session server (herdr's
+// api_socket_path_for): <config>/herdr.sock for the unnamed/default session,
+// <config>/sessions/<name>/herdr.sock otherwise, with <config> resolved by
+// herdrConfigDir. Any divergence makes this client dial a socket no herdr
+// process ever binds, so serverAlive() reads false against a perfectly
+// healthy server ("did not become ready"), and every retry launches a
+// redundant herdr server contending for the same pane ("agent_pane_busy") —
+// ga-nqlb8q, and on macOS #5770, where the former os.UserConfigDir()
+// resolution named $HOME/Library/Application Support, a directory herdr
+// never uses.
 func (c *client) socketPath() string {
 	if c.sockPath != "" {
 		return c.sockPath
 	}
-	configDir, _ := os.UserConfigDir()
+	configDir := herdrConfigDir()
 	if c.session == "" || c.session == "default" {
-		return filepath.Join(configDir, "herdr", "herdr.sock")
+		return filepath.Join(configDir, "herdr.sock")
 	}
-	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
+	return filepath.Join(configDir, "sessions", c.session, "herdr.sock")
+}
+
+// herdrConfigDir is the directory herdr keeps its config and session sockets
+// in, resolved by herdr's own non-Windows rule (src/config/io.rs config_dir
+// and platform_config_dir), which does not vary by OS:
+// $XDG_CONFIG_HOME/herdr, else $HOME/.config/herdr, else <temp dir>/herdr.
+// os.UserConfigDir() is not that rule: on macOS it ignores XDG_CONFIG_HOME
+// and returns $HOME/Library/Application Support, a directory herdr never
+// uses (#5770). An empty variable counts as unset (XDG Base Directory spec;
+// also what os.UserConfigDir() does on Linux today).
+func herdrConfigDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "herdr")
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".config", "herdr")
+	}
+	return filepath.Join(os.TempDir(), "herdr")
 }
 
 // serverAlive reports whether the session-server is actually accepting

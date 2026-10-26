@@ -57,6 +57,7 @@ go_test(
         "provider_live_test.go",
         "redaction_test.go",
         "seedmeta_test.go",
+        "socketpath_xdg_test.go",
         "staleserver_test.go",
         "start_test.go",
         "startup_delivery_confirm_test.go",
@@ -64,6 +65,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":herdr"],
+    embedsrcs = ["client.go"],
     deps = [
         "//internal/runtime",
         "//internal/runtime/herdr/herdrtest",

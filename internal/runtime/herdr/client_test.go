@@ -38,7 +38,6 @@ func skipUnlessXDGPlatform(t *testing.T) {
 }
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
-	skipUnlessXDGPlatform(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("HOME", t.TempDir()) // deliberately different; must be ignored
