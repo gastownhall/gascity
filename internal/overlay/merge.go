@@ -292,15 +292,41 @@ func mergeHookArray(base, over []any, wrapBareHooks bool) []any {
 	return result
 }
 
-// healBaseEntries removes byte-identical duplicates of identity-keyed entries
-// from an existing Claude settings array, keeping the first occurrence, so a
-// file already bloated by the #3862 append loop converges on the next merge
-// instead of needing a manual dedup. Same identity already means "one entry",
-// so exact copies carry no information. Entries without an identity key keep
-// their documented always-append semantics and are never removed. Only
-// wrap-style (Claude) merges call this; Codex and Cursor hooks.json keep the
-// merge's additive behavior. Returns a new slice; base is not modified.
+// healBaseEntries removes redundant copies of a hook from an existing Claude
+// settings array, so a file already bloated by the #3862 append loop converges
+// on the next merge instead of needing a manual dedup. Two kinds of residue go:
+//
+//   - byte-identical duplicates of an identity-keyed entry, which collapse to
+//     their first occurrence: same identity already means "one entry", so exact
+//     copies carry no information.
+//   - a legacy {"matcher": "", "hooks": [X]} twin that sits beside a matcherless
+//     {"hooks": [X]} entry for the same command. Both fire on every event, so the
+//     twin is pure duplication — a staged rollout leaves this shape behind when a
+//     newer binary writes the matcherless form and an older one re-appends the
+//     wrapped one. The matcherless entry is kept because it carries the content
+//     identity the merge keys on.
+//
+// Entries without an identity key keep their documented always-append semantics
+// and are never removed. Only wrap-style (Claude) merges call this; Codex and
+// Cursor hooks.json keep the merge's additive behavior. Returns a new slice;
+// base is not modified.
 func healBaseEntries(base []any) []any {
+	matcherless := make(map[string]bool) // inner-hooks key → a matcherless entry exists
+	for _, entry := range base {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasMatcher := m["matcher"]; hasMatcher {
+			continue
+		}
+		if inner, ok := m["hooks"]; ok {
+			if key, ok := innerHooksKey(inner); ok {
+				matcherless[key] = true
+			}
+		}
+	}
+
 	result := make([]any, 0, len(base))
 	seen := make(map[string]bool) // canonical JSON of identity-keyed entries
 	for _, entry := range base {
@@ -311,6 +337,9 @@ func healBaseEntries(base []any) []any {
 		}
 		if _, hasKey := hookEntryKey(m); !hasKey {
 			result = append(result, entry)
+			continue
+		}
+		if isRedundantEmptyMatcherTwin(m, matcherless) {
 			continue
 		}
 		// An entry that cannot be canonicalized cannot be proven a duplicate,
@@ -325,6 +354,21 @@ func healBaseEntries(base []any) []any {
 		result = append(result, entry)
 	}
 	return result
+}
+
+// isRedundantEmptyMatcherTwin reports whether entry is a {"matcher": "",
+// "hooks": [X]} wrapper whose command content is already carried by a
+// matcherless entry in the same category.
+func isRedundantEmptyMatcherTwin(entry map[string]any, matcherless map[string]bool) bool {
+	if matcher, ok := entry["matcher"].(string); !ok || matcher != "" {
+		return false
+	}
+	inner, ok := entry["hooks"]
+	if !ok {
+		return false
+	}
+	key, ok := innerHooksKey(inner)
+	return ok && matcherless[key]
 }
 
 // emptyMatcherTwin locates an entry carrying matcher "" whose inner hooks match
