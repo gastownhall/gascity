@@ -387,6 +387,13 @@ func resolveStorageOperatorRequest() (storageOperatorRequest, error) {
 func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) int {
 	const logPrefix = "gc storage migrate"
 
+	// A split the boot gate would refuse to serve (a reserved HQ or rig
+	// prefix, R10) is not created either.
+	if err := config.ReservedPrefixSplitRefusal(request.Cfg); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr

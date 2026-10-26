@@ -154,6 +154,7 @@ go_test(
         "public_packs_test.go",
         "repo_cache_lock_nonblocking_test.go",
         "repo_cache_lock_test.go",
+        "reserved_prefix_split_test.go",
         "reserved_prefixes_test.go",
         "resolve_test.go",
         "resolved_cache_test.go",

@@ -324,6 +324,13 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if shape == storageSplitUnsupported {
 		return nil, fmt.Errorf("%s: [storage.classes] describe an arrangement this build cannot serve. %s", logPrefix, storageSupportedTopologyStatement)
 	}
+	// A split whose HQ or rig prefix is a reserved class prefix shares the
+	// binding's id namespace (split-default audit R10). Refused here, before a
+	// plan is resolved or a binding opened or created; a city that relocates
+	// nothing never reaches this line and keeps the advisory warning.
+	if err := config.ReservedPrefixSplitRefusal(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
 
 	// Resolved once, for both shapes: an unknown provider, a defined reserved
 	// binding, an unreferenced binding or an unusable Work pin is a refusal

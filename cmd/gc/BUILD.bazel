@@ -2080,6 +2080,7 @@ go_test(
         "storage_preflight_test.go",
         "storage_provider_bundle_boundary_test.go",
         "storage_reload_guard_test.go",
+        "storage_reserved_prefix_test.go",
         "storage_shutdown_test.go",
         "store_health_test.go",
         "store_health_timeout_test.go",

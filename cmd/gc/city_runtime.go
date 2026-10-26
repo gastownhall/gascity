@@ -2699,6 +2699,23 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Warnings: warnings,
 		}
 	}
+	// Nor is a reload that gives a split city a reserved HQ or rig prefix
+	// (R10): the booted binding mints in that namespace, so the new ids would
+	// collide with it. Refused whole, like a changed [storage].
+	if refusal := config.ReservedPrefixSplitRefusal(nextCfg); refusal != nil {
+		err := fmt.Errorf("config reload: %w (keeping old config)", refusal)
+		fmt.Fprintf(cr.stderr, "%s: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false

@@ -217,25 +217,28 @@ func TestBdByIDReservedMissUnderExplicitRigFallsThrough(t *testing.T) {
 // actually live.
 //
 // A rig may lawfully be configured with a prefix inside a relocated class's
-// reserved namespace. config.ValidateRigs does not reject one and
-// config.ReservedPrefixWarnings only advises, so such a rig starts, serves, and
-// mints work beads carrying ids the binding has never held and never will. On a
+// reserved namespace: a longer prefix such as "gcg-alpha", whose ids
+// ("gcg-alpha-1") carry the reserved "gcg-" shape without being one the binding
+// mints. Such a rig starts, serves, and mints work beads carrying ids the
+// binding has never held and never will. (A rig whose prefix IS a reserved
+// class prefix is refused on a split city at the storage gate, split-default
+// R10 — TestStorageBootGateRefusesASplitCityWithAReservedRigPrefix — so that
+// spelling is no longer a city this door can be reached on.) On a
 // split city every `gc bd` invocation naming one used to be answered at this
 // door — a read reported as absent and a write refused — including the
 // step-completion write the core pack renders on every worked bead. The binding
 // is the namespace's AUTHORITY, not its only lawful holder, so its miss hands
 // the id to the passthrough that is pointed at the ledger holding it.
 //
-// Both spellings are driven. The exact reserved prefix is the one an operator
-// gets warned about; the longer prefix inside the same namespace is the one
-// IsReservedClassPrefix's exact match does not warn about at all, and is
-// therefore the likelier of the two to be running somewhere.
+// The longer prefix is the one IsReservedClassPrefix's exact match neither
+// warns about nor refuses, and is therefore the one that can be running
+// somewhere.
 func TestBdByIDShadowPrefixRigBeadReachesThePassthrough(t *testing.T) {
 	reserved, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok || reserved == "" {
 		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
 	}
-	for _, rigPrefix := range []string{reserved, reserved + "-alpha"} {
+	for _, rigPrefix := range []string{reserved + "-alpha"} {
 		t.Run(rigPrefix, func(t *testing.T) {
 			cityPath, rigPath, classStore := riggedForeignProviderCity(t, rigPrefix)
 			resident := seedRigWorkBead(t, cityPath, rigPath, rigPrefix, "a rig work bead inside the reserved namespace")
