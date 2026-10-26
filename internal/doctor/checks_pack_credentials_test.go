@@ -106,6 +106,24 @@ func TestPackCredentialsCheckUnmatchedPublicRemoteOK(t *testing.T) {
 	}
 }
 
+// An ambient credential source — the built-in github.com default loaded from
+// GH_TOKEN/GITHUB_TOKEN, or $GC_GIT_CREDENTIAL_COMMAND — must not turn a
+// public import no file rule matches into a warning, nor echo the token.
+func TestPackCredentialsCheckAmbientCredentialSourceOK(t *testing.T) {
+	const tokenSentinel = "gh-token-sentinel-5894"
+	for _, tc := range []struct{ name, env, value, source string }{
+		{name: "GH_TOKEN default", env: "GH_TOKEN", value: tokenSentinel, source: "https://gitlab.com/gastownhall/tools"},
+		{name: "GITHUB_TOKEN default", env: "GITHUB_TOKEN", value: tokenSentinel, source: "https://gitlab.com/gastownhall/tools"},
+		{name: "credential command layer", env: "GC_GIT_CREDENTIAL_COMMAND", value: "printf x", source: "https://github.com/gastownhall/gascity-packs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := credCtx(t)
+			t.Setenv(tc.env, tc.value)
+			assertPublicImportClean(t, ctx, tc.source, tokenSentinel)
+		})
+	}
+}
+
 // A public HTTPS import that clones anonymously must stay healthy when an
 // unrelated private-host rule is added (issue #5894): absence of a matching
 // rule is not evidence that a credential is required.
