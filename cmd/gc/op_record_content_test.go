@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1067,7 +1068,10 @@ func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
 }
 
 // A submit the API records and runs live (not a replay) reports the API's op
-// and the key under --json, with no replayed field.
+// and the key under --json, with no replayed field. Both rows route through
+// the supervisor API: one with the controller socket down, and one for a
+// supervisor-hosted city whose [api] port has no listener (#5262), where a
+// misroute to the dead port must not silently fall into the local path.
 func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1098,21 +1102,46 @@ func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	h, c := submitOpCity(t, "auto", srv)
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
-		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
-	}
-	contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
-	got := cliOpJSON(t, stdout.Bytes())
-	if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
-		t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
-	}
-	if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
-		t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
-	}
-	if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
-		t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+	for _, tc := range []struct {
+		name             string
+		supervisorHosted bool
+	}{
+		{name: "controller down"},
+		{name: "supervisor-hosted city with a dead [api] port", supervisorHosted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := submitOpCity(t, "auto", srv)
+			if tc.supervisorHosted {
+				// The supervisor hosts the controller in-process and ignores
+				// the city's [api] port; port 1 has no listener on loopback.
+				apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+					return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+				}
+				f, err := os.OpenFile(filepath.Join(c.dir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+				if err != nil {
+					t.Fatalf("appending [api] port to city.toml: %v", err)
+				}
+				if _, err := f.WriteString("[api]\nport = 1\n"); err != nil {
+					t.Fatalf("writing [api] port: %v", err)
+				}
+				f.Close() //nolint:errcheck // write errors above are the ones that matter
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+			}
+			contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+			got := cliOpJSON(t, stdout.Bytes())
+			if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
+				t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
+			}
+			if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
+				t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
+			}
+			if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
+				t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+			}
+		})
 	}
 }
 
