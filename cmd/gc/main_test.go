@@ -6930,6 +6930,102 @@ prompt_template = "prompts/does-not-exist.md"
 	}
 }
 
+// TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata
+// verifies strict template validation also runs before hook-mode side
+// effects for a template that exists but cannot be parsed or executed: a
+// broken prompt_template is a strict failure, so it must not persist
+// provider resume metadata. The valid-template control row proves the empty
+// session_key assertion cannot pass vacuously.
+func TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	const providerSessionID = "provider-session-broken-template"
+	rows := []struct {
+		name     string
+		body     string
+		wantCode int
+		wantKey  string
+	}{
+		{name: "parse error", body: "Hello {{base_branch}}", wantCode: 1},
+		{name: "execute error", body: `Hello {{template "no-such-fragment" .}}`, wantCode: 1},
+		{name: "valid template", body: "mayor prompt", wantCode: 0, wantKey: providerSessionID},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+
+			dir := t.TempDir()
+			gcDir := filepath.Join(dir, ".gc")
+			if err := os.MkdirAll(gcDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			promptDir := filepath.Join(dir, "prompts")
+			if err := os.MkdirAll(promptDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(promptDir, "mayor.template.md"), []byte(row.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.template.md"
+`
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store, err := openCityStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionBead, err := store.Create(beads.Bead{
+				Title: "mayor",
+				Type:  "session",
+				Labels: []string{
+					"gc:session",
+					"template:mayor",
+				},
+				Metadata: map[string]string{
+					"template":     "mayor",
+					"session_name": "mayor",
+					"state":        "active",
+					"work_dir":     dir,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			orig, _ := os.Getwd()
+			t.Cleanup(func() { _ = os.Chdir(orig) })
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_CITY_PATH", dir)
+
+			t.Setenv("GC_SESSION_ID", sessionBead.ID)
+			t.Setenv("GC_PROVIDER_SESSION_ID", providerSessionID)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, true, true)
+			if code != row.wantCode {
+				t.Fatalf("doPrimeWithMode(strict=true, hook=true, %s) = %d, want %d; stderr: %s", row.name, code, row.wantCode, stderr.String())
+			}
+
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(updated.Metadata["session_key"]); got != row.wantKey {
+				t.Fatalf("session_key = %q, want %q after %s", got, row.wantKey, row.name)
+			}
+		})
+	}
+}
+
 // TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess verifies that
 // strict+hook success no longer writes the legacy provider hook sidecar.
 func TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess(t *testing.T) {
