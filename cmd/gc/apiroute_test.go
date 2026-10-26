@@ -111,9 +111,13 @@ func TestAPIClientRouting(t *testing.T) {
 	})
 
 	t.Run("escape-hatch-returns-nil", func(t *testing.T) {
+		// The gate short-circuits before any probe: no identity round-trip
+		// under the operator escape hatch.
 		t.Setenv("GC_NO_API", "1")
-		restore(func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} },
-			func(string) *api.Client { return sentinel })
+		restore(func(string) controllerIdentityReply {
+			t.Fatalf("apiClient probed controller identity under the GC_NO_API escape hatch")
+			return controllerIdentityReply{}
+		}, func(string) *api.Client { return sentinel })
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
 		if got := apiClient(dir); got != nil {
 			t.Fatalf("apiClient = %p, want nil under GC_NO_API escape hatch", got)
@@ -156,6 +160,39 @@ func TestAPIClientRouting(t *testing.T) {
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 9443\n")
 		if got := apiClient(dir); got != nil {
 			t.Fatalf("apiClient = %p, want nil when the supervisor-managed client is unavailable", got)
+		}
+	})
+
+	t.Run("standalone-no-api-port-returns-nil", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		restore(func(string) controllerIdentityReply {
+			return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}
+		}, func(string) *api.Client {
+			t.Fatalf("apiClient consulted the supervisor client for a standalone controller")
+			return sentinel
+		})
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		if got := apiClient(dir); got != nil {
+			t.Fatalf("apiClient = %p, want nil for a standalone controller without an [api] port", got)
+		}
+	})
+
+	t.Run("unknown-with-api-port-uses-standalone", func(t *testing.T) {
+		// A controller predating identify: PID set, hosting mode unknown. It
+		// keeps the historical standalone routing.
+		t.Setenv("GC_NO_API", "")
+		restore(func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} },
+			func(string) *api.Client {
+				t.Fatalf("apiClient consulted the supervisor client for a legacy controller with a usable [api] port")
+				return sentinel
+			})
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 8080\n")
+		got := apiClient(dir)
+		if got == nil {
+			t.Fatalf("apiClient = nil, want standalone client")
+		}
+		if got == sentinel {
+			t.Fatalf("apiClient returned supervisor sentinel, want standalone client")
 		}
 	})
 }
