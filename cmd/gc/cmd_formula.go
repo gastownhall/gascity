@@ -731,6 +731,15 @@ store, copy them into the binding with
 
 			cookVars := parseFormulaVars(vars)
 
+			// Parse --meta before any bead exists so a malformed flag refuses the
+			// cook write-free: before PrepareInvocation can mint a synthetic input
+			// convoy, and before any root, step or blocking dependency is written,
+			// on whichever arm runs below.
+			rootMeta, err := parseMetadataArgs(metadata)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
+
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 				if err != nil {
@@ -1076,10 +1085,6 @@ store, copy them into the binding with
 				}
 			}
 
-			rootMeta, err := parseMetadataArgs(metadata)
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-			}
 			if len(rootMeta) > 0 {
 				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
 					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
