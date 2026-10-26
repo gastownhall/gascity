@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCopyDir_RecursiveCopy(t *testing.T) {
@@ -466,6 +467,39 @@ func TestCopyDirForProviders_ClaudeBareHookStableAcrossTicks(t *testing.T) {
 	}
 	if got := innerCommand(t, arr[0]); got != `if echo "$TOOL_INPUT" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi` {
 		t.Errorf("inner command = %q, want the ubs command", got)
+	}
+}
+
+func TestCopyDirForProviders_UnchangedMergeDoesNotRewrite(t *testing.T) {
+	// A steady-state reconcile tick produces the same bytes the workdir
+	// already holds. Rewriting anyway truncates the file under a live
+	// session's feet (the torn/empty-read window in #3862), so a merge result
+	// equal to the destination must leave the file untouched — same mtime,
+	// not just same content.
+	src := t.TempDir()
+	dst := t.TempDir()
+	mkdirAll(t, filepath.Join(src, ".claude"))
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"),
+		`{"hooks":{"PreToolUse":[`+ubsBareEntry+`]}}`)
+
+	var stderr bytes.Buffer
+	if err := CopyDirForProvidersWithSkip(src, dst, nil, nil, &stderr); err != nil {
+		t.Fatalf("initial staging: %v", err)
+	}
+	dstPath := filepath.Join(dst, ".claude", "settings.json")
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(dstPath, past, past); err != nil {
+		t.Fatalf("setting mtime into the past: %v", err)
+	}
+	if err := CopyDirForProvidersWithSkip(src, dst, nil, nil, &stderr); err != nil {
+		t.Fatalf("steady-state staging: %v", err)
+	}
+	info, err := os.Stat(dstPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !info.ModTime().Equal(past) {
+		t.Errorf("steady-state staging rewrote the file: mtime = %v, want %v (unchanged)", info.ModTime(), past)
 	}
 }
 

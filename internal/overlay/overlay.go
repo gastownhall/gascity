@@ -2,6 +2,7 @@
 package overlay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -360,7 +361,9 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 // and dst already exists. When wrapBareHooks is true (Claude settings), bare
 // hook entries in the result are normalized into wrapped form, both when
 // merging and when creating the file fresh. Falls back to plain copy on any
-// merge error.
+// merge error. A merge result that is byte-identical to the destination
+// leaves the file untouched, so a steady-state reconcile tick does not
+// truncate and rewrite a settings file a live session may be reading.
 func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if !merge {
 		return copyFile(src, dst)
@@ -389,6 +392,12 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if err != nil {
 		// Merge failed — fall back to overwrite.
 		return copyFile(src, dst)
+	}
+	if bytes.Equal(merged, dstData) {
+		// Steady state: the workdir already holds the merge result. Rewriting
+		// would briefly truncate the file under a live session's feet for no
+		// content change (#3862's torn/empty-read window).
+		return nil
 	}
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
