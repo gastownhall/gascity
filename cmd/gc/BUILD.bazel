@@ -2213,7 +2213,7 @@ go_test(
             ":gc",
             "//cmd/gc-write-mint",
             "@bd_bin_v1_3_2//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
@@ -2227,7 +2227,7 @@ go_test(
         "//:gotags_integration": {
             "GC_TEST_GC_BIN": "$(rootpath :gc)",
             "GC_TEST_PINNED_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
-            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
             "GC_TEST_WRITE_MINT_BIN": "$(rootpath //cmd/gc-write-mint)",
         },
         "//conditions:default": {},

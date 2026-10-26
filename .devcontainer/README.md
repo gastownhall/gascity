@@ -6,7 +6,7 @@ This devcontainer reproduces a development environment for [gastownhall/gascity]
 
 | Tool | Source | Version |
 |---|---|---|
-| Go 1.26 | `mcr.microsoft.com/devcontainers/go` base image | 1.26 (matches `go.mod`) |
+| Go 1.27 | `mcr.microsoft.com/devcontainers/go` base image | 1.27 (matches `go.mod`) |
 | `tmux` | apt | system |
 | `jq` | apt | system |
 | `libicu-dev` | apt | system |

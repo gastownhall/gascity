@@ -52,17 +52,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc doctor` reports as a warning per gate. `require`, which refuses a
     request it cannot record, stays opt-in.
 
-- **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, CI, the agent base image
+- **Dolt 2.6.0 or newer is now required.** `gc init` and `gc start` readiness,
+  `gc doctor`'s `dolt-version` check and the dolt pack's `check-dolt` doctor
+  now refuse a final Dolt below 2.6.0 (the floor was 2.1.0) and still refuse
+  every pre-release, naming the version found and the 2.6.0 they need. 2.6.0
+  is the first Dolt built with a Go toolchain that distrusts the compromised
+  eMudhra CA intermediates (https://emudhra.we-have-a-problem.com/), and the
+  Dolt that CI, the images and the rbe-west workers run. Upgrade with
+  `brew upgrade dolt` or from the
+  [Dolt releases](https://github.com/dolthub/dolt/releases), and upgrade a
+  shared Dolt server before the `gc` that uses it, backing it up first
+  (below).
+
+- **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, the CI workflows'
+  `DOLT_VERSION` pins (macOS regression, nightly, RC Gate, Ollama,
+  fork-verify), the Bazel test Dolt (`dolt_bin_v2_6_0`), the agent base image
   (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
   requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
-  2.6.0, the first Dolt release patched for the eMudhra CA distrust. Dolt
-  2.6.0 changes behaviour: `dolt_merge()` walks the full commit graph, so a
-  merge can now report conflicts that 2.2.0 resolved silently; the default
-  `sql_mode` is MySQL 8.0 strict (NO_ZERO_IN_DATE, NO_ZERO_DATE,
-  ERROR_FOR_DIVISION_BY_ZERO); and the server may migrate its on-disk storage
-  on first start. That migration is forward-only, so back up the data
-  directory before upgrading a server: going back means restoring that
-  backup, not reverting the image. The minimum supported Dolt is unchanged.
+  2.6.0, the first Dolt release patched for the eMudhra CA distrust. Moving
+  from 2.2.0 to 2.6.0 crosses several behaviour changes (release notes for
+  [2.3.3](https://github.com/dolthub/dolt/releases/tag/v2.3.3),
+  [2.4.0](https://github.com/dolthub/dolt/releases/tag/v2.4.0),
+  [2.5.0](https://github.com/dolthub/dolt/releases/tag/v2.5.0) and
+  [2.6.0](https://github.com/dolthub/dolt/releases/tag/v2.6.0)):
+  - Since 2.3.3, the default `sql_mode` is MySQL 8.0 strict: it adds
+    NO_ZERO_IN_DATE, NO_ZERO_DATE and ERROR_FOR_DIVISION_BY_ZERO.
+  - Since 2.4.0, `INSERT ... ON DUPLICATE KEY UPDATE` needs the UPDATE
+    privilege, and several error codes match MySQL's.
+  - Since 2.5.0, one transaction may commit to several branches.
+  - In 2.6.0, `dolt_merge()` changes only for histories with more than one
+    merge base (criss-cross merges): like git, it now merges against a
+    virtual base built from them. Such a merge can report conflicts that
+    earlier releases resolved silently, and some spurious conflicts go away.
+
+  Rollback is not a downgrade. Once Dolt 2.3.3 or newer creates or alters a
+  schema with a descending index column (bd's schema has them), a Dolt below
+  2.3.3 can no longer write to that database (`table has unknown fields`).
+  Treat the upgrade as one-way: back up the data directory first; going back
+  means restoring that backup, not reverting the image.
+
+- **gc is now built with Go 1.27.3.** On macOS and Windows, a set
+  `SSL_CERT_FILE` or `SSL_CERT_DIR` now replaces the system trust store
+  (the keychain, the Windows certificate store) for gc's HTTPS connections,
+  as it already did on Linux. If you export either variable for other tools
+  and rely on a root that only the system store holds (a corporate or MDM
+  root, for example), add that root to the bundle or unset the variable for
+  `gc`. gc on macOS now needs macOS 13 (Ventura) or newer.
 
 - **An agent now starts without a shared MCP server its provider cannot
   receive.** A server from the city's `mcp/` directory, a pack, or an
@@ -429,6 +464,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim for different packs fails the add.
 
 ### Changed
+
+- **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
+  analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
+  the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
+  now needs Go 1.27.3 or newer. The rbe-west worker host moves with it: its
+  workers install `go.mod`'s Go and, from rbe-worker `80d70774`, Dolt 2.6.0.
+  Contributors: a golangci-lint built with Go 1.26 refuses this module, which
+  breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
+  `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
 - **`gc init` pins the gastown pack to registry release 0.1.11.** Fresh
   cities, `examples/gastown`, and the pinned-import examples in the docs now
