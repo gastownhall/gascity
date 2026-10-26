@@ -39,7 +39,9 @@ import (
 //
 //	mc-1
 //	mc-wisp-jkl
-//	#gc:written 2026-08-10T12:00:00.123456789Z
+//	mc-old
+//	#gc:written 2026-10-26T12:00:00.123456789Z
+//	#gc:legacy-written 2026-08-10T12:00:01Z
 //	#gc:created mc-1 2026-08-01T09:30:00Z
 //	#gc:created mc-wisp-jkl 2026-08-09T18:02:11Z
 //
@@ -49,16 +51,38 @@ import (
 // and its own superset rewrite carries the annotations through. Its only
 // visible difference is an inflated "proven copy" count.
 //
-// A manifest with no annotations is the legacy format. Its entries carry no
-// created_at, and its written time is the file's modification time — the one
-// record of when the manifest was last written that the old format has (for
-// either format the later of the two is used; see readInfraCopyManifestRecord).
-// A legacy entry matches a row by id unless that row was created after the
-// manifest was written.
+// # Legacy entries, and the bound that judges them
+//
+// A manifest with no annotations is the legacy format, and an entry with no
+// #gc:created line (mc-old above) is a legacy entry. A legacy entry matches a
+// row by id, unless the row was created after the LEGACY BOUND: the time the
+// legacy manifest was written. That bound is never the file's modification
+// time. An mtime moves whenever the file is copied back from its .bak, synced
+// without -t, or touched, and a bound that moves later re-opens bare-id
+// matching for every id reused in between — and the clear deletes on it.
+//
+//   - A legacy manifest (no #gc:written) takes its bound from the convergence
+//     marker beside it: the migration writes the manifest and then the marker,
+//     and the marker's CONTENT carries the time to the second (every build
+//     since the marker was introduced, 2026-08-07, writes it). A later
+//     manifest extension by an older recover-stranded is younger than that
+//     bound, so its rows read as reused: they are named stranded, never
+//     deleted, and this build's recover-stranded proves them against the
+//     binding and records them with their created_at.
+//   - The first rewrite by this build persists that bound as #gc:legacy-
+//     written, and every later rewrite carries it unchanged. #gc:written,
+//     which every rewrite moves forward, never judges a legacy entry.
+//   - With no trustworthy bound (a legacy manifest whose marker carries no
+//     readable time; an annotated manifest with legacy entries and no
+//     #gc:legacy-written line) a legacy entry is UNBOUNDED. Read-only verdicts
+//     keep the id-only reading they always had; the clear refuses to delete
+//     such a row; recover-stranded upgrades the ones the binding still holds
+//     by proving them field-equal and recording their created_at.
 
 const (
-	infraManifestWrittenPrefix = "#gc:written "
-	infraManifestCreatedPrefix = "#gc:created "
+	infraManifestWrittenPrefix       = "#gc:written "
+	infraManifestLegacyWrittenPrefix = "#gc:legacy-written "
+	infraManifestCreatedPrefix       = "#gc:created "
 )
 
 // infraManifestClockSlack absorbs timestamp granularity: the work store
@@ -76,8 +100,14 @@ type infraCopyManifest struct {
 	// Created is each id's created_at when the manifest recorded one. An id
 	// with no entry is a legacy entry.
 	Created map[string]time.Time
-	// WrittenAt is when the manifest was last written (zero when unknown).
+	// WrittenAt is when the manifest was last written, as the manifest itself
+	// records it (zero when unknown). It judges rows the manifest does not
+	// list. For a legacy manifest it is the legacy bound.
 	WrittenAt time.Time
+	// LegacyBound is when the legacy part of the manifest was written: the
+	// bound a legacy entry (one with no created_at) is judged by. Zero means
+	// no trustworthy bound is known, and such an entry is unbounded.
+	LegacyBound time.Time
 }
 
 // infraManifestMatch is how one work-store row relates to the manifest.
@@ -92,6 +122,11 @@ const (
 	// different bead — the id was reused after the copy. The row was never
 	// carried.
 	infraManifestReusedID
+	// infraManifestLegacyUnbounded: a legacy entry lists the row's id and no
+	// trustworthy bound says whether the row is younger than the entry.
+	// Read-only verdicts read it as carried, as they always did; nothing
+	// deletes it on that reading.
+	infraManifestLegacyUnbounded
 )
 
 // Len is the number of ids the manifest records.
@@ -118,16 +153,33 @@ func (m infraCopyManifest) Match(b beads.Bead) infraManifestMatch {
 		return infraManifestReusedID
 	}
 	// A legacy entry: the id alone, unless the row is younger than the
-	// manifest that lists it.
-	if m.createdAfterWrite(b) {
+	// legacy bound. Never judged by WrittenAt, which every rewrite moves.
+	if m.LegacyBound.IsZero() {
+		return infraManifestLegacyUnbounded
+	}
+	if !b.CreatedAt.IsZero() && b.CreatedAt.After(m.LegacyBound.Add(infraManifestClockSlack)) {
 		return infraManifestReusedID
 	}
 	return infraManifestCarried
 }
 
-// Carried reports whether b is a bead the copy was proven to deliver.
+// Carried reports whether b is a bead the copy was proven to deliver. An
+// unbounded legacy entry is NOT carried here: this is the reading a deletion
+// may act on.
 func (m infraCopyManifest) Carried(b beads.Bead) bool {
 	return m.Match(b) == infraManifestCarried
+}
+
+// ReadsCarried is the read-only reading: Carried, plus an unbounded legacy
+// entry, which keeps the id-only verdict it had before entries were keyed by
+// created_at. It must never license a deletion.
+func (m infraCopyManifest) ReadsCarried(b beads.Bead) bool {
+	switch m.Match(b) {
+	case infraManifestCarried, infraManifestLegacyUnbounded:
+		return true
+	default:
+		return false
+	}
 }
 
 // sameCreatedSecond compares two created_at values at the work store's
@@ -149,10 +201,11 @@ func infraManifestCreatedOf(rows []beads.Bead, ids []string) map[string]time.Tim
 	return created
 }
 
-// writeInfraCopyManifest records ids with no created_at of their own. It is
-// writeInfraCopyManifestRecord for a caller that holds only ids.
+// writeInfraCopyManifest records ids with no created_at of their own and no
+// legacy bound. It is writeInfraCopyManifestRecord for a caller that holds
+// only ids (genesis writes none).
 func writeInfraCopyManifest(target infraBindingTarget, ids []string) error {
-	return writeInfraCopyManifestRecord(target, ids, nil)
+	return writeInfraCopyManifestRecord(target, ids, nil, time.Time{})
 }
 
 // writeInfraCopyManifestRecord records the ids the equality stage proved the
@@ -161,7 +214,11 @@ func writeInfraCopyManifest(target infraBindingTarget, ids []string) error {
 // marker, so a marker never claims convergence the manifest cannot
 // substantiate and a crash mid-write cannot leave a truncated manifest that
 // reads as complete.
-func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, created map[string]time.Time) error {
+//
+// legacyBound is persisted for the entries with no created_at (see "Legacy
+// entries" above). A rewrite must pass the bound it read, unchanged: it is the
+// one time in the file that a rewrite does not move.
+func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, created map[string]time.Time, legacyBound time.Time) error {
 	if err := os.MkdirAll(target.Root, 0o755); err != nil {
 		return fmt.Errorf("writing the infra copy manifest: %w", err)
 	}
@@ -183,10 +240,16 @@ func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, creat
 	lines = append(lines, ids...)
 	lines = append(lines, infraManifestWrittenPrefix+time.Now().UTC().Format(time.RFC3339Nano))
 	annotated := make([]string, 0, len(ids))
+	legacyEntries := false
 	for _, id := range ids {
 		if at, ok := created[id]; ok && !at.IsZero() {
 			annotated = append(annotated, infraManifestCreatedPrefix+id+" "+at.UTC().Format(time.RFC3339Nano))
+		} else {
+			legacyEntries = true
 		}
+	}
+	if legacyEntries && !legacyBound.IsZero() {
+		lines = append(lines, infraManifestLegacyWrittenPrefix+legacyBound.UTC().Format(time.RFC3339Nano))
 	}
 	sort.Strings(annotated)
 	lines = append(lines, annotated...)
@@ -236,6 +299,7 @@ func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, 
 		return infraCopyManifest{}, false, fmt.Errorf("reading the infra copy manifest %s: %w", path, err)
 	}
 	manifest := infraCopyManifest{IDs: make(map[string]bool), Created: make(map[string]time.Time)}
+	annotated := false
 	for _, raw := range strings.Split(string(contents), "\n") {
 		line := strings.TrimSpace(raw)
 		switch {
@@ -246,6 +310,13 @@ func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, 
 				return infraCopyManifest{}, false, fmt.Errorf("reading the infra copy manifest %s: malformed %q line: %w", path, line, err)
 			}
 			manifest.WrittenAt = at
+			annotated = true
+		case strings.HasPrefix(line, infraManifestLegacyWrittenPrefix):
+			at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(strings.TrimPrefix(line, infraManifestLegacyWrittenPrefix)))
+			if err != nil {
+				return infraCopyManifest{}, false, fmt.Errorf("reading the infra copy manifest %s: malformed %q line: %w", path, line, err)
+			}
+			manifest.LegacyBound = at
 		case strings.HasPrefix(line, infraManifestCreatedPrefix):
 			id, stamp, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(line, infraManifestCreatedPrefix)), " ")
 			if !ok {
@@ -262,16 +333,39 @@ func readInfraCopyManifestRecord(target infraBindingTarget) (infraCopyManifest, 
 			manifest.IDs[line] = true
 		}
 	}
-	// The later of the recorded write time and the file's modification time.
-	// The legacy format records no write time, so its modification time is the
-	// only record of when it was last written. And an older build that rewrites
-	// an annotated manifest (recover-stranded's superset write, after a
-	// downgrade) carries the old #gc:written line through verbatim while adding
-	// ids it recorded no created_at for: the modification time is what keeps
-	// those from reading as younger than their manifest. A stat failure leaves
-	// the recorded time, or none, which only weakens the time rule.
-	if info, err := os.Stat(path); err == nil && info.ModTime().After(manifest.WrittenAt) {
-		manifest.WrittenAt = info.ModTime()
+	// The file's modification time is never read: see "Legacy entries". A
+	// legacy manifest's bound is the marker's recorded time; an annotated one
+	// carries its own (or none, and its legacy entries are unbounded). An older
+	// build that rewrites an annotated manifest carries every annotation line
+	// through as an "id" and adds bare ids of its own; those are judged by the
+	// carried #gc:legacy-written bound and read as reused when younger, which
+	// names them stranded rather than deleting anything.
+	if !annotated {
+		if bound, ok := readInfraMarkerBound(target); ok {
+			manifest.LegacyBound = bound
+			manifest.WrittenAt = bound
+		}
 	}
 	return manifest, true, nil
+}
+
+// readInfraMarkerBound returns the end of the second the convergence marker
+// records as its write time: the marker's content ends with that time
+// (writeInfraMigratedMarker, RFC 3339 to the second), and the manifest of the
+// same run was written just before it. ok=false when the marker is absent,
+// unreadable or carries no time.
+func readInfraMarkerBound(target infraBindingTarget) (time.Time, bool) {
+	contents, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		return time.Time{}, false
+	}
+	fields := strings.Fields(string(contents))
+	if len(fields) == 0 {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339, fields[len(fields)-1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at.Truncate(time.Second).Add(time.Second), true
 }

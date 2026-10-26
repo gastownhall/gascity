@@ -1277,7 +1277,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// mistaken for the one copied (see infra_copy_manifest.go). The snapshot
 	// is the right source for it: the equality stage just proved the source
 	// still holds exactly these rows.
-	if err := writeInfraCopyManifestRecord(target, proven, infraManifestCreatedOf(rows, proven)); err != nil {
+	if err := writeInfraCopyManifestRecord(target, proven, infraManifestCreatedOf(rows, proven), time.Time{}); err != nil {
 		return fail(err)
 	}
 	if err := writeInfraMigratedMarker(target); err != nil {
@@ -1339,7 +1339,7 @@ func infraRetainedIDs(cityPath string, target infraBindingTarget) ([]string, err
 	}
 	var ids []string
 	for _, b := range rows {
-		if manifest.Carried(b) {
+		if manifest.ReadsCarried(b) {
 			ids = append(ids, b.ID)
 		}
 	}
@@ -1571,7 +1571,9 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, man
 //     (retained); one it does not hold is stranded.
 func (gap *infraContainmentGap) classify(b beads.Bead, held bool, manifest infraCopyManifest) {
 	switch manifest.Match(b) {
-	case infraManifestCarried:
+	case infraManifestCarried, infraManifestLegacyUnbounded:
+		// An unbounded legacy entry keeps the id-only reading it always had
+		// here; this verdict deletes nothing (the clear refuses it).
 		if !held {
 			gap.RemovedSinceCutover++
 		}

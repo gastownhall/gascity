@@ -171,6 +171,19 @@ func (e *infraUnprovenSourceRows) Error() string {
 		len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
 }
 
+// infraUnboundedLegacyRows is the clear's refusal for work-store rows a legacy
+// manifest entry lists by id alone, when the manifest carries no trustworthy
+// time to tell the copied bead from a later one that reused its id.
+type infraUnboundedLegacyRows struct {
+	IDs      []string
+	Manifest string
+}
+
+func (e *infraUnboundedLegacyRows) Error() string {
+	return fmt.Sprintf("the copy manifest %s lists %d work-store infrastructure bead(s) by id alone (%s) and records no time that tells the bead it copied from a later one that reused the id, so they cannot be cleared on its word. `%s` records the ones the binding still holds once it proves them equal; run it, then run this again",
+		e.Manifest, len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
+}
+
 // Test seams for the clear's fault-injection rows.
 var (
 	// infraClearBackupWritten runs after the backup is renamed into place and
@@ -228,16 +241,30 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		return result, nil
 	}
 
-	var unproven, retained []beads.Bead
+	var unproven, unbounded, retained []beads.Bead
 	// Carried, by (id, created_at): a row that merely reuses a manifest id was
-	// never copied, and deleting it here would destroy the only copy.
+	// never copied, and deleting it here would destroy the only copy. A legacy
+	// entry with no trustworthy bound is not carried either: nothing says the
+	// row is not younger than the entry, so it is not deleted on a guess.
 	for _, b := range rows {
-		if manifest.Carried(b) {
+		switch manifest.Match(b) {
+		case infraManifestCarried:
 			retained = append(retained, b)
-			continue
+		case infraManifestLegacyUnbounded:
+			unbounded = append(unbounded, b)
+		default:
+			unproven = append(unproven, b)
 		}
-		unproven = append(unproven, b)
 	}
+	if len(unbounded) > 0 && len(unproven) == 0 {
+		ids := make([]string, 0, len(unbounded))
+		for _, b := range unbounded {
+			ids = append(ids, b.ID)
+		}
+		sort.Strings(ids)
+		return result, &infraUnboundedLegacyRows{IDs: ids, Manifest: target.ManifestPath()}
+	}
+	unproven = append(unproven, unbounded...)
 	if len(unproven) > 0 {
 		ids := make([]string, 0, len(unproven))
 		for _, b := range unproven {

@@ -72,7 +72,7 @@ func backdateManifestEntry(t *testing.T, target infraBindingTarget, id string) {
 		ids = append(ids, i)
 	}
 	sort.Strings(ids)
-	if err := writeInfraCopyManifestRecord(target, ids, manifest.Created); err != nil {
+	if err := writeInfraCopyManifestRecord(target, ids, manifest.Created, manifest.LegacyBound); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -171,23 +171,43 @@ func TestClearRefusesToDeleteARowThatReusesAManifestID(t *testing.T) {
 	}
 }
 
+// writeLegacyManifest rewrites the city's manifest in the format every build
+// before this one wrote: one bare id per line, no annotations.
+func writeLegacyManifest(t *testing.T, target infraBindingTarget) []string {
+	t.Helper()
+	ids := manifestIDs(t, target)
+	if err := os.WriteFile(target.ManifestPath(), []byte(strings.Join(ids, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+// waitPastMarkerBound sleeps until a bead created now is younger than the
+// legacy bound the convergence marker records (the end of its second).
+func waitPastMarkerBound(t *testing.T, target infraBindingTarget) time.Time {
+	t.Helper()
+	bound, ok := readInfraMarkerBound(target)
+	if !ok {
+		t.Fatal("the fixture's convergence marker records no time")
+	}
+	if d := time.Until(bound.Add(infraManifestClockSlack)); d > 0 {
+		time.Sleep(d + 50*time.Millisecond)
+	}
+	return bound
+}
+
 // A manifest written by an older build has no created_at. It keeps reading
 // compatibly: an id it lists still matches the row it carried. But a row
-// created after the manifest was written is never that row.
+// created after the manifest was written is never that row, and "when it was
+// written" is the time the convergence marker RECORDS, never the file's mtime.
 func TestLegacyManifestStillMatchesByIDButNotForARowYoungerThanIt(t *testing.T) {
 	prevSlack := infraManifestClockSlack
 	infraManifestClockSlack = 0
 	t.Cleanup(func() { infraManifestClockSlack = prevSlack })
 
 	cityPath, _, source, target := convergedRecoveryCity(t)
-	ids := manifestIDs(t, target)
-	if err := os.WriteFile(target.ManifestPath(), []byte(strings.Join(ids, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	written := time.Now()
-	if err := os.Chtimes(target.ManifestPath(), written, written); err != nil {
-		t.Fatal(err)
-	}
+	ids := writeLegacyManifest(t, target)
+	bound := waitPastMarkerBound(t, target)
 	legacy, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil || !recorded {
 		t.Fatalf("reading the legacy manifest: recorded=%v err=%v", recorded, err)
@@ -195,8 +215,8 @@ func TestLegacyManifestStillMatchesByIDButNotForARowYoungerThanIt(t *testing.T) 
 	if legacy.Len() != len(ids) || len(legacy.Created) != 0 {
 		t.Fatalf("legacy read = %d ids / %d created, want %d / 0", legacy.Len(), len(legacy.Created), len(ids))
 	}
-	if !legacy.WrittenAt.Equal(written) {
-		t.Errorf("legacy written time = %s, want the file's modification time %s", legacy.WrittenAt, written)
+	if !legacy.LegacyBound.Equal(bound) || !legacy.WrittenAt.Equal(bound) {
+		t.Errorf("legacy bound = %s / written %s, want the marker's recorded time %s", legacy.LegacyBound, legacy.WrittenAt, bound)
 	}
 	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
 		t.Fatalf("a legacy manifest strands %v; its carried rows must still match by id", got)
@@ -206,6 +226,186 @@ func TestLegacyManifestStillMatchesByIDButNotForARowYoungerThanIt(t *testing.T) 
 	reuseCarriedID(t, source, id)
 	if got := strandedIDs(t, cityPath, target); !slices.Equal(got, []string{id}) {
 		t.Errorf("stranded = %v, want exactly the reused %s (created after the legacy manifest was written)", got, id)
+	}
+}
+
+// Review probe B: copying a legacy manifest back from its .bak, an rsync
+// without -t, or a touch moves its mtime past an id reuse. The bound must not
+// move with it, or the clear deletes a reused row that was never copied.
+func TestLegacyManifestMtimeBumpDoesNotLetTheClearDeleteAReusedRow(t *testing.T) {
+	prevSlack := infraManifestClockSlack
+	infraManifestClockSlack = 0
+	t.Cleanup(func() { infraManifestClockSlack = prevSlack })
+
+	cityPath, _, source, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	waitPastMarkerBound(t, target)
+	id := carriedMessageID(t, source)
+	if err := openMigratedDestination(t, target).Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	reuseCarriedID(t, source, id)
+	if got := strandedIDs(t, cityPath, target); !slices.Contains(got, id) {
+		t.Fatalf("precondition: the reused %s is not stranded (%v)", id, got)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(target.ManifestPath(), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if got := strandedIDs(t, cityPath, target); !slices.Contains(got, id) {
+		t.Errorf("after an mtime bump the reused %s is no longer stranded (%v)", id, got)
+	}
+	var announce bytes.Buffer
+	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); err == nil {
+		t.Error("the clear succeeded with a reused, never-copied row in the work store")
+	}
+	if _, err := source.Get(id); err != nil {
+		t.Errorf("the clear deleted the reused, never-copied %s: %v", id, err)
+	}
+}
+
+// Review probe A: this build's recover-stranded rewrites a legacy manifest
+// (moving #gc:written to now) while recovering some OTHER row. The legacy
+// entries must keep the legacy bound, or a reused id reads as carried.
+func TestRecoverRewritingALegacyManifestKeepsItsLegacyBound(t *testing.T) {
+	prevSlack := infraManifestClockSlack
+	infraManifestClockSlack = 0
+	t.Cleanup(func() { infraManifestClockSlack = prevSlack })
+
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	bound := waitPastMarkerBound(t, target)
+	id := carriedMessageID(t, source)
+	reuseCarriedID(t, source, id)
+	other := mustCreateInfraBead(t, source, beads.Bead{Title: "a later stranded mail", Type: "message"})
+	if got := strandedIDs(t, cityPath, target); !slices.Contains(got, id) || !slices.Contains(got, other.ID) {
+		t.Fatalf("precondition: stranded = %v, want %s and %s", got, id, other.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr)
+	after := strandedIDs(t, cityPath, target)
+	if !slices.Contains(after, id) {
+		t.Errorf("after recover-stranded rewrote the legacy manifest, the reused %s is no longer stranded (%v); stdout: %s", id, after, stdout.String())
+	}
+	if slices.Contains(after, other.ID) {
+		t.Errorf("the recovered %s is still stranded", other.ID)
+	}
+	manifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.LegacyBound.Equal(bound) {
+		t.Errorf("the rewrite persisted legacy bound %s, want the original %s", manifest.LegacyBound, bound)
+	}
+	contents, err := os.ReadFile(target.ManifestPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), infraManifestLegacyWrittenPrefix) {
+		t.Errorf("the rewritten manifest does not persist the legacy bound:\n%s", contents)
+	}
+	// And a second rewrite carries it unchanged.
+	future := time.Now().Add(time.Hour)
+	_ = os.Chtimes(target.ManifestPath(), future, future)
+	runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr)
+	if again, _, _ := readInfraCopyManifestRecord(target); !again.LegacyBound.Equal(bound) {
+		t.Errorf("a second rewrite moved the legacy bound to %s, want %s", again.LegacyBound, bound)
+	}
+	if got := strandedIDs(t, cityPath, target); !slices.Contains(got, id) {
+		t.Errorf("after a second rewrite the reused %s is no longer stranded (%v)", id, got)
+	}
+}
+
+// With no trustworthy bound — a legacy manifest whose marker carries no time —
+// the clear refuses legacy entries rather than guess, read-only verdicts keep
+// the id-only reading, and recover-stranded records the rows the binding still
+// holds once it proves them equal, after which the clear proceeds.
+func TestClearRefusesUnboundedLegacyEntriesUntilRecoverRecordsThem(t *testing.T) {
+	cityPath, cfg, _, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.LegacyBound.IsZero() || !manifest.WrittenAt.IsZero() {
+		t.Fatalf("a marker with no time produced bound %s / written %s; the mtime must not stand in", manifest.LegacyBound, manifest.WrittenAt)
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("unbounded legacy entries were called stranded: %v", got)
+	}
+	var announce bytes.Buffer
+	_, err = clearRetainedInfraCopies(cityPath, target, &announce)
+	var unbounded *infraUnboundedLegacyRows
+	if !errors.As(err, &unbounded) {
+		t.Fatalf("clear = %v, want the unbounded-legacy refusal", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code != 0 {
+		t.Fatalf("recover exited %d: %s %s", code, stdout.String(), stderr.String())
+	}
+	upgraded, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upgraded.Created) != upgraded.Len() {
+		t.Errorf("recover recorded created_at for %d of %d entries", len(upgraded.Created), upgraded.Len())
+	}
+	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); err != nil {
+		t.Errorf("the clear still refuses after recover recorded the entries: %v", err)
+	}
+}
+
+// M11: created_at is compared at the work store's second granularity. A
+// manifest that recorded nanoseconds still matches a row read back truncated
+// (or rounded within the second); a different second is a different bead.
+func TestManifestCreatedAtMatchesToTheSecond(t *testing.T) {
+	recorded := time.Date(2026, 8, 9, 18, 2, 11, 987654321, time.UTC)
+	m := infraCopyManifest{IDs: map[string]bool{"mc-1": true}, Created: map[string]time.Time{"mc-1": recorded}}
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want infraManifestMatch
+	}{
+		{"truncated to the second", recorded.Truncate(time.Second), infraManifestCarried},
+		{"same second, other nanos", recorded.Truncate(time.Second).Add(5 * time.Millisecond), infraManifestCarried},
+		{"same instant, other zone", recorded.In(time.FixedZone("x", 3600)), infraManifestCarried},
+		{"next second", recorded.Truncate(time.Second).Add(time.Second), infraManifestReusedID},
+		{"previous second", recorded.Truncate(time.Second).Add(-time.Nanosecond), infraManifestReusedID},
+	} {
+		if got := m.Match(beads.Bead{ID: "mc-1", CreatedAt: tc.at}); got != tc.want {
+			t.Errorf("%s: Match = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// M17: an annotated manifest records its own write time, and that — not the
+// file's mtime — judges the rows it does not list.
+func TestAnnotatedManifestRecordsItsWriteTime(t *testing.T) {
+	target := infraBindingTarget{Root: t.TempDir()}
+	before := time.Now()
+	if err := writeInfraCopyManifestRecord(target, []string{"mc-1"}, map[string]time.Time{"mc-1": before.Add(-time.Hour)}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+	future := after.Add(48 * time.Hour)
+	if err := os.Chtimes(target.ManifestPath(), future, future); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WrittenAt.Before(before.Add(-time.Second)) || m.WrittenAt.After(after.Add(time.Second)) {
+		t.Fatalf("written = %s, want the write time (between %s and %s), never the mtime %s", m.WrittenAt, before, after, future)
+	}
+	young := beads.Bead{ID: "mc-9", CreatedAt: after.Add(time.Hour)}
+	if !m.createdAfterWrite(young) {
+		t.Error("an unlisted row created an hour after the write is not younger than the manifest")
 	}
 }
 
@@ -269,10 +469,12 @@ func TestInfraContainmentClassifyTable(t *testing.T) {
 	before := written.Add(-24 * time.Hour)
 	after := written.Add(5 * 24 * time.Hour)
 	keyed := infraCopyManifest{
-		IDs:       map[string]bool{"mc-wisp-jkl": true, "mc-1": true, "mc-legacy": true},
-		Created:   map[string]time.Time{"mc-wisp-jkl": before, "mc-1": before},
-		WrittenAt: written,
+		IDs:         map[string]bool{"mc-wisp-jkl": true, "mc-1": true, "mc-legacy": true},
+		Created:     map[string]time.Time{"mc-wisp-jkl": before, "mc-1": before},
+		WrittenAt:   written,
+		LegacyBound: written,
 	}
+	unboundedManifest := infraCopyManifest{IDs: map[string]bool{"mc-legacy": true}, WrittenAt: written}
 	cases := []struct {
 		name    string
 		bead    beads.Bead
@@ -289,6 +491,25 @@ func TestInfraContainmentClassifyTable(t *testing.T) {
 		{"unlisted, younger, held", beads.Bead{ID: "mc-9", CreatedAt: after}, true, "stranded", 0},
 		{"unlisted, older, held", beads.Bead{ID: "mc-9", CreatedAt: before}, true, "retained", 0},
 		{"unlisted, older, not held", beads.Bead{ID: "mc-9", CreatedAt: before}, false, "stranded", 0},
+	}
+	for _, tc := range []struct {
+		name string
+		held bool
+	}{{"unbounded legacy entry, held", true}, {"unbounded legacy entry, collected", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := beads.Bead{ID: "mc-legacy", CreatedAt: after}
+			if got := unboundedManifest.Match(b); got != infraManifestLegacyUnbounded {
+				t.Fatalf("Match = %d, want unbounded", got)
+			}
+			if unboundedManifest.Carried(b) {
+				t.Error("an unbounded legacy entry reads as carried for a deletion")
+			}
+			var gap infraContainmentGap
+			gap.classify(b, tc.held, unboundedManifest)
+			if len(gap.Retained) != 1 || len(gap.Stranded) != 0 {
+				t.Errorf("classify = %+v, want the id-only reading (retained)", gap)
+			}
+		})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -315,7 +536,7 @@ func TestAnnotatedManifestStaysReadableByTheLegacyParser(t *testing.T) {
 	target := infraBindingTarget{Root: t.TempDir()}
 	ids := []string{"mc-1", "mc-wisp-jkl"}
 	created := map[string]time.Time{"mc-1": time.Date(2026, 8, 1, 9, 30, 0, 0, time.UTC)}
-	if err := writeInfraCopyManifestRecord(target, ids, created); err != nil {
+	if err := writeInfraCopyManifestRecord(target, ids, created, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(target.ManifestPath())

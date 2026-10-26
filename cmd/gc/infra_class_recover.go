@@ -813,15 +813,20 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// proven against it — the old bead fails that proof and is named, never
 	// folded in; the residue of an interrupted run of this repair passes it.
 	// When the binding does not hold the id it is stranded, and moves.
+	//
+	// An unbounded legacy entry (infra_copy_manifest.go) the binding still
+	// holds goes the unrecorded way too: proven equal, it is recorded with its
+	// created_at, which is what lets the clear act on it. One the binding no
+	// longer holds keeps the id-only reading.
 	for _, b := range rows {
-		carried := manifest.Carried(b)
+		match := manifest.Match(b)
 		if resolvable[b.ID] {
-			if !carried {
+			if match != infraManifestCarried {
 				unrecorded = append(unrecorded, b)
 			}
 			continue
 		}
-		if carried {
+		if match == infraManifestCarried || match == infraManifestLegacyUnbounded {
 			removedSinceCutover++
 			continue
 		}
@@ -1145,9 +1150,17 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	for id, at := range infraManifestCreatedOf(rows, recovered) {
 		extendedCreated[id] = at
 	}
-	extendedManifest := infraCopyManifest{IDs: setOf(extended), Created: extendedCreated, WrittenAt: time.Now()}
-	if err := writeInfraCopyManifestRecord(target, extended, extendedCreated); err != nil {
+	// The legacy bound passes through unchanged. #gc:written moves forward
+	// with this write; the bound that judges the entries with no created_at
+	// must not, or every id reused since the legacy manifest was written
+	// would read as the bead it copied.
+	if err := writeInfraCopyManifestRecord(target, extended, extendedCreated, manifest.LegacyBound); err != nil {
 		fmt.Fprintf(stderr, "%s: %v. The previous manifest is at %s\n", logPrefix, err, backup) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	extendedManifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: re-reading the extended manifest: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	fmt.Fprintf(stdout, "manifest: %d -> %d bead(s) (previous manifest retained at %s)\n", len(proven), len(extended), backup) //nolint:errcheck // best-effort stdout
