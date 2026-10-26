@@ -319,8 +319,27 @@ func TestPoolWorkerPromptStatesStepOutcomeContract(t *testing.T) {
 	if !strings.Contains(body, "gc bd update <id> --set-metadata gc.outcome=pass --status closed") {
 		t.Error("pool-worker prompt must give the workflow-step success close `gc bd update <id> --set-metadata gc.outcome=pass --status closed`; a bare close is judged missing_outcome")
 	}
+	for _, want := range []string{
+		"gc bd update <id> --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason=<short_reason> --status closed",
+		"gc bd update <id> --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=<short_reason> --status closed",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pool-worker prompt must give the workflow-step failure close %q", want)
+		}
+	}
 	if strings.Contains(body, "gc bd close <step-id>") {
 		t.Error("pool-worker prompt must not close a workflow step with `gc bd close <step-id>`; workflow steps close through gc.outcome (see Closing Your Bead)")
+	}
+	// A pass close carrying failure metadata is itself a contract violation
+	// the controller retries (pass_with_failure_metadata), so no command the
+	// prompt gives may pair them.
+	for _, line := range lines {
+		if !strings.Contains(line, "gc bd update") || !strings.Contains(line, "gc.outcome=pass") {
+			continue
+		}
+		if strings.Contains(line, "gc.failure_class") || strings.Contains(line, "gc.failure_reason") {
+			t.Errorf("a success close must not carry failure metadata: %s", line)
+		}
 	}
 }
 

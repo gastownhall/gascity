@@ -85,9 +85,27 @@ the step's description gives its own close command, run that one; otherwise:
   ```bash
   gc bd update <id> --set-metadata gc.outcome=pass --status closed
   ```
+- On transient failure (provider outage, rate limit, flaky infrastructure):
+  ```bash
+  gc bd update <id> \
+    --set-metadata gc.outcome=fail \
+    --set-metadata gc.failure_class=transient \
+    --set-metadata gc.failure_reason=<short_reason> \
+    --status closed
+  ```
+- On unrecoverable failure:
+  ```bash
+  gc bd update <id> \
+    --set-metadata gc.outcome=fail \
+    --set-metadata gc.failure_class=hard \
+    --set-metadata gc.failure_reason=<short_reason> \
+    --status closed
+  ```
 
-A step bead is workflow infrastructure: do not add `--notes` or
-`--append-notes` to it.
+Never set `gc.failure_class` or `gc.failure_reason` on a step you close with
+`gc.outcome=pass`: the controller treats that as a contract violation and
+retries the step. A step bead is workflow infrastructure: do not add `--notes`
+or `--append-notes` to it.
 
 **A plain work bead** — no `gc.step_ref`. Close it with a one-line summary of
 the outcome: `gc bd close <id> --reason "<what you did>"`.
