@@ -1137,6 +1137,48 @@ func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
 	}
 }
 
+// TestFormulaCookAttachStampsMetaOnTheSubDAGRoot pins the v1 --attach arm's
+// --meta contract ("set root bead metadata after cook"): the pairs land on the
+// sub-DAG root this cook created, never on the attach bead. The attach bead is
+// a bare task, so it is its own workflow root — WorkflowRootID == target.ID —
+// which is exactly what a stamp aimed at the wrong root would hit (#7309).
+func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	seedCLIStorageRoutes(t, cityDir, nil)
+	work, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
+	target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create attach bead: %v", err)
+	}
+
+	res := cookFormula(t, "legacy-work", "--attach", target.ID, "--meta", "work_dir=/w", "--meta", "base_sha=abc")
+
+	if res.WorkflowRootID != target.ID {
+		t.Fatalf("fixture premise: workflow_root_id = %q, want the self-rooted target %q — the negative check below would not be testing the wrong-root stamp", res.WorkflowRootID, target.ID)
+	}
+	root, err := work.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("attached sub-DAG root %s: %v", res.RootID, err)
+	}
+	for k, v := range map[string]string{"work_dir": "/w", "base_sha": "abc"} {
+		if got := root.Metadata[k]; got != v {
+			t.Errorf("sub-DAG root %s: metadata %s = %q, want %q", res.RootID, k, got, v)
+		}
+	}
+	attachBead, err := work.Get(target.ID)
+	if err != nil {
+		t.Fatalf("attach bead %s: %v", target.ID, err)
+	}
+	for _, k := range []string{"work_dir", "base_sha"} {
+		if got, ok := attachBead.Metadata[k]; ok {
+			t.Errorf("attach bead %s carries %s=%q; the --meta stamp belongs on the sub-DAG root %s, not on the workflow root", target.ID, k, got, res.RootID)
+		}
+	}
+}
+
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

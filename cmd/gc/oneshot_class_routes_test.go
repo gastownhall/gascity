@@ -615,6 +615,33 @@ func TestFormulaCookMetaStampLandsOnTheGraphResidentRoot(t *testing.T) {
 	}
 }
 
+// TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot is the
+// --attach twin of TestFormulaCookMetaStampLandsOnTheGraphResidentRoot, on the
+// one graft a split city serves: a v1 formula onto a binding-owned bead.
+// molecule.Attach materializes the sub-DAG through the store that holds the
+// attach bead, so the --meta stamp must go through that same store — addressed
+// at the scope store it fails the cook after the graft already exists (#7309).
+func TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+
+	source, err := graph.Create(beads.Bead{Title: "class-resident attach target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create the class-resident attach bead: %v", err)
+	}
+
+	res := cookFormula(t, "legacy-work", "--attach", source.ID, "--meta", "gc.trace=abc123")
+
+	root, err := graph.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("attached sub-DAG root %s is not resident in the graph binding: %v", res.RootID, err)
+	}
+	if got := root.Metadata["gc.trace"]; got != "abc123" {
+		t.Errorf("sub-DAG root %s: gc.trace = %q, want %q — the --meta stamp went to a store that never held the root", res.RootID, got, "abc123")
+	}
+}
+
 // TestFormulaCookAttachIsIdempotent drives the `existing != nil` early return,
 // the one attach path that returns without instantiating. A convoy target gives
 // the invocation a stable input-convoy id and therefore a stable graph root key,
