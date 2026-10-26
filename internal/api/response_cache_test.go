@@ -615,6 +615,51 @@ func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
 	}
 }
 
+// TestHandleAgentListBlockingBypassesTimeCache pins the strict-freshness
+// path: a blocking ?index=&wait= request must rebuild the list so the body
+// reflects the event it waited for, never a cached body built before it. Two
+// identical blocking requests share a cache key, so the second would be a
+// deterministic hit if the handler read the cache for blocking requests.
+func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+	// Move the head past 0 so ?index=0 returns without waiting.
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
+	// wait=1s keeps the two requests on one non-empty key: cacheKeyFor skips
+	// zero values, so index=0 alone contributes nothing to it.
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?index=0&wait=1s"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first blocking agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first blocking agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second blocking agents = %d, want 200", rec.Code)
+	}
+	if want := 2 * perBuild; store.listByAssigneeCalls != want {
+		t.Fatalf("assignee lookups after second blocking request = %d, want %d (blocking must bypass the cache)", store.listByAssigneeCalls, want)
+	}
+}
+
 // listCallsPerFeedBuild is how many store List calls one workflow-projection
 // build costs: listActiveWorkflowProjectionBeads issues one Live,
 // status-scoped read per active status, because bd is the only reader that can

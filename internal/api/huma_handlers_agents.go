@@ -30,7 +30,8 @@ var agentListResponseTTLFloor = 3 * time.Second
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
 func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput) (*ListOutput[agentResponse], error) {
 	bp := input.toBlockingParams()
-	if bp.isBlocking() {
+	blocking := bp.isBlocking()
+	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 	index := s.latestIndex()
@@ -47,21 +48,28 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// back to the patch-presence heuristic.
 	rawCfg := s.rawConfig()
 
+	// The agent list keys its response cache on a TIME bucket, not the event
+	// index: on a busy city the sequence advances between polls, so an
+	// index-keyed entry missed on nearly every request and paid the
+	// per-agent rebuild (gascity#7149, the class #3186 fixed for /status).
+	// A hit can therefore predate events recorded since its build, so it
+	// reports the index captured before that build (indexedResponse), never
+	// this request's index: X-GC-Index tells a client where to resume or
+	// block (docs/reference/api.md "Snapshot index").
+	//
+	// Strict-freshness callers (blocking ?index=&wait=) bypass the cache so
+	// the body they receive reflects the event they waited for. The gate
+	// cannot rely on the key: index 0 is a valid blocking index, and
+	// cacheKeyFor skips zero values, so a blocking ?index=0 request would
+	// share its key with plain polls. ?peek=true reads live pane output and
+	// is never cached either.
 	cacheKey := ""
-	if !wantPeek {
+	if !wantPeek && !blocking {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
 		// The list projects the config, whose swaps do not advance the
 		// event index, so the key also carries the config generation.
 		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
-		// The entry is keyed on the time bucket, not the event index: on a
-		// busy city the sequence advances between polls, so an index-keyed
-		// entry missed on nearly every request and paid the per-agent
-		// rebuild (gascity#7149, the class #3186 fixed for /status). A hit
-		// can therefore predate events recorded since its build, so it
-		// reports the index captured before that build (indexedResponse),
-		// never this request's index: X-GC-Index tells a client where to
-		// resume or block (docs/reference/api.md "Snapshot index").
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[agentResponse]]](s, cacheKey, bucket); ok {
 			return &ListOutput[agentResponse]{Index: hit.Index, Body: hit.Body}, nil
 		}

@@ -15,8 +15,8 @@ var responseCacheTTL = 2 * time.Second
 
 // timeBucketResponseCacheTTL bounds how long a built body is reused by the
 // endpoints that key their response-cache entry on a TIME bucket rather than
-// the event sequence: /status (gascity#3186), /formulas/feed, and bounded
-// all=true /beads reads (#3208). The shared index-keyed cache misses on every
+// the event sequence: /status (gascity#3186), /formulas/feed, bounded
+// all=true /beads reads (#3208), and the agent list (#7149). The shared index-keyed cache misses on every
 // poll of a busy city — the sequence advances each tick — so O(store-size)
 // bodies were rebuilt per request. These are coarse views where a few seconds
 // of staleness is acceptable (responses report X-GC-Cache-Age-S where a
