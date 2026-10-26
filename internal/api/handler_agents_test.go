@@ -2231,6 +2231,31 @@ func TestFindActiveBeadForAssigneesSkipsSuspendedRigs(t *testing.T) {
 	}
 }
 
+// TestActiveBeadLookupReadsRigInferredSuspended: status infers a rig
+// suspended when every one of its agents is suspended, but that rig's cache
+// keeps refreshing, so the lookup still reads it. The skip set is the
+// effective-suspension set, never status's grown suspendedRigs (#8162).
+func TestActiveBeadLookupReadsRigInferredSuspended(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Rigs = []config.Rig{{Name: "beta", Path: "/tmp/beta"}}
+	state.cfg.Agents = []config.Agent{{Name: "worker", Dir: "beta", Suspended: true, MaxActiveSessions: intPtr(1)}}
+	state.cfg.NamedSessions = nil
+	beta := &listCountingStore{Store: beads.NewMemStore()}
+	state.stores = map[string]beads.Store{"beta": beta}
+	work := addActiveWork(t, beta, "sess-1")
+
+	s := New(state)
+	if got := s.findActiveBeadForAssignees("", "sess-1"); got != work {
+		t.Fatalf("cached active bead = %q, want %q", got, work)
+	}
+	if got := s.findLiveActiveBeadForAssignees("", "sess-1"); got != work {
+		t.Fatalf("live active bead = %q, want %q", got, work)
+	}
+	if n := beta.listCalls.Load(); n == 0 {
+		t.Error("rig beta List calls = 0, want reads: an agent-inferred suspension must not skip the store")
+	}
+}
+
 // TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias: in legacy
 // shared-file mode every rig aliases one store, and sortedRigNames keeps only
 // the alphabetically first alias. The cold-rig filter must run before that
