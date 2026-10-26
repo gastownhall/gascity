@@ -569,8 +569,12 @@ func TestMergeSettingsJSON_MatcherlessWrapper_PreservesCoreHook(t *testing.T) {
 
 func TestMergeSettingsJSON_MatcherlessWrapper_RealWorldRecovery(t *testing.T) {
 	// Reproduce the observed corrupt state: a Stop array already bloated with
-	// many identical matcherless entries. Re-projecting the overlay must not
-	// grow it further (the fix is forward-looking; it stops accumulation).
+	// many identical matcherless entries. One merge must collapse the
+	// byte-identical duplicates back to a single entry (self-heal, #3862).
+	// The pack overlay carrying this shape projects onto .claude/settings.json,
+	// so production always merges it with WithWrapBareHooks (overlay.go,
+	// hooks.go) — the self-heal is scoped to that path and leaves the additive
+	// Codex/Cursor merge alone.
 	bloat := make([]string, 50)
 	for i := range bloat {
 		bloat[i] = maHookEntry
@@ -578,14 +582,12 @@ func TestMergeSettingsJSON_MatcherlessWrapper_RealWorldRecovery(t *testing.T) {
 	base := `{"hooks":{"Stop":[` + joinJSON(bloat) + `]}}`
 	over := `{"hooks":{"Stop":[` + maHookEntry + `]}}`
 
-	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
 	if err != nil {
 		t.Fatalf("MergeSettingsJSON: %v", err)
 	}
-	// The overlay's single copy collapses into the existing duplicates: count
-	// must not increase past the pre-existing bloat (no new append).
-	if got := len(stopEntries(t, result)); got > 50 {
-		t.Errorf("Stop entries = %d, want <= 50 (overlay must not append to existing bloat)", got)
+	if got := len(stopEntries(t, result)); got != 1 {
+		t.Errorf("Stop entries = %d, want 1 (byte-identical bloat must collapse)", got)
 	}
 }
 
@@ -809,5 +811,93 @@ func TestMergeSettingsJSON_WrapBareHooks_BareOverlayIdempotentAcrossTicks(t *tes
 	}
 	if got := len(preToolUse(t, merged)); got != 1 {
 		t.Errorf("PreToolUse entries after 25 ticks = %d, want 1 (idempotent re-projection)", got)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_LegacyWrappedBloatSelfHeals(t *testing.T) {
+	// A file already bloated by the pre-fix append loop holds N byte-identical
+	// {"matcher":"","hooks":[...]} copies of the pack hook. One merge tick must
+	// converge the category back to a single entry: duplicates collapse, and
+	// the surviving legacy twin unifies with the re-projected bare entry.
+	legacy := `{"matcher":"","hooks":[` + ubsBareEntry + `]}`
+	bloat := make([]string, 40)
+	for i := range bloat {
+		bloat[i] = legacy
+	}
+	base := `{"hooks":{"PreToolUse":[` + joinJSON(bloat) + `]}}`
+	over := `{"hooks":{"PreToolUse":[` + ubsBareEntry + `]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1 (bloat must self-heal)", len(arr))
+	}
+	if got, want := innerCommand(t, arr[0]), `if echo "$TOOL_INPUT" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi`; got != want {
+		t.Errorf("surviving command = %q, want the ubs command", got)
+	}
+}
+
+func TestMergeSettingsJSON_DedupKeepsDistinctSameKeyEntries(t *testing.T) {
+	// Exact-duplicate collapse must not touch entries that share an identity
+	// key but differ in content (e.g. a hand-added second Bash-matcher hook).
+	base := `{"hooks":{"PreToolUse":[
+		{"matcher":"Bash","hooks":[{"type":"command","command":"a"}]},
+		{"matcher":"Bash","hooks":[{"type":"command","command":"b"}]}
+	]}}`
+	result, err := MergeSettingsJSON([]byte(base), []byte(`{}`), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if got := len(preToolUse(t, result)); got != 2 {
+		t.Errorf("PreToolUse entries = %d, want 2 (distinct content must survive dedup)", got)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_HealKeepsNonObjectAndMalformedEntries(t *testing.T) {
+	// The self-heal may only remove provable duplicates: entries it cannot
+	// key (non-objects, a "hooks" value that is not an array) keep their
+	// documented always-keep semantics even in wrap mode.
+	base := `{"hooks":{"PreToolUse":[5,{"hooks":"x"},` + maHookEntry + `,` + maHookEntry + `]}}`
+	over := `{"hooks":{"PreToolUse":[]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := preToolUse(t, result)
+	if len(arr) != 3 {
+		t.Fatalf("PreToolUse entries = %d, want 3 (5, {\"hooks\":\"x\"}, one deduped entry):\n%s", len(arr), result)
+	}
+	if _, ok := arr[0].(float64); !ok {
+		t.Errorf("non-object entry = %v, want it preserved verbatim", arr[0])
+	}
+	if got := arr[1].(map[string]any)["hooks"]; got != "x" {
+		t.Errorf("malformed hooks entry = %v, want it preserved verbatim", arr[1])
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_HealLeavesCategoriesOverlayDoesNotProject(t *testing.T) {
+	// Healing runs per category the overlay projects. A bloated category the
+	// overlay does not carry is left exactly as written — the merge has no
+	// overlay truth for it and must not invent any.
+	bloat := make([]string, 3)
+	for i := range bloat {
+		bloat[i] = maHookEntry
+	}
+	base := `{"hooks":{"Stop":[` + joinJSON(bloat) + `],"PreToolUse":[` + joinJSON(bloat) + `]}}`
+	over := `{"hooks":{"PreToolUse":[]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if got := len(stopEntries(t, result)); got != 3 {
+		t.Errorf("Stop entries (not projected by overlay) = %d, want 3 (untouched)", got)
+	}
+	if got := len(preToolUse(t, result)); got != 1 {
+		t.Errorf("PreToolUse entries (projected by overlay) = %d, want 1 (healed)", got)
 	}
 }
