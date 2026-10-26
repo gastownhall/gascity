@@ -15,7 +15,10 @@ import (
 // errors as blocking), and reports which configured rules match a remote import
 // in the city's pack.toml and which are unused. It does NOT perform a live
 // network probe — that is a deferred follow-up (see the credentialed-pack-imports
-// plan) so doctor gains no new network surface here.
+// plan) so doctor gains no new network surface here. The check never infers
+// that an import needs a credential: offline it cannot tell a public import
+// from a private one, so authentication is classified only when a fetch runs
+// (gitcred.ClassifyAuthError).
 type PackCredentialsCheck struct {
 	imports map[string]config.Import
 }
@@ -63,16 +66,18 @@ func (c *PackCredentialsCheck) Run(ctx *CheckContext) *CheckResult {
 		details = append(details, fmt.Sprintf("%s (%s) — %s", lr.Match, lr.Origin, state))
 	}
 	sort.Strings(details)
-	r.Details = details
 
+	// Unmatched remotes stay informational Details, never a warning: offline,
+	// "no rule matches" is the normal state of every public import, so it is
+	// not evidence a credential is required. Auth is classified when a fetch
+	// runs (gitcred.ClassifyAuthError).
 	if len(unmatchedRemotes) > 0 {
 		sort.Strings(unmatchedRemotes)
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("%d remote import(s) have no matching credential rule", len(unmatchedRemotes))
-		r.FixHint = "register a credential for each host: gc import credential add <host> --helper 'gh auth token'"
-		r.Details = append(r.Details, unmatchedRemotes...)
-		return r
+		for _, remote := range unmatchedRemotes {
+			details = append(details, fmt.Sprintf("%s — no matching credential rule", remote))
+		}
 	}
+	r.Details = details
 
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("%d pack credential rule(s) configured", len(loaded))
@@ -81,7 +86,9 @@ func (c *PackCredentialsCheck) Run(ctx *CheckContext) *CheckResult {
 
 // remoteImportsWithoutRule returns the redacted clone URLs of networked remote
 // imports that no credential rule matches. A public import legitimately has no
-// rule, so this is advisory only (StatusWarning), not an error.
+// rule, so the check reports these as informational Details only — never a
+// warning — and leaves authentication to the fetch path's classification
+// (gitcred.ClassifyAuthError).
 func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []string {
 	var missing []string
 	for _, imp := range c.imports {
