@@ -76,6 +76,15 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				Body:  hit.Body,
 			}, nil
 		}
+		// A build that outlasts its own start bucket (8.19s for 145 rows in
+		// #7149) is stored under a bucket no later request computes; the
+		// floor serves that body, measured from when the build finished.
+		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[ListBody[agentResponse]]](s, cacheKey, agentListResponseTTLFloor); ok {
+			return &ListOutput[agentResponse]{
+				Index: hit.Index,
+				Body:  hit.Body,
+			}, nil
+		}
 	}
 
 	// Active graph-resident work, indexed once per request by agent session

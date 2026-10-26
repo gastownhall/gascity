@@ -577,6 +577,53 @@ func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
 	}
 }
 
+// TestHandleAgentListServesRecentBodyAfterBucketRollover pins the TTL-floor
+// tier: an agent-list build can outlast its own start bucket (8.19s for 145
+// rows in #7149), so it is stored under a bucket no later request computes.
+// A repeat inside agentListResponseTTLFloor is still served that cached body,
+// which predates any event recorded since its build, so it must carry the
+// build index rather than the live head.
+func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour // only the TTL floor can hit
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("first agents build issued no assignee-scoped List calls")
+	}
+	builtIndex := responseIndex(t, rec)
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second agents = %d, want 200", rec.Code)
+	}
+	if got := store.listByAssigneeCalls; got != perBuild {
+		t.Fatalf("assignee List calls = %d, want %d: the repeat was rebuilt instead of served from the TTL floor", got, perBuild)
+	}
+	if got := responseIndex(t, rec); got != builtIndex {
+		t.Fatalf("X-GC-Index = %d, want the build index %d on a TTL-floor hit", got, builtIndex)
+	}
+}
+
 // listCallsPerFeedBuild is how many store List calls one workflow-projection
 // build costs: listActiveWorkflowProjectionBeads issues one Live,
 // status-scoped read per active status, because bd is the only reader that can
