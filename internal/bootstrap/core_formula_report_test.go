@@ -216,6 +216,53 @@ func TestCorePoolWorkerPromptClosesWorkBeadWithReason(t *testing.T) {
 	}
 }
 
+// readCorePoolWorkerPrompt returns the stock pool-worker prompt template.
+func readCorePoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(coreFormulaSearchPaths(t)[0]), "assets", "prompts", "pool-worker.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// TestCorePoolWorkerPromptRecordsOutcomeBeforeClose guards the retry contract
+// in the stock worker prompt: a retry-managed workflow step whose attempt
+// closes without gc.outcome is classified missing_outcome and retried until it
+// hard-fails, so every close instruction must be preceded, within its section,
+// by the outcome write, and must still give the close a reason.
+func TestCorePoolWorkerPromptRecordsOutcomeBeforeClose(t *testing.T) {
+	const closeInstruction = "gc bd close <"
+	checked := 0
+	for _, section := range strings.Split(readCorePoolWorkerPrompt(t), "\n## ") {
+		heading, _, _ := strings.Cut(section, "\n")
+		rest := section
+		for {
+			at := strings.Index(rest, closeInstruction)
+			if at < 0 {
+				break
+			}
+			checked++
+			lineEnd := strings.IndexByte(rest[at:], '\n')
+			if lineEnd < 0 {
+				lineEnd = len(rest) - at
+			}
+			line := rest[at : at+lineEnd]
+			if !strings.Contains(rest[:at], "--set-metadata gc.outcome=") {
+				t.Errorf("pool-worker.template.md section %q: close instruction is not preceded by a `gc bd update <id> --set-metadata gc.outcome=...` write (a close without gc.outcome fails a retry-managed step as missing_outcome):\n%s", heading, line)
+			}
+			if !closeReasonPattern.MatchString(line) {
+				t.Errorf("pool-worker.template.md section %q: close must carry --reason:\n%s", heading, line)
+			}
+			rest = rest[at+len(closeInstruction):]
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no 'gc bd close <' instructions in pool-worker.template.md; guard pattern is stale")
+	}
+}
+
 // joinShellContinuations folds backslash-continued lines into one logical
 // command line so multi-line bd invocations are checked as a whole.
 func joinShellContinuations(text string) []string {
