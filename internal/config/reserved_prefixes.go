@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // The reserved-prefix table moved to internal/beadmeta, a stdlib-only leaf.
@@ -61,31 +62,95 @@ func RelocatesAnyClass(cfg *City) bool {
 	return false
 }
 
+// ReservedPrefixCollision reports the reserved class id-prefix a work-store
+// prefix collides with, if any: the prefix itself, or its first hyphen
+// segment. A rig prefixed "gcg-alpha" mints "gcg-alpha-1", which is inside the
+// binding's "gcg" namespace (storeref.IDInNamespace), so it collides exactly
+// as "gcg" does.
+func ReservedPrefixCollision(prefix string) (string, bool) {
+	p := strings.ToLower(strings.TrimSpace(prefix))
+	if p == "" {
+		return "", false
+	}
+	if IsReservedClassPrefix(p) {
+		return p, true
+	}
+	if first, _, cut := strings.Cut(p, "-"); cut && IsReservedClassPrefix(first) {
+		return first, true
+	}
+	return "", false
+}
+
 // ReservedPrefixSplitRefusal is the refusal for a SPLIT city whose HQ or rig
-// prefix is a reserved class id-prefix (split-default read audit R10), or nil.
+// prefix collides with a reserved class id-prefix (split-default read audit
+// R10), or nil.
 //
 // On a split city the binding mints gcg-N, gcs-N, ... and a work store under
-// the same prefix shares that namespace: storeref makes the binding the
-// authority for a reserved-prefix id, and the event scan ties, so ids collide
-// and work beads are answered from the wrong store. Ordinary names derive these
-// prefixes (gas-city-gateway -> gcg), so the refusal names the fix: an explicit
-// prefix. A city that relocates nothing keeps ReservedPrefixWarnings' advisory.
+// the same namespace collides with it: storeref makes the binding the
+// authority for a reserved-namespace id, and the event scan ties, so ids
+// collide and work beads are answered from the wrong store. Ordinary names
+// derive these prefixes (gas-city-gateway -> gcg), so the refusal names the
+// fix: an explicit prefix. A city that relocates nothing keeps
+// ReservedPrefixWarnings' advisory.
 func ReservedPrefixSplitRefusal(cfg *City) error {
 	if cfg == nil || !RelocatesAnyClass(cfg) {
 		return nil
 	}
 	var problems []string
-	if hq := strings.ToLower(strings.TrimSpace(EffectiveHQPrefix(cfg))); IsReservedClassPrefix(hq) {
-		problems = append(problems, fmt.Sprintf("the city's bead prefix %q (derived from %q unless set) is reserved; set an explicit prefix: workspace_prefix = \"<prefix>\" in .gc/site.toml", hq, cfg.EffectiveCityName()))
+	if hq := strings.ToLower(strings.TrimSpace(EffectiveHQPrefix(cfg))); hq != "" {
+		if reserved, ok := ReservedPrefixCollision(hq); ok {
+			problems = append(problems, fmt.Sprintf("the city's bead prefix %q (derived from %q unless set) is in the reserved %q namespace; set an explicit prefix: workspace_prefix = \"<prefix>\" in .gc/site.toml", hq, cfg.EffectiveCityName(), reserved))
+		}
 	}
 	for _, r := range cfg.Rigs {
-		if prefix := strings.ToLower(strings.TrimSpace(r.EffectivePrefix())); IsReservedClassPrefix(prefix) {
-			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is reserved; set an explicit prefix: prefix = \"<prefix>\" on that [[rigs]] entry", r.Name, prefix))
+		prefix := strings.ToLower(strings.TrimSpace(r.EffectivePrefix()))
+		if reserved, ok := ReservedPrefixCollision(prefix); ok {
+			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is in the reserved %q namespace; set an explicit prefix: prefix = \"<prefix>\" on that [[rigs]] entry", r.Name, prefix, reserved))
+		}
+	}
+	// A raw (unpatched) config being edited still carries its [[patches.rigs]]
+	// entries; a prefix one sets is the prefix the rig will mint under.
+	for _, p := range cfg.Patches.Rigs {
+		if p.Prefix == nil {
+			continue
+		}
+		prefix := strings.ToLower(strings.TrimSpace(*p.Prefix))
+		if reserved, ok := ReservedPrefixCollision(prefix); ok {
+			problems = append(problems, fmt.Sprintf("the rig patch for %q sets bead prefix %q, in the reserved %q namespace; choose another prefix", p.Name, prefix, reserved))
 		}
 	}
 	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("this city splits its coordination classes into a binding that mints ids under the reserved prefixes (%s), and %s. A work store under a reserved prefix shares the binding's id namespace, so their ids collide. Choose a prefix outside the reserved set and start again",
+	return fmt.Errorf("this city splits its coordination classes into a binding that mints ids under the reserved prefixes (%s), and %s. A work store whose prefix is, or starts with, a reserved prefix shares the binding's id namespace, so their ids collide. Choose a prefix whose first segment is outside the reserved set",
 		reservedClassPrefixListText(), strings.Join(problems, "; and "))
+}
+
+// ReservedPrefixSplitRefusalForEdit is ReservedPrefixSplitRefusal for a
+// config about to be WRITTEN: next is the raw (pre-include) config an edit
+// produced for the city at tomlPath. A raw config does not carry a [storage]
+// declared in an include fragment, so when next names none and has fragments
+// the composed config on disk decides whether the city is split. A composed
+// load that fails decides nothing here; the boot gate still refuses.
+//
+// It is the check where a reserved prefix is INTRODUCED (gc rig add, the API
+// rig create and rig/config edits, gc init --from): refusing at boot alone
+// lets one command write a config every later CLI process refuses.
+func ReservedPrefixSplitRefusalForEdit(fs fsys.FS, tomlPath string, next *City) error {
+	if next == nil {
+		return nil
+	}
+	if RelocatesAnyClass(next) {
+		return ReservedPrefixSplitRefusal(next)
+	}
+	if len(next.Include) == 0 || fs == nil || tomlPath == "" {
+		return nil
+	}
+	composed, _, err := LoadWithIncludes(fs, tomlPath)
+	if err != nil || !RelocatesAnyClass(composed) {
+		return nil
+	}
+	check := *next
+	check.Storage = composed.Storage
+	return ReservedPrefixSplitRefusal(&check)
 }

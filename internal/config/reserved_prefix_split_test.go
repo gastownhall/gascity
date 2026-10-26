@@ -1,8 +1,12 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // R10 (split-default read audit): an ordinary city or rig name derives a
@@ -81,5 +85,68 @@ func TestReservedPrefixSplitRefusalLeavesSingleStoreCitiesToTheWarning(t *testin
 	}
 	if len(ReservedPrefixWarnings(single.Rigs, EffectiveHQPrefix(single))) != 2 {
 		t.Error("the single-store advisory no longer warns about both collisions")
+	}
+}
+
+// Review finding 5: a prefix whose FIRST hyphen segment is reserved collides
+// too. "gcg-alpha" mints "gcg-alpha-1", which is inside the binding's "gcg"
+// namespace.
+func TestReservedPrefixCollisionMatchesTheFirstSegment(t *testing.T) {
+	for prefix, want := range map[string]string{
+		"gcg": "gcg", "GCG": "gcg", "gcg-alpha": "gcg", "gco-x-y": "gco", "gcnq": "gcnq", "gcnq-q": "gcnq",
+	} {
+		if got, ok := ReservedPrefixCollision(prefix); !ok || got != want {
+			t.Errorf("ReservedPrefixCollision(%q) = (%q, %v), want (%q, true)", prefix, got, ok, want)
+		}
+	}
+	for _, prefix := range []string{"", "gc", "gcgx", "alpha-gcg", "mc", "gcx-alpha"} {
+		if got, ok := ReservedPrefixCollision(prefix); ok {
+			t.Errorf("ReservedPrefixCollision(%q) = %q, want no collision", prefix, got)
+		}
+	}
+	err := ReservedPrefixSplitRefusal(splitCityNamed("my-city", Rig{Name: "alpha", Prefix: "gcg-alpha"}))
+	if err == nil || !strings.Contains(err.Error(), `"gcg-alpha"`) || !strings.Contains(err.Error(), `"gcg"`) {
+		t.Errorf("a split city with rig prefix gcg-alpha: refusal = %v", err)
+	}
+}
+
+// The edit-time check sees a [storage] declared in an include fragment, which
+// the raw config being written does not carry.
+func TestReservedPrefixSplitRefusalForEditReadsFragmentStorage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "storage.toml"), []byte(`
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("include = [\"storage.toml\"]\n[workspace]\nname = \"my-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	next := &City{Include: []string{"storage.toml"}, Workspace: Workspace{Name: "my-city"}, Rigs: []Rig{{Name: "gas-city-ops", Path: "/tmp/x"}}}
+	if err := ReservedPrefixSplitRefusalForEdit(fsys.OSFS{}, tomlPath, next); err == nil || !strings.Contains(err.Error(), "gco") {
+		t.Errorf("ForEdit with fragment [storage] = %v, want the gco refusal", err)
+	}
+	next.Include = nil
+	if err := ReservedPrefixSplitRefusalForEdit(fsys.OSFS{}, tomlPath, next); err != nil {
+		t.Errorf("ForEdit with no fragments and no [storage] refused: %v", err)
+	}
+}
+
+func TestReservedPrefixSplitRefusalSeesARigPatchPrefix(t *testing.T) {
+	cfg := splitCityNamed("my-city", Rig{Name: "alpha", Prefix: "al"})
+	reserved := "gcs-alpha"
+	cfg.Patches.Rigs = []RigPatch{{Name: "alpha", Prefix: &reserved}}
+	if err := ReservedPrefixSplitRefusal(cfg); err == nil || !strings.Contains(err.Error(), "gcs-alpha") {
+		t.Errorf("a rig patch setting gcs-alpha on a split city: refusal = %v", err)
 	}
 }

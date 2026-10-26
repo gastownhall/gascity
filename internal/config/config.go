@@ -4858,13 +4858,13 @@ var defaultBranchCharset = regexp.MustCompile(`^[A-Za-z0-9._/@+=-]+$`)
 // EffectiveHQPrefix).
 func ReservedPrefixWarnings(rigs []Rig, hqPrefix string) []string {
 	var warnings []string
-	if IsReservedClassPrefix(hqPrefix) {
-		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
+	if _, ok := ReservedPrefixCollision(hqPrefix); ok {
+		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is, or starts with, a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
 	}
 	for _, r := range rigs {
 		prefix := strings.ToLower(r.EffectivePrefix())
-		if IsReservedClassPrefix(prefix) {
-			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", r.Name, prefix, reservedClassPrefixListText()))
+		if _, ok := ReservedPrefixCollision(prefix); ok {
+			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is, or starts with, a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", r.Name, prefix, reservedClassPrefixListText()))
 		}
 	}
 	return warnings

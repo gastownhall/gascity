@@ -2236,6 +2236,18 @@ func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg
 	if err != nil {
 		return err
 	}
+	// A city initialized from a split source must not be given a reserved
+	// prefix (split-default R10): its first boot, and every CLI process,
+	// would refuse it.
+	if cfg != nil {
+		next := *cfg
+		next.Workspace.Name = cityName
+		next.ResolvedWorkspaceName = cityName
+		next.ResolvedWorkspacePrefix = cityPrefix
+		if err := config.ReservedPrefixSplitRefusalForEdit(fs, cityTomlPath, &next); err != nil {
+			return err
+		}
+	}
 	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, cityPrefix); err != nil {
 		if restoreErr := restoreLegacyWorkspaceIdentity(fs, cityTomlPath, cfg, cityName, cityPrefix); restoreErr != nil {
 			return errors.Join(err, fmt.Errorf("restoring legacy workspace identity: %w", restoreErr))
