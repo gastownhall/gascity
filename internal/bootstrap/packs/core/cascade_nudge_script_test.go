@@ -51,41 +51,68 @@ func countNudges(t *testing.T, logPath string) (int, string) {
 // the process that closed the bead and from the controller's cache when its
 // read saw the close first. When the copies land on either side of an order
 // evaluation the order runs once per copy, and the second run's lookback
-// window holds both. The dependent's assignee must still be nudged once.
+// window holds both. The dependent must still be nudged exactly once —
+// whether it is nudged at an assignee or, since #6020 left routed steps
+// unassigned until a session claims them, at its gc.routed_to target.
 func TestCascadeNudgeAbsorbsDuplicateCloseEvents(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
 	}
-	dir := t.TempDir()
-	eventsPath := filepath.Join(dir, "events.jsonl")
-	binDir, logPath := fakeGCBin(t, `case "$1" in
-events) cat '`+eventsPath+`' ;;
-bd) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
-esac
-exit 0
-`)
-	stateDir := filepath.Join(dir, "state")
-	copies := []string{
-		`{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
-		`{"seq":8,"type":"bead.closed","actor":"cache-reconcile","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
-	}
 
-	var events strings.Builder
-	for i, line := range copies {
-		events.WriteString(line + "\n")
-		if err := os.WriteFile(eventsPath, []byte(events.String()), 0o644); err != nil {
-			t.Fatalf("write events: %v", err)
-		}
-		if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
-			t.Fatalf("run %d: cascade-nudge-on-blocker-close.sh failed: %v\n%s", i+1, err, out)
-		}
-		if got, logged := countNudges(t, logPath); got != 1 {
-			t.Fatalf("after run %d: nudges = %d, want 1 for one close delivered twice; gc calls:\n%s", i+1, got, logged)
-		}
+	cases := []struct {
+		name    string
+		depJSON string
+		members map[string][]string
+		wantTo  string
+	}{
+		{
+			name:    "assigned dependent",
+			depJSON: `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
+			wantTo:  "worker-1",
+		},
+		{
+			name:    "routed unassigned dependent",
+			depJSON: `[{"id":"ga-dep","status":"open","assignee":"","metadata":{"gc.routed_to":"gascity/pool"}}]`,
+			members: map[string][]string{"gascity/pool": {"pool-1"}},
+			wantTo:  "pool-1",
+		},
 	}
-	_, logged := countNudges(t, logPath)
-	if !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed") {
-		t.Fatalf("the nudge must reach the dependent's assignee and name the blocker; gc calls:\n%s", logged)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			binDir, logPath := fakeGCBin(t, cascadeFake{
+				eventsPath: eventsPath,
+				depJSON:    tc.depJSON,
+				members:    tc.members,
+				failDir:    dir,
+			}.body())
+			stateDir := filepath.Join(dir, "state")
+			copies := []string{
+				`{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
+				`{"seq":8,"type":"bead.closed","actor":"cache-reconcile","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed"}}}`,
+			}
+
+			var events strings.Builder
+			for i, line := range copies {
+				events.WriteString(line + "\n")
+				if err := os.WriteFile(eventsPath, []byte(events.String()), 0o644); err != nil {
+					t.Fatalf("write events: %v", err)
+				}
+				if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+					t.Fatalf("run %d: cascade-nudge-on-blocker-close.sh failed: %v\n%s", i+1, err, out)
+				}
+				got, logged := countNudges(t, logPath)
+				if got != 1 || countNudgesTo(t, logPath, tc.wantTo) != 1 {
+					t.Fatalf("after run %d: nudges = %d (to %s = %d), want exactly 1 to %s for one close delivered twice; gc calls:\n%s",
+						i+1, got, tc.wantTo, countNudgesTo(t, logPath, tc.wantTo), tc.wantTo, logged)
+				}
+			}
+			_, logged := countNudges(t, logPath)
+			if !strings.Contains(logged, "gc session nudge "+tc.wantTo+" blocker ga-blk closed") {
+				t.Fatalf("the nudge must reach %s and name the blocker; gc calls:\n%s", tc.wantTo, logged)
+			}
+		})
 	}
 }
 
