@@ -6,9 +6,12 @@
 # work can resume: they poll, get nudged by hand, or miss the unblock.
 #
 # This order subscribes to bead.closed events. For each closed bead it
-# resolves the dependents linked by a `blocks` dependency and nudges the
-# assignee of every open or deferred dependent. Idempotent: a given
-# (blocker, dependent) pair is nudged at most once. Dedup state lives in
+# resolves the dependents linked by a `blocks` dependency and nudges every
+# open or deferred dependent's owner: its assignee when set, otherwise its
+# gc.routed_to target (a graph.v2 step stays unassigned until a session
+# claims it), resolving a pool base to the pool's active members.
+# Idempotent: a given (blocker, dependent) pair is nudged at most once,
+# whichever path delivered it. Dedup state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
 # both city- and pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -20,10 +23,12 @@
 # cache), and the blocker list and the per-pair dedup absorb the repeat.
 #
 # Cross-rig blocker chains within a city are supported via a prefix->rig
-# lookup so `gc bd dep list` and `gc session nudge` are scoped to the rig that
+# lookup so `gc bd dep list` and the assignee nudge are scoped to the rig that
 # owns each bead. The dep lookup routes through `gc bd` (not bare `bd`) so the
 # wrapper runs bd in the owning rig's directory; `--rig` is a gc flag, not a
-# bd flag. Cross-city cascade is out of scope.
+# bd flag. A gc.routed_to target is city-qualified and may name another rig,
+# so the routed nudge runs in default scope. Cross-city cascade is out of
+# scope.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -96,6 +101,33 @@ set_rig_args() {
     fi
 }
 
+# Nudge the session(s) named by a routed_to target with message $2. A
+# multi-session pool routes to the pool BASE (NormalizePoolRouteTarget
+# collapses slot -> base), which is the members' `template`, not a session
+# name — `gc session nudge` resolves a single session and cannot target a pool
+# base. So enumerate the pool's active members by template and nudge each; a
+# target with no members (a single-session agent, or an explicit slot name) is
+# nudged directly. Returns 0 if at least one nudge succeeded, non-zero
+# otherwise. Mirrors nudge_routed_target in nudge-on-route.sh.
+nudge_routed_target() {
+    local _target="$1" _msg="$2" _members _any _m
+    _members="$(gc session list --json --state active --template "$_target" 2>/dev/null \
+        | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || _members=""
+    if [ -n "$_members" ]; then
+        _any=1
+        while IFS= read -r _m; do
+            [ -n "$_m" ] || continue
+            if gc session nudge "$_m" "$_msg" >/dev/null 2>&1; then
+                _any=0
+            fi
+        done <<MEMBERS
+$_members
+MEMBERS
+        return "$_any"
+    fi
+    gc session nudge "$_target" "$_msg" >/dev/null 2>&1
+}
+
 # Pull recent bead.closed events. Best-effort: a read failure must not
 # crash the controller's order loop.
 EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
@@ -120,16 +152,24 @@ while IFS= read -r blocker; do
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
-    # Dependents that are still open/deferred and have an assignee to nudge.
+    # Dependents that are still open/deferred, as "<id>\t<kind>\t<target>":
+    # kind "assignee" when the dependent has an assignee, else "route" when it
+    # carries a gc.routed_to target. Every field is non-empty, so no empty
+    # column can shift the target into the wrong field. Malformed assignee or
+    # metadata values drop only their own row.
     ROWS="$(printf '%s' "$DEPS" \
         | jq -r '.[]
-                 | select((.status == "open" or .status == "deferred")
-                          and (.assignee != null and .assignee != ""))
-                 | [.id, .assignee] | @tsv' 2>/dev/null)" || ROWS=""
+                 | select(.status == "open" or .status == "deferred")
+                 | ((.assignee | strings) // "") as $assignee
+                 | ((.metadata | objects | .["gc.routed_to"] | strings) // "") as $route
+                 | if $assignee != "" then [.id, "assignee", $assignee]
+                   elif $route != "" then [.id, "route", $route]
+                   else empty end
+                 | @tsv' 2>/dev/null)" || ROWS=""
     [ -n "$ROWS" ] || continue
 
-    while IFS="$(printf '\t')" read -r dep_id assignee; do
-        if [ -z "$dep_id" ] || [ -z "$assignee" ]; then continue; fi
+    while IFS="$(printf '\t')" read -r dep_id kind target; do
+        if [ -z "$dep_id" ] || [ -z "$kind" ] || [ -z "$target" ]; then continue; fi
         key="$blocker|$dep_id"
         if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
@@ -137,8 +177,22 @@ while IFS= read -r blocker; do
         fi
         set_rig_args "$dep_id"
         [ -z "$RIG_SUSPENDED" ] || continue
-        msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-        if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
+        delivered=""
+        case "$kind" in
+            assignee)
+                msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
+                if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" >/dev/null 2>&1; then
+                    delivered=1
+                fi
+                ;;
+            route)
+                msg="blocker $blocker closed — routed dependent $dep_id may be ready to claim"
+                if nudge_routed_target "$target" "$msg"; then
+                    delivered=1
+                fi
+                ;;
+        esac
+        if [ -n "$delivered" ]; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             NUDGED=$((NUDGED + 1))
         fi

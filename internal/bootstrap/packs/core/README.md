@@ -22,7 +22,7 @@ none requires per-city configuration.
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
 | `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
-| **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees when a blocker bead closes** |
+| **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees or routed targets when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 
@@ -89,19 +89,35 @@ absorbs. For each closed bead it resolves dependents via:
 gc bd dep list <blocker> --direction=up --type=blocks --json
 ```
 
-and nudges the `assignee` of every dependent whose status is `open` or
-`deferred`:
+and nudges every dependent whose status is `open` or `deferred`. A dependent
+with an `assignee` nudges that assignee:
 
 ```
 gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> may be unblocked"
 ```
 
-**Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
-dependency lookup and the nudge to the rig that owns each bead, so cross-rig
-blocker chains within a city resolve correctly. Cross-city cascade is out of
-scope.
+An unassigned dependent with `metadata["gc.routed_to"]` — the graph.v2 shape,
+where a step stays unassigned until a session claims it — nudges the routed
+target instead. A pool base is the members' template, not a session name, so
+the order nudges each of the pool's active members
+(`gc session list --json --state active --template <routed_to>`), or the target
+itself when it has none:
 
-**Idempotence.** A `(blocker, dependent)` pair is nudged at most once.
+```
+gc session nudge <member> "blocker <blocker> closed — routed dependent <dep> may be ready to claim"
+```
+
+A dependent with neither is skipped.
+
+**Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
+dependency lookup and the assignee nudge to the rig that owns each bead, so
+cross-rig blocker chains within a city resolve correctly. A `gc.routed_to`
+target is city-qualified and may name another rig, so the routed nudge runs in
+default scope. Cross-city cascade is out of scope.
+
+**Idempotence.** A `(blocker, dependent)` pair is nudged at most once, by
+either path. A pair whose nudge fails is not recorded and is retried on the
+next run.
 
 **Dedup state.**
 `$GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json` — a JSON object
