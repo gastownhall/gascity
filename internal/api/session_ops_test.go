@@ -1689,6 +1689,12 @@ func TestSessionContentOpsUnmaterializedNamedTarget(t *testing.T) {
 				if acc.Op != nil || len(e.opRows(t)) != 0 {
 					t.Fatalf("auto recorded an unmaterialized target: %+v", acc)
 				}
+				// The 202 answers before the delivery runs: it materializes the
+				// named session, under the city's name locks, after the
+				// response. Wait for its terminal event, as require does, so
+				// the delivery is not still writing the city when the test's
+				// TempDir is removed (ga-qybvuf).
+				waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
 				return
 			}
 			if acc.Op == nil || acc.Op.Conversation == "" {
