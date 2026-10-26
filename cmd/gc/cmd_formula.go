@@ -917,6 +917,17 @@ store, copy them into the binding with
 						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
+					// The --meta stamp runs outside the closure: an error returned
+					// from inside it is handled above and closes the synthetic input
+					// convoy of a workflow that is already instantiated and wired,
+					// which a failed stamp must not do. Out here it also covers the
+					// `existing != nil` adopt return, so a repeat cook converges on
+					// the requested metadata. Past the attachStore != store refusal
+					// above, attachStore IS store, and the root was instantiated
+					// through store.
+					if err := stampFormulaCookRootMetadata(store, result.RootID, rootMeta); err != nil {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+					}
 					if jsonOutput {
 						if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
 							SchemaVersion:  "1",

@@ -931,3 +931,43 @@ func TestRecipeCoordClassRederivesTheVerdictFromTheClassifier(t *testing.T) {
 		})
 	}
 }
+
+// TestFormulaCookAttachStampsMetaOnTheRoot asserts the documented --meta
+// contract ("set root bead metadata after cook") holds on the --attach arms as
+// it does on a standalone cook, for both formula compilers (issue #7309).
+func TestFormulaCookAttachStampsMetaOnTheRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	resetCLIStorageRoutes(t)
+	seedCLIStorageRoutes(t, cityDir, nil)
+	work, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
+	want := map[string]string{
+		"work_dir":         "/tmp/cook-repro-worktree",
+		"review_work_bead": "fixture-bead",
+		"base_sha":         "base-abc",
+		"head_sha":         "head-def",
+	}
+	var metaArgs []string
+	for k, v := range want {
+		metaArgs = append(metaArgs, "--meta", k+"="+v)
+	}
+
+	for _, formulaName := range []string{"legacy-work", "graph-work"} {
+		source, err := work.Create(beads.Bead{Title: "attach target " + formulaName, Type: "task"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+		res := cookFormula(t, formulaName, append([]string{"--attach", source.ID}, metaArgs...)...)
+		root, err := work.Get(res.RootID)
+		if err != nil {
+			t.Fatalf("%s: get attached root %s: %v", formulaName, res.RootID, err)
+		}
+		for k, v := range want {
+			if got := root.Metadata[k]; got != v {
+				t.Errorf("%s --attach: root %s metadata %s = %q, want %q", formulaName, res.RootID, k, got, v)
+			}
+		}
+	}
+}
