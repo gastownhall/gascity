@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/packman"
 )
 
@@ -3672,5 +3673,58 @@ func TestDefaultImportHeadCommitRedactsUserinfo(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "ghp_secret") {
 		t.Fatalf("resolve error leaked the userinfo token: %v", err)
+	}
+}
+
+// TestPrintCredentialHintBytes pins the exact stderr bytes printCredentialHint
+// writes for both auth-classified forms (and silence for non-auth errors), so
+// the CLI hint text stays byte-identical when the hint text gains a non-
+// printing consumer (the doctor --fix remediation path).
+func TestPrintCredentialHintBytes(t *testing.T) {
+	unmatched := &gitcred.AuthError{
+		Host:      "github.com",
+		OrgPrefix: "github.com/acme",
+		Repo:      "https://github.com/acme/private",
+		Output:    "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+	}
+	matched := &gitcred.AuthError{
+		Host:       "github.com",
+		OrgPrefix:  "github.com/acme",
+		Repo:       "https://github.com/acme/private",
+		Matched:    true,
+		RuleOrigin: "/city/.gc/credentials.toml",
+		Output:     "fatal: Authentication failed for 'https://github.com/acme/private'",
+	}
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "unmatched",
+			err:  unmatched,
+			want: "hint: this source requires authentication; register a pack credential and retry:\n" +
+				"  gc import credential add github.com/acme --helper 'gh auth token'\n" +
+				"  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n",
+		},
+		{
+			name: "matched",
+			err:  matched,
+			want: "hint: credential rule from /city/.gc/credentials.toml matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n",
+		},
+		{
+			name: "non auth error",
+			err:  fmt.Errorf("connection timed out"),
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			printCredentialHint(&stderr, tc.err)
+			if got := stderr.String(); got != tc.want {
+				t.Fatalf("stderr = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

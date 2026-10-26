@@ -16,6 +16,7 @@ type mockCheck struct {
 	status   CheckStatus
 	severity CheckSeverity
 	msg      string
+	fixHint  string
 	canFix   bool
 	fixErr   error
 	fixed    bool          // set by Fix
@@ -37,6 +38,7 @@ func (m *mockCheck) Run(_ *CheckContext) *CheckResult {
 		Status:   st,
 		Severity: m.severity,
 		Message:  m.msg,
+		FixHint:  m.fixHint,
 	}
 }
 func (m *mockCheck) CanFix() bool { return m.canFix }
@@ -221,6 +223,75 @@ func TestDoctor_FixFails(t *testing.T) {
 	if !strings.Contains(buf.String(), "fix failed: fix failed") {
 		t.Errorf("output missing fix error: %q", buf.String())
 	}
+}
+
+// TestDoctor_FixHintErrorReplacesHint pins the runner's handling of a fix
+// failure that carries its own remedy: a *FixHintError's Hint replaces the
+// result's pre-fix FixHint while FixError keeps the underlying error's text,
+// and a plain error leaves FixError and FixHint exactly as they were.
+func TestDoctor_FixHintErrorReplacesHint(t *testing.T) {
+	t.Run("fix hint error replaces run hint", func(t *testing.T) {
+		d := &Doctor{}
+		d.Register(&mockCheck{
+			name:    "auth-fail",
+			status:  StatusError,
+			msg:     "bad",
+			fixHint: `run "gc doctor --fix" or "gc import install"`,
+			canFix:  true,
+			fixErr:  &FixHintError{Err: fmt.Errorf("sync failed"), Hint: "register a pack credential"},
+		})
+
+		var buf bytes.Buffer
+		r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+		res := r.Results[0]
+		if res.FixError != "sync failed" {
+			t.Errorf("FixError = %q, want the underlying error text %q", res.FixError, "sync failed")
+		}
+		if res.FixHint != "register a pack credential" {
+			t.Errorf("FixHint = %q, want the failure's own hint", res.FixHint)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "fix failed: sync failed") {
+			t.Errorf("output missing fix error: %q", out)
+		}
+		if !strings.Contains(out, "hint: register a pack credential") {
+			t.Errorf("output missing the replaced hint: %q", out)
+		}
+		if strings.Contains(out, "gc import install") {
+			t.Errorf("output still shows the pre-fix hint: %q", out)
+		}
+	})
+
+	t.Run("plain error keeps run hint", func(t *testing.T) {
+		d := &Doctor{}
+		d.Register(&mockCheck{
+			name:    "plain-fail",
+			status:  StatusError,
+			msg:     "bad",
+			fixHint: "check your network and retry",
+			canFix:  true,
+			fixErr:  fmt.Errorf("lockfile write"),
+		})
+
+		var buf bytes.Buffer
+		r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+		res := r.Results[0]
+		if res.FixError != "lockfile write" {
+			t.Errorf("FixError = %q, want %q", res.FixError, "lockfile write")
+		}
+		if res.FixHint != "check your network and retry" {
+			t.Errorf("FixHint = %q, want the Run hint unchanged", res.FixHint)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "hint: check your network and retry") {
+			t.Errorf("output missing the Run hint: %q", out)
+		}
+		if strings.Contains(out, "credential") {
+			t.Errorf("non-auth failure printed a credential hint: %q", out)
+		}
+	})
 }
 
 func TestDoctor_FixSucceedsButCheckStillFails(t *testing.T) {

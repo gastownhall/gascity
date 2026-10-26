@@ -117,6 +117,17 @@ func durableRegistryImportDetails(imports map[string]config.Import) []string {
 
 func (c *importStateDoctorCheck) CanFix() bool { return true }
 
+// withCredentialFixHint wraps a doctor --fix import failure that carries an
+// auth classification so the runner reports the same credential remediation
+// `gc import install` prints, instead of the check's generic sync hint.
+// Non-auth errors pass through unchanged.
+func withCredentialFixHint(err error) error {
+	if hint, ok := credentialHint(err); ok {
+		return &doctor.FixHintError{Err: err, Hint: hint}
+	}
+	return err
+}
+
 func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	imports, err := collectAllImportsFS(c.cityPath)
 	if err != nil {
@@ -149,13 +160,13 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	}
 	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
 		return err
 	}
 	if _, err := installLockedImports(c.cityPath); err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	return nil
 }

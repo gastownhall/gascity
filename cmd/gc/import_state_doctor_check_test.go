@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/packman"
 )
 
@@ -1100,5 +1103,150 @@ schema = 1
 	after := check.Run(&doctor.CheckContext{CityPath: cityDir})
 	if after.Status != doctor.StatusOK {
 		t.Fatalf("status after fix = %v, want OK; result=%#v", after.Status, after)
+	}
+}
+
+// The exact remediation text `gc import install` prints after "hint: " for an
+// auth-classified failure (pinned byte-for-byte by TestPrintCredentialHintBytes).
+// The doctor --fix import paths must surface the same text, not their generic
+// sync hint, when their fetch fails auth.
+const wantUnmatchedCredentialHint = "this source requires authentication; register a pack credential and retry:\n" +
+	"  gc import credential add github.com/acme --helper 'gh auth token'\n" +
+	"  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)"
+
+const wantMatchedCredentialHint = "credential rule from /city/.gc/credentials.toml matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)"
+
+func testAuthError(matched bool) *gitcred.AuthError {
+	return &gitcred.AuthError{
+		Host:       "github.com",
+		OrgPrefix:  "github.com/acme",
+		Repo:       "https://github.com/acme/private",
+		Matched:    matched,
+		RuleOrigin: "/city/.gc/credentials.toml",
+		Output:     "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+	}
+}
+
+// TestImportStateDoctorCheckFixWrapsAuthErrorWithCredentialHint proves Fix
+// returns the fetch error wrapped so the doctor runner reports the credential
+// remediation instead of the check's generic sync hint — for both auth forms
+// and from both fetch sites (syncImports and installLockedImports).
+func TestImportStateDoctorCheckFixWrapsAuthErrorWithCredentialHint(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+
+	t.Run("unmatched from sync", func(t *testing.T) {
+		authErr := testAuthError(false)
+		syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+			return nil, authErr
+		}
+		err := newImportStateDoctorCheck(dir).Fix(nil)
+		var hinted *doctor.FixHintError
+		if !errors.As(err, &hinted) {
+			t.Fatalf("Fix error = %v, want a *doctor.FixHintError", err)
+		}
+		if hinted.Error() != authErr.Error() {
+			t.Fatalf("FixHintError text = %q, want the unchanged error text %q", hinted.Error(), authErr.Error())
+		}
+		if hinted.Hint != wantUnmatchedCredentialHint {
+			t.Fatalf("Hint = %q, want the unmatched credential remediation", hinted.Hint)
+		}
+		var auth *gitcred.AuthError
+		if !errors.As(err, &auth) {
+			t.Fatalf("FixHintError no longer unwraps to *gitcred.AuthError: %v", err)
+		}
+	})
+
+	t.Run("matched from install", func(t *testing.T) {
+		authErr := testAuthError(true)
+		syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+			return &packman.Lockfile{Schema: packman.LockfileSchema}, nil
+		}
+		installLockedImports = func(_ string) (*packman.Lockfile, error) {
+			return nil, authErr
+		}
+		err := newImportStateDoctorCheck(dir).Fix(nil)
+		var hinted *doctor.FixHintError
+		if !errors.As(err, &hinted) {
+			t.Fatalf("Fix error = %v, want a *doctor.FixHintError", err)
+		}
+		if hinted.Hint != wantMatchedCredentialHint {
+			t.Fatalf("Hint = %q, want the matched credential remediation", hinted.Hint)
+		}
+	})
+
+	t.Run("plain error passes through unwrapped", func(t *testing.T) {
+		syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+			return nil, fmt.Errorf("network timeout")
+		}
+		err := newImportStateDoctorCheck(dir).Fix(nil)
+		var hinted *doctor.FixHintError
+		if errors.As(err, &hinted) {
+			t.Fatalf("plain error was wrapped in a FixHintError: %v", err)
+		}
+		if err == nil || err.Error() != "network timeout" {
+			t.Fatalf("Fix error = %v, want the unchanged network timeout", err)
+		}
+	})
+}
+
+// TestImportStateDoctorCheckFixAuthErrorHintReported runs the full doctor
+// runner: a failed import-state fix that carries an auth classification must
+// report the unchanged FixError and replace the check's pre-fix FixHint with
+// the credential remediation `gc import install` prints.
+func TestImportStateDoctorCheckFixAuthErrorHintReported(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+		checkInstalledImports = prevCheck
+	})
+
+	authErr := testAuthError(false)
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return nil, authErr
+	}
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{
+			CheckedSources: 1,
+			Issues: []packman.CheckIssue{{
+				Severity:   packman.CheckSeverityError,
+				Code:       "missing-lock-entry",
+				ImportName: "private",
+				Source:     "https://github.com/acme/private",
+			}},
+		}, nil
+	}
+
+	d := &doctor.Doctor{}
+	d.Register(newImportStateDoctorCheck(dir))
+	var buf bytes.Buffer
+	report := d.Run(&doctor.CheckContext{CityPath: dir}, &buf, true)
+
+	res := report.Results[0]
+	if res.FixError != authErr.Error() {
+		t.Fatalf("FixError = %q, want the unchanged error text %q", res.FixError, authErr.Error())
+	}
+	if res.FixHint != wantUnmatchedCredentialHint {
+		t.Fatalf("FixHint = %q, want the credential remediation that replaces the generic sync hint", res.FixHint)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "hint: this source requires authentication; register a pack credential and retry:") {
+		t.Fatalf("output missing the credential hint:\n%s", out)
+	}
+	if strings.Contains(out, `run "gc doctor --fix" or "gc import install"`) {
+		t.Fatalf("output still shows the pre-fix sync hint:\n%s", out)
 	}
 }

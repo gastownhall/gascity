@@ -127,21 +127,31 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// credentialHint returns the pack-credential remediation text for an auth-
+// classified network git failure, or ok=false when err carries no auth
+// classification. The text is the single source of truth for the hint: the
+// import and rig commands print it after "hint: ", and the doctor --fix import
+// paths surface it as their FixHintError (pinned by exact-match tests).
+func credentialHint(err error) (string, bool) {
+	var authErr *gitcred.AuthError
+	if !errors.As(err, &authErr) {
+		return "", false
+	}
+	if authErr.Matched {
+		return fmt.Sprintf("credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)", authErr.RuleOrigin), true
+	}
+	return fmt.Sprintf("this source requires authentication; register a pack credential and retry:\n  gc import credential add %s --helper 'gh auth token'\n  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)", authErr.OrgPrefix), true
+}
+
 // printCredentialHint appends the pack-credential remediation hint when err
 // carries an auth classification from a network git run. It is deliberately
 // separate from importAddErrorLine's framing (pinned by exact-match tests).
 func printCredentialHint(stderr io.Writer, err error) {
-	var authErr *gitcred.AuthError
-	if !errors.As(err, &authErr) {
+	hint, ok := credentialHint(err)
+	if !ok {
 		return
 	}
-	if authErr.Matched {
-		fmt.Fprintf(stderr, "hint: credential rule from %s matched but the remote rejected it; check the token is valid and has contents:read on this repository (gc import credential list)\n", authErr.RuleOrigin) //nolint:errcheck
-		return
-	}
-	fmt.Fprintf(stderr, "hint: this source requires authentication; register a pack credential and retry:\n")                                            //nolint:errcheck
-	fmt.Fprintf(stderr, "  gc import credential add %s --helper 'gh auth token'\n", authErr.OrgPrefix)                                                   //nolint:errcheck
-	fmt.Fprintf(stderr, "  (--token-file, --token-env, and --ssh-key-file are the non-interactive alternatives; see gc import credential add --help)\n") //nolint:errcheck
+	fmt.Fprintf(stderr, "hint: %s\n", hint) //nolint:errcheck
 }
 
 func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/migrate"
 	"github.com/gastownhall/gascity/internal/packman"
 )
@@ -1537,5 +1539,42 @@ source = ".gc/system/packs/gastown"
 	}
 	if string(after) != fragment {
 		t.Fatalf("Fix rewrote the wave-1 fragment import:\n%s", after)
+	}
+}
+
+// TestBuiltinImportDoctorCheck_FixWrapsAuthErrorWithCredentialHint proves the
+// builtin-pack-imports fix's resync step surfaces the credential remediation
+// (the text gc import install prints) when its fetch fails with an
+// auth-classified error, instead of returning the bare git failure.
+func TestBuiltinImportDoctorCheck_FixWrapsAuthErrorWithCredentialHint(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+
+	authErr := testAuthError(false)
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return nil, authErr
+	}
+
+	err := newBuiltinImportDoctorCheck(dir).Fix(nil)
+	var hinted *doctor.FixHintError
+	if !errors.As(err, &hinted) {
+		t.Fatalf("Fix error = %v, want a *doctor.FixHintError", err)
+	}
+	if hinted.Error() != authErr.Error() {
+		t.Fatalf("FixHintError text = %q, want the unchanged error text %q", hinted.Error(), authErr.Error())
+	}
+	if hinted.Hint != wantUnmatchedCredentialHint {
+		t.Fatalf("Hint = %q, want the unmatched credential remediation", hinted.Hint)
+	}
+	var auth *gitcred.AuthError
+	if !errors.As(err, &auth) {
+		t.Fatalf("FixHintError no longer unwraps to *gitcred.AuthError: %v", err)
 	}
 }
