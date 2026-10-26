@@ -6628,59 +6628,36 @@ prompt_template = %q
 // TestDoPrimeStrictTemplateRendersLegitimatelyEmpty verifies that --strict
 // does NOT error when a template file exists but produces empty output.
 // Templates with conditional blocks (e.g., `{{if .RigName}}...{{end}}`)
-// can legitimately evaluate to empty under some contexts; strict mode is
-// a typo/missing-file detector, not a check that templates produce
-// substantial content. The absence of this test would let the missing-
-// file strict check quietly regress into a broader empty-render check.
+// can legitimately evaluate to empty under some contexts, and an absent key
+// renders empty under missingkey=zero; strict mode fails on templates that
+// cannot be read or rendered, not on templates that render little. The
+// .template.md path matters: a plain .md is never executed, so it could not
+// exercise an empty render.
 func TestDoPrimeStrictTemplateRendersLegitimatelyEmpty(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
-
-	dir := t.TempDir()
-	gcDir := filepath.Join(dir, ".gc")
-	if err := os.MkdirAll(gcDir, 0o755); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		body string
+	}{
+		// RigName is empty when GC_RIG isn't set, so the conditional
+		// short-circuits the whole template body.
+		{name: "conditional", body: `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`},
+		{name: "absent key", body: `{{.NoSuchKey}}`},
 	}
-	promptDir := filepath.Join(dir, "prompts")
-	if err := os.MkdirAll(promptDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Template file exists but renders to empty string under this context.
-	// {{if}} with a missing/empty key (RigName is empty when GC_RIG isn't set)
-	// short-circuits the whole template body.
-	emptyTemplate := `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`
-	if err := os.WriteFile(filepath.Join(promptDir, "mayor.md"), []byte(emptyTemplate), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	toml := `[workspace]
-name = "test-city"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			setupStrictPrimeTemplateCity(t, tt.body)
 
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
-`
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	orig, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_CITY_PATH", dir)
-
-	// Clear GC_RIG so .RigName evaluates to empty and the conditional
-	// short-circuits. Without this, an ambient GC_RIG would produce output.
-	t.Setenv("GC_RIG", "")
-	t.Setenv("GC_RIG_ROOT", "")
-	t.Setenv("GC_AGENT", "")
-	t.Setenv("GC_ALIAS", "")
-
-	var stdout, stderr bytes.Buffer
-	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
-	if code != 0 {
-		t.Fatalf("doPrimeWithMode(strict=true, legitimately-empty template) = %d, want 0; stderr: %s", code, stderr.String())
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, legitimately-empty template) = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "prompt template") {
+				t.Errorf("stderr = %q, want no template render warning", stderr.String())
+			}
+		})
 	}
 }
 
