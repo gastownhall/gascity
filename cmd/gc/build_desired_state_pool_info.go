@@ -231,7 +231,14 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// today's behavior (a genuine crash gets a fresh identity rather than
 		// resuming a possibly-corrupt conversation); their freeable rows are
 		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
+		//
+		// A persistent canonical singleton (max_active_sessions = 1) is the
+		// exception: it has a single identity, so skipping its asleep bead
+		// while claimFreshPoolSlotInfo still counts it as the canonical holder
+		// stalls the pool ("slot stalled on its own runtime name"). It is
+		// reused through the wake path on a freeable reason, like a one_shot.
+		if !isPoolSessionSlotFreeableInfo(info, bp.now()) ||
+			(cfgAgent.Lifecycle != config.AgentLifecycleOneShot && !cfgAgent.UsesCanonicalSingletonPoolIdentity()) {
 			return false
 		}
 		// A one_shot exit that still holds an open/in-progress assigned work
