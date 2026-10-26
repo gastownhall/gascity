@@ -430,21 +430,19 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // through findLiveActiveBeadInStores.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
-	if !live {
-		// A rig suspended in runtime state (what `gc rig suspend` records)
-		// gets no background cache (rigStoreBackgroundRefresh), so a List on
-		// its store goes to bd and restarts its retired proxy and Dolt — the
-		// rule statusWorkCounts already follows. Cached lookups leave those
-		// stores unread (#8162).
-		cold := s.loadCacheColdRigs()
-		filtered := make(map[string]beads.Store, len(stores))
-		for name, store := range stores {
-			if !cold[name] {
-				filtered[name] = store
-			}
+	// A rig suspended in runtime state (what `gc rig suspend` records) gets
+	// no background cache (rigStoreBackgroundRefresh), so a List on its
+	// store goes to bd and restarts its retired proxy and Dolt — the rule
+	// statusWorkCounts already follows. Cached and live lookups leave those
+	// stores unread (#8162).
+	cold := s.loadCacheColdRigs()
+	filtered := make(map[string]beads.Store, len(stores))
+	for name, store := range stores {
+		if !cold[name] {
+			filtered[name] = store
 		}
-		stores = filtered
 	}
+	stores = filtered
 	var rigNames []string
 	if rig != "" {
 		if _, ok := stores[rig]; ok {

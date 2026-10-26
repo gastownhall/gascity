@@ -1973,6 +1973,62 @@ func suspendRigAtRuntime(t *testing.T, state *fakeState, rig string) {
 	}
 }
 
+// newActiveBeadTwoRigState builds a state over rigs alpha and beta, each
+// backed by a List-counting store, ready for suspension experiments. alpha
+// sorts first, so before any skip the unscoped lookup reads it first and its
+// bead wins.
+func newActiveBeadTwoRigState(t *testing.T) (*fakeState, *listCountingStore, *listCountingStore) {
+	t.Helper()
+	state := newFakeState(t)
+	state.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "/tmp/alpha"},
+		{Name: "beta", Path: "/tmp/beta"},
+	}
+	alpha := &listCountingStore{Store: beads.NewMemStore()}
+	beta := &listCountingStore{Store: beads.NewMemStore()}
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	return state, alpha, beta
+}
+
+// TestActiveBeadLookupSkipsSuspendedRig: a rig suspended in runtime state
+// (what `gc rig suspend` records) runs no background cache
+// (rigStoreBackgroundRefresh), so every List on its store goes to bd and
+// restarts its retired proxy and Dolt. Both lookup paths — cached (the
+// session and agent lists) and live (session get/create, agent detail) —
+// must leave it untouched and still find the session's work on the rigs
+// that run (#8162).
+func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{
+		{"cached", false},
+		{"live", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, alpha, beta := newActiveBeadTwoRigState(t)
+			suspendRigAtRuntime(t, state, "alpha")
+			alphaWork := addActiveWork(t, alpha, "sess-1")
+			betaWork := addActiveWork(t, beta, "sess-1")
+
+			s := New(state)
+			var got string
+			if tc.live {
+				got = s.findLiveActiveBeadForAssignees("", "sess-1")
+			} else {
+				got = s.findActiveBeadForAssignees("", "sess-1")
+			}
+
+			if got != betaWork {
+				t.Fatalf("active bead = %q, want beta's %q (alpha's would be %q)", got, betaWork, alphaWork)
+			}
+			if n := alpha.listCalls.Load(); n != 0 {
+				t.Errorf("suspended rig alpha List calls = %d, want 0", n)
+			}
+		})
+	}
+}
+
 // TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias: in legacy
 // shared-file mode every rig aliases one store, and sortedRigNames keeps only
 // the alphabetically first alias. The cold-rig filter must run before that
