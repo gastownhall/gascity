@@ -328,13 +328,8 @@ type lateAsyncStartListProvider struct {
 	listCalls int
 	// startReturnDelay holds Start open after the runtime is up, the window
 	// a loaded machine opens between the runtime appearing and the async
-	// start committing its session bead.
+	// start committing its session bead, which reads creating until then.
 	startReturnDelay time.Duration
-	// waitStartDone blocks until the async start has finished, its session
-	// bead committed. A runtime that shows running is not enough: the start
-	// commits the bead after the provider's Start returns, and until then
-	// the session still reads creating, which no stop may suspend.
-	waitStartDone func()
 }
 
 func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
@@ -360,7 +355,10 @@ func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error
 	running, err := p.Fake.ListRunning(prefix)
 	if call == 1 {
 		p.release("worker")
-		p.waitStartDone()
+		deadline := time.Now().Add(2 * time.Second)
+		for !p.IsRunning("worker") && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	return running, err
 }
@@ -2851,10 +2849,9 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 }
 
 // TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate holds the
-// provider's Start open after the runtime is up, so the async start commits
-// its session bead well after the runtime appears. The late relist must still
-// stop the runtime: its fixture waits for the start to finish, not only for
-// the runtime to show.
+// provider's Start open after the runtime is up, so the late relist reaches
+// the session while its bead still reads creating. The forced stop must still
+// stop that runtime.
 func TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate(t *testing.T) {
 	runForceShutdownRelistsLateAsyncStart(t, 200*time.Millisecond)
 }
@@ -2900,11 +2897,6 @@ func runForceShutdownRelistsLateAsyncStart(t *testing.T, startReturnDelay time.D
 		logPrefix:           "gc test",
 		stdout:              ioDiscard{},
 		stderr:              stderr,
-	}
-	sp.waitStartDone = func() {
-		if err := cr.asyncStarts.waitLaunchedStarts(context.Background(), hangBudget); err != nil {
-			t.Errorf("waiting for the async start to finish: %v", err)
-		}
 	}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(

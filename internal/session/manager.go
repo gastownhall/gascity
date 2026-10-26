@@ -1529,6 +1529,19 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		if current == StateDraining && intent == suspendIntentShutdown {
 			return m.tearDownRuntimeForSuspend(sessName)
 		}
+		// creating is the window between the provider's Start launching the
+		// runtime and the start committing the row active. A forced city stop
+		// stops what it lists without waiting out in-flight starts, and then
+		// re-lists so a late-created runtime does not survive the stop; that
+		// runtime's row can still read creating. Rejecting it left the runtime
+		// up past a stop that reported done. The sweep tears it down and,
+		// like the draining arm, writes no state: the start's own commit or
+		// rollback still owns the row, and the next controller start finds the
+		// runtime gone. An operator's suspend of a creating row keeps the
+		// illegal transition; the start in flight is not its to cut short.
+		if current == StateCreating && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName)
+		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.

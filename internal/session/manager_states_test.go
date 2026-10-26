@@ -180,6 +180,79 @@ func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
 	}
 }
 
+// seedCreatingSession writes a row in creating, as the start path leaves it
+// between the provider's Start and the start's commit, with its runtime up.
+func seedCreatingSession(t *testing.T, store beads.Store, sp *runtime.Fake) (string, string) {
+	t.Helper()
+	const sessName = "s-test-creating"
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   BeadType,
+		Labels: []string{LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"state":                string(StateCreating),
+			"pending_create_claim": "true",
+			"session_name":         sessName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating test bead: %v", err)
+	}
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+	return b.ID, sessName
+}
+
+// A forced city stop can stop a session whose start has launched the runtime
+// but not yet committed the row, which still reads creating. The sweep must
+// tear that runtime down, or it survives the stop. It writes no state: the
+// start's own commit or rollback still owns the row.
+func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := newTestManager(t, store, sp)
+	id, sessName := seedCreatingSession(t, store, sp)
+
+	if err := m.Suspend(context.Background(), testActor(m, ActorSweep), id, false); err != nil {
+		t.Fatalf("sweep Suspend(creating) = %v, want nil (the runtime would survive the city stop)", err)
+	}
+	if sp.IsRunning(sessName) {
+		t.Errorf("runtime session %q still running after sweep Suspend(creating)", sessName)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if got := State(after.Metadata["state"]); got != StateCreating {
+		t.Errorf("state = %q, want %q: the start's commit or rollback owns the row", got, StateCreating)
+	}
+	if after.Metadata["pending_create_claim"] != "true" {
+		t.Errorf("pending_create_claim = %q, want kept", after.Metadata["pending_create_claim"])
+	}
+	if after.Metadata["suspended_at"] != "" {
+		t.Errorf("suspended_at = %q, want empty: this path performs no suspension", after.Metadata["suspended_at"])
+	}
+}
+
+// The creating latitude belongs to the city-stop sweep. An operator naming a
+// session whose start is still in flight keeps the illegal transition.
+func TestConformance_OperatorSuspendStillRejectsCreating(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := newTestManager(t, store, sp)
+	id, sessName := seedCreatingSession(t, store, sp)
+
+	err := m.Suspend(context.Background(), testActor(m, ActorOperator), id, false)
+	if !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("operator Suspend(creating) = %v, want ErrIllegalTransition", err)
+	}
+	if !sp.IsRunning(sessName) {
+		t.Errorf("runtime session %q was stopped by a rejected operator suspend", sessName)
+	}
+}
+
 // A teardown that FAILED must not be reported as success. Callers read nil as
 // "the seat stopped" — gc stop prints "Stopped agent", counts it and records
 // session.stopped — so swallowing the error makes the sweep claim success over a

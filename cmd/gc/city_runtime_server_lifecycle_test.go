@@ -201,10 +201,10 @@ type forceLifecycleProvider struct {
 	// moments and the gap between them is what used to make this test flaky:
 	// enqueuePreparedStartWaveForCity runs the provider Start, then commits
 	// the session's creating -> active transition, and only then releases the
-	// tracker. A stop that lands in the gap is rejected by the session state
-	// machine ("state \"creating\" does not accept command \"suspend\""), so
-	// the late runtime survives a shutdown the test expected to tear it down.
-	// Waiting on the tracker puts the second sweep strictly after the commit.
+	// tracker. A stop that lands in the gap finds the row still creating, and
+	// the shutdown sweep tears that runtime down without the commit, so the
+	// events this test orders would race the commit. Waiting on the tracker
+	// puts the second sweep strictly after the commit.
 	awaitAsyncStart func() bool
 }
 
