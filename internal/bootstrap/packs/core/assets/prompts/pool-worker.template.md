@@ -93,7 +93,7 @@ recipient alias that resolves in every city; if your city staffs a
 coordinator role (e.g. the gastown pack's mayor), mail that instead:
 
 ```bash
-gc mail send human -s "BLOCKED: Brief description" -m "Details of the issue"
+gc mail send "${GC_ESCALATION_RECIPIENT:-human}" --notify -s "BLOCKED: Brief description" -m "Details of the issue"
 ```
 
 ## Context Exhaustion
