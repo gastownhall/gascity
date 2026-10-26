@@ -447,3 +447,24 @@ func namesGraphBeadVar(command string) bool {
 	}
 	return false
 }
+
+// TestMolScopedWorkWorkerStepsDocumentOutcomeClose pins issue #7678 on the
+// formula side: every retry-managed mol-scoped-work worker step is judged by
+// its gc.outcome, so each step text states the pass and failure closes for a
+// worker whose prompt does not.
+func TestMolScopedWorkWorkerStepsDocumentOutcomeClose(t *testing.T) {
+	f := readFormula(t, "mol-scoped-work.toml")
+	for _, id := range []string{"load-context", "workspace-setup", "preflight-tests", "implement", "self-review", "submit", "cleanup-worktree"} {
+		desc := formulaStep(t, f, id)
+		for _, want := range []string{
+			"gc bd update <step-id> --set-metadata gc.outcome=pass --status closed",
+			"gc.outcome=fail",
+			"gc.failure_class=transient",
+			"gc.failure_class=hard",
+		} {
+			if !strings.Contains(desc, want) {
+				t.Errorf("mol-scoped-work step %q does not state %q", id, want)
+			}
+		}
+	}
+}
