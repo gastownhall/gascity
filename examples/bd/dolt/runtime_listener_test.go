@@ -377,3 +377,38 @@ func TestManagedRuntimePortReadsRealProcWithoutLsof(t *testing.T) {
 		assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
 	})
 }
+
+// TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcTables pins the
+// fallback half of the contract: when neither TCP table under
+// $DOLT_PROC_ROOT is readable — what every darwin host looks like, which
+// an empty override models — the lookup still answers through the lsof
+// pipeline, skipping lsof's non-numeric noise and keeping only pids that
+// are alive. It passes both before and after the TCP-table switch; it is
+// the regression guard that keeps that switch from swallowing the
+// fallback (#7553).
+func TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcTables(t *testing.T) {
+	fakeBin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "lsof-ran")
+	testPid := strconv.Itoa(os.Getpid())
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+touch `+shellQuote(marker)+`
+echo "non-numeric noise"
+echo `+testPid+`
+`)
+
+	// An empty root has neither net/tcp nor net/tcp6: nothing readable,
+	// so the lookup must fall back to lsof and return its live pid.
+	got, err := runManagedRuntimeListenerPID(t, "4406", nil,
+		"GC_DOLT_PROC_ROOT="+t.TempDir(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	if err != nil {
+		t.Fatalf("managed_runtime_listener_pid: %v\noutput:\n%s", err, got)
+	}
+	if trimmed := strings.TrimSpace(got); trimmed != testPid {
+		t.Fatalf("managed_runtime_listener_pid fallback = %q, want the lsof pid %q", trimmed, testPid)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("lsof did not run; without readable TCP tables the lookup must keep the lsof fallback")
+	}
+}
