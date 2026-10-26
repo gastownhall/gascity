@@ -224,6 +224,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 

@@ -6738,6 +6738,80 @@ prompt_template = "prompts/worker.template.md"
 	}
 }
 
+// TestDoPrimeStrictTemplateExecuteErrorFails verifies --strict also fails
+// when the prompt_template parses but fails to execute. {{.BogusField}} is
+// deliberately absent: missingkey=zero renders an absent key empty
+// (TestRenderPromptMissingKeyEmptyString), which is not an execute error.
+func TestDoPrimeStrictTemplateExecuteErrorFails(t *testing.T) {
+	rows := []struct {
+		name       string
+		body       string
+		wantStderr string
+	}{
+		{
+			name:       "undefined template fragment",
+			body:       `Hello {{template "no-such-fragment" .}}`,
+			wantStderr: `template "no-such-fragment" not defined`,
+		},
+		{
+			name:       "field on a string value",
+			body:       `Hello {{.AgentName.Foo}}`,
+			wantStderr: `can't evaluate field Foo`,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+
+			dir := t.TempDir()
+			gcDir := filepath.Join(dir, ".gc")
+			if err := os.MkdirAll(gcDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			promptDir := filepath.Join(dir, "prompts")
+			if err := os.MkdirAll(promptDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(promptDir, "worker.template.md"), []byte(row.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+`
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			orig, _ := os.Getwd()
+			t.Cleanup(func() { _ = os.Chdir(orig) })
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_CITY_PATH", dir)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+			if code == 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, template execute error) = 0, want non-zero; stdout: %q; stderr: %q", stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty on strict failure", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), `prompt_template "prompts/worker.template.md" for agent "worker"`) {
+				t.Errorf("stderr = %q, want to name the template path and agent", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), row.wantStderr) {
+				t.Errorf("stderr = %q, want the underlying execute error %q", stderr.String(), row.wantStderr)
+			}
+		})
+	}
+}
+
 // TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar verifies
 // that when --strict fails because the agent isn't found, hook-mode side
 // effects do not recreate the legacy provider hook sidecar.

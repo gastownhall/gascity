@@ -445,6 +445,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc prime --strict` now fails when an agent's `prompt_template` cannot
+  be parsed or executed (#8149).** Prompt rendering warned on stderr and
+  returned the raw template body, and `--strict` only checked that the file
+  was readable, so a template with, say, an undefined function
+  (`{{base_branch}}`) printed the raw text and exited 0 — the exit code
+  CI and lint wrappers rely on. `--strict` now performs the render and
+  exits 1 on a `prompt_template` that cannot be read, parsed or executed,
+  naming the template path, the agent and the underlying error, before any
+  hook side effects. Without `--strict` the graceful fallback is unchanged:
+  the failure is reported on stderr and the raw unrendered text is output.
+
 - **An MCP server one agent's provider cannot receive no longer stops the
   city.** Servers from the city's `mcp/` directory, a rig pack, or an import
   reach every agent in that scope. When one agent's provider could not

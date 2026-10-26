@@ -88,9 +88,12 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute
 
 Without --strict, a prompt_template that cannot be read is reported on
-stderr and the default prompt is output.
+stderr and the default prompt is output; one that fails to parse or
+execute is reported on stderr and the raw unrendered template text is
+output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
@@ -127,7 +130,7 @@ to empty output from valid conditional logic, or on suspended states
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
-	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or a prompt_template that cannot be read or rendered instead of falling back to the default prompt")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
 }

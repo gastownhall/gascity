@@ -183,6 +183,21 @@ func TestRenderPromptWithMeta_ErrReportsFallbacks(t *testing.T) {
 			},
 		},
 		{
+			name:         "execute error",
+			templatePath: "prompts/exec.template.md",
+			setup: func(f *fsys.Fake) {
+				f.Files["/city/prompts/exec.template.md"] = []byte(`Hello {{template "no-such-fragment" .}}`)
+			},
+			check: func(t *testing.T, res PromptRenderResult, _ *strings.Builder) {
+				if res.Err == nil {
+					t.Fatal("Err = nil, want the execute error")
+				}
+				if want := `Hello {{template "no-such-fragment" .}}`; res.Text != want {
+					t.Errorf("Text = %q, want raw body %q", res.Text, want)
+				}
+			},
+		},
+		{
 			name:         "valid template",
 			templatePath: "prompts/ok.template.md",
 			setup: func(f *fsys.Fake) {
