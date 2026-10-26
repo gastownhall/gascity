@@ -47,7 +47,7 @@ func openRequireSQLite(t *testing.T, dir string) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	return s
@@ -166,8 +166,9 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 		if got := f.run(); got != 0 || !strings.Contains(f.log.String(), "outcome=deferred_by_runtime_lease") {
 			t.Fatalf("legacy start while the CLI starts = %d, log %q; want deferred", got, f.log.String())
 		}
-		if meta := mustGetBead(t, f.store, f.cand.info.ID).Metadata; meta["generation"] != "1" || meta[sessionpkg.RuntimeLeaseEpochKey] != "1" || len(f.sp.starts) != 0 {
-			t.Fatalf("row %v, starts %q; want the CLI's epoch 1 and no legacy PreWake or Start", meta, f.sp.starts)
+		// Generation 2 is the CLI start's own mint (I-MINT), under its lease.
+		if meta := mustGetBead(t, f.store, f.cand.info.ID).Metadata; meta["generation"] != "2" || meta[sessionpkg.RuntimeLeaseEpochKey] != "1" || len(f.sp.starts) != 0 {
+			t.Fatalf("row %v, starts %q; want the CLI's mint and epoch 1 and no legacy PreWake or Start", meta, f.sp.starts)
 		}
 		proceed()
 		expect("started err=<nil>")

@@ -1388,7 +1388,7 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "/bin/echo", runtime.Config{}); err != nil {
+	if err := startResolved(t, handle, "/bin/echo", runtime.Config{}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	pending, supported, err := handle.PendingStatus(context.Background())
@@ -1854,7 +1854,7 @@ func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "legacy --resume seeded", runtime.Config{
+	if err := startResolved(t, handle, "legacy --resume seeded", runtime.Config{
 		WorkDir: "/tmp/runtime-worker",
 	}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
@@ -2497,7 +2497,7 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 			"GC_WORKER_BOUNDARY": "start_resolved",
 		},
 	}
-	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), resolved.Command, resolved); err != nil {
+	if err := startResolved(t, handle, resolved.Command, resolved); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 

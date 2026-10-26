@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -14,7 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-func inventoryLines(lines ...string) string { return strings.Join(lines, "\n") }
+// inventoryLines renders runtimeInventoryFormat lines as tmux prints them:
+// each line ends with the terminator field.
+func inventoryLines(lines ...string) string {
+	return strings.Join(lines, "\t"+runtimeInventoryEnd+"\n") + "\t" + runtimeInventoryEnd
+}
 
 func runtimeInventoryFrom(t *testing.T, fe *fakeExecutor) (map[string]runtime.InventoryEntry, error) {
 	t.Helper()
@@ -28,13 +33,13 @@ func runtimeInventoryFrom(t *testing.T, fe *fakeExecutor) (map[string]runtime.In
 // (one entry per pane, or the last pane winning).
 func TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach(t *testing.T) {
 	fe := &fakeExecutor{out: inventoryLines(
-		"live\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t",
-		"corpse\t$2\t1700000002\t0\t0.0\t1\t201\t1700000100\t",
-		"corpse\t$2\t1700000002\t0\t0.1\t1\t202\t1700000100\t",
-		"mixed\t$3\t1700000003\t1\t0.0\t0\t301\t1700000100\t",
-		"mixed\t$3\t1700000003\t1\t0.1\t1\t302\t1700000100\t",
-		"watched\t$4\t1700000004\t2\t0.0\t0\t401\t1700000100\t",
-		"odd\t$5\t1700000005\tx\t0.0\t?\t501\t1700000100\t",
+		"live\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t0",
+		"corpse\t$2\t1700000002\t0\t0.0\t1\t201\t1700000100\t0",
+		"corpse\t$2\t1700000002\t0\t0.1\t1\t202\t1700000100\t0",
+		"mixed\t$3\t1700000003\t1\t0.0\t0\t301\t1700000100\t0",
+		"mixed\t$3\t1700000003\t1\t0.1\t1\t302\t1700000100\t0",
+		"watched\t$4\t1700000004\t2\t0.0\t0\t401\t1700000100\t0",
+		"odd\t$5\t1700000005\tx\t0.0\t?\t501\t1700000100\t0",
 	)}
 
 	got, err := runtimeInventoryFrom(t, fe)
@@ -65,9 +70,9 @@ func TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach(t *testing.T) {
 // incarnation taken from a pane other than the lowest window.pane index.
 func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 	before, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.0\t0\t200\t1700000100\t",
+		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100\t0",
+		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100\t0",
+		"s\t$7\t1700000007\t0\t2.0\t0\t200\t1700000100\t0",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory before respawn: %v", err)
@@ -79,9 +84,9 @@ func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 	// respawn-pane keeps the session id and creation time but starts a new
 	// process in the same pane.
 	after, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.0\t0\t555\t1700000100\t",
+		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100\t0",
+		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100\t0",
+		"s\t$7\t1700000007\t0\t2.0\t0\t555\t1700000100\t0",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory after respawn: %v", err)
@@ -96,10 +101,10 @@ func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 // reference, in the same batched read).
 func TestTmuxRuntimeInventory_ActivityIsTheLatestWindowsOrUnknown(t *testing.T) {
 	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$1\t1700000001\t0\t0.0\t0\t101\t1700000200\t",
-		"s\t$1\t1700000001\t0\t1.0\t1\t102\t1700000300\t",
-		"s\t$1\t1700000001\t0\t2.0\t0\t103\t1700000250\t",
-		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t\t",
+		"s\t$1\t1700000001\t0\t0.0\t0\t101\t1700000200\t0",
+		"s\t$1\t1700000001\t0\t1.0\t1\t102\t1700000300\t0",
+		"s\t$1\t1700000001\t0\t2.0\t0\t103\t1700000250\t0",
+		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t\t0",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory: %v", err)
@@ -134,21 +139,158 @@ func TestTmuxRuntimeInventory_NoServerIsError(t *testing.T) {
 	}
 }
 
-// Kills: a malformed pane line dropped silently. Dropping the only live pane
-// of a session would report that session as all-dead.
-func TestTmuxRuntimeInventory_MalformedLineIsError(t *testing.T) {
-	for _, bad := range []string{
-		"s\t$1\t1700000001\t0\t0.1",
-		"s\t$1\t1700000001\t0\tx.0\t0\t101\t1700000100\t",
-		"\t$1\t1700000001\t0\t0.1\t0\t101",
+// Kills: one malformed line costing the whole inventory (mc-ym1u4: every
+// tmux seat liveness-unknown), and a malformed line costing less than its
+// whole session. Each line is parsed on its own; a session with a malformed
+// line is omitted, every line of it, so it is never folded from the panes
+// that did parse: dropping its only live pane would read it all-dead. An
+// omitted name is unread, not gone. The others read exactly as without it.
+func TestTmuxRuntimeInventory_MalformedLineCostsOnlyItsSession(t *testing.T) {
+	end := "\t" + runtimeInventoryEnd
+	good := []string{
+		"a\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t0" + end,
+		"b\t$2\t1700000002\t1\t0.0\t1\t201\t1700000100\t0" + end,
+		"b\t$2\t1700000002\t1\t0.1\t0\t202\t1700000100\t0" + end,
+	}
+	// s's corpse pane parses; its live pane is the malformed line.
+	sCorpse := "s\t$9\t1700000009\t0\t0.0\t1\t900\t1700000100\t0" + end
+	act := time.Unix(1700000100, 0)
+	want := map[string]runtime.InventoryEntry{
+		"a": {Incarnation: "$1:1700000001:101", DeadKnown: true, AttachedKnown: true, ActivityKnown: true, LastActivity: act},
+		"b": {Incarnation: "$2:1700000002:201", DeadKnown: true, AttachedKnown: true, Attached: true, ActivityKnown: true, LastActivity: act},
+	}
+	for _, tc := range []struct {
+		name, bad string
+		// extra is a session the bad line's tail reads as. An unescaped
+		// newline (tmux before 3.2) splits a name, and the tail is a
+		// well-formed line under the tail's name, which list-sessions
+		// splits out and lists the same way.
+		extra map[string]runtime.InventoryEntry
+	}{
+		{name: "missing field", bad: "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100" + end},
+		{name: "trailing empty field trimmed, no terminator", bad: "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t"},
+		{name: "terminator cut short", bad: "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t0\tgc-"},
+		{name: "embedded tab in the name", bad: "s\tx\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t0" + end},
+		{
+			name: "embedded newline in the name", bad: "s\nx\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t0" + end,
+			extra: map[string]runtime.InventoryEntry{"x": {Incarnation: "$9:1700000009:901", DeadKnown: true, AttachedKnown: true, ActivityKnown: true, LastActivity: act}},
+		},
+		{name: "extra trailing field", bad: "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t0" + end + "\t"},
+		{name: "malformed pane index", bad: "s\t$9\t1700000009\t0\tx.1\t0\t901\t1700000100\t0" + end},
+		{name: "restart marker not 0 or 1", bad: "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t1700000050" + end},
 	} {
-		got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-			"s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100\t",
-			bad,
-		)})
-		if err == nil {
-			t.Errorf("RuntimeInventory with line %q = %#v, want an error", bad, got)
+		for _, order := range []string{"bad line first", "bad line last"} {
+			t.Run(tc.name+"/"+order, func(t *testing.T) {
+				lines := append([]string{tc.bad, sCorpse}, good...)
+				if order == "bad line last" {
+					lines = append(append([]string{sCorpse}, good...), tc.bad)
+				}
+				got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.Join(lines, "\n")})
+				if err != nil {
+					t.Fatalf("RuntimeInventory: %v, want the well-formed sessions", err)
+				}
+				wantHere := maps.Clone(want)
+				maps.Copy(wantHere, tc.extra)
+				if !reflect.DeepEqual(got, wantHere) {
+					t.Fatalf("RuntimeInventory =\n%#v\nwant\n%#v\n(s omitted, not read from the panes that parsed)", got, wantHere)
+				}
+			})
 		}
+	}
+
+	// A line with no name attributes to no session and costs none.
+	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.Join(append([]string{"\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t0" + end}, good...), "\n")})
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("RuntimeInventory with a nameless line = %#v, %v; want %#v", got, err, want)
+	}
+}
+
+// Kills a restart marker that can forge a line (tmux prints user options
+// raw): the format reads only whether the marker is set.
+func TestTmuxRuntimeInventory_MarkerIsReadAsAComparison(t *testing.T) {
+	if strings.Contains(strings.ReplaceAll(runtimeInventoryFormat, "#{!=:#{"+restartRequestedOption+"},}", ""), restartRequestedOption) {
+		t.Fatalf("format %q prints the restart marker's value", runtimeInventoryFormat)
+	}
+}
+
+// Kills: a field-count constant that drifts from the format.
+func TestTmuxRuntimeInventory_FieldCountMatchesTheFormat(t *testing.T) {
+	if got := strings.Count(runtimeInventoryFormat, "\t") + 1; got != runtimeInventoryFields {
+		t.Fatalf("runtimeInventoryFormat has %d fields, runtimeInventoryFields = %d", got, runtimeInventoryFields)
+	}
+	if !strings.HasSuffix(runtimeInventoryFormat, "\t"+runtimeInventoryEnd) {
+		t.Fatalf("runtimeInventoryFormat %q does not end with the terminator", runtimeInventoryFormat)
+	}
+}
+
+// Kills: an inventory that leaves no session (a tmux that prints the format
+// differently, or every session with a malformed line) reported as an empty
+// fleet with no error; and the two shapes reported alike.
+func TestTmuxRuntimeInventory_NoSessionLeftIsError(t *testing.T) {
+	for _, tc := range []struct{ name, out, want string }{
+		{"no well-formed line", "s\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t", "no well-formed inventory line"},
+		{"every session omitted", inventoryLines("s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100\t0") + "\ns\tbad", `every session omitted for a malformed inventory line: ["s"]`},
+	} {
+		got, err := runtimeInventoryFrom(t, &fakeExecutor{out: tc.out})
+		if err == nil || got != nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: RuntimeInventory = %#v, %v; want nil and an error containing %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+// Kills: a malformed line that goes unlogged, logs once per pass, or loses
+// the sessions it cost; a count of skipped reads that is never reset; and an
+// episode with no end. The first faulted read logs; later ones within
+// inventoryMalformedLogEvery are counted and reported by the next line; a
+// clean read ends the episode, once.
+func TestTmuxRuntimeInventory_MalformedLinesLogRateLimited(t *testing.T) {
+	var logged []string
+	p := NewProviderWithConfig(Config{})
+	p.logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	clean := inventoryLines("a\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t0")
+	faulted := &fakeExecutor{out: clean + "\nbad\tline\nzed"}
+	read := func(exec executor) {
+		t.Helper()
+		p.tm.exec = exec
+		_, _ = p.RuntimeInventory(context.Background())
+	}
+	rewind := func() {
+		p.inventoryMalformedLog.at = p.inventoryMalformedLog.at.Add(-inventoryMalformedLogEvery)
+	}
+
+	for range 3 {
+		read(faulted)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], `["bad" "zed"]`) || !strings.Contains(logged[0], `first line "bad\tline"`) || strings.Contains(logged[0], "unlogged") {
+		t.Fatalf("logged %q, want one line naming the omitted sessions and the first malformed line", logged)
+	}
+	rewind()
+	read(faulted)
+	if len(logged) != 2 || !strings.Contains(logged[1], "2 unlogged faulted reads") {
+		t.Fatalf("logged %q, want a second line counting the 2 unlogged reads", logged)
+	}
+	rewind()
+	read(faulted)
+	if len(logged) != 3 || strings.Contains(logged[2], "unlogged") {
+		t.Fatalf("logged %q, want a third line with the count reset", logged)
+	}
+
+	// A read that leaves no session is an error, and is logged.
+	rewind()
+	read(&fakeExecutor{out: "bad"})
+	if len(logged) != 4 || !strings.Contains(logged[3], `first line "bad"`) {
+		t.Fatalf("logged %q, want the all-malformed read logged", logged)
+	}
+
+	read(&fakeExecutor{out: clean})
+	read(&fakeExecutor{out: clean})
+	read(&fakeExecutor{err: ErrNoServer})
+	if len(logged) != 5 || !strings.Contains(logged[4], "well-formed again") {
+		t.Fatalf("logged %q, want one recovery line", logged)
+	}
+	read(faulted)
+	if len(logged) != 6 || !strings.Contains(logged[5], "malformed") {
+		t.Fatalf("logged %q, want a new episode logged at once", logged)
 	}
 }
 
@@ -354,6 +496,7 @@ func (f *inventoryFixtureExecutor) render(format string, s inventoryFixtureSessi
 		"#{pane_dead}", p.dead,
 		"#{pane_pid}", p.pid,
 		"#{window_activity}", s.activity[p.window],
+		"#{!=:#{"+restartRequestedOption+"},}", "0",
 	).Replace(format)
 }
 
@@ -496,7 +639,7 @@ func TestTmuxAttributionEnvironment_MatchesGetMeta(t *testing.T) {
 func TestTmuxRuntimeInventory_ActivityDiscountsAPoke(t *testing.T) {
 	prior, poke := time.Unix(1700000000, 0), time.Now().Add(-time.Hour).Truncate(time.Second)
 	p := NewProviderWithConfig(Config{})
-	p.tm.exec = &fakeExecutor{out: fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t%d\t", poke.Unix())}
+	p.tm.exec = &fakeExecutor{out: inventoryLines(fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t%d\t0", poke.Unix()))}
 	p.tm.pokeMu.Lock()
 	if p.tm.pokes == nil {
 		p.tm.pokes = map[string]pokeInfo{}
@@ -518,9 +661,9 @@ func TestTmuxRuntimeInventory_ActivityDiscountsAPoke(t *testing.T) {
 // RestartRequested; a blank one leaves it unset.
 func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1700000050",
-		"asked\t$1\t1700000001\t0\t0.1\t0\t102\t1700000100\t1700000050",
-		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t",
+		"asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1",
+		"asked\t$1\t1700000001\t0\t0.1\t0\t102\t1700000100\t1",
+		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t0",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory: %v", err)
@@ -528,8 +671,65 @@ func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	if !got["asked"].RestartRequested || got["quiet"].RestartRequested {
 		t.Fatalf("RestartRequested asked=%t quiet=%t, want only asked", got["asked"].RestartRequested, got["quiet"].RestartRequested)
 	}
-	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}") {
+	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{!=:#{@GC_RESTART_REQUESTED},}\t"+runtimeInventoryEnd) {
 		t.Fatalf("format %q does not read the marker's option", runtimeInventoryFormat)
+	}
+}
+
+// Regression (#7871): the real executor returns strings.TrimSpace(stdout).
+// Before the terminator field, tmux ended every line with the marker field,
+// so an unmarked LAST session arrived with its trailing tab trimmed away and
+// failed the whole inventory (which left every tmux seat liveness-unknown).
+// The terminator ends every line now, so trimming cannot change a line's
+// field count. The fixtures are tmux's raw stdout, trimmed exactly as
+// realExecutor trims it.
+// Kills: a parser that misreads an unmarked last session.
+func TestTmuxRuntimeInventory_ExecutorTrimmedEmptyMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stdout string
+		asked  map[string]bool
+	}{
+		{
+			name:   "empty marker on the last line",
+			stdout: "asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1\nquiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t0\n",
+			asked:  map[string]bool{"asked": true, "quiet": false},
+		},
+		{
+			name:   "empty marker on a middle line",
+			stdout: "quiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t0\nasked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1\n",
+			asked:  map[string]bool{"asked": true, "quiet": false},
+		},
+		{
+			name:   "no marker anywhere",
+			stdout: "a\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t0\nb\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t0\nb\t$2\t1700000002\t0\t0.1\t0\t202\t1700000100\t0\n",
+			asked:  map[string]bool{"a": false, "b": false},
+		},
+		{
+			name:   "one unmarked session",
+			stdout: "only\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t0\n",
+			asked:  map[string]bool{"only": false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout := inventoryLines(strings.Split(strings.TrimSuffix(tc.stdout, "\n"), "\n")...) + "\n"
+			got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.TrimSpace(stdout)})
+			if err != nil {
+				t.Fatalf("RuntimeInventory: %v", err)
+			}
+			if len(got) != len(tc.asked) {
+				t.Fatalf("RuntimeInventory = %#v, want sessions %v", got, tc.asked)
+			}
+			for name, asked := range tc.asked {
+				e, ok := got[name]
+				if !ok {
+					t.Fatalf("session %q missing from %#v", name, got)
+				}
+				if e.RestartRequested != asked || !e.DeadKnown || e.AllPanesDead || !e.ActivityKnown || e.Incarnation == "" {
+					t.Errorf("%s = %#v, want a live, known session with RestartRequested=%t", name, e, asked)
+				}
+			}
+		})
 	}
 }
 
@@ -557,5 +757,12 @@ func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 	}
 	if len(options) != 2 || !strings.Contains(options[0], "@GC_RESTART_REQUESTED 1700000050") || !strings.Contains(options[1], "-u @GC_RESTART_REQUESTED") {
 		t.Fatalf("option writes %q, want the marker set then unset, and nothing else", options)
+	}
+	// set-option's -t is a target-pane: tmux 3.4 answers "no such session"
+	// for a bare "=s", so the session is fenced as "=s:" (paneTarget).
+	for _, option := range options {
+		if !strings.Contains(option, "-t =s: ") {
+			t.Errorf("option write %q, want the session fenced as a pane target (-t =s:)", option)
+		}
 	}
 }

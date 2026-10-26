@@ -32,7 +32,9 @@ import (
 //   - the start-commit whose premise admits state=asleep (v5 S2);
 //   - the session.Store creates, wake, #46 episode save and wait-bead
 //     writers;
-//   - the runtime stops that skip the destructive fence (v5 O2).
+//   - the runtime stops that skip the destructive fence (v5 O2);
+//   - the operator's content hold writers and its batch item (OJ-19), which
+//     no effect or step writes.
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
 	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead",
@@ -46,6 +48,8 @@ var effectBannedMethods = []string{
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
+	"SetContentHold", "ContentHoldItem", "ClearContentHold",
+	"MintIncarnation", "ConfirmIncarnation", // the Manager's and legacy's mint: a v2 effect mints in its own CAS section
 	"NewStore", // session.NewStore: the raw session front door
 }
 

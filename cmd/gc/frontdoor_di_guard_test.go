@@ -409,6 +409,16 @@ var sessionRelocationRoutedFiles = []string{
 	// relocated sessions class — a green result that reads as "no stuck
 	// sessions" when the check simply looked in the wrong store.
 	"doctor_startup_health.go",
+	// `gc agent is-foreign` vouches for a claimant through this city's session
+	// records. Unrouted, it finds none under a relocated sessions class, so every
+	// dead local claim the orphan-sweep order asks about reads as foreign and is
+	// kept forever.
+	"cmd_agent_is_foreign.go",
+	// The in-band lane pass of `gc nudge drain --inject` reads the session row
+	// and writes the conversation's op rows and the delivery stamp. Unrouted,
+	// it would find no open lane op under a relocated sessions class, and the
+	// hook would deliver no notice while the controller is down.
+	"conversation_lane_hook.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

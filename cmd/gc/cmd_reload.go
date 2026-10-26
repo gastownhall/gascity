@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -164,6 +165,9 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 
 	switch reply.Outcome {
 	case reloadOutcomeAccepted, reloadOutcomeApplied, reloadOutcomeNoChange:
+		// The stage-1 MCP warnings come last, on stderr, in --json mode too,
+		// as gc start's do.
+		defer warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
 		message := strings.TrimSpace(reply.Message)
 		if jsonOut {
 			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc reload", lifecycleActionJSON{

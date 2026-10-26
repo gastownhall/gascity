@@ -70,7 +70,8 @@ func NewCityAt(t *testing.T, env *Env, cityDir string) *City {
 	return &City{t: t, Dir: cityDir, Env: env}
 }
 
-// Init runs gc init with the given provider (non-interactive).
+// Init runs gc init with the given provider (non-interactive), retrying once
+// on pinned bd's proxy-open stall (runInit).
 func (c *City) Init(provider string) {
 	c.t.Helper()
 	args := []string{"init", "--skip-provider-readiness"}
@@ -78,7 +79,7 @@ func (c *City) Init(provider string) {
 		args = append(args, "--provider", provider)
 	}
 	args = append(args, c.Dir)
-	out, err := RunGC(c.Env, "", args...)
+	out, err := c.runInit(args...)
 	if err != nil {
 		c.t.Fatalf("gc init failed: %v\n%s", err, out)
 	}
@@ -87,7 +88,8 @@ func (c *City) Init(provider string) {
 	})
 }
 
-// InitNoStart runs gc init without registering or starting the city.
+// InitNoStart runs gc init without registering or starting the city, retrying
+// once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitNoStart(provider string) {
 	c.t.Helper()
 	args := []string{"init", "--skip-provider-readiness", "--no-start"}
@@ -95,7 +97,7 @@ func (c *City) InitNoStart(provider string) {
 		args = append(args, "--provider", provider)
 	}
 	args = append(args, c.Dir)
-	out, err := RunGC(c.Env, "", args...)
+	out, err := c.runInit(args...)
 	if err != nil {
 		c.t.Fatalf("gc init --no-start failed: %v\n%s", err, out)
 	}
@@ -104,10 +106,11 @@ func (c *City) InitNoStart(provider string) {
 	})
 }
 
-// InitFrom runs gc init --from to copy an example city directory.
+// InitFrom runs gc init --from to copy an example city directory, retrying
+// once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitFrom(srcDir string) {
 	c.t.Helper()
-	out, err := RunGC(c.Env, "", "init", "--from", srcDir, "--skip-provider-readiness", c.Dir)
+	out, err := c.runInit("init", "--from", srcDir, "--skip-provider-readiness", c.Dir)
 	if err != nil {
 		c.t.Fatalf("gc init --from %s failed: %v\n%s", srcDir, err, out)
 	}
@@ -116,10 +119,11 @@ func (c *City) InitFrom(srcDir string) {
 	})
 }
 
-// InitFromNoStart runs gc init --from without registering or starting the city.
+// InitFromNoStart runs gc init --from without registering or starting the city,
+// retrying once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitFromNoStart(srcDir string) {
 	c.t.Helper()
-	out, err := RunGC(c.Env, "", "init", "--from", srcDir, "--skip-provider-readiness", "--no-start", c.Dir)
+	out, err := c.runInit("init", "--from", srcDir, "--skip-provider-readiness", "--no-start", c.Dir)
 	if err != nil {
 		c.t.Fatalf("gc init --from %s --no-start failed: %v\n%s", srcDir, err, out)
 	}

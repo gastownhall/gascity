@@ -1,5 +1,5 @@
 import { cleanup, render, screen, fireEvent, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EntityLinkView } from 'gas-city-dashboard-shared';
 import { RelatedEntities, isStale } from './RelatedEntities';
@@ -89,7 +89,7 @@ function renderRelated(v: EntityLinkView, onOpenBead = vi.fn()) {
   return {
     onOpenBead,
     ...render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <RelatedEntities view={v} loading={false} error={null} now={NOW} onOpenBead={onOpenBead} />
       </MemoryRouter>,
     ),
@@ -182,7 +182,7 @@ describe('RelatedEntities (R5/R6/RK3)', () => {
 
   it('renders a calm empty state', () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <RelatedEntities
           view={{ ...view(), nodes: [view().nodes[0]!], edges: [] }}
           loading={false}

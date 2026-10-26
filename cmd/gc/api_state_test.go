@@ -1858,8 +1858,15 @@ func TestControllerStateSchema2CreateRollsBackFreshConventionScaffoldWhenAgentTO
 			t.Fatalf("expanded agents include ghost helper after failed create: %+v", agent)
 		}
 	}
-	if cs.configDirty.Load() {
-		t.Fatal("CreateAgent should not mark config dirty after failed agent.toml write")
+	// The scaffold rollback removes agents/helper but not the agents/ directory
+	// it created, so disk no longer matches the pre-write snapshot and the
+	// failed write marks the reload pending, as the config watcher would on
+	// seeing agents/ appear.
+	if _, statErr := os.Stat(filepath.Join(cityDir, "agents")); statErr != nil {
+		t.Fatalf("agents dir stat err = %v, want the created agents/ left behind", statErr)
+	}
+	if !cs.configDirty.Load() {
+		t.Fatal("CreateAgent should mark config dirty when its failed write left agents/ behind")
 	}
 }
 
@@ -3733,6 +3740,34 @@ func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 	case <-cs.pokeCh:
 		t.Fatal("failed mutation should not poke reconciler")
 	default:
+	}
+}
+
+// TestControllerStateMutationErrorAfterADiskChangePokesController pins a failed
+// mutation that changed a config file before it failed: disk no longer holds
+// the config the controller published, so the mutation marks the reload
+// pending and pokes the reconciler, whose reload brings the controller to disk,
+// as an applied mutation does.
+func TestControllerStateMutationErrorAfterADiskChangePokesController(t *testing.T) {
+	cs, _ := newControllerStateMutationHarness(t)
+	errPartway := errors.New("persisting the rig binding failed")
+	sitePath := filepath.Join(cs.cityPath, ".gc", "site.toml")
+	err := cs.mutateAndPoke(func() error {
+		if err := writeFileMkdir(sitePath, "# rebound\n"); err != nil {
+			return err
+		}
+		return errPartway
+	})
+	if !errors.Is(err, errPartway) {
+		t.Fatalf("mutateAndPoke = %v, want %v", err, errPartway)
+	}
+	if !cs.configDirty.Load() {
+		t.Fatal("a failed mutation that changed disk did not mark the reload pending")
+	}
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("a failed mutation that changed disk did not poke the reconciler")
 	}
 }
 

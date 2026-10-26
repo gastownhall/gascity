@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -92,6 +93,9 @@ func newHookBudgetFixture(t *testing.T) hookBudgetFixture {
 	prevAPI := mailCheckAPIClient
 	mailCheckAPIClient = func(string) (*api.Client, string) { return nil, "" }
 	t.Cleanup(func() { mailCheckAPIClient = prevAPI })
+	prevStepAPI := activeWorkStepAPIClient
+	activeWorkStepAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
+	t.Cleanup(func() { activeWorkStepAPIClient = prevStepAPI })
 	prevPoller := startNudgePoller
 	startNudgePoller = func(string, string, string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prevPoller })
@@ -261,7 +265,7 @@ func recordHookCommand(t *testing.T, fn func(stdout, stderr io.Writer) int) hook
 		mu.Lock()
 		recorders = append(recorders, rec)
 		mu.Unlock()
-		return rec
+		return hookBudgetRecordedStore{OpRecordingStore: rec, opened: store}
 	}
 	// run() opens the invocation store memo for every hook verb measured here
 	// (TestInvocationStoreMemoCoversTheHookVerbs); the in-process call does the
@@ -282,6 +286,20 @@ func recordHookCommand(t *testing.T, fn func(stdout, stderr io.Writer) int) hook
 		run.ops = append(run.ops, rec.Ops()...)
 	}
 	return run
+}
+
+// hookBudgetRecordedStore is a recorded store that still applies guarded
+// batches when the store it records does, as the native store the wire model
+// prices does: a hook that reads only a store able to host a conversation
+// lane (hookLaneDue) takes here the path it takes against that store.
+type hookBudgetRecordedStore struct {
+	*beadstest.OpRecordingStore
+	opened beads.Store
+}
+
+// GuardedBatcherHandle implements beads.GuardedBatcherHandleProvider.
+func (s hookBudgetRecordedStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
+	return beads.GuardedBatcherFor(s.opened)
 }
 
 // hookBudgetCeiling bounds one scenario. Requests is the modeled wire total,
@@ -309,8 +327,37 @@ func mailCheckInject(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer
 	return cmdMailCheckWithFormat(nil, true, "", stdout, stderr)
 }
 
-func nudgeDrainInject(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+// nudgeDrainInject runs the prompt hook of a claude-family session, whose
+// plain-text output reaches the model, so the in-band lane pass probes the
+// hook's conversation (hookLaneReachesModel).
+func nudgeDrainInject(t *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+	t.Setenv("GC_PROVIDER", "claude")
 	return cmdNudgeDrainWithFormat(nil, true, "", stdout, stderr)
+}
+
+// nudgeDrainInjectDroppedOutput runs the prompt hook of a cursor-family
+// session, whose prompt hook does not show plain text to the model: the
+// in-band lane pass does not run, so it pays no probe.
+func nudgeDrainInjectDroppedOutput(t *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+	t.Setenv("GC_PROVIDER", "cursor")
+	return cmdNudgeDrainWithFormat(nil, true, "", stdout, stderr)
+}
+
+// nudgeDrainInjectRigAgent runs the prompt hook of a rig-scoped agent
+// (GC_RIG_ROOT set): the step reminder reads the rig's store, so the lane
+// probe of the city's sessions store opens a second store.
+func nudgeDrainInjectRigAgent(t *testing.T, f hookBudgetFixture, stdout, stderr io.Writer) int {
+	rig := filepath.Join(f.cityDir, "rigs", "r1")
+	if err := os.MkdirAll(filepath.Join(rig, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	toml := "[workspace]\n\n[beads]\nprovider = \"file\"\n\n[[rigs]]\nname = \"r1\"\npath = " + strconv.Quote(rig) + "\nprefix = \"rr\"\n"
+	if err := os.WriteFile(filepath.Join(f.cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	resetHookBudgetProcessState(t)
+	t.Setenv("GC_RIG_ROOT", rig)
+	return nudgeDrainInject(t, f, stdout, stderr)
 }
 
 func nudgeDrainInjectWithUsage(t *testing.T, f hookBudgetFixture, stdout, stderr io.Writer) int {
@@ -342,20 +389,36 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		f.autoHandoff(t)
 		f.sendMail(t, "status please")
 	}
+	// The controller holds the city's store and answers the step reminder.
+	controllerUp := func(t *testing.T, f hookBudgetFixture) {
+		withActiveWorkStepClient(t, readyWorkTestServer(t, hookCityController(t, f)), "")
+	}
 	return []hookBudgetScenario{
 		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
 		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
 		{name: "mail check --inject/priority window", seed: priorityWindow, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "update " + fmt.Sprint(mailInjectMaxMessages+1)},
 		{name: "mail check --inject/closed predecessors", seed: func(t *testing.T, f hookBudgetFixture) { f.predecessorMail(t) }, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 1, SessionGets: 1, GetMisses: 4}, wantStdout: "for my predecessor"},
-		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
-		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}},
-		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
+		// Every nudge drain --inject row of a family whose prompt hook output
+		// reaches the model includes the in-band lane pass's one keyed probe
+		// of the hook's conversation (opjournal.HasOpenLaneOps, DES-O1 §8);
+		// the lane store is opened only when an op is open. A family whose
+		// output is dropped pays no probe. A rig-scoped agent's empty prompt
+		// opens two stores: the step reminder reads the rig's, and the probe
+		// the city's sessions store. These rows run with the controller down;
+		// with it up, an empty prompt opens no store at all: the controller
+		// answers the step reminder, and its lane host serves the lanes.
+		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 0, GetMisses: 0}},
+		{name: "nudge drain --inject/empty controller up", seed: controllerUp, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 0, Opens: 0, SessionGets: 0, GetMisses: 0}},
+		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 10, Opens: 1, SessionGets: 1, GetMisses: 0}},
+		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
+		{name: "nudge drain --inject/empty output dropped", seed: none, run: nudgeDrainInjectDroppedOutput, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
+		{name: "nudge drain --inject/empty rig agent", seed: none, run: nudgeDrainInjectRigAgent, ceiling: hookBudgetCeiling{Requests: 11, Opens: 2, SessionGets: 0, GetMisses: 0}},
 		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
 		{name: "prime --hook/auto-handoff and mail", seed: handoffAndMail, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
-		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, stdout, stderr)
 		}},
 		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
@@ -462,6 +525,9 @@ func TestHookVerbsOpenOneStoreThroughRun(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			newHookBudgetFixture(t)
 			resetHookBudgetProcessState(t)
+			// A claude-family hook, so nudge drain --inject runs the lane
+			// probe and the memo must serve it.
+			t.Setenv("GC_PROVIDER", "claude")
 			var opens int
 			prev := observeOpenedStore
 			observeOpenedStore = func(_ string, store beads.Store) beads.Store {
@@ -554,5 +620,87 @@ func assertHookBudgetGolden(t *testing.T, goldenDir, scenario string, f hookBudg
 	}
 	if got != string(want) {
 		t.Errorf("hook output differs from %s:\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
+	}
+}
+
+// TestHookRequestBudgetOnAWorkerSite runs every hook scenario, and the hook
+// claim's continuation nudge, in a city a worker-site descriptor attached to a
+// remote controller. Each hook scenario sends its ledger exactly what it sends
+// in the same city on the Local plane; the continuation nudge sends nothing,
+// since a box queues no nudge text (hookContinuationNudgeEnqueue). None dials
+// through the gc socket seam: the hook verbs reach the controller only through
+// pokeController (the claim continuation) and the nudge wake ping (every queue
+// write), and both short-circuit in a box. The test writes only the
+// descriptor, so each command's own resolution finds the worker site.
+//
+// The fixture's work store is the file provider. A connect-path box never has
+// one (CN-3b's mint refuses a work binding on [beads] provider file or exec:,
+// mint_binding_unreachable); CN-1b does not refuse it in the box, so the
+// scenario measures the request counts the hook verbs make on any work store.
+func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
+	model := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: hookBudgetLedgerRows}
+	type siteScenario struct {
+		name string
+		seed func(t *testing.T, f hookBudgetFixture)
+		run  func(t *testing.T, f hookBudgetFixture, stdout, stderr io.Writer) int
+		// dialsLocally marks a scenario that dials on the Local plane, which
+		// proves the counter is wired to the dials it reaches.
+		dialsLocally bool
+		// siteSendsNothing marks a scenario whose worker-site arm returns
+		// before it opens a store, so the site sends nothing, not the same.
+		siteSendsNothing bool
+	}
+	var scenarios []siteScenario
+	for _, sc := range hookBudgetScenarios() {
+		scenarios = append(scenarios, siteScenario{name: sc.name, seed: sc.seed, run: sc.run})
+	}
+	scenarios = append(scenarios, siteScenario{
+		name: "hook --claim continuation nudge",
+		seed: func(*testing.T, hookBudgetFixture) {},
+		run: func(_ *testing.T, _ hookBudgetFixture, _, _ io.Writer) int {
+			hookContinuationNudgeEnqueue(hookBudgetIdentity)
+			return 0
+		},
+		dialsLocally:     true,
+		siteSendsNothing: true,
+	})
+
+	measure := func(t *testing.T, sc siteScenario, workerSite bool) (beadstest.WireCost, int32) {
+		t.Helper()
+		resetControlPlaneForTest(t)
+		f := newHookBudgetFixture(t)
+		sc.seed(t, f)
+		if workerSite {
+			// Only the descriptor: the hook command's own resolution must
+			// find the worker site.
+			writeControlPlaneFixture(t, f.cityDir, testDescriptor(f.cityDir, nil))
+		}
+		dials := countSocketDials(t)
+		run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return sc.run(t, f, stdout, stderr) })
+		if run.code != 0 {
+			t.Fatalf("worker site %v: exit %d; stderr=%s", workerSite, run.code, run.stderr)
+		}
+		return model.Price(run.opens, run.ops), dials.Load()
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			local, localDials := measure(t, sc, false)
+			if sc.dialsLocally && localDials == 0 {
+				t.Fatal("the Local plane dialed nothing; the counter is not wired to this scenario's dials")
+			}
+			site, dials := measure(t, sc, true)
+			switch {
+			case sc.siteSendsNothing:
+				if site.Requests != 0 || site.Opens != 0 {
+					t.Errorf("worker site: %d requests over %d opens, want none", site.Requests, site.Opens)
+				}
+			case site.Requests != local.Requests || site.Opens != local.Opens:
+				t.Errorf("worker site: %d requests over %d opens, local: %d over %d; want the same", site.Requests, site.Opens, local.Requests, local.Opens)
+			}
+			if dials != 0 {
+				t.Errorf("worker site dialed a gc socket %d times, want 0", dials)
+			}
+		})
 	}
 }

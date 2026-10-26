@@ -1,6 +1,6 @@
 import { errorMessage, GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router';
 import { formatApiError } from '../api/client';
 import { BeadDetailModal } from '../components/BeadDetailModal';
 import { Button } from '../components/Button';

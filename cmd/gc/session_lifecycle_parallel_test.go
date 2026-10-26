@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -53,6 +54,47 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 // for any write routed through store.Tx(...).
 func (s *failingMetadataBatchStore) Tx(_ string, fn func(beads.Tx) error) error {
 	return fn(s)
+}
+
+// failingFencedMetadataStore is failingMetadataBatchStore on the conditional
+// path: stamped auto (startCommitWriteArms), it fails the fenced metadata
+// write too, so the injected failure fires on whichever arm a write takes.
+type failingFencedMetadataStore struct{ *failingMetadataBatchStore }
+
+func (s failingFencedMetadataStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if s.failBatch && len(opts.Metadata) > 0 {
+		return errors.New("fenced batch failed")
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// Tx hands fn the wrapper, as failingMetadataBatchStore.Tx does.
+func (s failingFencedMetadataStore) Tx(_ string, fn func(beads.Tx) error) error { return fn(s) }
+
+// startCommitWriteArms are the two arms a session metadata write takes over a
+// store whose metadata batches fail: the unconditional batch (conditional
+// writes off), and the fenced write (auto over a store that fences, which
+// the default reaches since mc-dpo2b). Each builds the store; arm, called
+// once the rows are seeded, selects the arm.
+func startCommitWriteArms() map[string]func() (store beads.Store, arm func(*testing.T)) {
+	return map[string]func() (beads.Store, func(*testing.T)){
+		"unconditional": func() (beads.Store, func(*testing.T)) {
+			return &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}, func(*testing.T) {}
+		},
+		"conditional": func() (beads.Store, func(*testing.T)) {
+			inner := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+			store := failingFencedMetadataStore{inner}
+			return store, func(t *testing.T) {
+				t.Helper()
+				if err := beads.StampOpenedStore(inner.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
+					t.Fatalf("stamp: %v", err)
+				}
+				if w, _, err := beads.ResolveConditionalWriter(store); w == nil || err != nil {
+					t.Fatalf("the conditional arm is not active: writer %T, err %v", w, err)
+				}
+			}
+		},
+	}
 }
 
 type failNthMetadataBatchStore struct {
@@ -4755,8 +4797,18 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 // same SetMetadataBatch as the state/state_reason/creation_complete_at
 // transition so the sweep never observes a transient state without either
 // the claim or the marker.
+//
+// Both write arms keep the contract (startCommitWriteArms).
 func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
-	store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+	for name, newStore := range startCommitWriteArms() {
+		t.Run(name, func(t *testing.T) {
+			testCommitStartResultAtomicBatchFailureLeavesClaimIntact(t, newStore)
+		})
+	}
+}
+
+func testCommitStartResultAtomicBatchFailureLeavesClaimIntact(t *testing.T, newStore func() (beads.Store, func(*testing.T))) {
+	store, arm := newStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
 		Type:   sessionBeadType,
@@ -4772,6 +4824,7 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arm(t)
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
@@ -4816,7 +4869,8 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 // observe a wake whose metadata commit then fails (the reconciler reports
 // failure and retries, so the "fact" the event announced never landed).
 // When the atomic start batch fails no session.woke is emitted; on success
-// exactly one is. Regression test for ga-kmoj9c.
+// exactly one is, on both write arms (startCommitWriteArms). Regression test
+// for ga-kmoj9c.
 func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T) {
 	successResult := func(session *beads.Bead) startResult {
 		return startResult{
@@ -4844,29 +4898,11 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 	}
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}
 
-	t.Run("metadata batch failure suppresses the event", func(t *testing.T) {
-		store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
-		session, err := store.Create(beads.Bead{
-			Title:    "helper",
-			Type:     sessionBeadType,
-			Labels:   []string{sessionBeadLabel},
-			Metadata: sessionMeta(),
+	for name, newStore := range startCommitWriteArms() {
+		t.Run("metadata batch failure suppresses the event/"+name, func(t *testing.T) {
+			testCommitStartResultBatchFailureSuppressesSessionWoke(t, newStore, successResult, sessionMeta(), clk)
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := events.NewFake()
-		if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
-			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
-		}
-		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(woke) != 0 {
-			t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
-		}
-	})
+	}
 
 	t.Run("successful commit emits exactly one event", func(t *testing.T) {
 		store := beads.NewMemStore()
@@ -4891,6 +4927,31 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 			t.Fatalf("session.woke events = %d, want exactly 1 after the durable commit", len(woke))
 		}
 	})
+}
+
+func testCommitStartResultBatchFailureSuppressesSessionWoke(t *testing.T, newStore func() (beads.Store, func(*testing.T)), successResult func(*beads.Bead) startResult, meta map[string]string, clk *clock.Fake) {
+	store, arm := newStore()
+	session, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm(t)
+	rec := events.NewFake()
+	if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned true, want false when metadata batch fails")
+	}
+	woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(woke) != 0 {
+		t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
+	}
 }
 
 func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *testing.T) {
@@ -5090,6 +5151,67 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	if got.Metadata["creation_complete_at"] != clkTime.Format(time.RFC3339) {
 		t.Fatalf("creation_complete_at = %q, want %q — sweep guard would treat healed bead as stale without this stamp",
 			got.Metadata["creation_complete_at"], clkTime.Format(time.RFC3339))
+	}
+}
+
+// A bead heal marked awake while its start was in flight has no awake interval
+// of its own when that start's commit never landed, so recovery must stamp one.
+// Without it the live usage lane, which requires awake_started_at, never sweeps
+// the session. An interval that is still open keeps its epoch.
+func TestRecoverRunningPendingCreate_StampsAwakeEpochOnlyWhenNoIntervalIsOpen(t *testing.T) {
+	prior := time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+	fresh := clkTime.Format(time.RFC3339Nano)
+	cases := []struct {
+		name      string
+		epoch     string
+		emittedAt string
+		want      string
+	}{
+		{name: "no epoch", want: fresh},
+		{name: "previous interval already accounted", epoch: prior, emittedAt: prior, want: fresh},
+		{name: "open interval", epoch: prior, want: prior},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testCity := t.TempDir()
+			store := beads.NewMemStore()
+			meta := map[string]string{
+				"session_name":         "sky",
+				"pending_create_claim": "true",
+				"state":                "awake",
+				poolManagedMetadataKey: "true",
+			}
+			if tc.epoch != "" {
+				meta["awake_started_at"] = tc.epoch
+			}
+			if tc.emittedAt != "" {
+				meta[usageComputeEmittedAtKey] = tc.emittedAt
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "helper",
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel},
+				Metadata: meta,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+			tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+
+			if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, nil, &clock.Fake{Time: clkTime}, io.Discard, nil); !ok {
+				t.Fatal("recoverRunningPendingCreate returned false, want true")
+			}
+
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["awake_started_at"] != tc.want {
+				t.Fatalf("awake_started_at = %q, want %q", got.Metadata["awake_started_at"], tc.want)
+			}
+		})
 	}
 }
 
@@ -5309,8 +5431,10 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 // must still stamp state_reason=creation_complete — that marker is what
 // poolSessionWithinPostCreateProtection keys the post-create demand floor on,
 // and without it the fresh pool worker was drained as "orphaned" seconds after
-// claiming its first step. The in-flight awake interval the heal opened must
-// not be reset (mirrors recoverRunningPendingCreate).
+// claiming its first step. Heal never writes awake_started_at, so the seeded
+// epoch stands for an interval the compute lane has not accounted yet: an open
+// interval keeps its epoch (startOpensAwakeInterval, which
+// recoverRunningPendingCreate shares).
 func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testing.T) {
 	store := beads.NewMemStore()
 	healedAwakeAt := "2026-03-18T11:59:58Z"
@@ -5366,7 +5490,7 @@ func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testi
 		t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
 	}
 	if got.Metadata["awake_started_at"] != healedAwakeAt {
-		t.Errorf("awake_started_at = %q, want the in-flight interval %q kept (StartsAwakeInterval must stay keyed on a genuine pending start)", got.Metadata["awake_started_at"], healedAwakeAt)
+		t.Errorf("awake_started_at = %q, want the open interval's epoch %q kept (an open, not yet accounted, interval keeps its epoch; see startOpensAwakeInterval)", got.Metadata["awake_started_at"], healedAwakeAt)
 	}
 	if info := sessiontest.SeedBead(t, got); !poolSessionWithinPostCreateProtection(info, commitAt.Add(30*time.Second)) {
 		t.Error("fresh pool worker is not within post-create protection after its start committed onto a healed-awake bead")
@@ -5396,7 +5520,7 @@ func TestConfirmStartCommitState(t *testing.T) {
 		}
 	}
 	if confirmPendingStart("awake") {
-		t.Error("confirmPendingStart(awake) = true; StartsAwakeInterval would reset an in-flight awake interval")
+		t.Error("confirmPendingStart(awake) = true; startOpensAwakeInterval would then restamp an awake bead whose interval is still open")
 	}
 }
 
@@ -7900,7 +8024,6 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 		Alias:       "mayor",
 		ResolvedProvider: &config.ResolvedProvider{
 			Name:            "claude-max",
-			Kind:            "claude",
 			BuiltinAncestor: "claude",
 		},
 		TemplateName: "mayor",
@@ -8173,6 +8296,104 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 	}
 	if got.Metadata["opt_permission_mode"] != "plan" {
 		t.Fatalf("opt_permission_mode = %q, want plan", got.Metadata["opt_permission_mode"])
+	}
+}
+
+func TestStartOpensAwakeInterval(t *testing.T) {
+	const epoch = "2026-03-18T09:00:00Z"
+	cases := []struct {
+		name string
+		info sessionpkg.Info
+		want bool
+	}{
+		{name: "start out of creating", info: sessionpkg.Info{MetadataState: "creating"}, want: true},
+		{name: "wake from asleep with a prior epoch", info: sessionpkg.Info{MetadataState: "asleep", AwakeStartedAt: epoch}, want: true},
+		{name: "awake with no epoch", info: sessionpkg.Info{MetadataState: "awake"}, want: true},
+		{name: "active with no epoch", info: sessionpkg.Info{MetadataState: "active"}, want: true},
+		{name: "awake with an accounted epoch", info: sessionpkg.Info{MetadataState: "awake", AwakeStartedAt: epoch, UsageComputeEmittedAt: epoch}, want: true},
+		{name: "awake with an open epoch", info: sessionpkg.Info{MetadataState: "awake", AwakeStartedAt: epoch}, want: false},
+		{name: "active with an open epoch", info: sessionpkg.Info{MetadataState: "active", AwakeStartedAt: epoch, UsageComputeEmittedAt: "2026-03-18T08:00:00Z"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := startOpensAwakeInterval(tc.info); got != tc.want {
+				t.Fatalf("startOpensAwakeInterval(%+v) = %v, want %v", tc.info, got, tc.want)
+			}
+		})
+	}
+}
+
+// Heal projects awake as soon as a runtime is observed, so an async start can
+// commit onto a bead that already reads awake. A pool bead in that state has no
+// epoch yet, and without one the live usage lane never sweeps it. The commit
+// must stamp one, restamp a previous interval the compute lane already
+// accounted, and leave an open interval's epoch alone.
+func TestCommitStartResult_StampsAwakeEpochWhenHealedAwakeMidStart(t *testing.T) {
+	prior := time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	commitAt := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+	fresh := commitAt.Format(time.RFC3339Nano)
+	cases := []struct {
+		name      string
+		epoch     string
+		emittedAt string
+		want      string
+	}{
+		{name: "pool bead with no epoch", want: fresh},
+		{name: "previous interval already accounted", epoch: prior, emittedAt: prior, want: fresh},
+		{name: "open interval", epoch: prior, want: prior},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			meta := map[string]string{
+				"template":             "worker",
+				"session_name":         "worker-1",
+				"state":                "awake",
+				"pending_create_claim": "true",
+				poolManagedMetadataKey: "true",
+			}
+			if tc.epoch != "" {
+				meta["awake_started_at"] = tc.epoch
+			}
+			if tc.emittedAt != "" {
+				meta[usageComputeEmittedAtKey] = tc.emittedAt
+			}
+			session, err := store.Create(beads.Bead{
+				Title:    "worker-session",
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel},
+				Metadata: meta,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := startResult{
+				prepared: preparedStart{
+					candidate: startCandidate{
+						info: sessiontest.SeedBead(t, session),
+						tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+					},
+					coreHash: "core-abc",
+					liveHash: "live-xyz",
+				},
+				outcome:  "success",
+				started:  commitAt.Add(-10 * time.Second),
+				finished: commitAt,
+			}
+			if !commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: commitAt}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+				t.Fatal("commitStartResult returned false for successful start")
+			}
+			got, err := store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["awake_started_at"] != tc.want {
+				t.Fatalf("awake_started_at = %q, want %q", got.Metadata["awake_started_at"], tc.want)
+			}
+			if got.Metadata["pending_create_claim"] != "" {
+				t.Fatalf("pending_create_claim = %q, want cleared by the commit", got.Metadata["pending_create_claim"])
+			}
+		})
 	}
 }
 

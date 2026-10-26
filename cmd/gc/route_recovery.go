@@ -36,9 +36,12 @@ func carriedPoolRoute(b beads.Bead) string {
 	// withheld qualified one, and the restore's read-merge-write can land over
 	// the activation and put the fence back. The same holds for any bead Ready
 	// would never surface: it is not pool work, whatever gc.run_target says.
+	// A bead on a dispatch hold is parked rather than lost: its next actor is
+	// not the pool, so its empty gc.routed_to is deliberate too.
 	if strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" ||
 		strings.TrimSpace(b.Metadata[beadmeta.DeferredRoutedToMetadataKey]) != "" ||
-		beads.IsReadyExcludedBead(b) {
+		beads.IsReadyExcludedBead(b) ||
+		beadmeta.HasDispatchHold(b.Labels) {
 		return ""
 	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
@@ -70,6 +73,20 @@ func carriedPoolRoute(b beads.Bead) string {
 func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
 	cr.routeRecoveryOnce.Do(func() { cr.routeRecovery = newRouteRecoveryLane() })
 	return cr.routeRecovery
+}
+
+// claimLoopGuardOf is the runtime's claim-loop guard, created on first use. Its
+// alerts go to the runtime's recorder and stderr.
+func (cr *CityRuntime) claimLoopGuardOf() *claimLoopGuard {
+	cr.claimLoopOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimLoop = newClaimLoopGuard(record, cr.stderr)
+	})
+	return cr.claimLoop
 }
 
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
@@ -220,10 +237,11 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 // feed that makes the tick's delta passes possible, and the background sweeps
 // that converge what the feed can miss.
 //
-// One feed, three lanes plus the completion-fact index. A second watcher on the
-// same journal would be a second cursor to keep honest, and the gap semantics
-// have to be identical anyway: an event the tail missed is a gap for ALL of
-// them.
+// One feed, three lanes plus the completion-fact index and the claim-loop
+// guard. A second watcher on the same journal would be a second cursor to keep
+// honest, and the lanes' gap semantics have to be identical anyway: an event the
+// tail missed is a gap for ALL of the lanes. The guard is the one consumer that
+// treats a gap as nothing (see below).
 //
 // The sweeps are minutes of sequential remote reads on a large city — together
 // 88% of a 373s tick before this slice and its predecessor — so they run off the
@@ -234,6 +252,12 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	route := cr.routeRecoveryLaneOf()
 	completions := cr.completionsLaneOf()
 	orphans := cr.detachedOrphanLaneOf()
+	// The claim-loop guard rides the same feed and is published for the demand
+	// passes, which reach it by city path (claim_loop_guard.go). It needs no gap
+	// handling: a missed claim failure only delays a hold, and a missed bead
+	// change is covered by the hold's own expiry.
+	claimLoop := cr.claimLoopGuardOf()
+	registerClaimLoopGuard(ctx, cr.cityPath, claimLoop)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -246,6 +270,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			completions.observe(evt)
 			orphans.observe(evt)
 			cr.absorbCompletionFact(evt)
+			claimLoop.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
 	go cr.runCompletionsSweepLoop(ctx, completions)

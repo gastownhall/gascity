@@ -351,6 +351,38 @@ func TestReadLatestSeqSpansArchiveOnlyLog(t *testing.T) {
 	}
 }
 
+// TestReadLatestSeqCountsAnUnanchoredRotation pins that the log's head counts
+// an in-flight rotating file. From a rotation's rename until its anchor lands
+// in the fresh log, and for good when it cannot write the anchor, that file
+// holds the newest events while the active log is empty or absent.
+func TestReadLatestSeqCountsAnUnanchoredRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active []uint64 // the active log's seqs; nil leaves no active log
+		want   uint64
+	}{
+		{name: "empty active log", active: []uint64{}, want: 3},
+		{name: "no active log", want: 3},
+		{name: "anchored active log", active: []uint64{4}, want: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "events.jsonl")
+			seedEventLog(t, path, 3)
+			renameWithoutAnchor(t, path, 1, 3, false)
+			if tc.active != nil {
+				writeJSONLEvents(t, path, tc.active...)
+			}
+			seq, err := ReadLatestSeq(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seq != tc.want {
+				t.Fatalf("ReadLatestSeq = %d, want %d", seq, tc.want)
+			}
+		})
+	}
+}
+
 func TestReadAllSurvivesMultipleRotations(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

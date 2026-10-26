@@ -271,3 +271,23 @@ func (m *Manager) leaseForRestartLocked(ctx context.Context, by Actor, id, sessN
 	}
 	return by, release, nil
 }
+
+// KillRuntimeLease takes req's runtime lease for an operator kill (`gc
+// session kill`, the API session kill): it waits up to
+// RuntimeLeaseOperatorWait (CONTRACT O3) through wait, which is
+// WaitOperatorRuntimeLease or a caller's seam over it, and with force it then
+// takes the record past a hung flock holder whose record expired
+// (overridden). A failure other than busy never holds the kill hostage: it
+// falls back to the name's flock alone, with a warning.
+func KillRuntimeLease(ctx context.Context, front *Store, req RuntimeLeaseRequest, force bool, wait func(context.Context, *Store, RuntimeLeaseRequest) (*RuntimeLease, error), warn func(string)) (lease *RuntimeLease, overridden bool, err error) {
+	lease, err = wait(ctx, front, req)
+	if force && errors.Is(err, ErrRuntimeLeaseBusy) {
+		lease, err = ForceRuntimeLease(front, req)
+		overridden = err == nil
+	}
+	if err != nil && !errors.Is(err, ErrRuntimeLeaseBusy) {
+		warn(fmt.Sprintf("stopping %s under the name's flock alone: %v", req.Name, err))
+		lease, err = WaitOperatorRuntimeLease(ctx, nil, RuntimeLeaseRequest{City: req.City, Name: req.Name})
+	}
+	return lease, overridden, err
+}

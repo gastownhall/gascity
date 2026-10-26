@@ -40,6 +40,34 @@ evidence from tests, source, an issue, or a commit.
   extraction candidates unless they are tests, fixtures, or migration/doctor
   repair code.
 - Keep provider-specific runtime behavior behind `internal/runtime`.
+- Deferred submits go through the Manager's `DeferredSubmitQueue`
+  (`WithDeferredSubmitQueue`); no non-test session file touches the
+  state.json nudge queue directly. Enforced by
+  `TestSessionReachesTheNudgeQueueOnlyThroughDeferredSubmitQueue`.
+- The v2 stop request's keys (`stop_request_keys.go`) are read by cmd/gc's
+  `activeStop`, inside the reconciler, by cmd/gc's `v2SignaledUnacked`, for
+  legacy's rollback guard, and by `ReadStopRequest`, for the content gate,
+  whose one caller is the conversation lane's row read. `ReadStopRequest`
+  takes the reading of the controller's latched mode: residue
+  (`StopRequestsIgnored`) under legacy, live under v2. The controller's lane
+  host reads its own latch; every reader outside the controller (the CLI's
+  inline pass, the prompt hook) asks the running controller
+  (`reconciler-mode` on the controller socket), never the on-disk config,
+  and reads live when the mode is unknown. Only cmd/gc's
+  `conversation_lane_view.go` turns a mode into a reading
+  (`laneStopReading`, `controllerStopReading`); no other caller names
+  `StopRequestsLive` or `StopRequestsIgnored`, and only the controller's
+  lane host start, with its own latch, calls `laneStopReading`. The drain-protocol notice
+  (`GateContentDrainNotice`) is exempt from `stop_requested`, as from
+  `draining`, permanently, for the conversation lane's executors (the
+  controller's lane host and the CLI's inline pass), which report it as
+  `Probe.ContentAdmit`; the prompt hook's in-band pass admits no class, so
+  it holds the notice for the lane host. The single reader, the single
+  reading chooser and the key owners are guarded by
+  `TestStopRequestKeysAreNewKeys` and
+  `TestSessionReadsTheStopRequestOnlyInReadStopRequest`; the reader's rule
+  by `TestReadStopRequestAgreesWithActiveStop`; the published mode by
+  `TestQueryControllerReconcilerModeReadsTheControllersAnswer`.
 - Keep production CLI session creation and lifecycle operations on the
   `internal/worker/handle.go` boundary unless root `AGENTS.md` names an active
   exception.
@@ -54,9 +82,32 @@ evidence from tests, source, an issue, or a commit.
   allocation. Keep the fresh read and write inside that lock; provider calls
   and retired-session cleanup stay outside. This is an in-process fence, not
   protection against arbitrary external bead writers.
+- The mutation lock's acquire can be timed. `WithSessionMutationLockContext`
+  tries the lock first, then waits no longer than its context; a wait that
+  ends with the lock still held returns `ErrSessionMutationBusy` (wrapping the
+  context's error). A busy result means `fn` never ran and never will, so the
+  caller may retry the whole operation. The context bounds only the wait, not
+  `fn`. `CommitStartedIfCurrent`, `WithPendingCreateRollback`,
+  `RollbackPendingCreateAtomically` (and the `...Under` variants of the first
+  and third) take it as their first parameter. A `Manager` or `Store` method that takes a lock-bounding
+  `ctx` puts it first and says in its doc comment what it bounds; do not add a
+  parallel `...Ctx` variant.
+- The reconciler's advisory heal (`ApplyPatchIfLifecycleUnchanged`) decides
+  from its tick snapshot. Without conditional writes its re-check fences
+  nothing unless the check and the write share the row's mutation lock with the
+  in-process operator verbs, so it runs both inside that lock, tried through
+  `WithSessionMutationLockContext` with an already-done context: a free lock is
+  taken, a held one makes the heal skip (write nothing, `(false, nil)`) without
+  waiting. Never make it wait, since `Manager.Suspend` holds the lock through
+  the provider stop. Another process's writer (the CLI's managed
+  `gc session suspend` takes no mutation lock) is fenced only by a conditional
+  writer. `ApplyPatchIfLifecycleUnchangedUnder` runs under a caller-held lock
+  and must not take it again (ga-axgaemw).
 - `testing/synctest.Wait` does not consider `sync.Mutex.Lock` durably blocked.
   A test that pauses a lock holder on a channel and waits for a competing
-  mutex waiter will hang. `store_start_fence_test.go` checks the shared lock
+  mutex waiter will hang. The context-aware waiter is durably blocked, since
+  the lock is a channel, so it can be driven under `synctest` with a
+  `context.WithTimeout`. `store_start_fence_test.go` checks the shared lock
   directly at both read and write boundaries instead of relying on timing.
 - `awake` is not proof that creation completed: the reconciler can heal a
   running, still-claimed creation to awake before provider Start returns
@@ -75,7 +126,10 @@ provider with a session-id flag whose row is `creating` without a key: that
 start's conversation has no key yet. Families without `SupportsIDLookup`
 (Codex, Gemini, OpenCode, MiMo, ZCode) still fall back to work-directory
 discovery after a keyed miss, as does `SessionLogAdapter.DiscoverTranscript`;
-see `SESSION-HISTORY-EXACT-KEY`.
+see `SESSION-HISTORY-EXACT-KEY`. OpenCode and ZCode still prefer a keyed hit
+(the mirrored export is named for the session key) before that fallback. The
+model-usage paths in `internal/worker` resolve OpenCode by key only and never
+take the fallback.
 
 ## Manual Close During Reconciliation
 

@@ -1751,7 +1751,7 @@ func installNoSkillLiveProviderCommandOverride(cityDir, provider, sourceProvider
 func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string, readyDelay int, args []string) {
 	switch strings.TrimSpace(provider) {
 	case "codex":
-		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"}
+		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox"}
 	case "gemini":
 		return "arg", "", 5000, []string{"--approval-mode", "yolo"}
 	case "opencode":
@@ -3594,42 +3594,48 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 	nudgeTimedOut := isRunTimeout(err)
 	outputPath := filepath.Join(c.Dir, outputRel)
 	if err != nil && !nudgeTimedOut {
-		return inferenceSessionRun{
-				CityDir:      c.Dir,
-				Identity:     identity,
-				SessionID:    sessionInfo.ID,
-				SessionAlias: sessionInfo.Alias,
-				SessionName:  sessionInfo.SessionName,
-				SessionKey:   sessionInfo.SessionKey,
-				OutputPath:   outputPath,
-				LastStatus:   strings.TrimSpace(statusOut),
-			}, map[string]string{
-				"city_dir":              c.Dir,
-				"provider":              provider,
-				"identity":              identity,
-				"session_id":            sessionInfo.ID,
-				"session_name":          sessionInfo.SessionName,
-				"session_key":           sessionInfo.SessionKey,
-				"gc_session_id":         sessionInfo.SessionKey,
-				"bootstrap_transcript":  bootstrapPath,
-				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
-				"init_out":              strings.TrimSpace(initOut),
-				"start_out":             strings.TrimSpace(startOut),
-				"status":                strings.TrimSpace(statusOut),
-				"output_rel":            outputRel,
-			}, map[string]string{
-				"city_dir":              c.Dir,
-				"provider":              provider,
-				"identity":              identity,
-				"session_id":            sessionInfo.ID,
-				"session_name":          sessionInfo.SessionName,
-				"session_key":           sessionInfo.SessionKey,
-				"gc_session_id":         sessionInfo.SessionKey,
-				"bootstrap_transcript":  bootstrapPath,
-				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
-				"nudge_out":             strings.TrimSpace(nudgeOut),
-				"output_path":           outputPath,
-			}, "task", fmt.Errorf("gc session nudge failed: %w", err)
+		// Named, not returned as literals: gofumpt v0.9.2 (the Bazel format
+		// gate) and Go 1.27's printer (goimports) indent a multi-line
+		// composite literal in a return list differently.
+		run := inferenceSessionRun{
+			CityDir:      c.Dir,
+			Identity:     identity,
+			SessionID:    sessionInfo.ID,
+			SessionAlias: sessionInfo.Alias,
+			SessionName:  sessionInfo.SessionName,
+			SessionKey:   sessionInfo.SessionKey,
+			OutputPath:   outputPath,
+			LastStatus:   strings.TrimSpace(statusOut),
+		}
+		spawnEvidence := map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"identity":              identity,
+			"session_id":            sessionInfo.ID,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"init_out":              strings.TrimSpace(initOut),
+			"start_out":             strings.TrimSpace(startOut),
+			"status":                strings.TrimSpace(statusOut),
+			"output_rel":            outputRel,
+		}
+		taskEvidence := map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"identity":              identity,
+			"session_id":            sessionInfo.ID,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"nudge_out":             strings.TrimSpace(nudgeOut),
+			"output_path":           outputPath,
+		}
+		return run, spawnEvidence, taskEvidence, "task", fmt.Errorf("gc session nudge failed: %w", err)
 	}
 	if nudgeTimedOut {
 		if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr == nil && blocked != nil {

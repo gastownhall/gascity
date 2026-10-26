@@ -76,7 +76,7 @@ func runSigpipeUnwindHelper(mode, markerPath string) {
 		RouteTargets: []string{"worker"},
 		JSON:         true,
 	}, ops, os.Stdout, os.Stderr)
-	os.Exit(code)
+	exitTestProcess(code)
 }
 
 // runSigpipeUnwindChild re-execs this test binary with its stdout wired to a

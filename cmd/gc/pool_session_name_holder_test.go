@@ -139,7 +139,7 @@ func TestPoolSessionCreate_FailedCreateHolderReleasesItsName(t *testing.T) {
 		t.Fatalf("retry after a rolled-back attempt: %v", err)
 	}
 	// A new generation gets a new bead-scoped name; what keeps that from
-	// leaking the previous box is releaseBeadScopedPoolRuntime, pinned by
+	// leaking the previous box is releaseRowOwnedRuntime, pinned by
 	// TestPoolSessionCreate_FailedCreatesLeaveAtMostOneLiveRuntime.
 	if got := strings.TrimSpace(info.SessionNameMetadata); got == firstName || got != PoolSessionName(poolChurnTemplate, info.ID) {
 		t.Fatalf("retry session_name = %q, want a fresh bead-scoped name (first %q)", got, firstName)

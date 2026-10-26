@@ -32,7 +32,10 @@ import (
 )
 
 var (
-	authMu                        sync.Mutex
+	// authSem serializes ws-token requests and guards the cached token. It is
+	// a one-slot semaphore rather than a mutex so a waiter can give up when
+	// its ctx ends: see lockBridgeAuth.
+	authSem                       = make(chan struct{}, 1)
 	cachedBridgeWSToken           string
 	cachedBridgeWSTokenBaseURL    string
 	cachedBridgeWSTokenExpiresAt  time.Time
@@ -69,10 +72,20 @@ type Provider struct {
 	watchers     map[string]context.CancelFunc
 	recentStarts map[string]time.Time
 
+	// fenceChecked is a test seam run between a fenced operation's read of
+	// the thread and its dispatch.
+	fenceChecked func(name string)
+
+	// fresh coalesces fresh snapshot reads (DES-T3I D7).
+	fresh freshReads
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
+	// snapshotClears counts clearSnapshotCache calls: a read that started
+	// before the latest clear does not refill the cache.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
 	snapshotCacheAt  time.Time
+	snapshotClears   uint64
 }
 
 type threadBinding struct {
@@ -267,9 +280,24 @@ func resolveBearerSessionToken() (string, error) {
 	return readCachedBearerSessionToken()
 }
 
-func issueT3WebSocketToken(wsURL string) (string, error) {
-	authMu.Lock()
-	defer authMu.Unlock()
+// lockBridgeAuth takes authSem, or returns ctx's error if ctx ends first.
+func lockBridgeAuth(ctx context.Context) error {
+	select {
+	case authSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for the t3 auth lock: %w", ctx.Err())
+	}
+}
+
+// unlockBridgeAuth releases authSem.
+func unlockBridgeAuth() { <-authSem }
+
+func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
+	if err := lockBridgeAuth(ctx); err != nil {
+		return "", err
+	}
+	defer unlockBridgeAuth()
 
 	parsed, err := url.Parse(wsURL)
 	if err != nil {
@@ -295,7 +323,7 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 		return cachedBridgeWSToken, nil
 	}
 
-	req, err := http.NewRequest(http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return "", fmt.Errorf("build bridge ws-token request: %w", err)
 	}
@@ -331,7 +359,7 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 	return payload.Token, nil
 }
 
-func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
+func issueT3WebSocketTicket(ctx context.Context, wsURL, bearerToken string) (string, error) {
 	parsed, err := url.Parse(wsURL)
 	if err != nil {
 		return "", fmt.Errorf("parse ws url: %w", err)
@@ -348,7 +376,7 @@ func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 
-	req, err := http.NewRequest(http.MethodPost, parsed.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("build websocket-ticket request: %w", err)
 	}
@@ -591,13 +619,13 @@ func isLoopbackWsURL(wsURL string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func authenticatedWsURL(wsURL string) (string, http.Header, error) {
+func authenticatedWsURL(ctx context.Context, wsURL string) (string, http.Header, error) {
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return "", nil, err
 	}
 	if bearerToken != "" {
-		ticket, err := issueT3WebSocketTicket(wsURL, bearerToken)
+		ticket, err := issueT3WebSocketTicket(ctx, wsURL, bearerToken)
 		if err != nil {
 			if errors.Is(err, errWebSocketTicketUnsupported) {
 				headers := http.Header{}
@@ -618,7 +646,7 @@ func authenticatedWsURL(wsURL string) (string, http.Header, error) {
 	if isLoopbackWsURL(wsURL) {
 		return wsURL, nil, nil
 	}
-	wsToken, err := issueT3WebSocketToken(wsURL)
+	wsToken, err := issueT3WebSocketToken(ctx, wsURL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1152,29 +1180,79 @@ func (p *Provider) recentStartNames(prefix string) []string {
 
 // rpcCall makes a generic WebSocket RPC call and returns the result map.
 func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[string]interface{}, error) {
+	return p.rpcCallCtx(context.Background(), method, params)
+}
+
+// rpcCallCtx is rpcCall bounded by ctx: the dial, the auth requests and the
+// read stop when ctx ends, and so do the transient-retry sleeps.
+func (p *Provider) rpcCallCtx(ctx context.Context, method string, params map[string]interface{}) (map[string]interface{}, error) {
+	return p.rpcCallCheckedCtx(ctx, method, params, nil)
+}
+
+// rpcCallCheckedCtx is rpcCallCtx that runs beforeRetry, when set, after each
+// transient-retry sleep and before the next attempt; its error ends the call.
+// With beforeRetry set, an attempt ends at the first candidate that takes the
+// request, so the request is never sent again without the check.
+func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params map[string]interface{}, beforeRetry func(context.Context) error) (map[string]interface{}, error) {
 	p.mu.Lock()
 	p.reqSeq++
 	reqID := p.reqSeq
 	p.mu.Unlock()
 
 	deadline := time.Now().Add(bridgeConnectRetryWindow)
+	// written is whether an earlier attempt wrote the request and got no
+	// answer: T3 may have taken it, so every failure from then on says so.
+	written := false
+	fail := func(err error) error {
+		if written && !errors.Is(err, errRPCWrittenUnanswered) {
+			return fmt.Errorf("%w: %w", errRPCWrittenUnanswered, err)
+		}
+		return err
+	}
 	for attempt := 1; ; attempt++ {
-		result, err := p.rpcCallOnce(method, params, reqID)
+		result, err := p.rpcCallOnceCtx(ctx, method, params, reqID, beforeRetry != nil)
 		if err == nil {
 			return result, nil
 		}
+		written = written || errors.Is(err, errRPCWrittenUnanswered)
 		if !isTransientBridgeError(err) || time.Now().After(deadline) {
-			return nil, err
+			return nil, fail(err)
 		}
-		time.Sleep(nextBridgeRetryDelay(attempt))
+		retry := time.NewTimer(nextBridgeRetryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return nil, fail(fmt.Errorf("t3 rpc %s: %w: %w", method, ctx.Err(), err))
+		case <-retry.C:
+		}
+		if beforeRetry != nil {
+			if checkErr := beforeRetry(ctx); checkErr != nil {
+				return nil, fail(fmt.Errorf("t3 rpc %s: not retried after attempt %d failed: %w: %w", method, attempt, checkErr, err))
+			}
+		}
 	}
 }
 
-func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
+// errRPCWrittenUnanswered marks an RPC failure after a WebSocket candidate
+// took the whole request and no answer came back: T3 may have acted on it.
+var errRPCWrittenUnanswered = errors.New("t3 rpc request written but not answered")
+
+// rpcCallOnceCtx sends the request to each WebSocket candidate in turn until
+// one answers. With stopAfterWrite set, a candidate that takes the request and
+// then fails before answering ends the walk: the request may have reached T3.
+// A failure after any candidate took the request wraps
+// errRPCWrittenUnanswered.
+func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map[string]interface{}, reqID int, stopAfterWrite bool) (map[string]interface{}, error) {
 	var lastErr error
 	var failures []string
+	written := false
 	for _, candidate := range resolveWsURLCandidates() {
-		wsURL, headers, err := authenticatedWsURL(candidate)
+		if err := ctx.Err(); err != nil {
+			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			break
+		}
+		wsURL, headers, err := authenticatedWsURL(ctx, candidate)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
@@ -1182,13 +1260,17 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 		}
 		dialer := *websocket.DefaultDialer
 		dialer.HandshakeTimeout = bridgeWSTimeout
-		conn, _, err := dialer.Dial(wsURL, headers)
+		conn, _, err := dialer.DialContext(ctx, wsURL, headers)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
 			continue
 		}
 		defer func() { _ = conn.Close() }()
+		// Closing the connection when ctx ends unblocks the read below even
+		// when ctx has no deadline.
+		stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		defer stopClose()
 
 		payload := params
 		if payload == nil {
@@ -1202,54 +1284,98 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 			"headers": []interface{}{},
 		}
 		if err := conn.WriteJSON(request); err != nil {
+			// A failed write left T3 at most part of the message, which it
+			// cannot dispatch, so the walk goes on even with stopAfterWrite.
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
 			continue
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				lastErr = fmt.Errorf("%s: %w", candidate, err)
-				failures = append(failures, lastErr.Error())
-				break
-			}
-			var resp struct {
-				Tag       string `json:"_tag"`
-				RequestID string `json:"requestId"`
-				Exit      *struct {
-					Tag   string                 `json:"_tag"`
-					Value map[string]interface{} `json:"value"`
-					Cause json.RawMessage        `json:"cause"`
-				} `json:"exit"`
-				Defect string `json:"defect"`
-			}
-			if err := json.Unmarshal(msg, &resp); err != nil {
-				continue
-			}
-			if resp.Tag == "Defect" {
-				return nil, &t3RPCFailureError{method: method, cause: resp.Defect, defect: true}
-			}
-			if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
-				continue
-			}
-			if resp.Exit == nil {
-				return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
-			}
-			if resp.Exit.Tag == "Failure" {
-				return nil, &t3RPCFailureError{method: method, cause: string(resp.Exit.Cause), rejected: t3ExitCauseIsRejection(resp.Exit.Cause)}
-			}
-			return resp.Exit.Value, nil
+		value, answered, err := readRPCAnswer(ctx, conn, method, reqID)
+		if answered {
+			return value, err
+		}
+		written = true
+		lastErr = fmt.Errorf("%s: %w", candidate, err)
+		failures = append(failures, lastErr.Error())
+		if stopAfterWrite {
+			break
 		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
 	}
 	if len(failures) > 1 {
-		return nil, fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
+		lastErr = fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
+	}
+	// The failures above are text, so ctx's error survives only if named here.
+	if ctxErr := ctxEndErr(ctx); ctxErr != nil && !errors.Is(lastErr, ctxErr) {
+		lastErr = fmt.Errorf("%w: %w", ctxErr, lastErr)
+	}
+	if written {
+		return nil, fmt.Errorf("%w: %w", errRPCWrittenUnanswered, lastErr)
 	}
 	return nil, lastErr
+}
+
+// ctxEndErr is ctx.Err(), or context.DeadlineExceeded once ctx's deadline has
+// passed before its timer has run: a socket deadline taken from ctx.Deadline()
+// fires in that gap, and ctx.Err() is still nil there.
+func ctxEndErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// readRPCAnswer reads conn, for up to 30 s or until ctx's deadline, until T3
+// answers request reqID or reports a defect. answered is false when a read
+// fails first; the error is then the read failure, wrapping ctx's error when
+// ctx ended.
+func readRPCAnswer(ctx context.Context, conn *websocket.Conn, method string, reqID int) (map[string]interface{}, bool, error) {
+	readDeadline := time.Now().Add(30 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(readDeadline) {
+		readDeadline = ctxDeadline
+	}
+	_ = conn.SetReadDeadline(readDeadline)
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = fmt.Errorf("%w: %w", ctxErr, err)
+			}
+			return nil, false, err
+		}
+		var resp struct {
+			Tag       string `json:"_tag"`
+			RequestID string `json:"requestId"`
+			Exit      *struct {
+				Tag   string                 `json:"_tag"`
+				Value map[string]interface{} `json:"value"`
+				Cause json.RawMessage        `json:"cause"`
+			} `json:"exit"`
+			Defect string `json:"defect"`
+		}
+		if err := json.Unmarshal(msg, &resp); err != nil {
+			continue
+		}
+		if resp.Tag == "Defect" {
+			return nil, true, &t3RPCFailureError{method: method, cause: resp.Defect, defect: true}
+		}
+		if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
+			continue
+		}
+		if resp.Exit == nil {
+			return nil, true, fmt.Errorf("t3 rpc %s: nil exit", method)
+		}
+		if resp.Exit.Tag == "Failure" {
+			return nil, true, &t3RPCFailureError{method: method, cause: string(resp.Exit.Cause), rejected: t3ExitCauseIsRejection(resp.Exit.Cause)}
+		}
+		return resp.Exit.Value, true, nil
+	}
 }
 
 // threadSessionStatus returns the session status for a thread by checking
@@ -1268,30 +1394,12 @@ func (p *Provider) threadSessionStatus(threadID string) string {
 	if err != nil {
 		return ""
 	}
-
-	cache := make(map[string]string)
-	for _, raw := range snapshotItems(snapshot, "threads") {
-		thread, _ := raw.(map[string]interface{})
-		if thread == nil {
-			continue
-		}
-		id, _ := thread["id"].(string)
-		session, _ := thread["session"].(map[string]interface{})
-		if session != nil {
-			st, _ := session["status"].(string)
-			cache[id] = st
-		}
-	}
-
-	p.mu.Lock()
-	p.snapshotCache = cache
-	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
-
-	return cache[threadID]
+	return snapshotThreadStatuses(snapshot)[threadID]
 }
 
-func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
+// snapshotThreadStatuses maps each thread id in snapshot to its session
+// status.
+func snapshotThreadStatuses(snapshot map[string]interface{}) map[string]string {
 	cache := make(map[string]string)
 	for _, raw := range snapshotItems(snapshot, "threads") {
 		thread, _ := raw.(map[string]interface{})
@@ -1305,16 +1413,37 @@ func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 			cache[id] = st
 		}
 	}
+	return cache
+}
 
+// cacheSnapshot caches snapshot for the bridge's cached readers.
+func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
+	p.cacheSnapshotRead(snapshot, clears)
+}
+
+// cacheSnapshotRead caches snapshot, read by a read that started when the
+// cache had been cleared clears times, unless the cache was cleared since:
+// that read may predate the write the clear followed.
+func (p *Provider) cacheSnapshotRead(snapshot map[string]interface{}, clears uint64) {
+	cache := snapshotThreadStatuses(snapshot)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.snapshotClears != clears {
+		return
+	}
 	p.snapshotSnapshot = snapshot
 	p.snapshotCache = cache
 	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
 }
 
+// clearSnapshotCache empties the cache after a write the bridge made, so the
+// next cached read is answered by a read that started after the write.
 func (p *Provider) clearSnapshotCache() {
 	p.mu.Lock()
+	p.snapshotClears++
 	p.snapshotSnapshot = nil
 	p.snapshotCache = nil
 	p.snapshotCacheAt = time.Time{}
@@ -1326,7 +1455,9 @@ func (p *Provider) rpcDispatchCommand(command map[string]interface{}) error {
 	return err
 }
 
-func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, error) {
+// rpcHTTPSnapshot reads the orchestration snapshot over T3's HTTP endpoint,
+// bounded by ctx as well as the client timeout.
+func (p *Provider) rpcHTTPSnapshot(ctx context.Context, bearerToken string) (map[string]interface{}, error) {
 	var lastErr error
 	var unsupportedErr error
 	var failures []string
@@ -1351,7 +1482,7 @@ func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, 
 		parsed.RawQuery = ""
 		parsed.Fragment = ""
 
-		req, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: build snapshot request: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
@@ -1399,32 +1530,54 @@ func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, 
 	return nil, lastErr
 }
 
+// rpcSnapshot returns the cached snapshot while it is younger than
+// snapshotCacheTTL, else reads one. A cache that only aged out takes the
+// read in flight, if one is; a cache a write cleared (or never filled) waits
+// for a read that started after it arrived, so the write is visible.
 func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 	p.mu.Lock()
-	if time.Since(p.snapshotCacheAt) < snapshotCacheTTL && p.snapshotSnapshot != nil {
-		snapshot := p.snapshotSnapshot
+	cached := p.snapshotSnapshot
+	if cached != nil && time.Since(p.snapshotCacheAt) < snapshotCacheTTL {
 		p.mu.Unlock()
-		return snapshot, nil
+		return cached, nil
 	}
 	p.mu.Unlock()
+	if cached == nil {
+		return p.rpcSnapshotFresh(context.Background())
+	}
+	return p.fresh.shared(context.Background(), p.rpcSnapshotRead)
+}
 
+// rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
+// never from the cache, and caches what it read for the bridge's other
+// readers. Concurrent callers share reads by generation (freshReads): each
+// is answered by a read that started after it arrived.
+func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}, error) {
+	return p.fresh.do(ctx, p.rpcSnapshotRead)
+}
+
+// rpcSnapshotRead is one snapshot read for rpcSnapshotFresh.
+func (p *Provider) rpcSnapshotRead(ctx context.Context) (map[string]interface{}, error) {
+	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
 	}
 	var snapshot map[string]interface{}
 	if bearerToken != "" {
-		snapshot, err = p.rpcHTTPSnapshot(bearerToken)
+		snapshot, err = p.rpcHTTPSnapshot(ctx, bearerToken)
 		if errors.Is(err, errHTTPSnapshotUnsupported) {
-			snapshot, err = p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+			snapshot, err = p.rpcCallCtx(ctx, "orchestration.getSnapshot", map[string]interface{}{})
 		}
 	} else {
-		snapshot, err = p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+		snapshot, err = p.rpcCallCtx(ctx, "orchestration.getSnapshot", map[string]interface{}{})
 	}
 	if err != nil {
 		return nil, err
 	}
-	p.cacheSnapshot(snapshot)
+	p.cacheSnapshotRead(snapshot, clears)
 	return snapshot, nil
 }
 
@@ -1492,7 +1645,7 @@ func (p *Provider) dispatchProjectCreate(projectID, title, workspaceRoot, provid
 		"projectId":     projectID,
 		"title":         title,
 		"workspaceRoot": workspaceRoot,
-		"createdAt":     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":     time.Now().UTC().Format(t3TimeLayout),
 	}
 	if provider != "" || model != "" {
 		command["defaultModelSelection"] = map[string]interface{}{
@@ -1524,7 +1677,7 @@ func (p *Provider) dispatchThreadCreate(
 		"interactionMode": "default",
 		"branch":          nil,
 		"worktreePath":    nil,
-		"createdAt":       time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":       time.Now().UTC().Format(t3TimeLayout),
 	}
 	if branch != "" {
 		command["branch"] = branch
@@ -1551,7 +1704,7 @@ func (p *Provider) dispatchThreadSessionStop(threadID string) error {
 		"type":      "thread.session.stop",
 		"commandId": p.nextCommandID("t3bridge-session-stop"),
 		"threadId":  threadID,
-		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt": time.Now().UTC().Format(t3TimeLayout),
 	})
 }
 
@@ -1581,7 +1734,7 @@ func (p *Provider) dispatchThreadModelSelection(threadID, provider, model string
 
 func (p *Provider) dispatchActivity(threadID, kind, summary string, payload map[string]interface{}) error {
 	tone := "info"
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	now := time.Now().UTC().Format(t3TimeLayout)
 	return p.rpcDispatchCommand(map[string]interface{}{
 		"type":      "thread.activity.append",
 		"commandId": p.nextCommandID("t3bridge-activity"),
@@ -1644,9 +1797,25 @@ func deliveryIDNamespace(city string) string {
 	return namespace
 }
 
+// t3TimeLayout is the layout of every createdAt the bridge stamps on a T3
+// command: UTC with millisecond precision. T3 records a turn start's
+// requestedAt from it, so a turn's start and its message's createdAt compare
+// equal (DES-O1 §4.8 row 3).
+const t3TimeLayout = "2006-01-02T15:04:05.000Z"
+
 func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	return p.rpcDispatchCommand(map[string]interface{}{
+	_, err := p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+	return err
+}
+
+// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx and
+// returns the createdAt it stamped, which T3 stores as the message's
+// creation time and the turn's requestedAt. ids and the stamp are reused by
+// every retry; beforeRetry, when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) (time.Time, error) {
+	stamp := time.Now().UTC().Truncate(time.Millisecond)
+	now := stamp.Format(t3TimeLayout)
+	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", map[string]interface{}{
 		"type":      "thread.turn.start",
 		"commandId": ids.commandID,
 		"threadId":  threadID,
@@ -1663,16 +1832,33 @@ func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids
 		"runtimeMode":     "full-access",
 		"interactionMode": "default",
 		"createdAt":       now,
-	})
+	}, beforeRetry)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return stamp, nil
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
-	return p.rpcDispatchCommand(map[string]interface{}{
+	return p.dispatchTurnInterruptFor(context.Background(), threadID, "", nil)
+}
+
+// dispatchTurnInterruptFor dispatches thread.turn.interrupt bounded by ctx,
+// with a fresh command id that every retry reuses. A non-empty turnID is T3's
+// raw turn id: V1 records it and interrupts whatever turn runs. beforeRetry,
+// when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnID string, beforeRetry func(context.Context) error) error {
+	command := map[string]interface{}{
 		"type":      "thread.turn.interrupt",
 		"commandId": p.nextCommandID("t3bridge-interrupt"),
 		"threadId":  threadID,
-		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-	})
+		"createdAt": time.Now().UTC().Format(t3TimeLayout),
+	}
+	if turnID != "" {
+		command["turnId"] = turnID
+	}
+	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", command, beforeRetry)
+	return err
 }
 
 func snapshotProjects(snapshot map[string]interface{}) []map[string]interface{} {
@@ -2696,6 +2882,13 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 			fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) reuse decision=%s thread=%s\n", name, reuse.Decision, existingBinding.ThreadID) //nolint:errcheck
 			projectID = existingBinding.ProjectID
 			threadID = existingBinding.ThreadID
+			// The thread records the new incarnation before anything stops or
+			// rebinds it: until then its gc.sessionEnv proves the previous
+			// incarnation, and a fence check against it would pass for input
+			// meant for the session being replaced.
+			if err := p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, buildThreadEnv(cfg.Env))); err != nil {
+				return fail(fmt.Errorf("t3bridge: record incarnation on reused thread %s: %w", threadID, err))
+			}
 			if reuse.Decision == ReuseDecisionRebind {
 				_ = p.dispatchThreadModelSelection(threadID, providerName, modelName)
 			}
@@ -2712,7 +2905,6 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 				Model:       modelName,
 			}
 			p.setRecentStart(name, time.Now())
-			_ = p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, buildThreadEnv(cfg.Env)))
 			if worktreePath != "" {
 				_ = p.rpcUpdateThreadMeta(threadID, worktreeBranch, worktreePath)
 			}
@@ -3007,26 +3199,42 @@ func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
 // caller that delivers without first checking IsRunning, which reports such a
 // thread as not running.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.nudge(name, content, "")
+	_, err := p.nudge(name, content, "")
+	return err
 }
 
 // NudgeKeyed implements [runtime.KeyedNudgeProvider]: it delivers like Nudge,
 // deriving the turn's T3 command and message ids from key, so a redelivery
 // under the same key replays T3's receipt instead of starting a second turn.
 // A definitive T3 refusal is reported as [runtime.ErrNudgeRejected]; the
-// caller then redelivers under a new key.
-func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+// caller then redelivers under a new key. The receipt is the turn's message
+// id and the createdAt this send stamped on it.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	return p.nudge(name, content, key)
 }
 
-func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) error {
+func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	thread, binding, err := p.boundThread(name)
 	if err != nil {
-		return err
+		return runtime.DeliveryReceipt{}, err
 	}
+	return p.nudgeThread(name, thread, binding, content, key)
+}
+
+// nudgeThread starts a turn carrying content on the thread bound to name, as
+// read: thread and its binding. A non-empty key derives the turn's T3 ids.
+func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
+	return p.nudgeThreadFor(context.Background(), name, thread, binding, content, key, nil)
+}
+
+// nudgeThreadFor is nudgeThread bounded by ctx, with beforeRetry gating each
+// transient retry of the turn start. It returns the receipt of the turn
+// start: its message id and the createdAt it stamped. Empty text dispatches
+// nothing and reports no receipt.
+func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) (runtime.DeliveryReceipt, error) {
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return runtime.DeliveryReceipt{}, nil
 	}
 	meta := threadCustomMetadata(thread)
 	provider := meta["gc.runtimeProvider"]
@@ -3041,13 +3249,17 @@ func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string
 	if key != "" {
 		ids = deriveDeliveryIDs(meta["gc.city"], binding.ThreadID, key)
 	}
-	if err := p.dispatchTurnStart(binding.ThreadID, text, provider, model, ids); err != nil {
+	stamp, err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry)
+	if err != nil {
 		if isT3Rejection(err) {
-			return fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
 		}
-		return err
+		if errors.Is(err, errRPCWrittenUnanswered) {
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
+		}
+		return runtime.DeliveryReceipt{}, err
 	}
-	return nil
+	return runtime.DeliveryReceipt{MessageID: ids.messageID, MessageAt: stamp}, nil
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto

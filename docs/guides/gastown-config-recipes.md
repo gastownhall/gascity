@@ -27,7 +27,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 ```
 
 ```toml
@@ -37,7 +37,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 ```
 
 ```bash
@@ -55,7 +55,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -73,7 +73,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -90,10 +90,34 @@ City-scoped agents such as `mayor`, `deacon`, and `boot` are easiest to tweak wi
 [[patches.agent]]
 name = "gastown.mayor"
 provider = "codex"
-idle_timeout = "2h"
 ```
 
 Use patches when the target is already a concrete city-scoped agent. Use `[[rigs.patches]]` when the target is a pack agent stamped per rig.
+
+`idle_timeout` and `max_session_age` have no effect on `mayor`, `deacon`,
+`boot`, or `witness`: the Gastown pack runs them as always-on named sessions
+(`mode = "always"`), and the orchestrator keeps those running.
+
+### Stop `boot` from restarting
+
+The Gastown pack's `boot` agent is the deacon's watchdog. It runs as an
+always-on named session that wakes fresh, checks the deacon, and exits, so the
+orchestrator keeps starting it again. An `idle_timeout` on it changes nothing.
+To stop it, suspend it:
+
+```toml
+# city.toml
+[[patches.agent]]
+name = "gastown.boot"
+suspended = true
+```
+
+Add the patch to `city.toml` yourself. `boot` is defined by the Gastown pack,
+so on a city the supervisor runs (no `[api]` port in `city.toml`),
+`gc agent suspend gastown.boot` does not write the patch: it exits with
+`agent "gastown.boot" is defined by a pack — use [[patches]] to override`.
+Suspending `boot` turns off its deacon check. To turn it back on, delete the
+patch.
 
 ### Add a named crew agent
 
@@ -127,7 +151,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -202,6 +226,10 @@ rig = "*"
 interval = "12h"
 ```
 
+Use `skip` or an override for a given order, not both: `skip` removes the
+order before overrides apply, so an override that names it matches nothing
+and fails.
+
 ## A Complete Gastown Example
 
 The overrides above are fragments — single edits you splice into an existing
@@ -255,7 +283,7 @@ base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 
 [daemon]
 patrol_interval = "30s"
@@ -298,7 +326,7 @@ schema = 2
 # bundled copy. The gastown pack is no longer a local directory.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 ```
 
 ### The gastown pack — the reusable defaults

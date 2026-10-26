@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -41,9 +44,12 @@ func (p Profile) String() string {
 type ProfileBackend interface {
 	Provider
 	AttachmentObserverWithError
+	BackgroundWorkStopper
 	DeadRuntimeSessionChecker
 	DialogProvider
 	EnvironmentBatchProvider
+	FencedInputProvider
+	FencedInteractionProvider
 	FreshLivenessObserver
 	IdleSnapshotProvider
 	IdleWaitProvider
@@ -66,6 +72,9 @@ type ProfileBackend interface {
 	SessionObjectKiller
 	SessionRosterProvider
 	TurnEventProvider
+	TurnFenceProvider
+	TurnObservationProvider
+	TurnRunningProvider
 	UnattendedSessionStopper
 }
 
@@ -76,21 +85,21 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
-		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
+		return subprocessProfile{core, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, localTranscriptTrait{}}
 	case ProfileHerdr:
-		return herdrProfile{core, b, b, b, b, b}
+		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
-		return execProfile{core, b, b, b, b, timed, probeBudgetTrait{}}
+		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -101,25 +110,35 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
-	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
+	steerTrait         struct{ m SteerMode }
+	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
+	// agent runs on this host.
+	localTranscriptTrait struct{}
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
 
 func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return t.m }
 
+func (t steerTrait) SteerMode(string) SteerMode { return t.m }
+
 func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
 func (freshTrait) LivenessReadsFresh() bool { return true }
+
+func (localTranscriptTrait) LocalTranscripts() bool { return true }
 
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
 
 // profileCapabilities are each backend's static capabilities; subprocess
-// has none. exec's come from its script's handshake, so its profile has
-// none, as an exec provider has before one.
+// has none. exec's come from its script's handshake: the profile is a pack
+// declaring the exec connection and input fencing (proc.exec, input-fence)
+// alone, which reports none of these and fences input atomically through
+// the tmux carrier.
 var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileTmux:     {CanReportAttachment: true, CanReportActivity: true},
 	ProfileACP:      {CanReportActivity: true},
@@ -142,9 +161,12 @@ type (
 	tmuxProfile struct {
 		Provider
 		AttachmentObserverWithError
+		BackgroundWorkStopper
 		DeadRuntimeSessionChecker
 		DialogProvider
 		EnvironmentBatchProvider
+		FencedInputProvider
+		FencedInteractionProvider
 		FreshLivenessObserver
 		IdleSnapshotProvider
 		IdleWaitProvider
@@ -163,11 +185,15 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait
+		localTranscriptTrait
+		steerTrait
 	}
 	acpProfile struct {
 		Provider
+		FencedInputProvider
 		IdleSnapshotProvider
 		IdleWaitProvider
 		InteractionProvider
@@ -176,19 +202,24 @@ type (
 		ProcessTableScanner
 		SessionEventProvider
 		TurnEventProvider
+		TurnFenceProvider
+		TurnObservationProvider
 		freshTrait
 		sidecarTrait
 		sleepTrait
 		transportTrait
+		localTranscriptTrait
 	}
 	subprocessProfile struct {
 		Provider
+		FencedInputProvider
 		ListingAttestation
 		LivenessObserverWithError
 		ProcessTableScanner
 		freshTrait
 		sidecarTrait
 		sleepTrait
+		localTranscriptTrait
 	}
 	herdrProfile struct {
 		Provider
@@ -197,6 +228,7 @@ type (
 		LivenessObserver
 		ServerLifecycleProvider
 		SessionEventProvider
+		localTranscriptTrait
 	}
 	k8sProfile struct {
 		Provider
@@ -208,6 +240,7 @@ type (
 		Provider
 		AttachmentObserverWithError
 		DialogProvider
+		FencedInputProvider
 		IdleWaitProvider
 		RelaunchProvider
 		sleepTrait
@@ -220,13 +253,45 @@ type (
 	}
 	t3bridgeProfile struct {
 		Provider
+		FencedInputProvider
 		KeyedNudgeProvider
 		LivenessObserverWithError
 		SessionBindingProvider
+		TurnFenceProvider
+		TurnObservationProvider
 		sleepTrait
 		turnInterruptTrait
 	}
 )
+
+// InputFencing is acp's fixed trait: checked (the fence against the live
+// process's recorded digest, then its own connection). The fenced input
+// methods stay forwarded to the backend.
+func (acpProfile) InputFencing(string) InputFencing { return InputFencingChecked }
+
+// InputFencing is subprocess's fixed trait: checked (the fence against the
+// live child's recorded digest, then that child).
+func (subprocessProfile) InputFencing(string) InputFencing { return InputFencingChecked }
+
+// InputFencing is t3bridge's fixed trait: checked (the fence against the
+// thread binding's recorded incarnation, then that thread by id).
+func (t3bridgeProfile) InputFencing(string) InputFencing { return InputFencingChecked }
+
+// t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
+// trait the profile answers itself; a test pins it to production.
+var t3bridgeTurnCapabilities = TurnCapabilities{
+	Start:    TurnStartRecorded,
+	End:      TurnEndInferred,
+	Fence:    TurnFenceChecked,
+	Link:     TurnLinkCorrelated,
+	Lossless: false,
+}
+
+// TurnCapabilities implements [TurnObservationProvider] with t3bridge's
+// static row; TurnHistory stays forwarded to the backend.
+func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
+	return t3bridgeTurnCapabilities
+}
 
 // FullFake is a [Fake] implementing every [ProfileBackend] interface, the
 // ones Fake lacks answered from its session state.
@@ -248,8 +313,10 @@ func (f FullFake) liveness(method, name string) (Liveness, error) {
 }
 
 // NudgeKeyed implements [KeyedNudgeProvider]: it records a Nudge call
-// carrying key and answers as [Fake.Nudge] does.
-func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) error {
+// carrying key, a repeated key included, and answers as [Fake.Nudge] does.
+// A delivery that succeeds is held under key unless one already is, and its
+// receipt is the held one (fakeReceipt).
+func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) (DeliveryReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{
@@ -260,12 +327,78 @@ func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) er
 		DeliveryKey: key,
 	})
 	if f.broken {
-		return fmt.Errorf("session unavailable")
+		return DeliveryReceipt{}, fmt.Errorf("session unavailable")
 	}
-	if err, ok := f.NudgeErrors[name]; ok {
+	if err, ok := f.NudgeErrors[name]; ok && err != nil {
+		return DeliveryReceipt{}, err
+	}
+	return f.holdLocked(name, key), nil
+}
+
+// NudgeFenced is [Fake.NudgeFenced]; a fenced nudge under a delivery key
+// that succeeds is held as NudgeKeyed holds it, and its receipt fills
+// n.Receipt when set.
+func (f FullFake) NudgeFenced(ctx context.Context, name string, content []ContentBlock, n FencedNudge) error {
+	if err := f.Fake.NudgeFenced(ctx, name, content, n); err != nil {
 		return err
 	}
+	if n.DeliveryKey == "" {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.holdLocked(name, n.DeliveryKey)
+	if n.Receipt != nil {
+		*n.Receipt = r
+	}
 	return nil
+}
+
+// LookupDelivery implements [KeyedNudgeProvider]: it records a
+// LookupDelivery call carrying key and answers from KeyedDeliveries, a
+// broken fake with ErrRuntimeUnavailable and LookupDeliveryErrors first.
+func (f FullFake) LookupDelivery(_ context.Context, name, key string) (DeliveryReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "LookupDelivery", Name: name, DeliveryKey: key})
+	if f.broken {
+		return DeliveryReceipt{}, ErrRuntimeUnavailable
+	}
+	if err := f.LookupDeliveryErrors[name]; err != nil {
+		return DeliveryReceipt{}, err
+	}
+	if r, ok := f.KeyedDeliveries[name][key]; ok {
+		return r, nil
+	}
+	return DeliveryReceipt{}, fmt.Errorf("session %q: %w", name, ErrDeliveryNotFound)
+}
+
+// holdLocked holds a delivery to name under key unless one is held, and
+// returns the held receipt. The caller holds f.mu.
+func (f FullFake) holdLocked(name, key string) DeliveryReceipt {
+	if r, ok := f.KeyedDeliveries[name][key]; ok {
+		return r
+	}
+	if f.KeyedDeliveries == nil {
+		f.KeyedDeliveries = make(map[string]map[string]DeliveryReceipt)
+	}
+	if f.KeyedDeliveries[name] == nil {
+		f.KeyedDeliveries[name] = make(map[string]DeliveryReceipt)
+	}
+	r := fakeReceipt(name, key)
+	f.KeyedDeliveries[name][key] = r
+	return r
+}
+
+// fakeReceipt is a fake runtime's receipt of a delivery to name under key:
+// a message id derived from both, carrying neither, and a stamp of now at
+// millisecond precision.
+func fakeReceipt(name, key string) DeliveryReceipt {
+	sum := sha256.Sum256([]byte(name + "\x00" + key))
+	return DeliveryReceipt{
+		MessageID: "fake-message-" + hex.EncodeToString(sum[:8]),
+		MessageAt: time.Now().UTC().Truncate(time.Millisecond),
+	}
 }
 
 // SessionBinding implements [SessionBindingProvider] from the fake's
@@ -336,6 +469,17 @@ func (f FullFake) SnapshotIdle(name string) (bool, error) {
 	defer f.mu.Unlock()
 	_, running := f.sessions[name]
 	return running, nil
+}
+
+// TurnRunning implements [TurnRunningProvider]: a running session runs no
+// turn, and a session that is not running cannot be looked at.
+func (f FullFake) TurnRunning(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, running := f.sessions[name]; !running {
+		return false, fmt.Errorf("turn of %q: %w", name, ErrSessionNotFound)
+	}
+	return false, nil
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,
@@ -416,6 +560,152 @@ func (f FullFake) SubscribeTurnEvents(ctx context.Context) (<-chan TurnEvent, er
 		close(ch)
 	}()
 	return ch, nil
+}
+
+// ObserveTurn implements [TurnFenceProvider] from the fake's TurnScripts.
+func (f FullFake) ObserveTurn(ctx context.Context, name string) (TurnState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ObserveTurn", Name: name})
+	if err := ctx.Err(); err != nil {
+		return TurnState{}, err
+	}
+	st, _, err := f.readTurnLocked(name)
+	return st, err
+}
+
+// InterruptTurn implements [TurnFenceProvider]: it reads the script and
+// "sends" only when the read names turnID, recording what it did in Value. An
+// empty turnID is refused before the read, so no script entry is consumed.
+func (f FullFake) InterruptTurn(ctx context.Context, name, turnID string) (TurnInterrupt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	call := Call{Method: "InterruptTurn", Name: name, Key: turnID, Value: "error"}
+	defer func() { f.Calls = append(f.Calls, call) }()
+	if turnID == "" {
+		return TurnInterrupt{}, ErrTurnUnnamed
+	}
+	if err := ctx.Err(); err != nil {
+		return TurnInterrupt{}, err
+	}
+	st, _, err := f.readTurnLocked(name)
+	if err != nil {
+		return TurnInterrupt{}, err
+	}
+	if st.TurnID != turnID {
+		call.Value = "not_current"
+		return TurnInterrupt{}, &TurnNotCurrentError{Session: name, TurnID: turnID, Current: st}
+	}
+	if err := f.InterruptTurnErrors[name]; err != nil {
+		return TurnInterrupt{}, err
+	}
+	call.Value = "sent"
+	return TurnInterrupt{Fenced: f.FencedTurnInterrupts}, nil
+}
+
+// WaitTurnEnded implements [TurnFenceProvider] without sleeping: it reads the
+// script until the turn is no longer turnID, and answers ErrTurnNotEnded once
+// the script is exhausted on turnID. A read reporting ErrSessionNotFound ends
+// the turn, as the bridge's poll does; another read error is skipped and the
+// next entry read. timeout is not consulted.
+func (f FullFake) WaitTurnEnded(ctx context.Context, name, turnID string, _ time.Duration) (TurnState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "WaitTurnEnded", Name: name, Key: turnID})
+	if turnID == "" {
+		return TurnState{}, ErrTurnUnnamed
+	}
+	if f.broken {
+		return TurnState{}, ErrRuntimeUnavailable
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return TurnState{}, err
+		}
+		st, exhausted, err := f.readTurnLocked(name)
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			return TurnState{}, nil
+		case err != nil:
+			continue // TurnReadErrors is finite: the script answers next
+		case st.TurnID != turnID:
+			return st, nil
+		case exhausted:
+			return st, ErrTurnNotEnded
+		}
+	}
+}
+
+// readTurnLocked is one turn read: the next TurnReadErrors entry, else the
+// next script entry. exhausted reports that the entry read repeats from here
+// on. The caller holds f.mu.
+func (f FullFake) readTurnLocked(name string) (st TurnState, exhausted bool, err error) {
+	if f.broken {
+		return TurnState{}, true, ErrRuntimeUnavailable
+	}
+	if errs := f.TurnReadErrors[name]; len(errs) > 0 {
+		f.TurnReadErrors[name] = errs[1:]
+		if errs[0] != nil {
+			return TurnState{}, false, errs[0]
+		}
+	}
+	script := f.TurnScripts[name]
+	if len(script) == 0 {
+		return TurnState{}, true, nil
+	}
+	if len(script) > 1 {
+		f.TurnScripts[name] = script[1:]
+	}
+	return TurnState{TurnID: script[0]}, len(script) == 1, nil
+}
+
+// TurnCapabilities implements [TurnObservationProvider] from the fake's
+// TurnCapabilityScripts, normalized as [TurnCapabilitiesFor] reports them, so
+// an unscripted session reads as the canonical nothing.
+func (f FullFake) TurnCapabilities(name string) TurnCapabilities {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return popScript(f.TurnCapabilityScripts, name).Normalized()
+}
+
+// TurnHistory implements [TurnObservationProvider]: the next TurnHistoryErrors
+// entry, else the next TurnHistoryScripts entry, stamped now when it carries
+// no ObservedAt. A broken fake's read fails.
+func (f FullFake) TurnHistory(ctx context.Context, name string) (TurnHistory, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TurnHistory", Name: name})
+	if err := ctx.Err(); err != nil {
+		return TurnHistory{}, err
+	}
+	if f.broken {
+		return TurnHistory{}, ErrRuntimeUnavailable
+	}
+	if errs := f.TurnHistoryErrors[name]; len(errs) > 0 {
+		f.TurnHistoryErrors[name] = errs[1:]
+		if errs[0] != nil {
+			return TurnHistory{}, errs[0]
+		}
+	}
+	h := popScript(f.TurnHistoryScripts, name)
+	if h.ObservedAt.IsZero() {
+		h.ObservedAt = time.Now()
+	}
+	return h, nil
+}
+
+// popScript returns name's next scripted entry, the zero value when it has
+// none, and keeps the last entry to repeat. The caller holds the fake's lock.
+func popScript[T any](scripts map[string][]T, name string) T {
+	script := scripts[name]
+	if len(script) == 0 {
+		var zero T
+		return zero
+	}
+	if len(script) > 1 {
+		scripts[name] = script[1:]
+	}
+	return script[0]
 }
 
 func (f FullFake) record(method, name string) {

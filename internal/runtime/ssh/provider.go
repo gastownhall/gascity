@@ -542,11 +542,12 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // in its own pass so the variable-width column is last and parses safely.
 // Each pass is filtered on the box to the pane pids' process trees
 // (processTreeAwk), so only those rows cross the connection, not the whole
-// table of a busy box.
+// table of a busy box. The pane pids reach awk space-separated: the One True
+// AWK (macOS's awk) rejects a -v value holding a newline.
 func processAliveScript(name string) string {
 	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F " + shellQuote([]string{runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}"}) + ") || exit 3\n" +
 		"echo \"$panes\"\n" +
-		"roots=$(echo \"$panes\" | awk '{print $2}')\n" +
+		"roots=$(echo \"$panes\" | awk '{printf \"%s \", $2}')\n" +
 		"echo " + processSectionComm + "\n" +
 		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n" +
 		"echo " + processSectionArgs + "\n" +

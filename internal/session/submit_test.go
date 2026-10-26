@@ -2351,6 +2351,109 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	}
 }
 
+// busyNudgeProvider defers every wait-idle Nudge with runtime.ErrSessionBusy,
+// typing nothing, the way the tmux provider answers a Codex pane still running
+// a turn when its wait for idle runs out.
+type busyNudgeProvider struct{ *runtime.Fake }
+
+func (p *busyNudgeProvider) Nudge(name string, _ []runtime.ContentBlock) error {
+	return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+}
+
+// TestSendQueuesWhenTheRuntimeDefersABusySession: a default send the runtime
+// defers rather than interrupt a running turn is queued for later delivery
+// (queued, deferred), not reported as a failure that loses it; the live-only
+// send, whose caller is the queue itself, reports the deferral so the queue
+// keeps its item.
+func TestSendQueuesWhenTheRuntimeDefersABusySession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &busyNudgeProvider{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	defer func() { startSessionSubmitPoller = origPoller }()
+	hints := runtime.Config{WorkDir: info.WorkDir}
+
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorBackground), info.ID, "while you work", BuildResumeCommand(info), hints)
+	if err != nil || !out.Queued || !out.Deferred {
+		t.Fatalf("Send = %+v, %v; want queued and deferred", out, err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "while you work" {
+		t.Fatalf("pending %+v, want the message queued for the session", state.Pending)
+	}
+
+	delivered, err := mgr.SendLiveOnly(context.Background(), info.ID, "x", nil)
+	if delivered || !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("SendLiveOnly = %t, %v; want undelivered with runtime.ErrSessionBusy", delivered, err)
+	}
+}
+
+// TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn: a default Codex
+// submit goes out through NudgeNow, and the tmux runtime answers a Codex pane
+// still running a turn with runtime.ErrSessionBusy, nothing typed, rather than
+// lead its submit with an Escape that aborts that turn. The submit is then
+// queued for the next idle boundary, never reported delivered.
+func TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	defer func() { startSessionSubmitPoller = origPoller }()
+	sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, info.SessionName)}
+
+	out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "marker", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil || !out.Queued {
+		t.Fatalf("Submit(default) = %+v, %v; want queued", out, err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "marker" {
+		t.Fatalf("pending %+v, want the submit queued for the session", state.Pending)
+	}
+}
+
+// TestSubmitDefaultCodexReportsALostDeliveryAsAFailure: when the runtime
+// proves the message never landed (the tmux runtime's ErrNudgeSubmitLost:
+// Codex's rollout records the turn aborted and never the message), the submit
+// fails rather than report a delivery. Only a delivery the runtime proved
+// (runtime.ErrNudgeDeliveredUnobserved) counts as one.
+func TestSubmitDefaultCodexReportsALostDeliveryAsAFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	lost := errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed): the provider ended the turn before it recorded the message")
+	sp.NudgeErrors = map[string]error{info.SessionName: lost}
+
+	out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "marker", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if !errors.Is(err, lost) {
+		t.Fatalf("Submit(default) = %+v, %v; want the lost delivery reported", out, err)
+	}
+	if out.Queued {
+		t.Fatalf("Submit(default) = %+v, want not queued", out)
+	}
+}
+
 // TestSendPathsQueueOverACrashedAgent (mc-wdjni): every send path, not only
 // Submit's default, holds text off a pane whose agent is dead: Send and
 // SendImmediate queue it (queued, deferred), the live-only sends and the
@@ -2499,17 +2602,21 @@ func (f staleCacheFake) ObserveLivenessSince(name string, processNames []string,
 }
 
 // crashedBehindStaleCache is a claude row whose agent crashed in a pane
-// still up, behind a provider cache that still shows it alive.
+// still up, behind a provider cache that still shows it alive. Its fresh read
+// fails with freshErr only once the row is created, since a create refuses
+// on a fresh read that cannot answer.
 func crashedBehindStaleCache(t *testing.T, provider string, freshErr error) (*Manager, *runtime.Fake, Info, string, runtime.Config) {
 	t.Helper()
 	store := beads.NewMemStore()
 	fake := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, staleCacheFake{Fake: fake, freshErr: freshErr}, WithCityPath(cityPath))
+	sp := &staleCacheFake{Fake: fake}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	sp.freshErr = freshErr
 	origPoller := startSessionSubmitPoller
 	startSessionSubmitPoller = func(string, string, string) error { return nil }
 	t.Cleanup(func() { startSessionSubmitPoller = origPoller })
@@ -2638,5 +2745,89 @@ func TestCrashedAgentStopAndKillFencesStillRefuse(t *testing.T) {
 				t.Fatalf("pending %+v, want nothing queued", state.Pending)
 			}
 		})
+	}
+}
+
+func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realBin := filepath.Join(dir, "bin", "session_test_", "session_test")
+	spyBin := filepath.Join(dir, "spy", "session_test")
+	// A real gc started by a bazel integration test runs with TEST_SRCDIR set
+	// and is exec'd through its runfiles symlink; only the _test name gate
+	// keeps it from being treated as a test binary.
+	gcBin := filepath.Join(dir, "bin", "gc_", "gc")
+	for _, p := range []string{realBin, spyBin, gcBin} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	// Bazel's test-setup.sh execs the test via its runfiles path, which is a
+	// symlink to the built binary under local (non-RBE) execution, while
+	// os.Executable reports the resolved target.
+	runfilesLink := filepath.Join(dir, "runfiles", "_main", "internal", "session", "session_test")
+	if err := os.MkdirAll(filepath.Dir(runfilesLink), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(realBin, runfilesLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	gcRunfilesLink := filepath.Join(dir, "runfiles", "_main", "cmd", "gc", "gc_", "gc")
+	if err := os.MkdirAll(filepath.Dir(gcRunfilesLink), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(gcBin, gcRunfilesLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	resolvedReal, err := filepath.EvalSymlinks(realBin)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	resolvedGC, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	const srcdir = "/runfiles"
+
+	tests := []struct {
+		name       string
+		path       string
+		argv0      string
+		testSrcdir string
+		want       bool
+	}{
+		{"go test binary", filepath.Join(dir, "session.test"), "/elsewhere/x", "", true},
+		{"bazel direct exec", realBin, realBin, srcdir, true},
+		{"bazel runfiles symlink exec", resolvedReal, runfilesLink, srcdir, true},
+		{"symlink exec outside bazel", resolvedReal, runfilesLink, "", false},
+		{"renamed spy binary", spyBin, runfilesLink, srcdir, false},
+		{"renamed spy binary direct argv0", spyBin, realBin, srcdir, false},
+		{"unresolvable argv0", resolvedReal, filepath.Join(dir, "missing", "session_test"), srcdir, false},
+		{"production gc binary", "/usr/local/bin/gc", "/usr/local/bin/gc", "", false},
+		{"gc under bazel runfiles symlink exec", resolvedGC, gcRunfilesLink, srcdir, false},
+		{"gc under bazel direct exec", resolvedGC, resolvedGC, srcdir, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGoTestExecutableFor(tt.path, tt.argv0, tt.testSrcdir); got != tt.want {
+				t.Fatalf("isGoTestExecutableFor(%q, %q, %q) = %v, want %v", tt.path, tt.argv0, tt.testSrcdir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsGoTestExecutableRecognizesRunningTestBinary pins the argv0 and
+// TEST_SRCDIR wiring in isGoTestExecutable, which the table above bypasses by
+// calling isGoTestExecutableFor. Plain go test names the binary *.test, which
+// matches without that wiring, so the wiring is only exercised under bazel.
+func TestIsGoTestExecutableRecognizesRunningTestBinary(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	if !isGoTestExecutable(exe) {
+		t.Fatalf("isGoTestExecutable(%q) = false (argv0 %q, TEST_SRCDIR %q), want true for the running test binary", exe, os.Args[0], os.Getenv("TEST_SRCDIR"))
 	}
 }

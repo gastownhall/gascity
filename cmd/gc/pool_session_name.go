@@ -71,7 +71,7 @@ type releasedPoolAssignment struct {
 // createPoolSessionBeadWithIdentifiers and the sync lane in session_beads.go),
 // so a live runtime resolves straight back to its bead. Because a failed create
 // is retried under a NEW bead and therefore a new name, the ga-vcjr9 box leak
-// is closed by ordering rather than by name reuse: releaseBeadScopedPoolRuntime
+// is closed by ordering rather than by name reuse: releaseRowOwnedRuntime
 // tears the failed attempt's runtime down before its row may close, and
 // ensurePoolIdentityNotHeldByOpenRow refuses a successor while that row is open.
 func PoolSessionName(template, beadID string) string {
@@ -697,17 +697,16 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 // release assignment and metadata in one UpdateIfMatch guarded by that
 // revision. Conflicts are left for a later tick's fresh snapshot.
 // Required-but-unavailable capability refuses the release. Otherwise,
-// including for snapshots listed from the native store (or a CachingStore over
-// it), which carry no revision, the legacy paths below apply:
+// including for snapshots at revision 0 whose live row is not (a store whose
+// lists carry no revision, such as BdStore), the legacy paths below apply:
 //
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee
 //     — the verb's contract) AND the bead carries no active continuation-group
 //     routing vector (see beadHasActiveContinuationGroup). On BdStore this
-//     currently rides raw `bd sql`; when bd grows a native conditional-release
-//     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
-//     verb, fall back to `bd sql` on unsupported) and this caller needs no
-//     change.
+//     runs bd's conditional-release verb (`bd update --if-assignee
+//     --if-status`); a bd without it answers ErrConditionalReleaseUnsupported
+//     and the release falls through to 2.
 //  2. Otherwise releasePoolAssignmentWithRecheck: status, assignee and the
 //     affinity metadata as one write fenced on the snapshot's (status,
 //     assignee), so a claim landing after the snapshot is never clobbered.

@@ -1,0 +1,273 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
+
+# The op-journal evidence against real gc processes: X2's kill matrix, X6's
+# fan-in and X8's order across a lane-host restart (OJ-12x), and X12's O0
+# crash matrix, fault-free load and incapable-store arm (OJ-8). Only the
+# integration build stages the test-hooks gc (the one link that honors
+# GC_LANE_FAILPOINT and GC_OPS_FAILPOINT) and the fake exec runtime, so
+# `bazel test //...` neither links nor stages them;
+# scripts/cmd_gc_testhooks_test.go pins GC_LANE_GC_BIN. Within its process,
+# X6 measures latency alone, before the parallel tests run their cities
+# (harness_test.go's cityParallel), but the targets below run beside it on
+# the farm; X12 runs its gating subset in conversationlane_x12_test, its small
+# load in parallel with the rest (it reports latency without asserting it).
+# Only the evidence load runs alone. Run the whole package with
+# :conversationlane_test and :conversationlane_integration_solo_tests.
+#
+# The integration build runs the suite as six targets in parallel, each a
+# fixed set of top-level tests (or, for the X2 host matrix, of its store
+# arms) by -test.run / -test.skip over the same binary, as cmd/gc's
+# INTEGRATION_SOLO_TESTS do: conversationlane_test skips the tests below and
+# keeps the rest (TestBdDoltArmProvisionsAndRecords and X6, which run first
+# and one at a time, the CLI inline pass, and any new test).
+# //test:integration_packages runs them all through
+# :conversationlane_integration_solo_tests, and
+# scripts/conversationlane_targets_test.go keeps every test in exactly one.
+# As one action the suite ran 395-450 s on rbe-west, the integration-packages
+# lane's last action from #8147 (2026-10-20) on. rules_go's shard_count would
+# not do: it deals top-level tests to shards round-robin in source order, so
+# the 16-cell X2 host matrix would stay one shard's work, and every shard
+# holding an X12 test would learn X12's off baselines again.
+#
+# Seconds measured 2026-10-24 on rbe-west (--config=ci --config=integration,
+# --nocache_test_results, the six targets side by side: two local runs and
+# PR #8254's integration-packages lane; the x12 figures are this layout's,
+# after the load test stopped waiting for the baselines);
+# conversationlane_test itself ran 96 s (TestBdDoltArmProvisionsAndRecords
+# 12 s and X6 64 s, one at a time, then the CLI inline pass). No
+# target can be shorter than its cells that wait out the controller's 2 min
+# lane lease plus skew at production timing (opjournal.DefaultLeaseTTL +
+# LeaseSkew = 130 s): X2's host take and effect cells and X8's
+# inside_a_delivery.
+INTEGRATION_SOLO_TESTS = {
+    # Every X12 test, in one process: they share the off baselines one city
+    # learns (~110 s) while the load runs its rounds; the matrix's six cities
+    # and the incapable store start once the baselines are learned.
+    "conversationlane_x12_test": "TestX12.*",  # 198-201 s
+    "conversationlane_x2_cli_test": "TestX2CLIKillMatrix",  # 14 cells, 8 at a time: 121-142 s
+    "conversationlane_x8_test": "TestX8OrderAcrossLaneHostRestart",  # 143 s
+}
+
+# The X2 host matrix by store arm, eight cities each: the "" target runs the
+# arms not named (dolt).
+INTEGRATION_SOLO_SPLIT_TESTS = {
+    "TestX2LaneHostKillMatrix": {
+        "conversationlane_x2_host_sqlite_test": "sqlite",  # 142 s
+        "conversationlane_x2_host_test": "",  # 159-214 s (the high end with other Dolt cities beside it)
+    },
+}
+
+go_test(
+    name = "conversationlane_test",
+    size = "large",
+    srcs = [
+        "bddolt_gating_test.go",
+        "harness_bddolt_test.go",
+        "harness_test.go",
+        "inline_pass_test.go",
+        "main_test.go",
+        "testenv_import_test.go",
+        "x12_evidence_guard_test.go",
+        "x12_harness_test.go",
+        "x12_incapable_test.go",
+        "x12_load_test.go",
+        "x12_matrix_test.go",
+        "x12_report_test.go",
+        "x2_test.go",
+        "x6_test.go",
+        "x8_test.go",
+    ],
+    args = select({
+        "//:gotags_integration": ["-test.skip=^(%s)$$" % "|".join(INTEGRATION_SOLO_TESTS.values() + INTEGRATION_SOLO_SPLIT_TESTS.keys())],
+        "//conditions:default": [],
+    }),
+    # The pinned bd and dolt are the bd-dolt arm's (harness_bddolt_test.go):
+    # the releases the integration fixtures run.
+    data = select({
+        "//:gotags_integration": [
+            "//cmd/gc:gc_testhooks",
+            "//test/conversationlane/fakeruntime",
+            "@bd_bin_v1_3_2//:bd",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
+    env = select({
+        "//:gotags_integration": {
+            "GC_LANE_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
+            "GC_LANE_DOLT_BIN": "$(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_LANE_FAKE_RUNTIME": "$(rootpath //test/conversationlane/fakeruntime)",
+            "GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
+        },
+        "//conditions:default": {},
+    }),
+    deps = [
+        "//internal/api/genclient",
+        "//internal/bazeltest",
+        "//internal/beads",
+        "//internal/clock",
+        "//internal/loopbackport",
+        "//internal/opjournal",
+        "//internal/pathutil",
+        "//internal/storebinding/sqlite",
+        "//internal/testenv",
+        "//internal/testutil",
+        "//test/toolhome",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# The integration build's other five targets (INTEGRATION_SOLO_TESTS and
+# INTEGRATION_SOLO_SPLIT_TESTS above).
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^(%s)$$" % tests],
+    tags = ["manual"],
+    test = ":conversationlane_test",
+) for name, tests in INTEGRATION_SOLO_TESTS.items()]
+
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$/^%s$$" % (test, subtest)] if subtest else [
+        "-test.run=^%s$$" % test,
+        "-test.skip=^%s$$/^(%s)$$" % (
+            test,
+            "|".join([s for s in parts.values() if s]),
+        ),
+    ],
+    tags = ["manual"],
+    test = ":conversationlane_test",
+) for test, parts in INTEGRATION_SOLO_SPLIT_TESTS.items() for name, subtest in parts.items()]
+
+test_suite(
+    name = "conversationlane_integration_solo_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in INTEGRATION_SOLO_TESTS] + [
+        ":" + name
+        for parts in INTEGRATION_SOLO_SPLIT_TESTS.values()
+        for name in parts
+    ],
+)
+
+# X12's evidence (DES-O0API §15 OJ-8, G-X12) in two parts: the matrix part
+# runs every kill-matrix cell at production timing and waits out each op's
+# finish_by (P1-P3, P5) and, on embedded Dolt, the incapable-store arm; the
+# load part runs the six-round fault-free load (P4, R1-R3, every well-formed
+# request succeeding) within its 90-minute budget. The crash arms run on
+# SQLite and embedded Dolt, which the maintainers' 2026-10-23 ruling on
+# #8217 keeps for them only. The load runs on SQLite and on bd-dolt
+# (x12PartArms): a workspace the pinned bd provisioned on a dolt sql-server,
+# served natively, the store a direct-server city gets. bd-dolt stands in
+# for the load arm that ruling asked for, a bd-served Dolt arm on the
+# topology real cities run, until a maintainer accepts the substitute or
+# ga-ve3tjw adds that arm: that topology serves sessions through BdStore,
+# which records no ops with the pinned bd (harness_bddolt_test.go). Each
+# part writes x12-report-<backend>-<part>.{json,md} to its undeclared
+# outputs. Manual, outside the integration lane's suite, and local (tagged
+# so: a part runs from 30 minutes to well over an hour, past the remote
+# executor's 1200 s action cap). conversationlane_test's
+# TestBdDoltArmProvisionsAndRecords keeps the bd-dolt arm in the gating run.
+# Every variant also selects TestX12EvidenceNeedsTheIntegrationBuild, which
+# fails a run built without --config=integration instead of letting it pass
+# with no test. Run the matrix parts together and the load parts one at a
+# time, as two runs: a load's R2 latency and its budget are measured with
+# nothing beside it, and beside the matrix parts it can overrun the budget,
+# so no suite holds both:
+#
+#   bazel test --config=ci --config=integration --strategy=TestRunner=local \
+#     --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+#     //test/conversationlane:x12_evidence_matrix
+#   bazel test --config=ci --config=integration --strategy=TestRunner=local \
+#     --local_test_jobs=1 \
+#     --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+#     //test/conversationlane:x12_evidence_load
+#
+# (GC_X12_SOURCE names the source revision in the report: the test-hooks gc
+# is not stamped.)
+_X12_PARTS = {
+    "load": "^TestX12(FaultFreeLoad|EvidenceNeedsTheIntegrationBuild)$$",
+    "matrix": "^TestX12(KillMatrix|IncapableStore|EvidenceNeedsTheIntegrationBuild)$$",
+}
+
+[go_variant_test(
+    name = "x12_evidence_%s_%s_test" % (
+        backend.replace("-", "_"),
+        part,
+    ),
+    size = "enormous",
+    args = ["-test.run=" + _X12_PARTS[part]],
+    env = {
+        "GC_X12_BACKEND": backend,
+        "GC_X12_EVIDENCE": "1",
+        "GC_X12_PART": part,
+    },
+    tags = [
+        "local",
+        "manual",
+        "no-remote",
+    ],
+    test = ":conversationlane_test",
+) for backend, part in [
+    ("sqlite", "matrix"),
+    ("dolt", "matrix"),
+    ("sqlite", "load"),
+    ("bd-dolt", "load"),
+]]
+
+test_suite(
+    name = "x12_evidence_matrix",
+    tags = ["manual"],
+    tests = [
+        ":x12_evidence_dolt_matrix_test",
+        ":x12_evidence_sqlite_matrix_test",
+    ],
+)
+
+test_suite(
+    name = "x12_evidence_load",
+    tags = ["manual"],
+    tests = [
+        ":x12_evidence_bd_dolt_load_test",
+        ":x12_evidence_sqlite_load_test",
+    ],
+)
+
+# scripts/cmd_gc_testhooks_test.go reads this file.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

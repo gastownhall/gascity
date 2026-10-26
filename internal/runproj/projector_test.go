@@ -2,8 +2,10 @@ package runproj
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -91,6 +93,116 @@ func TestProjectorCountsDecodeMisses(t *testing.T) {
 	if p.DecodeMisses() != 2 {
 		t.Errorf("DecodeMisses = %d, want 2 (cumulative across passes)", p.DecodeMisses())
 	}
+}
+
+// TestProjectorFoldsRepeatedIdenticalUpdateIdempotently pins what makes two
+// writers announcing the same change safe: a worker's `gc hook --claim`
+// records the claim's bead.updated, and the supervisor may record the same
+// snapshot again when it reads the row back. The repeat lands on the same
+// snapshot and keeps the bead's first-seen slot, and a close that follows in
+// log order still wins.
+func TestProjectorFoldsRepeatedIdenticalUpdateIdempotently(t *testing.T) {
+	claimed := beads.Bead{
+		ID: "step", Status: "in_progress", Type: "task", Assignee: "worker-1",
+		Metadata: map[string]string{"gc.root_bead_id": "root"},
+	}
+	payload, err := beads.EncodeBeadEventPayload(claimed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookClaim := events.Event{Seq: 3, Type: events.BeadUpdated, Actor: "worker-1", Subject: "step", Payload: payload}
+	supervisorRepeat := events.Event{Seq: 4, Type: events.BeadUpdated, Actor: "cache-reconcile", Subject: "step", Payload: payload}
+
+	p := NewProjector()
+	p.Apply([]events.Event{
+		beadEvent(1, events.BeadCreated, "root", "open"),
+		beadEvent(2, events.BeadCreated, "step", "open"),
+		hookClaim,
+	})
+	once := p.Beads()
+
+	p.Apply([]events.Event{supervisorRepeat})
+	twice := p.Beads()
+
+	if !equalIDs(idsOf(twice), []string{"root", "step"}) {
+		t.Fatalf("beads after the repeat = %v, want [root step]", idsOf(twice))
+	}
+	if !reflect.DeepEqual(once, twice) {
+		t.Fatalf("a repeated identical bead.updated changed the fold:\n once:  %+v\n twice: %+v", once, twice)
+	}
+	if got := twice[1]; got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("step = status %q assignee %q, want in_progress owned by worker-1", got.Status, got.Assignee)
+	}
+
+	closed := claimed
+	closed.Status = "closed"
+	closedPayload, err := beads.EncodeBeadEventPayload(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Apply([]events.Event{
+		{Seq: 5, Type: events.BeadClosed, Actor: "worker-1", Subject: "step", Payload: closedPayload},
+		{Seq: 6, Type: events.BeadClosed, Actor: "cache-reconcile", Subject: "step", Payload: closedPayload},
+	})
+	if got := p.Beads()[1]; got.Status != "closed" {
+		t.Fatalf("step after a repeated close = status %q, want closed", got.Status)
+	}
+	if p.LastSeq() != 6 {
+		t.Fatalf("lastSeq = %d, want 6", p.LastSeq())
+	}
+}
+
+// TestProjectorIDOnlyDeleteDropsRunFromCensus pins what a cache's delete
+// tombstone relies on (#5934): a bead.deleted whose payload is the bare bead
+// id — all a cache can announce for a row it holds no snapshot of — removes
+// the run root, so the census stops counting it as pending. The fold only
+// ever removes a row on bead.deleted, and ColdLoad replays the retained log on
+// every restart, so without the event the root reads pending forever.
+func TestProjectorIDOnlyDeleteDropsRunFromCensus(t *testing.T) {
+	root := beads.Bead{
+		ID: "gc-wisp-1", Title: "patrol", Type: "molecule", Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.KindMetadataKey:            beadmeta.KindRun,
+			beadmeta.FormulaMetadataKey:         "mol-patrol",
+		},
+	}
+	created, err := beads.EncodeBeadEventPayload(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tombstone, err := beads.EncodeBeadEventPayload(beads.Bead{ID: root.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewProjector()
+	p.Apply([]events.Event{{Seq: 1, Type: events.BeadCreated, Subject: root.ID, Payload: created}})
+	if got := projectedRunCensus(p); got.Pending != 1 {
+		t.Fatalf("precondition: census = %+v, want the run pending", got)
+	}
+
+	if !p.Apply([]events.Event{{Seq: 2, Type: events.BeadDeleted, Subject: root.ID, Payload: tombstone}}) {
+		t.Fatal("Apply reported no change for the id-only bead.deleted")
+	}
+
+	if got := projectedRunCensus(p); got != (CanonicalRunStatusCounts{}) {
+		t.Fatalf("census after the id-only bead.deleted = %+v, want no runs", got)
+	}
+	if got := idsOf(p.Beads()); len(got) != 0 {
+		t.Fatalf("folded beads = %v, want none", got)
+	}
+	if p.DecodeMisses() != 0 {
+		t.Fatalf("DecodeMisses = %d, want 0: an id-only payload decodes", p.DecodeMisses())
+	}
+}
+
+// projectedRunCensus classifies the folded runs as the run tailer and the
+// runs API do.
+func projectedRunCensus(p *Projector) CanonicalRunStatusCounts {
+	beadList := FilterRunBeads(p.Beads())
+	_, lanes := BuildRunSummaryWithAllLanes(beadList)
+	return CountCanonicalRunStatuses(beadList, lanes)
 }
 
 func idsOf(bl []beads.Bead) []string {

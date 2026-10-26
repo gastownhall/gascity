@@ -24,19 +24,26 @@ func baselineCase(t *testing.T, liveness rowLiveness, desired desire, live []str
 	return c, sessionCoreConfigForHashInfo(tp, info)
 }
 
-// v5 is h under the previous fingerprint version, as production rows carry.
+// v5 is h under an older fingerprint version, as production rows carry.
 func v5(h string) string { return "v5:" + strings.TrimPrefix(h, runtime.FingerprintVersion+":") }
+
+// v6 is h under the version before the FingerprintExtra change policy, for a
+// hash whose digest that policy left unchanged.
+func v6(h string) string { return "v6:" + strings.TrimPrefix(h, runtime.FingerprintVersion+":") }
 
 // Kills a cutover drain storm and a rebaseline of what legacy leaves (v5
 // M2, SESS-551/563/564/567): a legacy or version-mismatched stored config
 // hash is rebaselined, all six keys, at any liveness but a start's this
-// pass; a missing one and a real drift are not; once the core matches, an
-// alive row's empty live hash with no session_live config is backfilled
-// and a mismatched one rebaselined, and a real live drift is not.
+// pass, and a v6 one only for unchanged config, the core baseline alone;
+// a missing one and a real drift are not; once the core matches, an alive
+// row's empty live hash with no session_live config is backfilled and a
+// mismatched one rebaselined, a v6 one only for the same session_live,
+// and a real live drift is not.
 func TestDecideRowBaseline(t *testing.T) {
 	probe, _ := baselineCase(t, livenessAlive, desireKeep, nil)
 	cfg := sessionCoreConfigForHashInfo(TemplateParams{TemplateName: "worker", Command: "run-worker"}, probe.w.Census.Rows[probe.k].Info)
 	core, live := runtime.CoreFingerprint(cfg), runtime.LiveFingerprint(cfg)
+	prePolicy := runtime.PrePolicyCoreFingerprint(cfg)
 	for _, tc := range []struct {
 		name     string
 		liveness rowLiveness
@@ -52,10 +59,15 @@ func TestDecideRowBaseline(t *testing.T) {
 		{"a v5 core hash on a wanted row its quarantine holds", livenessGone, desireWake, nil, []string{"state", "asleep", "started_config_hash", v5(core), "quarantined_until", rowAt(time.Hour)}, decideBaselineVersion},
 		{"no stored hash", livenessAlive, desireKeep, nil, []string{"started_live_hash", ""}, ""},
 		{"a real drift", livenessAlive, desireKeep, nil, []string{"started_config_hash", runtime.FingerprintVersion + ":other", "started_live_hash", live}, ""},
+		{"a v6 core hash of the config on a live row", livenessAlive, desireKeep, nil, []string{"started_config_hash", prePolicy, "started_live_hash", v6(live)}, decideBaselinePrePolicy},
+		{"a v6 core hash of the config on an asleep row", livenessGone, desireSleep, nil, []string{"state", "asleep", "started_config_hash", prePolicy}, decideBaselinePrePolicy},
+		{"another config's v6 core hash", livenessAlive, desireKeep, nil, []string{"started_config_hash", "v6:other", "started_live_hash", live}, ""},
 		{"an empty live hash, no session_live", livenessAlive, desireKeep, nil, []string{"started_config_hash", core}, decideBaselineLive},
 		{"an empty live hash on an asleep row", livenessGone, desireSleep, nil, []string{"state", "asleep", "started_config_hash", core}, ""},
 		{"an empty live hash with session_live", livenessAlive, desireKeep, []string{"echo live"}, []string{"started_config_hash", core}, ""},
 		{"a v5 live hash", livenessAlive, desireKeep, nil, []string{"started_config_hash", core, "started_live_hash", v5(live)}, decideBaselineVersion},
+		{"a v6 live hash of the session_live", livenessAlive, desireKeep, nil, []string{"started_config_hash", core, "started_live_hash", v6(live)}, decideBaselineVersion},
+		{"another session_live's v6 live hash", livenessAlive, desireKeep, nil, []string{"started_config_hash", core, "started_live_hash", "v6:other"}, ""},
 		{"a live drift", livenessAlive, desireKeep, nil, []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, ""},
 		{"converged", livenessAlive, desireKeep, nil, []string{"started_config_hash", core, "started_live_hash", live}, ""},
 	} {
@@ -68,8 +80,8 @@ func TestDecideRowBaseline(t *testing.T) {
 				}
 				return
 			}
-			want := baselinePatch(cfg, map[string]baselineReason{decideBaselineVersion: baselineVersionArtifact, decideBaselineLive: baselineLiveBackfill}[tc.want])
-			keys := map[string]int{decideBaselineVersion: 6, decideBaselineLive: 2}[tc.want] // all six; the live pair
+			want := baselinePatch(cfg, map[string]baselineReason{decideBaselineVersion: baselineVersionArtifact, decideBaselineLive: baselineLiveBackfill, decideBaselinePrePolicy: baselinePrePolicy}[tc.want])
+			keys := map[string]int{decideBaselineVersion: 6, decideBaselineLive: 2, decideBaselinePrePolicy: 4}[tc.want] // all six; the live pair; the core four
 			if it.Kind != intentBaseline || it.Reason != tc.want || len(it.Patch) != keys || len(want) != keys {
 				t.Fatalf("decideRow = (%q, %q) %v, want %q writing %v", it.Kind, it.Reason, it.Patch, tc.want, want)
 			}

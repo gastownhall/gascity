@@ -733,7 +733,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 	cfg := mayorCity()
 	t.Run("fenced", func(t *testing.T) {
 		mem := beads.NewMemStore()
-		if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		closed := seedClosedNamedRow(t, mem, cfg, nil)
@@ -780,7 +780,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 }
 
 // revisionlessListStore reads its rows back from List with no revision, as
-// the native store does: there, Get is the only read that carries one.
+// BdStore does (mc-3c8h5): there, Get is the only read that carries one.
 type revisionlessListStore struct{ beads.Store }
 
 func (s revisionlessListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -822,7 +822,7 @@ func TestCreateEffect_NamedReopenFencesOnTheLiveReReadOfTheRow(t *testing.T) {
 }
 
 // Kills a reopen that re-reads the row through the cache: a cached row's
-// revision lags (a List-primed native row carries none), so the CAS must be
+// revision lags (a List-primed bd row carries none), so the CAS must be
 // taken on a live read.
 func TestCreateEffect_NamedReopenReReadsTheRowLive(t *testing.T) {
 	cfg := mayorCity()
@@ -1158,7 +1158,7 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 				ID: "gc-bait", Title: "bait", Status: "open", Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{"template": "mayor", "session_name": "bait"},
 			}}, nil)
-			if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			target := ""
@@ -1615,7 +1615,7 @@ type namedCondStore struct {
 func newNamedCondStore(t *testing.T) *namedCondStore {
 	t.Helper()
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return &namedCondStore{MemStore: mem}
@@ -1971,7 +1971,7 @@ func adoptLiveRunIn(t *testing.T, dir string, store beads.Store, prep func(sp *s
 func fencedMemStore(t *testing.T) *beads.MemStore {
 	t.Helper()
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return mem

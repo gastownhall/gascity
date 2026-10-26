@@ -76,7 +76,7 @@ func TestACPPermissionRoundTripThroughManager(t *testing.T) {
 		HandshakeTimeout: acpPermissionWait,
 		NudgeBusyTimeout: acpPermissionWait,
 	})
-	mgr := NewManagerWithOptions(beads.NewMemStore(), sp)
+	mgr := newTestManager(t, beads.NewMemStore(), sp)
 	replyFile := filepath.Join(t.TempDir(), "replies.jsonl")
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template:  "helper",
@@ -205,7 +205,7 @@ func startACPLatePermissionSession(t *testing.T) *acpLatePermissionSession {
 		NudgeBusyTimeout: time.Hour,
 	})
 	s := &acpLatePermissionSession{
-		mgr:       NewManagerWithOptions(beads.NewMemStore(), sp),
+		mgr:       newTestManager(t, beads.NewMemStore(), sp),
 		askFile:   filepath.Join(t.TempDir(), "ask"),
 		replyFile: filepath.Join(t.TempDir(), "replies.jsonl"),
 	}
@@ -276,11 +276,7 @@ func sessionMutationLockHeld(id string) bool {
 	if lock == nil {
 		return false
 	}
-	if lock.mu.TryLock() {
-		lock.mu.Unlock()
-		return false
-	}
-	return true
+	return sessionMutationLockEntryHeld(lock)
 }
 
 // TestACPSubmitWaitingForIdleRefusedWhenPermissionArrives composes the

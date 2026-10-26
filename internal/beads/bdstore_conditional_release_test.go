@@ -3,6 +3,8 @@ package beads_test
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -107,8 +109,8 @@ func isReleaseVerb(args []string) bool {
 	return false
 }
 
-// TestReleaseIfCurrentPrefersTheNativeVerb pins the exact argv, because the
-// whole conversion is "stop assembling SQL, state the two preconditions".
+// TestReleaseIfCurrentPrefersTheNativeVerb pins the exact argv: the release
+// states its two preconditions to bd and assembles no SQL.
 func TestReleaseIfCurrentPrefersTheNativeVerb(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	s := beads.NewBdStore("/city", runner.run)
@@ -194,8 +196,9 @@ func TestReleaseIfCurrentPreconditionMissDoesNotClassifyOnMessageText(t *testing
 	})
 }
 
-// TestReleaseIfCurrentTreatsAnUnresolvableIDAsNotHeld keeps the observable
-// contract the raw-SQL path had, where an absent bead matched zero rows.
+// TestReleaseIfCurrentTreatsAnUnresolvableIDAsNotHeld pins the verdict for an
+// absent bead: it holds no assignment, so the answer is "not held", not an
+// error.
 //
 // The fixture is bd's measured wording and exit status for an id that resolves
 // to nothing (`bd update tst-nosuchbead --status open` → exit 1, `Error
@@ -228,9 +231,7 @@ func TestReleaseIfCurrentTreatsAnUnresolvableIDAsNotHeld(t *testing.T) {
 // resolver prefix/substring-matches an id with no exact hit, so handing it
 // through unverified releases a bead the caller never named — and reports
 // success. The CAS preconditions are no defense, because bd evaluates them
-// against the bead it resolved, and one worker commonly holds several. The
-// statement this verb replaced matched `WHERE id = <literal>` and was therefore
-// exact by construction.
+// against the bead it resolved, and one worker commonly holds several.
 func TestReleaseIfCurrentRefusesAFuzzyIDCollision(t *testing.T) {
 	runner := &releaseVerbRunner{
 		// bd resolved a LONGER id — the gcy-g4o shape ("gcy-dv7" →
@@ -300,58 +301,76 @@ func TestReleaseIfCurrentSurfacesInfraFailuresAsErrors(t *testing.T) {
 	}
 }
 
-// TestReleaseIfCurrentFallsBackToSQLOnAnOldBd is the bd 1.0.4 compatibility
-// proof: the minimum supported bd rejects the flags, and the store must reach
-// the raw-SQL statement. The statement mints a fresh revision — a release that
-// left the pre-release token current would keep a stale fence valid — so the
-// token is the one part of it that cannot be pinned.
-func TestReleaseIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
-	runner := &releaseVerbRunner{}
-	runner.reply = func(args []string) ([]byte, error) {
-		if isReleaseVerb(args) {
-			return nil, errors.New("unknown flag: --if-assignee")
-		}
-		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
-	}
-	s := beads.NewBdStore("/city", runner.run)
+// TestReleaseIfCurrentOnOldBdIsTypedNotSQL pins the bd 1.3.0 floor: a bd that
+// predates the conditional-release flags (beads#5008) gets a typed refusal that
+// wraps ErrConditionalReleaseUnsupported and names the floor. It must never
+// reach a raw `bd sql` statement or the Dolt CLI: no release path writes the
+// row behind bd's back. Callers read ErrConditionalReleaseUnsupported as "take
+// the fenced recheck path", the same answer a store with no conditional release
+// gives.
+func TestReleaseIfCurrentOnOldBdIsTypedNotSQL(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata string
+	}{
+		{name: "server"},
+		// An embedded-Dolt scope must not reach the `dolt sql` CLI either.
+		{name: "embedded dolt", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.metadata != "" {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(tc.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &releaseVerbRunner{}
+			runner.reply = func(args []string) ([]byte, error) {
+				if isReleaseVerb(args) {
+					return []byte("Error: unknown flag: --if-assignee"), exitErrorWithCode(t, 1)
+				}
+				return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+			}
+			s := beads.NewBdStore(dir, runner.run)
 
-	released, err := s.ReleaseIfCurrent("bd-42", "worker-'1")
-	if err != nil {
-		t.Fatalf("ReleaseIfCurrent: %v", err)
-	}
-	if !released {
-		t.Fatal("ReleaseIfCurrent released = false, want true")
-	}
-	calls := runner.releaseVerbArgv()
-	if len(calls) != 2 {
-		t.Fatalf("calls = %v, want the verb probe then the SQL fallback", calls)
-	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision>" +
-		" WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-''1'"
-	got := append([]string(nil), calls[1]...)
-	got[len(got)-1] = normalizeReleaseRevisionQuery(t, got[len(got)-1])
-	want := []string{"bd", "sql", "--json", wantQuery}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("fallback argv = %q\nwant          %q", calls[1], want)
+			released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+			if !errors.Is(err, beads.ErrConditionalReleaseUnsupported) {
+				t.Fatalf("ReleaseIfCurrent err = %v, want ErrConditionalReleaseUnsupported", err)
+			}
+			if !strings.Contains(err.Error(), "1.3.0") {
+				t.Errorf("error %q does not name the bd 1.3.0 floor", err)
+			}
+			if released {
+				t.Fatal("released = true on an old bd")
+			}
+			for _, call := range runner.argv() {
+				if call[0] == "dolt" || (len(call) > 1 && call[1] == "sql") {
+					t.Fatalf("an old bd reached a SQL path: %v", runner.argv())
+				}
+			}
+		})
 	}
 }
 
-// TestReleaseIfCurrentLatchesTheOldBdFallback proves the probe is paid once:
+// TestReleaseIfCurrentLatchesTheOldBdRefusal proves the probe is paid once:
 // a store that has seen the flags rejected must not spend a failed subprocess
-// on every later release.
-func TestReleaseIfCurrentLatchesTheOldBdFallback(t *testing.T) {
+// on every later release, and every later release gets the same typed refusal.
+func TestReleaseIfCurrentLatchesTheOldBdRefusal(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	runner.reply = func(args []string) ([]byte, error) {
 		if isReleaseVerb(args) {
 			return nil, errors.New("unknown flag: --if-assignee")
 		}
-		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+		return nil, fmt.Errorf("unexpected bd call after the refusal: %v", args)
 	}
 	s := beads.NewBdStore("/city", runner.run)
 
 	for i := range 3 {
-		if _, err := s.ReleaseIfCurrent("bd-42", "worker-1"); err != nil {
-			t.Fatalf("release %d: %v", i, err)
+		if _, err := s.ReleaseIfCurrent("bd-42", "worker-1"); !errors.Is(err, beads.ErrConditionalReleaseUnsupported) {
+			t.Fatalf("release %d err = %v, want ErrConditionalReleaseUnsupported", i, err)
 		}
 	}
 	verbProbes := 0
@@ -366,14 +385,14 @@ func TestReleaseIfCurrentLatchesTheOldBdFallback(t *testing.T) {
 }
 
 // TestReleaseIfCurrentDoesNotLatchOnARealFailure guards the inverse: a backend
-// error must never be mistaken for an old bd and permanently downgrade a
-// capable store to the SQL path.
+// error must never be mistaken for an old bd and permanently refuse releases on
+// a capable store.
 func TestReleaseIfCurrentDoesNotLatchOnARealFailure(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	fail := true
 	runner.reply = func(args []string) ([]byte, error) {
 		if !isReleaseVerb(args) {
-			return nil, fmt.Errorf("fell back to %v after a transient failure", args)
+			return nil, fmt.Errorf("unexpected bd call %v after a transient failure", args)
 		}
 		if fail {
 			return []byte("dial tcp: connection refused"), exitErrorWithCode(t, 1)
@@ -388,7 +407,7 @@ func TestReleaseIfCurrentDoesNotLatchOnARealFailure(t *testing.T) {
 	fail = false
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
-		t.Fatalf("the store latched the fallback after a transient failure: %v", err)
+		t.Fatalf("the store latched the old-bd refusal after a transient failure: %v", err)
 	}
 	if !released {
 		t.Fatal("released = false after recovery")
@@ -398,7 +417,7 @@ func TestReleaseIfCurrentDoesNotLatchOnARealFailure(t *testing.T) {
 // TestReleaseIfCurrentUnknownFlagMatchIsAnchored guards the latch against a
 // capable bd's cobra usage echo, which lists every flag it HAS whenever any
 // flag is wrong. A floating substring check would latch a capable bd into the
-// SQL path forever the first time gascity passed an unrelated bad flag.
+// old-bd refusal forever the first time gascity passed an unrelated bad flag.
 func TestReleaseIfCurrentUnknownFlagMatchIsAnchored(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	runner.reply = func(args []string) ([]byte, error) {
@@ -406,16 +425,15 @@ func TestReleaseIfCurrentUnknownFlagMatchIsAnchored(t *testing.T) {
 			// A capable bd rejecting something else, echoing its own flags.
 			return []byte("unknown flag: --nope\nFlags:\n  --if-assignee string\n  --if-status string\n"), exitErrorWithCode(t, 1)
 		}
-		return nil, fmt.Errorf("latched the fallback on a capable bd's usage echo: %v", args)
+		return nil, fmt.Errorf("unexpected bd call after a capable bd's usage echo: %v", args)
 	}
 	s := beads.NewBdStore("/city", runner.run)
 
-	if _, err := s.ReleaseIfCurrent("bd-42", "worker-1"); err == nil {
+	_, err := s.ReleaseIfCurrent("bd-42", "worker-1")
+	if err == nil {
 		t.Fatal("expected the underlying failure to surface")
 	}
-	for _, call := range runner.argv() {
-		if len(call) > 1 && call[1] == "sql" {
-			t.Fatalf("a capable bd was latched into the SQL fallback: %v", runner.argv())
-		}
+	if errors.Is(err, beads.ErrConditionalReleaseUnsupported) {
+		t.Fatalf("a capable bd was refused as an old bd: %v", err)
 	}
 }

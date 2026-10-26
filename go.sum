@@ -625,8 +625,8 @@ github.com/fsnotify/fsnotify v1.10.1/go.mod h1:TLheqan6HD6GBK6PrDWyDPBaEV8LspOxv
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
 github.com/fxamacker/cbor/v2 v2.9.0/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/gabriel-vasile/mimetype v1.4.13/go.mod h1:d+9Oxyo1wTzWdyVUPMmXFvp4F9tea18J8ufA774AB3s=
-github.com/gastownhall/gascity-packs v0.3.1-0.20260617013242-33d3a430a67d h1:I20T52WM8FGFgEGDGfmzVds0ZS73M3tc8GYB/Cy25vk=
-github.com/gastownhall/gascity-packs v0.3.1-0.20260617013242-33d3a430a67d/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
+github.com/gastownhall/gascity-packs v0.3.1-0.20261023052836-66c672b5ed00 h1:K6uyH9tFOpaZMUGCh4QAp8dsM03b7XegYSLtWozNvwI=
+github.com/gastownhall/gascity-packs v0.3.1-0.20261023052836-66c672b5ed00/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
 github.com/getkin/kin-openapi v0.144.0/go.mod h1:3BH9M9XDe/y9M5DSvEocVYAYq1w0qrhJHjC/vZi0AaY=
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/gin-contrib/sse v0.1.0/go.mod h1:RHrZQHXnP2xjPF+u1gW/2HnVO7nvIa9PG3Gm+fLHvGI=
@@ -1185,6 +1185,8 @@ github.com/steveyegge/beads v1.3.1-rc.2 h1:zW5nPr/5aEnsj1R9txIVB/S5kZm4b33xlOw2E
 github.com/steveyegge/beads v1.3.1-rc.2/go.mod h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=
 github.com/steveyegge/beads v1.3.1 h1:Ec9DhMDHo/prSd8PDYts+4VF5TY9hI0PrZ46bYnxj1Y=
 github.com/steveyegge/beads v1.3.1/go.mod h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=
+github.com/steveyegge/beads v1.3.2 h1:j5Nl22LxLOs/iBrSCavuEUtoO4G7EKRkRxHaE2iEGHg=
+github.com/steveyegge/beads v1.3.2/go.mod h1:CIUA8czOIImoDG+a9cLM50W/qtM/zuLt3bFQJ/XOh4E=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.1.1/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.2.0/go.mod h1:qt09Ya8vawLte6SNmTgCsAVtYtaKzEcn8ATUoHMkEqE=
@@ -1632,6 +1634,8 @@ golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
 golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
 golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5 h1:ZUSxONxc981v7AW7QUg+I9WwZzSTTJ019ENBYr5pV/Q=
 golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5/go.mod h1:LVehoXe41cL5SCVQilsV7Gg6BNG+Js6P9PhSbYTIUkQ=
+golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518 h1:F5BWKvW126NXR74uxkxuc1jQHhm/rwm/J3rSiFyuRs4=
+golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518/go.mod h1:i+ivNqjDnTF3WTElsdk5g9V5DTSBYgdNo7xTU9SDwYA=
 golang.org/x/term v0.0.0-20201117132131-f5c789dd3221/go.mod h1:Nr5EML6q2oocZ2LXRh80K7BxOlk5/8JxuGnuhpl+muw=
 golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1/go.mod h1:bj7SfCRtBDWHUb9snDiAeCFNEtKQo2Wmx5Cou7ajbmo=
 golang.org/x/term v0.0.0-20210927222741-03fcf44c2211/go.mod h1:jbD1KX2456YbFQfuXm/mYQcufACuNUgVhRMnK/tPxf8=
@@ -1734,6 +1738,8 @@ golang.org/x/tools v0.1.12/go.mod h1:hNGJHUnrk76NpqgfD5Aqm5Crs+Hm0VOH/i9J2+nxYbc
 golang.org/x/tools v0.6.0/go.mod h1:Xwgl3UAJ/d3gWutnCtw505GrjyAbvKui8lOU390QaIU=
 golang.org/x/tools v0.49.0 h1:3NI7VXzL9+1WZD52Dx2ttoPwD5DWrFGpl9mFZDlmisI=
 golang.org/x/tools v0.49.0/go.mod h1:SJNXV9DBKT0UbdttsQjbfJlAE/q+y36++zo3uL3N0Oo=
+golang.org/x/tools v0.50.0 h1:c2ifzfcuY7L90lZ2aKd8S4K2NpASF08SZx9ZuJkHmSU=
+golang.org/x/tools v0.50.0/go.mod h1:7ulVMw3831Mwi5EZD6RomGyffr4VFjuNYXf2BbCEAV0=
 golang.org/x/tools/go/expect v0.1.0-deprecated/go.mod h1:eihoPOH+FgIqa3FpoTwguz/bVUSGBlGQU67vpBeOrBY=
 golang.org/x/tools/go/packages/packagestest v0.1.1-deprecated/go.mod h1:RVAQXBGNv1ib0J382/DPCRS/BPnsGebyM1Gj5VSDpG8=
 golang.org/x/xerrors v0.0.0-20190410155217-1f06c39b4373/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=

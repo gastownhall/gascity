@@ -229,6 +229,18 @@ func validHermeticIdentity(row ReviewedHermeticBody) bool {
 		!strings.ContainsAny(row.Owner, "*?[")
 }
 
+// validateReviewedHermeticRowOrder requires [[reviewed_hermetic_body]] rows
+// sorted by (package_dir, package_name, owner), for the same merge reason as
+// the [[medium]] rows.
+func validateReviewedHermeticRowOrder(rows []ReviewedHermeticBody) []string {
+	for index := 1; index < len(rows); index++ {
+		if runnableKeyLess(reviewedHermeticBodyKey(rows[index]), reviewedHermeticBodyKey(rows[index-1])) {
+			return []string{fmt.Sprintf("reviewed_hermetic_body rows are not sorted by (package_dir, package_name, owner): first out of order row is package_dir=%s package_name=%s owner=%s", rows[index].PackageDir, rows[index].PackageName, rows[index].Owner)}
+		}
+	}
+	return nil
+}
+
 func reviewedHermeticBodyKey(row ReviewedHermeticBody) runnableKey {
 	return runnableKey{packageDir: row.PackageDir, packageName: row.PackageName, owner: row.Owner}
 }

@@ -14,7 +14,9 @@
 // JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), the
 // t3bridge UI thread-metadata namespace (internal/runtime/t3bridge), and the
 // conversation operation journal's gc.op.* / gc.fact.* row namespace
-// (internal/opjournal, whose bead codec is the only reader and writer). Pack- and
+// (internal/opjournal, whose bead codec is the only reader and writer), and the
+// event-fact gc.ev.* and projector-checkpoint gc.evproj.* row namespaces
+// (internal/eventfact, likewise). Pack- and
 // prompt-private keys that no Go file reads stay open-world by design and are
 // intentionally NOT declared here (see KnownMetadataPrefixes for the dynamic
 // gc.var.<name> case).
@@ -344,10 +346,11 @@ const (
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
 	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
-	// IS the unit of work and must remain claimable via the
-	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
-	// children have all closed and is only waiting on workflow-finalize —
-	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	// IS the unit of work and must remain claimable via its RoutedToMetadataKey
+	// or the legacy RunTargetMetadataKey fallback, from an expanded root, which
+	// is a latch closed by workflow-finalize and is never fresh worker demand
+	// through any route, an explicit RoutedToMetadataKey included — see
+	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 

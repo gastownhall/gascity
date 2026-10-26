@@ -1,0 +1,1456 @@
+### enqueue n-a1
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-a1 limit=21}
+op Create BEAD-1
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-a2
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-a2 limit=21}
+op Create BEAD-2
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-legb
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-legb limit=21}
+op Create BEAD-3
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-old",
+      "continuation_epoch": "1",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### claim a new batch, adopting n-legb onto the claimer's fence
+result: [n-a1@BATCH-1 n-a2@BATCH-1 n-legb@BATCH-1[s-new/2]] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 1 wake_pings: 0
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-3",
+      "lease_until": "T-4",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-3",
+      "lease_until": "T-4",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-3",
+      "lease_until": "T-4",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### release with a backoff keeps the pin
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### claim inside the backoff
+result: [] err=<nil>
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### claim resumes the pinned batch whole
+result: [n-a1@BATCH-1 n-a2@BATCH-1 n-legb@BATCH-1[s-new/2]] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-6",
+      "lease_until": "T-7",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-6",
+      "lease_until": "T-7",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-6",
+      "lease_until": "T-7",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### an ordinary failure keeps the pin
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### a failure of one member delays only it
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-10",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-11",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### a due member resumes the batch, its not-due sibling with it
+result: [n-a2@BATCH-1 n-legb@BATCH-1[s-new/2] n-a1@BATCH-1] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-10",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-11",
+      "last_error": "delivery refused",
+      "claimed_at": "T-12",
+      "lease_until": "T-13",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "T-12",
+      "lease_until": "T-13",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-8",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "delivery_batch": "BATCH-1",
+      "last_attempt_at": "T-9",
+      "last_error": "delivery refused",
+      "claimed_at": "T-12",
+      "lease_until": "T-13",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### a rejection unpins
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-a3
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-a3 limit=21}
+op Create BEAD-4
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### claim a new batch after the rejection
+result: [n-a3@BATCH-2 n-a1@BATCH-2 n-a2@BATCH-2 n-legb@BATCH-2[s-new/2]] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### release one member
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-a4
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-a4 limit=21}
+op Create BEAD-5
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a4",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### a batch with a member in flight is not resumed; the unpinned item gets a new batch
+result: [n-a4@BATCH-3] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a4",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-3",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-18",
+      "lease_until": "T-19",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### repin the in-flight claims onto a new key
+result: [n-a2@BATCH-4 n-a3@BATCH-4 n-legb@BATCH-4[s-new/2] n-a4@BATCH-4] err=withdrawing a sibling failed
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "T-16",
+      "lease_until": "T-17",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a4",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-18",
+      "lease_until": "T-19",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### repin with a claim no longer in flight releases them all
+result: [] err=withdrawing a sibling failed
+moving the delivery onto a new key: 1 of 5 claimed nudges are no longer in flight
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a3",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a4",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a1",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a1",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "delivery_batch": "BATCH-2",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-a2",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a2",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-legb",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "session_id": "s-new",
+      "continuation_epoch": "2",
+      "source": "session",
+      "message": "message n-legb",
+      "created_at": "T-1",
+      "deliver_after": "T-14",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "delivery_batch": "BATCH-4",
+      "last_attempt_at": "T-15",
+      "last_error": "refused: runtime rejected the nudge",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### ack every claim
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op SetMetadataBatch BEAD-4
+op Close BEAD-4
+op SetMetadataBatch BEAD-5
+op Close BEAD-5
+op SetMetadataBatch BEAD-1
+op Close BEAD-1
+op SetMetadataBatch BEAD-2
+op Close BEAD-2
+op SetMetadataBatch BEAD-3
+op Close BEAD-3
+state.json:
+{}
+
+### enqueue n-k1
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-k1 limit=21}
+op Create BEAD-6
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-k1",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-k1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-k2
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-k2 limit=21}
+op Create BEAD-7
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-k1",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-k1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-k2",
+      "bead_id": "BEAD-7",
+      "agent": "old-alpha",
+      "source": "session",
+      "message": "message n-k2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### claim a batch across both keys
+result: [n-k1@BATCH-5 n-k2@BATCH-5] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-k1",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-k1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-20",
+      "lease_until": "T-21",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-k2",
+      "bead_id": "BEAD-7",
+      "agent": "old-alpha",
+      "source": "session",
+      "message": "message n-k2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-20",
+      "lease_until": "T-21",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### release it
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-k1",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-k1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-k2",
+      "bead_id": "BEAD-7",
+      "agent": "old-alpha",
+      "source": "session",
+      "message": "message n-k2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### a target with one of the keys does not take the split batch
+result: [] err=<nil>
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-k1",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-k1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-k2",
+      "bead_id": "BEAD-7",
+      "agent": "old-alpha",
+      "source": "session",
+      "message": "message n-k2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### the target with both keys resumes it
+result: [n-k1@BATCH-5 n-k2@BATCH-5] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-k1",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-k1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-22",
+      "lease_until": "T-23",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-k2",
+      "bead_id": "BEAD-7",
+      "agent": "old-alpha",
+      "source": "session",
+      "message": "message n-k2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "delivery_batch": "BATCH-5",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-22",
+      "lease_until": "T-23",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+

@@ -25,7 +25,7 @@ func TestSweepStartsNothing(t *testing.T) {
 			_, err := m.mgr.Send(context.Background(), sweep, m.info.ID, "hi", BuildResumeCommand(m.info), hints)
 			return err
 		}(),
-		"StartRuntimeOnly": m.mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorSweep, Lease: held}, m.info.ID, BuildResumeCommand(m.info), hints),
+		"StartRuntimeOnly": m.mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorSweep, Lease: held}, m.info.ID, Incarnation{}, BuildResumeCommand(m.info), hints),
 	} {
 		if !errors.Is(err, ErrSweepStarts) {
 			t.Errorf("%s by a sweep = %v, want ErrSweepStarts", name, err)
@@ -63,7 +63,7 @@ func TestBorrowedLeaseIsChecked(t *testing.T) {
 		}
 		ctl := m.as(ActorController)
 		ctl.Lease = lease
-		if err := m.mgr.StartRuntimeOnly(context.Background(), ctl, m.info.ID, BuildResumeCommand(m.info), hints); err == nil || !strings.Contains(err.Error(), "the caller's lease") {
+		if err := m.mgr.StartRuntimeOnly(context.Background(), ctl, m.info.ID, Incarnation{}, BuildResumeCommand(m.info), hints); err == nil || !strings.Contains(err.Error(), "the caller's lease") {
 			t.Errorf("%s: StartRuntimeOnly = %v, want the borrow refused", name, err)
 		}
 		if _, err := LeaseRuntimeName(context.Background(), by, m.info.SessionName); err == nil || !strings.Contains(err.Error(), "the caller's lease") {
@@ -80,7 +80,7 @@ func TestBorrowedLeaseIsChecked(t *testing.T) {
 	} else {
 		release()
 	}
-	if err := m.mgr.StartRuntimeOnly(context.Background(), m.as(ActorController), m.info.ID, BuildResumeCommand(m.info), hints); !errors.Is(err, ErrNoCallerLease) {
+	if err := m.mgr.StartRuntimeOnly(context.Background(), m.as(ActorController), m.info.ID, Incarnation{}, BuildResumeCommand(m.info), hints); !errors.Is(err, ErrNoCallerLease) {
 		t.Fatalf("StartRuntimeOnly with a City and no lease = %v, want ErrNoCallerLease", err)
 	}
 }

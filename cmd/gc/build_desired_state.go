@@ -504,6 +504,31 @@ func buildDesiredStateWithSessionBeads(
 	)
 }
 
+// buildDesiredStatePreview is buildDesiredState for gc start --dry-run: it
+// resolves the agents that would start without a store and without the
+// side effects a real build performs on each agent's work dir (overlay
+// staging, hook installation, work dir creation, Claude settings projection,
+// skill snapshots). The result is for display only.
+func buildDesiredStatePreview(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	stderr io.Writer,
+) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAtOpts(
+		cityName, cityPath, beaconTime, time.Now(), cfg, sp, nil, nil, nil, nil, stderr,
+		desiredStateOptions{readOnly: true},
+	)
+}
+
+// desiredStateOptions adjusts one desired-state build.
+type desiredStateOptions struct {
+	// readOnly resolves every agent with read-only build params
+	// (agentBuildParams.readOnly): the build writes nothing.
+	readOnly bool
+}
+
 func buildDesiredStateWithSessionBeadsAt(
 	cityName, cityPath string,
 	beaconTime, poolDecisionTime time.Time,
@@ -515,12 +540,31 @@ func buildDesiredStateWithSessionBeadsAt(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAtOpts(
+		cityName, cityPath, beaconTime, poolDecisionTime, cfg, sp, store, rigStores, sessionBeads, trace, stderr,
+		desiredStateOptions{},
+	)
+}
+
+func buildDesiredStateWithSessionBeadsAtOpts(
+	cityName, cityPath string,
+	beaconTime, poolDecisionTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+	opts desiredStateOptions,
+) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.readOnly = opts.readOnly
 	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
@@ -695,6 +739,9 @@ func buildDesiredStateWithSessionBeadsAt(
 			var errs []error
 			collected.DefaultProbed = true
 			collected.DefaultCounts, collected.DefaultDemand, collected.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandReadyCache)
+			// A bead whose claims keep failing the same way is not spawn demand
+			// (claim_loop_guard.go).
+			collected.DefaultCounts, collected.DefaultDemand = claimLoopGuardFor(cityPath).withhold(collected.DefaultCounts, collected.DefaultDemand)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(targets.defaultScaleTargets),
 			})
@@ -2854,18 +2901,14 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 // City's "open", so a blocked bead is indistinguishable from ready work and
 // would count as controller demand, re-entering dispatch (EB-42o8/gc-nz5i). Only
 // a Live read reaches the backing store's server-side --status=open filter
-// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?), which
+// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?;
+// NativeDoltStore pushes the raw status, nativeListPushesRawOpen), which
 // excludes the raw blocked status. This extends the fix gc-4zb/#4395 applied to
 // restoreCarriedWorkRoutes and the workflow projection to the controller-demand
 // List reads. AllowScan opts into the intentional open-status population read;
 // handles.Live unions the wisp step-bead tier (TierBoth). Correctness outranks
 // latency on the demand path (see readyDemandCache): this pays one live
 // backing-store read rather than over-counting blocked work as demand.
-//
-// Known gap: NativeDoltStore maps Status:"open" to
-// ExcludeStatus=[closed,in_progress] (see nativeIssueFilterFromListQuery), so it
-// still returns raw blocked/deferred rows regardless of Live — this gate is
-// inert on that backend, tracked separately.
 func listOpenForControllerDemandLive(store beads.Store) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Live.List(beads.ListQuery{Status: "open", AllowScan: true})
 }
@@ -4598,8 +4641,8 @@ func resolveTemplateForSessionBeadInfo(
 // realizePoolDesiredSessions uses a deep-copied instance agent +
 // qualifiedInstance, and this helper is what makes the other pool-backed
 // paths (rediscovery, store-backed dependency-floor) agree. GC_ALIAS and
-// FingerprintExtra are part of CoreFingerprint, so divergent shapes across
-// ticks trip the reconciler's config-drift drain.
+// the Restart-policy FingerprintExtra keys are part of CoreFingerprint, so
+// divergent shapes across ticks trip the reconciler's config-drift drain.
 //
 // Named beads resolve to their own stored alias (configured_named_identity),
 // NOT the shared backing template's qualified name. The main named-session
@@ -5396,11 +5439,7 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	if bp != nil {
 		// The v2 realization memo counts its occupancy's slots once (A3).
 		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
-			for slot := 1; unlimited || slot <= upper; slot++ {
-				if usedSlots[slot] || held[slot] {
-					continue
-				}
-				usedSlots[slot] = true
+			if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
 				return slot, nil
 			}
 			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
@@ -7234,13 +7273,22 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
-	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
-	// runs immediately after this staging on the SAME workDir (see
+	// Skip the reconciler-owned mergeable hook/settings files hooks.Install
+	// writes: it runs immediately after this staging on the SAME workDir (see
 	// prepareTemplateResolution), so it must be the sole writer of those files
 	// ON THE RECONCILE TICK. Staging them too leaves two writers with
 	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
 	// The runtime task-worktree staging path keeps staging them — it is their
 	// sole writer.
+	//
+	// Only the files hooks.Install actually writes are skipped. A mergeable file
+	// no installer owns — a codex agent's .codex/hooks.json when install_agent_hooks
+	// does not name codex — is staged here like any other overlay file. Skipping
+	// it left session-start staging as its first writer, AFTER this tick's
+	// fingerprint: the next tick's CopyFiles probe then found a hook file GC had
+	// generated itself, and the reconciler drained the freshly started worker
+	// for config drift. Staged here, the file exists before every fingerprint,
+	// and session start re-merges the same overlay into it idempotently.
 	//
 	// "Sole writer" is scoped to the tick on purpose. For a persistent
 	// (non-task) agent the home dir is also the session workDir, and
@@ -7261,13 +7309,15 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// below: it carries the per-pass write-tracking that keeps a path this pass
 	// itself wrote overridable by a later overlay layer (last-writer-wins).
 	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
+	installed := hooks.InstalledWorkDirPaths(installHooks, func(name string) string { return config.BuiltinFamily(name, bp.providers) })
+	installerOwns := func(relPath string) bool { return installed[relPath] }
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(od, workDir, overlayProviders, installerOwns, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(overlayDir, workDir, overlayProviders, installerOwns, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
@@ -7283,7 +7333,11 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}
-	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	if !bp.readOnly {
+		// A read-only resolution stages nothing; resolveTemplate keeps it a
+		// pure read too.
+		prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	}
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
 }
 
@@ -7340,7 +7394,7 @@ func validateAgentSessionTransport(
 // whose resolved provider is not Claude but which opt in explicitly via
 // install_agent_hooks = ["claude"] still flow through hooks.Install here.
 func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	if bp != nil && bp.planOnly {
+	if bp != nil && (bp.planOnly || bp.readOnly) {
 		return
 	}
 	// Install provider hooks (idempotent filesystem side effect). Route

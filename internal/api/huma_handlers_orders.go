@@ -354,7 +354,9 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		if gate.ExitCode != "" {
 			entry.ExitCode = &gate.ExitCode
 		}
-		entry.HasOutput = entry.CaptureOutput || gate.HasOutput()
+		// has_output reports whether this run recorded output for the history
+		// detail to serve; capture_output describes the order, not the run.
+		entry.HasOutput = gate.HasOutput()
 
 		entries = append(entries, entry)
 		if len(entries) >= limit {
