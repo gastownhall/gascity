@@ -17,6 +17,10 @@ type formulaFile struct {
 		ID          string `toml:"id"`
 		Title       string `toml:"title"`
 		Description string `toml:"description"`
+		Retry       *struct {
+			MaxAttempts int    `toml:"max_attempts"`
+			OnExhausted string `toml:"on_exhausted"`
+		} `toml:"retry"`
 	} `toml:"steps"`
 }
 
@@ -377,6 +381,63 @@ func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	}
 	if closes == 0 {
 		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}
+
+// molScopedWorkRetrySteps are mol-scoped-work's worker-facing retry-managed
+// steps (max_attempts = 3, on_exhausted = "hard_fail"). The body scope latch
+// is not a worker step and carries no [steps.retry].
+var molScopedWorkRetrySteps = map[string]bool{
+	"load-context":     true,
+	"workspace-setup":  true,
+	"preflight-tests":  true,
+	"implement":        true,
+	"self-review":      true,
+	"submit":           true,
+	"cleanup-worktree": true,
+}
+
+// TestMolScopedWorkRetryStepsStateCloseContract guards #7678 on the formula
+// side: every retry-managed step of mol-scoped-work becomes an attempt bead a
+// worker claims, and the retry evaluator reads gc.outcome off that bead when
+// it closes — a close without one is missing_outcome, retried, then
+// hard-failed. The step description is the only formula text the worker sees,
+// so each one must state the close contract itself, naming the step bead via
+// `gc hook current --id-only` ($GC_BEAD_ID is never set in a session shell;
+// see cmd/gc/cmd_hook_current.go).
+func TestMolScopedWorkRetryStepsStateCloseContract(t *testing.T) {
+	f := readFormula(t, "mol-scoped-work.toml")
+	retryCount := 0
+	for _, step := range f.Steps {
+		if step.Retry == nil {
+			continue
+		}
+		retryCount++
+		if !molScopedWorkRetrySteps[step.ID] {
+			t.Errorf("mol-scoped-work step %q is retry-managed but unknown to this guard; update molScopedWorkRetrySteps", step.ID)
+			continue
+		}
+		for _, want := range []string{
+			"gc.outcome=pass",
+			"gc.outcome=fail",
+			"gc.failure_class",
+			"gc.failure_reason",
+			"gc hook current --id-only",
+			"--status=closed",
+		} {
+			if !strings.Contains(step.Description, want) {
+				t.Errorf("mol-scoped-work step %q description must state %q (a close without it hard-fails as missing_outcome):\n%s", step.ID, want, step.Description)
+			}
+		}
+		if strings.Contains(step.Description, "GC_BEAD_ID") {
+			t.Errorf("mol-scoped-work step %q must name its step bead with `gc hook current --id-only`; $GC_BEAD_ID is never set in a session shell", step.ID)
+		}
+		if ids := findBeadIDLiterals(step.Description); len(ids) > 0 {
+			t.Errorf("mol-scoped-work step %q description carries literal bead ids %v; use a placeholder", step.ID, ids)
+		}
+	}
+	if retryCount != len(molScopedWorkRetrySteps) {
+		t.Fatalf("mol-scoped-work has %d retry-managed steps, want exactly its %d worker steps (the guard list and the formula drifted)", retryCount, len(molScopedWorkRetrySteps))
 	}
 }
 
