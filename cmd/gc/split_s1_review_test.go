@@ -70,11 +70,15 @@ func TestRigAddRefusesAReservedPrefixOnASplitCity(t *testing.T) {
 }
 
 // gc init --from a split source city into a name that derives a reserved
-// prefix is refused before the workspace identity is persisted.
+// prefix is refused BEFORE anything is copied, for the pack.toml layout and
+// the legacy one alike (re-review probe P4: the legacy layout skipped the
+// check), and leaves nothing behind, so the corrected retry succeeds.
 func TestInitFromASplitCityRefusesAReservedDerivedPrefix(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	srcDir := t.TempDir()
-	src := "[workspace]\nname = \"declared-city\"\n" + `
+	for _, withPack := range []bool{true, false} {
+		t.Run(map[bool]string{true: "pack.toml", false: "legacy"}[withPack], func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			srcDir := t.TempDir()
+			src := "[workspace]\nname = \"declared-city\"\n" + `
 [storage.classes]
 work = "work"
 graph = "infra"
@@ -86,24 +90,32 @@ nudges = "infra"
 [storage.bindings.infra]
 provider = "sqlite-beads"
 `
-	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte("[pack]\nname = \"declared-city\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cityPath := filepath.Join(t.TempDir(), "target")
-	var stdout, stderr bytes.Buffer
-	if code := doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, "gas-city-gateway", &stdout, &stderr, true); code == 0 {
-		t.Fatalf("gc init --from a split city named gas-city-gateway succeeded; stdout=%s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "gcg") || !strings.Contains(stderr.String(), "workspace_prefix") {
-		t.Errorf("stderr = %q, want the reserved-prefix refusal naming workspace_prefix", stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "site.toml")); err == nil {
-		if data, _ := os.ReadFile(filepath.Join(cityPath, ".gc", "site.toml")); strings.Contains(string(data), "gas-city-gateway") {
-			t.Errorf("the refused init persisted the reserved identity:\n%s", data)
-		}
+			if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if withPack {
+				if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte("[pack]\nname = \"declared-city\"\nschema = 2\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cityPath := filepath.Join(t.TempDir(), "gas-city-gateway")
+			var stdout, stderr bytes.Buffer
+			if code := doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, "gas-city-gateway", &stdout, &stderr, true); code == 0 {
+				t.Fatalf("gc init --from a split city named gas-city-gateway succeeded; stdout=%s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "gcg") || !strings.Contains(stderr.String(), "workspace_prefix") {
+				t.Errorf("stderr = %q, want the reserved-prefix refusal naming workspace_prefix", stderr.String())
+			}
+			if _, err := os.Stat(cityPath); err == nil {
+				entries, _ := os.ReadDir(cityPath)
+				t.Errorf("the refused init left %d entr(ies) behind at %s", len(entries), cityPath)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, "my-city", &stdout, &stderr, true); code != 0 {
+				t.Errorf("the corrected retry failed (%d): %s", code, stderr.String())
+			}
+		})
 	}
 }
 

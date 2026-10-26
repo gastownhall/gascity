@@ -1837,6 +1837,12 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
+	// Refused before anything is copied, so a refusal leaves no destination
+	// behind and the corrected retry is not "already initialized".
+	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := fs.MkdirAll(cityPath, 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1976,6 +1982,32 @@ func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, std
 // from cfg and persisted to .gc/site.toml instead; the stripped bindings are
 // returned so later writers of the same city.toml can re-supply them and avoid
 // erasing the site bindings just written.
+// initFromReservedPrefixRefusal refuses `gc init --from` a split source when
+// the city it would create mints under a reserved class prefix (split-default
+// R10): its first boot, and every CLI process, would refuse it. It reads the
+// SOURCE and predicts the identity rewriteCopiedInitFromIdentity gives the
+// copy — the target name, the source's workspace prefix, the source's rigs —
+// for both the pack.toml and the legacy (no pack.toml) layout, so it can run
+// before anything is copied. A [storage] in a source include fragment counts:
+// fragments resolve against the source directory exactly as they will
+// against the copy.
+func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string) error {
+	data, err := fs.ReadFile(srcToml)
+	if err != nil {
+		return nil // the copy and its own parse report this
+	}
+	src, err := config.Parse(data)
+	if err != nil {
+		return nil
+	}
+	cityName := resolveCityName(nameOverride, "", cityPath)
+	next := *src
+	next.Workspace.Name = cityName
+	next.ResolvedWorkspaceName = cityName
+	next.ResolvedWorkspacePrefix = strings.TrimSpace(src.Workspace.Prefix)
+	return config.ReservedPrefixSplitRefusalForEdit(fs, srcToml, &next)
+}
+
 func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	data, err := fs.ReadFile(copiedToml)
@@ -2235,18 +2267,6 @@ func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg
 	cityPrefix, err := preserveBoundWorkspacePrefix(fs, cityPath, cityPrefix)
 	if err != nil {
 		return err
-	}
-	// A city initialized from a split source must not be given a reserved
-	// prefix (split-default R10): its first boot, and every CLI process,
-	// would refuse it.
-	if cfg != nil {
-		next := *cfg
-		next.Workspace.Name = cityName
-		next.ResolvedWorkspaceName = cityName
-		next.ResolvedWorkspacePrefix = cityPrefix
-		if err := config.ReservedPrefixSplitRefusalForEdit(fs, cityTomlPath, &next); err != nil {
-			return err
-		}
 	}
 	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, cityPrefix); err != nil {
 		if restoreErr := restoreLegacyWorkspaceIdentity(fs, cityTomlPath, cfg, cityName, cityPrefix); restoreErr != nil {
