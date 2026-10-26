@@ -367,3 +367,32 @@ func TestPoolWorkerPromptStatesStepFailureCloses(t *testing.T) {
 		}
 	}
 }
+
+// TestPoolWorkerPromptClosesPlainWorkBeadWithReason pins the other branch of
+// the close contract: a claimed bead without gc.step_ref is a plain work bead,
+// which closes with a reason rather than a step outcome, and every
+// `gc bd close` the prompt gives is that close.
+func TestPoolWorkerPromptClosesPlainWorkBeadWithReason(t *testing.T) {
+	prompt := readPoolWorkerPrompt(t)
+	const plainClose = `gc bd close <id> --reason "`
+	_, section, ok := strings.Cut(prompt, "## Closing Your Bead")
+	if !ok {
+		t.Fatal("pool-worker prompt has no Closing Your Bead section")
+	}
+	section, _, _ = strings.Cut(section, "## ")
+	_, plain, ok := strings.Cut(section, "plain work bead")
+	if !ok || !strings.Contains(plain, plainClose) {
+		t.Errorf("Closing Your Bead does not tell the worker to close a plain work bead with %q", plainClose)
+	}
+	for rest := prompt; ; {
+		i := strings.Index(rest, "gc bd close")
+		if i < 0 {
+			break
+		}
+		rest = rest[i:]
+		if !strings.HasPrefix(rest, plainClose) {
+			t.Errorf("pool-worker prompt gives a close that is not %q: %.60s", plainClose, rest)
+		}
+		rest = rest[len("gc bd close"):]
+	}
+}

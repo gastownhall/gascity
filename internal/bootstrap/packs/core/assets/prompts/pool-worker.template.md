@@ -106,6 +106,9 @@ Never set `gc.failure_class` or `gc.failure_reason` on a step you close with
 retries the step. A step bead is workflow infrastructure: do not add `--notes`
 or `--append-notes` to it.
 
+**A plain work bead** — no `gc.step_ref`. Close it with a one-line summary of
+the outcome: `gc bd close <id> --reason "<what you did>"`.
+
 ## How to Work
 
 1. Find and claim work: `gc hook --claim --drain-ack --json`
