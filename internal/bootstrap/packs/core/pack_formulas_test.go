@@ -17,6 +17,10 @@ type formulaFile struct {
 		ID          string `toml:"id"`
 		Title       string `toml:"title"`
 		Description string `toml:"description"`
+		Retry       *struct {
+			MaxAttempts int    `toml:"max_attempts"`
+			OnExhausted string `toml:"on_exhausted"`
+		} `toml:"retry"`
 	} `toml:"steps"`
 }
 
@@ -356,6 +360,50 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	removeAt := strings.Index(step, `rm -rf "$WORKTREE"`)
 	if guardAt > removeAt {
 		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
+}
+
+// TestMolScopedWorkWorkerStepsDocumentOutcomeClose pins the formula half of
+// issue #7678: every worker-facing step of mol-scoped-work is retry-managed,
+// so the retry evaluator judges each attempt bead by gc.outcome — a close
+// without it is missing_outcome and, once the attempts run out, the workflow
+// hard-fails. The step text must state the close contract itself, because the
+// pool running the formula may render the stock pool-worker prompt. The
+// controller-owned `body` scope latch is not a worker step and is excluded.
+func TestMolScopedWorkWorkerStepsDocumentOutcomeClose(t *testing.T) {
+	f := readFormula(t, "mol-scoped-work.toml")
+	workerSteps := map[string]bool{
+		"load-context":     false,
+		"workspace-setup":  false,
+		"preflight-tests":  false,
+		"implement":        false,
+		"self-review":      false,
+		"submit":           false,
+		"cleanup-worktree": false,
+	}
+	for _, step := range f.Steps {
+		if _, ok := workerSteps[step.ID]; !ok {
+			continue
+		}
+		workerSteps[step.ID] = true
+		if step.Retry == nil {
+			t.Errorf("step %q is no longer retry-managed; this test pins the close contract for retry-managed steps, so a premise change must update it", step.ID)
+		}
+		for _, want := range []string{
+			"gc.outcome=pass",
+			"gc.outcome=fail",
+			"gc.failure_class=transient",
+			"gc.failure_class=hard",
+		} {
+			if !strings.Contains(step.Description, want) {
+				t.Errorf("step %q: description must state %q — a retry-managed step closed without gc.outcome is judged missing_outcome and hard-fails the workflow", step.ID, want)
+			}
+		}
+	}
+	for id, seen := range workerSteps {
+		if !seen {
+			t.Errorf("mol-scoped-work has no step %q; the worker-step list is stale", id)
+		}
 	}
 }
 
