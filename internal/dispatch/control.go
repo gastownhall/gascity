@@ -286,9 +286,9 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 // ralph control, reloads the control so the check sees the updated values, and
 // runs the check script. An iteration that failed hard closes the control as a
 // hard failure without running the check; a GatePass closes the control; a
-// gate run that produced no verdict (a timeout) charges the infra-retry
-// budget and pends instead of spending the iteration; anything else spawns
-// the next iteration or exhausts.
+// gate run that produced no verdict (a timeout, or a blind read) charges the
+// infra-retry budget and pends instead of spending the iteration; anything
+// else spawns the next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
@@ -318,14 +318,23 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
 	// A gate run that produced no verdict must not spend the iteration: a
-	// timeout charges the shared infra-retry budget and re-runs on a later
+	// timeout, or a blind read (exit 75 / a typed infrastructure marker on
+	// stderr), charges the shared infra-retry budget and re-runs on a later
 	// sweep via ErrControlPending, the same protection the kind=check lane has
 	// (gastownhall/gascity#6947). GateError stays graded: on this lane it is a
 	// failed start (the gate runs on context.Background, so a parent cancel
 	// cannot produce it), and a failed start spends an attempt each time
-	// (formula-spec-v2 §3.1). The counter lives on the control, which spans
-	// every iteration, so it is the loop's total infra budget.
-	if checkResult.Outcome == convergence.GateTimeout {
+	// (formula-spec-v2 §3.1). Unlike the check lane, a blind read is not
+	// reclassified: the attempt log records what the gate actually did. The
+	// counter lives on the control, which spans every iteration, so it is the
+	// loop's total infra budget.
+	infra := checkResult.Outcome == convergence.GateTimeout
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s",
+			bead.ID, iterationNum, reason, formatGateExitCode(checkResult.ExitCode))
+		infra = true
+	}
+	if infra {
 		if err := spendCheckInfraRetry(store, reloaded, checkResult.Outcome, iterationNum, opts); err != nil {
 			return attemptEvaluation{}, err
 		}

@@ -158,6 +158,41 @@ func TestProcessRalphCheckBlindReadBudgetExhaustionBurns(t *testing.T) {
 	}
 }
 
+// TestProcessRalphControlBlindReadDoesNotBurnIteration covers the compiled
+// kind=ralph lane for each blind gate shape: a gate that exits nonzero because
+// it could not see its infrastructure produced no verdict, so it charges the
+// infra budget and re-runs without spending the iteration.
+func TestProcessRalphControlBlindReadDoesNotBurnIteration(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range blindGateCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "blind-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+
+			_, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if !errors.Is(err, ErrControlPending) {
+				t.Fatalf("ProcessControl on a blind gate read = %v, want ErrControlPending (re-run without burning the iteration)", err)
+			}
+
+			got := mustGet(t, store, control.ID)
+			if got.Status == "closed" {
+				t.Fatalf("control closed (outcome=%q failed_attempt=%q), want held open for an infra re-run",
+					got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata[beadmeta.FailedAttemptMetadataKey])
+			}
+			if log := got.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+				t.Errorf("gc.attempt_log = %q, want empty (no iteration was spent)", log)
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "1" {
+				t.Errorf("gc.check_infra_retry = %q, want 1", r)
+			}
+		})
+	}
+}
+
 // TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt is the control: an
 // ordinary nonzero gate is still a real verdict and must keep burning attempts.
 // Without it, the blind-read classification could silently swallow every gate
