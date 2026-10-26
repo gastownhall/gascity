@@ -445,6 +445,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc prime --strict` fails on a `prompt_template` that does not render.**
+  A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
+  execute, such as one calling an undefined function `{{base_branch}}`, was
+  reported on stderr while `gc prime --strict` printed the raw template text
+  and exited 0, so lint wrappers saw success. It now exits non-zero with
+  `gc prime: prompt_template "<path>" for agent "<agent>": <error>`, writes
+  nothing to stdout, and in hook mode leaves the session's `session_key`
+  unset. Without `--strict` the raw-text fallback is unchanged. (#8149)
+
 - **An MCP server one agent's provider cannot receive no longer stops the
   city.** Servers from the city's `mcp/` directory, a rig pack, or an import
   reach every agent in that scope. When one agent's provider could not
