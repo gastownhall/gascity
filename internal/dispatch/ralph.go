@@ -34,7 +34,7 @@ import (
 // keeps the counter (gc.check_infra_retry) where it spans the whole loop: the
 // legacy kind=check lane charges GateError and GateTimeout and clones the
 // counter into each next check bead; the compiled kind=ralph lane charges
-// GateTimeout on the control itself, where a GateError is a failed start that
+// GateTimeout and blind reads on the control itself, where a GateError is a failed start that
 // spends an attempt (formula-spec-v2 §3.1). Either way it is the loop's total
 // infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
 // outage.
