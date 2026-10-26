@@ -57,8 +57,21 @@ func opSweepWrites(rec *beadstest.OpRecordingStore) int {
 	return n
 }
 
+// opsGatesOff turns all three ops gates off, the opt-out from their auto
+// default (D-GATES), so a test starts from a city that records no ops and
+// turns on only the gates it names after it.
+func opsGatesOff(opts ...rollout.ForTestOption) []rollout.ForTestOption {
+	return append([]rollout.ForTestOption{
+		rollout.WithOpsContent(rollout.Off),
+		rollout.WithOpsControl(rollout.Off),
+		rollout.WithOpsLifecycle(rollout.Off),
+	}, opts...)
+}
+
+// newOpSweepCS is a controller over store with every ops gate off but those
+// opts turn on.
 func newOpSweepCS(store beads.Store, opts ...rollout.ForTestOption) *controllerState {
-	return &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(opts...), beadsQuiescent: new(atomic.Bool)}
+	return &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(opsGatesOff(opts...)...), beadsQuiescent: new(atomic.Bool)}
 }
 
 // opSweepClock is a fake clock safe to move while the loop goroutine reads it.

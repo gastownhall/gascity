@@ -307,7 +307,7 @@ func TestSessionNudgeOpRefusedBehindAPendingPrompt(t *testing.T) {
 // nudge before any effect.
 func TestSessionNudgeOpOffAndRequire(t *testing.T) {
 	t.Run("off", func(t *testing.T) {
-		c := newContentOpCity(t, "")
+		c := newContentOpCity(t, "off")
 		code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", true)
 		if code != 0 || stderr != "" {
 			t.Fatalf("nudge = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
@@ -371,7 +371,7 @@ func deliveredTextIsUnchangedByTheGate(t *testing.T, provider string) {
 		}
 		return r
 	}
-	off := runAll("")
+	off := runAll("off")
 	if len(off.calls)+len(off.queued) != 3 {
 		t.Fatalf("off deliveries = %+v, queued = %v; want 3 between them", off.calls, off.queued)
 	}
@@ -799,7 +799,7 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 	t.Run("off sends no key", func(t *testing.T) {
 		var got string
 		srv := serve(t, &got)
-		h, c := submitOpCity(t, "", srv)
+		h, c := submitOpCity(t, "off", srv)
 		var stdout, stderr bytes.Buffer
 		if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
 			t.Fatalf("submit = %d, want the test server's refusal; stderr=%s", code, stderr.String())

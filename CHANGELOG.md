@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The op journal now records session requests by default.** The three
+  `[ops]` rollout gates, `content` (submit, messages, nudge, mail notify),
+  `control` (interrupt, respond) and `lifecycle` (wake, suspend, reset, kill,
+  close), now default to `auto` instead of `off`. Each request is recorded as
+  an op in the sessions store beside its unchanged legacy execution, so a
+  same-key retry is deduplicated across restarts and each request gets one
+  typed outcome. Delivered text is unchanged. Where the sessions store cannot
+  record ops (no conditional writes, or no id prefix), requests run
+  unrecorded, with a degrade event and a `gc doctor` `ops-recording` warning.
+  Recording adds two store writes per request (open and close); in the X12
+  load test it added about 8 ms at p50 on SQLite and 160 to 175 ms on a
+  bd-served Dolt store. Closed op rows are kept, with about 820 bytes of row
+  data each. To keep the old behavior,
+  set `content`, `control` and `lifecycle` to `"off"` in `[ops]`, or set
+  `GC_OPS_CONTENT`, `GC_OPS_CONTROL` and `GC_OPS_LIFECYCLE` to `off`.
+  `require`, which refuses a request it cannot record, stays opt-in.
+
 - **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, CI, the agent base image
   (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
   requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to

@@ -30,9 +30,11 @@ func (c opsRecordingClosingStore) CloseStore() error {
 	return c.err
 }
 
+// newTestOpsRecordingCheck is the check over store with every ops gate off
+// but those opts turn on.
 func newTestOpsRecordingCheck(store beads.Store, now time.Time, opts ...rollout.ForTestOption) (*opsRecordingDoctorCheck, *atomic.Int32) {
 	var opens atomic.Int32
-	c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(opts...), nil)
+	c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(opsGatesOff(opts...)...), nil)
 	c.open = func() (beads.Store, error) {
 		opens.Add(1)
 		return store, nil

@@ -314,7 +314,7 @@ func TestSessionResetOpRollbackOrderAtPropose(t *testing.T) {
 func TestSessionVerbOpOffWritesNothing(t *testing.T) {
 	for _, tc := range cliOpVerbCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newCLIOpVerbFixture(t, tc, nil)
+			f := newCLIOpVerbFixture(t, tc, cliOpsOffEnv())
 			r := f.run("", true)
 			if r.code != 0 {
 				t.Fatalf("%s = %d; stderr=%s", tc.name, r.code, r.stderr)

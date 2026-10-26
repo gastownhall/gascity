@@ -368,7 +368,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newOpsEnv(t, "")
+			e := newOpsEnv(t, "off")
 			var info session.Info
 			if tc.setup != nil {
 				info = tc.setup(t, e)
@@ -1191,7 +1191,7 @@ func TestSessionContentOpsReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.
 func TestSessionContentOpsOffReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.T) {
 	for _, endpoint := range []string{"/submit", "/messages"} {
 		t.Run(strings.TrimPrefix(endpoint, "/"), func(t *testing.T) {
-			e := newOpsEnv(t, "")
+			e := newOpsEnv(t, "off")
 			cityLog := events.NewFake()
 			live := &closableEvents{Fake: cityLog}
 			e.fs.eventProv = live

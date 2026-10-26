@@ -693,6 +693,9 @@ func TestDeliverSessionNudgeWithWorkerImmediateResumesUnheldSession(t *testing.T
 
 func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	// The file store names no id prefix, so ops.content=auto would run the
+	// nudge unrecorded with a warning; this test is about the delivery ack.
+	t.Setenv("GC_OPS_CONTENT", "off")
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
@@ -733,6 +736,9 @@ func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t 
 // manager's plain delivery, and must still report and stamp a delivery.
 func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedFromRunningSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	// The file store names no id prefix, so ops.content=auto would run the
+	// nudge unrecorded with a warning; this test is about the delivery ack.
+	t.Setenv("GC_OPS_CONTENT", "off")
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()

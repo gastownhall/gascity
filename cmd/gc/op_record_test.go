@@ -38,6 +38,12 @@ type cliOpHarness struct {
 	opStore beads.Store
 }
 
+// cliOpsOffEnv turns every ops gate off through the env break-glass: the
+// opt-out from the gates' auto default (D-GATES).
+func cliOpsOffEnv() map[string]string {
+	return map[string]string{"GC_OPS_CONTENT": "off", "GC_OPS_CONTROL": "off", "GC_OPS_LIFECYCLE": "off"}
+}
+
 func newCLIOpHarness(t *testing.T, env map[string]string) *cliOpHarness {
 	t.Helper()
 	h := &cliOpHarness{env: env, clk: &clock.Fake{Time: cliOpT0}}
@@ -306,7 +312,7 @@ func (f *cliOpWakeFixture) run(t *testing.T, key string, asJSON bool) (int, stri
 }
 
 func TestSessionWakeOpOffWritesNothing(t *testing.T) {
-	h := newCLIOpHarness(t, nil)
+	h := newCLIOpHarness(t, cliOpsOffEnv())
 	f := newCLIOpWakeFixture(t)
 	code, stdout, stderr := f.run(t, "", true)
 	if code != 0 {

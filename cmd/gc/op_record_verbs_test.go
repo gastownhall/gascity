@@ -1160,7 +1160,7 @@ func TestSessionWakeOpJSONReplayNotesTheOpOnStderr(t *testing.T) {
 // With the gate off --key is not read at all: an invalid one draws no
 // warning.
 func TestSessionWakeOpOffIgnoresAnInvalidKey(t *testing.T) {
-	newCLIOpHarness(t, nil)
+	newCLIOpHarness(t, cliOpsOffEnv())
 	f := newCLIOpWakeFixture(t)
 	code, _, stderr := f.run(t, " padded", false)
 	if code != 0 || stderr != "" {
