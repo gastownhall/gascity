@@ -2114,6 +2114,32 @@ func TestActiveBeadLookupUsesEffectiveRigSuspension(t *testing.T) {
 	}
 }
 
+// TestActiveBeadLookupReadsRigInferredSuspended: a rig that status infers
+// suspended because all of its agents are keeps a refreshing cache and is
+// still read.
+func TestActiveBeadLookupReadsRigInferredSuspended(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("live=%v", live), func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			l.state.cfg.Rigs = l.state.cfg.Rigs[1:]
+			delete(l.state.stores, "alpha")
+			l.state.cfg.Agents = []config.Agent{
+				{Name: "worker", Dir: "beta", Provider: "test-agent", Suspended: true},
+			}
+			l.state.cfg.NamedSessions = nil
+
+			got := lookupActiveBead(New(l.state), live, "", "session-id")
+
+			if l.beta.listCalls == 0 {
+				t.Error("beta was not read")
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want beta's %q", got, l.betaWork)
+			}
+		})
+	}
+}
+
 // TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias: in legacy
 // shared-file mode every rig aliases one store. A suspended alpha must not
 // hide the store that beta still reaches.
