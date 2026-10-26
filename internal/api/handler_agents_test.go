@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -2055,6 +2056,64 @@ func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
 	}
 }
 
+// TestActiveBeadLookupUsesEffectiveRigSuspension: the skipped set is the one
+// statusWorkCounts skips. A runtime override wins; without one, the config's
+// suspended_on_start (or legacy suspended) decides.
+func TestActiveBeadLookupUsesEffectiveRigSuspension(t *testing.T) {
+	tests := []struct {
+		name      string
+		rig       config.Rig
+		runtime   *bool
+		wantAlpha bool
+	}{
+		{
+			name: "suspended_on_start without runtime override",
+			rig:  config.Rig{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+		},
+		{
+			name:      "suspended_on_start with runtime resume",
+			rig:       config.Rig{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+			runtime:   boolPtr(false),
+			wantAlpha: true,
+		},
+		{
+			name: "legacy suspended",
+			rig:  config.Rig{Name: "alpha", Path: "/tmp/alpha", Suspended: true},
+		},
+		{
+			name:    "runtime suspend over suspended_on_start false",
+			rig:     config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+			runtime: boolPtr(true),
+		},
+	}
+	for _, tt := range tests {
+		for _, live := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/live=%v", tt.name, live), func(t *testing.T) {
+				l := newSuspendedRigLookup(t)
+				l.state.cfg.Rigs[0] = tt.rig
+				if tt.runtime != nil {
+					if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, l.state.cityPath, "alpha", tt.runtime); err != nil {
+						t.Fatalf("SetRigSuspended(alpha, %v): %v", *tt.runtime, err)
+					}
+				}
+
+				got := lookupActiveBead(New(l.state), live, "", "session-id")
+
+				want := l.betaWork
+				if tt.wantAlpha {
+					want = l.alphaWork
+				}
+				if read := l.alpha.listCalls > 0; read != tt.wantAlpha {
+					t.Errorf("alpha read = %v (List calls %d), want %v", read, l.alpha.listCalls, tt.wantAlpha)
+				}
+				if got != want {
+					t.Errorf("active bead = %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
 // TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias: in legacy
 // shared-file mode every rig aliases one store. A suspended alpha must not
 // hide the store that beta still reaches.
@@ -2075,4 +2134,53 @@ func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestActiveBeadLookupSuspensionStateEdges: an unreadable state file or an
+// unknown city path still applies the config defaults, neither skipping nor
+// reading every rig wholesale.
+func TestActiveBeadLookupSuspensionStateEdges(t *testing.T) {
+	t.Run("corrupt state file", func(t *testing.T) {
+		l := newSuspendedRigLookup(t)
+		l.state.cfg.Rigs[0].SuspendedOnStart = true
+		path := citylayout.SuspensionStateFile(l.state.cityPath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := New(l.state).findActiveBeadForAssignees("", "session-id")
+
+		if l.alpha.listCalls != 0 {
+			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
+		}
+		if l.beta.listCalls == 0 || got != l.betaWork {
+			t.Errorf("active bead = %q (beta List calls %d), want beta's %q", got, l.beta.listCalls, l.betaWork)
+		}
+	})
+	t.Run("empty city path", func(t *testing.T) {
+		l := newSuspendedRigLookup(t)
+		l.state.cfg.Rigs[0].SuspendedOnStart = true
+		l.state.cityPath = ""
+		cwd := t.TempDir()
+		t.Chdir(cwd)
+		relative := citylayout.SuspensionStateFile("")
+		if err := os.MkdirAll(filepath.Dir(relative), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(relative, []byte(`{"rigs":{"beta":{"suspended":true}}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := New(l.state).findLiveActiveBeadForAssignees("", "session-id")
+
+		if l.alpha.listCalls != 0 {
+			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
+		}
+		if got != l.betaWork {
+			t.Errorf("active bead = %q, want beta's %q (a relative state file must not be read)", got, l.betaWork)
+		}
+	})
 }
