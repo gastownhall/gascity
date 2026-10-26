@@ -16,8 +16,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type partialAgentSessionLister struct {
@@ -1946,5 +1948,27 @@ func TestLiveActiveBeadStoreErrors(t *testing.T) {
 				t.Fatalf("active bead = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// listCountingStore counts every List call, so a test can prove a store was
+// never read.
+type listCountingStore struct {
+	beads.Store
+	listCalls int
+}
+
+func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.Store.List(query)
+}
+
+// suspendAlphaAtRuntime suspends rig alpha in runtime state the way
+// `gc rig suspend alpha` records it.
+func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
+	t.Helper()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "alpha", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended(alpha): %v", err)
 	}
 }

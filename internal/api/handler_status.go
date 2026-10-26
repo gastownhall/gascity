@@ -215,18 +215,13 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
-	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
-	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
-	// the same set as suspendedRigs, which grows below to include rigs merely
-	// inferred suspended because every one of their agents is — those keep a
-	// refreshing cache and must still be asked for ready work.
-	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
-			suspendedRigs[r.Name] = true
-			cacheColdRigs[r.Name] = true
-		}
+	// cacheColdRigs is deliberately not the same set as suspendedRigs, which
+	// grows below to include rigs merely inferred suspended because every one
+	// of their agents is — those keep a refreshing cache and must still be
+	// asked for ready work.
+	cacheColdRigs := cacheColdRigNames(cfg, citySt)
+	for name := range cacheColdRigs {
+		suspendedRigs[name] = true
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
@@ -552,6 +547,44 @@ type statusSessionInfo struct {
 	agentName   string
 	template    string
 	state       session.State
+}
+
+// cacheColdRigNames returns the rigs suspended by effective state. It mirrors
+// the controller's per-rig cache refresh gate (rigStoreBackgroundRefresh): such
+// a rig gets no cache at all, so any read of its store goes to bd and restarts
+// the rig's retired proxy and Dolt. gc leaves a suspended scope untouched, so
+// neither status (statusWorkCounts) nor the active-bead lookup reads these
+// stores. The map is never nil.
+func cacheColdRigNames(cfg *config.City, st suspensionstate.State) map[string]bool {
+	cold := make(map[string]bool)
+	if cfg == nil {
+		return cold
+	}
+	for _, r := range cfg.Rigs {
+		if suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
+			cold[r.Name] = true
+		}
+	}
+	return cold
+}
+
+// loadCacheColdRigs reads the runtime suspension state and returns
+// cacheColdRigNames for the current config. An unreadable state file is
+// logged and treated as no runtime overrides, so the config's startup
+// defaults still decide, as they do for the controller. Without a city path
+// there is no state file to read.
+func (s *Server) loadCacheColdRigs() map[string]bool {
+	cfg := s.state.Config()
+	cityPath := s.state.CityPath()
+	if cityPath == "" {
+		return cacheColdRigNames(cfg, suspensionstate.State{})
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		log.Printf("api: reading suspension state: %v", err)
+		st = suspensionstate.State{}
+	}
+	return cacheColdRigNames(cfg, st)
 }
 
 // citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
