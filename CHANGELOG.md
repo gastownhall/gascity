@@ -9,43 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **The op journal now records session requests by default, where the
-  sessions store can record them.** The three `[ops]` rollout gates,
-  `content` (submit, messages, nudge, mail notify), `control` (interrupt,
-  respond) and `lifecycle` (wake, suspend, reset, kill, close), now default
-  to `auto` instead of `off`. On a sessions store with conditional writes
-  and an id prefix (today a native beads store), each request is recorded
-  as an op beside its unchanged legacy execution, so a same-key retry is
-  deduplicated across restarts and each request gets one typed outcome.
-  Delivered text is unchanged.
-  - **Stores that cannot record stay as before.** No released bd supports
-    `--if-revision`, so a sessions store served through bd (the default
-    `gc init` city), a file store and an exec-provider store record
-    nothing. Under the builtin default such a store is treated as `off`:
-    no CLI warning, no `ops.recording_degraded` event, no `gc doctor`
-    warning, no warning in the controller log, and the controller's op
-    sweeper does nothing after its boot pass until a reload replaces the
-    sessions store. The only cost is one `bd update --help` capability
-    probe per command that could be recorded. A run with `--key` still
-    warns that it ran unrecorded. An explicit `auto`, in `[ops]` or through
-    `GC_OPS_*`, warns as before.
-  - **A bd with `--if-revision` starts recording.** Whether a city served
-    through bd records depends on the bd on `PATH`, not on gc: once
-    `bd update`, `close`, `assign` and `delete` all advertise
-    `--if-revision`, its sessions store can record, and the default records
-    every op-recorded command and session API request through bd, with no
-    gc or config change. That path has not been measured: the X12 Dolt arm
-    below read and wrote its server natively, while here each op's writes
-    run as bd subprocesses and the capability probe runs all four verbs. To
-    keep such a city unrecorded, set the gates to `off` in `[ops]`.
-  - **Cost where it records.** Recording adds two store writes per request
-    (open and close). In the X12 load test the added p50 latency on the
-    API's 202 path was about 8 ms on SQLite, and on a bd-provisioned Dolt
-    server read natively it went from about 145 ms with `off` to 313 to
-    318 ms (about 2.1x). Closed op rows are kept: about 820 bytes of row data per
-    op, but on that Dolt server the recorded rounds grew 352 MB on disk
-    against 132 MB for the matching `off` rounds, about 208 KB per op. Set
-    the gates to `off` where that growth matters.
+- **The op journal now records session requests by default on a SQLite
+  sessions store.** The three `[ops]` rollout gates, `content` (submit,
+  messages, nudge, mail notify), `control` (interrupt, respond) and
+  `lifecycle` (wake, suspend, reset, kill, close), now default to `auto`
+  instead of `off`. Left unset, `auto` records only when the city's sessions
+  store writes to SQLite: a city whose sessions class is bound to a
+  `sqlite-beads` storage binding, such as a split city whose work stays on
+  Dolt. There each request is recorded as an op beside its unchanged legacy
+  execution, so a same-key retry is deduplicated across restarts and each
+  request gets one typed outcome. Delivered text is unchanged.
+  - **Natively served Dolt cities stop recording by default.** This
+    reverses the earlier unreleased default (#8325), under which a city
+    whose sessions store a Dolt server serves natively recorded every
+    request. A Dolt-served sessions store, native or through bd, now records
+    nothing under the default, whatever the bd on `PATH` supports, so a bd
+    that gains `--if-revision` does not start recording either. The check is
+    an allowlist of SQLite, so any other store (file, exec, memory) records
+    nothing too. Under the default such a store is treated as `off`: no CLI
+    warning, no `ops.recording_degraded` event, a `gc doctor` OK ("auto
+    (default) records nothing on a Dolt-served sessions store", and whether
+    an explicit gate could record there: a released bd cannot), one line in
+    the controller log, and no `bd update --help` capability probe on the
+    commands it would record. A run with `--key` still warns that it ran
+    unrecorded. The controller's op sweeper still closes expired ops an
+    earlier recording left behind, then goes idle.
+  - **Opting in on Dolt.** Set `content`, `control` and `lifecycle` to
+    `"auto"` (or `"require"`) in `[ops]`, or through `GC_OPS_CONTENT`,
+    `GC_OPS_CONTROL` and `GC_OPS_LIFECYCLE`. An explicit gate records over
+    any sessions store that can record ops (conditional writes and an id
+    prefix), Dolt included, and warns where the store cannot.
+  - **What recording costs on Dolt.** Recording adds two store writes per
+    request (open and close). In the X12 load test the added p50 latency on
+    the API's 202 path was about 8 ms on SQLite, and on a bd-provisioned
+    Dolt server read natively it went from about 145 ms with `off` to 313 to
+    318 ms (about +170 ms, 2.1x). Most of that is the beads
+    library's per-write cost on Dolt: an op create runs 38 SQL statements,
+    about half its time in two no-op `is_blocked` recomputes. Op rows are
+    already no-history: they land in bd's `dolt_ignore`d wisps table and
+    make no Dolt commits. The 208 KB per op the X12 Dolt arm reported is
+    chunk-journal garbage from a harness that turned Dolt auto-GC off; after
+    a GC about 1.4 to 3 KB per op is retained, and gc's managed Dolt server
+    runs auto-GC.
   - **Opting out.** Set `content`, `control` and `lifecycle` to `"off"` in
     `[ops]`. `GC_OPS_CONTENT`, `GC_OPS_CONTROL` and `GC_OPS_LIFECYCLE` set
     to `off` also work, but they are break-glass overrides, which

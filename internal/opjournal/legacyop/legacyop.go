@@ -705,10 +705,15 @@ func (r *Recorder) stopped() bool {
 
 // openReason is the unrecorded reason for a store that did not open.
 func openReason(err error) string {
-	if errors.Is(err, opjournal.ErrNoNamespace) {
+	var notDefault *opjournal.NotRecordedByDefaultError
+	switch {
+	case errors.Is(err, opjournal.ErrNoNamespace):
 		return ReasonNoNamespace
+	case errors.As(err, &notDefault):
+		return ReasonNotRecordedByDefault
+	default:
+		return ReasonStoreUnavailable
 	}
-	return ReasonStoreUnavailable
 }
 
 // proposeReason is the unrecorded reason for a failed Propose.
@@ -723,7 +728,10 @@ func proposeReason(err error) string {
 // or namespace gap, contention, or a store error. Every surface that degrades
 // past an op-store failure classifies it here, so the classes cannot drift.
 func DegradeReason(err error) string {
+	var notDefault *opjournal.NotRecordedByDefaultError
 	switch {
+	case errors.As(err, &notDefault):
+		return DegradeNotRecordedByDefault
 	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
 		return DegradeConditionalWritesUnsupported
 	case errors.Is(err, opjournal.ErrBeadTypeUnregistered):

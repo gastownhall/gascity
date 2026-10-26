@@ -160,6 +160,7 @@ go_test(
         "list_all_test.go",
         "list_from_infos_test.go",
         "mailbox_address_test.go",
+        "manager_close_burst_test.go",
         "manager_lease_test.go",
         "manager_states_test.go",
         "manager_test.go",

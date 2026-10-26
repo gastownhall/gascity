@@ -1781,14 +1781,14 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
+		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
 		case res == CommitMoved:
 			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
 		case res == CommitContended:
-			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, operatorSuspendAttempts)
 		case res != CommitLanded && res != CommitClosed:
 			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}

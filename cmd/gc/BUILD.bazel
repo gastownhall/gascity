@@ -1967,6 +1967,7 @@ go_test(
         "session_lifecycle_prepare_budget_test.go",
         "session_lifecycle_start_boundary_test.go",
         "session_lifecycle_start_deadline_test.go",
+        "session_lifecycle_wave_deadline_test.go",
         "session_lifecycle_worker_boundary_test.go",
         "session_local_metadata_composition_test.go",
         "session_manager_test.go",
