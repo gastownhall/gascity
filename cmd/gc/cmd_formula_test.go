@@ -1179,6 +1179,80 @@ func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
 	}
 }
 
+// TestFormulaCookAttachGraphV2StampsMetaOnTheWorkflowRoot pins the graph.v2
+// --attach arm's --meta stamp on both results that arm can return: a freshly
+// instantiated workflow, and the live workflow a repeat cook adopts for the
+// same convoy target (#7309).
+func TestFormulaCookAttachGraphV2StampsMetaOnTheWorkflowRoot(t *testing.T) {
+	t.Run("fresh workflow", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+
+		res := cookFormula(t, "graph-work", "--attach", target.ID, "--meta", "k=v")
+
+		root, err := work.Get(res.RootID)
+		if err != nil {
+			t.Fatalf("workflow root %s: %v", res.RootID, err)
+		}
+		if got := root.Metadata["k"]; got != "v" {
+			t.Errorf("workflow root %s: k = %q, want %q", res.RootID, got, "v")
+		}
+		if got := root.Metadata[beadmeta.KindMetadataKey]; got != beadmeta.KindWorkflow {
+			t.Errorf("workflow root %s: %s = %q, want %q — the fixture must be a graph.v2 workflow root", res.RootID, beadmeta.KindMetadataKey, got, beadmeta.KindWorkflow)
+		}
+		attachBead, err := work.Get(target.ID)
+		if err != nil {
+			t.Fatalf("attach bead %s: %v", target.ID, err)
+		}
+		if got, ok := attachBead.Metadata["k"]; ok {
+			t.Errorf("attach bead %s carries k=%q; the stamp belongs on the workflow root %s", target.ID, got, res.RootID)
+		}
+	})
+	t.Run("adopted live workflow", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		// A convoy target gives the invocation a stable input-convoy id and
+		// therefore a stable graph root key, so the second cook adopts the live
+		// workflow through the `existing != nil` return instead of instantiating.
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+
+		first := cookFormula(t, "graph-work", "--attach", target.ID, "--meta", "k=v1", "--meta", "keep=1")
+		second := cookFormula(t, "graph-work", "--attach", target.ID, "--meta", "k=v2")
+
+		if first.RootID != second.RootID {
+			t.Fatalf("re-cook minted a second workflow root (%s then %s); the adopt return must be stamped, not skipped", first.RootID, second.RootID)
+		}
+		root, err := work.Get(second.RootID)
+		if err != nil {
+			t.Fatalf("workflow root %s: %v", second.RootID, err)
+		}
+		if got := root.Metadata["k"]; got != "v2" {
+			t.Errorf("adopted workflow root %s: k = %q, want %q (last cook wins)", second.RootID, got, "v2")
+		}
+		if got := root.Metadata["keep"]; got != "1" {
+			t.Errorf("adopted workflow root %s: keep = %q, want %q — the stamp must merge, not replace", second.RootID, got, "1")
+		}
+		if got := blockingDepCount(t, work, target.ID); got != 1 {
+			t.Errorf("attach bead %s carries %d blocking deps after two cooks, want 1", target.ID, got)
+		}
+	})
+}
+
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
