@@ -378,7 +378,8 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
-// searched. Returns "" if no match.
+// searched. Rigs suspended by effective state are never searched. Returns ""
+// if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
 }
@@ -386,6 +387,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
 // lower-frequency detail views where external reassignment freshness matters.
+// Rigs suspended by effective state are never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
@@ -394,9 +396,23 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // highest-priority identity: identity order first, then store order, then
 // newest first within a store. Cached reads use a targeted ListQuery with
 // Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores.
+// through findLiveActiveBeadInStores. A rig suspended by effective state
+// (cacheColdRigNames) has no cache, and a read of its store restarts its
+// retired proxy and Dolt, so its store is dropped before either path runs; a
+// lookup scoped to such a rig returns "" without reading any store. Dropping
+// stores before sortedRigNames dedupes them keeps a shared store reachable
+// through a non-suspended alias.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
-	stores := s.state.BeadStores()
+	cold := s.loadCacheColdRigs()
+	if cold[rig] {
+		return ""
+	}
+	stores := make(map[string]beads.Store)
+	for name, store := range s.state.BeadStores() {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
 	var rigNames []string
 	if rig != "" {
 		if _, ok := stores[rig]; ok {
