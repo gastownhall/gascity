@@ -15,32 +15,37 @@ import (
 
 // Indirected for tests. apiClient's branch between a standalone controller
 // (which binds cfg.API.Port) and a supervisor-managed city (which is reached
-// on the supervisor's port via city-scoped routes) depends on live sockets,
-// so tests swap these to exercise the fall-through without a running
-// controller or supervisor. (gascity ga-tp7)
+// on the supervisor's port via city-scoped routes) depends on how the live
+// controller socket identifies itself, so tests swap these to exercise the
+// routing without a running controller or supervisor. (gascity ga-tp7)
 var (
-	apiRouteControllerAliveHook  = controllerAlive
-	apiRouteSupervisorClientHook = supervisorCityAPIClient
+	apiRouteControllerIdentityHook = probeControllerIdentity
+	apiRouteSupervisorClientHook   = supervisorCityAPIClient
 )
 
 // apiClient returns an API client if a controller with a mutable API server
 // is running for the city at cityPath. Returns nil if no controller is running,
-// the API is not configured, GC_NO_API is set truthy (operator escape hatch),
-// or the API is bound to a non-localhost address without allow_mutations.
-// CLI commands use this to route reads/writes through the API when available,
-// falling back to direct bd or file mutation.
+// the city is not served by a supervisor, the API is not configured, GC_NO_API
+// is set truthy (operator escape hatch), or the API is bound to a non-localhost
+// address without allow_mutations. CLI commands use this to route
+// reads/writes through the API when available, falling back to direct bd or
+// file mutation.
 //
 // A standalone controller (gc controller / gc serve) and a supervisor-managed
 // city both answer the per-city controller socket — the supervisor hosts that
-// controller in-process. When the socket is alive, apiClient routes to the
-// standalone HTTP endpoint if the city configures an [api] port, otherwise
-// returns nil so the caller uses its local fallback; when the socket is not
-// alive it returns the supervisor-managed client. Callers whose local fallback
-// is missing or prohibitively expensive use supervisorFallthroughAPIClient
-// instead, which additionally routes a supervisor-managed city (alive socket,
-// no standalone [api] port) to the supervisor client rather than reporting
-// controller-down: maintenance (no local fallback at all) and gc status (local
-// fallback re-opens the bead/dolt store). (gascity ga-tp7, ra-r9hm6v)
+// controller in-process — so liveness alone cannot tell the two apart; the
+// socket's identify reply can. Supervisor mode ignores the city's [api] port
+// and serves the city on the supervisor's own port via city-scoped routes, so
+// for a supervisor-hosted city apiClient returns the supervisor-managed
+// client — nil when none is available (the caller's local fallback, which can
+// only reach state on disk, never the supervisor's in-memory sessions; #5262).
+// A standalone controller, or one predating identify (hosting mode unknown),
+// keeps the historical routing: the standalone HTTP endpoint when the city
+// configures an [api] port, otherwise nil so the caller uses its local
+// fallback. Callers whose local fallback is missing or prohibitively
+// expensive use supervisorFallthroughAPIClient instead: maintenance (no local
+// fallback at all) and gc status (local fallback re-opens the bead/dolt
+// store). (gascity ga-tp7, ra-r9hm6v)
 func apiClient(cityPath string) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -59,21 +64,22 @@ func apiClient(cityPath string) *api.Client {
 	} else if warn != "" {
 		fmt.Fprintln(os.Stderr, "warning: "+warn) //nolint:errcheck // best-effort stderr
 	}
-	if apiRouteControllerAliveHook(cityPath) != 0 {
-		// Alive socket: use the standalone HTTP endpoint when configured, else
-		// return nil so the caller takes its local fallback. A supervisor-managed
-		// city (no standalone [api] port) reaches the supervisor client only via
-		// supervisorFallthroughAPIClient (maintenance and gc status).
+	identity := apiRouteControllerIdentityHook(cityPath)
+	if identity.PID != 0 && identity.HostingMode != controllerHostingSupervisor {
+		// Standalone controller, or one predating identify (hosting mode
+		// unknown): its configured [api] port is the only endpoint it serves.
 		return standaloneControllerClient(cityPath)
 	}
+	// No controller socket, or the supervisor hosts the city in-process and
+	// serves it on its own port via city-scoped routes, ignoring [api] port.
 	return apiRouteSupervisorClientHook(cityPath)
 }
 
 // standaloneControllerClient builds an API client for a standalone controller
-// that binds cfg.API.Port from city.toml. It returns nil — the signal for
-// apiClient to fall through to the supervisor-managed client — when no usable
-// standalone HTTP endpoint exists: the config is unreadable, [api] port is
-// unset, or the listener binds a non-loopback address without allow_mutations.
+// that binds cfg.API.Port from city.toml. It returns nil — which apiClient
+// hands to its caller as the local-fallback signal — when no usable standalone
+// HTTP endpoint exists: the config is unreadable, [api] port is unset, or the
+// listener binds a non-loopback address without allow_mutations.
 func standaloneControllerClient(cityPath string) *api.Client {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
@@ -103,26 +109,26 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 
 // supervisorFallthroughAPIClient resolves an API client the same way apiClient
 // does, but additionally falls through to the supervisor-managed client when
-// the per-city controller socket is alive and the city has no standalone
-// [api] port configured — the common case for a supervisor-managed city.
-// apiClient intentionally stops at nil in that case for general commands
-// (see TestAPIClientRouting), on the assumption that those commands' local
-// fallback is cheap. That assumption doesn't hold for every caller:
-// maintenance commands have no local fallback at all, and `gc status`'s local
-// fallback re-opens the full local bead/dolt store and rescans event
-// archives to rebuild store health — far more expensive than the
-// supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
-// ~0.35s warm API). Callers whose local path is missing or prohibitively
-// expensive should route through here instead of apiClient directly.
+// the per-city controller socket is alive with no usable standalone [api]
+// port — a standalone or legacy (pre-identify) controller whose city is
+// nonetheless served by an older supervisor. A supervisor-hosted city never
+// needs this branch: apiClient has already resolved its supervisor client.
+// That extra step serves callers whose local fallback is missing or
+// prohibitively expensive: maintenance commands have no local fallback at
+// all, and `gc status`'s local fallback re-opens the full local bead/dolt
+// store and rescans event archives to rebuild store health — far more
+// expensive than the supervisor's already-cached response (ra-r9hm6v: ~9.5s
+// local CPU vs ~0.35s warm API). Such callers should route through here
+// instead of apiClient directly.
 func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
 	if c := apiClient(cityPath); c != nil {
 		return c, ""
 	}
 	// Honor the GC_NO_API escape hatch: apiClient returns nil under it, and the
-	// alive-hook/supervisor client below never re-check it, so without this guard
-	// an explicit operator opt-out would be silently bypassed here.
+	// identity probe/supervisor client below never re-check it, so without this
+	// guard an explicit operator opt-out would be silently bypassed here.
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
-		if apiRouteControllerAliveHook(cityPath) != 0 {
+		if apiRouteControllerIdentityHook(cityPath).PID != 0 {
 			if c := apiRouteSupervisorClientHook(cityPath); c != nil {
 				return c, ""
 			}
