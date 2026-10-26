@@ -2,6 +2,8 @@ package core
 
 import (
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -380,6 +382,218 @@ func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	}
 }
 
+// molDoWorkCloseSkipEnv are the settings each close-step run supplies itself.
+// The test host is itself a gc session, so inherited values for the session
+// identity and the bead-id variables would leak into the block under test and
+// let a formula that reads the environment instead of gc pass.
+var molDoWorkCloseSkipEnv = map[string]struct{}{
+	"GC_ALIAS":           {},
+	"GC_BEAD_ID":         {},
+	"GC_SESSION_ID":      {},
+	"GC_SESSION_NAME":    {},
+	"GC_TRIGGER_BEAD_ID": {},
+	"CONVOY_STATUS":      {},
+	"STEP_BEAD":          {},
+	"STEP_BEAD_ID":       {},
+	"WORK_BEAD_ID":       {},
+}
+
+// molDoWorkWantClose is the only write a verified close may issue.
+const molDoWorkWantClose = "gc bd update ga-step --set-metadata gc.outcome=pass --status=closed"
+
+// molDoWorkConvoyOneChild is the convoy answer that names the single work
+// bead, the only shape the close-step block accepts.
+const molDoWorkConvoyOneChild = `{"children":[{"id":"ga-work"}]}`
+
+// molDoWorkCloseStepBlock returns the do-work step's "Close this formula
+// step" bash block with {{convoy_id}} rendered, ready to run as one command.
+func molDoWorkCloseStepBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	marker := "**4. Close this formula step:**"
+	at := strings.Index(step, marker)
+	if at < 0 {
+		t.Fatalf("do-work step has no %q section", marker)
+	}
+	section := step[at:]
+	open := strings.Index(section, "```bash\n")
+	if open < 0 {
+		t.Fatal("close-step section has no bash block")
+	}
+	body := section[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("close-step bash block is unterminated")
+	}
+	return strings.ReplaceAll(body[:end], "{{convoy_id}}", "cv-1")
+}
+
+// molDoWorkDoWorkStepJSON is the claimed do-work step as `gc bd show` answers
+// it: in progress, assigned to this session, carrying this step's ref.
+const molDoWorkDoWorkStepJSON = `{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+
+// molDoWorkCloseCase is one run of the close-step block against a scripted
+// gc. Exit codes are strings so the fake's builder needs no strconv.
+type molDoWorkCloseCase struct {
+	name       string
+	hookOut    string // `gc hook current --id-only` stdout
+	hookRC     string // its exit code ("" is success)
+	hookErr    string // its stderr
+	convoyOut  string // `gc convoy status cv-1 --json` stdout
+	convoyRC   string
+	convoyErr  string
+	showOut    string // `gc bd show <id> --json` stdout
+	showRC     string
+	showErr    string
+	updateRC   string // `gc bd update` exit code
+	updateErr  string
+	env        []string // extra environment for the run
+	wantUpdate string   // the exact update line required on a pass
+	wantFail   bool     // the block must exit non-zero and write nothing
+	wantOut    string   // substring the combined output must contain
+	forbidLog  string   // substring the gc log must not contain
+}
+
+// molDoWorkFakeVerb renders one verb of the fake gc: print out, print errText
+// on stderr when set, then exit (an empty exitCode is success).
+func molDoWorkFakeVerb(out, errText, exitCode string) string {
+	if exitCode == "" {
+		exitCode = "0"
+	}
+	body := "    printf '%s\\n' '" + out + "'\n"
+	if errText != "" {
+		body += "    echo \"" + errText + "\" >&2\n"
+	}
+	return body + "    exit " + exitCode + "\n    ;;"
+}
+
+// molDoWorkGCFakeBody renders the fake gc for one case: it answers the four
+// verbs the close-step block uses and refuses every other argv loudly.
+func molDoWorkGCFakeBody(c molDoWorkCloseCase) string {
+	return `case "$1 $2" in
+"hook current")
+` + molDoWorkFakeVerb(c.hookOut, c.hookErr, c.hookRC) + `
+"convoy status")
+` + molDoWorkFakeVerb(c.convoyOut, c.convoyErr, c.convoyRC) + `
+"bd show")
+` + molDoWorkFakeVerb(c.showOut, c.showErr, c.showRC) + `
+"bd update")
+` + molDoWorkFakeVerb("", c.updateErr, c.updateRC) + `
+*)
+    echo "unexpected gc command: $*" >&2
+    exit 64
+    ;;
+esac
+`
+}
+
+// molDoWorkJQOnPATH reports whether jq is reachable. The close-step checks
+// are jq filters, so a host without jq cannot exercise them.
+func molDoWorkJQOnPATH() bool {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
+		if info, err := os.Stat(filepath.Join(dir, "jq")); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// TestMolDoWorkClosesOnlyItsVerifiedClaimedStep runs the do-work step's
+// "Close this formula step" block in a session shell, where GC_BEAD_ID never
+// exists (its only Go setter is the dispatch condition environment; see
+// cmd/gc/cmd_hook_current.go). The block must close exactly the bead
+// `gc hook current --id-only` names after verifying it is this session's
+// in-progress do-work step and not the work bead, and must fail loudly
+// instead of skipping when it cannot do that (issue #7991).
+func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
+	if !molDoWorkJQOnPATH() {
+		t.Skip("jq is not on PATH; the close-step checks are jq filters")
+	}
+	block := molDoWorkCloseStepBlock(t)
+
+	// pass builds the verified-claim scenario every case starts from.
+	pass := func(name string) molDoWorkCloseCase {
+		return molDoWorkCloseCase{
+			name:       name,
+			hookOut:    "ga-step",
+			convoyOut:  molDoWorkConvoyOneChild,
+			showOut:    molDoWorkDoWorkStepJSON,
+			wantUpdate: molDoWorkWantClose,
+		}
+	}
+	cases := []molDoWorkCloseCase{
+		pass("close_verified_claim"),
+	}
+
+	legacy := pass("close_legacy_session_name_assignee")
+	legacy.showOut = `{"id":"ga-step","status":"in_progress","assignee":"rig--polecat-1","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	cases = append(cases, legacy)
+
+	alias := pass("close_alias_assignee")
+	alias.showOut = `{"id":"ga-step","status":"in_progress","assignee":"rig/polecat","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	alias.env = []string{"GC_ALIAS=rig/polecat"}
+	cases = append(cases, alias)
+
+	strayEnv := pass("close_claim_not_env_bead_id")
+	strayEnv.env = []string{"GC_BEAD_ID=ga-other"}
+	strayEnv.forbidLog = "ga-other"
+	cases = append(cases, strayEnv)
+
+	array := pass("close_when_bd_show_answers_an_array")
+	array.showOut = "[" + molDoWorkDoWorkStepJSON + "]"
+	cases = append(cases, array)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, logPath := fakeGCBin(t, molDoWorkGCFakeBody(tc))
+			scriptPath := filepath.Join(t.TempDir(), "close-step.sh")
+			if err := os.WriteFile(scriptPath, []byte(block), 0o644); err != nil {
+				t.Fatalf("write close-step block: %v", err)
+			}
+			env := append([]string{"GC_SESSION_ID=gcg-session-me", "GC_SESSION_NAME=rig--polecat-1"}, tc.env...)
+			out, runErr := runPackScript(t, scriptPath, binDir, molDoWorkCloseSkipEnv, env)
+
+			logged, readErr := os.ReadFile(logPath)
+			if os.IsNotExist(readErr) {
+				logged = nil
+			} else if readErr != nil {
+				t.Fatalf("read gc log: %v", readErr)
+			}
+			var updates []string
+			for _, line := range strings.Split(string(logged), "\n") {
+				if strings.HasPrefix(line, "gc bd update") {
+					updates = append(updates, line)
+				}
+			}
+
+			if tc.wantFail {
+				if runErr == nil {
+					t.Fatalf("close-step block exited 0; it must fail loudly instead:\nblock:\n%s\noutput:\n%s\ngc calls:\n%s", block, out, logged)
+				}
+				if len(updates) != 0 {
+					t.Errorf("a failed close must not issue a gc bd update; got:\n%s", logged)
+				}
+			} else {
+				if runErr != nil {
+					t.Fatalf("close-step block failed: %v\noutput:\n%s\ngc calls:\n%s", runErr, out, logged)
+				}
+				if len(updates) != 1 || updates[0] != tc.wantUpdate {
+					t.Errorf("close-step block must issue exactly one `%s`; got %d update(s):\n%s", tc.wantUpdate, len(updates), logged)
+				}
+			}
+			if tc.forbidLog != "" && strings.Contains(string(logged), tc.forbidLog) {
+				t.Errorf("gc log must not contain %q:\n%s", tc.forbidLog, logged)
+			}
+			if tc.wantOut != "" && !strings.Contains(out, tc.wantOut) {
+				t.Errorf("close-step output must contain %q:\n%s", tc.wantOut, out)
+			}
+		})
+	}
+}
+
 // graphBeadVars are the shell variables core formulas use for workflow
 // infrastructure beads: the claimed formula step, the drain continuation and
 // the workflow root. Every one carries gc.root_bead_id, so on a city that
@@ -446,4 +660,59 @@ func namesGraphBeadVar(command string) bool {
 		}
 	}
 	return false
+}
+
+// TestMolDoWorkStepCloseWithoutGCBeadID runs the do-work step's "Close this
+// formula step" block in a session shell, where GC_BEAD_ID is never exported.
+// The block must either close the step this session claimed (named by
+// `gc hook current --id-only`) or fail loudly; exiting 0 with no close leaves
+// the step in_progress after the real work is done (issue #7991).
+func TestMolDoWorkStepCloseWithoutGCBeadID(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	marker := "**4. Close this formula step:**"
+	at := strings.Index(step, marker)
+	if at < 0 {
+		t.Fatalf("do-work step has no %q section", marker)
+	}
+	section := step[at:]
+	open := strings.Index(section, "```bash\n")
+	if open < 0 {
+		t.Fatal("close-step section has no bash block")
+	}
+	body := section[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("close-step bash block is unterminated")
+	}
+	block := body[:end]
+
+	binDir, logPath := fakeGCBin(t, `case "$1 $2" in
+"hook current") printf '%s\n' ga-step ;;
+"bd show") printf '%s\n' '{"id":"ga-step","status":"in_progress","assignee":"sess-1","metadata":{"gc.step_ref":"mol-do-work.do-work"}}' ;;
+esac
+exit 0
+`)
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatalf("create gc log: %v", err)
+	}
+	scriptPath := filepath.Join(t.TempDir(), "close-step.sh")
+	if err := os.WriteFile(scriptPath, []byte(block), 0o644); err != nil {
+		t.Fatalf("write close-step block: %v", err)
+	}
+	out, runErr := runPackScript(t, scriptPath, binDir,
+		map[string]struct{}{"GC_BEAD_ID": {}, "GC_SESSION_ID": {}, "WORK_BEAD_ID": {}},
+		[]string{"GC_SESSION_ID=sess-1", "WORK_BEAD_ID=ga-work"})
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	closed := false
+	for _, line := range strings.Split(string(logged), "\n") {
+		if strings.HasPrefix(line, "gc bd update ga-step ") && strings.Contains(line, "--status=closed") {
+			closed = true
+		}
+	}
+	if runErr == nil && !closed {
+		t.Fatalf("close-step block exited 0 without closing the claimed step ga-step (GC_BEAD_ID unset)\nblock:\n%s\noutput:\n%s\ngc calls:\n%s", block, out, logged)
+	}
 }
