@@ -2032,6 +2032,29 @@ func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
 	}
 }
 
+// TestActiveBeadLookupForSuspendedRigReadsNoStore: a rig-scoped lookup for a
+// suspended rig answers nothing instead of falling back to every rig.
+func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{{"live", true}, {"cached", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+
+			got := lookupActiveBead(New(l.state), tc.live, "alpha", "session-id")
+
+			if got != "" {
+				t.Errorf("active bead = %q, want none", got)
+			}
+			if l.alpha.listCalls != 0 || l.beta.listCalls != 0 {
+				t.Errorf("List calls alpha=%d beta=%d, want no store read", l.alpha.listCalls, l.beta.listCalls)
+			}
+		})
+	}
+}
+
 // TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias: in legacy
 // shared-file mode every rig aliases one store. A suspended alpha must not
 // hide the store that beta still reaches.
