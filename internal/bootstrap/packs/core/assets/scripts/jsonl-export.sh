@@ -970,10 +970,27 @@ move_legacy_snapshot_files() {
     fi
 }
 
-# Ensure archive repo exists.
+# Ensure archive repo exists. A first run initializes the repo beside its
+# final path and renames it into place, so the archive path never exists
+# without its .git: gc doctor's jsonl-archive check reports such a path as a
+# malformed archive, and a doctor run during a first export would fail on it.
+# A path that already exists without .git is initialized in place, as before.
 if [ ! -d "$ARCHIVE_REPO/.git" ]; then
-    mkdir -p "$ARCHIVE_REPO"
-    git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+    if [ -e "$ARCHIVE_REPO" ]; then
+        git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+    else
+        archive_parent=$(dirname "$ARCHIVE_REPO")
+        mkdir -p "$archive_parent"
+        archive_init=$(mktemp -d "$archive_parent/.jsonl-archive-init.XXXXXX") || archive_init=""
+        if [ -n "$archive_init" ] && git -C "$archive_init" init -q 2>/dev/null \
+            && [ ! -e "$ARCHIVE_REPO" ] && mv "$archive_init" "$ARCHIVE_REPO"; then
+            :
+        else
+            [ -n "$archive_init" ] && rm -rf "$archive_init"
+            mkdir -p "$ARCHIVE_REPO"
+            git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+        fi
+    fi
 fi
 
 TOTAL_EXPORTED=0

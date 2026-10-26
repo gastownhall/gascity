@@ -7831,6 +7831,61 @@ func TestJsonlExportCountsRecordsViaJq(t *testing.T) {
 	}
 }
 
+// TestJsonlExportFirstRunNeverLeavesTheArchivePathWithoutGit is ga-ooxzxz:
+// the first export ran mkdir on the archive path and then git init, so for
+// the length of the init the path existed with no .git. A gc doctor run in
+// that window, as on a freshly started city whose first jsonl-export order
+// was firing, failed its blocking jsonl-archive check ("archive repo ... is
+// malformed (no .git)"). A git shim records the archive path's state each
+// time git init runs: it must be absent or already a repo, never a bare
+// directory, and the finished archive is a repo.
+func TestJsonlExportFirstRunNeverLeavesTheArchivePathWithoutGit(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "packs", "core", "jsonl-archive")
+	initLog := filepath.Join(t.TempDir(), "git-init.log")
+
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	shim := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = init ]; then\n" +
+		"    if [ -d \"$ARCHIVE_PROBE\" ] && [ ! -d \"$ARCHIVE_PROBE/.git\" ]; then echo bare >>\"$INIT_LOG\"; else echo ok >>\"$INIT_LOG\"; fi\n" +
+		"  fi\n" +
+		"done\n" +
+		"exec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["ARCHIVE_PROBE"] = archiveRepo
+	env["INIT_LOG"] = initLog
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	data, err := os.ReadFile(initLog)
+	if err != nil {
+		t.Fatalf("git init never ran: %v", err)
+	}
+	if strings.Contains(string(data), "bare") {
+		t.Fatalf("git init ran while the archive path existed without .git (%q): a doctor run then reports the archive malformed", strings.TrimSpace(string(data)))
+	}
+	if _, err := os.Stat(filepath.Join(archiveRepo, ".git")); err != nil {
+		t.Fatalf("archive repo not initialized: %v", err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(archiveRepo), ".jsonl-archive-init.*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("init staging dirs left behind: %v (%v)", leftovers, err)
+	}
+}
+
 func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 	// Bug 2 (#1547): percent-delta with no absolute floor escalates on tiny
 	// counts. prev=2, current=1 → 50% delta would cross the 20% threshold.
