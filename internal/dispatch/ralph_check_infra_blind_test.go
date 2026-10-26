@@ -193,6 +193,50 @@ func TestProcessRalphControlBlindReadDoesNotBurnIteration(t *testing.T) {
 	}
 }
 
+// TestProcessRalphControlVerdictStillBurnsIteration is the compiled-lane
+// control: a gate whose nonzero exit is an ordinary verdict — including stderr
+// that merely mentions an infrastructure string — still spends the iteration
+// and never touches the infra budget.
+func TestProcessRalphControlVerdictStillBurnsIteration(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		script string
+	}{
+		{name: "plain exit 1", script: "#!/bin/bash\necho 'tests failed' >&2\nexit 1\n"},
+	}
+	cases = append(cases, verdictGateCases...)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "verdict-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+
+			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if result.Action != "fail" {
+				t.Fatalf("result = %+v, want fail (a verdict consumes the only iteration)", result)
+			}
+			got := mustGet(t, store, control.ID)
+			if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			if fa := got.Metadata[beadmeta.FailedAttemptMetadataKey]; fa != "1" {
+				t.Errorf("gc.failed_attempt = %q, want 1", fa)
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+				t.Errorf("gc.check_infra_retry = %q, want empty — a verdict must not spend the infra budget", r)
+			}
+		})
+	}
+}
+
 // TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt is the control: an
 // ordinary nonzero gate is still a real verdict and must keep burning attempts.
 // Without it, the blind-read classification could silently swallow every gate
