@@ -164,6 +164,86 @@ version = "^1.0"
 	}
 }
 
+// setupImportStateFixFailure writes a city whose packv2-import-state check
+// fails (no lockfile) and stubs its Fix so syncImports returns syncErr and
+// installLockedImports returns installErr.
+func setupImportStateFixFailure(t *testing.T, syncErr, installErr error) string {
+	t.Helper()
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+		checkInstalledImports = prevCheck
+	})
+	lock := &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.1.0", Commit: "new"},
+		},
+	}
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		if syncErr != nil {
+			return nil, syncErr
+		}
+		return lock, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		if installErr != nil {
+			return nil, installErr
+		}
+		return lock, nil
+	}
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{Issues: []packman.CheckIssue{{
+			Severity: packman.CheckSeverityError,
+			Code:     "missing-lockfile",
+		}}}, nil
+	}
+	return cityDir
+}
+
+func TestImportStateDoctorCheckFixAuthErrorReportsCredentialHint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		matched bool
+		sync    bool
+	}{
+		{name: "sync unmatched", matched: false, sync: true},
+		{name: "sync matched", matched: true, sync: true},
+		{name: "install unmatched", matched: false},
+		{name: "install matched", matched: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authErr := authErrorSeam(tc.matched)
+			syncErr, installErr := error(nil), authErr
+			if tc.sync {
+				syncErr, installErr = authErr, nil
+			}
+			cityDir := setupImportStateFixFailure(t, syncErr, installErr)
+			res := runDoctorFix(t, newImportStateDoctorCheck(cityDir), cityDir)
+			if res.FixError != authErr.Error() {
+				t.Errorf("FixError = %q, want the unchanged error %q", res.FixError, authErr.Error())
+			}
+			if want := wantDoctorCredentialFixHint(tc.matched); res.FixHint != want {
+				t.Errorf("FixHint = %q, want the gc import install credential hint %q", res.FixHint, want)
+			}
+		})
+	}
+}
+
 func TestImportStateDoctorCheckReportsDurableRegistrySelectors(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

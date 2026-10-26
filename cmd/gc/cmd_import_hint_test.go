@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -159,4 +160,28 @@ func TestDoImportInstallPrintsCredentialHintBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// wantDoctorCredentialFixHint is the FixHint gc doctor --fix reports for an
+// auth-classified fix failure: the text gc import install prints after "hint: ".
+func wantDoctorCredentialFixHint(matched bool) string {
+	want := wantUnmatchedCredentialHint
+	if matched {
+		want = wantMatchedCredentialHint
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(want, "hint: "), "\n")
+}
+
+// runDoctorFix runs check through the doctor runner with --fix and returns
+// its reported result.
+func runDoctorFix(t *testing.T, check doctor.Check, cityPath string) *doctor.CheckResult {
+	t.Helper()
+	d := &doctor.Doctor{}
+	d.Register(check)
+	var out strings.Builder
+	r := d.Run(&doctor.CheckContext{CityPath: cityPath}, &out, true)
+	if len(r.Results) != 1 {
+		t.Fatalf("Results = %d, want 1; output:\n%s", len(r.Results), out.String())
+	}
+	return r.Results[0]
 }

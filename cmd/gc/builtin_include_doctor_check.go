@@ -598,13 +598,13 @@ func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	}
 	lock, err := syncImports(c.cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
 		return err
 	}
 	if _, err := installLockedImports(c.cityPath); err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	return nil
 }
