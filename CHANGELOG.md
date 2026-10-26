@@ -449,10 +449,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
   execute, such as one calling an undefined function `{{base_branch}}`, was
   reported on stderr while `gc prime --strict` printed the raw template text
-  and exited 0, so lint wrappers saw success. It now exits non-zero with
-  `gc prime: prompt_template "<path>" for agent "<agent>": <error>`, writes
-  nothing to stdout, and in hook mode leaves the session's `session_key`
-  unset. Without `--strict` the raw-text fallback is unchanged. (#8149)
+  and exited 0, so lint wrappers saw success. It now exits non-zero, prints
+  the render warnings and
+  `gc prime: prompt_template "<path>" for agent "<agent>": <error>` on
+  stderr, writes nothing to stdout, and in hook mode leaves the session's
+  `session_key` unset. Strict checks only the templates gc prime renders,
+  and stops at the agent whose prompt it prints, so a fallback agent from
+  `GC_TEMPLATE` that is never reached cannot fail it. Fragments appended to
+  the prompt (`global_fragments`, `inject_fragments`, `append_fragments`)
+  still only warn when missing or broken. Without `--strict` the raw-text
+  fallback is unchanged. (#8149)
 
 - **An MCP server one agent's provider cannot receive no longer stops the
   city.** Servers from the city's `mcp/` directory, a rig pack, or an import
