@@ -14,11 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages, nudge, mail notify), `control` (interrupt, respond) and
   `lifecycle` (wake, suspend, reset, kill, close), now default to `auto`
   instead of `off`. Left unset, `auto` records only when the city's sessions
-  store writes to SQLite: a SQLite city, or a city whose sessions class is
-  bound to SQLite while its work stays on Dolt. There each request is
-  recorded as an op beside its unchanged legacy execution, so a same-key
-  retry is deduplicated across restarts and each request gets one typed
-  outcome. Delivered text is unchanged.
+  store writes to SQLite: a city whose sessions class is bound to a
+  `sqlite-beads` storage binding, such as a split city whose work stays on
+  Dolt. There each request is recorded as an op beside its unchanged legacy
+  execution, so a same-key retry is deduplicated across restarts and each
+  request gets one typed outcome. Delivered text is unchanged.
   - **Natively served Dolt cities stop recording by default.** This
     reverses the earlier unreleased default (#8325), under which a city
     whose sessions store a Dolt server serves natively recorded every
@@ -28,11 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     an allowlist of SQLite, so any other store (file, exec, memory) records
     nothing too. Under the default such a store is treated as `off`: no CLI
     warning, no `ops.recording_degraded` event, a `gc doctor` OK ("auto
-    (default) records nothing on a Dolt-served sessions store"), one line in
-    the controller log, and no `bd update --help` capability probe. A run
-    with `--key` still warns that it ran unrecorded. The controller's op
-    sweeper still closes expired ops an earlier recording left behind, then
-    goes idle.
+    (default) records nothing on a Dolt-served sessions store", and whether
+    an explicit gate could record there: a released bd cannot), one line in
+    the controller log, and no `bd update --help` capability probe on the
+    commands it would record. A run with `--key` still warns that it ran
+    unrecorded. The controller's op sweeper still closes expired ops an
+    earlier recording left behind, then goes idle.
   - **Opting in on Dolt.** Set `content`, `control` and `lifecycle` to
     `"auto"` (or `"require"`) in `[ops]`, or through `GC_OPS_CONTENT`,
     `GC_OPS_CONTROL` and `GC_OPS_LIFECYCLE`. An explicit gate records over

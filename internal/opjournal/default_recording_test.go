@@ -43,8 +43,11 @@ func TestCheckRecordsByDefaultAllowsOnlySQLite(t *testing.T) {
 			if notDefault.Backend.DoltServed != tc.doltServed || notDefault.Backend.SQLite {
 				t.Fatalf("backend = %+v, want DoltServed=%v and not SQLite", notDefault.Backend, tc.doltServed)
 			}
-			if msg := err.Error(); !strings.Contains(msg, tc.phrase) || !strings.Contains(msg, "[ops]") {
-				t.Fatalf("message %q, want it to name %q and the [ops] opt-in", msg, tc.phrase)
+			// The opt-in is conditional: no I/O ran, so the message cannot
+			// know whether this store can record ops (a released bd cannot).
+			if msg := err.Error(); !strings.Contains(msg, tc.phrase) || !strings.Contains(msg, "[ops]") ||
+				!strings.Contains(msg, "if the store can record ops") {
+				t.Fatalf("message %q, want it to name %q and the [ops] opt-in, conditional on the store recording ops", msg, tc.phrase)
 			}
 		})
 	}

@@ -17,13 +17,15 @@ type NotRecordedByDefaultError struct {
 	Backend beads.ConditionalWritesBackend
 }
 
-// Error names the backend and how to opt in.
+// Error names the backend and the opt-in. The opt-in is conditional: no
+// capability probe ran, so whether this store can record ops at all (a
+// released bd cannot) is not known here.
 func (e *NotRecordedByDefaultError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
 	return fmt.Sprintf("opening op store: the builtin auto default records ops only on a SQLite sessions store, not on %s; "+
-		"set the [ops] gates (or GC_OPS_*) to auto or require to record here", backendPhrase(e.Backend))
+		"an [ops] gate (or GC_OPS_*) set to auto or require records here if the store can record ops", backendPhrase(e.Backend))
 }
 
 // backendPhrase is the store a NotRecordedByDefaultError names.

@@ -317,37 +317,58 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 // TestOpsRecordingDoctorCheckDefaultAuto covers the builtin default (every
 // ops gate auto, none set), which records only over a SQLite sessions store:
 // any other store is OK while it holds no op row, Dolt-served or not, capable
-// or not; one holding op rows is still checked for expired ones when it can
-// open, and a Warning when it cannot. An explicit auto stays loud over a store
-// that cannot record, and a SQLite store reads as recording.
+// or not, and the check says whether an explicit gate would record there
+// (only a store that can record ops is offered the opt-in); one holding op
+// rows is still checked for expired ones when it can open, and a Warning when
+// it cannot. An explicit auto stays loud over a store that cannot record, and
+// a SQLite store reads as recording.
 func TestOpsRecordingDoctorCheckDefaultAuto(t *testing.T) {
 	defaulted := func(store beads.Store, now time.Time) *opsRecordingDoctorCheck {
 		c, _ := newTestOpsRecordingCheck(store, now)
 		c.flags = rollout.ForTest()
 		return c
 	}
+	bdWithHelp := func(help string) *beads.BdStore {
+		return beads.NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+			if len(args) == 2 && args[1] == "--help" {
+				return []byte(help), nil
+			}
+			return nil, fmt.Errorf("unexpected bd %v", args)
+		}, "gc")
+	}
 	// A bd whose conditional-write verbs all advertise --if-revision: a
 	// Dolt-served store that can record ops.
-	bd := beads.NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
-		if len(args) == 2 && args[1] == "--help" {
-			return []byte("Flags:\n      --if-revision int   fence\n"), nil
-		}
-		return nil, fmt.Errorf("unexpected bd %v", args)
-	}, "gc")
+	bd := bdWithHelp("Flags:\n      --if-revision int   fence\n")
+	const optIn = "set the [ops] gates to auto or require to record ops here"
 	for _, tc := range []struct {
 		name  string
 		store beads.Store
 		where string
+		// cannot is the reason an explicit gate would not record either,
+		// empty for a store that can record ops.
+		cannot string
 	}{
-		{"a Dolt-served store", cliOpBdLeafProxy{Store: newOpSweepStore(), leaf: bd}, "a Dolt-served sessions store"},
-		{"a capable memory store", newOpSweepStore(), "not SQLite-backed"},
-		{"no conditional writes", incapableStore{beads.NewMemStore()}, "not SQLite-backed"},
-		{"no namespace", &beads.MemStore{HonorExplicitIDs: true}, "not SQLite-backed"},
+		{"a Dolt-served store", cliOpBdLeafProxy{Store: newOpSweepStore(), leaf: bd}, "a Dolt-served sessions store", ""},
+		// The default gc init topology: a proxied store whose writes land in
+		// a released bd, which lacks --if-revision.
+		{"a Dolt-served store behind a released bd", cliOpBdLeafProxy{Store: newOpSweepStore(), leaf: bdWithHelp("Flags:\n      --json   JSON output\n")}, "a Dolt-served sessions store", legacyop.DegradeConditionalWritesUnsupported},
+		{"a capable memory store", newOpSweepStore(), "not SQLite-backed", ""},
+		{"no conditional writes", incapableStore{beads.NewMemStore()}, "not SQLite-backed", legacyop.DegradeConditionalWritesUnsupported},
+		{"no namespace", &beads.MemStore{HonorExplicitIDs: true}, "not SQLite-backed", legacyop.DegradeNoNamespace},
 	} {
 		t.Run(tc.name+" is OK", func(t *testing.T) {
 			r := defaulted(tc.store, opSweepT0).Run(&doctor.CheckContext{})
 			if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "auto (default) records nothing on") || !strings.Contains(r.Message, tc.where) {
 				t.Fatalf("result = %v %q, want OK saying the default records nothing on %s", r.Status, r.Message, tc.where)
+			}
+			if tc.cannot == "" {
+				if !strings.Contains(r.Message, optIn) {
+					t.Fatalf("message %q, want the opt-in for a store that can record ops", r.Message)
+				}
+				return
+			}
+			if strings.Contains(r.Message, optIn) || !strings.Contains(r.Message, "cannot record ops ("+tc.cannot+")") {
+				t.Fatalf("message %q, want no opt-in and the store's own reason it cannot record ops (%s)", r.Message, tc.cannot)
 			}
 		})
 	}

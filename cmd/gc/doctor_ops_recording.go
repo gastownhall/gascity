@@ -246,6 +246,8 @@ func defaultCannotRecord(r *doctor.CheckResult, sessions beads.SessionStore, rea
 // not record on (err is the *opjournal.NotRecordedByDefaultError): OK, as
 // with every gate off, so the store is only checked for the expired legacy
 // ops an earlier explicit gate may have left, which the sweeper still closes.
+// A store holding none is told whether an explicit gate would record there
+// (explicitGateHint).
 func (c *opsRecordingDoctorCheck) defaultNotRecorded(r *doctor.CheckResult, sessions beads.SessionStore, err error) *doctor.CheckResult {
 	where := "a sessions store that is not SQLite-backed"
 	var notDefault *opjournal.NotRecordedByDefaultError
@@ -262,7 +264,7 @@ func (c *opsRecordingDoctorCheck) defaultNotRecorded(r *doctor.CheckResult, sess
 		return offCannotRead(r, herr)
 	}
 	if !has {
-		r.Message = state + "; set the [ops] gates to auto or require to record ops here"
+		r.Message = state + "; " + c.explicitGateHint(sessions)
 		return r
 	}
 	st, oerr := opjournal.NewStore(sessions, c.clk)
@@ -274,6 +276,23 @@ func (c *opsRecordingDoctorCheck) defaultNotRecorded(r *doctor.CheckResult, sess
 		return offCannotRead(r, oerr)
 	}
 	return c.scanExpiredAs(r, st, "", state, state)
+}
+
+// explicitGateHint says whether an explicit [ops] gate would record over
+// sessions, a store the builtin default records nothing on: it opens the op
+// store as such a gate would, capability probe included, so a store that
+// cannot record ops at all (a released bd, a store with no id prefix) is not
+// offered an opt-in that would only run its requests unrecorded, or refuse
+// them under require.
+func (c *opsRecordingDoctorCheck) explicitGateHint(sessions beads.SessionStore) string {
+	_, err := opjournal.NewStore(sessions, c.clk)
+	if err == nil {
+		return "set the [ops] gates to auto or require to record ops here"
+	}
+	if reason := legacyop.DegradeReason(err); legacyop.CannotRecord(reason) {
+		return fmt.Sprintf("the store cannot record ops (%s), so an explicit [ops] gate would not record here either", reason)
+	}
+	return "an [ops] gate set to auto or require records here if the store can record ops"
 }
 
 // offCannotRead reports, with every gate off, a sessions store that could
