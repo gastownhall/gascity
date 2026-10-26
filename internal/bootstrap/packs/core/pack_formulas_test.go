@@ -546,6 +546,33 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 	array.showOut = "[" + molDoWorkDoWorkStepJSON + "]"
 	cases = append(cases, array)
 
+	hookFails := pass("fail_loudly_when_hook_current_fails")
+	hookFails.hookOut = ""
+	hookFails.hookRC = "1"
+	hookFails.hookErr = "gc hook current failed (simulated)"
+	hookFails.wantUpdate = ""
+	hookFails.wantFail = true
+	hookFails.wantOut = "gc hook current failed (simulated)"
+	hookFails.forbidLog = "bd show"
+	cases = append(cases, hookFails)
+
+	hookEmpty := pass("fail_loudly_when_hook_current_names_nothing")
+	hookEmpty.hookOut = ""
+	hookEmpty.wantUpdate = ""
+	hookEmpty.wantFail = true
+	hookEmpty.wantOut = "named no claimed step"
+	hookEmpty.forbidLog = "bd show"
+	cases = append(cases, hookEmpty)
+
+	hookEmptyEnv := pass("fail_loudly_when_hook_current_names_nothing_even_with_env_bead_id")
+	hookEmptyEnv.hookOut = ""
+	hookEmptyEnv.env = []string{"GC_BEAD_ID=ga-step"}
+	hookEmptyEnv.wantUpdate = ""
+	hookEmptyEnv.wantFail = true
+	hookEmptyEnv.wantOut = "named no claimed step"
+	hookEmptyEnv.forbidLog = "ga-step"
+	cases = append(cases, hookEmptyEnv)
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir, logPath := fakeGCBin(t, molDoWorkGCFakeBody(tc))
