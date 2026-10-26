@@ -976,6 +976,13 @@ store, copy them into the binding with
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
+				// The stamp targets the sub-DAG root this cook created, through
+				// the store molecule.Attach materialized it in. WorkflowRootID
+				// is the parent workflow's root, and for a self-rooted target it
+				// is the attach bead itself.
+				if err := stampFormulaCookRootMetadata(attachStore, result.RootID, rootMeta); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -1017,7 +1024,7 @@ store, copy them into the binding with
 			// rootStore is the store the cooked root ended up in, so the --meta
 			// stamp below lands on the bead it just created rather than on a
 			// store that has never held it.
-			rootStore := store
+			var rootStore beads.Store
 			if isGraphFormula {
 				// This arm writes molecule.Cook's sequence out rather than
 				// calling molecule.CookChoosingStore, and it needs all three
@@ -1083,11 +1090,8 @@ store, copy them into the binding with
 				}
 			}
 
-			if len(rootMeta) > 0 {
-				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
-					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
+			if err := stampFormulaCookRootMetadata(rootStore, result.RootID, rootMeta); err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			if jsonOutput {
@@ -1120,6 +1124,18 @@ store, copy them into the binding with
 	cmd.Flags().StringVar(&attach, "attach", "", "attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
 	return cmd
+}
+
+// stampFormulaCookRootMetadata writes the --meta pairs onto the cooked root
+// through the store that holds it. An empty map writes nothing.
+func stampFormulaCookRootMetadata(store beads.Store, rootID string, meta map[string]string) error {
+	if len(meta) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(rootID, meta); err != nil {
+		return fmt.Errorf("setting root metadata on %s: %w", rootID, err)
+	}
+	return nil
 }
 
 // emitFormulaCookExecutionFacts projects the cooked run's execution facts from

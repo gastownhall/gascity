@@ -1673,3 +1673,41 @@ func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
 		}
 	}
 }
+
+// TestFormulaCookAttachStampsMetaOnTheSubDAGRoot pins the documented --meta
+// contract ("set root bead metadata after cook") on the v1 --attach arm: the
+// pairs land on the sub-DAG root this cook created, never on the attach bead,
+// which is also the workflow root of a self-rooted target (issue #7309).
+func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	seedCLIStorageRoutes(t, cityDir, nil)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	target, err := store.Create(beads.Bead{Title: "attach target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create attach bead: %v", err)
+	}
+
+	res := cookFormula(t, "legacy-work", "--attach", target.ID, "--meta", "work_dir=/w", "--meta", "base_sha=abc")
+
+	root, err := store.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("get attached root %s: %v", res.RootID, err)
+	}
+	for k, want := range map[string]string{"work_dir": "/w", "base_sha": "abc"} {
+		if got := root.Metadata[k]; got != want {
+			t.Errorf("attached root %s: metadata %s = %q, want %q", res.RootID, k, got, want)
+		}
+	}
+	attached, err := store.Get(target.ID)
+	if err != nil {
+		t.Fatalf("get attach bead %s: %v", target.ID, err)
+	}
+	for _, k := range []string{"work_dir", "base_sha"} {
+		if got, ok := attached.Metadata[k]; ok {
+			t.Errorf("attach bead %s (workflow_root_id %s) carries %s = %q; the stamp belongs on the sub-DAG root %s", target.ID, res.WorkflowRootID, k, got, res.RootID)
+		}
+	}
+}

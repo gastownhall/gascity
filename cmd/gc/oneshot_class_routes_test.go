@@ -904,3 +904,28 @@ func TestRecipeCoordClassRederivesTheVerdictFromTheClassifier(t *testing.T) {
 		})
 	}
 }
+
+// TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot is the
+// --attach twin of TestFormulaCookMetaStampLandsOnTheGraphResidentRoot. The v1
+// arm materializes the sub-DAG through the store that holds the attach bead,
+// so on a split city whose binding owns that bead the --meta stamp must go to
+// the binding: the work ledger has never held the root.
+func TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+	source, err := graph.Create(beads.Bead{Title: "a running workflow step", Type: "task"})
+	if err != nil {
+		t.Fatalf("create the class-resident attach bead: %v", err)
+	}
+
+	res := cookFormula(t, "legacy-work", "--attach", source.ID, "--meta", "gc.trace=abc123")
+
+	root, err := graph.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("attached root %s is not resident in the graph binding: %v", res.RootID, err)
+	}
+	if got := root.Metadata["gc.trace"]; got != "abc123" {
+		t.Errorf("attached root %s: gc.trace = %q, want %q — the --meta stamp went to a store that never held the root", res.RootID, got, "abc123")
+	}
+}
