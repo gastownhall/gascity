@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCopyDir_RecursiveCopy(t *testing.T) {
@@ -542,5 +543,33 @@ func TestCopyDirForProviders_ClaudeLegacyBloatHealsInOneTick(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("ubs --staged")) {
 		t.Errorf("surviving entry lost the ubs command:\n%s", data)
+	}
+}
+
+func TestCopyDirForProviders_UnchangedMergeDoesNotRewrite(t *testing.T) {
+	// A steady-state tick whose merge result equals the destination must leave
+	// the file alone, so a running Claude session never reads a truncated
+	// settings file mid-rewrite.
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"), ubsPackSettings)
+	settings := filepath.Join(dst, ".claude", "settings.json")
+
+	if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+		t.Fatalf("first stage: %v", err)
+	}
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(settings, past, past); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+		t.Fatalf("second stage: %v", err)
+	}
+	info, err := os.Stat(settings)
+	if err != nil {
+		t.Fatalf("stat settings: %v", err)
+	}
+	if !info.ModTime().Equal(past) {
+		t.Errorf("settings mtime = %v, want %v (unchanged merge must not rewrite the file)", info.ModTime(), past)
 	}
 }
