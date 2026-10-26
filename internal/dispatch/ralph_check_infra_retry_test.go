@@ -191,3 +191,54 @@ func decodeAttemptLog(t *testing.T, bead beads.Bead) []map[string]string {
 	}
 	return entries
 }
+
+// TestProcessRalphControlInfraRetryBudgetExhaustionBurns pins the bound on the
+// compiled kind=ralph lane: once the control's infrastructure budget is spent,
+// a check that still yields no verdict is graded as the gate reported it, so a
+// permanently hung or blind check closes the step instead of pending forever.
+func TestProcessRalphControlInfraRetryBudgetExhaustionBurns(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		script      string
+		wantOutcome string
+	}{
+		{name: "timeout", script: "#!/bin/sh\nsleep 30\n", wantOutcome: convergence.GateTimeout},
+		{name: "exit 75", script: "#!/bin/sh\nexit 75\n", wantOutcome: convergence.GateFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "infra-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+			if err := store.SetMetadataBatch(control.ID, map[string]string{
+				beadmeta.CheckTimeoutMetadataKey:    "100ms",
+				beadmeta.CheckInfraRetryMetadataKey: strconv.Itoa(maxCheckInfraRetries),
+			}); err != nil {
+				t.Fatalf("prime infra-retry budget: %v", err)
+			}
+
+			result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if !result.Processed || result.Action != "fail" {
+				t.Fatalf("result = %+v, want processed fail once the infra-retry budget is spent", result)
+			}
+			got := mustGet(t, store, control.ID)
+			if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			entries := decodeAttemptLog(t, got)
+			if len(entries) != 1 || entries[0]["attempt"] != "1" || entries[0]["outcome"] != tc.wantOutcome {
+				t.Errorf("gc.attempt_log = %q, want one attempt-1 %s entry", got.Metadata[beadmeta.AttemptLogMetadataKey], tc.wantOutcome)
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != strconv.Itoa(maxCheckInfraRetries) {
+				t.Errorf("gc.check_infra_retry = %q, want %d (an exhausted budget is not spent further)", r, maxCheckInfraRetries)
+			}
+		})
+	}
+}
