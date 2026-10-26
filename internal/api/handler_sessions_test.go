@@ -24,11 +24,13 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -1082,6 +1084,58 @@ func TestHandleSessionListActiveBeadUsesCachedLookup(t *testing.T) {
 	}
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
+	}
+}
+
+// TestHandleSessionListActiveBeadSkipsSuspendedRig: a rig suspended in
+// runtime state (what `gc rig suspend` records) runs no background cache
+// (rigStoreBackgroundRefresh), so each List its store would serve goes to bd
+// and restarts its retired proxy and Dolt — the 40-83 s /sessions of #8162.
+// The list's cached active-bead lookup must leave it untouched and still
+// report the session's work on the rigs that run. On this path the
+// active-bead lookup is the only rig-store reader.
+func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "/tmp/alpha"},
+		{Name: "beta", Path: "/tmp/beta"},
+	}
+	alpha := &listCountingStore{Store: beads.NewMemStore()}
+	beta := &listCountingStore{Store: beads.NewMemStore()}
+	fs.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, fs.cityPath, "alpha", &suspended); err != nil {
+		t.Fatalf("suspend alpha: %v", err)
+	}
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	alphaWork := addActiveWork(t, alpha, info.ID)
+	betaWork := addActiveWork(t, beta, info.ID)
+
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ID != info.ID {
+		t.Fatalf("response = %#v, want one session %s", resp, info.ID)
+	}
+	if got := resp.Items[0].ActiveBead; got != betaWork {
+		t.Fatalf("active_bead = %q, want beta's %q (alpha's would be %q)", got, betaWork, alphaWork)
+	}
+	if n := alpha.listCalls.Load(); n != 0 {
+		t.Errorf("suspended rig alpha List calls = %d, want 0", n)
 	}
 }
 

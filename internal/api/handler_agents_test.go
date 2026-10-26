@@ -11,13 +11,16 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type partialAgentSessionLister struct {
@@ -1946,5 +1949,52 @@ func TestLiveActiveBeadStoreErrors(t *testing.T) {
 				t.Fatalf("active bead = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// listCountingStore counts List calls so a test can prove a store was never
+// read.
+type listCountingStore struct {
+	beads.Store
+	listCalls atomic.Int32
+}
+
+func (c *listCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	c.listCalls.Add(1)
+	return c.Store.List(q)
+}
+
+// suspendRigAtRuntime records the runtime override `gc rig suspend` writes.
+func suspendRigAtRuntime(t *testing.T, state *fakeState, rig string) {
+	t.Helper()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, rig, &suspended); err != nil {
+		t.Fatalf("suspend rig %s: %v", rig, err)
+	}
+}
+
+// TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias: in legacy
+// shared-file mode every rig aliases one store, and sortedRigNames keeps only
+// the alphabetically first alias. The cold-rig filter must run before that
+// dedupe: suspending alpha must not hide the shared store that beta still
+// reaches (#8162).
+func TestActiveBeadLookupSharedStoreKeepsNonSuspendedAlias(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "/tmp/alpha"},
+		{Name: "beta", Path: "/tmp/beta"},
+	}
+	shared := &listCountingStore{Store: beads.NewMemStore()}
+	state.stores = map[string]beads.Store{"alpha": shared, "beta": shared}
+	suspendRigAtRuntime(t, state, "alpha")
+	work := addActiveWork(t, shared, "sess-1")
+
+	got := New(state).findActiveBeadForAssignees("", "sess-1")
+
+	if got != work {
+		t.Fatalf("active bead = %q, want the shared store's %q", got, work)
+	}
+	if n := shared.listCalls.Load(); n != 1 {
+		t.Errorf("shared store List calls = %d, want exactly 1 (through beta)", n)
 	}
 }

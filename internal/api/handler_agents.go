@@ -12,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -375,6 +377,37 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 	return instance.QualifiedName(), rig, true
 }
 
+// loadCacheColdRigs returns the rigs whose stores an active-work lookup must
+// not read: those suspended in runtime state, the override `gc rig suspend`
+// records. Such a rig runs no background cache (rigStoreBackgroundRefresh),
+// so any read goes to bd and restarts its retired proxy and Dolt — the same
+// rule statusWorkCounts follows. With no city path there is no state file to
+// read, and the answer stays empty rather than reading a relative
+// .gc/runtime/suspension-state.json under the process's working directory.
+// A state file that fails to load is logged and treated as the zero state.
+func (s *Server) loadCacheColdRigs() map[string]bool {
+	var st suspensionstate.State
+	if cityPath := s.state.CityPath(); cityPath != "" {
+		loaded, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+		if err != nil {
+			log.Printf("api: reading suspension state: %v", err)
+		} else {
+			st = loaded
+		}
+	}
+	cold := make(map[string]bool)
+	cfg := s.state.Config()
+	if cfg == nil {
+		return cold
+	}
+	for _, r := range cfg.Rigs {
+		if suspensionstate.EffectiveRigSuspended(st, r.Name, false) {
+			cold[r.Name] = true
+		}
+	}
+	return cold
+}
+
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
@@ -397,6 +430,21 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // through findLiveActiveBeadInStores.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
+	if !live {
+		// A rig suspended in runtime state (what `gc rig suspend` records)
+		// gets no background cache (rigStoreBackgroundRefresh), so a List on
+		// its store goes to bd and restarts its retired proxy and Dolt — the
+		// rule statusWorkCounts already follows. Cached lookups leave those
+		// stores unread (#8162).
+		cold := s.loadCacheColdRigs()
+		filtered := make(map[string]beads.Store, len(stores))
+		for name, store := range stores {
+			if !cold[name] {
+				filtered[name] = store
+			}
+		}
+		stores = filtered
+	}
 	var rigNames []string
 	if rig != "" {
 		if _, ok := stores[rig]; ok {
