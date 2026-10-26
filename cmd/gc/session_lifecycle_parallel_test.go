@@ -8893,7 +8893,8 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 // provider does: only an absolute CLAUDE_CONFIG_DIR pins it; a relative or ~
 // one, or none, falls back to the city roots. An absolute value in the
 // launch's own env (tp.Env) never pins: it is merged in beside the city
-// roots, deduplicated, because a wrapper may set its own.
+// roots, deduplicated, because a wrapper may set its own; the probe reads
+// the launch's env, never gc's own.
 func TestLaunchTranscriptRoots(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -8914,6 +8915,9 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		{"a relative operator dir", "", "cfg/claude-b", cityRoots},
 		{"an env dir beside the city roots", "/cfg/claude-a", "", append(sessionTranscriptSearchPaths(observed), "/cfg/claude-a/projects")},
 		{"the default root's own dir in the env", filepath.Join(home, ".claude"), "", cityRoots},
+		{"a blank env dir", "  ", "", cityRoots},
+		{"a ~ env dir", "~/.claude-a", "", cityRoots},
+		{"a relative env dir", "cfg/claude-a", "", cityRoots},
 		{"the operator dir over an env dir", "/cfg/claude-a", "/cfg/claude-b", []string{"/cfg/claude-b/projects"}},
 		{"a ~ operator dir over the same ambient value", "~/.claude-b", "~/.claude-b", cityRoots},
 	} {
@@ -8927,6 +8931,11 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		if got := launchTranscriptRoots(observed, tp); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
 		}
+	}
+	// gc's own environment is ambient: only the launch's env (tp.Env) is read.
+	t.Setenv("CLAUDE_CONFIG_DIR", "/ambient/a")
+	if got := launchTranscriptRoots(observed, TemplateParams{}); !reflect.DeepEqual(got, cityRoots) {
+		t.Errorf("an ambient-only config dir: roots %v, want %v", got, cityRoots)
 	}
 	// A nil city keeps the defaults, with the launch's dir merged in.
 	if got, want := launchTranscriptRoots(nil, TemplateParams{Env: map[string]string{"CLAUDE_CONFIG_DIR": "/cfg/claude-a"}}),
