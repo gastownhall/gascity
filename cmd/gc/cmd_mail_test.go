@@ -5614,3 +5614,63 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 		t.Errorf("Description = %q, want %q (--all -m flag body should win over positional)", msg.Description, "flag body")
 	}
 }
+
+func TestCmdMailSendRejectsBlankPositionalRecipient(t *testing.T) {
+	cityPath := mailSendTestCity(t, "mayor")
+
+	for name, recipient := range map[string]string{
+		"empty":      "",
+		"whitespace": " \t",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cmdMailSend([]string{recipient}, false, false, "controller", "", "subject", "body", &stdout, &stderr)
+			if code == 0 {
+				t.Errorf("cmdMailSend(%q) = 0, want failure", recipient)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "missing recipient") {
+				t.Errorf("stderr = %q, want missing recipient error", stderr.String())
+			}
+		})
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after rejected sends: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("message beads = %d, want 0: %#v", len(all), all)
+	}
+}
+
+func TestMailSendCommandRejectsBlankToFlag(t *testing.T) {
+	for name, recipient := range map[string]string{
+		"empty":      "",
+		"whitespace": " \t",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := newMailSendCmd(&stdout, &stderr)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs([]string{"--to", recipient, "-s", "subject", "-m", "body"})
+
+			if err := cmd.Execute(); !errors.Is(err, errExit) {
+				t.Fatalf("Execute() error = %v, want errExit", err)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "missing recipient") {
+				t.Errorf("stderr = %q, want missing recipient error", stderr.String())
+			}
+		})
+	}
+}

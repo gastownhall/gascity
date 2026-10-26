@@ -1712,7 +1712,11 @@ so on stderr, because a duplicate notification beats a dropped one.`,
   gc mail send --all "Status update: tests passing"
   gc mail send worker -s "disk warning" --dedup "disk-warn:hq"`,
 		Args: cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("to") && strings.TrimSpace(to) == "" {
+				fmt.Fprintln(stderr, "gc mail send: missing recipient") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, dedupKey, jsonOut, stdout, stderr)
 			if code != 0 {
 				return errExit
@@ -1965,6 +1969,11 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 // [mail.DedupSender] capability so a repeating notifier keeps at most one live
 // copy; an empty dedupKey sends unconditionally.
 func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
+	if !all && to == "" && len(args) > 0 && strings.TrimSpace(args[0]) == "" {
+		fmt.Fprintln(stderr, "gc mail send: missing recipient") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
