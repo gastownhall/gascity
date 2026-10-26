@@ -389,7 +389,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// prompt template to render.
 	defaultBranch := ""
 	if cfgAgent.PromptTemplate != "" {
-		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+		defaultBranch = p.defaultBranch(rigName, workDir)
 	}
 	topo := config.QueryTopology{}
 	if p.city != nil {

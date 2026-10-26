@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -368,7 +369,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newOpsEnv(t, "")
+			e := newOpsEnv(t, "off")
 			var info session.Info
 			if tc.setup != nil {
 				info = tc.setup(t, e)
@@ -1191,7 +1192,7 @@ func TestSessionContentOpsReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.
 func TestSessionContentOpsOffReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.T) {
 	for _, endpoint := range []string{"/submit", "/messages"} {
 		t.Run(strings.TrimPrefix(endpoint, "/"), func(t *testing.T) {
-			e := newOpsEnv(t, "")
+			e := newOpsEnv(t, "off")
 			cityLog := events.NewFake()
 			live := &closableEvents{Fake: cityLog}
 			e.fs.eventProv = live
@@ -1674,6 +1675,71 @@ func TestSessionContentOpsDegradeRaisesALatchedEvent(t *testing.T) {
 	}
 }
 
+// opsIncapableStore hides the conditional-write family of the store it
+// wraps, as a bd without --if-revision does.
+type opsIncapableStore struct{ beads.Store }
+
+// opsLogHandler keeps the level of every record logged through it.
+type opsLogHandler struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (h *opsLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *opsLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	return nil
+}
+
+func (h *opsLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *opsLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *opsLogHandler) logged() []slog.Level {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Level(nil), h.levels...)
+}
+
+// A store that cannot record ops raises ops.recording_degraded and logs a
+// warning under an explicit auto, and under the builtin default, which treats
+// that store as off, raises nothing and logs at debug only. Both run the
+// request.
+func TestSessionContentOpsDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	for _, c := range []struct {
+		mode   string
+		events int
+		level  slog.Level
+	}{{"", 0, slog.LevelDebug}, {"auto", 1, slog.LevelWarn}} {
+		t.Run("mode="+c.mode, func(t *testing.T) {
+			e := newOpsEnv(t, c.mode)
+			e.fs.cityBeadStore = opsIncapableStore{e.store}
+			e.restart(t)
+			logs := &opsLogHandler{}
+			e.server(t).ops.content.Logger = slog.New(logs)
+			info := e.session(t, "Incapable")
+			rec := e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if acc.Op != nil {
+				t.Fatalf("an incapable store recorded: %+v", acc.Op)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+			if len(evs) != c.events {
+				t.Fatalf("degrade events = %d, want %d", len(evs), c.events)
+			}
+			if got := logs.logged(); !slices.Equal(got, []slog.Level{c.level}) {
+				t.Fatalf("degrade log levels = %v, want [%v]", got, c.level)
+			}
+		})
+	}
+}
+
 // §6.4: a configured named session with no row runs unrecorded in auto and
 // is materialized, then recorded, in require.
 func TestSessionContentOpsUnmaterializedNamedTarget(t *testing.T) {
@@ -1689,6 +1755,12 @@ func TestSessionContentOpsUnmaterializedNamedTarget(t *testing.T) {
 				if acc.Op != nil || len(e.opRows(t)) != 0 {
 					t.Fatalf("auto recorded an unmaterialized target: %+v", acc)
 				}
+				// The 202 answers before the delivery runs: it materializes the
+				// named session, under the city's name locks, after the
+				// response. Wait for its terminal event, as require does, so
+				// the delivery is not still writing the city when the test's
+				// TempDir is removed (ga-qybvuf).
+				waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
 				return
 			}
 			if acc.Op == nil || acc.Op.Conversation == "" {

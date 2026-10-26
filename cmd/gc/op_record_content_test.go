@@ -307,7 +307,7 @@ func TestSessionNudgeOpRefusedBehindAPendingPrompt(t *testing.T) {
 // nudge before any effect.
 func TestSessionNudgeOpOffAndRequire(t *testing.T) {
 	t.Run("off", func(t *testing.T) {
-		c := newContentOpCity(t, "")
+		c := newContentOpCity(t, "off")
 		code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", true)
 		if code != 0 || stderr != "" {
 			t.Fatalf("nudge = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
@@ -371,7 +371,7 @@ func deliveredTextIsUnchangedByTheGate(t *testing.T, provider string) {
 		}
 		return r
 	}
-	off := runAll("")
+	off := runAll("off")
 	if len(off.calls)+len(off.queued) != 3 {
 		t.Fatalf("off deliveries = %+v, queued = %v; want 3 between them", off.calls, off.queued)
 	}
@@ -799,7 +799,7 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 	t.Run("off sends no key", func(t *testing.T) {
 		var got string
 		srv := serve(t, &got)
-		h, c := submitOpCity(t, "", srv)
+		h, c := submitOpCity(t, "off", srv)
 		var stdout, stderr bytes.Buffer
 		if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
 			t.Fatalf("submit = %d, want the test server's refusal; stderr=%s", code, stderr.String())
@@ -1259,5 +1259,26 @@ func TestSessionSubmitThroughTheAPIUnrecordedKeyWarns(t *testing.T) {
 		if got := strings.Contains(stderr.String(), "warning: --key not recorded"); got != tc.warn {
 			t.Fatalf("submit key %q stderr = %q, want the unrecorded --key warning = %v", tc.key, stderr.String(), tc.warn)
 		}
+	}
+}
+
+// A broadcast notify under the builtin default over a store that cannot
+// record ops prints no op-journal warning, for any recipient.
+func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	c := newContentOpCity(t, "")
+	c.h.opStore = cliOpIncapableStore{c.h.opStore}
+	var warn bytes.Buffer
+	nudgeWarningWriter = &warn
+	mp := beadmail.New(beads.NewMemStore())
+	nf := func(_, messageID string) (string, error) {
+		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
+	}
+	recipients := map[string]bool{"human": true, "a": true, "b": true, "c": true}
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"hello"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("send --all = %d; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(warn.String()+stderr.String(), "op journal") {
+		t.Fatalf("warnings = %q, stderr = %q; want no op-journal warning under the builtin default", warn.String(), stderr.String())
 	}
 }

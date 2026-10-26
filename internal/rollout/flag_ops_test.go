@@ -33,7 +33,8 @@ func (g opsGate) city(raw string) *config.City {
 }
 
 // TestOpsGatesSpecs pins the registry shape DES-O0API §2.1 and D-GATES fix:
-// infra-rollout, default off, the env break-glass, and the shared expiry.
+// infra-rollout, default auto (OJ-8 flipped it from off once X12 passed;
+// require stays opt-in), the env break-glass, and the shared expiry.
 func TestOpsGatesSpecs(t *testing.T) {
 	t.Parallel()
 	for _, g := range opsGates() {
@@ -44,8 +45,8 @@ func TestOpsGatesSpecs(t *testing.T) {
 		if s.Category != InfraRollout {
 			t.Errorf("%s: Category = %q, want %q", g.key, s.Category, InfraRollout)
 		}
-		if s.Default.Mode == nil || *s.Default.Mode != Off {
-			t.Errorf("%s: Default = %v, want off (D-GATES: the gates ship off)", g.key, s.Default.Mode)
+		if s.Default.Mode == nil || *s.Default.Mode != Auto {
+			t.Errorf("%s: Default = %v, want auto (D-GATES: OJ-8 flips the gates to auto after X12)", g.key, s.Default.Mode)
 		}
 		if s.EnvOverride != g.env || s.EnvSemantics != EnvOverrides {
 			t.Errorf("%s: env = %q/%q, want %q/%q", g.key, s.EnvOverride, s.EnvSemantics, g.env, EnvOverrides)
@@ -85,8 +86,8 @@ func TestOpsGatesVersionAnchorPresent(t *testing.T) {
 func TestOpsGatesForTest(t *testing.T) {
 	t.Parallel()
 	for _, g := range opsGates() {
-		if got := g.get(ForTest()); got != Off {
-			t.Errorf("%s: ForTest default = %q, want off", g.key, got)
+		if got := g.get(ForTest()); got != Auto {
+			t.Errorf("%s: ForTest default = %q, want auto", g.key, got)
 		}
 		f := ForTest(g.with(Require))
 		if got := g.get(f); got != Require {
@@ -96,7 +97,7 @@ func TestOpsGatesForTest(t *testing.T) {
 			t.Errorf("%s: OriginOf/ValueOf = %q/%q, want config/require", g.key, f.OriginOf(g.key), f.ValueOf(g.key))
 		}
 		for _, other := range opsGates() {
-			if other.key != g.key && other.get(f) != Off {
+			if other.key != g.key && other.get(f) != Auto {
 				t.Errorf("With for %s leaked into %s = %q", g.key, other.key, other.get(f))
 			}
 		}
@@ -117,8 +118,8 @@ func TestResolveOpsGatesPrecedence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if g.get(f) != Off || f.OriginOf(g.key) != OriginBuiltin {
-				t.Errorf("unset: %q/%q, want off/builtin", g.get(f), f.OriginOf(g.key))
+			if g.get(f) != Auto || f.OriginOf(g.key) != OriginBuiltin {
+				t.Errorf("unset: %q/%q, want auto/builtin", g.get(f), f.OriginOf(g.key))
 			}
 
 			f, err = Resolve(g.city("auto"), env(nil))
@@ -127,6 +128,16 @@ func TestResolveOpsGatesPrecedence(t *testing.T) {
 			}
 			if g.get(f) != Auto || f.OriginOf(g.key) != OriginConfig || f.ValueOf(g.key) != "auto" {
 				t.Errorf("config: %q/%q, want auto/config", g.get(f), f.OriginOf(g.key))
+			}
+
+			// off is the opt-out from the auto default: an explicit config
+			// value, not the builtin.
+			f, err = Resolve(g.city("off"), env(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if g.get(f) != Off || f.OriginOf(g.key) != OriginConfig || f.ValueOf(g.key) != "off" {
+				t.Errorf("config off: %q/%q, want off/config", g.get(f), f.OriginOf(g.key))
 			}
 
 			f, err = Resolve(g.city(""), env(map[string]string{g.env: "require"}))

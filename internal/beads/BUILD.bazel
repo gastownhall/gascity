@@ -73,6 +73,7 @@ go_test(
         "bdstore_split_key_test.go",
         "bdstore_storage_conformance_test.go",
         "bdstore_test.go",
+        "bdstore_tier_pair_test.go",
         "bdstore_transfer_if_current_test.go",
         "bdstore_update_if_assignment_test.go",
         "bdtrace_smoke_test.go",
@@ -294,7 +295,7 @@ go_test(
     ] + select({
         "//:gotags_integration": [
             "@bd_bin_v1_3_2//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
@@ -303,7 +304,7 @@ go_test(
     # the pinned binaries first on PATH (internal/testenv).
     env = select({
         "//:gotags_integration": {
-            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
         },
         "//conditions:default": {},
     }),

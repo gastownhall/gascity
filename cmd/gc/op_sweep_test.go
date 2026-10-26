@@ -57,8 +57,21 @@ func opSweepWrites(rec *beadstest.OpRecordingStore) int {
 	return n
 }
 
+// opsGatesOff turns all three ops gates off, the opt-out from their auto
+// default (D-GATES), so a test starts from a city that records no ops and
+// turns on only the gates it names after it.
+func opsGatesOff(opts ...rollout.ForTestOption) []rollout.ForTestOption {
+	return append([]rollout.ForTestOption{
+		rollout.WithOpsContent(rollout.Off),
+		rollout.WithOpsControl(rollout.Off),
+		rollout.WithOpsLifecycle(rollout.Off),
+	}, opts...)
+}
+
+// newOpSweepCS is a controller over store with every ops gate off but those
+// opts turn on.
 func newOpSweepCS(store beads.Store, opts ...rollout.ForTestOption) *controllerState {
-	return &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(opts...), beadsQuiescent: new(atomic.Bool)}
+	return &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(opsGatesOff(opts...)...), beadsQuiescent: new(atomic.Bool)}
 }
 
 // opSweepClock is a fake clock safe to move while the loop goroutine reads it.
@@ -693,6 +706,117 @@ func TestOpSweepGatesOffIncapableStoreStops(t *testing.T) {
 	}
 	if l := h.logLines("reason=conditional_writes_unsupported"); len(l) != 1 {
 		t.Fatalf("degrade log lines = %q, want one", l)
+	}
+}
+
+// opSweepIncapableCases are sessions stores that cannot record ops, each
+// over a recording store that sees their reads.
+var opSweepIncapableCases = []struct {
+	name   string
+	store  func(*beadstest.OpRecordingStore) beads.Store
+	reason string
+}{
+	{"no conditional writes", func(rec *beadstest.OpRecordingStore) beads.Store {
+		return incapableStore{opSweepStore{rec}}
+	}, legacyop.DegradeConditionalWritesUnsupported},
+	{"no namespace", func(rec *beadstest.OpRecordingStore) beads.Store { return rec }, legacyop.DegradeNoNamespace},
+}
+
+// TestOpSweepDefaultAutoIncapableStoreIdles proves the builtin default
+// (every ops gate auto, none set) over a store that cannot record ops runs
+// as if every gate were off: no degrade event and one log line saying why.
+// The loop keeps its ticker, as the gates are on, but a tick over that same
+// store reads nothing. An explicit auto over the same store degrades and
+// keeps ticking.
+func TestOpSweepDefaultAutoIncapableStoreIdles(t *testing.T) {
+	for _, tc := range opSweepIncapableCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := beadstest.NewOpRecordingStore(&beads.MemStore{HonorExplicitIDs: true})
+			cs := &controllerState{cityBeadStore: tc.store(rec), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+			h := newOpSweepHarness(cs)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := runOpSweep(ctx, h)
+			h.tick(t)
+			h.tick(t) // the first tick's pass has finished
+			cancel()
+			waitOpSweep(t, done)
+			if n := h.tickers.Load(); n != 1 {
+				t.Fatalf("started %d ticker(s) under the builtin default over an incapable store, want 1", n)
+			}
+			if n := opSweepLists(rec); n != 1 {
+				t.Fatalf("passes read the store %d time(s), want only the boot pass's submitted-op probe", n)
+			}
+			if d := h.degraded(); len(d) != 0 {
+				t.Fatalf("degrade hook heard %+v, want nothing under the builtin default", d)
+			}
+			if l := h.logLines("auto by default"); len(l) != 1 || !strings.Contains(l[0], tc.reason) {
+				t.Fatalf("log lines = %q, want one naming %s", l, tc.reason)
+			}
+
+			explicitStore := tc.store(beadstest.NewOpRecordingStore(&beads.MemStore{HonorExplicitIDs: true}))
+			explicit := newOpSweepHarness(newOpSweepCS(explicitStore, rollout.WithOpsContent(rollout.Auto)))
+			explicit.s.safePass()
+			if d := explicit.degraded(); len(d) != 1 || d[0].Reason != tc.reason {
+				t.Fatalf("explicit auto: degrades = %+v, want one %s", d, tc.reason)
+			}
+			if !explicit.s.wantsTicker() {
+				t.Fatal("explicit auto: the sweeper stopped ticking")
+			}
+		})
+	}
+}
+
+// TestOpSweepDefaultAutoSweepsAStoreThatCanRecordOnceSwappedIn proves the
+// builtin default's incapable latch holds only for the store it was found
+// on: after an incapable boot pass, once a reload swaps in a sessions store
+// that can record ops, the next tick opens that store and sweeps it, as the
+// API and the CLI record over it from then on.
+func TestOpSweepDefaultAutoSweepsAStoreThatCanRecordOnceSwappedIn(t *testing.T) {
+	for _, tc := range opSweepIncapableCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := beadstest.NewOpRecordingStore(&beads.MemStore{HonorExplicitIDs: true})
+			cs := &controllerState{cityBeadStore: tc.store(rec), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+			h := newOpSweepHarness(cs)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := runOpSweep(ctx, h)
+			h.tick(t)
+			h.tick(t) // the first tick's pass, over the incapable store, has finished
+
+			capable := newOpSweepStore()
+			op := seedOp(t, capable, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyAPI, "after-reload")
+			h.clk.Set(op.FinishBy.Add(time.Second))
+			cs.mu.Lock()
+			cs.cityBeadStore = capable
+			cs.mu.Unlock()
+			h.tick(t)
+			h.tick(t) // a pass over the swapped-in store has finished
+			cancel()
+			waitOpSweep(t, done)
+			if got := getOp(t, capable, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+				t.Fatalf("the expired op on the swapped-in store = %+v, want closed failed{deadline_in_flight}", got)
+			}
+			if d := h.degraded(); len(d) != 0 {
+				t.Fatalf("degrade hook heard %+v, want nothing", d)
+			}
+		})
+	}
+}
+
+// TestOpSweepDefaultAutoCapableStoreTicks proves the builtin default over a
+// store that can record ops keeps the sweeper's ticker, as an explicit auto
+// does.
+func TestOpSweepDefaultAutoCapableStoreTicks(t *testing.T) {
+	cs := &controllerState{cityBeadStore: newOpSweepStore(), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("the pass panicked")
+	}
+	if !h.s.wantsTicker() {
+		t.Fatal("the builtin default over a capable store stopped ticking")
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrades = %+v, want none", d)
 	}
 }
 

@@ -286,6 +286,24 @@ func legacyRotate(t *testing.T, path, rotatingPath string, last uint64) {
 	}
 }
 
+// renameWithoutAnchor does what a rotation does before it writes its anchor:
+// it renames the log at path, which holds seqs first..last, to its rotating-*
+// name. With fresh it then creates the empty log the rotation reopens, as when
+// the anchor write fails; without it there is no log at path, as when the
+// reopen fails.
+func renameWithoutAnchor(t *testing.T, path string, first, last uint64, fresh bool) {
+	t.Helper()
+	rotating := filepath.Join(filepath.Dir(path), formatRotatingBasename(time.Now().UTC(), first, last))
+	if err := os.Rename(path, rotating); err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func lastSeqIn(t *testing.T, path string) uint64 {
 	t.Helper()
 	_, last, err := readSeqWindow(path)

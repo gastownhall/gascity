@@ -32,7 +32,7 @@ ACCEPTANCE_ENV = {
     "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
     "GC_ACCEPTANCE_TOPOLOGY_MATRIX": "1",
     "GC_REQUIRE_ACCEPTANCE_TOOLING": "1",
-    "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+    "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
 }
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
@@ -184,6 +184,7 @@ go_test(
         "mcp_capability_test.go",
         "migration_regression_test.go",
         "nudge_service_test.go",
+        "ops_default_quiet_test.go",
         "order_commands_test.go",
         "order_env_test.go",
         "pack_registry_live_test.go",
@@ -211,7 +212,7 @@ go_test(
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt, same versions the go-test CI installs.
         "@bd_bin_v1_3_2//:bd",
-        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+        "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
     ],
     env = ACCEPTANCE_ENV,
     # rules_go assigns tests round-robin in source order; the lane is as slow

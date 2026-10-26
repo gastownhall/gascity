@@ -30,9 +30,11 @@ func (c opsRecordingClosingStore) CloseStore() error {
 	return c.err
 }
 
+// newTestOpsRecordingCheck is the check over store with every ops gate off
+// but those opts turn on.
 func newTestOpsRecordingCheck(store beads.Store, now time.Time, opts ...rollout.ForTestOption) (*opsRecordingDoctorCheck, *atomic.Int32) {
 	var opens atomic.Int32
-	c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(opts...), nil)
+	c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(opsGatesOff(opts...)...), nil)
 	c.open = func() (beads.Store, error) {
 		opens.Add(1)
 		return store, nil
@@ -308,6 +310,57 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 		c, _ := newTestOpsRecordingCheck(nil, opSweepT0)
 		if c.Name() != "ops-recording" || c.CanFix() || c.WarmupEligible() {
 			t.Fatalf("name/canfix/warmup = %q/%v/%v", c.Name(), c.CanFix(), c.WarmupEligible())
+		}
+	})
+}
+
+// TestOpsRecordingDoctorCheckDefaultAuto covers the builtin default (every
+// ops gate auto, none set): a store that cannot record ops is treated as off,
+// so it is OK while it holds no op row, and a Warning once it holds one; a
+// capable store reads as recording.
+func TestOpsRecordingDoctorCheckDefaultAuto(t *testing.T) {
+	defaulted := func(store beads.Store) *opsRecordingDoctorCheck {
+		c, _ := newTestOpsRecordingCheck(store, opSweepT0)
+		c.flags = rollout.ForTest()
+		return c
+	}
+	for _, tc := range []struct {
+		name   string
+		store  beads.Store
+		reason string
+	}{
+		{"no conditional writes", incapableStore{beads.NewMemStore()}, legacyop.DegradeConditionalWritesUnsupported},
+		{"no namespace", &beads.MemStore{HonorExplicitIDs: true}, legacyop.DegradeNoNamespace},
+	} {
+		t.Run(tc.name+" is OK", func(t *testing.T) {
+			r := defaulted(tc.store).Run(&doctor.CheckContext{})
+			if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "auto by default") || !strings.Contains(r.Message, tc.reason) {
+				t.Fatalf("result = %v %q, want OK naming the default and %s", r.Status, r.Message, tc.reason)
+			}
+		})
+	}
+	t.Run("incapable store holding op rows warns", func(t *testing.T) {
+		store := newOpSweepStore()
+		seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "orphan")
+		r := defaulted(incapableStore{store}).Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "auto by default") || !strings.Contains(r.Message, "cannot be checked") {
+			t.Fatalf("result = %v %q, want a default Warning naming the unchecked op rows", r.Status, r.Message)
+		}
+		if strings.Contains(r.FixHint, "set the ops gates to off") {
+			t.Fatalf("remedy %q offers turning the gates off, which does not reach the op rows", r.FixHint)
+		}
+	})
+	t.Run("explicit auto stays loud", func(t *testing.T) {
+		c := defaulted(incapableStore{beads.NewMemStore()})
+		c.flags = rollout.ForTest(rollout.WithOpsControl(rollout.Auto))
+		if r := c.Run(&doctor.CheckContext{}); r.Status != doctor.StatusWarning {
+			t.Fatalf("status = %v, want Warning under an explicit auto: %s", r.Status, r.Message)
+		}
+	})
+	t.Run("capable store records", func(t *testing.T) {
+		r := defaulted(newOpSweepStore()).Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "can record ops") {
+			t.Fatalf("result = %v %q, want OK, the store can record ops", r.Status, r.Message)
 		}
 	})
 }

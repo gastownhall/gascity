@@ -904,7 +904,7 @@ func cliOpWakeCase(t *testing.T) cliOpVerbCase {
 }
 
 // A city config that does not load leaves its [ops] gates unread: the verb
-// says so instead of silently running unrecorded, and a gate set in the
+// says so, each gate takes its builtin default, and a gate set in the
 // environment still applies.
 func TestSessionVerbOpConfigLoadFailure(t *testing.T) {
 	const broken = "\n[ops]\nlifecycle = \"require\"\ncontent = \"bogus\"\n"
@@ -915,8 +915,13 @@ func TestSessionVerbOpConfigLoadFailure(t *testing.T) {
 		if r.code != 0 {
 			t.Fatalf("wake = %d; stderr=%s", r.code, r.stderr)
 		}
-		if !strings.Contains(r.stderr, "[ops] gates were not read") {
-			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read", r.stderr)
+		if !strings.Contains(r.stderr, "[ops] gates were not read, so each takes its builtin default") {
+			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read and take their builtin defaults", r.stderr)
+		}
+		// The lifecycle gate's builtin default is auto, so a store that can
+		// record ops records the run.
+		if ops := cliOpRows(t, f.h.opStore); len(ops) != 1 || ops[0].Status != opjournal.StatusClosed {
+			t.Fatalf("op rows = %+v, want the run recorded and closed under the builtin auto default", ops)
 		}
 	})
 	t.Run("an environment require still refuses", func(t *testing.T) {
@@ -1160,7 +1165,7 @@ func TestSessionWakeOpJSONReplayNotesTheOpOnStderr(t *testing.T) {
 // With the gate off --key is not read at all: an invalid one draws no
 // warning.
 func TestSessionWakeOpOffIgnoresAnInvalidKey(t *testing.T) {
-	newCLIOpHarness(t, nil)
+	newCLIOpHarness(t, cliOpsOffEnv())
 	f := newCLIOpWakeFixture(t)
 	code, _, stderr := f.run(t, " padded", false)
 	if code != 0 || stderr != "" {

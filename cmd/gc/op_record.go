@@ -261,8 +261,9 @@ type cliOp struct {
 // store opened lazily on sessStore. It records nothing yet.
 func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp {
 	op := &cliOp{req: req, sessStore: sessStore}
+	mode, builtinAuto := op.mode(cfg)
 	op.rec = &legacyop.Recorder{
-		Mode:     op.mode(cfg),
+		Mode:     mode,
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
 			if op.opened == nil && op.openErr == nil {
@@ -276,7 +277,15 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		// reports a late or unrecordable close itself (finish).
 		Logger: slog.New(slog.DiscardHandler),
 
-		CrashPoints: opsFailpointState.hook(legacyop.SurfaceCLI),
+		// Under a gate that is auto only by its builtin default, a store that
+		// cannot record ops at all (a bd without --if-revision, a store with
+		// no id prefix) runs the request unrecorded without a warning, as if
+		// the gate were off: every released bd lacks --if-revision, so a
+		// warning there would print on every recorded command of a default
+		// city. A run that asked for a --key still warns, as it does not get
+		// the dedup it asked for.
+		QuietCannotRecord: builtinAuto && req.key == "",
+		CrashPoints:       opsFailpointState.hook(legacyop.SurfaceCLI),
 	}
 	return op
 }
@@ -600,27 +609,28 @@ func (o *cliOp) noteReplayByID(target string) {
 }
 
 // mode is the gate mode of the op's kind, resolved from cfg and the env
-// break-glass. A gate that does not resolve (a misspelled config value) is
-// off, with a warning: a config typo never records, and never refuses. A
-// config that did not load at all leaves only the env break-glass, with a
-// warning that the config's gates were not read; a malformed env value is
-// ignored with a warning.
-func (o *cliOp) mode(cfg *config.City) rollout.Mode {
+// break-glass, and whether that mode is auto only by the gate's builtin
+// default. A gate that does not resolve (a misspelled config value) is off,
+// with a warning: a config typo never records, and never refuses. A config
+// that did not load at all leaves each gate at its builtin default unless
+// its env break-glass is set, with a warning that the config's gates were
+// not read; a malformed env value is ignored with a warning.
+func (o *cliOp) mode(cfg *config.City) (rollout.Mode, bool) {
 	if cfg == nil {
 		if o.req.cfgErr != nil {
-			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: city config did not load (%v); its [ops] gates were not read, so only their environment overrides apply\n", o.req.verb, o.req.cfgErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: city config did not load (%v); its [ops] gates were not read, so each takes its builtin default unless its environment override is set\n", o.req.verb, o.req.cfgErr) //nolint:errcheck // best-effort stderr
 		}
 		cfg = &config.City{}
 	}
 	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{LookupEnv: cliOpLookupEnv})
 	if err != nil {
 		fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %v; not recording\n", o.req.verb, err) //nolint:errcheck // best-effort stderr
-		return rollout.Off
+		return rollout.Off, false
 	}
 	spec, err := opjournal.Lookup(o.req.kind)
 	if err != nil {
 		fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %v; not recording\n", o.req.verb, err) //nolint:errcheck // best-effort stderr
-		return rollout.Off
+		return rollout.Off, false
 	}
 	key, mode := rollout.KeyOpsLifecycle, flags.OpsLifecycle()
 	switch spec.Class {
@@ -634,7 +644,7 @@ func (o *cliOp) mode(cfg *config.City) rollout.Mode {
 			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %s\n", o.req.verb, n.Message) //nolint:errcheck // best-effort stderr
 		}
 	}
-	return mode
+	return mode, flags.BuiltinAuto(key)
 }
 
 // cliPrincipal is the CLI's principal and actor (DES-O0API §3.3): the agent
@@ -733,7 +743,9 @@ func (o *cliOp) writeFailure(code, message, opID, key string) {
 }
 
 // warnDegrade prints one warning per stage for a store failure the recorder
-// degraded past. A require-mode refusal is reported by refuse instead.
+// degraded past. A require-mode refusal is reported by refuse instead. A
+// store the builtin default treats as off never reaches it
+// (QuietCannotRecord in newCLIOp).
 func (o *cliOp) warnDegrade(d legacyop.Degrade) {
 	if d.Mode == rollout.Require && (d.Stage == legacyop.StageOpen || d.Stage == legacyop.StagePropose) {
 		return

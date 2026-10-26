@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -15,6 +16,7 @@ import (
 // countingFakeBd is a fake bd that records every command a BdStore runs.
 type countingFakeBd struct {
 	*beadstest.FakeBd
+	mu    sync.Mutex // guards calls: a two-tier List runs its two bd reads at once
 	calls [][]string
 }
 
@@ -23,7 +25,9 @@ func newCountingFakeBd() *countingFakeBd {
 }
 
 func (f *countingFakeBd) run(dir, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, slices.Clone(args))
+	f.mu.Unlock()
 	return f.Run(dir, name, args...)
 }
 

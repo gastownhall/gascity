@@ -396,7 +396,9 @@ type acpReaperBackend struct {
 func (a *acpReaperBackend) ListRunning(prefix string) ([]string, error) {
 	return a.w.ListRunning(prefix)
 }
-func (a *acpReaperBackend) ListRunningComplete() bool                { return a.w.ListRunningComplete() }
+
+func (a *acpReaperBackend) ListRunningComplete() bool { return a.w.ListRunningComplete() }
+
 func (a *acpReaperBackend) GetMeta(name, key string) (string, error) { return a.w.GetMeta(name, key) }
 func (a *acpReaperBackend) Stop(name string) error                   { return a.w.Stop(name) }
 func (a *acpReaperBackend) IsRunning(name string) bool               { return a.w.IsRunning(name) }

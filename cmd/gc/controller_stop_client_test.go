@@ -236,8 +236,10 @@ func (c *scriptedControllerStopConn) Close() error {
 	return nil
 }
 
-func (*scriptedControllerStopConn) LocalAddr() net.Addr  { return scriptedControllerStopAddr("local") }
+func (*scriptedControllerStopConn) LocalAddr() net.Addr { return scriptedControllerStopAddr("local") }
+
 func (*scriptedControllerStopConn) RemoteAddr() net.Addr { return scriptedControllerStopAddr("remote") }
+
 func (*scriptedControllerStopConn) SetDeadline(time.Time) error {
 	return errors.New("unexpected SetDeadline")
 }

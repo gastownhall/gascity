@@ -34,6 +34,19 @@ package main
 // row is submitted (opjournal.HasSubmittedOps, one keyed read of one row),
 // and only then opens the op store, so a city that never recorded an op does
 // not pay NewStore's capability probe at every controller start.
+//
+// Gates that are auto only by their builtin default (none set in [ops] or
+// through GC_OPS_*) treat a sessions store that cannot record ops at all (no
+// conditional writes, no namespace) as off: a pass that finds the store so
+// logs that once and runs as a gates-off pass, so it raises no
+// ops.recording_degraded event. Every released bd lacks --if-revision, so a
+// default bd city would otherwise degrade on every pass for the controller's
+// life. The loop keeps ticking, as the gates are on, but while that store is
+// still the sessions store a tick with nothing left to retry does nothing: an
+// open over it fails the same way, so it can hold no op this sweeper could
+// close. A reload that replaces the store is opened on the next tick, so ops
+// recorded over a store that can record are swept. An explicit auto or
+// require stays loud.
 
 import (
 	"context"
@@ -92,6 +105,11 @@ type opSweeper struct {
 	st     *opjournal.Store
 	stOver beads.Store
 	booted bool
+	// incapableOver is the sessions-class store the last open found unable
+	// to record ops at all under gates that are auto only by their builtin
+	// default, nil when the last open did not. While it is still the
+	// sessions store, passes run as if every gate were off (pass).
+	incapableOver beads.Store
 	// leftWork reports that the last pass left something a later pass can
 	// finish; with every gate off it keeps the ticker running.
 	leftWork bool
@@ -125,14 +143,7 @@ func (cs *controllerState) newOpSweeper() *opSweeper {
 // gate that records.
 func (s *opSweeper) reportDegrade(d legacyop.Degrade) {
 	s.logDegrade(d)
-	for _, g := range []struct {
-		key  string
-		mode rollout.Mode
-	}{
-		{rollout.KeyOpsContent, s.flags.OpsContent()},
-		{rollout.KeyOpsControl, s.flags.OpsControl()},
-		{rollout.KeyOpsLifecycle, s.flags.OpsLifecycle()},
-	} {
+	for _, g := range opsGateModes(s.flags) {
 		if g.mode == rollout.Off {
 			continue
 		}
@@ -180,6 +191,48 @@ func (s *opSweeper) wantsTicker() bool {
 	return !booted || leftWork || s.strongestMode() != rollout.Off
 }
 
+// incapableNow reports whether the sessions store is still the one the last
+// open found unable to record ops under gates that are auto only by their
+// builtin default.
+func (s *opSweeper) incapableNow() bool {
+	over := s.cs.SessionsBeadStore().Store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.incapableOver != nil && sameBeadStore(s.incapableOver, over)
+}
+
+// opsGatesBuiltinDefaultOnly reports whether every ops gate that is on under
+// flags is auto only by its builtin default, and at least one is on. Such
+// gates treat a store that cannot record ops at all as off.
+func opsGatesBuiltinDefaultOnly(flags rollout.Flags) bool {
+	on := false
+	for _, g := range opsGateModes(flags) {
+		if g.mode == rollout.Off || g.mode == rollout.ModeUnset {
+			continue
+		}
+		if !flags.BuiltinAuto(g.key) {
+			return false
+		}
+		on = true
+	}
+	return on
+}
+
+// opsGateMode is one ops gate's key and resolved mode.
+type opsGateMode struct {
+	key  string
+	mode rollout.Mode
+}
+
+// opsGateModes lists the three ops gates with their modes under flags.
+func opsGateModes(flags rollout.Flags) []opsGateMode {
+	return []opsGateMode{
+		{rollout.KeyOpsContent, flags.OpsContent()},
+		{rollout.KeyOpsControl, flags.OpsControl()},
+		{rollout.KeyOpsLifecycle, flags.OpsLifecycle()},
+	}
+}
+
 // strongestMode is the strongest of the three ops gates: require over auto
 // over off. An unset gate reads as off.
 func (s *opSweeper) strongestMode() rollout.Mode {
@@ -218,15 +271,26 @@ func (s *opSweeper) safePass() (panicked bool) {
 // pass sweeps the op store once and records whether it left work. A
 // quiescent city is not read; the pass does not count as the boot pass. A
 // panicking pass leaves no work, so a bug cannot keep a gates-off ticker
-// alive.
+// alive. While the sessions store is one an open found unable to record ops
+// under the builtin-default gates (incapableNow), a pass runs as if every
+// gate were off, and does nothing when the last pass left no work.
 func (s *opSweeper) pass() {
 	if s.cs.storesQuiescent() {
 		return
 	}
+	incapable := s.incapableNow()
 	s.mu.Lock()
+	if incapable && !s.leftWork {
+		s.mu.Unlock()
+		return
+	}
 	s.booted, s.leftWork = true, false
 	s.mu.Unlock()
-	left := s.sweep(s.strongestMode())
+	mode := s.strongestMode()
+	if incapable {
+		mode = rollout.Off
+	}
+	left := s.sweep(mode)
 	s.mu.Lock()
 	s.leftWork = left
 	s.mu.Unlock()
@@ -246,12 +310,25 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 			return false
 		}
 	}
-	st, err := s.store()
+	st, over, err := s.store()
 	if err != nil {
 		reason := legacyop.DegradeReason(err)
+		if mode != rollout.Off && legacyop.CannotRecord(reason) && opsGatesBuiltinDefaultOnly(s.flags) {
+			s.mu.Lock()
+			s.incapableOver = over
+			s.mu.Unlock()
+			if s.logDue(opSweepLogKey{stage: legacyop.StageOpen, reason: "default:" + reason}) {
+				s.logf("op-sweep: the ops gates are auto by default, but the sessions store cannot record ops (%s: %v); "+
+					"sweeping as if every gate were off until a reload replaces it", reason, err)
+			}
+			return s.sweep(rollout.Off)
+		}
 		s.fail(mode, legacyop.StageOpen, reason, err)
 		return opSweepRetryable(reason)
 	}
+	s.mu.Lock()
+	s.incapableOver = nil
+	s.mu.Unlock()
 	s.healthy(legacyop.StageOpen)
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)
@@ -367,21 +444,22 @@ func (s *opSweeper) hasStore() bool {
 }
 
 // store returns the cached op store, opening it over the current
-// sessions-class store when none is cached or that store was replaced.
-func (s *opSweeper) store() (*opjournal.Store, error) {
+// sessions-class store when none is cached or that store was replaced, with
+// the sessions-class store it is over, or a failed open was over.
+func (s *opSweeper) store() (*opjournal.Store, beads.Store, error) {
 	over := s.cs.SessionsBeadStore()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st != nil && sameBeadStore(s.stOver, over.Store) {
-		return s.st, nil
+		return s.st, over.Store, nil
 	}
 	st, err := opjournal.NewStore(over, s.clk)
 	if err != nil {
 		s.st, s.stOver = nil, nil
-		return nil, err
+		return nil, over.Store, err
 	}
 	s.st, s.stOver = st, over.Store
-	return st, nil
+	return st, over.Store, nil
 }
 
 // sameBeadStore reports whether a and b are the same store value. Stores are

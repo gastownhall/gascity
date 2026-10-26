@@ -1225,8 +1225,17 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("mail") {
 		base.Mail = fragment.Mail
 	}
-	if fragMeta.IsDefined("events") {
-		base.Events = fragment.Events
+	// [events] merges per key: a fragment that sets only [events.mirror]
+	// keeps the base's provider and [events.rotation], and the reverse. A
+	// table the fragment defines replaces the base's whole table.
+	if fragMeta.IsDefined("events", "provider") {
+		base.Events.Provider = fragment.Events.Provider
+	}
+	if fragMeta.IsDefined("events", "rotation") {
+		base.Events.Rotation = fragment.Events.Rotation
+	}
+	if fragMeta.IsDefined("events", "mirror") {
+		base.Events.Mirror = fragment.Events.Mirror
 	}
 	if fragMeta.IsDefined("usage") {
 		base.Usage = fragment.Usage

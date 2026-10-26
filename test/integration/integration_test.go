@@ -290,7 +290,7 @@ func TestMain(m *testing.M) {
 		if err := writeExecShim(doltBinary, override); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
 		}
-	} else if resolved := runfilesBinaryAt("dolt_bin_v2_2_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
+	} else if resolved := runfilesBinaryAt("dolt_bin_v2_6_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
 		// Prebuilt pinned dolt from runfiles (bazel http_archive data dep);
 		// preferred over PATH so remote workers without a system dolt run the
 		// dolt-backed shapes.
@@ -1636,6 +1636,22 @@ func newIsolatedToolEnv(t *testing.T, useDolt bool) []string {
 
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
+	return newIsolatedCommandEnvWithBD(t, useDolt, false)
+}
+
+// newIsolatedCommandEnvDirectBD is newIsolatedCommandEnv on a Dolt city whose gc
+// processes, the supervisor's included, find the pinned bd itself first on PATH
+// rather than the file-store shim. For a Dolt-backed city the shim only execs
+// that bd, after paying its own start (a 120 MB binary, ~35 ms of package init),
+// on every bd call: a latency guard measures gc and bd, not the harness
+// (ga-3js1ayv).
+func newIsolatedCommandEnvDirectBD(t *testing.T) []string {
+	t.Helper()
+	return newIsolatedCommandEnvWithBD(t, true, true)
+}
+
+func newIsolatedCommandEnvWithBD(t *testing.T, useDolt, directBD bool) []string {
+	t.Helper()
 
 	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
 
@@ -1648,6 +1664,14 @@ func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 		path := filepath.Join(shimDir, name)
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatalf("writing %s shim: %v", name, err)
+		}
+	}
+	if directBD {
+		if realBDBinary == "" {
+			t.Fatal("direct bd requested but no pinned bd is staged")
+		}
+		if err := os.Symlink(realBDBinary, filepath.Join(shimDir, "bd")); err != nil {
+			t.Fatalf("staging the pinned bd first on PATH: %v", err)
 		}
 	}
 	envMap := parseEnvList(env)

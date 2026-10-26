@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -36,6 +39,12 @@ type cliOpHarness struct {
 	// store: a file-backed city's store mints its own ids, so it cannot pin
 	// an op id.
 	opStore beads.Store
+}
+
+// cliOpsOffEnv turns every ops gate off through the env break-glass: the
+// opt-out from the gates' auto default (D-GATES).
+func cliOpsOffEnv() map[string]string {
+	return map[string]string{"GC_OPS_CONTENT": "off", "GC_OPS_CONTROL": "off", "GC_OPS_LIFECYCLE": "off"}
 }
 
 func newCLIOpHarness(t *testing.T, env map[string]string) *cliOpHarness {
@@ -306,7 +315,7 @@ func (f *cliOpWakeFixture) run(t *testing.T, key string, asJSON bool) (int, stri
 }
 
 func TestSessionWakeOpOffWritesNothing(t *testing.T) {
-	h := newCLIOpHarness(t, nil)
+	h := newCLIOpHarness(t, cliOpsOffEnv())
 	f := newCLIOpWakeFixture(t)
 	code, stdout, stderr := f.run(t, "", true)
 	if code != 0 {
@@ -576,5 +585,117 @@ func TestCLIOpWakeConflictReasonIsAlwaysAValidToken(t *testing.T) {
 		if why == "" || len(why) > opjournal.MaxRefusedWhyLen {
 			t.Errorf("cliOpWakeConflictReason(%q) = %q, want a non-empty reason that fits a token", state, why)
 		}
+	}
+}
+
+// Under the builtin default (no [ops] gate, no GC_OPS_* override) the gate is
+// auto, but a store that cannot record ops is treated as off: the wake runs
+// unrecorded and prints nothing, as every released bd lacks --if-revision.
+func TestSessionWakeOpDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	f := newCLIOpWakeFixture(t)
+	f.deps.store = cliOpIncapableStore{f.rec}
+	code, stdout, stderr := f.run(t, "", true)
+	if code != 0 {
+		t.Fatalf("wake = %d; stderr=%s", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want nothing under the builtin default over an incapable store", stderr)
+	}
+	if _, ok := cliOpJSON(t, []byte(stdout))["op_id"]; ok {
+		t.Fatalf("JSON %s carries op_id for an unrecorded run", stdout)
+	}
+	b, _ := f.rec.Get(f.id)
+	if b.Metadata["state"] == "suspended" {
+		t.Fatal("the wake did not run")
+	}
+}
+
+// A --key under the builtin default still warns over a store that cannot
+// record ops: the run asked for a dedup the journal cannot give.
+func TestSessionWakeOpDefaultAutoWarnsForAKeyOnAnIncapableStore(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	f := newCLIOpWakeFixture(t)
+	f.deps.store = cliOpIncapableStore{f.rec}
+	code, _, stderr := f.run(t, "k-1", false)
+	if code != 0 {
+		t.Fatalf("wake = %d; stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: op journal open failed (conditional_writes_unsupported)") {
+		t.Fatalf("stderr = %q, want the open warning for a --key run", stderr)
+	}
+}
+
+// The builtin default records on a store that can record ops.
+func TestSessionWakeOpDefaultAutoRecordsOnACapableStore(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	f := newCLIOpWakeFixture(t)
+	if code, _, stderr := f.run(t, "", false); code != 0 || stderr != "" {
+		t.Fatalf("wake = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
+	}
+	op := cliOpOnly(t, f.rec)
+	if op.Status != opjournal.StatusClosed {
+		t.Fatalf("op = %+v, want closed", op)
+	}
+}
+
+// cliOpBdLeafProxy stands in for the default topology's proxied sessions
+// store: its conditional writes, and so the op journal's open, resolve to its
+// bd write leaf.
+type cliOpBdLeafProxy struct {
+	beads.Store
+	leaf beads.Store
+}
+
+func (p cliOpBdLeafProxy) ConditionalWritesResolveTarget() beads.Store { return p.leaf }
+
+// The builtin default over a proxied sessions store follows the bd behind
+// it, as the CHANGELOG's upgrading note says: a bd whose update, close,
+// assign and delete all advertise --if-revision opens the op journal, so the
+// default records through bd; a released bd, which lacks the flag, fails the
+// open as a store that cannot record ops, which the default treats as off.
+func TestCLIOpDefaultAutoOverAProxiedBdStore(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		help    string
+		records bool
+		probes  []string
+	}{
+		{"bd with --if-revision", "Flags:\n      --if-revision int   fence\n", true, []string{"update", "close", "assign", "delete"}},
+		{"released bd", "Flags:\n      --json   JSON output\n", false, []string{"update"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldLookup := cliOpLookupEnv
+			cliOpLookupEnv = func(string) (string, bool) { return "", false }
+			t.Cleanup(func() { cliOpLookupEnv = oldLookup })
+			var probes []string
+			bd := beads.NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+				if len(args) == 2 && args[1] == "--help" {
+					probes = append(probes, args[0])
+					return []byte(tc.help), nil
+				}
+				return nil, fmt.Errorf("unexpected bd %v", args)
+			}, "gc")
+			var stderr bytes.Buffer
+			op := newCLIOp(&config.City{}, cliOpBdLeafProxy{Store: beads.NewMemStore(), leaf: bd},
+				cliOpRequest{verb: "gc session wake", kind: opjournal.KindWake, stderr: &stderr})
+			if op.rec.Mode != rollout.Auto || !op.rec.QuietCannotRecord {
+				t.Fatalf("recorder mode=%s quiet=%t, want the builtin auto default, quiet over a store that cannot record", op.rec.Mode, op.rec.QuietCannotRecord)
+			}
+			st, err := op.rec.Open()
+			if tc.records {
+				if err != nil || st.Prefix() != "gc" {
+					t.Fatalf("Open() = %v, %v; want the op journal over the bd leaf's gc namespace", st, err)
+				}
+			} else if !errors.Is(err, beads.ErrConditionalWriteUnsupported) || !legacyop.CannotRecord(legacyop.DegradeReason(err)) {
+				t.Fatalf("Open() = %v, want a store that cannot record ops (conditional_writes_unsupported)", err)
+			}
+			if !slices.Equal(probes, tc.probes) {
+				t.Fatalf("bd probes = %v, want %v", probes, tc.probes)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want nothing", stderr.String())
+			}
+		})
 	}
 }
