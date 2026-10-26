@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -633,5 +636,66 @@ func TestSessionWakeOpDefaultAutoRecordsOnACapableStore(t *testing.T) {
 	op := cliOpOnly(t, f.rec)
 	if op.Status != opjournal.StatusClosed {
 		t.Fatalf("op = %+v, want closed", op)
+	}
+}
+
+// cliOpBdLeafProxy stands in for the default topology's proxied sessions
+// store: its conditional writes, and so the op journal's open, resolve to its
+// bd write leaf.
+type cliOpBdLeafProxy struct {
+	beads.Store
+	leaf beads.Store
+}
+
+func (p cliOpBdLeafProxy) ConditionalWritesResolveTarget() beads.Store { return p.leaf }
+
+// The builtin default over a proxied sessions store follows the bd behind
+// it, as the CHANGELOG's upgrading note says: a bd whose update, close,
+// assign and delete all advertise --if-revision opens the op journal, so the
+// default records through bd; a released bd, which lacks the flag, fails the
+// open as a store that cannot record ops, which the default treats as off.
+func TestCLIOpDefaultAutoOverAProxiedBdStore(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		help    string
+		records bool
+		probes  []string
+	}{
+		{"bd with --if-revision", "Flags:\n      --if-revision int   fence\n", true, []string{"update", "close", "assign", "delete"}},
+		{"released bd", "Flags:\n      --json   JSON output\n", false, []string{"update"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldLookup := cliOpLookupEnv
+			cliOpLookupEnv = func(string) (string, bool) { return "", false }
+			t.Cleanup(func() { cliOpLookupEnv = oldLookup })
+			var probes []string
+			bd := beads.NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+				if len(args) == 2 && args[1] == "--help" {
+					probes = append(probes, args[0])
+					return []byte(tc.help), nil
+				}
+				return nil, fmt.Errorf("unexpected bd %v", args)
+			}, "gc")
+			var stderr bytes.Buffer
+			op := newCLIOp(&config.City{}, cliOpBdLeafProxy{Store: beads.NewMemStore(), leaf: bd},
+				cliOpRequest{verb: "gc session wake", kind: opjournal.KindWake, stderr: &stderr})
+			if op.rec.Mode != rollout.Auto || !op.rec.QuietCannotRecord {
+				t.Fatalf("recorder mode=%s quiet=%t, want the builtin auto default, quiet over a store that cannot record", op.rec.Mode, op.rec.QuietCannotRecord)
+			}
+			st, err := op.rec.Open()
+			if tc.records {
+				if err != nil || st.Prefix() != "gc" {
+					t.Fatalf("Open() = %v, %v; want the op journal over the bd leaf's gc namespace", st, err)
+				}
+			} else if !errors.Is(err, beads.ErrConditionalWriteUnsupported) || !legacyop.CannotRecord(legacyop.DegradeReason(err)) {
+				t.Fatalf("Open() = %v, want a store that cannot record ops (conditional_writes_unsupported)", err)
+			}
+			if !slices.Equal(probes, tc.probes) {
+				t.Fatalf("bd probes = %v, want %v", probes, tc.probes)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want nothing", stderr.String())
+			}
+		})
 	}
 }

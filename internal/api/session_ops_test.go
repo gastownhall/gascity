@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1678,18 +1679,46 @@ func TestSessionContentOpsDegradeRaisesALatchedEvent(t *testing.T) {
 // wraps, as a bd without --if-revision does.
 type opsIncapableStore struct{ beads.Store }
 
-// A store that cannot record ops raises ops.recording_degraded under an
-// explicit auto, and nothing under the builtin default, which treats that
-// store as off. Both run the request.
+// opsLogHandler keeps the level of every record logged through it.
+type opsLogHandler struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (h *opsLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *opsLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	return nil
+}
+
+func (h *opsLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *opsLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *opsLogHandler) logged() []slog.Level {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Level(nil), h.levels...)
+}
+
+// A store that cannot record ops raises ops.recording_degraded and logs a
+// warning under an explicit auto, and under the builtin default, which treats
+// that store as off, raises nothing and logs at debug only. Both run the
+// request.
 func TestSessionContentOpsDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 	for _, c := range []struct {
 		mode   string
 		events int
-	}{{"", 0}, {"auto", 1}} {
+		level  slog.Level
+	}{{"", 0, slog.LevelDebug}, {"auto", 1, slog.LevelWarn}} {
 		t.Run("mode="+c.mode, func(t *testing.T) {
 			e := newOpsEnv(t, c.mode)
 			e.fs.cityBeadStore = opsIncapableStore{e.store}
 			e.restart(t)
+			logs := &opsLogHandler{}
+			e.server(t).ops.content.Logger = slog.New(logs)
 			info := e.session(t, "Incapable")
 			rec := e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`)
 			if rec.Code != http.StatusAccepted {
@@ -1703,6 +1732,9 @@ func TestSessionContentOpsDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 			evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
 			if len(evs) != c.events {
 				t.Fatalf("degrade events = %d, want %d", len(evs), c.events)
+			}
+			if got := logs.logged(); !slices.Equal(got, []slog.Level{c.level}) {
+				t.Fatalf("degrade log levels = %v, want [%v]", got, c.level)
 			}
 		})
 	}

@@ -2128,7 +2128,7 @@
             "auto",
             "require"
           ],
-          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"auto\" is the default for all three gates: it\nrecords where the store can and runs unrecorded where it cannot, loudly\nwhen set and quietly when only the default. \"off\"\nrecords nothing. \"require\" (opt-in) refuses a request it cannot record\nbefore any effect. A change takes effect at the next process start.",
+          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"auto\" is the default for all three gates: it\nrecords where the store can and runs unrecorded where it cannot, loudly\nwhen set and quietly when only the default. A store served through bd\ncan record once that bd supports --if-revision, which no released bd\ndoes yet. \"off\" records nothing. \"require\" (opt-in) refuses a request it\ncannot record before any effect. A change takes effect at the next\nprocess start.",
           "default": "auto"
         },
         "control": {
@@ -2138,7 +2138,7 @@
             "auto",
             "require"
           ],
-          "description": "Records interrupt (stop) and respond requests as ops. \"auto\" is the\ndefault: it records where the store can and runs unrecorded where it\ncannot, loudly when set and quietly when only the default. \"off\" records nothing. \"require\" (opt-in) refuses a request it\ncannot record before any effect. A change takes effect at the next\nprocess start.",
+          "description": "Records interrupt (stop) and respond requests as ops. \"auto\" is the\ndefault: it records where the store can and runs unrecorded where it\ncannot, loudly when set and quietly when only the default. A store\nserved through bd can record once that bd supports --if-revision, which\nno released bd does yet. \"off\" records nothing. \"require\" (opt-in)\nrefuses a request it cannot record before any effect. A change takes\neffect at the next process start.",
           "default": "auto"
         },
         "lifecycle": {
@@ -2148,7 +2148,7 @@
             "auto",
             "require"
           ],
-          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"auto\" is the default: it records where the store can and runs\nunrecorded where it cannot, loudly when set and quietly when only the\ndefault. \"off\" records nothing. \"require\" (opt-in)\nrefuses a request it cannot record before any effect. A change takes\neffect at the next process start.",
+          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"auto\" is the default: it records where the store can and runs\nunrecorded where it cannot, loudly when set and quietly when only the\ndefault. A store served through bd can record once that bd supports\n--if-revision, which no released bd does yet. \"off\" records nothing.\n\"require\" (opt-in) refuses a request it cannot record before any\neffect. A change takes effect at the next process start.",
           "default": "auto"
         },
         "authoritative": {

@@ -15,34 +15,41 @@ import (
 // Each gate takes "off" (no op row; the legacy behavior), "auto" (shadow: the
 // request is recorded where the store can record it and runs unrecorded where
 // it cannot, with a loud degrade when auto is set and quietly when it is only
-// the default; the default for all three gates when unset)
-// or "require" (durable: a request whose op cannot be recorded is refused
-// before any effect; opt-in). Any other value fails config load. A GC_OPS_CONTENT, GC_OPS_CONTROL or GC_OPS_LIFECYCLE env
-// override takes precedence; read the effective values through
-// internal/rollout.Flags, never these fields directly. The Go field names end
-// in Mode because cmd/gc's prompt-boundary lint forbids a gate's config field
-// name in prompt-rendering code, and a bare Content or Lifecycle would collide
-// with unrelated identifiers there.
+// the default; the default for all three gates when unset) or "require"
+// (durable: a request whose op cannot be recorded is refused before any
+// effect; opt-in). Any other value fails config load. A store served through
+// bd can record once that bd's update, close, assign and delete accept
+// --if-revision, which no released bd does yet. A GC_OPS_CONTENT,
+// GC_OPS_CONTROL or GC_OPS_LIFECYCLE env override takes precedence; read the
+// effective values through internal/rollout.Flags, never these fields
+// directly. The Go field names end in Mode because cmd/gc's prompt-boundary
+// lint forbids a gate's config field name in prompt-rendering code, and a
+// bare Content or Lifecycle would collide with unrelated identifiers there.
 type OpsConfig struct {
 	// Records message deliveries (session submit and messages, nudge, mail
 	// notify) as message ops. "auto" is the default for all three gates: it
 	// records where the store can and runs unrecorded where it cannot, loudly
-	// when set and quietly when only the default. "off"
-	// records nothing. "require" (opt-in) refuses a request it cannot record
-	// before any effect. A change takes effect at the next process start.
+	// when set and quietly when only the default. A store served through bd
+	// can record once that bd supports --if-revision, which no released bd
+	// does yet. "off" records nothing. "require" (opt-in) refuses a request it
+	// cannot record before any effect. A change takes effect at the next
+	// process start.
 	ContentMode string `toml:"content,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records interrupt (stop) and respond requests as ops. "auto" is the
 	// default: it records where the store can and runs unrecorded where it
-	// cannot, loudly when set and quietly when only the default. "off" records nothing. "require" (opt-in) refuses a request it
-	// cannot record before any effect. A change takes effect at the next
-	// process start.
+	// cannot, loudly when set and quietly when only the default. A store
+	// served through bd can record once that bd supports --if-revision, which
+	// no released bd does yet. "off" records nothing. "require" (opt-in)
+	// refuses a request it cannot record before any effect. A change takes
+	// effect at the next process start.
 	ControlMode string `toml:"control,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records wake, suspend, reset (restart), kill and close requests as ops.
 	// "auto" is the default: it records where the store can and runs
 	// unrecorded where it cannot, loudly when set and quietly when only the
-	// default. "off" records nothing. "require" (opt-in)
-	// refuses a request it cannot record before any effect. A change takes
-	// effect at the next process start.
+	// default. A store served through bd can record once that bd supports
+	// --if-revision, which no released bd does yet. "off" records nothing.
+	// "require" (opt-in) refuses a request it cannot record before any
+	// effect. A change takes effect at the next process start.
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
 	// of their legacy path. The default is empty, and message is not on by

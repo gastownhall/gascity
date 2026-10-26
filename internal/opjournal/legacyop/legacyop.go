@@ -172,11 +172,16 @@ func (a *Admission) DeliveryKey() string {
 // answers by then. Inflight is the API's in-flight registry; nil (the CLI)
 // means never adopt. Neither surface adopts an op past its finish_by: a
 // same-key Admit closes it, as the sweeper would. Degraded, when set, is told
-// of every store failure the recorder degrades past. Healthy, when set, is
-// told of every close the store answers, before the op's entry is released: a
-// background retry's close lands after Finish has returned, out of the
-// caller's sight. Logger receives the recorder's rate-limited degrade lines
-// and late-result lines; nil is slog.Default(). Done, when closed (its owner
+// of every store failure the recorder degrades past but one QuietCannotRecord
+// keeps quiet. Healthy, when set, is told of every close the store answers,
+// before the op's entry is released: a background retry's close lands after
+// Finish has returned, out of the caller's sight. Logger receives the
+// recorder's rate-limited degrade lines and late-result lines; nil is
+// slog.Default(). QuietCannotRecord, set for a gate that is auto only by its
+// builtin default, treats a store that cannot record ops at all
+// (Degrade.StoreCannotRecord) as off: that degrade is logged at debug and not
+// passed to Degraded, while a store error, contention or a later-stage
+// failure still degrades loudly. Done, when closed (its owner
 // shutting down), ends any background close retry, leaving the op to the
 // sweeper; the entry stays held until the op's finish_by has passed, so a
 // same-key retry in this process does not adopt an op whose effect may
@@ -193,6 +198,8 @@ type Recorder struct {
 	Healthy  func(stage string)
 	Logger   *slog.Logger
 	Done     <-chan struct{}
+
+	QuietCannotRecord bool
 
 	CrashPoints CrashPointFunc
 

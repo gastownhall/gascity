@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -456,5 +457,53 @@ func TestDegradeStoreCannotRecord(t *testing.T) {
 		if got := d.StoreCannotRecord(); got != c.want {
 			t.Errorf("Degrade{%s, %s}.StoreCannotRecord() = %t, want %t", c.stage, c.reason, got, c.want)
 		}
+	}
+}
+
+// A recorder with QuietCannotRecord, as a gate that is auto only by its
+// builtin default builds, treats a store that cannot record ops at all as
+// off: that open degrade logs at Debug and never reaches the Degraded hook. A
+// store fault still logs at Warn and reaches it, as does a store that cannot
+// record under a recorder without the flag. Every request runs unrecorded.
+func TestQuietCannotRecordDegrade(t *testing.T) {
+	unsupported := fmt.Errorf("opening op store: %w", beads.ErrConditionalWriteUnsupported)
+	for _, c := range []struct {
+		name          string
+		err           error
+		quietRecorder bool
+		quiet         bool
+	}{
+		{"no conditional writes", unsupported, true, true},
+		{"no namespace", fmt.Errorf("opening op store: %w", opjournal.ErrNoNamespace), true, true},
+		{"store fault", errors.New("transport: refused"), true, false},
+		{"no conditional writes without the flag", unsupported, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			h := &recordHandler{}
+			r := apiRecorder(e, gate.Auto)
+			r.Logger = slog.New(h)
+			r.QuietCannotRecord = c.quietRecorder
+			hooked := 0
+			r.Degraded = func(Degrade) { hooked++ }
+			r.Open = func() (*opjournal.Store, error) { return nil, c.err }
+			adm, err := r.Admit(msg("", "hello"))
+			if err != nil || adm.Decision != Execute {
+				t.Fatalf("Admit = %+v, %v; want an unrecorded Execute", adm, err)
+			}
+			wantHooked, wantLevel := 1, slog.LevelWarn
+			if c.quiet {
+				wantHooked, wantLevel = 0, slog.LevelDebug
+			}
+			h.mu.Lock()
+			var levels []slog.Level
+			for _, rec := range h.records {
+				levels = append(levels, rec.Level)
+			}
+			h.mu.Unlock()
+			if hooked != wantHooked || !slices.Equal(levels, []slog.Level{wantLevel}) {
+				t.Fatalf("hook heard %d, log levels %v; want %d and [%v]", hooked, levels, wantHooked, wantLevel)
+			}
+		})
 	}
 }

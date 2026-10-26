@@ -14,20 +14,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `content` (submit, messages, nudge, mail notify), `control` (interrupt,
   respond) and `lifecycle` (wake, suspend, reset, kill, close), now default
   to `auto` instead of `off`. On a sessions store with conditional writes
-  and an id prefix (a native beads store), each request is recorded as an op
-  beside its unchanged legacy execution, so a same-key retry is deduplicated
-  across restarts and each request gets one typed outcome. Delivered text is
-  unchanged.
+  and an id prefix (today a native beads store), each request is recorded
+  as an op beside its unchanged legacy execution, so a same-key retry is
+  deduplicated across restarts and each request gets one typed outcome.
+  Delivered text is unchanged.
   - **Stores that cannot record stay as before.** No released bd supports
     `--if-revision`, so a sessions store served through bd (the default
     `gc init` city), a file store and an exec-provider store record
     nothing. Under the builtin default such a store is treated as `off`:
     no CLI warning, no `ops.recording_degraded` event, no `gc doctor`
-    warning, and the controller's op sweeper stops after its boot pass. The
-    only cost is one `bd update --help` capability probe per command that
-    could be recorded. A run with `--key` still warns that it ran
-    unrecorded. An explicit `auto`, in `[ops]` or through `GC_OPS_*`, warns
-    as before.
+    warning, no warning in the controller log, and the controller's op
+    sweeper does nothing after its boot pass until a reload replaces the
+    sessions store. The only cost is one `bd update --help` capability
+    probe per command that could be recorded. A run with `--key` still
+    warns that it ran unrecorded. An explicit `auto`, in `[ops]` or through
+    `GC_OPS_*`, warns as before.
+  - **A bd with `--if-revision` starts recording.** Whether a city served
+    through bd records depends on the bd on `PATH`, not on gc: once
+    `bd update`, `close`, `assign` and `delete` all advertise
+    `--if-revision`, its sessions store can record, and the default records
+    every op-recorded command and session API request through bd, with no
+    gc or config change. That path has not been measured: the X12 Dolt arm
+    below read and wrote its server natively, while here each op's writes
+    run as bd subprocesses and the capability probe runs all four verbs. To
+    keep such a city unrecorded, set the gates to `off` in `[ops]`.
   - **Cost where it records.** Recording adds two store writes per request
     (open and close). In the X12 load test the added p50 latency on the
     API's 202 path was about 8 ms on SQLite, and on a bd-provisioned Dolt

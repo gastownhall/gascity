@@ -91,7 +91,8 @@ func CannotRecord(reason string) bool {
 // StoreCannotRecord reports whether d is an op store that did not open
 // because the store cannot record ops at all (CannotRecord). A gate that is
 // auto only by its builtin default treats that store as off: its surfaces
-// stay quiet, as beads.conditional_writes does under its auto default.
+// stay quiet (Recorder.QuietCannotRecord), as beads.conditional_writes does
+// under its auto default.
 func (d Degrade) StoreCannotRecord() bool {
 	return d.Stage == StageOpen && CannotRecord(d.Reason)
 }
@@ -123,12 +124,22 @@ type degradeLogKey struct {
 }
 
 // degrade tells the Degraded hook about a store failure and logs it, at most
-// once per DegradeLogInterval per (surface, stage, reason).
+// once per DegradeLogInterval per (surface, stage, reason). Under
+// QuietCannotRecord a store that cannot record ops at all is logged at debug
+// and kept from the hook.
 func (r *Recorder) degrade(kind opjournal.Kind, stage, reason string, err error) {
 	d := Degrade{Mode: r.Mode, Surface: surface(r.Executor), Kind: kind, Stage: stage, Reason: reason, Err: err}
+	quiet := r.QuietCannotRecord && d.StoreCannotRecord()
 	if r.shouldLogDegrade(degradeLogKey{surface: d.Surface, stage: stage, reason: reason}) {
-		r.logger().Warn("op journal: recording degraded", "mode", d.Mode, "surface", d.Surface, "kind", d.Kind,
-			"stage", d.Stage, "reason", d.Reason, "err", err)
+		level := slog.LevelWarn
+		if quiet {
+			level = slog.LevelDebug
+		}
+		r.logger().Log(context.Background(), level, "op journal: recording degraded", "mode", d.Mode, "surface", d.Surface,
+			"kind", d.Kind, "stage", d.Stage, "reason", d.Reason, "err", err)
+	}
+	if quiet {
+		return
 	}
 	if r.Degraded != nil {
 		r.Degraded(d)
