@@ -562,26 +562,38 @@ func TestTranscriptOfReadsObservePaths(t *testing.T) {
 // Kills v2's probes reading every observed root for a launch whose Claude
 // config dir the operator names (mc-bm1af, ruling A): PreWake's transcriptOf
 // and the failure Call's probe both search only that dir's projects, so a
-// conversation left under another observed root reads gone.
+// conversation left under another observed root reads gone. A config dir the
+// launch is merely handed (tp.Env passthrough, not the operator's) is
+// searched beside the city roots, so one holding the transcript is found
+// with no observe_paths at all (#6677).
 func TestV2ProbesTheLaunchConfigDir(t *testing.T) {
 	workDir := t.TempDir()
 	root := observedTranscript(t, workDir)
 	for _, c := range []struct {
-		name  string
-		dir   string
-		found bool
+		name    string
+		dir     string
+		viaEnv  bool // the dir rides tp.Env (passthrough), not tp.OperatorEnv
+		observe bool // the city's [daemon] observe_paths cover the root
+		found   bool
 	}{
-		{"no config dir named", "", true},
-		{"the old config dir named", filepath.Dir(root), true},
-		{"moved to a new config dir", t.TempDir(), false},
+		{"no config dir named", "", false, true, true},
+		{"the old config dir named", filepath.Dir(root), false, true, true},
+		{"moved to a new config dir", t.TempDir(), false, true, false},
+		{"a passed-through config dir holding the transcript", filepath.Dir(root), true, false, true},
 	} {
 		k := startKit(t, intentStart, "creating")
-		k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		if c.observe {
+			k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		}
 		row := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", workDir,
 			"session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0")
 		tp := TemplateParams{TemplateName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider()}
 		if c.dir != "" {
-			tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": c.dir}
+			if c.viaEnv {
+				tp.Env = map[string]string{"CLAUDE_CONFIG_DIR": c.dir}
+			} else {
+				tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": c.dir}
+			}
 		}
 		if got := transcriptOf(effectReads{}, k.p.World, sessionInfoFromBead(row), tp); (got == sessTranscriptPresent) != c.found {
 			t.Errorf("%s: transcriptOf = %v, want found %v", c.name, got, c.found)
