@@ -3,6 +3,7 @@ package dispatch
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -157,5 +158,48 @@ func TestProcessRalphControlInfraTimeoutDoesNotBurnIteration(t *testing.T) {
 				t.Errorf("bead count = %d, want %d (no successor iteration may be spawned)", n, beadsBefore)
 			}
 		})
+	}
+}
+
+// TestProcessRalphControlInfraRetryThenPassClosesSameIteration pins the
+// recovery path: after a timed-out run charged the infra budget (not the
+// iteration), a sweep whose check now finishes and passes closes the control
+// on iteration 1 with a single attempt-log entry and no successor iteration.
+func TestProcessRalphControlInfraRetryThenPassClosesSameIteration(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "slow-check.sh", "#!/bin/bash\nsleep 30\n")
+	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	if err := store.SetMetadata(control.ID, beadmeta.CheckTimeoutMetadataKey, "100ms"); err != nil {
+		t.Fatalf("set check timeout: %v", err)
+	}
+	control = mustGet(t, store, control.ID)
+	beadsBefore := countAllBeads(t, store)
+
+	_, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("first ProcessControl = %v, want ErrControlPending", err)
+	}
+
+	// The gate heals: the same script now exits 0 well within the timeout.
+	writeCheckScript(t, cityPath, "slow-check.sh", "#!/bin/sh\nexit 0\n")
+	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("second ProcessControl: %v", err)
+	}
+	if result.Action != "pass" {
+		t.Fatalf("result = %+v, want pass", result)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("control status=%q outcome=%q, want closed pass", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	log := got.Metadata[beadmeta.AttemptLogMetadataKey]
+	if !strings.Contains(log, `"attempt":"1"`) || !strings.Contains(log, `"outcome":"pass"`) || strings.Contains(log, `"attempt":"2"`) {
+		t.Errorf("gc.attempt_log = %q, want a single attempt-1 pass entry", log)
+	}
+	if n := countAllBeads(t, store); n != beadsBefore {
+		t.Errorf("bead count = %d, want %d (no successor iteration)", n, beadsBefore)
 	}
 }
