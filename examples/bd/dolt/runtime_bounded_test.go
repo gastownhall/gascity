@@ -344,3 +344,23 @@ func TestRuntimeScriptPortResolutionFindsHolderWithoutLsof(t *testing.T) {
 		t.Fatalf("lsof ran during port resolution; the holder must come from the kernel socket tables (gascity#7553)\n%s", out)
 	}
 }
+
+// TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet is AC-3 of the
+// gascity#7553 fix: when no kernel socket table is readable (no procfs),
+// managed_runtime_listener_pid keeps answering with lsof, exactly as before.
+func TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet(t *testing.T) {
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "lsof"), "#!/bin/sh\nprintf '1\\n'\n")
+
+	code, out := runRuntimeScriptShell(t, t.TempDir(), bin,
+		"managed_runtime_listener_pid 4406",
+		"GC_DOLT_PORT=4406",
+		"GC_DOLT_PROC_ROOT="+t.TempDir(),
+	)
+	if code != 0 {
+		t.Fatalf("managed_runtime_listener_pid exited %d\n%s", code, out)
+	}
+	if got := strings.TrimSpace(out); got != "1" {
+		t.Fatalf("managed_runtime_listener_pid = %q, want the lsof shim's 1\n%s", got, out)
+	}
+}
