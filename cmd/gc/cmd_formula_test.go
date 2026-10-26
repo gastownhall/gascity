@@ -1640,6 +1640,82 @@ func TestFormulaCookRejectsMalformedMetaBeforeWriting(t *testing.T) {
 	}
 }
 
+// TestFormulaCookAttachStampsMetaOnTheSubDAGRoot pins #7309's fix on the
+// v1 arm: the --meta pairs land on the bead the cook reports as root_id,
+// through the store that holds it — for a v1 graft that is the store
+// molecule.Attach materialized the sub-DAG in, the class binding when the
+// attach bead lives there — and the attach target gains none of them.
+func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
+	metaArgs := []string{
+		"--meta", "work_dir=/tmp/cook-repro-worktree",
+		"--meta", "review_work_bead=fixture-bead",
+		"--meta", "base_sha=base-abc",
+		"--meta", "head_sha=head-def",
+	}
+	wantMeta := map[string]string{
+		"work_dir":         "/tmp/cook-repro-worktree",
+		"review_work_bead": "fixture-bead",
+		"base_sha":         "base-abc",
+		"head_sha":         "head-def",
+	}
+	assertRootMeta := func(t *testing.T, store beads.Store, rootID string) {
+		t.Helper()
+		root, err := store.Get(rootID)
+		if err != nil {
+			t.Fatalf("sub-DAG root %s is not resident in the expected store: %v", rootID, err)
+		}
+		for key, want := range wantMeta {
+			if got := root.Metadata[key]; got != want {
+				t.Errorf("attached root %s metadata[%q] = %q, want %q (--meta dropped on --attach)", rootID, key, got, want)
+			}
+		}
+	}
+
+	t.Run("v1 single-store", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+		if err != nil {
+			t.Fatalf("create target: %v", err)
+		}
+
+		res := cookFormula(t, "legacy-work", append([]string{"--attach", target.ID}, metaArgs...)...)
+
+		assertRootMeta(t, work, res.RootID)
+		if res.RootID == target.ID {
+			t.Fatalf("root_id %s is the attach target itself", res.RootID)
+		}
+		target, err = work.Get(target.ID)
+		if err != nil {
+			t.Fatalf("get target %s: %v", target.ID, err)
+		}
+		for key := range wantMeta {
+			if got, ok := target.Metadata[key]; ok {
+				t.Errorf("attach target %s gained metadata[%q] = %q; --meta belongs on the root", target.ID, key, got)
+			}
+		}
+	})
+
+	t.Run("v1 split city stamps through the binding", func(t *testing.T) {
+		work, graph := cookCityWithSplitGraph(t)
+		target, err := graph.Create(beads.Bead{Title: "a class-resident attach bead", Type: "task"})
+		if err != nil {
+			t.Fatalf("create target: %v", err)
+		}
+
+		res := cookFormula(t, "legacy-work", append([]string{"--attach", target.ID}, metaArgs...)...)
+
+		assertRootMeta(t, graph, res.RootID)
+		if _, err := work.Get(res.RootID); err == nil {
+			t.Errorf("the work ledger also holds v1 sub-DAG root %s; the stamp must not move the graft", res.RootID)
+		}
+	})
+}
+
 // TestFormulaCookAttachHelpDoesNotClaimParentChild pins the #2392 fix:
 // --attach only ever creates a "blocks" dependency back to the attached
 // bead (ensureFormulaCookAttachDep / molecule.Attach both call
