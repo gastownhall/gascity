@@ -140,6 +140,17 @@ func TestAPIClientRouting(t *testing.T) {
 			t.Fatalf("apiClient = %p, want supervisor sentinel %p (the supervisor does not serve [api] port 9443)", got, sentinel)
 		}
 	})
+
+	t.Run("supervisor-hosted-no-api-port-uses-supervisor", func(t *testing.T) {
+		// AC-2 (#5262): the supervisor is the only endpoint serving the city, so
+		// nil (the local fallback) cannot reach its process-owned runtime state.
+		t.Setenv("GC_NO_API", "")
+		restore(supervisorHosted, supervisorClient)
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		if got := apiClient(dir); got != sentinel {
+			t.Fatalf("apiClient = %p, want supervisor sentinel %p for a supervisor-hosted city", got, sentinel)
+		}
+	})
 }
 
 // TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
