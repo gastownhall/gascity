@@ -8928,6 +8928,11 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		{"no city", nil, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects")},
 		{"no passed-through dir", observed, map[string]string{}, nil, city},
 		{"the operator's absolute dir over a passed-through one", observed, dir("/cfg/claude-a"), dir("/cfg/claude-b"), []string{"/cfg/claude-b/projects"}},
+		{"a blank passed-through dir", observed, dir(""), nil, city},
+		{"a spaces-only passed-through dir", observed, dir("  "), nil, city},
+		{"a ~ passed-through dir", observed, dir("~/.claude-a"), nil, city}, // the provider resolves it, not the probe
+		{"a relative passed-through dir", observed, dir("cfg/claude-a"), nil, city},
+		{"the operator's ~ dir written over an ambient one", observed, dir("~/.claude-b"), dir("~/.claude-b"), city},
 	} {
 		if got := launchTranscriptRoots(c.cfg, TemplateParams{Env: c.env, OperatorEnv: c.operator}); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
