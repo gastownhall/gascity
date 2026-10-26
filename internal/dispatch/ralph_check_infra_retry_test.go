@@ -203,3 +203,60 @@ func TestProcessRalphControlInfraRetryThenPassClosesSameIteration(t *testing.T) 
 		t.Errorf("bead count = %d, want %d (no successor iteration)", n, beadsBefore)
 	}
 }
+
+// TestProcessRalphControlInfraRetryBudgetExhaustionBurns pins the bound on the
+// compiled lane: once the infra budget is spent, a gate that still yields no
+// verdict falls through to normal grading so the step terminates instead of
+// pending forever. The attempt log records what the gate actually did, and the
+// counter stays at its cap.
+func TestProcessRalphControlInfraRetryBudgetExhaustionBurns(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		script     string
+		timeout    string
+		wantLogOut string
+	}{
+		{name: "timeout", script: "#!/bin/bash\nsleep 30\n", timeout: "100ms", wantLogOut: "timeout"},
+		{name: "blind exit 75", script: "#!/bin/bash\nexit 75\n", wantLogOut: "fail"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "budget-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+			meta := map[string]string{
+				beadmeta.CheckInfraRetryMetadataKey: strconv.Itoa(maxCheckInfraRetries),
+			}
+			if tc.timeout != "" {
+				meta[beadmeta.CheckTimeoutMetadataKey] = tc.timeout
+			}
+			if err := store.SetMetadataBatch(control.ID, meta); err != nil {
+				t.Fatalf("prime infra budget: %v", err)
+			}
+			control = mustGet(t, store, control.ID)
+
+			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if result.Action != "fail" {
+				t.Fatalf("result = %+v, want fail (budget spent, the outcome is graded)", result)
+			}
+			got := mustGet(t, store, control.ID)
+			if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			log := got.Metadata[beadmeta.AttemptLogMetadataKey]
+			if !strings.Contains(log, `"attempt":"1"`) || !strings.Contains(log, `"outcome":"`+tc.wantLogOut+`"`) {
+				t.Errorf("gc.attempt_log = %q, want an attempt-1 entry with outcome %q", log, tc.wantLogOut)
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != strconv.Itoa(maxCheckInfraRetries) {
+				t.Errorf("gc.check_infra_retry = %q, want it to stay at %d", r, maxCheckInfraRetries)
+			}
+		})
+	}
+}

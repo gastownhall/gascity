@@ -792,8 +792,10 @@ that run as an infrastructure outcome rather than a verdict:
 | none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
 
 Attempt-free re-runs are themselves bounded by a separate infrastructure
-budget, so a script that exits 75 forever still terminates; it just does not
-burn the semantic budget on the way there. No Go code inspects what the check
+budget — the `gc.check_infra_retry` counter on the control bead, 20 runs —
+so a script that exits 75 or hangs past its `check.timeout` forever still
+terminates; it just does not burn the semantic budget on the way there. No
+Go code inspects what the check
 was verifying — exit 75 is the signal a script declares deliberately, and the
 one to write against. It is not the only route to an infrastructure outcome,
 though: the stderr fallback below can reclassify a nonzero exit from a script
