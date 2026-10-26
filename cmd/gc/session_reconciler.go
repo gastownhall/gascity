@@ -2035,6 +2035,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
 	}
+	// A pass over a partial store read did not see every pending create, so
+	// its deferrals must not replace the memo or move its pass start; the
+	// previous record keeps holding while reads are incomplete.
+	if storeQueryPartial {
+		effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), withStartDeferralMemo(nil))
+	}
 	// Starts and launch-drift relaunches read the same dispatch option sources, so
 	// a relaunch applies the trigger-bead pins its fresh start would.
 	dispatchSources := reconcileDispatchOptionSources(reconcileOpts, sw)

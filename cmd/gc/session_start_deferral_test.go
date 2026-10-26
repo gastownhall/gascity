@@ -775,3 +775,54 @@ func TestStartGateDeferredHoldTraceDecision(t *testing.T) {
 		t.Errorf("fields[anchor_age] = %v, want %s (measured from the claim time)", got, want)
 	}
 }
+
+// A pass over a partial store read did not see every pending create, so it
+// must not replace the memo's record or move its pass start; a full pass does.
+func TestStartGateDeferredPartialStorePassLeavesTheMemoAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		partial     bool
+		wantUntouch bool
+	}{
+		{"a partial-store pass leaves the record alone", true, true},
+		{"a full pass replaces the record", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newCapacityEnv(t, false, "a", "b")
+			e.limitToOneWake()
+			memo := newStartDeferralMemo()
+			e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+			prior := e.clk.Now().Add(-time.Minute)
+			commitDeferralPass(memo, prior, "held-id")
+			a := e.pendingCreate(t, "a", "", nil)
+			b := e.pendingCreate(t, "b", "", nil)
+
+			poolDesired := map[string]int{"a": 1, "b": 1}
+			cfgNames := configuredSessionNames(e.cfg, "", e.store)
+			reconcileSessionBeadsTraced(
+				context.Background(), e.city, []beads.Bead{e.bead(t, a.info.ID), e.bead(t, b.info.ID)}, e.desiredState, cfgNames, e.cfg, e.sp,
+				e.store, nil, nil, nil, nil, e.dt, poolDesired, tc.partial, nil, "",
+				nil, e.clk, e.rec, 0, 0, &e.log, &e.log, e.trace,
+				e.startOptions...,
+			)
+
+			got := committedDeferrals(memo)
+			passStart := memoPassStart(memo)
+			if tc.wantUntouch {
+				if !slices.Equal(got, []string{"held-id"}) {
+					t.Fatalf("committed = %v, want [held-id]: a partial-store pass replaced the record", got)
+				}
+				if !passStart.Equal(prior) {
+					t.Fatalf("lastPassStart = %v, want %v: a partial-store pass moved it", passStart, prior)
+				}
+				return
+			}
+			if slices.Contains(got, "held-id") {
+				t.Fatalf("committed = %v: a full pass did not replace the prior record", got)
+			}
+			if want := e.clk.Now(); !passStart.Equal(want) {
+				t.Fatalf("lastPassStart = %v, want this pass's start %v", passStart, want)
+			}
+		})
+	}
+}
