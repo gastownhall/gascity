@@ -196,7 +196,7 @@ var (
 // row is removed, so the edges a backend will drop are on record first.
 func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announce io.Writer) (infraClearResult, error) {
 	result := infraClearResult{}
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		return result, err
 	}
@@ -229,8 +229,10 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 
 	var unproven, retained []beads.Bead
+	// Carried, by (id, created_at): a row that merely reuses a manifest id was
+	// never copied, and deleting it here would destroy the only copy.
 	for _, b := range rows {
-		if proven[b.ID] {
+		if manifest.Carried(b) {
 			retained = append(retained, b)
 			continue
 		}

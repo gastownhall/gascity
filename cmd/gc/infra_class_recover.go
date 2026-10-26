@@ -738,11 +738,12 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// this verb is for. A manifest read before that pause is a snapshot of bytes
 	// that can have moved on, and writing a replacement built from it drops
 	// whatever the other run recorded.
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	proven := manifest.IDs
 	if !recorded {
 		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so nothing distinguishes a bead the copy never carried from one the binding's own GC has since collected. Recovering on that basis would import rows the binding deliberately deleted. Re-converge the binding to restore the check\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.Database, target.ManifestPath())
@@ -804,14 +805,23 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	var stranded []beads.Bead
 	var unrecorded []beads.Bead
 	removedSinceCutover := 0
+	//
+	// Both questions are asked of the manifest by (id, created_at), never by id
+	// alone (infra_copy_manifest.go): a row that reuses an id the manifest
+	// lists for an older bead was never carried. When the binding holds a row
+	// under that id it lands in unrecorded, where the reopened binding's row is
+	// proven against it — the old bead fails that proof and is named, never
+	// folded in; the residue of an interrupted run of this repair passes it.
+	// When the binding does not hold the id it is stranded, and moves.
 	for _, b := range rows {
+		carried := manifest.Carried(b)
 		if resolvable[b.ID] {
-			if !proven[b.ID] {
+			if !carried {
 				unrecorded = append(unrecorded, b)
 			}
 			continue
 		}
-		if proven[b.ID] {
+		if carried {
 			removedSinceCutover++
 			continue
 		}
@@ -1125,14 +1135,25 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			logPrefix, len(dropped), strings.Join(dropped, ", "), target.ManifestPath())
 		return 1
 	}
-	if err := writeInfraCopyManifest(target, extended); err != nil {
+	// created_at carries over for every id already recorded, and a recovered
+	// row's own created_at replaces it: when a recovered row reused an id, the
+	// bead the binding now holds under that id is the recovered one.
+	extendedCreated := make(map[string]time.Time, len(extended))
+	for id, at := range manifest.Created {
+		extendedCreated[id] = at
+	}
+	for id, at := range infraManifestCreatedOf(rows, recovered) {
+		extendedCreated[id] = at
+	}
+	extendedManifest := infraCopyManifest{IDs: setOf(extended), Created: extendedCreated, WrittenAt: time.Now()}
+	if err := writeInfraCopyManifestRecord(target, extended, extendedCreated); err != nil {
 		fmt.Fprintf(stderr, "%s: %v. The previous manifest is at %s\n", logPrefix, err, backup) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	fmt.Fprintf(stdout, "manifest: %d -> %d bead(s) (previous manifest retained at %s)\n", len(proven), len(extended), backup) //nolint:errcheck // best-effort stdout
 
 	// The residual, read back through the same classifier the boot check uses.
-	residual, err := classifyInfraContainmentGap(request.CityPath, target, setOf(extended))
+	residual, err := classifyInfraContainmentGap(request.CityPath, target, extendedManifest)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: re-reading the containment gap: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1

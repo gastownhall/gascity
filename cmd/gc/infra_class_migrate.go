@@ -207,7 +207,6 @@ package main
 // in a binding no work-store reader will ever look at.
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -233,7 +232,8 @@ import (
 const infraMigratedMarkerName = "infra.migrated"
 
 // infraCopyManifestName is the record of exactly which beads the equality stage
-// proved the binding held, one id per line, beside the marker. It is what the
+// proved the binding held, keyed by (id, created_at), beside the marker (format
+// and reasoning in infra_copy_manifest.go). It is what the
 // per-boot containment re-check tests absence against: without it, "the source
 // has it and the binding does not" cannot be told apart from the binding's own
 // GC doing its job. See "What absence from the binding actually means".
@@ -1273,7 +1273,11 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	}
 	// Before the marker, so a marker never exists without the manifest that
 	// makes its convergence claim re-checkable.
-	if err := writeInfraCopyManifest(target, proven); err != nil {
+	// Each id with its created_at, so a later row that reuses the id is never
+	// mistaken for the one copied (see infra_copy_manifest.go). The snapshot
+	// is the right source for it: the equality stage just proved the source
+	// still holds exactly these rows.
+	if err := writeInfraCopyManifestRecord(target, proven, infraManifestCreatedOf(rows, proven)); err != nil {
 		return fail(err)
 	}
 	if err := writeInfraMigratedMarker(target); err != nil {
@@ -1320,7 +1324,7 @@ var clearRetainedInfraCopiesFn = clearRetainedInfraCopies
 // infraRetainedIDs lists the work store's retained copies against the manifest,
 // best-effort, for a refusal to name.
 func infraRetainedIDs(cityPath string, target infraBindingTarget) ([]string, error) {
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil || !recorded {
 		return nil, err
 	}
@@ -1335,7 +1339,7 @@ func infraRetainedIDs(cityPath string, target infraBindingTarget) ([]string, err
 	}
 	var ids []string
 	for _, b := range rows {
-		if proven[b.ID] {
+		if manifest.Carried(b) {
 			ids = append(ids, b.ID)
 		}
 	}
@@ -1417,7 +1421,7 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 // reporting the city unconverged and handing it the revert, which is the one
 // instruction that would abandon everything written since cutover.
 func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
@@ -1434,7 +1438,7 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 				target.Database, target.ManifestPath()),
 		}
 	}
-	gap, err := classifyInfraContainmentGap(cityPath, target, proven)
+	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
@@ -1444,9 +1448,9 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 			return reportUncheckableConvergence(target, logPrefix, stderr, err)
 		}
 		if len(gap.Retained) > 0 || (notePresent && !note.Complete) {
-			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, ProvenBeads: len(proven), LostCrossEdges: note.LostCrossEdges}
+			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges}
 		}
-		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: len(proven), LostCrossEdges: note.LostCrossEdges}
+		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges}
 	}
 	// The removed-since count is context for reading the strand, not a second
 	// alarm: on a city whose wisp GC has run it is large and entirely expected,
@@ -1512,7 +1516,7 @@ type infraContainmentGap struct {
 // opens the binding read-only and the work store through the city's normal
 // work-store opener, and creates nothing: a converged city must not be mutated
 // by its own convergence check.
-func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, proven map[string]bool) (infraContainmentGap, error) {
+func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, manifest infraCopyManifest) (infraContainmentGap, error) {
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)
@@ -1542,20 +1546,45 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	}
 	gap := infraContainmentGap{}
 	for _, b := range rows {
-		if have[b.ID] {
-			gap.Retained = append(gap.Retained, b.ID)
-			continue
-		}
-		if proven[b.ID] {
-			gap.RemovedSinceCutover++
-			gap.Retained = append(gap.Retained, b.ID)
-			continue
-		}
-		gap.Stranded = append(gap.Stranded, b.ID)
+		gap.classify(b, have[b.ID], manifest)
 	}
 	sort.Strings(gap.Stranded)
 	sort.Strings(gap.Retained)
 	return gap, nil
+}
+
+// classify files one work-store infrastructure row. held is whether the
+// binding holds a row under its id.
+//
+// The manifest is consulted by (id, created_at), never by id alone, and that
+// order of questions is the fix for reused ids (infra_copy_manifest.go):
+//
+//   - the bead the copy carried is retained, and counted as removed since
+//     cutover when the binding no longer holds it;
+//   - a row whose id the manifest lists for a DIFFERENT bead was never
+//     carried — bd minted the id again after the copy — so it is stranded even
+//     when the binding holds a row under that id, which is the old bead and
+//     not this one;
+//   - a row the manifest does not list, created after the manifest was
+//     written, cannot be a retained copy of anything: stranded;
+//   - an older unlisted row the binding holds keeps its old reading
+//     (retained); one it does not hold is stranded.
+func (gap *infraContainmentGap) classify(b beads.Bead, held bool, manifest infraCopyManifest) {
+	switch manifest.Match(b) {
+	case infraManifestCarried:
+		if !held {
+			gap.RemovedSinceCutover++
+		}
+		gap.Retained = append(gap.Retained, b.ID)
+	case infraManifestReusedID:
+		gap.Stranded = append(gap.Stranded, b.ID)
+	default:
+		if held && !manifest.createdAfterWrite(b) {
+			gap.Retained = append(gap.Retained, b.ID)
+			return
+		}
+		gap.Stranded = append(gap.Stranded, b.ID)
+	}
 }
 
 // infraBindingResidentIDs is the binding's whole id set, both tiers and closed
@@ -1585,69 +1614,6 @@ func infraBindingResidentIDs(destination beads.Store) (map[string]bool, error) {
 		have[b.ID] = true
 	}
 	return have, nil
-}
-
-// writeInfraCopyManifest records the ids the equality stage proved the binding
-// held. It is written atomically (temp + rename) and before the marker, so a
-// marker never claims convergence the manifest cannot substantiate and a crash
-// mid-write cannot leave a truncated manifest that reads as complete.
-func writeInfraCopyManifest(target infraBindingTarget, ids []string) error {
-	if err := os.MkdirAll(target.Root, 0o755); err != nil {
-		return fmt.Errorf("writing the infra copy manifest: %w", err)
-	}
-	tmp, err := os.CreateTemp(target.Root, infraCopyManifestName+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("writing the infra copy manifest: %w", err)
-	}
-	name := tmp.Name()
-	cleanup := func(cause error) error {
-		_ = os.Remove(name)
-		return fmt.Errorf("writing the infra copy manifest: %w", cause)
-	}
-	writer := bufio.NewWriter(tmp)
-	for _, id := range ids {
-		if _, err := fmt.Fprintln(writer, id); err != nil {
-			_ = tmp.Close()
-			return cleanup(err)
-		}
-	}
-	if err := writer.Flush(); err != nil {
-		_ = tmp.Close()
-		return cleanup(err)
-	}
-	// Synced before the rename: the clear deletes work-store rows on the
-	// manifest's word, so it must be durable before anything relies on it.
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return cleanup(err)
-	}
-	if err := tmp.Close(); err != nil {
-		return cleanup(err)
-	}
-	if err := infraMigrationRename(name, target.ManifestPath()); err != nil {
-		return cleanup(err)
-	}
-	return nil
-}
-
-// readInfraCopyManifest returns the id set the copy was proven to deliver.
-// recorded=false with no error means the city converged before the manifest
-// existed, which is the one state in which absence cannot be classified at all.
-func readInfraCopyManifest(target infraBindingTarget) (proven map[string]bool, recorded bool, err error) {
-	contents, err := os.ReadFile(target.ManifestPath())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("reading the infra copy manifest %s: %w", target.ManifestPath(), err)
-	}
-	proven = make(map[string]bool)
-	for _, line := range strings.Split(string(contents), "\n") {
-		if id := strings.TrimSpace(line); id != "" {
-			proven[id] = true
-		}
-	}
-	return proven, true, nil
 }
 
 // infraPathExists reports whether path exists, distinguishing absence from an

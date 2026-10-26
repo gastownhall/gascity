@@ -620,7 +620,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	}
 	reportBindingRelics(target, logPrefix, stdout, stderr)
 
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -629,13 +629,13 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintln(stdout, "converged: yes (no proven-copy manifest, so stranded-write detection is off for this city)") //nolint:errcheck // best-effort stdout
 		return exitCode
 	}
-	gap, err := classifyInfraContainmentGap(request.CityPath, target, proven)
+	gap, err := classifyInfraContainmentGap(request.CityPath, target, manifest)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	fmt.Fprintf(stdout, "converged: yes\n  proven copy: %d bead(s)\n  stranded:    %d\n  retained copies: %d\n", //nolint:errcheck // best-effort stdout
-		len(proven), len(gap.Stranded), len(gap.Retained))
+		manifest.Len(), len(gap.Stranded), len(gap.Retained))
 	if len(gap.Stranded) > 0 {
 		fmt.Fprintf(stdout, "  stranded ids: %s\n", strings.Join(gap.Stranded, ", ")) //nolint:errcheck // best-effort stdout
 		// The exit code is the deploy gate; the remedy is what an operator does
