@@ -11,6 +11,7 @@ package dolt_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -349,6 +350,26 @@ func TestManagedRuntimeListenerPIDIgnoresBadPort(t *testing.T) {
 		}
 	}
 	assertLsofNeverRan(t, marker)
+}
+
+// TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet covers hosts
+// without procfs listener tables (macOS): the holder comes from lsof as
+// before, skipping holders that are no longer running.
+func TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet(t *testing.T) {
+	binDir := t.TempDir()
+	marker := writeRecordingLsof(t, binDir, fmt.Sprintf("%d\n1\n", reapedPID(t)))
+
+	env := runtimeShellEnv(t, t.TempDir(), binDir, "GC_DOLT_PORT=4406", "GC_DOLT_PROC_ROOT="+t.TempDir())
+	if got := strings.TrimSpace(runRuntimeShell(t, env, "managed_runtime_listener_pid 4407")); got != "1" {
+		t.Fatalf("managed_runtime_listener_pid 4407 = %q, want the first running lsof holder 1", got)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("lsof shim never ran: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "-nP -t -iTCP:4407 -sTCP:LISTEN"; got != want {
+		t.Fatalf("lsof argv = %q, want %q", got, want)
+	}
 }
 
 // procNetTCPFixture mirrors internal/pidutil/listener_test.go: listeners on
