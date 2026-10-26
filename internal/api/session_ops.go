@@ -427,20 +427,27 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 // degrades and health to its city's reporter under gateKey. A gate that is
 // auto only by its builtin default treats a store that cannot record ops at
 // all as off (legacyop.Recorder.QuietCannotRecord): that degrade raises no
-// event and logs at debug.
+// event and logs at debug. Such a gate also leaves a sessions store that is
+// not SQLite-backed unopened (openDefaultOpStore), so it records nothing on a
+// Dolt-served store unless the gate is set explicitly.
 func (o *serverOps) newRecorder(s *Server, gateKey string, mode gate.Mode) *legacyop.Recorder {
 	city := o.city
+	builtinAuto := s.bootFlags.BuiltinAuto(gateKey)
+	open := s.openOpStore
+	if builtinAuto {
+		open = s.openDefaultOpStore
+	}
 	return &legacyop.Recorder{
 		Mode:     mode,
 		Executor: legacyop.ExecutorAPI,
-		Open:     s.openOpStore,
+		Open:     open,
 		Inflight: city.inflight,
 		Clock:    o.clk,
 		Degraded: func(d legacyop.Degrade) { city.degraded.Report(gateKey, d) },
 		Healthy:  func(stage string) { o.healthyGate(gateKey, stage) },
 		Done:     city.done,
 
-		QuietCannotRecord: s.bootFlags.BuiltinAuto(gateKey),
+		QuietCannotRecord: builtinAuto,
 		CrashPoints:       o.crashPoints,
 	}
 }
@@ -489,6 +496,18 @@ func (s *Server) liveServer() *Server {
 func (s *Server) openOpStore() (*opjournal.Store, error) {
 	live := s.liveServer()
 	return live.ops.store(live.state.SessionsBeadStore())
+}
+
+// openDefaultOpStore is openOpStore for a gate that is auto only by its
+// builtin default: it answers *opjournal.NotRecordedByDefaultError, without
+// opening anything, when the live sessions store is not SQLite-backed.
+func (s *Server) openDefaultOpStore() (*opjournal.Store, error) {
+	live := s.liveServer()
+	over := live.state.SessionsBeadStore()
+	if err := opjournal.CheckRecordsByDefault(over); err != nil {
+		return nil, err
+	}
+	return live.ops.store(over)
 }
 
 // healthy tells the degrade reporter that stages of the content gate just

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -62,7 +63,8 @@ func (*opsRecordingDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 // Run implements doctor.Check. With a gate on: an Error (any gate require)
 // or a Warning (auto only) when the store cannot record ops, else OK; gates
 // that are auto only by their builtin default treat a store that cannot
-// record ops at all as off (defaultCannotRecord). With
+// record ops at all as off (defaultCannotRecord), and record nothing on a
+// sessions store that is not SQLite-backed (defaultNotRecorded). With
 // every gate off: OK while the sessions store holds no submitted op row
 // (opjournal.HasSubmittedOps), and a Warning when that cannot be read. Then,
 // for either, a Warning for expired legacy ops left open or a scan for them
@@ -98,6 +100,11 @@ func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 			return r
 		}
 	}
+	if gates != "" && opsGatesBuiltinDefaultOnly(c.flags) {
+		if err := opjournal.CheckRecordsByDefault(sessions); err != nil {
+			return c.defaultNotRecorded(r, sessions, err)
+		}
+	}
 	st, err := opjournal.NewStore(sessions, c.clk)
 	if err != nil {
 		if gates == "" {
@@ -122,6 +129,12 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 		state = "ops recording on (" + gates + ")"
 		capable = state + ": the sessions store can record ops"
 	}
+	return c.scanExpiredAs(r, st, gates, state, capable)
+}
+
+// scanExpiredAs is scanExpired reporting state, and capable when nothing is
+// wrong.
+func (c *opsRecordingDoctorCheck) scanExpiredAs(r *doctor.CheckResult, st *opjournal.Store, gates, state, capable string) *doctor.CheckResult {
 	scan, err := st.ListExpiredLegacy(c.clk.Now().Add(-opsRecordingStaleAfter), opSweepLimit)
 	if err != nil {
 		r.Status = doctor.StatusWarning
@@ -227,6 +240,40 @@ func defaultCannotRecord(r *doctor.CheckResult, sessions beads.SessionStore, rea
 	r.Details = append(r.Details, err.Error())
 	r.FixHint = opsRecordingRemedy(reason, false)
 	return r
+}
+
+// defaultNotRecorded reports a sessions store the builtin auto default does
+// not record on (err is the *opjournal.NotRecordedByDefaultError): OK, as
+// with every gate off, so the store is only checked for the expired legacy
+// ops an earlier explicit gate may have left, which the sweeper still closes.
+func (c *opsRecordingDoctorCheck) defaultNotRecorded(r *doctor.CheckResult, sessions beads.SessionStore, err error) *doctor.CheckResult {
+	where := "a sessions store that is not SQLite-backed"
+	var notDefault *opjournal.NotRecordedByDefaultError
+	if errors.As(err, &notDefault) {
+		if notDefault.Backend.DoltServed {
+			where = "a Dolt-served sessions store"
+		} else {
+			where += " (" + notDefault.Backend.Kind + ")"
+		}
+	}
+	state := "ops recording: auto (default) records nothing on " + where
+	has, herr := opjournal.HasSubmittedOps(sessions)
+	if herr != nil {
+		return offCannotRead(r, herr)
+	}
+	if !has {
+		r.Message = state + "; set the [ops] gates to auto or require to record ops here"
+		return r
+	}
+	st, oerr := opjournal.NewStore(sessions, c.clk)
+	if oerr != nil {
+		reason := legacyop.DegradeReason(oerr)
+		if legacyop.CannotRecord(reason) {
+			return defaultCannotRecord(r, sessions, reason, oerr)
+		}
+		return offCannotRead(r, oerr)
+	}
+	return c.scanExpiredAs(r, st, "", state, state)
 }
 
 // offCannotRead reports, with every gate off, a sessions store that could
