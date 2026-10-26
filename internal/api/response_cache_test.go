@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -667,6 +668,146 @@ func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
 	}
 	if got := store.listByAssigneeCalls; got != 2*perBuild {
 		t.Fatalf("assignee List calls after second blocking request = %d, want %d (blocking must bypass the time cache)", got, 2*perBuild)
+	}
+}
+
+// TestHandleAgentListDoesNotCachePartialList guards the partial-body rule: a
+// partial list reflects a transient backend failure, so it must not be
+// cached — the next request after the backend recovers must see the complete
+// list, not the failure.
+func TestHandleAgentListDoesNotCachePartialList(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := onDemandPoolState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// A failing session provider makes the on-demand pool's session listing
+	// fail, so the response is partial (as in
+	// TestAgentListOnDemandPoolDiscoveryFailureIsPartial).
+	good := state.sp
+	state.sp = runtime.NewFailFake()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var partial agentListWire
+	if err := json.NewDecoder(rec.Body).Decode(&partial); err != nil {
+		t.Fatalf("decode partial agents: %v", err)
+	}
+	if !partial.Partial {
+		t.Fatal("agents with a failing provider = not partial, want partial")
+	}
+
+	// Recover the provider with no event in between: the repeat must
+	// rebuild, because the partial body was never cached.
+	state.sp = good
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("recovered agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var recovered agentListWire
+	if err := json.NewDecoder(rec.Body).Decode(&recovered); err != nil {
+		t.Fatalf("decode recovered agents: %v", err)
+	}
+	if recovered.Partial {
+		t.Fatalf("agents after provider recovery = partial, want complete; errors: %q", recovered.PartialErrors)
+	}
+	if _, ok := agentByNameIn(recovered.Items, "myrig/claude"); !ok {
+		t.Fatalf("myrig/claude missing after provider recovery; items = %+v", recovered.Items)
+	}
+}
+
+// TestHandleAgentListPeekBypassesCache guards the peek rule: ?peek=true
+// requests never read (or write) the response cache. Peek output changes
+// without advancing the event sequence, so a cached peek body would freeze
+// the last output, and the plain list's cached body must not strip the peek
+// output a peek caller asked for.
+func TestHandleAgentListPeekBypassesCache(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
+	state.sp.SetPeekOutput("myrig--worker", "one")
+	h := newTestCityHandler(t, state)
+
+	// Prime the plain-list cache.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming agents = %d, want 200", rec.Code)
+	}
+	perBuild := store.listByAssigneeCalls
+	if perBuild == 0 {
+		t.Fatal("priming agents build issued no assignee-scoped List calls")
+	}
+
+	peekList := func() agentListWire {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?peek=true"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("peek agents = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		var resp agentListWire
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode peek agents: %v", err)
+		}
+		return resp
+	}
+
+	// A peek request must not be served the plain body the prime stored:
+	// that body carries no last_output.
+	peeked := peekList()
+	row, ok := agentByNameIn(peeked.Items, "myrig/worker")
+	if !ok {
+		t.Fatalf("myrig/worker missing from peek list; items = %+v", peeked.Items)
+	}
+	if row.LastOutput != "one" {
+		t.Fatalf("peek last_output = %q, want %q (a peek request must rebuild, not serve the cached plain body)", row.LastOutput, "one")
+	}
+
+	// Peek output changes with no event, so peek requests cannot be cached
+	// against each other either: the second peek must see the new output.
+	state.sp.SetPeekOutput("myrig--worker", "two")
+	peeked = peekList()
+	row, ok = agentByNameIn(peeked.Items, "myrig/worker")
+	if !ok {
+		t.Fatalf("myrig/worker missing from second peek list; items = %+v", peeked.Items)
+	}
+	if row.LastOutput != "two" {
+		t.Fatalf("peek last_output = %q, want %q (peek requests must rebuild on every request)", row.LastOutput, "two")
+	}
+	if got := store.listByAssigneeCalls; got != 3*perBuild {
+		t.Fatalf("assignee List calls after prime + two peeks = %d, want %d (one prime build plus one rebuild per peek)", got, 3*perBuild)
+	}
+
+	// The peek requests must not have disturbed the plain list's cache.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain agents after peeks = %d, want 200", rec.Code)
+	}
+	if got := store.listByAssigneeCalls; got != 3*perBuild {
+		t.Fatalf("assignee List calls after plain repeat = %d, want %d (peek requests must not evict the plain cache)", got, 3*perBuild)
 	}
 }
 
