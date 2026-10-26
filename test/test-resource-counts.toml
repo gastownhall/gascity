@@ -843,6 +843,11 @@ resource = "environment"
 calls = 3
 
 [[count]]
+path = "cmd/gc/infra_copy_manifest_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "cmd/gc/init_provider_readiness_test.go"
 resource = "fixed_sleep"
 calls = 1
