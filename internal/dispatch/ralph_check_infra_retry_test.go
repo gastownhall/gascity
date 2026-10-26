@@ -260,3 +260,51 @@ func TestProcessRalphControlInfraRetryBudgetExhaustionBurns(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessRalphControlInfraRetryTransientStoreErrorStaysPending pins the
+// store boundary of the compiled lane's infra charge: when recording
+// gc.check_infra_retry fails with a transient store error, the control pends
+// (no iteration spent) with gc.controller_error_class=transient recorded, and
+// the next sweep records the spend.
+func TestProcessRalphControlInfraRetryTransientStoreErrorStaysPending(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "slow-check.sh", "#!/bin/bash\nsleep 30\n")
+	memStore, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	if err := memStore.SetMetadata(control.ID, beadmeta.CheckTimeoutMetadataKey, "100ms"); err != nil {
+		t.Fatalf("set check timeout: %v", err)
+	}
+	store := &failOnceMetadataKeyStore{
+		Store: memStore,
+		key:   beadmeta.CheckInfraRetryMetadataKey,
+		err:   errors.New("failed to update metadata: invalid connection: i/o timeout"),
+	}
+	control = mustGet(t, store, control.ID)
+
+	_, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl = %v, want ErrControlPending (transient store error on the infra charge)", err)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Status == "closed" {
+		t.Fatalf("control closed (outcome=%q), want held open", got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if c := got.Metadata[beadmeta.ControllerErrorClassMetadataKey]; c != beadmeta.FailureClassTransient {
+		t.Errorf("gc.controller_error_class = %q, want %q", c, beadmeta.FailureClassTransient)
+	}
+	if log := got.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+		t.Errorf("gc.attempt_log = %q, want empty (no iteration was spent)", log)
+	}
+	if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+		t.Errorf("gc.check_infra_retry = %q, want empty (the write failed)", r)
+	}
+
+	_, err = ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("second ProcessControl = %v, want ErrControlPending (budget spent, iteration still not burned)", err)
+	}
+	if r := mustGet(t, store, control.ID).Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "1" {
+		t.Errorf("gc.check_infra_retry = %q after the store recovers, want 1", r)
+	}
+}
