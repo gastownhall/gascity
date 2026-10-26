@@ -411,3 +411,15 @@ All5 owned roots and8 affected neighbors execute and PASS. No skip appears in an
 | other | 1 | x6_test.go:248: DES-O1's literal X6 line (5,000 notices in 60 s) is a manual measurement: --test_env=GC_LANE_X6_FULL=1 |
 
 Original evidence: `/var/tmp/deploy-ga-ysu0jbr-fresh.e8vpnobh`. Raw BEP predicates: bep-recomputed.json. Execution-record SHA256: `553dab6ba924d1beefad5dab4d0026dfbca275cbc0aaf0cfe946a0a73c17aabd`. All original evidence and immutable digests survive cleanup. docs/PROJECT_MANIFEST.md is absent; TESTING.md, Makefile, CI and the supplied seven-criterion contract define coverage.
+
+## Local pre-push exception (after the canonical gate)
+
+The first normal pre-push hook FAILED on the original gate-record head `446e0dfe7fd92deda848eb813aa31013230e4934`. The original failure remains a FAIL: TestFreshMergeActionBehaviour/clean_merge_onto_the_fetched_tip, scripts_test shard4of6, a scratch fixture's git fetch signal:killed at scripts/bazel_fresh_merge_test.go:241 (parent84.08s). This is separate from canonical criterion3, which completed cleanly with no attributed failures. The full hook was not retried.
+
+failure_attribution: TestFreshMergeActionBehaviour -> ga-ymbahnl | clause3(a): unreachable production package; pre-push only.
+
+Clause1: the test's own function and file are unchanged; DOT --site241 reads UNCHANGED with zero shared hunks. Clause2: tracker ga-ymbahnl (opened in full) was created2026-10-15, and its2026-10-24 sighting already names a killed fixture git fetch. The current sighting was appended and exact-text read back (comment 08eb9551-4511-54b3-b3bc-07881fc82b7e). This is the first hit in this deploy/build lineage; no duplicate tracker or fix was filed. Clause3(a): the complete module test import closure contains24 directories and excludes cmd/gc, the only changed production package; the failing fixture itself invokes git/bash and does not execute gc. Clause4: no path/package overlap (scripts vs cmd/gc). This is a decisive mechanism proof, not an inconclusive or same-package escape; new tests in cmd/gc are recorded honestly.
+
+The mandatory non-diff-owned-gate-failure protocol authorizes a head-scoped pre-push --no-verify after recorded attribution. The source/tests/BUILD remain identical to the failed original head. This addendum is the only follow-up tree change; its normal pre-commit/docs check must PASS, the all-non-gate-files equality must be verified, and the resulting exact head must be pinned for push/clearance. No source rewrite, reset, rebase, force-push, test retry or waiver. The original origin dry-run exit1 selects fork per the supplied remote-selection rule.
+
+Original hook stdout/stderr, the failed raw log, all377 available hook log/XML artifacts and digests, import graph, unchanged-site proof, opened tracker and verified sighting are retained under the evidence directory. The exact original gate/audit before this addendum is preserved separately.
