@@ -697,8 +697,11 @@ func TestMergeSettingsJSON_WrapBareHooks_NormalizesOverlayBareEntry(t *testing.T
 		t.Fatalf("PreToolUse entries = %d, want 1", len(arr))
 	}
 	entry := arr[0].(map[string]any)
-	if entry["matcher"] != "" {
-		t.Errorf("matcher = %v, want empty string", entry["matcher"])
+	if _, hasMatcher := entry["matcher"]; hasMatcher {
+		// The wrapped form omits "matcher" so the entry keys on its inner
+		// command content — a matcher-"" stamp would collide with the core
+		// hooks' matcher-"" identity slot and with other bare pack hooks.
+		t.Errorf("wrapped entry carries matcher %v, want matcherless wrapper", entry["matcher"])
 	}
 	if got := innerCommand(t, entry); got != "scan" {
 		t.Errorf("inner command = %q, want scan", got)
@@ -783,5 +786,51 @@ func TestMergeSettingsJSON_NoWrap_LeavesBareEntries(t *testing.T) {
 	}
 	if _, wrapped := arr[0].(map[string]any)["hooks"]; wrapped {
 		t.Errorf("bare entry was wrapped without WithWrapBareHooks: %v", arr[0])
+	}
+}
+
+// ubsBareEntry is the bare {type,command} shape the ubs pack ships. Reconcile
+// re-projects it into .claude/settings.json on every tick (#3862).
+const ubsBareEntry = `{"type":"command","command":"if echo \"$TOOL_INPUT\" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi"}`
+
+func TestMergeSettingsJSON_WrapBareHooks_IdempotentAcrossReconciles(t *testing.T) {
+	// Issue #3862: the ubs pack overlay ships a bare PreToolUse entry. Each
+	// reconcile merges that overlay into the already-projected (wrapped)
+	// .claude/settings.json; the hook must stay at exactly one matcherless
+	// entry instead of growing by one copy per reconcile.
+	over := []byte(`{"hooks":{"PreToolUse":[` + ubsBareEntry + `]}}`)
+	merged := []byte(`{}`)
+	for i := 0; i < 25; i++ {
+		var err error
+		merged, err = MergeSettingsJSON(merged, over, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("merge tick %d: %v", i, err)
+		}
+	}
+	arr := preToolUse(t, merged)
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries after 25 reconciles = %d, want 1 (idempotent)", len(arr))
+	}
+	assertCanonicalEqual(t, arr[0], `{"hooks":[`+ubsBareEntry+`]}`)
+}
+
+// assertCanonicalEqual fails unless got marshals to the same canonical JSON as
+// the want document.
+func assertCanonicalEqual(t *testing.T, got any, want string) {
+	t.Helper()
+	gotJSON, err := MarshalCanonicalJSON(got)
+	if err != nil {
+		t.Fatalf("marshal got: %v", err)
+	}
+	var wantDoc any
+	if err := json.Unmarshal([]byte(want), &wantDoc); err != nil {
+		t.Fatalf("unmarshal want: %v", err)
+	}
+	wantJSON, err := MarshalCanonicalJSON(wantDoc)
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	if !bytes.Equal(gotJSON, wantJSON) {
+		t.Errorf("entry = %s, want %s", gotJSON, wantJSON)
 	}
 }
