@@ -330,3 +330,66 @@ func TestCLIStorageRoutesReuseAnUnsettledAnswerBriefly(t *testing.T) {
 		t.Errorf("after the window and the repair the session class still refuses: %v", err)
 	}
 }
+
+// M27: a load that fails only because the builtin readiness pass had not run
+// (a cold pack cache) is retried once after that pass, and then serves.
+func TestCLIStorageRoutesRetryTheLoadAfterTheBuiltinReadinessPass(t *testing.T) {
+	cityPath, _ := migratedOneShotCLICity(t)
+	stderr := captureCLIStorageStderr(t)
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	breakSplitCityConfig(t, cityPath) // includes missing-fragment.toml
+	prev := cliStorageRoutesReadyBuiltins
+	readied := 0
+	cliStorageRoutesReadyBuiltins = func(_ fsys.FS, tomlPath string, _ io.Writer) error {
+		readied++
+		// What the readiness pass does for a cold cache: put the missing
+		// composition input in place.
+		return os.WriteFile(filepath.Join(filepath.Dir(tomlPath), "missing-fragment.toml"), []byte("# prepared\n"), 0o644)
+	}
+	t.Cleanup(func() { cliStorageRoutesReadyBuiltins = prev })
+
+	sessions := cliSessionStore(beads.NewMemStore(), nil, cityPath)
+	if _, err := sessions.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Errorf("the load that the readiness pass would fix was refused: %v", err)
+	}
+	if readied != 1 {
+		t.Errorf("the readiness pass ran %d times, want 1", readied)
+	}
+	if strings.Contains(stderr.String(), "refusing to route") {
+		t.Errorf("a refusal was printed for a load the retry fixed: %q", stderr.String())
+	}
+}
+
+// M29: a city.toml that does not exist is not a load failure. With no
+// served-binding note the absent-section verdict applies (identity routes, no
+// refusal); with one, the gate's revert hold refuses, not the config-load
+// refusal.
+func TestCLIStorageRoutesTreatAMissingCityTOMLAsNoStorage(t *testing.T) {
+	expireUnsettledCLIRoutesImmediately(t)
+	cityPath := t.TempDir()
+	resetCLIStorageRoutes(t)
+	stderr := captureCLIStorageStderr(t)
+	if routes := cliStorageRoutes(cityPath); routes != nil {
+		t.Errorf("a city with no city.toml resolved routes %+v, want none", routes)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("a city with no city.toml wrote %q", stderr.String())
+	}
+
+	served := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(served, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBornSplitServedNote(served, bornSplitServedNote{Binding: "infra", Provider: config.StorageProviderSQLiteBeads, Location: "/x"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := cliSessionStore(beads.NewMemStore(), nil, served).List(beads.ListQuery{AllowScan: true})
+	if err == nil {
+		t.Fatal("a city that served a split and lost its city.toml routed sessions to the work store")
+	}
+	if strings.Contains(err.Error(), "failed to load") {
+		t.Errorf("a missing city.toml was reported as a load failure: %v", err)
+	}
+}

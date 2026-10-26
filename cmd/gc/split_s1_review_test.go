@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -102,5 +104,70 @@ provider = "sqlite-beads"
 		if data, _ := os.ReadFile(filepath.Join(cityPath, ".gc", "site.toml")); strings.Contains(string(data), "gas-city-gateway") {
 			t.Errorf("the refused init persisted the reserved identity:\n%s", data)
 		}
+	}
+}
+
+// M25: `gc start` refuses a split city whose rig prefix is reserved, at its
+// own validation step (beside ValidateRigs), before the storage gate.
+func TestStartRefusesASplitCityWithAReservedRigPrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "gas-city-gateway")
+	clearInheritedBeadsEnv(t)
+	t.Chdir(t.TempDir())
+	for _, dir := range []string{filepath.Join(cityPath, ".gc"), rigPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityTOML := `[workspace]
+name = "start-r10"
+
+[beads]
+provider = "file"
+
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+
+[[rigs]]
+name = "gas-city-gateway"
+`
+	siteTOML := "workspace_name = \"start-r10\"\n\n[[rig]]\nname = \"gas-city-gateway\"\npath = " + strconv.Quote(rigPath) + "\n"
+	for path, body := range map[string]string{
+		filepath.Join(cityPath, "city.toml"):        cityTOML,
+		filepath.Join(cityPath, ".gc", "site.toml"): siteTOML,
+		filepath.Join(cityPath, "pack.toml"):        "[pack]\nname = \"start-r10\"\nschema = 2\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldDry := dryRunMode
+	dryRunMode = true
+	t.Cleanup(func() { dryRunMode = oldDry })
+	gateRan := false
+	prevSource := openInfraMigrationSource
+	openInfraMigrationSource = func(p string) (beads.Store, error) { gateRan = true; return prevSource(p) }
+	t.Cleanup(func() { openInfraMigrationSource = prevSource })
+
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("gc start exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `rig "gas-city-gateway"`) || !strings.Contains(stderr.String(), "gcg") {
+		t.Errorf("stderr = %q, want the reserved-prefix refusal naming the rig", stderr.String())
+	}
+	if gateRan {
+		t.Error("gc start reached the storage gate; the refusal belongs to its own validation step")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "store")); err == nil {
+		t.Error("the refused start created a binding")
 	}
 }

@@ -270,7 +270,7 @@ func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled 
 		// that reached a class resolver without the load that prepares the
 		// builtin pack caches (see prewarmCLIStorageRoutes) must not be refused
 		// for a cache that was merely cold. Only the failure path pays for it.
-		if readyErr := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, io.Discard); readyErr == nil {
+		if readyErr := cliStorageRoutesReadyBuiltins(fsys.OSFS{}, tomlPath, io.Discard); readyErr == nil {
 			cfg, _, err = config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, cliStorageRoutesLoad)
 		}
 	}
@@ -291,6 +291,11 @@ func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled 
 	}
 	return resolveCLIStorageRoutesFor(cityPath, cfg)
 }
+
+// cliStorageRoutesReadyBuiltins is the builtin readiness pass the routing read
+// retries its config load after: a seam, so a test can stand in for a cold
+// cache being prepared.
+var cliStorageRoutesReadyBuiltins = ensureBuiltinPacksForConfigLoad
 
 // cityTOMLPresent reports whether the root config file exists. Only a provably
 // absent file counts as absent: a stat that fails any other way is a config
