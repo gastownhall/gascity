@@ -969,6 +969,15 @@ store, copy them into the binding with
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
+				// The sub-DAG root lives where molecule.Attach materialized it:
+				// attachStore, which on a split city is the class binding.
+				rootMeta, err := parseMetadataArgs(metadata)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				if err := setFormulaCookRootMetadata(attachStore, result.RootID, rootMeta); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -1010,7 +1019,7 @@ store, copy them into the binding with
 			// rootStore is the store the cooked root ended up in, so the --meta
 			// stamp below lands on the bead it just created rather than on a
 			// store that has never held it.
-			rootStore := store
+			var rootStore beads.Store
 			if isGraphFormula {
 				// This arm writes molecule.Cook's sequence out rather than
 				// calling molecule.CookChoosingStore, and it needs all three
@@ -1080,11 +1089,8 @@ store, copy them into the binding with
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
-			if len(rootMeta) > 0 {
-				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
-					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
+			if err := setFormulaCookRootMetadata(rootStore, result.RootID, rootMeta); err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			if jsonOutput {
@@ -1180,6 +1186,18 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	// MetadataOnly mirrors the no-session default binding).
 	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+}
+
+// setFormulaCookRootMetadata applies the --meta pairs to the cooked root
+// through the store that holds it. No pairs is a no-op.
+func setFormulaCookRootMetadata(store beads.Store, rootID string, meta map[string]string) error {
+	if len(meta) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(rootID, meta); err != nil {
+		return fmt.Errorf("setting root metadata on %s: %w", rootID, err)
+	}
+	return nil
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {

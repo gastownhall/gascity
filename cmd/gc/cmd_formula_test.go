@@ -1612,3 +1612,92 @@ func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
 		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
 	}
 }
+
+// formulaCookAttachMetaArgs is the bug report's (#7309) four --meta pairs.
+var formulaCookAttachMetaArgs = []string{
+	"--meta", "work_dir=/tmp/cook-repro-worktree",
+	"--meta", "review_work_bead=fixture-bead",
+	"--meta", "base_sha=base-abc",
+	"--meta", "head_sha=head-def",
+}
+
+// formulaCookAttachMetaWant is what formulaCookAttachMetaArgs stamps.
+var formulaCookAttachMetaWant = map[string]string{
+	"work_dir":         "/tmp/cook-repro-worktree",
+	"review_work_bead": "fixture-bead",
+	"base_sha":         "base-abc",
+	"head_sha":         "head-def",
+}
+
+// requireFormulaCookMeta fails unless the bead carries every
+// formulaCookAttachMetaWant pair.
+func requireFormulaCookMeta(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get cooked root %s: %v", id, err)
+	}
+	for key, want := range formulaCookAttachMetaWant {
+		if got := b.Metadata[key]; got != want {
+			t.Errorf("cooked root %s metadata[%q] = %q, want %q (--meta dropped on --attach)", id, key, got, want)
+		}
+	}
+}
+
+// requireNoFormulaCookMeta fails if the attach bead picked up any --meta key:
+// the caller's metadata belongs on the cooked root, not on the bead it grafts
+// onto.
+func requireNoFormulaCookMeta(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get attach bead %s: %v", id, err)
+	}
+	for key := range formulaCookAttachMetaWant {
+		if got, ok := b.Metadata[key]; ok {
+			t.Errorf("attach bead %s metadata[%q] = %q, want unset (--meta landed on the attach bead)", id, key, got)
+		}
+	}
+}
+
+// TestFormulaCookAttachStampsMetaOnTheSubDAGRoot pins #7309: `gc formula cook
+// --attach` writes every --meta pair to the bead it reports as root_id, in the
+// store that holds that root, exactly as a standalone cook does.
+func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
+	t.Run("v1 single-store", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+
+		res := cookFormula(t, "legacy-work", append([]string{"--attach", target.ID}, formulaCookAttachMetaArgs...)...)
+
+		if res.RootID == target.ID {
+			t.Fatalf("cook reported the attach bead %s as its root", target.ID)
+		}
+		requireFormulaCookMeta(t, work, res.RootID)
+		requireNoFormulaCookMeta(t, work, target.ID)
+	})
+
+	t.Run("v1 split city, attach bead in the binding", func(t *testing.T) {
+		work, graph := cookCityWithSplitGraph(t)
+		target, err := graph.Create(beads.Bead{Title: "a running workflow step", Type: "task"})
+		if err != nil {
+			t.Fatalf("create the class-resident attach bead: %v", err)
+		}
+
+		res := cookFormula(t, "legacy-work", append([]string{"--attach", target.ID}, formulaCookAttachMetaArgs...)...)
+
+		requireFormulaCookMeta(t, graph, res.RootID)
+		requireNoFormulaCookMeta(t, graph, target.ID)
+		if _, err := work.Get(res.RootID); err == nil {
+			t.Errorf("the work ledger holds v1 sub-DAG root %s, grafted onto a bead it does not hold", res.RootID)
+		}
+	})
+}
