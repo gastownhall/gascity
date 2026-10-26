@@ -901,3 +901,27 @@ func TestMergeSettingsJSON_WrapBareHooks_HealLeavesCategoriesOverlayDoesNotProje
 		t.Errorf("PreToolUse entries (projected by overlay) = %d, want 1 (healed)", got)
 	}
 }
+
+func TestMergeSettingsJSON_WrapBareHooks_TwinDropsWhenMatcherlessCopyExists(t *testing.T) {
+	// A staged rollout can leave both shapes on disk: a new binary writes the
+	// matcherless entry, an older one re-appends the legacy matcher-"" twin.
+	// The twin is redundant with the matcherless copy and must not survive, or
+	// the pack hook fires twice on every event forever.
+	base := `{"hooks":{"Stop":[` +
+		`{"matcher":"","hooks":[{"type":"command","command":"pack"}]},` +
+		`{"hooks":[{"type":"command","command":"pack"}]}` +
+		`]}}`
+	over := []byte(`{"hooks":{"Stop":[{"type":"command","command":"pack"}]}}`)
+
+	result, err := MergeSettingsJSON([]byte(base), over, WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := stopEntries(t, result)
+	if len(arr) != 1 {
+		t.Fatalf("Stop entries = %d, want 1 (legacy twin must not survive beside its matcherless copy)\n%s", len(arr), result)
+	}
+	if _, hasMatcher := arr[0].(map[string]any)["matcher"]; hasMatcher {
+		t.Errorf("surviving entry should be the matcherless form, got %v", arr[0])
+	}
+}
