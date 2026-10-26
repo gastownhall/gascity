@@ -340,7 +340,8 @@ func singleBashBlock(t *testing.T, section string) string {
 // $GC_ESCALATION_RECIPIENT with --notify, as escalate.sh does, so a
 // configured triage agent is woken instead of the mail landing in the
 // sessionless human inbox. Unset and empty both fall back to human, for which
-// --notify is a no-op.
+// --notify is a no-op. The section must not leave the recipient to the
+// model's judgment or hide the command behind a template action.
 func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 	cases := []struct {
 		name string
@@ -353,13 +354,26 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 		{name: "unset", want: "human"},
 		{name: "empty", env: []string{"GC_ESCALATION_RECIPIENT="}, want: "human"},
 	}
+	sections := make(map[string]string, len(coreWorkerPrompts))
 	for _, path := range coreWorkerPrompts {
 		t.Run(path, func(t *testing.T) {
 			data, err := fs.ReadFile(PackFS, path)
 			if err != nil {
 				t.Fatalf("reading %s: %v", path, err)
 			}
-			block := singleBashBlock(t, promptSection(t, string(data), "Escalation"))
+			section := promptSection(t, string(data), "Escalation")
+			sections[path] = section
+			for _, banned := range []string{"gc mail send human", "mail that instead", "coordinator", "{{"} {
+				if strings.Contains(section, banned) {
+					t.Errorf("Escalation section contains %q; routing must come from GC_ESCALATION_RECIPIENT and render verbatim:\n%s", banned, section)
+				}
+			}
+			for _, want := range []string{"GC_ESCALATION_RECIPIENT", "`human`"} {
+				if !strings.Contains(section, want) {
+					t.Errorf("Escalation section does not name %q:\n%s", want, section)
+				}
+			}
+			block := singleBashBlock(t, section)
 			scriptPath := filepath.Join(t.TempDir(), "escalation-block.sh")
 			if err := os.WriteFile(scriptPath, []byte(block), 0o644); err != nil {
 				t.Fatalf("write escalation block: %v", err)
@@ -388,5 +402,11 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 				})
 			}
 		})
+	}
+	// graph-worker.md is not a template and cannot share a fragment, so the
+	// two copies are pinned identical to keep them from drifting.
+	if first, second := sections[coreWorkerPrompts[0]], sections[coreWorkerPrompts[1]]; first != second {
+		t.Errorf("Escalation sections differ:\n%s:\n%s\n%s:\n%s",
+			coreWorkerPrompts[0], first, coreWorkerPrompts[1], second)
 	}
 }
