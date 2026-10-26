@@ -237,6 +237,51 @@ func TestManagedRuntimeListenerPIDReadsProcTables(t *testing.T) {
 			port: "24976",
 			want: "",
 		},
+		{
+			name: "candidate holding the socket wins over a lower holder",
+			rows: []fakeProcRow{{port: 24977, state: "0A", inode: "700005"}},
+			fds: []fakeProcFD{
+				{pid: "300", fd: "3", target: "socket:[700005]"},
+				{pid: "500", fd: "3", target: "socket:[700005]"},
+			},
+			port:       "24977",
+			candidates: []string{"500"},
+			want:       "500",
+		},
+		{
+			name: "candidate holding nothing falls back to the lowest holder",
+			rows: []fakeProcRow{{port: 24978, state: "0A", inode: "700006"}},
+			fds: []fakeProcFD{
+				{pid: "300", fd: "3", target: "socket:[700006]"},
+				{pid: "700", fd: "3", target: "/dev/null"},
+			},
+			port:       "24978",
+			candidates: []string{"700"},
+			want:       "300",
+		},
+		{
+			name: "spoofed fd link targets never count as holders",
+			rows: []fakeProcRow{{port: 24979, state: "0A", inode: "700007"}},
+			fds: []fakeProcFD{
+				{pid: "300", fd: "3", target: "socket:[700007]"},
+				{pid: "400", fd: "9", target: "/tmp/x 9 -> socket:[700007]"},
+				{pid: "400", fd: "8", target: "/tmp/a\nlrwx------ 1 0 0 64 Oct 26 12:00 9 -> socket:[700007]"},
+			},
+			port: "24979",
+			want: "300",
+		},
+		{
+			name: "spoofed candidate is rejected and the walk answers",
+			rows: []fakeProcRow{{port: 24980, state: "0A", inode: "700008"}},
+			fds: []fakeProcFD{
+				{pid: "300", fd: "3", target: "socket:[700008]"},
+				{pid: "400", fd: "9", target: "/tmp/x 9 -> socket:[700008]"},
+				{pid: "400", fd: "8", target: "/tmp/a\nlrwx------ 1 0 0 64 Oct 26 12:00 9 -> socket:[700008]"},
+			},
+			port:       "24980",
+			candidates: []string{"400"},
+			want:       "300",
+		},
 	}
 
 	for _, tt := range tests {
