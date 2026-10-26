@@ -1,6 +1,7 @@
 package herdr
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -46,4 +47,31 @@ func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
 	if got, want := c.socketPath(), filepath.Join(home, ".config", "herdr", "sessions", "hometest", "herdr.sock"); got != want {
 		t.Errorf("socketPath() = %q; want %q", got, want)
 	}
+}
+
+// Environments where os.UserConfigDir() fails — a relative XDG_CONFIG_HOME,
+// or neither XDG_CONFIG_HOME nor HOME set — must still resolve the socket
+// the way herdr does: herdr uses a relative XDG_CONFIG_HOME as-is, and with
+// neither variable set it roots under the temp dir. A resolver that
+// discards the os.UserConfigDir() error joins onto an empty config root and
+// dials the cwd-relative "herdr/sessions/<name>/herdr.sock".
+func TestSocketPathMatchesHerdrWhereUserConfigDirFails(t *testing.T) {
+	t.Run("relative_xdg", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "rel")
+		t.Setenv("HOME", t.TempDir())
+
+		c := newClient("reltest", "")
+		if got, want := c.socketPath(), filepath.Join("rel", "herdr", "sessions", "reltest", "herdr.sock"); got != want {
+			t.Errorf("socketPath() = %q; want %q", got, want)
+		}
+	})
+	t.Run("no_xdg_no_home", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("HOME", "")
+
+		c := newClient("tmptest", "")
+		if got, want := c.socketPath(), filepath.Join(os.TempDir(), "herdr", "sessions", "tmptest", "herdr.sock"); got != want {
+			t.Errorf("socketPath() = %q; want %q", got, want)
+		}
+	})
 }
