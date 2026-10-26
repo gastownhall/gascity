@@ -195,6 +195,12 @@ type Server struct {
 	webhookAccessFaultMu     sync.Mutex
 	webhookAccessFaultLogged map[string]struct{}
 
+	// suspensionStateFault is the suspension-state read fault the active-bead
+	// lookup last logged, "" while the file reads; see
+	// suspensionStateFaultChanged.
+	suspensionStateFaultMu sync.Mutex
+	suspensionStateFault   string
+
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
 	webhookMaxBody int64

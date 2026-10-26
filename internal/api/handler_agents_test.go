@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2034,25 +2035,33 @@ func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
 }
 
 // TestActiveBeadLookupForSuspendedRigReadsNoStore: a rig-scoped lookup for a
-// suspended rig answers nothing instead of falling back to every rig.
+// suspended rig whose store no unsuspended rig shares answers nothing instead
+// of falling back to every rig. That holds for a store of its own and for one
+// it shares only with another suspended rig.
 func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		live bool
-	}{{"live", true}, {"cached", false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			l := newSuspendedRigLookup(t)
-			suspendAlphaAtRuntime(t, l.state)
+		name                  string
+		shareWithSuspendedRig bool
+	}{{"own store", false}, {"store shared with a suspended rig", true}} {
+		for _, live := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/live=%v", tc.name, live), func(t *testing.T) {
+				l := newSuspendedRigLookup(t)
+				suspendAlphaAtRuntime(t, l.state)
+				if tc.shareWithSuspendedRig {
+					l.state.cfg.Rigs = append(l.state.cfg.Rigs, config.Rig{Name: "gamma", Path: "/tmp/gamma", SuspendedOnStart: true})
+					l.state.stores["gamma"] = l.alpha
+				}
 
-			got := lookupActiveBead(New(l.state), tc.live, "alpha", "session-id")
+				got := lookupActiveBead(New(l.state), live, "alpha", "session-id")
 
-			if got != "" {
-				t.Errorf("active bead = %q, want none", got)
-			}
-			if l.alpha.listCalls != 0 || l.beta.listCalls != 0 {
-				t.Errorf("List calls alpha=%d beta=%d, want no store read", l.alpha.listCalls, l.beta.listCalls)
-			}
-		})
+				if got != "" {
+					t.Errorf("active bead = %q, want none", got)
+				}
+				if l.alpha.listCalls != 0 || l.beta.listCalls != 0 {
+					t.Errorf("List calls alpha=%d beta=%d, want no store read", l.alpha.listCalls, l.beta.listCalls)
+				}
+			})
+		}
 	}
 }
 
@@ -2141,11 +2150,12 @@ func TestActiveBeadLookupReadsRigInferredSuspended(t *testing.T) {
 }
 
 // TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias: in legacy
-// shared-file mode every rig aliases one store. A suspended alpha must not
-// hide the store that beta still reaches.
+// shared-file mode every rig aliases one store, which the controller keeps
+// warm even for a suspended rig. A suspended alpha must not hide the store
+// that beta still reaches, whether the lookup is unscoped or scoped to alpha.
 func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
 	for _, live := range []bool{true, false} {
-		t.Run(fmt.Sprintf("live=%v", live), func(t *testing.T) {
+		t.Run(fmt.Sprintf("unscoped/live=%v", live), func(t *testing.T) {
 			l := newSuspendedRigLookup(t)
 			suspendAlphaAtRuntime(t, l.state)
 			l.state.stores["alpha"] = l.beta
@@ -2157,6 +2167,27 @@ func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
 			}
 			if got != l.betaWork {
 				t.Errorf("active bead = %q, want %q", got, l.betaWork)
+			}
+		})
+		// The scoped lookup reads the shared store and nothing else: able
+		// has a store of its own and sorts first, so a lookup that fell
+		// back to every store would answer able's bead.
+		t.Run(fmt.Sprintf("scoped to alpha/live=%v", live), func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+			l.state.stores["alpha"] = l.beta
+			able := &listCountingStore{Store: &beads.MemStore{IDPrefix: "able"}}
+			addActiveWork(t, able.Store, "session-id")
+			l.state.cfg.Rigs = append(l.state.cfg.Rigs, config.Rig{Name: "able", Path: "/tmp/able"})
+			l.state.stores["able"] = able
+
+			got := lookupActiveBead(New(l.state), live, "alpha", "session-id")
+
+			if able.listCalls != 0 {
+				t.Errorf("rig able List calls = %d, want 0", able.listCalls)
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want the shared store's %q", got, l.betaWork)
 			}
 		})
 	}
@@ -2209,4 +2240,44 @@ func TestActiveBeadLookupSuspensionStateEdges(t *testing.T) {
 			t.Errorf("active bead = %q, want beta's %q (a relative state file must not be read)", got, l.betaWork)
 		}
 	})
+}
+
+// TestActiveBeadLookupLogsUnreadableSuspensionStateOnce: every lookup reads
+// the state file, once per row of a list, so an unreadable file is logged
+// once, naming the file, until it reads again. A fault after that is logged
+// again.
+func TestActiveBeadLookupLogsUnreadableSuspensionStateOnce(t *testing.T) {
+	l := newSuspendedRigLookup(t)
+	path := citylayout.SuspensionStateFile(l.state.cityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeState := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := New(l.state)
+	lookupRows := func() {
+		for range 3 {
+			srv.findActiveBeadForAssignees("", "session-id")
+		}
+	}
+	var logs bytes.Buffer
+	t.Cleanup(captureLog(t, &logs))
+
+	writeState("{not json")
+	lookupRows()
+	if n := strings.Count(logs.String(), path); n != 1 {
+		t.Fatalf("corrupt state file logged %d times naming %s, want 1; log:\n%s", n, path, logs.String())
+	}
+
+	writeState(`{}`)
+	lookupRows()
+	writeState("{not json")
+	lookupRows()
+	if n := strings.Count(logs.String(), path); n != 2 {
+		t.Fatalf("state file corrupt again after it read logged %d times in all, want 2; log:\n%s", n, logs.String())
+	}
 }

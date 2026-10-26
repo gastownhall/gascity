@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -570,9 +571,10 @@ func cacheColdRigNames(cfg *config.City, st suspensionstate.State) map[string]bo
 
 // loadCacheColdRigs reads the runtime suspension state and returns
 // cacheColdRigNames for the current config. An unreadable state file is
-// logged and treated as no runtime overrides, so the config's startup
-// defaults still decide, as they do for the controller. Without a city path
-// there is no state file to read.
+// treated as no runtime overrides, so the config's startup defaults still
+// decide, as they do for the controller. It is logged once, naming the file,
+// until it reads again or fails differently (suspensionStateFaultChanged).
+// Without a city path there is no state file to read.
 func (s *Server) loadCacheColdRigs() map[string]bool {
 	cfg := s.state.Config()
 	cityPath := s.state.CityPath()
@@ -580,11 +582,30 @@ func (s *Server) loadCacheColdRigs() map[string]bool {
 		return cacheColdRigNames(cfg, suspensionstate.State{})
 	}
 	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
-	if err != nil {
-		log.Printf("api: reading suspension state: %v", err)
+	if newFault := s.suspensionStateFaultChanged(err); err != nil {
+		if newFault {
+			log.Printf("api: reading suspension state %s: %v; applying the config's suspension defaults", citylayout.SuspensionStateFile(cityPath), err)
+		}
 		st = suspensionstate.State{}
 	}
 	return cacheColdRigNames(cfg, st)
+}
+
+// suspensionStateFaultChanged records err, nil once the state file reads
+// again, as the current suspension-state read fault and reports whether it
+// differs from the one recorded before. Every active-bead lookup loads the
+// file, once per row of a list, so a persistent fault is logged once rather
+// than on every row of every poll.
+func (s *Server) suspensionStateFaultChanged(err error) bool {
+	fault := ""
+	if err != nil {
+		fault = err.Error()
+	}
+	s.suspensionStateFaultMu.Lock()
+	defer s.suspensionStateFaultMu.Unlock()
+	changed := fault != s.suspensionStateFault
+	s.suspensionStateFault = fault
+	return changed
 }
 
 // citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
