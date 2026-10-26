@@ -124,6 +124,45 @@ func TestPackCredentialsCheckAmbientCredentialSourceOK(t *testing.T) {
 	}
 }
 
+// Unmatched networked remotes stay visible as redacted Details lines so an
+// operator can still see which imports no rule covers.
+func TestPackCredentialsCheckUnmatchedRemoteDetails(t *testing.T) {
+	ctx := credCtx(t)
+	writeCityCred(t, ctx.CityPath, "[[credential]]\nmatch=\"gitlab.com/acme\"\nhelper=\"x\"\n", 0o600)
+	imports := map[string]config.Import{
+		"public":    {Source: "https://user:s3cret-token@github.com/gastownhall/gascity-packs", Version: "^1.0"},
+		"tools":     {Source: "https://github.com/gascity/tools", Version: "^1.0"},
+		"covered":   {Source: "https://gitlab.com/acme/private", Version: "^1.0"},
+		"local-dir": {Source: "./packs/review"},
+	}
+	r := NewPackCredentialsCheck(imports).Run(ctx)
+	if r.Status != StatusOK || r.FixHint != "" {
+		t.Fatalf("status = %v fix=%q, want OK with no FixHint; details=%v", r.Status, r.FixHint, r.Details)
+	}
+	for _, want := range []string{
+		"https://***@github.com/gastownhall/gascity-packs — no matching credential rule",
+		"https://github.com/gascity/tools — no matching credential rule",
+	} {
+		n := 0
+		for _, d := range r.Details {
+			if d == want {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("Details contains %q %d time(s), want 1; details=%v", want, n, r.Details)
+		}
+	}
+	for _, line := range append([]string{r.Message, r.FixHint}, r.Details...) {
+		if strings.Contains(line, "s3cret-token") || strings.Contains(line, "user:") {
+			t.Fatalf("userinfo leaked into output: %q", line)
+		}
+		if strings.Contains(line, "gitlab.com/acme/private") || strings.Contains(line, "packs/review") {
+			t.Fatalf("matched or local import listed as unmatched: %q", line)
+		}
+	}
+}
+
 // A public HTTPS import that clones anonymously must stay healthy when an
 // unrelated private-host rule is added (issue #5894): absence of a matching
 // rule is not evidence that a credential is required.

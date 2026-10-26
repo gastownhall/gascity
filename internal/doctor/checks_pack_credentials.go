@@ -79,10 +79,10 @@ func (c *PackCredentialsCheck) Run(ctx *CheckContext) *CheckResult {
 	return r
 }
 
-// remoteImportsWithoutRule returns the redacted clone URLs of networked remote
-// imports that no credential rule matches. A public import legitimately has no
-// rule, so these are informational Details only: the result stays StatusOK
-// with no FixHint.
+// remoteImportsWithoutRule returns one Details line, "<redacted clone URL> —
+// no matching credential rule", per networked remote import that no credential
+// rule matches. A public import legitimately has no rule, so these are
+// informational Details only: the result stays StatusOK with no FixHint.
 func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []string {
 	var missing []string
 	for _, imp := range c.imports {
@@ -92,7 +92,7 @@ func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []
 		if _, ok := rules.MatchSource(imp.Source); ok {
 			continue
 		}
-		missing = append(missing, gitcred.RedactUserinfo(remotesource.Parse(imp.Source).CloneURL))
+		missing = append(missing, gitcred.RedactUserinfo(remotesource.Parse(imp.Source).CloneURL)+" — no matching credential rule")
 	}
 	return missing
 }
