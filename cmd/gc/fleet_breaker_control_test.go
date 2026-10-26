@@ -624,3 +624,70 @@ func TestFleetBreakerDoctorCheck_Run(t *testing.T) {
 		}
 	})
 }
+
+// askControllerFleetBreaker sends one fleet breaker verb through
+// handleControllerConn, the dispatch the controller socket runs, so the
+// reconciler mode the handler answers for is the one wake carries.
+func askControllerFleetBreaker(t *testing.T, cityDir, command string, wake *controllerWake) fleetBreakerReply {
+	t.Helper()
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleControllerConn(server, cityDir, controllerHostingStandalone, func() {}, nil, nil, nil, nil, wake)
+	}()
+	defer func() {
+		_ = client.Close()
+		<-done
+	}()
+	if _, err := client.Write([]byte(fleetBreakerCommandPrefix + command + "\n")); err != nil {
+		t.Fatalf("writing the %q verb: %v", command, err)
+	}
+	var reply fleetBreakerReply
+	if err := json.NewDecoder(client).Decode(&reply); err != nil {
+		t.Fatalf("decoding the %q reply: %v", command, err)
+	}
+	return reply
+}
+
+// The handler tests above hand handleFleetBreakerSocketCmd the latched mode
+// directly. This one reaches it through the controller socket's dispatch, where
+// the mode comes from the wake that carries the latch: a dispatch that answers a
+// v2 controller from a guard nothing reads, or a legacy controller as if the
+// breaker did not apply, goes red here.
+func TestHandleControllerConn_FleetBreakerVerbsAnswerForTheLatchedReconciler(t *testing.T) {
+	legacyWake := &controllerWake{mode: reconcilerLegacy}
+	v2Wake := &controllerWake{mode: reconcilerV2, planner: &planner{}}
+
+	t.Run("a v2 controller reports the breaker does not apply and a reset leaves the guard alone", func(t *testing.T) {
+		g := openFleetGuard(t)
+		dir := fleetControlCity(t, g)
+		status := askControllerFleetBreaker(t, dir, fleetBreakerStatusCommand, v2Wake)
+		if status.Outcome != "ok" || status.Enabled || status.State != "" || !status.unguardedByMode() {
+			t.Fatalf("status through a v2 controller = %+v, want ok, not enabled, no state, reconciler_mode %q", status, reconcilerV2)
+		}
+		reset := askControllerFleetBreaker(t, dir, fleetBreakerResetCommand, v2Wake)
+		if reset.Outcome != "ok" || reset.Enabled || reset.WasOpen || !reset.unguardedByMode() {
+			t.Fatalf("reset through a v2 controller = %+v, want ok, not enabled, not was_open, reconciler_mode %q", reset, reconcilerV2)
+		}
+		if got := fleetState(g); got != resilience.StateOpen {
+			t.Fatalf("guard after a reset through a v2 controller = %v, want it untouched (open)", got)
+		}
+	})
+
+	t.Run("a legacy controller answers for the published guard and a reset clears it", func(t *testing.T) {
+		g := openFleetGuard(t)
+		dir := fleetControlCity(t, g)
+		status := askControllerFleetBreaker(t, dir, fleetBreakerStatusCommand, legacyWake)
+		if status.Outcome != "ok" || !status.Enabled || status.State != resilience.StateOpen.String() || status.unguardedByMode() {
+			t.Fatalf("status through a legacy controller = %+v, want ok, enabled, open, reconciler_mode %q", status, reconcilerLegacy)
+		}
+		reset := askControllerFleetBreaker(t, dir, fleetBreakerResetCommand, legacyWake)
+		if reset.Outcome != "ok" || !reset.Enabled || !reset.WasOpen || reset.unguardedByMode() {
+			t.Fatalf("reset through a legacy controller = %+v, want ok, enabled, was_open, reconciler_mode %q", reset, reconcilerLegacy)
+		}
+		if got := fleetState(g); got != resilience.StateClosed {
+			t.Fatalf("guard after a reset through a legacy controller = %v, want closed", got)
+		}
+	})
+}
