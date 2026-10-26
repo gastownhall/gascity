@@ -142,10 +142,15 @@ jobs:
           echo "review-formulas shard: ${{ steps.gate.outputs.reason }}"
       # Remote execution on rbe-west only for code this repository trusts
       # (a push, a same-repo PR or a dispatch of a same-repo head) while
-      # rbe-west is on; otherwise mode cache.
+      # rbe-west is on; otherwise mode cache. A fork repository's own CI
+      # (github.repository's owner is not gastownhall) is mode local: no
+      # rbe-cache, which would otherwise serve every fork push at the farm's
+      # cost (bazel.yml's rbe job, FORK_REPO). Fork PRs into gascity run with
+      # github.repository gastownhall/gascity and are unaffected.
       - name: Decide Bazel execution mode
         id: mode
         env:
+          FORK_REPO: ${{ github.repository_owner != 'gastownhall' }}
           RBE_VAR_ON: ${{ vars.RBE_WEST_WORKERS == 'true' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
           EVENT_NAME: ${{ github.event_name }}
@@ -160,7 +165,10 @@ jobs:
             workflow_dispatch) { [ -z "$DISPATCH_HEAD_REPO" ] || [ "$DISPATCH_HEAD_REPO" = "$REPO" ]; } && trusted=true ;;
           esac
           mode=cache
-          if [ "$trusted" = true ] && [ "$RBE_VAR_ON" = true ] && [ "$HAS_EXECUTOR" = true ]; then
+          if [ "$FORK_REPO" = true ]; then
+            mode=local
+            echo "Fork repository's own CI ($REPO): local, no rbe-cache" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$trusted" = true ] && [ "$RBE_VAR_ON" = true ] && [ "$HAS_EXECUTOR" = true ]; then
             mode=remote
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
@@ -172,7 +180,8 @@ jobs:
   # trusted run (push, same-repo PR, same-repo dispatch) runs remotely;
   # anything else (a fork head via the label dispatcher, or rbe-west off)
   # executes here with lookups in the anonymous read-only cache, as
-  # bazel.yml's mode cache does.
+  # bazel.yml's mode cache does; mode local (a fork repository's own CI)
+  # executes here without them.
   review-formulas-shard:
     name: Integration / review-formulas (bazel)
     needs:
@@ -213,12 +222,12 @@ jobs:
           RBE_TLS_CERT: ${{ needs.gate.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
           RBE_TLS_KEY: ${{ needs.gate.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
           RBE_INSTANCE: ${{ needs.gate.outputs.mode == 'remote' && 'oss' || '' }}
-          BAZEL_FORK_CACHE: ${{ needs.gate.outputs.mode != 'remote' && 'true' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.gate.outputs.mode == 'cache' && 'true' || '' }}
       - name: Restore the LLVM archive
         uses: ./.github/actions/llvm-archive-cache
-      # Mode cache executes the tests here, with .bazelrc's pinned test PATH:
-      # the Go the remote workers have at /usr/local/go, and the tmux, lsof
-      # and ssh they drive.
+      # Modes cache and local execute the tests here, with .bazelrc's
+      # pinned test PATH: the Go the remote workers have at /usr/local/go,
+      # and the tmux, lsof and ssh they drive.
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         if: needs.gate.outputs.mode != 'remote'
         with:

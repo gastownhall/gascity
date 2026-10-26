@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -147,7 +148,7 @@ func (m *Manager) fencedInterruptAndSubmitLocked(ctx context.Context, by Actor, 
 	})
 	out := SubmitOutcome{Interrupt: &report}
 	if now {
-		queued, sendErr := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+		queued, sendErr := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
 		// A send the runtime refused as unavailable sent nothing, as
 		// runtime.TurnFenceProvider requires: queue it.
 		if !errors.Is(sendErr, runtime.ErrRuntimeUnavailable) {
@@ -156,7 +157,7 @@ func (m *Manager) fencedInterruptAndSubmitLocked(ctx context.Context, by Actor, 
 			return out, sendErr
 		}
 	}
-	if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+	if err := m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit); err != nil {
 		recordTurnInterrupt(ctx, sessName, report, out, err)
 		return out, err
 	}

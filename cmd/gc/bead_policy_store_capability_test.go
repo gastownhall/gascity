@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -129,6 +131,136 @@ func TestBeadPolicyStoreDepListBatchAgreesWithDepList(t *testing.T) {
 	}
 	if diff := compare(); diff == "" {
 		t.Fatal("the comparison passed after an edge was added between the two reads, so it cannot fail and proves nothing")
+	}
+}
+
+// The policy wrapper must not hide the batched children read either: without
+// it molecule.ListSubtree reads one `bd list --parent` plus one `bd query` per
+// member of the run it walks.
+func TestBeadPolicyStoreForwardsTheBatchedChildrenRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wrapped beads.Store
+	}{
+		{"policy store", wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})},
+		{"policy graph store", wrapStoreWithBeadPolicies(mustOpenSQLiteStoreForCapabilityTest(t), &config.City{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := tc.wrapped.(beads.ChildrenBatchLister); !ok {
+				t.Fatalf("%T does not advertise ChildrenOfAny; a subtree walk through it reads one parent per round trip", tc.wrapped)
+			}
+		})
+	}
+}
+
+// childrenTierSpy records the options each forwarded ChildrenOfAny carries
+// and answers with rows and err.
+type childrenTierSpy struct {
+	beads.Store
+	opts [][]beads.QueryOpt
+	rows []beads.Bead
+	err  error
+}
+
+func (s *childrenTierSpy) ChildrenOfAny(_ []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.opts = append(s.opts, opts)
+	return s.rows, s.err
+}
+
+// TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier pins that the forwarded
+// batch asks for the tier the policy layer's own Children reads: a default
+// (issues-tier) read widens to both tiers, as Children's List does, and the
+// other options pass through.
+func TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []beads.QueryOpt
+		want beads.TierMode
+	}{
+		{"default tier widens to both", nil, beads.TierBoth},
+		{"both tiers stay both", []beads.QueryOpt{beads.WithBothTiers}, beads.TierBoth},
+		{"wisps tier stays wisps", []beads.QueryOpt{beads.WithEphemeral}, beads.TierWisps},
+		{"other options pass through", []beads.QueryOpt{beads.IncludeClosed}, beads.TierBoth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &childrenTierSpy{Store: beads.NewMemStore()}
+			wrapped := wrapStoreWithBeadPolicies(spy, &config.City{})
+			if _, err := beads.ChildrenOfAny(wrapped, []string{"gc-1"}, tc.opts...); err != nil {
+				t.Fatalf("ChildrenOfAny: %v", err)
+			}
+			if len(spy.opts) != 1 {
+				t.Fatalf("the wrapped batch was asked %d times, want once", len(spy.opts))
+			}
+			if got := beads.TierModeFromOpts(spy.opts[0]); got != tc.want {
+				t.Errorf("forwarded tier = %v, want %v (options %v)", got, tc.want, spy.opts[0])
+			}
+			if beads.HasOpt(tc.opts, beads.IncludeClosed) && !beads.HasOpt(spy.opts[0], beads.IncludeClosed) {
+				t.Errorf("forwarded options %v dropped IncludeClosed", spy.opts[0])
+			}
+		})
+	}
+}
+
+// TestBeadPolicyStoreChildrenOfAnyAgreesWithItsChildren is the correctness
+// control over the production stack (policy over cache over bd): the batch
+// answers what the wrapper's own Children answers per parent, ephemeral
+// children included, and a wrapped store without the batch is read through
+// that Children.
+func TestBeadPolicyStoreChildrenOfAnyAgreesWithItsChildren(t *testing.T) {
+	fake := beadstest.NewFakeBd()
+	seed := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		seeded, err := fake.Seed(b)
+		if err != nil {
+			t.Fatalf("seed %q: %v", b.Title, err)
+		}
+		return seeded
+	}
+	var parents []string
+	for range 3 {
+		p := seed(beads.Bead{Title: "parent"})
+		parents = append(parents, p.ID)
+		seed(beads.Bead{Title: "durable child", ParentID: p.ID})
+		seed(beads.Bead{Title: "wisp child", ParentID: p.ID, Ephemeral: true})
+	}
+	stack := wrapWithCachingStore(context.Background(), wrapStoreWithBeadPolicies(fake.NewBdStore(), &config.City{}), nil, false)
+
+	ids := func(bs []beads.Bead) []string {
+		out := make([]string, 0, len(bs))
+		for _, b := range bs {
+			out = append(out, b.ID)
+		}
+		slices.Sort(out)
+		return out
+	}
+	var perParent []beads.Bead
+	for _, p := range parents {
+		children, err := stack.Children(p, beads.IncludeClosed)
+		if err != nil {
+			t.Fatalf("Children(%s): %v", p, err)
+		}
+		perParent = append(perParent, children...)
+	}
+	if len(perParent) != 6 {
+		t.Fatalf("the policy layer's Children returned %d rows, want 6 (durable and ephemeral children)", len(perParent))
+	}
+	batched, err := beads.ChildrenOfAny(stack, parents)
+	if err != nil {
+		t.Fatalf("ChildrenOfAny: %v", err)
+	}
+	if got, want := ids(batched), ids(perParent); !slices.Equal(got, want) {
+		t.Fatalf("batched children = %v, want the policy layer's per-parent Children %v", got, want)
+	}
+
+	mem := beads.NewMemStore()
+	p, _ := mem.Create(beads.Bead{Title: "parent"})
+	child, _ := mem.Create(beads.Bead{Title: "wisp child", ParentID: p.ID, Ephemeral: true})
+	fallback, err := beads.ChildrenOfAny(wrapStoreWithBeadPolicies(mem, &config.City{}), []string{p.ID})
+	if err != nil {
+		t.Fatalf("ChildrenOfAny without a wrapped batch: %v", err)
+	}
+	if got := ids(fallback); !slices.Equal(got, []string{child.ID}) {
+		t.Fatalf("children without a wrapped batch = %v, want the policy layer's Children answer [%s]", got, child.ID)
 	}
 }
 

@@ -443,12 +443,13 @@ func TestResolveActiveWispStepKeepsTheLegacyFallbackOnWork(t *testing.T) {
 func TestWispStepResolutionListingsStateTheirOrder(t *testing.T) {
 	rec := beadstest.NewOpRecordingStore(beads.NewMemStore())
 	assignees := []string{"worker-a", "gc-1"}
-	if _, err := resolveActiveMolecule(rec, assignees); err != nil {
-		t.Fatalf("resolveActiveMolecule: %v", err)
+	r := stepResolution{work: rec, graph: rec, logf: t.Logf}
+	if _, err := r.activeMolecule(assignees); err != nil {
+		t.Fatalf("activeMolecule: %v", err)
 	}
-	_ = resolveMoleculeRootViaBridge(rec, rec, assignees)
-	if _, err := resolveBeadWithDescription(rec, assignees); err != nil {
-		t.Fatalf("resolveBeadWithDescription: %v", err)
+	_ = r.rootViaBridge(assignees)
+	if _, err := r.beadWithDescription(assignees); err != nil {
+		t.Fatalf("beadWithDescription: %v", err)
 	}
 	bounded := 0
 	for _, op := range rec.Ops() {

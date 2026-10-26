@@ -61,6 +61,25 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+	// Done, when non-nil, is closed once the runner abandons this Run at the
+	// per-check timeout. Nothing reads an abandoned check's result, so a check
+	// that issues many store or subprocess calls should stop issuing new ones
+	// once it closes (see Canceled). Nil for unbounded runs.
+	Done <-chan struct{}
+}
+
+// Canceled reports whether the runner has abandoned the check execution this
+// context belongs to. A nil context, or one without Done, is never canceled.
+func (c *CheckContext) Canceled() bool {
+	if c == nil || c.Done == nil {
+		return false
+	}
+	select {
+	case <-c.Done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Renderer is implemented by checks that produce additional, optional

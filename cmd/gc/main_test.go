@@ -222,6 +222,24 @@ func testscriptGC() {
 	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
 }
 
+// testProcessTeardown removes what TestMain made for this process: its
+// temp root (with GC_HOME, the runtime dir and the provider stubs inside),
+// the managed dolt servers it registered, and its tmux socket parent. The
+// TestingM chain runs the same teardown after m.Run returns.
+var testProcessTeardown func()
+
+// exitTestProcess ends a re-exec'd helper test binary with code from inside
+// m.Run. A bare os.Exit there skips TestMain's teardown and leaves the
+// helper's temp root and tmux socket parent behind, for the parent's later
+// helpers to sweep and announce on their stderr (ga-gcast6, ga-5qipy6), so
+// it tears down first.
+func exitTestProcess(code int) {
+	if testProcessTeardown != nil {
+		testProcessTeardown()
+	}
+	os.Exit(code)
+}
+
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
@@ -329,7 +347,15 @@ func TestMain(m *testing.M) {
 	// children above keep the real installer: their scripts run follow-on
 	// commands that need the installed imports.
 	configureInitRemoteImportsForTests()
-	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	doltGuard := newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	testProcessTeardown = func() {
+		doltGuard.cleanupTemporaryPaths()
+		reapManagedDoltTestProcesses()
+		if tmuxSocketCleanupRoot != "" {
+			_ = os.RemoveAll(tmuxSocketCleanupRoot)
+		}
+	}
+	var testRunner testscript.TestingM = doltGuard
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
 	// per-run socket root still exists (dip-73cr05 — city-name sockets like

@@ -34,7 +34,7 @@ type PromptContext struct {
 	WorkDir                 string
 	IssuePrefix             string
 	Branch                  string
-	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD
+	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD; empty when the build's probe did not complete
 	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
 	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
 	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
@@ -399,17 +399,24 @@ func defaultBranchFor(dir string) string {
 // rendering so polecats and the refinery target the rig's true mainline
 // even when origin/HEAD is unset on the local clone.
 func defaultBranchForRig(rigName string, rigs []config.Rig, dir string) string {
-	if rigName != "" {
-		for i := range rigs {
-			if rigs[i].Name == rigName {
-				if branch := rigs[i].EffectiveDefaultBranch(); branch != "" {
-					return branch
-				}
-				break
-			}
-		}
+	if branch := recordedDefaultBranch(rigName, rigs); branch != "" {
+		return branch
 	}
 	return defaultBranchFor(dir)
+}
+
+// recordedDefaultBranch returns the named rig's recorded DefaultBranch, or ""
+// when the rig is unnamed, unknown, or records none.
+func recordedDefaultBranch(rigName string, rigs []config.Rig) string {
+	if rigName == "" {
+		return ""
+	}
+	for i := range rigs {
+		if rigs[i].Name == rigName {
+			return rigs[i].EffectiveDefaultBranch()
+		}
+	}
+	return ""
 }
 
 // promptFuncMap returns template functions available in prompt templates.

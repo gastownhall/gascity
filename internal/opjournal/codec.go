@@ -274,6 +274,12 @@ func checkOpID(op Op) error {
 	return nil
 }
 
+// isOpBead reports whether b is an op row: the journal's bead type and the
+// op label.
+func isOpBead(b beads.Bead) bool {
+	return b.Type == BeadType && slices.Contains(b.Labels, LabelOp)
+}
+
 // DecodeOp reads an op row. A row without gc.op.executor reads
 // ExecutorLegacy, and Revision is the bead's. It fails loudly — ErrUnsupportedKind for a kind
 // this build does not know, ErrUnsupportedSchema for a newer schema,
@@ -287,7 +293,7 @@ func checkOpID(op Op) error {
 // never writes; the store's next Close, Cancel or Transition of the row stores
 // that outcome.
 func DecodeOp(b beads.Bead) (Op, error) {
-	if b.Type != BeadType || !slices.Contains(b.Labels, LabelOp) {
+	if !isOpBead(b) {
 		return Op{}, corruptf(b.ID, "not an op row (type %q, labels %v)", b.Type, b.Labels)
 	}
 	d := metaDecoder{id: b.ID, meta: b.Metadata}

@@ -35,7 +35,7 @@ func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T)
 }
 
 func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesDispatchHoldLabels(t *testing.T) {
-	got := legacyEphemeralPoolDemandShell(20, QueryTopology{}, true)
+	got := legacyEphemeralPoolDemandShell(20, QueryTopology{})
 	if !strings.Contains(got, ".labels") {
 		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing a .labels reference", got)
 	}
@@ -101,7 +101,7 @@ func TestRouteScopedPoolDemandShellsExcludeHumanLabel(t *testing.T) {
 			t.Errorf("%s() = %q, missing %q", name, got, want)
 		}
 	}
-	if got := legacyEphemeralPoolDemandShell(20, QueryTopology{}, true); !strings.Contains(got, `"human"`) {
+	if got := legacyEphemeralPoolDemandShell(20, QueryTopology{}); !strings.Contains(got, `"human"`) {
 		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing the human label in its jq label filter", got)
 	}
 }

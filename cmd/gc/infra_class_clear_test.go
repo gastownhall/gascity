@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -60,7 +61,7 @@ func TestMigratedCityStopsServingAClosedStepFromTheWorkCopy(t *testing.T) {
 	}
 
 	var out, errb bytes.Buffer
-	if rc := cmdReady(readyOpts{}, &out, &errb); rc != 0 {
+	if rc := cmdReady(readywork.Query{}, &out, &errb); rc != 0 {
 		t.Fatalf("gc ready exited %d: %s", rc, errb.String())
 	}
 	var rows []map[string]any

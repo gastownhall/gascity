@@ -56,8 +56,8 @@ Gas City requires the following tools on your system. `gc init` and
 | jq | Always | — | `brew install jq` | `apt install jq` |
 | pgrep | Always | — | (included in macOS) | `apt install procps` |
 | lsof | Always | — | (included in macOS) | `apt install lsof` |
-| dolt | Beads provider `bd` | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | Beads provider `bd` | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| dolt | Beads provider `bd` | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| bd | Beads provider `bd` | 1.3.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
 | gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
@@ -72,11 +72,12 @@ The `bd` (beads) provider is the default. To use a file-based store instead
 (no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
 to your `city.toml`.
 
-Managed Dolt checks require a final Dolt 2.1.0 or newer. Older and
-pre-release builds are below Gas City's managed bd/Dolt compatibility floor;
-releases before 1.86.2 can also miss the upstream GC/writer deadlock fix in
-dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync` under
-heavy write load.
+Managed Dolt checks require a final Dolt 2.6.0 or newer. Older and
+pre-release builds are below Gas City's managed bd/Dolt compatibility floor:
+2.6.0 is the first Dolt built with a Go toolchain that distrusts the
+compromised eMudhra CA intermediates. Releases before 1.86.2 can also miss the
+upstream GC/writer deadlock fix in dolthub/dolt commit `ccf7bde206`, which can
+hang `dolt_backup sync` under heavy write load.
 
 Install from Homebrew:
 
@@ -85,7 +86,7 @@ brew install gascity
 gc version
 ```
 
-Or build from source (requires `make`, Go 1.26.4+, and ICU for a transitive Dolt
+Or build from source (requires `make`, Go 1.27.3+, and ICU for a transitive Dolt
 CGO dependency — `brew install icu4c` on macOS, `apt install libicu-dev` on
 Linux; on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 

@@ -309,10 +309,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// API key). Codex auth is the API key; no separate auth-token var.
 		UpstreamBaseURLEnv: "OPENAI_BASE_URL",
 		UpstreamAPIKeyEnv:  "OPENAI_API_KEY",
+		// No model or effort default: unless the city, agent or session
+		// chooses one, codex runs on the user's own ~/.codex/config.toml.
+		// Which models an account may use depends on how it is logged in
+		// (a ChatGPT-account login rejects ids an API key accepts), so a
+		// catalog pin here broke every turn for those users while the
+		// session looked healthy.
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
-			"model":           "gpt-5.5",
-			"effort":          "xhigh",
 		},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u203a ",

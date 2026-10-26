@@ -449,7 +449,7 @@ func (h *attachRaceSP) Start(ctx context.Context, name string, cfg runtime.Confi
 	return err
 }
 
-// attachRaceStore runs beforeClear once, before the first metadata batch
+// attachRaceStore runs beforeClear once, before the first metadata write
 // that clears the stop request's controller half (the operator's confirm).
 type attachRaceStore struct {
 	*beads.MemStore
@@ -457,12 +457,23 @@ type attachRaceStore struct {
 }
 
 func (s *attachRaceStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.race(kvs)
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// UpdateIfMatch is the start's confirm fenced on its incarnation
+// (session.Store.ConfirmIncarnation).
+func (s *attachRaceStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	s.race(opts.Metadata)
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *attachRaceStore) race(kvs map[string]string) {
 	if _, ok := kvs[session.DrainIntentReasonKey]; ok && s.beforeClear != nil {
 		f := s.beforeClear
 		s.beforeClear = nil
 		f()
 	}
-	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
 // TestSignalNeverStrandsAnOperatorStart (#7638, mc-ted51; review probes

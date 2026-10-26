@@ -77,6 +77,7 @@ go_test(
         "gc_bd_latency_test.go",
         "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
+        "gc_seat_hook_latency_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",
         "helpers_test.go",
@@ -114,8 +115,8 @@ go_test(
             # and dolt for the dolt-backed integration shapes, same versions the
             # go-test CI installs via install-bd-archive.sh /
             # install-dolt-archive.sh.
-            "@bd_bin_v1_3_1//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@bd_bin_v1_3_2//:bd",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),

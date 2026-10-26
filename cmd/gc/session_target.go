@@ -48,6 +48,9 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 	if !ok {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (city context not set)")
 	}
+	if err := gateControlPlaneAt(cityPath); err != nil {
+		return sessionRuntimeTarget{}, err
+	}
 	return sessionRuntimeTarget{
 		cityPath:    cityPath,
 		display:     display,

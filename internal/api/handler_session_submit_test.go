@@ -204,7 +204,7 @@ func TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime(t *testing.T) {
 			fs.sp.TurnInterruptModeValue = tc.mode
 			h := newTestCityHandler(t, fs)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -260,7 +260,7 @@ func TestSessionSubmitInterruptNowUnsupportedReportsTypedFailureCode(t *testing.
 	fs.sp.TurnInterruptModeValue = runtime.TurnInterruptUnsupported
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -287,7 +287,7 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -340,7 +340,7 @@ func TestHandleSessionStopFollowsRuntimeTurnInterruptMode(t *testing.T) {
 			fs.sp.TurnInterruptModeValue = tc.mode
 			h := newTestCityHandler(t, fs)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -681,5 +681,53 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 		!slices.Contains(fs.enqueuedKeys(), reconcilekey.Session(info.ID)) {
 		t.Fatalf("starts = %d, wake_request = %q, enqueued = %v; want the start left to the controller",
 			fs.sp.CountCalls("Start", info.SessionName)-startsBefore, b.Metadata["wake_request"], fs.enqueuedKeys())
+	}
+}
+
+// TestSessionReadsReportSteer kills a read model whose supports_steer
+// disagrees with Manager.SubmissionCapabilities: steer is the runtime's steer
+// mode combined with the session's provider family, so a protocol runtime
+// steers every family, a runtime that cannot steer steers none, and no family
+// takes a keystroke steer (Codex reads tmux's trailing Escape as cancel).
+func TestSessionReadsReportSteer(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		mode     runtime.SteerMode
+		want     bool
+	}{
+		{provider: "codex", mode: runtime.SteerProtocol, want: true},
+		{provider: "gemini", mode: runtime.SteerProtocol, want: true},
+		{provider: "codex", mode: runtime.SteerKeystroke, want: false},
+		{provider: "claude", mode: runtime.SteerKeystroke, want: false},
+		{provider: "codex", mode: runtime.SteerNone, want: false},
+	} {
+		t.Run(tc.provider+"/"+string(tc.mode), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.sp.SteerModeValue = tc.mode
+			h := newTestCityHandler(t, fs)
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			caps, err := mgr.SubmissionCapabilities(info.ID)
+			if err != nil || caps.SupportsSteer != tc.want {
+				t.Fatalf("Manager.SubmissionCapabilities = %+v, %v; want supports_steer %v", caps, err, tc.want)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("get status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var got sessionResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode get: %v", err)
+			}
+			if got.SubmissionCapabilities.SupportsSteer != tc.want {
+				t.Fatalf("GET supports_steer = %v, want %v", got.SubmissionCapabilities.SupportsSteer, tc.want)
+			}
+		})
 	}
 }

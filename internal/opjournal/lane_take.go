@@ -95,7 +95,9 @@ func (l *ConversationLane) take(ctx context.Context, snap laneSnapshot, spec *ta
 		next.Attempt = e.op.Attempt + 1
 		next.LaneSeq = spec.baseSeq + uint64(i) + 1
 		next.RetryAt = time.Time{}
-		if spec.kind == TakeContent {
+		// Only content carries a delivery key: a control op's is its id,
+		// the same on every re-take, and a unit's interrupt is one.
+		if spec.kind == TakeContent || spec.kind == TakeNow && e.op.Kind == KindMessage {
 			next.DeliveryKey = spec.key
 		}
 		next.Transitions = appendTransition(e.op.Transitions, Transition{Status: StatusExecuting, At: now, By: by})
@@ -196,23 +198,31 @@ func (l *ConversationLane) reread(ctx context.Context, lease Lease, read func() 
 // takeRowItem is the Take's runtime-row item and the row as the Take leaves
 // it (revision unset).
 func (l *ConversationLane) takeRowItem(rt runtimeSnap, spec *takeSpec, conv string, lease Lease, k uint64) (beads.GuardedItem, beads.Bead, error) {
+	next := RuntimeRow{Conversation: conv}
+	if rt.found {
+		if rt.row.Closed {
+			return beads.GuardedItem{}, beads.Bead{}, fmt.Errorf("%w: conversation %s: the runtime row is closed and does not reopen", ErrIllegalTransition, conv)
+		}
+		next = rt.row
+	}
+	next.Seq += k
+	next.Lease = lease
+	next.Generation, next.Epoch = spec.inc.gen, spec.inc.epoch
+	return l.rowWrite(rt, next)
+}
+
+// rowWrite is the guarded item that writes next over the runtime row as read
+// in rt: a create at its pinned id when there is none, else an update under
+// its revision. It returns the row as the item leaves it (revision unset).
+func (l *ConversationLane) rowWrite(rt runtimeSnap, next RuntimeRow) (beads.GuardedItem, beads.Bead, error) {
 	if !rt.found {
-		b, err := EncodeRuntimeRow(l.store.prefix, RuntimeRow{
-			Conversation: conv, Generation: spec.inc.gen, Epoch: spec.inc.epoch, Seq: k, Lease: lease,
-		})
+		b, err := EncodeRuntimeRow(l.store.prefix, next)
 		if err != nil {
 			return beads.GuardedItem{}, beads.Bead{}, err
 		}
 		create := b
 		return beads.GuardedItem{Create: &create}, b, nil
 	}
-	if rt.row.Closed {
-		return beads.GuardedItem{}, beads.Bead{}, fmt.Errorf("%w: conversation %s: the runtime row is closed and does not reopen", ErrIllegalTransition, conv)
-	}
-	next := rt.row
-	next.Seq += k
-	next.Lease = lease
-	next.Generation, next.Epoch = spec.inc.gen, spec.inc.epoch
 	opts, err := RuntimeRowPatch(rt.bead, next)
 	if err != nil {
 		return beads.GuardedItem{}, beads.Bead{}, err

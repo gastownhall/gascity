@@ -67,7 +67,7 @@ func TestACPPermissionThroughPendingRespondAndStream(t *testing.T) {
 	srv.structuredPeekPoll = peekPoll
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, sp, session.WithCityPath(fs.cityPath))
 	replyFile := filepath.Join(t.TempDir(), "replies.jsonl")
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template:  "helper",

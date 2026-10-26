@@ -56,7 +56,8 @@ jobs:
         uses: ./.github/actions/rbe-worker
       # worker-env, as in rbe-worker-pool.yml: measured before any untrusted
       # action runs here. Drift fails this step, never the worker, which still
-      # serves fork actions that send no worker-env (beads).
+      # serves only fork actions that send no worker-env. gascity's and
+      # beads' both send the pin, so a drifted worker serves neither.
       - name: Measure this host against the worker-env pin
         id: worker-env
         continue-on-error: true

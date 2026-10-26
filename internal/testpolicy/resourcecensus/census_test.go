@@ -18,9 +18,9 @@ import (
 )
 
 // updateLedgerDoc regenerates test/test-resource-counts.toml and the TESTING.md
-// checked resource ledger block when set. Run:
+// checked resource ledger block when set. Run, from the repository root:
 //
-//	go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+//	GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
 var updateLedgerDoc = flag.Bool("update", false, "regenerate test/test-resource-counts.toml and the TESTING.md checked resource ledger block")
 
 func TestScanUsesImportIdentityAndParsedBuildConstraints(t *testing.T) {

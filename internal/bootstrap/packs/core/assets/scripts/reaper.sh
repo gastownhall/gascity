@@ -52,6 +52,55 @@ resolve_escalate_script() {
 
 ESCALATE_SCRIPT="$(resolve_escalate_script)"
 
+# escalate_refused_incident_flags RC STDERR is true when an escalate.sh override
+# refused the incident flags as a usage error, as one written before them (the
+# 1.5.0 contract) does: with exit 2, the usage-error status (the 1.5.0
+# escalate.sh, argparse, Go's flag package), or with a message that names the
+# flag (getopt-style parsers exit 1). The core escalate.sh next to this script
+# takes the flags, so no failure of it is read as a refusal.
+escalate_refused_incident_flags() {
+    [ "$1" -ne 0 ] || return 1
+    if [ "$ESCALATE_SCRIPT" -ef "$SCRIPT_DIR/escalate.sh" ]; then
+        return 1
+    fi
+    [ "$1" -ne 2 ] || return 0
+    case "$2" in
+        *incident-key*|*--fingerprint*|*resolve-incident*) return 0 ;;
+    esac
+    return 1
+}
+
+# raise_incident KEY FINGERPRINT SUBJECT MESSAGE escalates MESSAGE as incident
+# KEY, which escalate.sh keeps quiet while FINGERPRINT is unchanged. An override
+# that refuses the incident flags is sent the alert again without them, so it
+# keeps alerting, undeduplicated, rather than losing the alert.
+raise_incident() {
+    local rc=0 err
+    # stdout passes through; stderr is held to tell a refusal from a failure.
+    { err=$("$ESCALATE_SCRIPT" --subject "$3" --message "$4" \
+        --incident-key "$1" --fingerprint "$2" 2>&1 >&3 3>&-); } 3>&1 || rc=$?
+    if ! escalate_refused_incident_flags "$rc" "$err"; then
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        return "$rc"
+    fi
+    echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --incident-key); sent the alert without them, so it is not deduplicated" >&2
+    "$ESCALATE_SCRIPT" --subject "$3" --message "$4"
+}
+
+# resolve_incident KEY tells escalate.sh that incident KEY cleared, so its next
+# occurrence alerts at once. An override that refuses the flag keeps no
+# incidents, so there is nothing to clear.
+resolve_incident() {
+    local rc=0 err
+    err=$("$ESCALATE_SCRIPT" --resolve-incident "$1" 2>&1 >/dev/null) || rc=$?
+    if escalate_refused_incident_flags "$rc" "$err"; then
+        echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --resolve-incident); its alerts are not deduplicated" >&2
+        return 0
+    fi
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    return "$rc"
+}
+
 maintenance_done() {
     local summary="$1"
     local target="${GC_MAINTENANCE_DONE_TARGET:-}"
@@ -1205,10 +1254,60 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
     SCOPE_DB="$CITY_DB"
     if [ -n "$SESSION_BEAD_PATTERN" ]; then
         # ── gc bd prune path (pattern-configurable) ──────────────────────────────
+        # The pattern is checked first, then the prune's own candidates are
+        # counted; the backup-age and type-scope gates guard only a prune that
+        # has something to delete.
         SESSION_PRUNE_ANOMALY_SCOPE="session"
         case "$SESSION_BEAD_PATTERN" in
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
         esac
+        _PRUNE_SKIP=0
+
+        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into the SQL
+        # LIKE literals below (candidate count, type-scope gate) and passed as
+        # bd's own --pattern flag. A value outside this charset (e.g. a single
+        # quote) would corrupt those COUNT queries -- id LIKE 'x' OR '1'='1'
+        # always matches, silently defeating the guard. Fail closed before any
+        # SQL is built.
+        case "$SESSION_BEAD_PATTERN" in
+            ''|*[!A-Za-z0-9_.*?-]*)
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+                _PRUNE_SKIP=1
+                ;;
+        esac
+
+        # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A literal %
+        # or _ in a custom pattern would not round-trip. An age not given in
+        # hours (e.g. 30d) counts every closed match: more than bd prunes,
+        # never less.
+        _PRUNE_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
+        _PRUNE_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
+        case "$_PRUNE_AGE_H" in ''|*[!0-9]*) _PRUNE_AGE_H=0 ;; esac
+
+        # Candidate count: `gc bd prune` deletes closed, non-ephemeral beads
+        # that match the pattern and closed before its cutoff, in the issues
+        # table and among the no-history rows of the wisps table. This counts
+        # every closed match in both tables, which covers that set. With none,
+        # the prune would delete nothing, so the gates below have nothing to
+        # protect: skip them and the prune without an anomaly. A count that
+        # cannot be computed is recorded by get_sql_count, and the gates
+        # decide as before.
+        if [ "$_PRUNE_SKIP" -eq 0 ] && get_sql_count "session prune candidate" "
+            SELECT COUNT(*) FROM (
+                SELECT id FROM \`$CITY_DB\`.issues
+                WHERE id LIKE '$_PRUNE_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
+                UNION ALL
+                SELECT id FROM \`$CITY_DB\`.wisps
+                WHERE id LIKE '$_PRUNE_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
+            ) AS session_prune_candidates
+        " && [ "$SQL_COUNT_RESULT" -eq 0 ]; then
+            echo "reaper: session prune: nothing to prune (no closed bead matching $SESSION_BEAD_PATTERN is older than $SESSION_PURGE_AGE)"
+            _PRUNE_SKIP=1
+        fi
 
         # Backup-age gate: skip bulk prune unless bd reports a backup of the
         # city store newer than the threshold. bd owns the backup (the dolt
@@ -1220,84 +1319,71 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         # JSONL-era backup state must not open the gate while the Dolt backup
         # is stale or never ran); only a scope with no Dolt destination is
         # judged on bd's legacy backup state.
-        _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
-        case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        _PRUNE_SKIP=0
-        _PRUNE_SKIP_REASON=""
-        _PRUNE_BACKUP_UNSUPPORTED=0
-        _BACKUP_TS=""
-        _BACKUP_ERR_FILE=$(mktemp)
-        if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
-            _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
-                (if (.dolt.configured // false) == true
-                 then (.dolt.last_sync // empty)
-                 else (.backup.timestamp // empty) end)
-                | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
-            if [ -z "$_BACKUP_TS" ]; then
-                _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
-                _PRUNE_SKIP=1
-            fi
-        else
-            _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
-            case "$_BACKUP_STATUS" in
-                *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
-                    # This bd cannot back up the city scope's transport, so no
-                    # backup evidence can exist yet. The prune waits; the run
-                    # reports it without escalating every cooldown.
-                    _PRUNE_BACKUP_UNSUPPORTED=1
-                    ;;
-            esac
-            _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
-            _PRUNE_SKIP=1
-        fi
-        rm -f "$_BACKUP_ERR_FILE"
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            case "$_BACKUP_TS" in
-                [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
-                *)
-                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
-                    _PRUNE_SKIP=1
-                    ;;
-            esac
-        fi
-        if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            # bd timestamps are RFC3339 (possibly with fractional seconds).
-            # Truncate to whole seconds, as Step 4's SQL does.
-            case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
-            _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
-                || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
-                || echo "")
-            if [ -z "$_BACKUP_EPOCH" ]; then
-                _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
-                _PRUNE_SKIP=1
-            else
-                _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
-                if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
-                    _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
+            _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
+            case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
+            _PRUNE_SKIP_REASON=""
+            _PRUNE_BACKUP_UNSUPPORTED=0
+            _BACKUP_TS=""
+            _BACKUP_ERR_FILE=$(mktemp)
+            if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
+                _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
+                    (if (.dolt.configured // false) == true
+                     then (.dolt.last_sync // empty)
+                     else (.backup.timestamp // empty) end)
+                    | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
+                if [ -z "$_BACKUP_TS" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
                     _PRUNE_SKIP=1
                 fi
+            else
+                _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
+                case "$_BACKUP_STATUS" in
+                    *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
+                        # This bd cannot back up the city scope's transport, so no
+                        # backup evidence can exist yet. The prune waits; the run
+                        # reports it without escalating every cooldown.
+                        _PRUNE_BACKUP_UNSUPPORTED=1
+                        ;;
+                esac
+                _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
+                _PRUNE_SKIP=1
             fi
-        fi
-
-        if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
-            order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
-        elif [ "$_PRUNE_SKIP" -eq 1 ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
-            order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
-        fi
-
-        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into a SQL
-        # LIKE literal below (type-scope gate) and passed as bd's own --pattern
-        # flag. A value outside this charset (e.g. a single quote) would corrupt
-        # the guard's own COUNT query -- id LIKE 'x' OR '1'='1' always matches,
-        # silently defeating the guard. Fail closed before any SQL is built.
-        if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            case "$SESSION_BEAD_PATTERN" in
-                ''|*[!A-Za-z0-9_.*?-]*)
-                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+            rm -f "$_BACKUP_ERR_FILE"
+            if [ "$_PRUNE_SKIP" -eq 0 ]; then
+                case "$_BACKUP_TS" in
+                    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
+                    *)
+                        _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
+                        _PRUNE_SKIP=1
+                        ;;
+                esac
+            fi
+            if [ "$_PRUNE_SKIP" -eq 0 ]; then
+                # bd timestamps are RFC3339 (possibly with fractional seconds).
+                # Truncate to whole seconds, as Step 4's SQL does.
+                case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
+                _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || echo "")
+                if [ -z "$_BACKUP_EPOCH" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
                     _PRUNE_SKIP=1
-                    ;;
-            esac
+                else
+                    _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
+                    if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
+                        _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
+                        _PRUNE_SKIP=1
+                    fi
+                fi
+            fi
+
+            if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
+                order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
+            elif [ "$_PRUNE_SKIP" -eq 1 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+                order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
+            fi
         fi
 
         # Type-scope gate: bd's prune has no issue_type filter (only ID glob +
@@ -1307,16 +1393,11 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         # rows, and fail closed on a nonzero hit or on a count that could not
         # be computed.
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A
-            # literal % or _ in a custom pattern would not round-trip.
-            _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
-            _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
-            case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
             if ! get_sql_count "type scope guard" "
                 SELECT COUNT(*) FROM \`$CITY_DB\`.issues
-                WHERE id LIKE '$_TYPE_GUARD_LIKE'
+                WHERE id LIKE '$_PRUNE_LIKE'
                 AND status = 'closed'
-                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
                 AND issue_type != 'session'
             "; then
                 record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: type-scope guard count could not be computed (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
@@ -1427,13 +1508,10 @@ order_outcome_write
 # clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
     ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
-    "$ESCALATE_SCRIPT" \
-        --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" \
-        --incident-key "reaper:anomalies" \
-        --fingerprint "$ANOMALY_FINGERPRINT" 2>/dev/null || true
+    raise_incident "reaper:anomalies" "$ANOMALY_FINGERPRINT" \
+        "ESCALATION: Reaper anomalies detected [MEDIUM]" "$ANOMALIES" || true
 else
-    "$ESCALATE_SCRIPT" --resolve-incident "reaper:anomalies" >/dev/null || true
+    resolve_incident "reaper:anomalies" || true
 fi
 
 SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"

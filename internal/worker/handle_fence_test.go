@@ -418,6 +418,9 @@ func TestHandlesFencedNudgeOfAGoneSessionMisses(t *testing.T) {
 	keep := func(*testing.T, *runtime.Fake, string) {}
 	readable := func(sp *runtime.Fake) runtime.Provider { return sp }
 	unreadable := func(sp *runtime.Fake) runtime.Provider { return freshErrFake{sp} }
+	// A session handle's start reads the runtime fresh before it mints
+	// (I-MINT), so its read fails only once the session runs.
+	unreadableOnceStarted := func(sp *runtime.Fake) runtime.Provider { return &freshErrAfterStartFake{Fake: sp} }
 	session := func(rt func(*runtime.Fake) runtime.Provider, then func(*testing.T, *runtime.Fake, string)) func(*testing.T) gone {
 		return func(t *testing.T) gone {
 			sp := runtime.NewFake()
@@ -454,7 +457,7 @@ func TestHandlesFencedNudgeOfAGoneSessionMisses(t *testing.T) {
 		{"session without a row", withoutRow, runtime.FenceFoundAbsent},
 		{"session stopped", session(readable, stop), runtime.FenceFoundAbsent},
 		{"session agent exited", session(readable, exit), runtime.FenceFoundDead},
-		{"session unreadable", session(unreadable, keep), ""},
+		{"session unreadable", session(unreadableOnceStarted, keep), ""},
 		{"runtime stopped", runtimeOnly(readable, stop), runtime.FenceFoundAbsent},
 		{"runtime agent exited", runtimeOnly(readable, exit), runtime.FenceFoundDead},
 		{"runtime unreadable", runtimeOnly(unreadable, keep), ""},

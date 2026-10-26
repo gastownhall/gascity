@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ const bdParityFakeBd = `#!/bin/sh
   done
   printf 'http_token=%s\n' "${BEADS_HTTP_TOKEN:+set}"
   printf -- '--\n'
-} >> "${BD_PARITY_LOG}"
+} >> "${BD_PARITY_LOG}.$$"
 case " $* " in
   *" demo-missing "*) echo 'no issue found' >&2; echo 'not-found-stdout'; exit 3 ;;
 esac
@@ -154,7 +155,7 @@ func runBdParityArm(t *testing.T, legacy bool, opts bdParityOpts, setup func(t *
 	}
 	var stdout, stderr bytes.Buffer
 	code := doBd(args, &stdout, &stderr)
-	log, _ := os.ReadFile(filepath.Join(c.scratch, "bd.log"))
+	log := readBdParityLog(t, c.scratch)
 	gcHome := os.Getenv("GC_HOME")
 	norm := func(s string) string {
 		// GC_HOME first: clearGCEnv puts it outside root, and a cache path in
@@ -165,7 +166,7 @@ func runBdParityArm(t *testing.T, legacy bool, opts bdParityOpts, setup func(t *
 		s = strings.ReplaceAll(strings.ReplaceAll(s, c.root, "$ROOT"), c.rawRoot, "$ROOT")
 		return bdParityTimestamp.ReplaceAllString(s, "$$TIME")
 	}
-	return bdParityResult{code: code, stdout: norm(stdout.String()), stderr: norm(stderr.String()), bd: norm(string(log))}
+	return bdParityResult{code: code, stdout: norm(stdout.String()), stderr: norm(stderr.String()), bd: norm(log)}
 }
 
 // TestGcBdPassthroughTrimsKeepRouting runs every case twice, on the loaders
@@ -303,6 +304,28 @@ func TestGcBdPassthroughTrimsKeepRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readBdParityLog joins the fake bd's records, one file per invocation (named
+// by its pid), in sorted order. A two-tier BdStore list runs its bd list and bd
+// query reads at once, so their order, and any interleaving of two processes
+// appending to one file, are not part of what the arms are compared on.
+func readBdParityLog(t *testing.T, scratch string) string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(scratch, "bd.log.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]string, 0, len(files))
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, string(data))
+	}
+	sort.Strings(records)
+	return strings.Join(records, "")
 }
 
 func appendFile(t *testing.T, path, text string) {

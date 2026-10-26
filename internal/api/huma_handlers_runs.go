@@ -8,13 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/api/dashboardbff"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -78,6 +81,41 @@ type RunProjectionGraceSource interface {
 	RunProjectionMissInGrace(context.Context, string, string) bool
 	ForgetRunProjectionMiss(context.Context, string, string)
 }
+
+// runProjectionFreshness is the freshness contract every run read documents.
+const runProjectionFreshness = "Run reads are a projection of the city event log, not a direct store read. " +
+	"A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads on the projection's next poll, normally within about a second; " +
+	"a successful POST /runs/{run_id}/cancel is reflected before its response. " +
+	"A worker's `gc hook --claim` (the claim and the hook's own follow-up writes) and `gc bd close` record their changes in the log before the command returns, and these reads pick them up on the next poll. " +
+	"No fixed bound is promised: on a slow store the recording itself takes store reads, and claims were measured visible 1 to 8 seconds after they landed. " +
+	"Any other change another process writes straight to the bead store (such as a `bd close` or `bd update` run without gc), or one of those changes the worker could not record, reaches the log, and these reads, " +
+	"when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). " +
+	"From then on these reads agree with GET /bead/{id}, which serves the same supervisor view."
+
+// RunProjectionSyncSource folds everything already appended to the city's
+// event log into the warm projection before it returns. A handler that just
+// wrote run state through the supervisor's cache — whose bead.* events are
+// recorded synchronously — calls it so the caller's next point read reflects
+// that write (read-your-writes) instead of waiting for the next poll. The bool
+// is false when the projection could not be synced (unknown city, tailer not
+// running, ctx done); the projection then catches up on its own.
+type RunProjectionSyncSource interface {
+	SyncRunProjection(context.Context, string) bool
+}
+
+// The dashboard plane is production's run projection source; a source that
+// silently stopped satisfying the sync capability would quietly drop the
+// cancel's read-your-writes, so pin it at compile time.
+var _ interface {
+	RunProjectionSource
+	RunProjectionGraceSource
+	RunProjectionSyncSource
+} = (*dashboardbff.Plane)(nil)
+
+// runCancelProjectionSyncTimeout bounds how long a successful cancel waits for
+// the projection to fold its events. The cancel has already committed, so
+// running out only forfeits read-your-writes for this one response.
+const runCancelProjectionSyncTimeout = 5 * time.Second
 
 // runFold reads the warm incremental projection when the injected census source
 // provides it. Direct Server users without that capability retain the legacy
@@ -266,8 +304,13 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 
 	// Derive the run's canonical lifecycle status exactly as laneToRun/deriveRunStatus
 	// do (root-terminality wins over lingering members), then clamp each step through
-	// it: a completed run must not report a step as eternally active when its close
-	// event was lost. A non-terminal run yields an inactive clamp (raw statuses stand).
+	// it: a terminal run must not report a step as eternally active. A clamped
+	// step reads the status dispatch closes it with (canceled under a canceled
+	// run, skipped otherwise), so it never flips between terminal statuses. A step
+	// that executes after the root settles (the workflow finalizer, the teardown
+	// tail) is not clamped: it has not closed yet, and presenting it skipped would
+	// be contradicted by its own close. A non-terminal run yields an inactive clamp
+	// (raw statuses stand).
 	byID := beadsByID(fold.beads)
 	root, rootFound := byID[input.RunID]
 	var rootPtr *beads.Bead
@@ -277,6 +320,7 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 	runStatus := runproj.CanonicalRunStatusForLane(lane, rootPtr, countStartedMembers(fold.beads, lane.ID))
 
 	members := topoSortRunSteps(runMemberBeads(fold.beads, input.RunID))
+	clamp := runproj.NewRunStepClamp(runStatus, members)
 	out := &RunStepsOutput{}
 	out.Body.RunID = input.RunID
 	out.Body.Steps = make([]RunStep, 0, len(members))
@@ -285,7 +329,7 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 		if m.ID == input.RunID {
 			continue // the root is the run, not a step
 		}
-		status := RunStepStatus(runproj.ClampStepStatusForRun(runStatus, string(deriveRunStepStatus(m))))
+		status := RunStepStatus(clamp.Apply(m.ID, string(deriveRunStepStatus(m))))
 		out.Body.Steps = append(out.Body.Steps, RunStep{
 			ID:       m.ID,
 			Title:    runStepTitle(m),
@@ -313,18 +357,40 @@ func (s *Server) forgetRunProjectionMiss(ctx context.Context, runID string) {
 const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
 
 // humaHandleRunCancel is the Huma-typed handler for
-// POST /v0/city/{cityName}/runs/{run_id}/cancel. It stamps cancel intent on the
-// run root and synchronously winds the run down — closing the root and its open
-// beads with a canceled outcome so the dispatcher finds no more ready work and
-// the run starves. Registered with a 202 default status: in-flight sessions
-// finish their current step before idling, so the wind-down is accepted, not
-// instantaneous.
-func (s *Server) humaHandleRunCancel(_ context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
+// POST /v0/city/{cityName}/runs/{run_id}/cancel. Its first write marks the run
+// root canceling (gc.cancel_requested), which stops new work at once: the claim
+// gate refuses the run's steps, nested drain items included, and the
+// dispatcher closes its controls. It then interrupts the current turn of each
+// session holding an in-progress step of the run (interruptRunHolders, the same
+// interrupt as POST /session/{id}/stop; the sessions are not killed) while it
+// closes the root and its open beads with a canceled outcome. The interrupts
+// do not wait for the closes, which cost a store write each. Registered with a
+// 202 default status: the interrupts are best-effort and a session may take a
+// moment to settle, so the wind-down is accepted, not instantaneous.
+func (s *Server) humaHandleRunCancel(ctx context.Context, input *RunCancelInput) (*RunCancelOutput, error) {
 	runID := strings.TrimSpace(input.RunID)
-	res, err := s.cancelRun(runID)
+	// The run is durably canceling before any interrupt starts, so a client
+	// that hangs up does not get to abandon the interrupts it implies.
+	interruptCtx := context.WithoutCancel(ctx)
+	var (
+		interrupts  sync.WaitGroup
+		interrupted []string
+		failures    []RunCancelInterruptFailure
+	)
+	res, err := s.cancelRun(runID, func(holders []string) {
+		interrupts.Add(1)
+		go func() {
+			defer interrupts.Done()
+			interrupted, failures = s.interruptRunHolders(interruptCtx, runID, holders)
+		}()
+	})
+	// Wait out the interrupts even when a close failed: they were issued under
+	// a run already marked canceling, and the response is their only report.
+	interrupts.Wait()
 	if err != nil {
 		// A store read/write failed mid-cancel: do NOT report a cancellation we
-		// could not substantiate. 503 is retryable; the run keeps running.
+		// could not substantiate. 503 is retryable; the run root stays open,
+		// marked canceling if the mark landed, and a retry completes the close.
 		return nil, apierr.ServiceUnavailable.Msgf("run cancel failed: %v", err)
 	}
 	if !res.found {
@@ -333,11 +399,32 @@ func (s *Server) humaHandleRunCancel(_ context.Context, input *RunCancelInput) (
 	if res.terminal {
 		return nil, apierr.ConflictWrongState.Msgf("run %s is already terminal; nothing to cancel", runID)
 	}
+	s.syncRunProjectionAfterWrite(ctx)
 	out := &RunCancelOutput{}
 	out.Body.RunID = runID
 	out.Body.Status = res.status
 	out.Body.Closed = res.closed
+	out.Body.Interrupted = interrupted
+	out.Body.InterruptFailures = failures
 	return out, nil
+}
+
+// syncRunProjectionAfterWrite gives the caller read-your-writes on the run
+// projection after a write this handler made through the supervisor's cache:
+// the write's bead.* events are already in the event log, and this folds them
+// before the response goes out. It costs no store call — one stat and a read of
+// the newly appended log bytes — and is a no-op for a source that cannot sync
+// (the legacy on-disk fold re-reads the log whenever it changed).
+func (s *Server) syncRunProjectionAfterWrite(ctx context.Context) {
+	source, ok := s.runCensusSource.(RunProjectionSyncSource)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, runCancelProjectionSyncTimeout)
+	defer cancel()
+	if !source.SyncRunProjection(ctx, s.state.CityName()) {
+		log.Printf("gc api: run projection did not catch up after a run write; the next read may be stale until the next poll")
+	}
 }
 
 // cancelRunResult is the outcome of a cancelRun wind-down.
@@ -348,24 +435,54 @@ type cancelRunResult struct {
 	status   RunStatus // resulting run status
 }
 
+// runCancelTarget is one open run root a cancel winds down, and the IDs of the
+// open workflow roots of its tree it closes, deepest first and the run root
+// last.
+type runCancelTarget struct {
+	store     beads.Store
+	root      beads.Bead
+	workflows []string
+}
+
 // cancelRun winds down the run rooted at runID across every workflow store,
 // closing each open root and its still-OPEN member beads with a canceled
-// outcome. It reuses the workflow teardown close ordering (descendants before
-// the root, blockers before blocked) so a strict store accepts the batch. The
-// cancel-intent marker is stamped root-only, together with the root's own close:
-// on an atomic store the two commit as one transaction, so a failed close
-// persists neither and never strands an open, half-marked root; on a non-atomic
-// store the marker is durably recorded so the returned 5xx's retry completes the
-// wind-down. Already-terminal runs (and already-closed members) are left
-// untouched — closing a completed member would rewrite its recorded outcome. The
-// run's teardown tail (molecule.TeardownTailExclusion) is excluded from this
-// close: it runs AFTER the root reaches a terminal state by contract, and its
-// pass condition may read ROOT_OUTCOME, which this cancel's own close just
-// stamped — force-closing it unexecuted would strand the resources it releases.
-// Any store read/write failure is returned so the caller reports a 5xx rather
-// than a phantom success.
-func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
+// outcome, in three steps ordered so the run's work stops as early as it can:
+//
+//  1. Mark each open run root canceling: gc.cancel_requested, one write per
+//     root and none when a previous attempt already marked it. From here on
+//     the claim gate (molecule.WorkflowStopReason) refuses every open step of
+//     the run, including the steps of drain item workflows whose own roots
+//     are still open, since their ancestry reaches the marked root; the
+//     dispatcher's control gate closes the run's controls; the workflow
+//     finalizer settles as canceled; and the run projects "canceling".
+//  2. Read the run's workflow tree (sourceworkflow.WorkflowTree: the run and
+//     every drain item workflow nested under it at any depth, one member read
+//     per workflow) and collect the assignees of the in-progress steps the
+//     close will sweep, then hand them to interrupt, which must not block: the
+//     interrupts run alongside the closes. The tree is read after the mark, so
+//     a claim that landed before the mark is seen here and one after it is
+//     refused by the gate.
+//  3. Close each open workflow, nested drain items deepest first and the run
+//     root last, reusing the workflow teardown close ordering (descendants
+//     before the root, blockers before blocked) so a strict store accepts the
+//     batch. Each root's close stamps the cancel marker on it too, so a nested
+//     item's own controls stop as canceled.
+//
+// Any store read/write failure is returned so the caller reports a retryable
+// 5xx rather than a phantom success. Every state a failure (or a crash) can
+// leave is one a retry completes: the run root stays open until its own close,
+// the last write, so the retry finds the run again instead of 409ing; if the
+// mark landed the run is already stopped meanwhile; already-closed members and
+// nested roots are left as they are, and the retry interrupts whoever still
+// holds an in-progress step. Already-terminal runs (and already-closed members)
+// are left untouched: closing a completed member would rewrite its recorded
+// outcome. Each workflow's teardown tail (molecule.TeardownTailExclusion) is
+// spared: it runs AFTER its root reaches a terminal state by contract, and its
+// pass condition may read ROOT_OUTCOME, which this cancel's own close stamps;
+// force-closing it unexecuted would strand the resources it releases.
+func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (cancelRunResult, error) {
 	var res cancelRunResult
+	var targets []runCancelTarget
 	for _, info := range s.workflowStores() {
 		if info.store == nil {
 			continue
@@ -379,29 +496,207 @@ func (s *Server) cancelRun(runID string) (cancelRunResult, error) {
 			if isClosedStatus(root.Status) {
 				continue // already terminal — nothing to wind down
 			}
-			exclude, err := molecule.TeardownTailExclusion(info.store, root.ID)
-			if err != nil {
-				return res, err
-			}
-			n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(
-				info.store,
-				root.ID,
-				beadmeta.OutcomeCanceled,
-				runCanceledCloseReason,
-				map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
-				exclude,
-			)
-			if err != nil {
-				return res, err
-			}
-			res.closed += n
-			res.status = RunStatusCanceled
+			targets = append(targets, runCancelTarget{store: info.store, root: root})
 		}
 	}
-	if res.found && res.status == "" {
-		res.terminal = true
+	if len(targets) == 0 {
+		res.terminal = res.found
+		return res, nil
+	}
+
+	for _, target := range targets {
+		if strings.TrimSpace(target.root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" {
+			continue // marked by an earlier attempt
+		}
+		if err := target.store.SetMetadata(target.root.ID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+			return res, err
+		}
+	}
+
+	var holders []string
+	for i := range targets {
+		held, err := planRunCancel(&targets[i])
+		if err != nil {
+			return res, err
+		}
+		holders = append(holders, held...)
+	}
+	if len(holders) > 0 && interrupt != nil {
+		interrupt(holders)
+	}
+
+	for _, target := range targets {
+		for _, rootID := range target.workflows {
+			n, err := cancelWorkflowRoot(target.store, rootID)
+			res.closed += n
+			if err != nil {
+				return res, err
+			}
+		}
+		res.status = RunStatusCanceled
 	}
 	return res, nil
+}
+
+// cancelWorkflowRoot closes one workflow root and its open members as
+// canceled, stamping the cancel-intent marker on the root alone and sparing its
+// teardown tail. A nested drain item root is canceled exactly like the run
+// root: it is a workflow root in its own right, so its own controls read
+// gc.cancel_requested off it and its own teardown tail still runs.
+func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
+	exclude, err := molecule.TeardownTailExclusion(store, rootID)
+	if err != nil {
+		return 0, err
+	}
+	return sourceworkflow.CloseWorkflowSubtreeAsExcept(
+		store,
+		rootID,
+		beadmeta.OutcomeCanceled,
+		runCanceledCloseReason,
+		map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+		exclude,
+	)
+}
+
+// planRunCancel reads target's workflow tree, records the open workflows the
+// cancel closes (deepest first, the run root last), and returns the assignees
+// of the in-progress members those closes will sweep, in first-seen order and
+// possibly repeated. A nested item workflow already closed is neither closed
+// again nor searched for holders. A spared teardown step is not swept, so its
+// holder is not returned; the teardown tail is judged from the members the
+// tree walk already read (every member of a graph workflow carries its
+// gc.root_bead_id) rather than from a further subtree read, which the close
+// makes for itself, so that no read beyond the walk delays the interrupts.
+func planRunCancel(target *runCancelTarget) ([]string, error) {
+	tree, err := sourceworkflow.WorkflowTree(target.store, target.root.ID)
+	if err != nil {
+		return nil, err
+	}
+	var holders []string
+	for _, node := range tree {
+		if node.Root.ID == "" || isClosedStatus(node.Root.Status) {
+			continue
+		}
+		exclude := molecule.TeardownTailExclusionFromMembers(node.Members)
+		holders = append(holders, inProgressAssignees(node.Members, exclude)...)
+		target.workflows = append(target.workflows, node.Root.ID)
+	}
+	return holders, nil
+}
+
+// inProgressAssignees returns the assignees of the in-progress members of a
+// workflow that a close sparing exclude would sweep: the same member set
+// CloseWorkflowSubtreeAsExcept closes, narrowed to claimed work.
+func inProgressAssignees(members []beads.Bead, exclude func(beads.Bead) bool) []string {
+	var assignees []string
+	for _, member := range members {
+		if member.Status != "in_progress" || (exclude != nil && exclude(member)) {
+			continue
+		}
+		if assignee := strings.TrimSpace(member.Assignee); assignee != "" {
+			assignees = append(assignees, assignee)
+		}
+	}
+	return assignees
+}
+
+// interruptRunHolders interrupts the current turn of each live session among
+// holders — assignees of in-progress steps of a run being canceled — so a
+// step that was executing (a foreground tool included) stops rather than
+// running on after its run was canceled. It is the interrupt POST /session/{id}/stop
+// sends (session.Manager.StopTurn); no session is killed, because a pool
+// session may go on to serve other work.
+//
+// An assignee resolves to its session through the API's session target
+// resolution (bead ID, session name, alias, configured named identity), as the
+// ?assignee bead filter does. One that names no open session, or a session
+// that is suspended or whose runtime is not running, has no turn to interrupt
+// and is skipped.
+//
+// Best-effort: the run is already durably marked canceling, so a failure is
+// logged and returned for the response rather than failing the cancel. Distinct sessions
+// are interrupted concurrently, since a provider's interrupt can wait for the
+// session to settle. Returns the interrupted session IDs, in holder order, and
+// the failures.
+func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders []string) ([]string, []RunCancelInterruptFailure) {
+	if len(holders) == 0 {
+		return nil, nil
+	}
+	var failures []RunCancelInterruptFailure
+	fail := func(sessionRef string, err error) {
+		log.Printf("gc api: run %s canceled, but interrupting %s failed: %v", runID, sessionRef, err)
+		failures = append(failures, RunCancelInterruptFailure{Session: sessionRef, Error: err.Error()})
+	}
+	var unique []string
+	seenHolder := map[string]bool{}
+	for _, holder := range holders {
+		if !seenHolder[holder] {
+			seenHolder[holder] = true
+			unique = append(unique, holder)
+		}
+	}
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		for _, holder := range unique {
+			fail(holder, errors.New("no session store configured"))
+		}
+		return nil, failures
+	}
+
+	var ids []string
+	seenID := map[string]bool{}
+	for _, holder := range unique {
+		id, err := s.resolveSessionTargetIDWithContext(ctx, store, holder, apiSessionResolveOptions{})
+		if errors.Is(err, session.ErrSessionNotFound) {
+			continue // not an open session: nothing is executing under it
+		}
+		if err != nil {
+			fail(holder, err)
+			continue
+		}
+		if !seenID[id] {
+			seenID[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	sp := s.state.SessionProvider()
+	results := make([]error, len(ids))
+	skipped := make([]bool, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mgr := s.sessionManager(store)
+			info, err := mgr.Get(id)
+			if err != nil {
+				results[i] = err
+				return
+			}
+			// StopTurn's own guard (a suspended or stopped session has no
+			// turn), checked first so such a session is neither waited on nor
+			// reported as interrupted.
+			if info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName) {
+				skipped[i] = true
+				return
+			}
+			results[i] = mgr.StopTurn(id)
+		}()
+	}
+	wg.Wait()
+
+	var interrupted []string
+	for i, id := range ids {
+		switch {
+		case skipped[i]:
+		case results[i] != nil:
+			fail(id, results[i])
+		default:
+			interrupted = append(interrupted, id)
+		}
+	}
+	return interrupted, failures
 }
 
 // findWorkflowRoots returns the graph-workflow roots in store that match runID

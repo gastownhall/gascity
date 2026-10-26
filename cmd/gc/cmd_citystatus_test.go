@@ -24,6 +24,23 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
+// statusTestCityDir returns an empty, test-owned city directory for tests that
+// run real session observations. An observation does real filesystem I/O on
+// the city path (store and controller probes, path normalization, and the
+// per-city events recorder it opens), and gc status bounds each observation by
+// statusObservationTimeout. A made-up host path such as "/home/user/city" makes
+// that I/O depend on the machine: on macOS /home is an autofs mount, every
+// lookup under it costs tens of milliseconds, and the observations overrun the
+// deadline and report a running agent as stopped. resetCLIFactoryRecorders
+// registers its cleanup after t.TempDir's, so the recorder the observations
+// memoize for this directory is closed before the directory is removed.
+func statusTestCityDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resetCLIFactoryRecorders(t)
+	return dir
+}
+
 func TestCityStatusEmptyCity(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
@@ -70,14 +87,15 @@ func TestCityStatusWithAgents(t *testing.T) {
 		},
 	}
 
+	cityPath := statusTestCityDir(t)
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
 
-	if !strings.Contains(out, "/home/user/city") {
+	if !strings.Contains(out, cityPath) {
 		t.Errorf("stdout missing city path, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Agents:") {
@@ -113,7 +131,7 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, statusTestCityDir(t), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -418,12 +436,12 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 		Rigs: []config.Rig{
-			{Name: "myrig", Path: "/home/user/myrig"},
+			{Name: "myrig", Path: t.TempDir()},
 		},
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatusJSON(sp, cfg, statusTestCityDir(t), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

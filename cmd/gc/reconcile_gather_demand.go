@@ -87,6 +87,9 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		var errs []error
 		c.DefaultProbed = true
 		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(env.Cfg, targets.defaultScaleTargets, cache)
+		// A bead whose claims keep failing the same way is not spawn demand
+		// (claim_loop_guard.go).
+		c.DefaultCounts, c.DefaultDemand = claimLoopGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
 		for _, probeErr := range errs {
 			fmt.Fprintf(stderr, "gatherDemand: %v (counts above may be a partial of one demand source)\n", probeErr) //nolint:errcheck
 		}

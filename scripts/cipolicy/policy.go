@@ -311,7 +311,16 @@ const (
 	// gets `token: ''`, so pull requests diff with git instead of calling the
 	// pulls/files API on the shared github.token budget. Reviewed delta: one
 	// `with` input; no new job, step command or permission.
-	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
+	//
+	// Bumped again (MCP mail conformance on lock bumps): the changes job's
+	// mail filter adds .github/requirements/mcp-agent-mail.in, .overrides.txt
+	// and .txt. The mcp-mail job installs mcp_agent_mail from that lock and
+	// runs TestMCPMailConformanceLive, the only live gc <-> mcp_agent_mail
+	// test, yet #8307 (GitPython, filelock, fastmcp and opentelemetry-api
+	// bumps) merged without it running. requiredFilterPaths pins the three
+	// paths. Reviewed delta: three filter paths; no new job, step command or
+	// permission.
+	expectedCIExecutionHash     = "97af365879b1ea3c6a86cfdb6e9cc662a2cef31bc50463f833f57eef7067d6a9"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -345,16 +354,32 @@ const (
 	// It selected GC_BEADS=sqlite, a provider #3151 removed (gc now
 	// hard-errors on it), so it failed every night; no job may select a
 	// provider now. Reviewed delta: one job removed; no new job, trigger or
-	// permission.
-	expectedNightlyExecutionHash = "cb54a44e7bfc392a047849ab6cfe695dcbffec56e127b5a84d427e3c1d4bef8c"
+	// permission. Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
+	// from hotfix/1.5.1): BD_VERSION env value only. Then Dolt 2.2.0 -> 2.6.0
+	// (the first patched Dolt release for the eMudhra CA distrust):
+	// the workflow DOLT_VERSION env value only.
+	expectedNightlyExecutionHash = "56ab9f58ed4e8b418c22d7890cd3372de3f276bdf37956322e2f1a69911205e4"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
-	// `uses: ./.github/actions/go-mod-download`.
-	expectedSetupActionHash = "910f005f48c629c9bf76c69a007b60c4132a76859183e59c0fe99d642bf6141f"
+	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
+	// input default moves 2.1.123 -> 2.1.283 (Opus 5.5 needs >= 2.1.280);
+	// install-claude-native.sh pins its per-platform SHA-256s. No new step,
+	// input, permission or secret.
+	// Bumped again (eMudhra CA follow-up): 2.1.283 -> 2.1.308, the first
+	// stable Claude Code that rejects the compromised eMudhra intermediates.
+	// Reviewed delta: one input default; no new step, command, permission or
+	// secret.
+	expectedSetupActionHash = "2894a52d9e9e5fc4ae62402076003c6e7ee8f6ad74f53c14126ceda00b3dae70"
 )
 
 var requiredFilterPaths = map[string][]string{
-	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
+	"mail": {
+		"internal/mail/**",
+		"contrib/mail-scripts/**",
+		".github/requirements/mcp-agent-mail.in",
+		".github/requirements/mcp-agent-mail.overrides.txt",
+		".github/requirements/mcp-agent-mail.txt",
+	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",

@@ -493,7 +493,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
 		m := beads.NewMemStoreFrom(0, rows, nil)
-		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
@@ -1285,12 +1285,14 @@ func (s *sim) failf(inv, format string, args ...any) {
 	}
 }
 
-// report fails t with the seed's violations and its schedule.
+// report fails t with the seed's violations, the command that reruns t's
+// top-level test on the seed, and its schedule.
 func (s *sim) report(t *testing.T) {
 	t.Helper()
 	if len(s.failures) > 0 {
-		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: GC_V2_SIM_SEED=%d go test -run TestSimCorpus ./cmd/gc/\nschedule:\n%s",
-			s.seed, s.lag, strings.Join(s.failures, "\n  "), s.seed, strings.Join(s.schedule, "\n"))
+		test, _, _ := strings.Cut(t.Name(), "/")
+		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: bazel test //cmd/gc:gc_test --test_sharding_strategy=disabled --test_filter='^%s$' --test_env=GC_V2_SIM_SEED=%d\nschedule:\n%s",
+			s.seed, s.lag, strings.Join(s.failures, "\n  "), test, s.seed, strings.Join(s.schedule, "\n"))
 	}
 }
 

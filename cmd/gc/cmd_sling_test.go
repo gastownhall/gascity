@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1953,18 +1954,23 @@ type bdInvocation struct {
 // responses for the subcommands cmdSling's inline-text path actually
 // runs (show, create, update). Unexpected subcommands fail the test
 // loudly so drift in sling's bd usage surfaces instead of silently
-// passing. Returns a pointer to the capture slice; auto-restores via
+// passing. Returns a snapshot func for the captured invocations; the runner
+// can be entered from several goroutines at once (a two-tier List reads both
+// tiers concurrently), so the capture is mutex-protected. Auto-restores via
 // t.Cleanup.
-func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
+func installCaptureBdRunner(t *testing.T) func() []bdInvocation {
 	t.Helper()
 	orig := beadsExecCommandRunnerWithEnv
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = orig })
 
-	calls := &[]bdInvocation{}
+	var mu sync.Mutex
+	var calls []bdInvocation
 	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		snap := maps.Clone(env)
 		return func(dir, name string, args ...string) ([]byte, error) {
-			*calls = append(*calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			mu.Lock()
+			calls = append(calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			mu.Unlock()
 			if name != "bd" {
 				t.Errorf("unexpected command %q args=%v", name, args)
 				return nil, fmt.Errorf("unexpected command %q", name)
@@ -1990,7 +1996,11 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 			}
 		}
 	}
-	return calls
+	return func() []bdInvocation {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(calls)
+	}
 }
 
 // firstBdCreate returns the first `bd create --json` invocation
@@ -2018,7 +2028,7 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir, rigDir := setupRigScopedBdCity(t)
-	calls := installCaptureBdRunner(t)
+	captured := installCaptureBdRunner(t)
 
 	t.Chdir(cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -2029,10 +2039,11 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	create := firstBdCreate(t, *calls)
+	calls := captured()
+	create := firstBdCreate(t, calls)
 	wantBeadsDir := filepath.Join(rigDir, ".beads")
 	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
-		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, *calls)
+		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, calls)
 	}
 	if got := create.Env["GC_RIG_ROOT"]; got != rigDir {
 		t.Fatalf("bd create GC_RIG_ROOT = %q, want %q", got, rigDir)
@@ -2053,7 +2064,7 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir, rigDir := setupRigScopedBdCity(t)
-	calls := installCaptureBdRunner(t)
+	captured := installCaptureBdRunner(t)
 
 	t.Chdir(rigDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -2064,11 +2075,12 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	create := firstBdCreate(t, *calls)
+	calls := captured()
+	create := firstBdCreate(t, calls)
 	wantBeadsDir := filepath.Join(rigDir, ".beads")
 	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
 		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped). Bare target %q from rig cwd must land in the rig store; all calls: %v",
-			got, wantBeadsDir, "worker", *calls)
+			got, wantBeadsDir, "worker", calls)
 	}
 	// Mirror the env-surface assertions from the qualified-target
 	// variant so a regression that sets BEADS_DIR correctly but drops

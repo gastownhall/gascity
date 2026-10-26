@@ -145,7 +145,7 @@ func (d Disposition) render() string {
 func TestDispositionTableGolden(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("# The disposition table (ARCH-RESTRUCTURE-2 R7): event by actor, from seed -> result.\n")
-	b.WriteString("# Regenerate: go test ./internal/session -run TestDispositionTableGolden -update-golden\n")
+	b.WriteString("# Regenerate: GC_TEST_REPO_ROOT=\"$PWD\" bazel run //internal/session:session_test -- -test.run='^TestDispositionTableGolden$' -update-golden\n")
 	for _, e := range dispEvents() {
 		fmt.Fprintf(&b, "\n%s by %s", e.ev.Kind, actorNames[e.by])
 		if !e.ev.Until.IsZero() {

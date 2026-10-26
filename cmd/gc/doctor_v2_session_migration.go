@@ -21,9 +21,10 @@ import (
 // factory can write (beads v1.3.1's native Dolt open migrates the schema). An
 // unchecked leg may hide a refused row: an error under v2, a warning otherwise.
 type v2SessionMigrationCheck struct {
-	cfg      *config.City
-	cityName string
-	openLegs func() []v2SessionLeg
+	cfg       *config.City
+	cityName  string
+	openLegs  func() []v2SessionLeg
+	lookupEnv func(string) (string, bool) // nil reads reconcilerModeLookupEnv
 }
 
 // v2SessionLeg is one census leg; with no read-only open, notChecked says why.
@@ -92,16 +93,20 @@ func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	}
 	msg := fmt.Sprintf("%d open session row(s): %d in a state main does not know, %d shared pool-slot session name(s), %d named session(s) claimed by more than one row",
 		len(rows), flagged, len(m.SharedSlotNames), len(m.DuplicateNamed))
-	mode, _, _ := c.cfg.Daemon.SessionReconcilerMode()
+	mode, resolved := doctorReconcilerMode(c.cfg, c.lookupEnv)
+	details = append(details, resolved)
 	switch {
-	case notChecked > 0 && mode == config.SessionReconcilerV2:
+	case notChecked > 0 && mode == reconcilerV2:
 		return errorCheck(c.Name(), msg+fmt.Sprintf("; %d leg(s) not checked, counts are a lower bound", notChecked),
 			"read the unchecked legs from a store copy", details)
 	case notChecked > 0:
 		return warnCheck(c.Name(), msg+fmt.Sprintf("; %d leg(s) not checked, counts are a lower bound", notChecked),
 			"read the unchecked legs from a store copy; a legacy city warns here, so a census must look for this warning's \"not checked\" details, not the exit code", details)
-	case m.refusal() != nil && mode == config.SessionReconcilerV2:
-		return warnCheck(c.Name(), msg+"; v2 refuses to boot over them", "the repair (--fix) is not available yet", details)
+	case m.refusal() != nil && mode == reconcilerV2:
+		// An unset key that resolves to v2 boots over this census as an
+		// explicit v2 does, so the refusal is reported before it lands.
+		return warnCheck(c.Name(), msg+"; v2 refuses to boot over them ("+resolved+")",
+			`close or repair the rows listed in the details (the repair, --fix, is not available yet), or set session_reconciler = "legacy"`, details)
 	case m.refusal() != nil:
 		msg += " (legacy runs over these; v2 would refuse to boot)"
 	}

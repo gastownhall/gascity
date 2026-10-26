@@ -1051,7 +1051,7 @@ func TestAllocator_EntryTemplateResolvesLegacyRows(t *testing.T) {
 	in := f.inputs()
 	p := newDecidePass(in)
 	p.prepare()
-	p.markTemplate("worker", true, "pool-scale-check-partial")
+	p.markTemplate("worker", true, causeScaleCheckPartial)
 	d := p.finish()
 	if e := entryOf(t, d, "gc-2"); e.Template != "worker" || e.Desired != desireKeep {
 		t.Fatalf("legacy-template row = template %q %s/%s, want worker, retained", e.Template, e.Desired, e.Reason)

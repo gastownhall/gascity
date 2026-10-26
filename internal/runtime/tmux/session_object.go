@@ -172,12 +172,17 @@ func lsofUnixBound(out, path string) bool {
 // ObserveLivenessSince is ObserveLivenessWithError over a snapshot whose
 // fetch started at or after since, on the cache clock (v5 O1 "fresh for the
 // effect"). It reuses a new enough snapshot, refreshes otherwise, and never
-// invalidates the cache. A refresh that fails for a missing server answers
-// absent only when [Provider.ServerConfirmedDead] says so; any other failure
-// is unknown. A running session with exactly one live pane also reports that
-// pane's pid, for a zombie kill.
+// invalidates the cache. A name that a presence-only listing taken at or
+// after since does not hold reads absent without a refresh and its full-OS
+// process scan (StateCache.absentSince). A refresh that fails for a missing
+// server answers absent only when [Provider.ServerConfirmedDead] says so; any
+// other failure is unknown. A running session with exactly one live pane also
+// reports that pane's pid, for a zombie kill.
 func (p *Provider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
 	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	if p.cache.absentSince(name, since) {
 		return runtime.Liveness{}, nil
 	}
 	obs, ok := p.cache.observeSince(since)

@@ -1027,15 +1027,18 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 }
 
 type t3BridgeTestServer struct {
-	t                  *testing.T
-	server             *httptest.Server
-	mu                 sync.Mutex
-	commands           []string
-	payloads           []map[string]interface{}
-	rejectCommands     map[string]interface{}
-	snapshot           map[string]interface{}
-	snapshots          []map[string]interface{}
-	commandHook        func(payload map[string]interface{})
+	t              *testing.T
+	server         *httptest.Server
+	mu             sync.Mutex
+	commands       []string
+	payloads       []map[string]interface{}
+	rejectCommands map[string]interface{}
+	snapshot       map[string]interface{}
+	snapshots      []map[string]interface{}
+	commandHook    func(payload map[string]interface{})
+	// snapshotHook runs as the server answers a snapshot read, after it
+	// chose the snapshot it answers.
+	snapshotHook       func()
 	commandDrops       int
 	commandDropClose   []byte
 	stalled            bool
@@ -1293,11 +1296,11 @@ func (ts *t3BridgeTestServer) setCommandHook(hook func(payload map[string]interf
 	ts.commandHook = hook
 }
 
-// dropCommands makes the next n dispatched commands go unanswered: each is
+// dropNextCommand makes the next dispatched command go unanswered: it is
 // recorded and its hook runs, then its connection closes, as when T3 took a
 // command and the answer was lost.
-func (ts *t3BridgeTestServer) dropCommands(n int) {
-	ts.closeCommands(n, nil)
+func (ts *t3BridgeTestServer) dropNextCommand() {
+	ts.closeCommands(1, nil)
 }
 
 // closeCommands is dropCommands whose connections send closeMessage, a close
@@ -1313,15 +1316,20 @@ func (ts *t3BridgeTestServer) closeCommands(n int, closeMessage []byte) {
 // nextSnapshot is the snapshot the next read answers; false for an outage.
 func (ts *t3BridgeTestServer) nextSnapshot() (map[string]interface{}, bool) {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if len(ts.snapshots) == 0 {
-		return ts.snapshot, true
+	next, ok := ts.snapshot, true
+	if len(ts.snapshots) > 0 {
+		next = ts.snapshots[0]
+		ok = next != nil
+		if len(ts.snapshots) > 1 {
+			ts.snapshots = ts.snapshots[1:]
+		}
 	}
-	next := ts.snapshots[0]
-	if len(ts.snapshots) > 1 {
-		ts.snapshots = ts.snapshots[1:]
+	hook := ts.snapshotHook
+	ts.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
-	return next, next != nil
+	return next, ok
 }
 
 func (ts *t3BridgeTestServer) recordCommand(typ string) {

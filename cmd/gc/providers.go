@@ -24,6 +24,7 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -164,7 +165,14 @@ func transportForRuntimeName(name string) string {
 // selection (mapping to the registry's seam-backed construction), but it is the
 // single place the Transport/Upstream axes will be honored as the de-conflation
 // completes.
+//
+// On a worker site it returns the guard provider, whatever the spec names: a
+// box never constructs a provider that can start, stop, type into or annotate
+// a runtime; the remote controller owns them (DES-CN D12).
 func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	if onWorkerSite(cityPath) {
+		return guard.New(), nil
+	}
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil {
 		return nil, err
@@ -1196,17 +1204,46 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 	if !settings.enabled {
 		maxSize = 0
 	}
-	return []events.FileRecorderOption{
+	opts := []events.FileRecorderOption{
 		events.WithMaxSize(maxSize),
 		events.WithRotationCheckRecords(settings.checkIntervalRecords),
 		events.WithRotationCheckInterval(settings.checkInterval),
 		events.WithArchiveRetainAge(settings.archiveRetainAge),
 	}
+	if mirror, ok := eventsMirrorOptions(eventsCfg.Mirror, stderr); ok {
+		opts = append(opts, events.WithMirror(mirror))
+	}
+	return opts
+}
+
+// eventsMirrorObserve, when set by a test, receives every step of the events
+// mirror copier, so the test can wait for a mirrored event.
+var eventsMirrorObserve func(events.MirrorProgress)
+
+// eventsMirrorOptions converts [events.mirror] into the recorder's mirror
+// options. It reports false when no mirror is configured, or when the
+// configured one is unusable, which it warns about: a bad mirror setting
+// disables the mirror, never the city.
+func eventsMirrorOptions(cfg config.EventsMirrorConfig, stderr io.Writer) (events.MirrorOptions, bool) {
+	if !cfg.Enabled() {
+		return events.MirrorOptions{}, false
+	}
+	if problem := cfg.Problem(); problem != "" {
+		warnEventsRotation(stderr, "events.mirror: warning: %s; the events mirror is disabled\n", problem)
+		return events.MirrorOptions{}, false
+	}
+	mode, _ := cfg.ModeOrDefault() // Problem already rejected a bad mode
+	return events.MirrorOptions{
+		Path:    cfg.Path,
+		Mode:    mode,
+		MaxSize: cfg.MaxSizeBytesOrDefault(),
+		Observe: eventsMirrorObserve,
+	}, true
 }
 
 // newFileEventsRecorder opens the city's rotation owner: the one long-lived
-// recorder that applies [events.rotation] and sweeps rotation leftovers on
-// open. Exactly one process per log may own it — the supervisor (its per-city
+// recorder that applies [events.rotation] and [events.mirror] and sweeps
+// rotation leftovers on open. Exactly one process per log may own it — the supervisor (its per-city
 // recorder and its own log) or, without a supervisor, the standalone
 // controller that holds .gc/controller.lock. Every other writer uses
 // newSecondaryFileEventsRecorder. Two rotators no longer lose events (the

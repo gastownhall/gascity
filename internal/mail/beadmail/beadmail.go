@@ -219,21 +219,12 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	if to == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
 	}
-	existing, err := p.store.List(beads.ListQuery{
-		Type:     messageBeadType,
-		Status:   "open",
-		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
-		TierMode: beads.TierBoth,
-		Live:     true,
-	})
+	existing, suppressed, err := p.findLiveDuplicate(to, key, false)
 	if err != nil {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
 	}
-	routes := p.recipientRoutes(to)
-	for _, b := range existing {
-		if matchesRecipientRoute(routes, b.Assignee) {
-			return beadToMessage(b), true, nil
-		}
+	if suppressed {
+		return existing, true, nil
 	}
 	msg, err := p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.DedupKeyMetadataKey: key})
 	if err != nil {
@@ -242,18 +233,66 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	return msg, false, nil
 }
 
+func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (mail.Message, bool, error) {
+	existing, err := p.store.List(beads.ListQuery{
+		Type:     messageBeadType,
+		Status:   "open",
+		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
+		TierMode: beads.TierBoth,
+		Live:     true,
+	})
+	if err != nil {
+		return mail.Message{}, false, err
+	}
+	if len(existing) == 0 {
+		return mail.Message{}, false, nil
+	}
+	routes := p.recipientRoutes(to)
+	for _, b := range existing {
+		if pendingHandoffOnly && !isUnreadInjectedAutoHandoff(b) {
+			continue
+		}
+		if matchesRecipientRoute(routes, b.Assignee) {
+			return beadToMessage(b), true, nil
+		}
+	}
+	return mail.Message{}, false, nil
+}
+
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
 // mail.Message at the boundary while confining the type=message bead, the
 // stable thread label, and the handoff-specific extra labels to this
 // implementation. Sender-route metadata is resolved exactly as [Provider.Send]
-// does, so handoff mail replies route correctly.
-func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) {
+// does, so handoff mail replies route correctly. When intent.DedupKey is
+// non-empty the send is suppressed, returning the existing message with
+// suppressed=true, only while an unread archive-after-inject auto-handoff for
+// the same recipient and key is pending; a handoff that was read but left open
+// does not suppress.
+func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, error) {
 	if intent.To == "" {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: recipient is required")
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: recipient is required")
+	}
+	dedupKey := strings.TrimSpace(intent.DedupKey)
+	if dedupKey != "" {
+		existing, suppressed, err := p.findLiveDuplicate(intent.To, dedupKey, true)
+		if err != nil {
+			return mail.Message{}, false, fmt.Errorf("beadmail handoff: dedup probe for key %q: %w", dedupKey, err)
+		}
+		if suppressed {
+			return existing, true, nil
+		}
 	}
 	from, metadata, err := p.resolveSenderRoute(intent.From)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: %w", err)
+	}
+	if dedupKey != "" {
+		withDedup := make(map[string]string, len(metadata)+1)
+		for key, value := range metadata {
+			withDedup[key] = value
+		}
+		withDedup[mail.DedupKeyMetadataKey] = dedupKey
+		metadata = withDedup
 	}
 	labels := make([]string, 0, 1+len(intent.ExtraLabels))
 	labels = append(labels, "thread:"+intent.ThreadID)
@@ -261,9 +300,9 @@ func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) 
 
 	b, err := p.createMessageBead(intent.Subject, intent.Body, from, intent.To, labels, metadata)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: %w", err)
 	}
-	return beadToMessage(b), nil
+	return beadToMessage(b), false, nil
 }
 
 // createMessageBead is the single confined edge where a mail message becomes a
@@ -473,13 +512,32 @@ func (p *Provider) Archive(id string) error {
 	if b.Status == "closed" {
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Close(id); err != nil {
+	if err := p.closeArchived(id, hasLabel(b.Labels, "read")); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
 	return nil
+}
+
+// closeArchived marks an unread message read, then closes it. Archive means
+// "dismissed", and a dismissed message left unread was lost twice over: it
+// kept reading as unread in any history view, and the read-gated retention
+// sweep (SweepReadMessagesBefore / PurgeReadMessageWisps) never reclaims an
+// unread message, so it lingered forever. Marking read first is the
+// same order ArchiveInjectedAutoHandoffs already uses. alreadyRead skips the
+// write when the caller has seen the read label.
+func (p *Provider) closeArchived(id string, alreadyRead bool) error {
+	if !alreadyRead {
+		if err := p.store.Update(id, beads.UpdateOpts{
+			Labels:   []string{"read"},
+			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+		}); err != nil {
+			return err
+		}
+	}
+	return p.store.Close(id)
 }
 
 // ArchiveCandidates returns open messages that match filter without archiving
@@ -540,7 +598,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Close(id); err != nil {
+		if err := p.closeArchived(id, candidates[i].Read); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -597,6 +655,10 @@ func isInjectedAutoHandoff(b beads.Bead) bool {
 	return b.Type == messageBeadType &&
 		hasLabel(b.Labels, mail.AutoHandoffLabel) &&
 		hasLabel(b.Labels, mail.ArchiveAfterInjectLabel)
+}
+
+func isUnreadInjectedAutoHandoff(b beads.Bead) bool {
+	return !hasLabel(b.Labels, "read") && isInjectedAutoHandoff(b)
 }
 
 // archiveInjectedAutoHandoffs marks each injected handoff read and closes it,

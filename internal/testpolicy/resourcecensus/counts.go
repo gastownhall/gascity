@@ -25,7 +25,9 @@ const (
 		"# Per-file counts for the P0.4 source resource census (owner: ga-cp3hwi).\n" +
 		"# Regenerate: " + regenerateCommand + "\n"
 
-	regenerateCommand = "go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update"
+	// regenerateCommand runs the generator with `bazel run` from the
+	// repository root: `bazel test` would write only into its sandbox.
+	regenerateCommand = `GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update`
 
 	regenerateLine = "regenerate with: " + regenerateCommand + " (then review the diff of " + CountsPath + ": each changed line is a ceiling change)"
 
@@ -462,7 +464,7 @@ func writeIfChanged(name string, content []byte) error {
 	}
 	if err := writeAtomically(name, content, mode); err != nil {
 		if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
-			return fmt.Errorf("write %s: %w (the source tree is read-only here: run go test ... -update from a writable checkout)", name, err)
+			return fmt.Errorf("write %s: %w (the source tree is read-only here: regenerate from a writable checkout with %s)", name, err, regenerateCommand)
 		}
 		return fmt.Errorf("write %s: %w", name, err)
 	}

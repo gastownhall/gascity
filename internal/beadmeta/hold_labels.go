@@ -67,7 +67,9 @@ const HumanLabel = "human"
 // So held OPEN assigned work is never wake readiness, keep-awake work or a
 // drain-ack strand, which ended the wake/drain loop where an on-demand named
 // session was re-woken every tick for assigned hold:external work its hook
-// drained past as no_work.
+// drained past as no_work. The controller's route-restore lanes consult it too
+// (isDetachedHandoffOrphanCandidate, carriedPoolRoute): a held bead's empty
+// gc.routed_to is a parking decision, not a lost route, so it is not re-stamped.
 //
 // Two demand paths do not consult it. Pool accounting
 // (filterAssignedWorkBeadsForPoolDemandAt) still counts a held OPEN assigned

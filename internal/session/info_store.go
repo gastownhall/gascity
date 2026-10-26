@@ -295,3 +295,20 @@ func sessionMatchesFiltersInfo(info Info, stateFilter, templateFilter string) bo
 	}
 	return true
 }
+
+// StateFilterIncludesClosed reports whether a session-list state filter can
+// keep a closed session under the filter ListFromInfos applies: the whole
+// filter "all", or a comma-separated "closed" entry. The empty default and
+// every other filter keep open sessions only, so a list that reads persisted
+// rows before filtering them needs closed rows only when this is true.
+func StateFilterIncludesClosed(stateFilter string) bool {
+	if stateFilter == "all" {
+		return true
+	}
+	for _, sf := range strings.Split(stateFilter, ",") {
+		if sf == "closed" {
+			return true
+		}
+	}
+	return false
+}

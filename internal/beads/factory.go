@@ -323,6 +323,12 @@ type StoreOpenOptions struct {
 	// behaves exactly like today's default and can never raise enforcement.
 	ConditionalWrites gate.Mode
 
+	// ConditionalWritesDefaulted reports that ConditionalWrites is the
+	// builtin default rather than an operator's choice. A defaulted auto on a
+	// store that cannot carry the mode is treated as off: the open notes it
+	// at debug and fires no degrade. The stamp records it as defaulted.
+	ConditionalWritesDefaulted bool
+
 	// OnConditionalWritesDegraded receives the first (and only the first)
 	// capability degrade of each store this open produces — the composition
 	// root converts it into the typed beads.conditional_writes.degraded
@@ -703,9 +709,9 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	if err != nil || result.Store == nil {
 		return result, err
 	}
-	mode, defaulted := opts.ConditionalWrites, false
+	mode, defaulted, unthreaded := opts.ConditionalWrites, opts.ConditionalWritesDefaulted, false
 	if mode == gate.ModeUnset {
-		mode, defaulted = gate.Off, true
+		mode, defaulted, unthreaded = gate.Off, true, true
 	}
 	carrier, ok := result.Store.(conditionalWritesModeCarrier)
 	if !ok {
@@ -715,7 +721,7 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	if !carrier.stampConditionalWritesMode(mode, defaulted) {
 		return opts.unstampableResult(result, mode, "store forwards the stamp into a backing that cannot carry it")
 	}
-	if defaulted && opts.Logger != nil {
+	if unthreaded && opts.Logger != nil {
 		opts.Logger.Debug("conditional_writes mode not threaded; defaulted to off",
 			slog.String("store", result.Diagnostic.Store),
 			slog.String("scope", opts.ScopeRoot))
@@ -726,19 +732,20 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 // StampOpenedStore stamps the conditional-writes mode onto a store the factory
 // did not open, such as a relocated class binding's engine, by the factory's
 // own rules: ModeUnset defaults to off, and a store that cannot carry the mode
-// is refused under require and degraded loudly under auto. kind names the
+// is refused under require and degraded loudly under auto, or quietly when
+// defaulted (StoreOpenOptions.ConditionalWritesDefaulted). kind names the
 // store in the diagnostic and log vocabulary.
 //
 // A store that already carries a mode is refused, whatever the new mode: the
 // stamp is latched for the store's lifetime (§6.3), and a second stamp is the
 // one way a caller could lower a require it did not set.
-func StampOpenedStore(store Store, kind string, mode gate.Mode, onDegrade func(ConditionalWritesDegrade), logger *slog.Logger) error {
+func StampOpenedStore(store Store, kind string, mode gate.Mode, defaulted bool, onDegrade func(ConditionalWritesDegrade), logger *slog.Logger) error {
 	if carrier, ok := store.(conditionalWritesModeCarrier); ok {
 		if stamped, _ := carrier.conditionalWritesMode(); stamped != gate.ModeUnset {
 			return fmt.Errorf("stamping %s: conditional_writes mode is already %q and stays latched for the store's lifetime", kind, stamped)
 		}
 	}
-	opts := StoreOpenOptions{ConditionalWrites: mode, OnConditionalWritesDegraded: onDegrade, Logger: logger}
+	opts := StoreOpenOptions{ConditionalWrites: mode, ConditionalWritesDefaulted: defaulted, OnConditionalWritesDegraded: onDegrade, Logger: logger}
 	_, err := opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: kind}}, nil)
 	return err
 }
@@ -749,17 +756,17 @@ func StampOpenedStore(store Store, kind string, mode gate.Mode, onDegrade func(C
 // OPEN refuses — a store that cannot enforce the fence must never be handed
 // to a caller whose config promises fencing; under auto the open succeeds but
 // degrades LOUDLY (warn log plus the degrade notification, fired directly —
-// there is no stamp to latch on, and an open happens once per store); off and
-// unset stay a debug note.
+// there is no stamp to latch on, and an open happens once per store); off,
+// unset and a defaulted auto (ConditionalWritesDefaulted) stay a debug note.
 func (opts StoreOpenOptions) unstampableResult(result StoreOpenResult, mode gate.Mode, reason string) (StoreOpenResult, error) {
-	switch mode {
-	case gate.Require:
+	switch {
+	case mode == gate.Require:
 		refusal := &ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason}
 		if opts.ScopeRoot == "" {
 			return StoreOpenResult{}, fmt.Errorf("opening %s: %w", result.Diagnostic.Store, refusal)
 		}
 		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w", result.Diagnostic.Store, opts.ScopeRoot, refusal)
-	case gate.Auto:
+	case mode == gate.Auto && !opts.ConditionalWritesDefaulted:
 		if opts.Logger != nil {
 			opts.Logger.Warn("conditional_writes degraded at open",
 				slog.String("store", result.Diagnostic.Store),

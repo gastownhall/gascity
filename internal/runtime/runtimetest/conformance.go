@@ -15,8 +15,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -460,6 +462,40 @@ func fencedStart(t *testing.T, opts Options, sp runtime.Provider, name string, c
 	return fence
 }
 
+// peekBarrierWait bounds how long peekBarrier waits for its marker.
+const peekBarrierWait = 2 * time.Second
+
+// peekBarrier nudges a marker unfenced (NudgeNow when sp has it) and waits
+// for Peek to show it, returning that output. Input sent before the barrier
+// has reached the session by then, so a case can confirm delivery or
+// non-delivery from it. False when sp's Peek never shows nudged text (a
+// runtime with no visible input), so the case cannot confirm by peeking; the
+// log then names the input fencing the case relied on instead.
+func peekBarrier(t *testing.T, sp runtime.Provider, name string) (string, bool) {
+	t.Helper()
+	marker := "barrier-" + name
+	send := sp.Nudge
+	if now, ok := sp.(runtime.ImmediateNudgeProvider); ok {
+		send = now.NudgeNow
+	}
+	if err := send(name, runtime.TextContent(marker)); err != nil {
+		t.Logf("barrier nudge: %v; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", err, runtime.InputFencingFor(sp, name))
+		return "", false
+	}
+	deadline := time.Now().Add(peekBarrierWait)
+	for {
+		out, err := sp.Peek(name, 0)
+		if err == nil && strings.Contains(out, marker) {
+			return out, true
+		}
+		if time.Now().After(deadline) {
+			t.Logf("Peek never showed the barrier nudge; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", runtime.InputFencingFor(sp, name))
+			return "", false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // runFencedInputTests is the fenced-input group: a provider that can fence a
 // session's input (runtime.FencedInputProvider) delivers under the fence of
 // the incarnation it started, and refuses every input under another fence or
@@ -472,11 +508,15 @@ func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
 		fence := fencedStart(t, opts, sp, name, cfg)
 		fp := sp.(runtime.FencedInputProvider)
 		ctx := context.Background()
-		if err := fp.NudgeFenced(ctx, name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true}); err != nil {
+		text := "fenced-in-" + name
+		if err := fp.NudgeFenced(ctx, name, runtime.TextContent(text), runtime.FencedNudge{Fence: fence, Immediate: true}); err != nil {
 			t.Errorf("NudgeFenced under the session's fence: %v", err)
 		}
 		if err := fp.SendKeysFenced(ctx, name, fence, "Enter"); err != nil {
 			t.Errorf("SendKeysFenced under the session's fence: %v", err)
+		}
+		if out, ok := peekBarrier(t, sp, name); ok && !strings.Contains(out, text) {
+			t.Errorf("Peek after the fenced nudge and a later unfenced one = %q, want the fenced text %q delivered", out, text)
 		}
 	})
 
@@ -487,14 +527,18 @@ func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
 		ctx := context.Background()
 		other := fence
 		other.Token += "-other"
+		stale := "fenced-stale-" + name
 		for op, err := range map[string]error{
-			"NudgeFenced":     fp.NudgeFenced(ctx, name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: other, Immediate: true}),
+			"NudgeFenced":     fp.NudgeFenced(ctx, name, runtime.TextContent(stale), runtime.FencedNudge{Fence: other, Immediate: true}),
 			"SendKeysFenced":  fp.SendKeysFenced(ctx, name, other, "Enter"),
 			"InterruptFenced": fp.InterruptFenced(ctx, name, other),
 		} {
 			if !errors.Is(err, runtime.ErrFenceMismatch) || runtime.IsSessionGone(err) {
 				t.Errorf("%s under another fence = %v, want ErrFenceMismatch, not gone", op, err)
 			}
+		}
+		if out, ok := peekBarrier(t, sp, name); ok && strings.Contains(out, stale) {
+			t.Errorf("Peek after a refused nudge and a later unfenced one = %q, want nothing of the refused text %q", out, stale)
 		}
 	})
 

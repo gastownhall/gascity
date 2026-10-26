@@ -61,10 +61,19 @@ type controllerStopClient struct {
 	readTimeout  time.Duration
 }
 
+// sendControllerStop asks cityPath's controller to stop. On a worker site it
+// fails closed before touching the socket path: the box has no socket file, and
+// reading that absence as "no controller runs" would let direct cleanup act
+// behind the remote controller.
 func sendControllerStop(cityPath string, force bool) controllerStopResult {
+	if onWorkerSite(cityPath) {
+		return classifiedControllerStopResult(controllerStopOutcomeInvalid, "reaching the controller", errWorkerSiteNoController)
+	}
 	return controllerStopClient{
-		stat:         os.Stat,
-		dial:         net.DialTimeout,
+		stat: os.Stat,
+		dial: func(_, address string, timeout time.Duration) (net.Conn, error) {
+			return dialCitySocket(cityPath, address, timeout)
+		},
 		dialTimeout:  controllerStopDialTimeout,
 		writeTimeout: controllerStopWriteTimeout,
 		readTimeout:  controllerStopReadTimeout,
@@ -82,6 +91,11 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 	}
 
 	conn, err := c.dial("unix", socketPath, c.dialTimeout)
+	if errors.Is(err, errWorkerSiteNoController) {
+		// The seam refused a worker site's dial: its controller is the remote
+		// one, so the refusal is no proof that none runs.
+		return classifiedControllerStopResult(controllerStopOutcomeInvalid, "dialing socket", err)
+	}
 	if err != nil {
 		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "dialing socket", err)
 	}

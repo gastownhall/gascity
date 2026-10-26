@@ -88,6 +88,7 @@ go_test(
         "exec_outcome_test.go",
         "filenames_test.go",
         "filter_test.go",
+        "order_requires_backend_test.go",
         "order_test.go",
         "override_test.go",
         "run_record_test.go",

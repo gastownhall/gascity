@@ -704,7 +704,7 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{"mayor"}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionWake([]string{"mayor"}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -797,7 +797,7 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code == 0 {
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code == 0 {
 		t.Fatalf("cmdSessionWake() = %d, want rejection; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	// Pin the CLI wake-conflict artifact: the fused WakeSession returns a
@@ -844,7 +844,7 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionWake() = %d, want success; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "wake requested") {
@@ -919,5 +919,40 @@ func TestDoSessionWakeReadsTheWorkStoreOnASplitCity(t *testing.T) {
 		store: work, cfg: cfg, cityPath: cityPath, sp: sp, now: time.Now,
 	}); code != 0 || strings.Contains(stderr.String(), "will not start") {
 		t.Fatalf("doSessionWake = %d, stderr %q; want the work store's claim to override the latch", code, stderr.String())
+	}
+}
+
+// TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy: the CLI wake refuses a
+// session whose respawn circuit is open only when the city's controller runs
+// legacy, the one reconciler that reads the circuit; under v2 the open circuit
+// is stale state. The mode is the running controller's latch. Kills the
+// circuit refusal applied under v2.
+func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	for _, mode := range []reconcilerMode{reconcilerLegacy, reconcilerV2} {
+		t.Run(mode.String(), func(t *testing.T) {
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) { return mode, true }
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "worker", "session_name": "worker", "state": "asleep",
+				session.SessionCircuitStateMetadataKey: session.SessionCircuitStateOpen,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deps := sessionWakeDeps{
+				store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+				withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+				cityUsesManagedReconciler: func(string) bool { return false },
+				pokeController:            func(string, reconcilekey.Key) error { return nil },
+			}
+			var stderr bytes.Buffer
+			code := doSessionWake(b.ID, &bytes.Buffer{}, &stderr, false, deps)
+			refused := code != 0 && strings.Contains(stderr.String(), "circuit breaker is open")
+			if refused != (mode == reconcilerLegacy) {
+				t.Fatalf("doSessionWake = %d, stderr %q; want refused=%v under %s", code, stderr.String(), mode == reconcilerLegacy, mode)
+			}
+		})
 	}
 }

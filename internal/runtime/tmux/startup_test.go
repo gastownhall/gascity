@@ -1043,6 +1043,123 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		callsByMethod(t, ops, "sendKeys", 1)
 		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
+
+	// A startup turn (prompt_mode = "arg") that outlasts the ladder holds
+	// every attempt's interrupting submit, so the nudge was never delivered.
+	// The busy pane is that turn, not the nudge landing: the start must not
+	// read it as delivery, and it must not fail either. It warns and leaves
+	// the durable artifact, as an unconfirmed nudge does.
+	t.Run("busy deferral is not fatal and never read as delivered", func(t *testing.T) {
+		origBackoffs := startupNudgeRetryBackoffs
+		startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+		defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+		ops := &fakeStartOps{
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q: its submit keys were held back", runtime.ErrSessionBusy, "test"),
+			paneBusyResult:             true,
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
+		}
+
+		cfg := runtime.Config{
+			Command: "codex",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for a deferred startup nudge", err)
+		}
+		callsByMethod(t, ops, "sendKeys", len(startupNudgeRetryBackoffs)+1)
+		callsByMethod(t, ops, "paneBusy", 0)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+	})
+
+	// A held submit whose draft would not clear left the nudge typed but
+	// unsent: no retry (a re-paste would land on that draft), no start
+	// failure, and the durable artifact.
+	t.Run("held draft that would not clear is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q", errNudgeSubmitHeld, "test"),
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
+		}
+
+		cfg := runtime.Config{
+			Command: "codex",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for a held startup nudge", err)
+		}
+		callsByMethod(t, ops, "sendKeys", 1)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+	})
+}
+
+// TestSendStartupNudgeWithRetry_BusyDeferralIsRetriedNeverDelivered: an
+// attempt deferred because a turn held its interrupting submit
+// (runtime.ErrSessionBusy) sent no submit, so the pane reading busy after it
+// is the turn that held it, not the nudge landing. The ladder re-runs the
+// delivery instead of returning nil, and hands the deferral back once its
+// backoffs are spent.
+func TestSendStartupNudgeWithRetry_BusyDeferralIsRetriedNeverDelivered(t *testing.T) {
+	calls, busyCalls := 0, 0
+	send := func() error {
+		calls++
+		return fmt.Errorf("%w: session %q: its submit keys were held back", runtime.ErrSessionBusy, "test")
+	}
+	busy := func() (bool, error) {
+		busyCalls++
+		return true, nil
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
+	if !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("err = %v, want runtime.ErrSessionBusy: a held submit is not a delivery", err)
+	}
+	if want := len(startupNudgeRetryBackoffs) + 1; calls != want {
+		t.Fatalf("send calls = %d, want %d", calls, want)
+	}
+	if busyCalls != 0 {
+		t.Fatalf("busy calls = %d, want 0: busy after a deferral proves nothing about the nudge", busyCalls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_DeliversAfterABusyDeferral: once the turn
+// that held the submit ends, a later attempt delivers.
+func TestSendStartupNudgeWithRetry_DeliversAfterABusyDeferral(t *testing.T) {
+	calls := 0
+	send := func() error {
+		calls++
+		if calls < 3 {
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionBusy, "test")
+		}
+		return nil
+	}
+	busy := func() (bool, error) { return true, nil }
+	if err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if calls != 3 {
+		t.Fatalf("send calls = %d, want 3", calls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_HeldDraftIsNotRetried: a held submit whose
+// draft would not clear left the message typed; re-running the delivery would
+// paste onto it, so the ladder returns it at once.
+func TestSendStartupNudgeWithRetry_HeldDraftIsNotRetried(t *testing.T) {
+	calls, slept := 0, false
+	send := func() error {
+		calls++
+		return fmt.Errorf("%w: session %q", errNudgeSubmitHeld, "test")
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, nil)
+	if !errors.Is(err, errNudgeSubmitHeld) {
+		t.Fatalf("err = %v, want errNudgeSubmitHeld", err)
+	}
+	if calls != 1 || slept {
+		t.Fatalf("send calls = %d, slept = %t; want one attempt and no backoff", calls, slept)
+	}
 }
 
 // TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt is the fail-before/

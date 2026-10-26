@@ -51,9 +51,10 @@ type condWritesStamp struct {
 	// the seam treats it exactly like Off, so an unwired open path can never
 	// RAISE enforcement.
 	condWritesModeVal gate.Mode
-	// condWritesDefaulted records that the factory received ModeUnset and
-	// mapped it to Off — an unthreaded open path, distinguishable from a
-	// deliberate off for tests and future doctor surfaces.
+	// condWritesDefaulted records that no operator chose the mode: the
+	// factory received ModeUnset and mapped it to Off (an unthreaded open
+	// path), or the caller passed the builtin default
+	// (StoreOpenOptions.ConditionalWritesDefaulted).
 	condWritesDefaulted bool
 	// condWritesDegradeNoted arms at-most-once degraded-event emission per
 	// store instance.
@@ -81,7 +82,7 @@ type ConditionalWritesDegrade struct {
 }
 
 // stampConditionalWritesMode records the resolved mode on this store.
-// defaulted marks a ModeUnset→Off factory mapping (unthreaded open path). The
+// defaulted marks a mode no operator chose (condWritesDefaulted). The
 // return reports whether the stamp LANDED: a store that owns its stamp always
 // lands it; a delegating wrapper (CachingStore) forwards into its backing and
 // reports false when the backing cannot carry a mode — the factory logs that
@@ -96,7 +97,7 @@ func (s *condWritesStamp) stampConditionalWritesMode(mode gate.Mode, defaulted b
 }
 
 // conditionalWritesMode returns the stamped mode and whether it was a
-// factory default for an unthreaded open path.
+// default no operator chose.
 func (s *condWritesStamp) conditionalWritesMode() (gate.Mode, bool) {
 	s.condWritesMu.Lock()
 	defer s.condWritesMu.Unlock()

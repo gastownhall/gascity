@@ -61,24 +61,13 @@ const (
 	TurnLinkExact      TurnLinkLevel = "exact"
 )
 
-// TurnReplace is the sequence a family needs to replace its running turn with
-// a new message (X11 D11).
-type TurnReplace string
-
-// Turn replacement sequences.
-const (
-	TurnReplaceNone           TurnReplace = "none"
-	TurnReplaceInterrupt      TurnReplace = "interrupt"
-	TurnReplaceInterruptReset TurnReplace = "interrupt_reset"
-	TurnReplaceRestart        TurnReplace = "restart"
-)
-
 // TurnSupport is what a provider family's transcript tells about its turns.
+// How deliver-now replaces a family's turn is not a transcript fact:
+// internal/session decides it (session.RuntimeTurnTraits.Replace).
 type TurnSupport struct {
-	Start   TurnStartLevel
-	End     TurnEndLevel
-	Link    TurnLinkLevel
-	Replace TurnReplace
+	Start TurnStartLevel
+	End   TurnEndLevel
+	Link  TurnLinkLevel
 	// HookTurnID names the hook payload field that carries the same id as the
 	// transcript. It stays empty until the X11 live arm verifies the match.
 	HookTurnID string
@@ -95,25 +84,22 @@ type turnFamily struct {
 // provider families record turns (X11 §3.2).
 var turnFamilies = map[string]turnFamily{
 	"claude": {
-		support: TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt},
+		support: TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated},
 		format:  claudeTurnFormat{},
 	},
 	"codex": {
-		support: TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt},
+		support: TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated},
 		format:  codexTurnFormat{},
 	},
 	"gemini": {
-		support: TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterruptReset},
+		support: TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated},
 		format:  geminiTurnFormat{},
-	},
-	"pi": {
-		support: TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceRestart},
 	},
 }
 
 // defaultTurnSupport is the row of every family the table does not list: no
-// turn identity, and a replacement that interrupts before it delivers.
-var defaultTurnSupport = TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceInterrupt}
+// turn identity.
+var defaultTurnSupport = TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone}
 
 // TurnSupportFor reports what provider's transcript family records about its
 // turns.

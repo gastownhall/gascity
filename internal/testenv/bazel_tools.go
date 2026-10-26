@@ -11,7 +11,7 @@ import (
 // from PATH. Its value is the space-separated $(rootpaths ...) of data deps,
 // e.g.
 //
-//	env = {"GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd)"}
+//	env = {"GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd)"}
 //
 // Under `bazel test` init prepends each tool's runfiles directory to PATH, so
 // the pinned, declared binary wins over anything on the worker's PATH (which

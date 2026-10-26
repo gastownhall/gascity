@@ -132,7 +132,7 @@ func TestLifecycleVerbsRefuseAnActorWithoutCityOrKind(t *testing.T) {
 	starts := map[string]verb{
 		"Start": func(m managerLeaseFixture, by Actor) error { return m.start(by) },
 		"StartRuntimeOnly": func(m managerLeaseFixture, by Actor) error {
-			return m.mgr.StartRuntimeOnly(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), hints(m))
+			return m.mgr.StartRuntimeOnly(context.Background(), by, m.info.ID, Incarnation{}, BuildResumeCommand(m.info), hints(m))
 		},
 		"Attach": func(m managerLeaseFixture, by Actor) error {
 			return m.mgr.Attach(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), hints(m))

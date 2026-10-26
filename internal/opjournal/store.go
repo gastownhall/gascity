@@ -1,6 +1,7 @@
 package opjournal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -30,6 +31,12 @@ type Store struct {
 	// batcher applies the conversation lane's guarded batches; nil for a
 	// store opened with NewStore rather than NewLaneStore.
 	batcher beads.GuardedBatcher
+	// beforeRelowerRead, when set (tests), runs between RelowerNowUnits'
+	// scan of a unit and its read of the unit's interrupt by id.
+	beforeRelowerRead func(scanned Op)
+	// beforeRelowerBatch, when set (tests), runs between RelowerNowUnits'
+	// read of an interrupt and the batch that moves it.
+	beforeRelowerBatch func(read Op)
 }
 
 // Option configures NewStore.
@@ -127,6 +134,11 @@ func (s *Store) Preview(req Request) (Op, error) {
 	if err != nil {
 		return Op{}, err
 	}
+	if op.Kind == KindRespond {
+		if err := validateRespondKey(s.prefix, op); err != nil {
+			return Op{}, err
+		}
+	}
 	op.ID, err = DeriveID(s.prefix, op.Conversation, op.Producer.Principal, op.ClientKey)
 	if err != nil {
 		return Op{}, err
@@ -152,8 +164,7 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 	if err != nil {
 		return Op{}, false, err
 	}
-	b, err := EncodeOp(op)
-	if err != nil {
+	if _, err := EncodeOp(op); err != nil {
 		return Op{}, false, err
 	}
 	// Read first: a retry then never reaches Create, so a store that
@@ -169,6 +180,16 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 		case !errors.Is(getErr, beads.ErrNotFound):
 			return Op{}, false, fmt.Errorf("reading op %s before creating it: %w", op.ID, getErr)
 		}
+	}
+	return s.create(op)
+}
+
+// create writes op, a previewed op, create-if-absent at its pinned id, and
+// resolves a create that lost to a stored row as Propose does.
+func (s *Store) create(op Op) (Op, bool, error) {
+	b, err := EncodeOp(op)
+	if err != nil {
+		return Op{}, false, err
 	}
 	created, createErr := s.store.Create(b)
 	if createErr == nil {
@@ -281,23 +302,65 @@ func (s *Store) ListOpenTolerant(conversation string) ([]Op, []QuarantinedRow, e
 	return out, quarantined, nil
 }
 
-// legacyScanPages bounds ListOpenLegacy's read: at most this many pages of
+// HasSubmittedOps reports whether store holds any submitted op row, lane or
+// legacy, with one keyed read of at most one row. Unlike NewStore it needs no
+// conditional-write capability or namespace, so a caller with nothing to
+// write (the op sweeper with every ops gate off) can learn there is nothing
+// to sweep without paying NewStore's capability probe. Like NewStore it
+// refuses a nil store with an error rather than panicking.
+func HasSubmittedOps(store beads.SessionStore) (bool, error) {
+	if isNilStore(store.Store) {
+		return false, errors.New("probing for submitted ops: store is required")
+	}
+	rows, err := store.List(beads.ListQuery{
+		Label:    LabelOp,
+		Metadata: map[string]string{keyStatus: string(StatusSubmitted)},
+		Limit:    1,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return false, fmt.Errorf("probing for submitted ops: %w", err)
+	}
+	return len(rows) > 0, nil
+}
+
+// legacyScanPages bounds ListExpiredLegacy's read: at most this many pages of
 // limit rows.
 const legacyScanPages = 8
 
-// ListOpenLegacy returns up to limit open legacy ops (every executor but
-// lane), oldest first, for the sweeper. It reads keyed on gc.op.status =
-// submitted, because a legacy op never leaves submitted until it closes, in
-// pages of limit rows (SeekAfter), dropping lane ops and setting aside rows
-// that do not decode, until it has limit legacy ops, the matches run out or
-// it has read legacyScanPages pages; so a head of unsweepable rows (a lane
-// backlog, a newer build's rows) shorter than that does not starve the
-// sweeper. Undecodable rows are returned by id rather than failing the sweep.
-// The bool reports a truncated read: it stopped at that cap after a full
-// page, so legacy ops behind the head may remain unread, and the next read
-// starts again at the oldest row. A limit below 1 reads every match in one
-// read.
-func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, bool, error) {
+// LegacyScan is what one ListExpiredLegacy read found.
+type LegacyScan struct {
+	// Expired holds the open legacy ops past their finish_by at the cutoff,
+	// oldest first.
+	Expired []Op
+	// Pending counts the open legacy ops the read passed that are not past
+	// their finish_by at the cutoff; they do not count toward the limit.
+	Pending int
+	// Undecodable holds the ids of the rows the read could not decode.
+	Undecodable []string
+	// Full reports that the read stopped at limit expired ops with rows left
+	// unread, so more may wait behind them: not when the limit-th op ends a
+	// short page, which ends the matches.
+	Full bool
+	// Truncated reports that the read stopped at its page cap after a full
+	// page, so legacy ops behind the rows it read may remain unread.
+	Truncated bool
+}
+
+// ListExpiredLegacy returns up to limit open legacy ops (every executor but
+// lane) past their finish_by at at, oldest first, for the sweeper. It reads
+// keyed on gc.op.status = submitted, because a legacy op never leaves
+// submitted until it closes, in pages of limit rows (SeekAfter), dropping
+// lane ops, counting the legacy ops not past their finish_by (an adopted op
+// or one with an explicit deadline may be older than an expired one) and
+// setting aside rows that do not decode, until it has limit expired ops, the
+// matches run out or it has read legacyScanPages pages; so a head of rows the
+// sweeper never closes (a lane backlog, a newer build's rows) or cannot close
+// yet (ops in flight) shorter than that does not starve it. Undecodable rows
+// are returned by id rather than failing the sweep. A read that stops early
+// (Full, Truncated) is not resumed: the next read starts again at the oldest
+// row. A limit below 1 reads every match in one read.
+func (s *Store) ListExpiredLegacy(at time.Time, limit int) (LegacyScan, error) {
 	if limit < 0 {
 		limit = 0
 	}
@@ -308,32 +371,37 @@ func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, bool, error) {
 		Limit:    limit,
 		TierMode: beads.TierBoth,
 	}
-	var out []Op
-	var undecodable []string
+	var scan LegacyScan
 	for page := 1; ; page++ {
 		rows, err := s.store.List(q)
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("listing open legacy ops: %w", err)
+			return LegacyScan{}, fmt.Errorf("listing expired legacy ops: %w", err)
 		}
-		for _, b := range rows {
-			if limit > 0 && len(out) == limit {
-				break
-			}
+		for i, b := range rows {
 			op, err := DecodeOp(b)
 			if err != nil {
-				undecodable = append(undecodable, b.ID)
+				scan.Undecodable = append(scan.Undecodable, b.ID)
 				continue
 			}
 			if op.Status == StatusClosed || !op.Executor.Legacy() {
 				continue
 			}
-			out = append(out, op)
+			if !at.After(op.FinishBy) {
+				scan.Pending++
+				continue
+			}
+			scan.Expired = append(scan.Expired, op)
+			if len(scan.Expired) == limit {
+				scan.Full = i < len(rows)-1 || len(rows) == limit
+				return scan, nil
+			}
 		}
-		if limit == 0 || len(out) == limit || len(rows) < limit {
-			return out, undecodable, false, nil
+		if limit == 0 || len(rows) < limit {
+			return scan, nil
 		}
 		if page == legacyScanPages {
-			return out, undecodable, true, nil
+			scan.Truncated = true
+			return scan, nil
 		}
 		last := rows[len(rows)-1]
 		q.SeekAfter = &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
@@ -430,8 +498,8 @@ func (s *Store) writeKnown(op, next Op) (Op, bool, error) {
 // closed the op. Otherwise it writes nothing and returns the op as it stands:
 // an op an adopter moved (a later finish_by), a lane op, an op not yet expired
 // and an op another closer reached first all stay as they are. The sweeper
-// and the CLI's expiry rule close through it, so neither ever closes an op
-// before its current finish_by (DES-O0API I7).
+// and the legacy recorder's expiry rule (legacyop's Admit) close through it,
+// so neither ever closes an op before its current finish_by (DES-O0API I7).
 func (s *Store) CloseExpired(op Op, now time.Time, by string) (Op, bool, error) {
 	if err := validateText("close by", by, maxPrincipalLen); err != nil {
 		return Op{}, false, err
@@ -598,7 +666,7 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		return "", Op{}, err
 	}
 	var result CancelResult
-	op, err := s.mutate(id, by, func(cur Op, spec Spec) (Op, bool, error) {
+	op, err := s.mutateWith(id, by, "opjournal: cancel", func(cur Op, spec Spec) (Op, bool, []beads.GuardedItem, error) {
 		cancel := cur.Cancel
 		if !cancel.Recorded() {
 			cancel = Cancel{By: by, At: utc(s.clk.Now()), Reason: reason}
@@ -606,35 +674,61 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		switch {
 		case cur.Status == StatusClosed:
 			result = CancelAlreadyTerminal
-			return cur, false, nil
+			return cur, false, nil, nil
 		case cur.Executor.Legacy():
-			return Op{}, false, fmt.Errorf("%w: %s op %s is closed only by its legacy path, an adopter or the sweeper", ErrIllegalTransition, cur.Executor, id)
+			return Op{}, false, nil, fmt.Errorf("%w: %s op %s is closed only by its legacy path, an adopter or the sweeper", ErrIllegalTransition, cur.Executor, id)
 		case cur.Status == StatusSettling:
 			result = CancelAlreadyDecided
-			return cur, false, nil
+			return cur, false, nil, nil
 		case cur.Status == StatusSubmitted,
 			cur.Status == StatusAccepted && spec.Lane == LaneConversation:
 			result = CancelClosed
 			next := cur
 			next.Cancel = cancel
-			return closed(next, Outcome{Arm: ArmCanceled}, by, s.clk), true, nil
+			next = closed(next, Outcome{Arm: ArmCanceled}, by, s.clk)
+			// A canceled lane respond ends its occurrence in the batch
+			// that closes it, as the lane's closes do (endItem): a close
+			// that loses its write to a Take ends nothing, so the answer
+			// that Take sends lands under an open occurrence.
+			end, ok, err := s.endItem(next, nil, utc(s.clk.Now()))
+			switch {
+			case err != nil:
+				return Op{}, false, nil, err
+			case ok:
+				return next, true, []beads.GuardedItem{end}, nil
+			}
+			return next, true, nil, nil
 		default:
 			result = CancelRequested
 			if cur.Cancel.Recorded() {
-				return cur, false, nil
+				return cur, false, nil, nil
 			}
 			next := cur
 			next.Cancel = cancel
-			return next, true, nil
+			return next, true, nil, nil
 		}
 	})
 	if err != nil {
 		return "", Op{}, err
 	}
+	// The close has landed even when its bead's repair fails, so the
+	// occurrence's end is recorded regardless.
+	var closeErr, endErr error
 	if result == CancelClosed || result == CancelAlreadyTerminal {
-		if err := s.closeBead(id); err != nil {
-			return "", Op{}, err
-		}
+		closeErr = s.closeBead(id)
+	}
+	switch result {
+	case CancelClosed:
+		// Another answer to the occurrence, closing at once, may have read
+		// this one open and withheld the end for it (Store.endClosed).
+		endErr = s.endClosed(op, utc(s.clk.Now()))
+	case CancelAlreadyTerminal:
+		// A lane respond closed outside the lane and Cancel, or whose
+		// re-check did not land, gets its end here (Store.endTerminal).
+		endErr = s.endTerminal(op, utc(s.clk.Now()))
+	}
+	if err := errors.Join(closeErr, endErr); err != nil {
+		return "", Op{}, err
 	}
 	return result, op, nil
 }
@@ -650,6 +744,19 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 // answers ErrConditionalWriteUnsupported itself and that error is returned as
 // is.
 func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, error)) (Op, error) {
+	return s.mutateWith(id, by, "", func(cur Op, spec Spec) (Op, bool, []beads.GuardedItem, error) {
+		next, write, err := decide(cur, spec)
+		return next, write, nil, err
+	})
+}
+
+// mutateWith is mutate for a write that may carry rows of its own: decide
+// also returns items, written with the op's update in one guarded batch
+// (reason names it) whose op item carries the same revision guard, so they
+// land exactly when the update does. A batch refused by a row that moved, or
+// by a create whose id another writer took first, is re-read and re-decided
+// as a lost revision race is.
+func (s *Store) mutateWith(id, by, reason string, decide func(cur Op, spec Spec) (Op, bool, []beads.GuardedItem, error)) (Op, error) {
 	var lastConflict error
 	for range casAttempts {
 		b, err := s.store.Get(id)
@@ -661,6 +768,7 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 			return Op{}, err
 		}
 		var next Op
+		var with []beads.GuardedItem
 		external := closedExternally(b)
 		if external {
 			next = closed(cur, cur.Outcome, by, s.clk)
@@ -670,7 +778,7 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 				return Op{}, err
 			}
 			var write bool
-			next, write, err = decide(cur, spec)
+			next, write, with, err = decide(cur, spec)
 			if err != nil {
 				return Op{}, err
 			}
@@ -682,7 +790,7 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 		if err != nil {
 			return Op{}, err
 		}
-		err = s.writer.UpdateIfMatch(id, b.Revision, opts)
+		err = s.writeWith(id, b.Revision, opts, reason, with)
 		if err == nil && external {
 			continue
 		}
@@ -690,12 +798,23 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 			return next, nil
 		}
 		var stale *beads.PreconditionFailedError
-		if !errors.As(err, &stale) {
+		if !errors.As(err, &stale) && !errors.Is(err, beads.ErrAlreadyExists) {
 			return Op{}, fmt.Errorf("updating op %s: %w", id, err)
 		}
 		lastConflict = err
 	}
 	return Op{}, fmt.Errorf("%w: updating op %s lost %d revision races: %w", ErrContention, id, casAttempts, lastConflict)
+}
+
+// writeWith writes opts to op id under revision rev: one UpdateIfMatch, or,
+// with rows of its own, one guarded batch of the update and those rows.
+func (s *Store) writeWith(id string, rev int64, opts beads.UpdateOpts, reason string, with []beads.GuardedItem) error {
+	if len(with) == 0 {
+		return s.writer.UpdateIfMatch(id, rev, opts)
+	}
+	items := append([]beads.GuardedItem{{Update: &beads.GuardedUpdate{ID: id, Opts: opts, ExpectedRevision: &rev}}}, with...)
+	_, _, err := s.apply(context.Background(), reason, items)
+	return err
 }
 
 // patch is the update that turns row b, which decoded as cur, into next's

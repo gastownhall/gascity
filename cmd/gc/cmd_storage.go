@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -270,6 +271,17 @@ refuses such a city and names this command.
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
 
+Last, on the converged binding, each open deliver-now unit the copy carried in
+is re-lowered under the binding's id prefix: its derived interrupt is re-created
+at the id a lowering there gives it, with its state, and the old row is closed
+as a pointer to it, one all-or-nothing write per unit. A unit in flight or that
+may have run, one with more than one open derived interrupt, and one whose id
+there another row already holds are left as they are and named; their lanes run
+each one as a unit by identity. A message not yet lowered, or whose unit is
+over, is not a unit to move, and is not named. A city whose binding holds no
+lowered deliver-now message skips the step and prints nothing for it. A step
+that did not finish exits non-zero, and running this command again finishes it.
+
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.`,
@@ -387,7 +399,8 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// The same resolution boot performs, performed first: a plan the runtime
 	// would refuse to serve must not be migrated toward, or the operator ends
 	// up with a proven copy in a binding that still cannot start.
-	if _, err := resolveCityStoragePlan(request.CityPath, request.Cfg); err != nil {
+	plan, err := resolveCityStoragePlan(request.CityPath, request.Cfg)
+	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -439,8 +452,19 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	recordStorageBindingOutcome(rec, report, "")
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear))
+	// The last step, on a converged binding only: every other binding handle
+	// of this command is closed, and the step opens the binding as the
+	// runtime serves it.
+	var relowered opjournal.RelowerReport
+	if converged, ok := report.convergedBinding(plan, request.CityPath, request.Cfg); ok {
+		relowered, err = relowerConvergedNowUnits(ctx, converged, rec, logPrefix, stderr)
+		if err != nil {
+			fmt.Fprintln(stderr, relowerFailureAdvice(logPrefix, target.Binding, err)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered))
 	return 0
 }
 
@@ -721,10 +745,11 @@ func cityWorkStoreRows(cityPath string) (map[string]beads.Bead, error) {
 // the two tier bits, the timestamps, defer_until, close_reason, labels as a set
 // and metadata as a map — under a reflection guard that makes a field added to
 // beads.Bead either compared there, and so here, or exempted with its reason.
-// The payload is compared rather than trusted to a version stamp because a
-// listing carries none to rely on: the native store clears Revision on every
-// list row and never fills UpdatedAt, and bd keeps updated_at when it adds a
-// label or an edge.
+// The payload is compared rather than trusted to a version stamp because no
+// stamp is comparable across the two stores: a revision is each store's own
+// token (a native row's is a random row_lock per database), bd lists every
+// row without one and keeps updated_at when it adds a label or an edge, and
+// the native store never fills UpdatedAt.
 //
 // Two list rows are not a source row and its copy, so four things differ from
 // that stage:
@@ -733,16 +758,15 @@ func cityWorkStoreRows(cityPath string) (map[string]beads.Bead, error) {
 //     no edges shows both sides empty, so there a divergence in edges alone is
 //     not seen. Needs is create-time shorthand for edges, which the copy
 //     strips rather than carries, and is not compared.
-//   - Revision is compared only when both rows publish one. Zero is "no token",
-//     not revision 0 (revisionMoved reads it the same way), so a listing that
+//   - Revision is not compared, as beadCopyDifference does not compare it:
+//     it is a token of the store that minted it, so two stores' revisions for
+//     one id are unrelated whether they agree or not, and 0 is either side's
+//     real revision of a legacy row, not an absent one.
+//   - A timestamp is compared only when both rows carry it: a listing that
 //     publishes none is neither a match nor a mismatch.
-//   - A timestamp is compared only when both rows carry it, for the same reason.
 //   - IsBlocked is not compared: it is bd's readiness projection, not stored
 //     state, and the copy strips it.
 func censusRowDiffers(city, rig beads.Bead) bool {
-	if city.Revision != 0 && rig.Revision != 0 && city.Revision != rig.Revision {
-		return true
-	}
 	if stringSetDifference("dependency", censusEdges(rig.Dependencies), censusEdges(city.Dependencies)) != "" {
 		return true
 	}

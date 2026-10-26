@@ -11,15 +11,20 @@
 #   1. Collect all three, into scratch files:
 #        scripts/check-residency-boundary.sh --emit-baseline   # the grep rows;
 #          # its own first four lines are a PARTIAL warning — drop them
-#        RESIDENCY_BASELINE_EMIT=1 go test ./scripts -v \
-#          -run TestResidencyResolverBoundary             # ast:returns-store-list
-#        RESIDENCY_BASELINE_EMIT=1 go test ./scripts -v \
-#          -run TestResidencyASTExpressionRatchet   # ast:vocabulary-alias and
-#                                                   # ast:plan-leg-store-chain
-#      The two go test emitters print through the test harness, so filter their
-#      output to lines with exactly three tabs — `=== RUN`, `--- SKIP` and the
-#      trailing `ok` line are chatter, and a chatter line spliced in here is a
-#      row the ratchet will never match and never report.
+#        bazel test //scripts:scripts_test --test_sharding_strategy=disabled \
+#          --test_env=RESIDENCY_BASELINE_EMIT=1 --test_output=all \
+#          --test_filter='^TestResidencyResolverBoundary$'
+#          # ast:returns-store-list
+#        bazel test //scripts:scripts_test --test_sharding_strategy=disabled \
+#          --test_env=RESIDENCY_BASELINE_EMIT=1 --test_output=all \
+#          --test_filter='^TestResidencyASTExpressionRatchet$'
+#          # ast:vocabulary-alias, ast:plan-leg-store-chain and
+#          # ast:uncounted-call-spelling
+#      The two Go test emitters print through Bazel's test log, so filter
+#      their output to lines with exactly three tabs — Bazel's progress lines,
+#      the log banners and the test's `PASS` line are chatter, and a chatter
+#      line spliced in here is a row the ratchet will never match and never
+#      report.
 #   2. Concatenate the three row sets and sort the whole thing once
 #      (LC_ALL=C sort), so the file stays in one global order rather than three
 #      concatenated runs. Both halves read it as an unordered map, but a

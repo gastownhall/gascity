@@ -231,7 +231,7 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -835,6 +835,85 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 	}
 }
 
+// TestHandleSessionListStateFilterListsClosedSessions pins the state filter of
+// both session list routes against closed sessions: the default and the
+// open-state filters list open sessions only, while "closed", "all" and a list
+// naming closed include the closed ones, reported as state "closed". The read
+// model used to fetch open rows only, so a closed-inclusive filter matched
+// nothing.
+func TestHandleSessionListStateFilterListsClosedSessions(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	open := createTestSession(t, fs.cityBeadStore, fs.sp, "Still Open")
+	closed := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Now")
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	routes := []struct {
+		name  string
+		serve func(query string) *httptest.ResponseRecorder
+	}{
+		{name: "city", serve: func(query string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(fs, "/sessions"+query), nil))
+			return rec
+		}},
+		{name: "legacy", serve: func(query string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			srv.legacySessionHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v0/sessions"+query, nil))
+			return rec
+		}},
+	}
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{name: "default", query: "", want: []string{open.ID}},
+		{name: "active", query: "?state=active", want: []string{open.ID}},
+		{name: "closed", query: "?state=closed", want: []string{closed.ID}},
+		{name: "all", query: "?state=all", want: []string{open.ID, closed.ID}},
+		{name: "active_or_closed", query: "?state=active,closed", want: []string{open.ID, closed.ID}},
+	}
+	for _, route := range routes {
+		for _, tc := range cases {
+			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
+				rec := route.serve(tc.query)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+				}
+				var resp struct {
+					Items []sessionResponse `json:"items"`
+					Total int               `json:"total"`
+				}
+				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				got := make(map[string]string, len(resp.Items))
+				for _, item := range resp.Items {
+					got[item.ID] = item.State
+				}
+				if len(got) != len(tc.want) || resp.Total != len(tc.want) {
+					t.Fatalf("listed %v (total %d), want exactly %v", got, resp.Total, tc.want)
+				}
+				for _, id := range tc.want {
+					state, ok := got[id]
+					if !ok {
+						t.Fatalf("listed %v, missing %s", got, id)
+					}
+					if id == closed.ID && state != "closed" {
+						t.Fatalf("closed session %s state = %q, want %q", id, state, "closed")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestHandleSessionListPagination(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1093,7 +1172,7 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 	fs := newSessionFakeState(t)
 	searchBase := newHermeticCodexSessionSearchPath(t)
 	workDir := t.TempDir()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 
 	type wantTelemetry struct {
 		info       session.Info
@@ -1195,7 +1274,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	workDir := t.TempDir()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Codex Chat", Command: "codex", WorkDir: workDir, Provider: "codex-max", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1235,7 +1314,7 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	workDir := t.TempDir()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Codex Chat", Command: "codex", WorkDir: workDir, Provider: "codex-max", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1368,7 +1447,7 @@ func TestHandleSessionSuspend(t *testing.T) {
 	}
 
 	// Verify the session is now suspended.
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	got, err := mgr.Get(info.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -1392,7 +1471,7 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	// Drain the session the way the controller's drain-ack path does, the
 	// only writer of state=draining (this test isolates the transition check).
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.PersistedStore().ApplyPatch(info.ID, session.DrainAckStopPendingPatch(time.Now())); err != nil {
 		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
@@ -1452,7 +1531,7 @@ func TestHandleSessionClose(t *testing.T) {
 	}
 
 	// Session should no longer appear in default listing (excludes closed).
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -2085,7 +2164,7 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Fork", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2747,6 +2826,9 @@ command = [broken
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
+	// The async create runs after the response; let it finish inside the
+	// test, while the city its start leases in still exists.
+	waitForNSessionCreateEvents(t, fs.eventProv, 1, 5*time.Second)
 }
 
 func TestHandleSessionCreateProviderReturns202WithRequestID(t *testing.T) {
@@ -2935,6 +3017,9 @@ func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
+	// The async create runs after the response; let it finish inside the
+	// test, while the city its start leases in still exists.
+	waitForNSessionCreateEvents(t, fs.eventProv, 1, 5*time.Second)
 }
 
 func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
@@ -3703,7 +3788,7 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 	if failure.SessionID != "" {
 		t.Fatalf("failure session_id = %q, want empty: the rollback removed the session", failure.SessionID)
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider, session.WithCityPath(fs.cityPath))
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list sessions after rollback: %v", err)
@@ -5100,26 +5185,33 @@ func TestHandleSessionMessageMaterializesNamedSessionAsync(t *testing.T) {
 	}
 }
 
-func TestHandleSessionMessageEmitsFailureWhenProviderNudgeHangs(t *testing.T) {
+// A delivery that fails after outlasting the API's wait reports its own
+// error, not a timeout the API invented while the delivery was still running.
+func TestHandleSessionMessageSlowDeliveryFailureReportsRealError(t *testing.T) {
 	fs := newSessionFakeState(t)
 	blocker := &blockingNudgeProvider{
 		Fake:    fs.sp,
 		started: make(chan struct{}),
 		unblock: make(chan struct{}),
 	}
-	t.Cleanup(func() {
-		close(blocker.unblock)
-	})
-	prevTimeout := sessionMessageAsyncTimeout
-	sessionMessageAsyncTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		sessionMessageAsyncTimeout = prevTimeout
-	})
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(blocker.unblock) }) }
+	t.Cleanup(unblock)
+	prevWait := sessionMessageSlowDeliveryLogAfter
+	sessionMessageSlowDeliveryLogAfter = time.Nanosecond
+	t.Cleanup(func() { sessionMessageSlowDeliveryLogAfter = prevWait })
+	// The bound of a recorded /messages: an unrecorded one (ops.content off)
+	// ignores it.
+	prevBound := sessionMessageAsyncTimeout
+	sessionMessageAsyncTimeout = time.Nanosecond
+	t.Cleanup(func() { sessionMessageAsyncTimeout = prevBound })
+	logs := captureLockedLog(t)
 
 	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "blocked-message")
+	fs.sp.NudgeErrors = map[string]error{info.SessionName: errors.New("pane went away")}
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -5134,79 +5226,22 @@ func TestHandleSessionMessageEmitsFailureWhenProviderNudgeHangs(t *testing.T) {
 	case <-time.After(testEventTimeout):
 		t.Fatal("provider nudge was not reached")
 	}
+	logs.waitFor(t, "session.message still in flight")
+	unblock()
+
 	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
 	if success != nil {
 		t.Fatalf("unexpected success: %+v", success)
 	}
-	if failure == nil {
-		t.Fatal("expected request.failed for blocked provider nudge")
-	}
-	if failure.ErrorCode != "timeout" {
-		t.Fatalf("failure error_code = %q, want timeout", failure.ErrorCode)
+	if failure.ErrorCode != "message_failed" || !strings.Contains(failure.ErrorMessage, "pane went away") {
+		t.Fatalf("failure = %s: %s, want message_failed carrying the delivery error", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
-func TestSessionMessageAsyncTimeoutMatchesClientTimeout(t *testing.T) {
-	if sessionMessageAsyncTimeout != sessionMessageTimeout {
-		t.Fatalf("sessionMessageAsyncTimeout = %s, want client timeout %s", sessionMessageAsyncTimeout, sessionMessageTimeout)
+func TestSessionMessageSlowDeliveryLogMatchesClientTimeout(t *testing.T) {
+	if sessionMessageSlowDeliveryLogAfter != sessionMessageTimeout {
+		t.Fatalf("sessionMessageSlowDeliveryLogAfter = %s, want client timeout %s", sessionMessageSlowDeliveryLogAfter, sessionMessageTimeout)
 	}
-}
-
-func TestHandleSessionMessageLogsLateProviderResultAfterTimeout(t *testing.T) {
-	fs := newSessionFakeState(t)
-	blocker := &blockingNudgeProvider{
-		Fake:    fs.sp,
-		started: make(chan struct{}),
-		unblock: make(chan struct{}),
-	}
-	prevTimeout := sessionMessageAsyncTimeout
-	sessionMessageAsyncTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		sessionMessageAsyncTimeout = prevTimeout
-	})
-
-	var logs bytes.Buffer
-	oldOutput := log.Writer()
-	oldFlags := log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(oldOutput)
-		log.SetFlags(oldFlags)
-	})
-
-	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
-	h := newTestCityHandlerWith(t, fs, srv)
-
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "late-message")
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
-	}
-	accepted := decodeAsyncAccepted(t, rec.Body)
-
-	select {
-	case <-blocker.started:
-	case <-time.After(testEventTimeout):
-		t.Fatal("provider nudge was not reached")
-	}
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil || failure.ErrorCode != "timeout" {
-		t.Fatalf("failure = %+v, want timeout", failure)
-	}
-
-	close(blocker.unblock)
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logs.String(), "late session.message result after timeout") {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("logs = %q, want late session.message result after timeout", logs.String())
 }
 
 func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity(t *testing.T) {
@@ -5763,7 +5798,7 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5855,7 +5890,7 @@ func TestHandleSessionTranscriptAfterCursor(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5905,7 +5940,7 @@ func TestHandleSessionTranscriptAfterCursorRaw(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5949,7 +5984,7 @@ func TestHandleSessionTranscriptCursorPaginationMetadata(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6035,7 +6070,7 @@ func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6067,7 +6102,7 @@ func TestHandleSessionTranscriptMissingCursorReturnsConflict(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6158,7 +6193,7 @@ func TestSessionTranscriptAndStreamDuplicateEntryIDReturnsConflict(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -6275,7 +6310,7 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -6408,7 +6443,7 @@ func TestHandleSessionTranscriptNoHistoryStillValidatesCursors(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
 		Title:    "Chat",
@@ -6804,6 +6839,41 @@ func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	}
 }
 
+// TestHandleSessionRespondRuntimeRefusals pins the statuses /respond answers
+// for the refusals the runtime names (OJ-16): a prompt that cleared between
+// the session's pending check and the runtime's own pre-verify, and an action
+// the prompt does not offer, are 409 invalid_interaction; a pane the runtime
+// could not read is 503 runtime_unavailable. Each sent nothing.
+func TestHandleSessionRespondRuntimeRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"prompt cleared", fmt.Errorf("approval req-1 is gone: %w", runtime.ErrInteractionGone), http.StatusConflict, "invalid_interaction"},
+		{"unknown action", fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, "answer"), http.StatusConflict, "invalid_interaction"},
+		{"pane unreadable", fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, errors.New("server busy")), http.StatusServiceUnavailable, "runtime_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+			fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "approve?"})
+			fs.sp.RespondErrors[info.SessionName] = tc.err
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"request_id":"req-1","action":"approve"}`)))
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.code) {
+				t.Fatalf("respond = %d %s, want %d %s", rec.Code, rec.Body.String(), tc.status, tc.code)
+			}
+			if got := fs.sp.Responses[info.SessionName]; len(got) != 0 {
+				t.Fatalf("runtime answers %+v, want none", got)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -6812,7 +6882,7 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7088,7 +7158,7 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7169,7 +7239,7 @@ func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7258,7 +7328,7 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -7338,7 +7408,7 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -7406,7 +7476,7 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7476,7 +7546,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7549,7 +7619,7 @@ func TestHandleSessionStreamRawStallEmitsPendingWithoutTranscriptGrowth(t *testi
 		sessionStreamPendingStallTimeout = prevStallTimeout
 	}()
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7609,7 +7679,7 @@ func TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute(t *testing.T) {
 		sessionStreamPendingStallTimeout = prevStallTimeout
 	}()
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7680,7 +7750,7 @@ func TestSessionStreamStructuredHistoryStallEmitsPending(t *testing.T) {
 				handler = newTestCityHandlerWith(t, fs, srv)
 			}
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 			resume := session.ProviderResume{
 				ResumeFlag:    "--resume",
 				ResumeStyle:   "flag",
@@ -7757,7 +7827,7 @@ func TestHandleSessionStreamRawRunningSessionWithoutTranscriptOpensImmediately(t
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7796,7 +7866,7 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7860,7 +7930,7 @@ func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7900,7 +7970,7 @@ func TestHandleSessionStreamConversationRedactsThinkingText(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7938,7 +8008,7 @@ func TestHandleSessionStreamRawUsesLatestCompactionTail(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7981,7 +8051,7 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8038,7 +8108,7 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8103,7 +8173,7 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8215,7 +8285,7 @@ func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8271,7 +8341,7 @@ func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8319,7 +8389,7 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8730,4 +8800,167 @@ func TestSessionMessageAndSubmitRejectAmbiguousTargetWith409(t *testing.T) {
 			t.Fatalf("%s status = %d, want %d (409 for ambiguous target); body=%s", path, rec.Code, http.StatusConflict, rec.Body.String())
 		}
 	}
+}
+
+// unconfirmedCloseStore reproduces a bd staged Tx whose read-back of a write
+// timed out on a slow store: the writes it ran committed, but the Tx answered
+// `updating bead "<id>": ...: waiting for tx update projection: context
+// deadline exceeded` (wrapping beads.ErrWriteUnconfirmed). landClose decides
+// whether the close was among the committed writes (the post-close read-back
+// timed out) or not (the pre-close one did, so the close never ran). refuse
+// instead fails the Tx with nothing committed, as a write bd refused does. A
+// Tx runs through untouched until armed, so seeding is unaffected.
+type unconfirmedCloseStore struct {
+	beads.Store
+	armed     bool
+	landClose bool
+	refuse    error
+	txCalls   int
+}
+
+func (s *unconfirmedCloseStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	if !s.armed {
+		return s.Store.Tx(commitMsg, fn)
+	}
+	s.txCalls++
+	if s.refuse != nil {
+		return s.refuse
+	}
+	var id string
+	if err := s.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		return fn(&closeFilterTx{Tx: tx, skipClose: !s.landClose, id: &id})
+	}); err != nil {
+		return err
+	}
+	return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w", id, beads.ErrWriteUnconfirmed, context.DeadlineExceeded)
+}
+
+type closeFilterTx struct {
+	beads.Tx
+	skipClose bool
+	id        *string
+}
+
+func (tx *closeFilterTx) Close(id string) error {
+	*tx.id = id
+	if tx.skipClose {
+		return nil
+	}
+	return tx.Tx.Close(id)
+}
+
+func postSessionClose(t *testing.T, h http.Handler, fs *fakeState, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+id+"/close", nil))
+	return w
+}
+
+func requireSessionStatus(t *testing.T, store beads.Store, id, want string) {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got.Status != want {
+		t.Fatalf("session %s status = %q, want %q", id, got.Status, want)
+	}
+}
+
+// TestHumaSessionCloseThatLandedUnconfirmedAnswersOK is the regression for a
+// close answering 500 "internal: closing session ...: waiting for tx update
+// projection: context deadline exceeded" while the session read closed right
+// after. A close whose write committed but whose read-back timed out is a
+// close that landed: the answer is 200, the session reads closed, and a retry
+// of the close (all a client could do with the old 500) is also 200.
+func TestHumaSessionCloseThatLandedUnconfirmedAnswersOK(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore, landClose: true}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unconfirmed Close")
+	store.armed = true
+
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusOK {
+		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("close Tx calls = %d, want 1", store.txCalls)
+	}
+	requireSessionStatus(t, store.Store, info.ID, "closed")
+
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusOK {
+		t.Fatalf("second close status = %d, want %d (closing a closed session is idempotent); body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("close Tx calls after the retry = %d, want 1 (a closed session is not rewritten)", store.txCalls)
+	}
+}
+
+// TestLegacySessionCloseThatLandedUnconfirmedAnswersOK mirrors the Huma
+// regression on the legacy close route.
+func TestLegacySessionCloseThatLandedUnconfirmedAnswersOK(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore, landClose: true}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unconfirmed Legacy Close")
+	store.armed = true
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		w := httptest.NewRecorder()
+		srv.legacySessionHandler().ServeHTTP(w, newPostRequest("/v0/session/"+info.ID+"/close", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("close attempt %d status = %d, want %d; body: %s", attempt, w.Code, http.StatusOK, w.Body.String())
+		}
+	}
+	requireSessionStatus(t, store.Store, info.ID, "closed")
+}
+
+// TestHumaSessionCloseUnconfirmedAndStillOpenAnswersRetryable503: when the
+// read-back that timed out came before the close, so the session still reads
+// open, the close did not land. That is neither success nor an internal
+// fault: the answer is the declared, retryable 503 write_unconfirmed, and the
+// retry closes the session.
+func TestHumaSessionCloseUnconfirmedAndStillOpenAnswersRetryable503(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unconfirmed Open Close")
+	store.armed = true
+
+	w := postSessionClose(t, h, fs, info.ID)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "write_unconfirmed") {
+		t.Fatalf("close body = %s, want the write_unconfirmed detail", w.Body.String())
+	}
+	requireSessionStatus(t, store.Store, info.ID, "open")
+
+	store.armed = false
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusOK {
+		t.Fatalf("retried close status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	requireSessionStatus(t, store.Store, info.ID, "closed")
+}
+
+// TestHumaSessionCloseRefusedWriteStillFails: a close whose write the store
+// refused committed nothing and is still an error, and the session stays open.
+func TestHumaSessionCloseRefusedWriteStillFails(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore, refuse: errors.New("updating bead: exit status 1: disk full")}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Refused Close")
+	store.armed = true
+
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusInternalServerError {
+		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	requireSessionStatus(t, store.Store, info.ID, "open")
 }

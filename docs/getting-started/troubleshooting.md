@@ -217,8 +217,8 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | 1.0.4 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| dolt | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| bd | 1.3.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
 ### Optional for GitHub gates
@@ -249,11 +249,12 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires a final Dolt 2.1.0 or newer. Older and pre-release builds
-are below the managed bd/Dolt compatibility floor; releases before 1.86.2 can
-also miss the upstream GC/writer deadlock fix in dolthub/dolt commit
-`ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
-your version:
+Gas City requires a final Dolt 2.6.0 or newer. Older and pre-release builds
+are below the managed bd/Dolt compatibility floor: 2.6.0 is the first Dolt
+built with a Go toolchain that distrusts the compromised eMudhra CA
+intermediates. Releases before 1.86.2 can also miss the upstream GC/writer
+deadlock fix in dolthub/dolt commit `ccf7bde206`, which can hang
+`dolt_backup sync` under heavy write load. Check your version:
 
 ```bash
 dolt version
@@ -264,10 +265,18 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.4 or newer. The bd-backed store relies on
-ephemeral-bead support used by order tracking, including `bd create
---ephemeral` and `bd query ephemeral=true`, so older binaries can fail
-order tracking and the cleanup of those ephemeral beads. Check your
+Gas City requires `bd` 1.3.0 or newer. `gc init` and `gc start` refuse an
+older `bd` with `bd (found vX, need v1.3.0+)`, and `gc doctor`'s `check-bd`
+check reports `bd X is too old (need >= 1.3.0)`.
+
+1.3.0 is the first tested release with the `bd update --if-assignee
+--if-status` conditional release, which Gas City uses to release a stale
+work assignment without clobbering a concurrent re-claim. A `bd` without
+those flags gets a typed "conditional assignment release unsupported" error,
+and Gas City releases no stale assignment through it: work orphaned by a dead
+session stays assigned to that session until you upgrade `bd`. A 1.2.x version
+number is not enough: bd 1.2.0 and 1.2.1 were accidental, untested releases,
+and bd 1.2.2 re-released the 1.1.2 code without the flags. Check your
 version:
 
 ```bash
@@ -434,6 +443,117 @@ Existing Cursor sessions keep the command fingerprint they were created with.
 The supervisor reconciler restarts sessions automatically after the fingerprint
 changes. Drain the pool first when you need a controlled handoff rather than
 waiting for the next automatic restart.
+
+## Gas City Leaves a Project's Own MCP Config Alone
+
+gc writes the MCP servers from your city's catalog into each provider's
+project config: `.mcp.json`, `.codex/config.toml`, `.gemini/settings.json`,
+`.cursor/mcp.json`, `opencode.json`, or `mimocode.json`, at the city root,
+each rig root, and agent work dirs. When one of those files already holds MCP
+servers the catalog does not define, or defines a server differently, such as
+a team's `.mcp.json` committed to a rig's repository, gc does not take it
+over, since that would replace the team's servers. It leaves the file as it
+is and warns:
+
+```text
+gc: warning: agent "frontend/coder" starts without gc's MCP server "notes": not adopting /src/frontend/.mcp.json: gc does not manage it yet, and adopting it would drop MCP server "team-db"; to let gc manage it, define the servers you still need in gc's MCP catalog (an mcp/ directory) and remove those entries from the file
+```
+
+The agents that read that file keep the team's servers and start without
+gc's. To see where this applies:
+
+- `gc doctor` lists every such file under `mcp-adoption`.
+- `gc start --dry-run` shows a file at the city root or a rig root as
+  `leave ... as it is`, and warns about a file in an agent's own work dir.
+- `gc mcp list --agent <name>`, or `--session <id>` for a pool or worktree
+  session, says "Not delivered" for an agent that reads one.
+- The supervisor log shows the warning when the city starts, and when gc
+  next resolves an agent whose own work dir holds such a file, such as a
+  session's checkout of a repository that commits its own `.mcp.json`. It
+  shows it once per agent, and again if the file's content changes or the
+  file comes back after gc saw it gone.
+
+gc also leaves alone a file it cannot read or parse, a symlinked one, and
+one that is not a regular file (a named pipe, a device) or is larger than
+4 MiB, which it does not read at all.
+
+To give those agents gc's servers too, define the file's servers you still
+need in an `mcp/` catalog that reaches every agent reading the file, one
+`<name>.toml` per server, and remove the file's own entries:
+
+- A file at the city root or a rig root is shared by every agent of that
+  provider there, including the one gc adds for each declared provider.
+  Use the city's `mcp/`, or for a rig root, a pack the rig imports.
+- A file in one agent's own work dir can also take the agent's own
+  `agents/<name>/mcp/`.
+
+gc adopts the file the next time it projects there: at the next city start
+for the city and rig roots, and at the agent's next session start for its
+own work dir. Editing the file does not restart anything. On
+adoption, gc saves the original under `.gc/mcp-adopted/` and writes every
+server from the catalog.
+
+If the repository tracks the file, think twice before letting gc adopt it.
+gc's version can hold secrets expanded from `env` or `headers`, and it shows
+up as a change to the tracked file; `.gitignore` does not hide changes to
+tracked files. gc does not ask before it adopts a tracked file that holds
+no servers of its own, such as a committed `opencode.json` or
+`.gemini/settings.json` with only settings. It notes the adoption on stderr,
+adds gc's servers to the file, keeps its other settings, and rewrites its
+formatting (comments in a `.codex/config.toml` are lost).
+
+gc starts Claude with project MCP servers pre-approved, so the servers in a
+`.mcp.json` gc leaves alone run in its Claude agents without a trust prompt,
+as they do in a city with no MCP catalog. Review a repository's MCP config
+before you add it as a rig.
+
+`gc doctor` also reports files an earlier gc took over while they held
+servers the catalog does not define. Their definitions are in the snapshot
+it names under `.gc/mcp-adopted/`. To hand such a file back, stop the city
+(`gc stop`), restore the file from the snapshot, and delete the marker gc
+keeps for it, `.gc/mcp-managed/<provider>.json` at the same root; gc then
+leaves it alone. Deleting the snapshots clears the report.
+
+## An Agent Starts Without an MCP Server
+
+The supervisor log (`gc supervisor logs`) shows a warning like this one when
+the city starts or reloads its config; `gc start --dry-run` prints it too.
+`gc start` and `gc reload` print it as well, but they work it out on your
+shell's `PATH`, which can differ from the supervisor's. If they disagree, for
+example about a provider that is not installed, the supervisor log is right:
+
+```text
+gc: warning: city "my-city": agents "cursor" (the implicit agent for provider "cursor"), "editor" start without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
+```
+
+An implicit agent is one gc adds for every provider the city declares, so
+work can be slung to that provider without defining an agent; the warning
+names its provider because you never wrote it.
+
+MCP servers from the city's `mcp/` directory, a rig pack, or an import apply
+to every agent in that scope. When an agent's provider cannot receive one of
+them, Gas City leaves that server out of the agent's MCP config and starts the
+agent without it. Every other agent starts as usual.
+
+| Provider family | Receives |
+|---|---|
+| `claude`, `codex`, `gemini`, `opencode`, `mimocode` | stdio and HTTP servers |
+| `cursor` | stdio servers only |
+| any other provider, such as `copilot` | no MCP servers |
+
+Agents whose sessions use ACP receive every server through the protocol
+itself, whatever their provider family.
+
+`gc mcp list --agent <name>` lists the skipped servers under **Not
+projected**. `gc doctor`, `gc config show --validate`, and `gc import add`
+report the same warning, so you can see it before the city starts.
+
+If the agent does not need the server, nothing needs to change. If it does,
+switch the agent to a provider that can receive it.
+
+A server in an agent's own `agents/<name>/mcp/` directory is meant for that
+agent alone. If the agent's provider cannot receive it, that agent does not
+start, and the warning says `cannot start`; the rest of the city still starts.
 
 ## `gc version` Prints Unexpected Output
 
@@ -968,7 +1088,12 @@ rm -f .gc/incidents/*.state
 A pack that overrides `escalate.sh` receives `--incident-key KEY
 --fingerprint F` on an alert and `--resolve-incident KEY` on a clean run. The
 override must accept or ignore those flags and must send nothing for
-`--resolve-incident`; an override that rejects them loses the alert.
+`--resolve-incident`. An override written before incident keys, which rejects
+the flags as a usage error (exit 2, or an error that names the flag), still
+alerts: the order sends the alert again without the flags, so it is mailed on
+every run instead of deduplicated. The order's output then names the override
+as one that predates incident keys; run the order by hand to see it, for
+example `gc order run reaper`.
 
 ## WSL (Windows Subsystem for Linux)
 
@@ -979,7 +1104,7 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires `make` and Go 1.26.4 or newer:
+Building from source requires `make` and Go 1.27.3 or newer:
 
 ```bash
 make --version

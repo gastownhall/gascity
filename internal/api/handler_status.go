@@ -200,19 +200,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	// A suspended city's bead stores are not read: a read restarts the
 	// retired bd proxy the controller just stopped, and an open dashboard
 	// polling this would cycle it. The body says so (StoresNotRead) and
 	// carries no work, mail, session-count or store-health figures.
-	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
-	sessionSnapshot := statusSessionSnapshot{
-		bySessionName: make(map[string]statusSessionInfo),
-		byTemplate:    make(map[string][]statusSessionInfo),
-	}
-	if !citySuspended {
-		sessionSnapshot = s.statusSessionSnapshot(ctx)
-	}
+	sessionSnapshot, citySt, citySuspended := s.citySessionSnapshot(ctx, cfg)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
@@ -560,6 +552,23 @@ type statusSessionInfo struct {
 	agentName   string
 	template    string
 	state       session.State
+}
+
+// citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
+// unless the city is suspended, and returns the city's suspension state with
+// whether it is in effect. A suspended city's snapshot is empty and reads no
+// bead store: a read restarts the retired bd proxy the controller just
+// stopped, and an open dashboard polling a view built on it would cycle it.
+// Every view that reads the session snapshot goes through here.
+func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (statusSessionSnapshot, suspensionstate.State, bool) {
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	if suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()) {
+		return statusSessionSnapshot{
+			bySessionName: make(map[string]statusSessionInfo),
+			byTemplate:    make(map[string][]statusSessionInfo),
+		}, citySt, true
+	}
+	return s.statusSessionSnapshot(ctx), citySt, false
 }
 
 // statusSessionSnapshot reads the session-class beads every session-derived
@@ -1081,7 +1090,6 @@ func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, c
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 		seenSessionNames[info.sessionName] = true

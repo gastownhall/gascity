@@ -15,8 +15,10 @@ import (
 // scopeFixture is a city whose bead scopes are served by the fake `gc bd`
 // route (writeMaintenanceGCStub) over a `dolt` stub that plays the store.
 // The stub answers every query with an empty result unless the test passes
-// extra case arms. It refuses to answer when called outside the gc route
-// (GC_FAKE_SCOPE unset): the maintenance orders must never dial Dolt.
+// extra case arms, except the reaper's count of bd prune's candidates, which
+// is as many as the bd double prunes (BD_PRUNE_COUNT). It refuses to answer
+// when called outside the gc route (GC_FAKE_SCOPE unset): the maintenance
+// orders must never dial Dolt.
 type scopeFixture struct {
 	cityDir     string
 	binDir      string
@@ -54,6 +56,9 @@ fi
 printf '%s|%s\n' "$GC_FAKE_SCOPE" "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
 `+storeCases+`
+  *"session_prune_candidates"*)
+    printf 'COUNT(*)\n%s\n' "${BD_PRUNE_COUNT:-0}"
+    ;;
   *"COUNT("*)
     printf 'COUNT(*)\n0\n'
     ;;
@@ -100,12 +105,17 @@ func (f scopeFixture) read(t *testing.T, path string) string {
 	return string(data)
 }
 
-func (f scopeFixture) runReaper(t *testing.T) {
+// runReaper runs the reaper over the fixture and returns its output.
+func (f scopeFixture) runReaper(t *testing.T) string {
 	t.Helper()
-	runScript(t, coreScriptPath("reaper.sh"), f.env)
+	out, err := runScriptResult(t, coreScriptPath("reaper.sh"), f.env)
+	if err != nil {
+		t.Fatalf("reaper.sh failed: %v\n%s", err, out)
+	}
 	if direct := f.read(t, f.doltLog); strings.Contains(direct, "DIRECT DOLT CALL") {
 		t.Fatalf("reaper dialed Dolt directly instead of going through gc bd:\n%s", direct)
 	}
+	return string(out)
 }
 
 type scriptOutcome struct {
@@ -475,20 +485,270 @@ func TestReaperRaisesUnchangedAnomaliesAsOneIncident(t *testing.T) {
 	}
 }
 
-func TestReaperSessionPrunePatternGateRefusesUnsafePattern(t *testing.T) {
-	f := sessionPruneFixture(t, "")
-	f.env["BD_BACKUP_STATUS_JSON"] = freshBackupStatusJSON(time.Hour, false)
-	f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = "gm-*' OR '1'='1"
-	f.runReaper(t)
+// Argument parsers an escalate.sh override written to the 1.5.0 contract,
+// before incident keys, can have. Each is the shell an override runs for an
+// argument it does not take, which it sees as $1.
+const (
+	// The 1.5.0 escalate.sh's own parser, which overrides were copied from.
+	escalateRefusalV150 = `echo "escalate: unknown argument $1" >&2; exit 2`
+	// A GNU getopt parser names the option it does not know and exits 1.
+	escalateRefusalGetopt = `echo "escalate: unrecognized option '$1'" >&2; exit 1`
+	// A usage message that names no flag, under the usage-error status.
+	escalateRefusalUsage = `echo "usage: escalate.sh --subject S [--message M]" >&2; exit 2`
+	// A lenient parser skips what it does not take.
+	escalateSkipsUnknown = `shift`
+)
 
-	if strings.Contains(f.read(t, f.bdLog), "args=prune") {
-		t.Fatalf("an unsafe pattern must not reach bd prune:\n%s", f.read(t, f.bdLog))
+// What an override does once it has read its arguments.
+const (
+	escalateDelivers  = `printf 'SENT %s\n' "$subject" >> "$ESCALATE_OVERRIDE_LOG"`
+	escalateSendFails = `echo "escalate: pager unreachable" >&2; exit 1`
+)
+
+// writeEscalateOverride installs an escalate.sh override as the fixture's
+// GC_ESCALATE_SCRIPT and returns its path and log. The override takes the
+// 1.5.0 contract's flags (--subject, --message, --severity), runs refusal for
+// any other argument, then runs deliver. Its log holds a "CALL <flags>" line
+// per call and a "SENT <subject>" line per delivered alert.
+func (f scopeFixture) writeEscalateOverride(t *testing.T, refusal, deliver string) (script, log string) {
+	t.Helper()
+	dir := t.TempDir()
+	script = filepath.Join(dir, "escalate.sh")
+	log = filepath.Join(dir, "escalate.log")
+	writeExecutable(t, script, `#!/usr/bin/env bash
+flags=""
+for arg in "$@"; do
+    case "$arg" in --*) flags="$flags $arg" ;; esac
+done
+printf 'CALL%s\n' "$flags" >> "$ESCALATE_OVERRIDE_LOG"
+subject=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --subject) subject="$2"; shift 2 ;;
+        --message|-m|--severity) shift 2 ;;
+        *) `+refusal+` ;;
+    esac
+done
+`+deliver+"\n")
+	f.env["GC_ESCALATE_SCRIPT"] = script
+	f.env["ESCALATE_OVERRIDE_LOG"] = log
+	return script, log
+}
+
+// TestReaperAlertsThroughAnEscalateOverrideThatPredatesIncidentKeys covers a
+// city whose escalate.sh override was written before incident keys and
+// refuses --incident-key as a usage error. The reaper sends the alert again
+// in the 1.5.0 form, so it still arrives, undeduplicated, and the run says so
+// in one line.
+func TestReaperAlertsThroughAnEscalateOverrideThatPredatesIncidentKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		refusal string
+	}{
+		{"1.5.0 escalate.sh parser, exit 2", escalateRefusalV150},
+		{"getopt parser naming the flag, exit 1", escalateRefusalGetopt},
+		{"usage error naming no flag, exit 2", escalateRefusalUsage},
 	}
-	if strings.Contains(f.read(t, f.doltLog), "OR '1'='1") {
-		t.Fatalf("an unsafe pattern must not be spliced into SQL:\n%s", f.read(t, f.doltLog))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sessionPruneFixture(t, "")
+			f.env["BD_BACKUP_STATUS_JSON"] = freshBackupStatusJSON(48*time.Hour, false)
+			script, log := f.writeEscalateOverride(t, tc.refusal, escalateDelivers)
+
+			out := f.runReaper(t)
+
+			want := "CALL --subject --message --incident-key --fingerprint\n" +
+				"CALL --subject --message\n" +
+				"SENT ESCALATION: Reaper anomalies detected [MEDIUM]\n"
+			if got := f.read(t, log); got != want {
+				t.Fatalf("override calls:\n%s\nwant the refused keyed call, then one call in the 1.5.0 form that delivers:\n%s", got, want)
+			}
+			if got := strings.Count(out, "predates incident keys"); got != 1 {
+				t.Fatalf("%d warnings that the override predates incident keys, want 1:\n%s", got, out)
+			}
+			if !strings.Contains(out, script+" predates incident keys") {
+				t.Fatalf("the warning must name the override:\n%s", out)
+			}
+		})
 	}
-	if !strings.Contains(f.read(t, f.gcLog), "outside the allowed pattern charset") {
-		t.Fatalf("pattern refusal was not escalated:\n%s", f.read(t, f.gcLog))
+}
+
+// TestReaperClearsNoIncidentOnAnEscalateOverrideThatPredatesIncidentKeys: such
+// an override refuses a clean run's --resolve-incident too. It keeps no
+// incidents, so there is nothing to clear or resend: the run sends nothing and
+// reports the override in one line instead of its usage error.
+func TestReaperClearsNoIncidentOnAnEscalateOverrideThatPredatesIncidentKeys(t *testing.T) {
+	f := sessionPruneFixture(t, "")
+	_, log := f.writeEscalateOverride(t, escalateRefusalV150, escalateDelivers)
+
+	out := f.runReaper(t)
+
+	if got, want := f.read(t, log), "CALL --resolve-incident\n"; got != want {
+		t.Fatalf("override calls:\n%s\nwant only the clean run's resolve:\n%s", got, want)
+	}
+	if got := strings.Count(out, "predates incident keys"); got != 1 {
+		t.Fatalf("%d warnings that the override predates incident keys, want 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "unknown argument") {
+		t.Fatalf("the override's usage error must be replaced by the warning:\n%s", out)
+	}
+}
+
+// TestReaperDoesNotResendWhenAnEscalateOverrideFailsToSend: an override that
+// fails for a reason other than the incident flags is not sent the alert
+// again, and its own error reaches the order log.
+func TestReaperDoesNotResendWhenAnEscalateOverrideFailsToSend(t *testing.T) {
+	f := sessionPruneFixture(t, "")
+	f.env["BD_BACKUP_STATUS_JSON"] = freshBackupStatusJSON(48*time.Hour, false)
+	_, log := f.writeEscalateOverride(t, escalateSkipsUnknown, escalateSendFails)
+
+	out := f.runReaper(t)
+
+	if got, want := f.read(t, log), "CALL --subject --message --incident-key --fingerprint\n"; got != want {
+		t.Fatalf("override calls:\n%s\nwant the one keyed call:\n%s", got, want)
+	}
+	if strings.Contains(out, "predates incident keys") {
+		t.Fatalf("a failed send is not a refusal of the incident flags:\n%s", out)
+	}
+	if !strings.Contains(out, "escalate: pager unreachable") {
+		t.Fatalf("the override's error must reach the order log:\n%s", out)
+	}
+}
+
+// TestReaperNeverResendsThroughItsOwnEscalateScript: the core escalate.sh
+// takes the incident flags, so its failure, even under the usage-error
+// status, is a failed send and the alert is not sent again without them.
+func TestReaperNeverResendsThroughItsOwnEscalateScript(t *testing.T) {
+	f := sessionPruneFixture(t, "")
+	f.env["BD_BACKUP_STATUS_JSON"] = freshBackupStatusJSON(48*time.Hour, false)
+	// No override and no installed packs: the reaper falls back to the
+	// escalate.sh next to it.
+	f.env["GC_ESCALATE_SCRIPT"] = ""
+	f.env["GC_SYSTEM_PACKS_DIR"] = filepath.Join(f.cityDir, ".gc", "system", "packs")
+	writeMaintenanceGCStub(t, filepath.Join(f.binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "${1:-}" in mail) exit 2 ;; esac
+exit 0
+`)
+
+	out := f.runReaper(t)
+
+	if got := strings.Count(f.read(t, f.gcLog), "mail send "); got != 1 {
+		t.Fatalf("%d mail sends, want the one failed keyed escalation:\n%s", got, f.read(t, f.gcLog))
+	}
+	if strings.Contains(out, "predates incident keys") {
+		t.Fatalf("the core escalate.sh takes the incident flags:\n%s", out)
+	}
+}
+
+// TestReaperSessionPrunePatternGateRefusesUnsafePattern: a pattern outside the
+// allowed charset is refused before any SQL is built from it, and the refusal
+// is escalated whatever the backup state.
+func TestReaperSessionPrunePatternGateRefusesUnsafePattern(t *testing.T) {
+	cases := []struct {
+		name   string
+		backup string
+	}{
+		{"fresh backup", freshBackupStatusJSON(time.Hour, false)},
+		{"no backup", `{"backup":{},"dolt":{"configured":false}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sessionPruneFixture(t, "")
+			f.env["BD_BACKUP_STATUS_JSON"] = tc.backup
+			f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = "gm-*' OR '1'='1"
+			f.runReaper(t)
+
+			if strings.Contains(f.read(t, f.bdLog), "args=prune") {
+				t.Fatalf("an unsafe pattern must not reach bd prune:\n%s", f.read(t, f.bdLog))
+			}
+			if strings.Contains(f.read(t, f.doltLog), "id LIKE") {
+				t.Fatalf("an unsafe pattern must not be spliced into SQL:\n%s", f.read(t, f.doltLog))
+			}
+			if !strings.Contains(f.read(t, f.gcLog), "outside the allowed pattern charset") {
+				t.Fatalf("pattern refusal was not escalated:\n%s", f.read(t, f.gcLog))
+			}
+		})
+	}
+}
+
+// TestReaperSessionPruneGatesOnlyAPruneThatWouldDelete: the backup gate
+// protects what bd prune would delete, so the reaper first counts bd prune's
+// own candidates (pattern, closed, past the retention age). With none, it
+// skips the prune without consulting the backup and without an anomaly, so a
+// city with no fresh backup of its city store is not escalated on every run
+// for a prune that would delete nothing (#6284). A count that cannot be
+// computed is reported and the gates decide as before.
+func TestReaperSessionPruneGatesOnlyAPruneThatWouldDelete(t *testing.T) {
+	noBackup := `{"backup":{},"dolt":{"configured":false}}`
+	staleBackup := freshBackupStatusJSON(48*time.Hour, false)
+	freshBackup := freshBackupStatusJSON(time.Hour, false)
+	countFails := `
+  *"session_prune_candidates"*)
+    printf 'table wisps does not exist\n' >&2
+    exit 1
+    ;;`
+	cases := []struct {
+		name       string
+		store      string
+		candidates string
+		backup     string
+		wantGate   bool
+		wantPrune  bool
+		wantAnoms  []string
+		wantSkip   string
+	}{
+		{name: "nothing to prune, no backup", candidates: "0", backup: noBackup},
+		{name: "nothing to prune, stale backup", candidates: "0", backup: staleBackup},
+		{
+			name: "candidates, stale backup", candidates: "2", backup: staleBackup, wantGate: true,
+			wantAnoms: []string{"bulk prune skipped: backup stale or absent"},
+			wantSkip:  "session prune skipped: no fresh backup",
+		},
+		{
+			name: "count fails, stale backup", store: countFails, candidates: "2", backup: staleBackup, wantGate: true,
+			wantAnoms: []string{"session prune candidate count failed", "bulk prune skipped: backup stale or absent"},
+			wantSkip:  "session prune skipped: no fresh backup",
+		},
+		{
+			name: "count fails, fresh backup", store: countFails, candidates: "2", backup: freshBackup, wantGate: true, wantPrune: true,
+			wantAnoms: []string{"session prune candidate count failed"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScopeFixture(t, tc.store)
+			f.env["BD_PRUNE_COUNT"] = tc.candidates
+			f.env["BD_BACKUP_STATUS_JSON"] = tc.backup
+			runOut := f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			if gate := strings.Contains(bdLog, "args=backup status"); gate != tc.wantGate {
+				t.Fatalf("backup gate consulted = %v, want %v:\n%s", gate, tc.wantGate, bdLog)
+			}
+			if pruned := strings.Contains(bdLog, "args=prune "); pruned != tc.wantPrune {
+				t.Fatalf("prune ran = %v, want %v:\n%s", pruned, tc.wantPrune, bdLog)
+			}
+			gcLog := f.read(t, f.gcLog)
+			if escalated := strings.Contains(gcLog, "ESCALATION"); escalated != (len(tc.wantAnoms) > 0) {
+				t.Fatalf("escalated = %v, want anomalies %q:\n%s", escalated, tc.wantAnoms, gcLog)
+			}
+			for _, want := range tc.wantAnoms {
+				if !strings.Contains(gcLog, want) {
+					t.Fatalf("escalation missing %q:\n%s", want, gcLog)
+				}
+			}
+			out, declared := f.outcome(t)
+			if tc.wantSkip == "" && declared {
+				t.Fatalf("unexpected outcome declaration %+v", out)
+			}
+			if tc.wantSkip != "" && (!declared || !out.hasScope("city", tc.wantSkip)) {
+				t.Fatalf("outcome = %+v (declared %v), want city %q", out, declared, tc.wantSkip)
+			}
+			if !tc.wantGate && !strings.Contains(runOut, "nothing to prune") {
+				t.Fatalf("a skipped no-op prune is not reported in the run output:\n%s", runOut)
+			}
+		})
 	}
 }
 

@@ -52,6 +52,7 @@ go_test(
         "fanout_membership_test.go",
         "finalize_quarantined_root_test.go",
         "finalize_query_timeout_tier_repro_test.go",
+        "main_test.go",
         "ralph_check_asset_test.go",
         "ralph_check_infra_blind_test.go",
         "ralph_check_infra_retry_test.go",
@@ -65,6 +66,7 @@ go_test(
         "root_view_test.go",
         "runtime_test.go",
         "scope_settle_test.go",
+        "scope_skip_bd_batch_test.go",
         "scope_skip_compat_test.go",
         "terminal_root_gate_test.go",
         "testenv_import_test.go",
@@ -74,6 +76,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/convergence",
         "//internal/convoy",

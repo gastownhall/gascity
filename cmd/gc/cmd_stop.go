@@ -126,6 +126,12 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return stopCommandOutcome{code: 1}
 	}
+	// A worker site's controller is the remote one: stopping here would tear
+	// down sessions and the bead store behind it.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return stopCommandOutcome{code: 1, cityPath: cityPath}
+	}
 
 	stopStdout := stdout
 	if jsonOut {
@@ -419,6 +425,10 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 // default wall-clock cap that extendCap grows (nil when the cap is the
 // operator's --timeout, or there is none).
 func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	cityName := loadedCityName(cfg, cityPath)
 
 	// If a controller is running, ask it to shut down (it stops agents).

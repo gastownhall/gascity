@@ -3648,7 +3648,10 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 		t.Fatalf("Start: %v", err)
 	}
 
-	store := beads.NewMemStore()
+	// The trigger lives in the store too: the backstop re-reads it live
+	// before delivery and nudges only while that read still shows it open.
+	trigger := workBead("w-idle", "worker", "", "open", 5)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{trigger}, nil)
 	staleObs := time.Now().Add(-2 * idleClaimNudgeGrace).UTC().Format(time.RFC3339)
 	session, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -3693,7 +3696,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 		AssignedWorkBeads: []beads.Bead{
 			// Open + unassigned == unclaimed: the slot's trigger bead the warm pool
 			// worker never began. workBead sets gc.routed_to but leaves the assignee empty.
-			workBead("w-idle", "worker", "", "open", 5),
+			trigger,
 		},
 	}
 	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, cr.loadSessionBeadSnapshot(), nil, false)
@@ -5018,7 +5021,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	oldRev := cr.configRev
 
 	prev := cityRuntimeStartBeadsLifecycle
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return fmt.Errorf("boom")
 	}
 	t.Cleanup(func() {
@@ -5103,7 +5106,7 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 	prevStart := cityRuntimeStartBeadsLifecycle
 	prevDelay := cityRuntimeReloadLifecycleRetryDelay
 	var calls int
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		calls++
 		if calls == 1 {
 			return fmt.Errorf("init city beads: exec beads init: signal: terminated")

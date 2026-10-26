@@ -154,14 +154,11 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 	for _, p := range providers {
 		family := resolveFamily(resolve, p)
 		var err error
-		switch family {
-		case "claude":
+		if family == "claude" {
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
-			err = installOverlayManaged(fs, cityDir, workDir, family)
-		case "groq", "cerebras":
-			err = installOverlayManaged(fs, cityDir, workDir, "opencode")
-		default:
+		} else if overlayProvider, ok := workDirOverlayProvider(family); ok {
+			err = installOverlayManaged(fs, cityDir, workDir, overlayProvider)
+		} else {
 			return fmt.Errorf("unsupported hook provider %q", p)
 		}
 		if err != nil {
@@ -169,6 +166,46 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		}
 	}
 	return nil
+}
+
+// workDirOverlayProvider maps a hook family to the embedded per-provider
+// overlay InstallWithResolver writes into the work dir for it. It reports
+// false for a family that writes nothing there (claude's settings are
+// city-level) and for an unsupported one.
+func workDirOverlayProvider(family string) (string, bool) {
+	switch family {
+	case "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
+		return family, true
+	case "groq", "cerebras":
+		return "opencode", true
+	default:
+		return "", false
+	}
+}
+
+// InstalledWorkDirPaths returns the work-dir-relative, slash-separated paths
+// InstallWithResolver writes for providers (".codex/hooks.json" for codex, for
+// example). A caller that stages the same provider overlay into the same work
+// dir uses it to leave exactly those paths to the installer, so every file
+// keeps one writer. Unsupported providers contribute nothing.
+func InstalledWorkDirPaths(providers []string, resolve FamilyResolver) map[string]bool {
+	out := make(map[string]bool)
+	for _, p := range providers {
+		overlayProvider, ok := workDirOverlayProvider(resolveFamily(resolve, p))
+		if !ok {
+			continue
+		}
+		base := path.Join("overlay", "per-provider", overlayProvider)
+		_ = iofs.WalkDir(core.PackFS, base, func(name string, d iofs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				// A missing overlay installs nothing; Install reports it.
+				return nil
+			}
+			out[strings.TrimPrefix(name, base+"/")] = true
+			return nil
+		})
+	}
+	return out
 }
 
 func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error {

@@ -181,10 +181,10 @@ func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
 // and assignee fence cannot tell apart. That update returns nil only when the
 // release landed or the bead is gone: any write since the snapshot is a
 // conflict error, because the guard cannot tell a newer claim from an
-// unrelated write. Snapshots listed from the native store (or a CachingStore
-// over it) carry no revision and take the tiers. Under
-// conditional_writes=require, a store without the capability is refused
-// before either tier.
+// unrelated write. A snapshot at revision 0 is re-read: a legacy row still at
+// 0 is fenced at 0, and anything else (a store whose lists carry no revision)
+// takes the tiers. Under conditional_writes=require, a store without the
+// capability is refused before either tier.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
 	store := w.unwrapped()
 	if store == nil {
@@ -368,17 +368,41 @@ func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.Update
 // Return the conflict: the assignee may be unchanged, so callers must not count
 // it as a completed release when deciding whether to close the owning session.
 //
-// A snapshot without a revision is left to the legacy tiers (handled=false).
-// List rows from the native store, and from a CachingStore over it, carry no
-// revision, and release snapshots come from a List, so refusing them would
-// strand every claim on that store.
+// A snapshot at revision 0 is one of two rows: a legacy row whose real
+// revision is 0, or a row listed by a store whose list reads carry no revision
+// (BdStore: `bd list --json` publishes none, mc-3c8h5). One live read tells
+// them apart for this write. Live at 0 too, the release is fenced at 0 like any
+// revision: every capable store compares it exactly, and the write moves the
+// row off 0. Live at anything else, the snapshot's revision is unknown (or the
+// row moved since), and the release is left to the legacy tiers
+// (handled=false), which fence on the live status and assignee; refusing those
+// would strand every claim on a store whose lists carry no revision.
+//
+// The live read is HandlesFor(store).Live, as releaseAssignmentFenced's is, so
+// store must be a leaf store or carry Handles of its own (a CachingStore reads
+// its backing): the unwrapped work store, not a class wrapper. Over a cache, a
+// class wrapper's live read is the cached row, and a stale 0 there fences the
+// release on a revision the row no longer holds, refused on every tick rather
+// than left to the tiers.
 func releaseWorkAssignmentIfRevisionMatches(store beads.Store, item beads.Bead, update beads.UpdateOpts) (released, handled bool, err error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return false, true, fmt.Errorf("conditional release of %q: %w", item.ID, err)
 	}
-	if writer == nil || item.Revision == 0 {
+	if writer == nil {
 		return false, false, nil
+	}
+	if item.Revision == 0 {
+		current, err := beads.HandlesFor(store).Live.Get(item.ID)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			log.Printf("conditional release of %q: skipping removed bead: %v", item.ID, err)
+			return false, true, nil
+		case err != nil:
+			return false, true, fmt.Errorf("conditional release of %q: re-reading its revision: %w", item.ID, err)
+		case current.Revision != 0:
+			return false, false, nil
+		}
 	}
 	if err := writer.UpdateIfMatch(item.ID, item.Revision, update); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {

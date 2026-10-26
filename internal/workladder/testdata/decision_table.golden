@@ -1,0 +1,17 @@
+# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)
+
+| state | quiet | quiet, degraded | gate held | not quiet | runtime dead |
+|---|---|---|---|---|---|
+| trigger/assigned, attempts < 3 | nudge 3; next 12m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| trigger/assigned, attempts >= 3 | recycle + nudge 4; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| trigger/assigned, >= 3, recycled 10m ago | nudge 5; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| continuation/assigned, attempts < 6 | nudge 6; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| continuation/assigned, attempts >= 6 | alert continuation_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| continuation/assigned, >= 6, alerted | nudge 8; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/claimed, attempts < 3 | nudge 3; next 12m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/claimed, attempts >= 3 | release; next - | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/claimed, release did not finish | release + alert release_unfinished + nudge 4; next - | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/started, attempts < 6 | nudge 6; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/started, >= 6, recycles 0 < R | recycle (keep claim) + alert started_recycled; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/started, >= 6, recycles 1 = R | alert started_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/escalated | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |

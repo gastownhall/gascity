@@ -31,6 +31,24 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 	return p.tm.Respond(name, response)
 }
 
+var _ runtime.FencedInteractionProvider = (*Provider)(nil)
+
+// ResponseFencing reports that tmux fences answers atomically, as it fences
+// input (InputFencing): the answer's keys run inside the pane guard.
+func (p *Provider) ResponseFencing(name string) runtime.InputFencing {
+	return p.InputFencing(name)
+}
+
+// RespondFenced answers as Respond does, with every key it sends (a
+// copy-mode exit, the answer) conditional on the agent pane's fence naming
+// fence's incarnation (DES-O1 §6.2). The captures before and after are
+// reads, not input, so a respawn between them sends nothing.
+func (p *Provider) RespondFenced(ctx context.Context, name string, fence runtime.InputFence, response runtime.InteractionResponse) error {
+	return p.fenced(ctx, name, fence, false, func(ctx context.Context) error {
+		return p.tm.respond(ctx, name, response)
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Pane-based approval detection
 // ---------------------------------------------------------------------------
@@ -532,7 +550,7 @@ func approvalOptionKey(approval *parsedApproval, action string) (string, error) 
 			return label == "no" || strings.HasPrefix(label, "no,") || strings.HasPrefix(label, "no ")
 		}
 	default:
-		return "", fmt.Errorf("unknown action %q", action)
+		return "", fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, action)
 	}
 	if err := approvalDenyOnly(approval, action); err != nil {
 		return "", err
@@ -780,6 +798,38 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		runtime.ErrPendingInteraction, name, approvalPromptText(approval), "tmux-"+approvalHash(approval))
 }
 
+// cancelClaudeApproval cancels a Claude permission prompt on session name's
+// agent pane with Escape, the key the prompt offers ("Esc to cancel"). Ctrl-C
+// does not dismiss the prompt, and stopping a turn must never pick one of its
+// numbered options. handled reports that Interrupt is done: a prompt was
+// canceled or the session is gone. A pane that cannot be read is not
+// handled: the error is returned for the caller to log, and the caller
+// interrupts with Ctrl-C as it did before it looked.
+func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled bool, err error) {
+	target, err := t.agentPaneTarget(name)
+	if err == nil {
+		var approval *parsedApproval
+		approval, err = t.approvalInPane(target)
+		if err == nil && (approval == nil || approval.Codex) {
+			return false, nil
+		}
+	}
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return true, absorbGone(ctx, err)
+		}
+		return false, fmt.Errorf("looking for a permission prompt: %w", err)
+	}
+	t.cancelCopyModeIfParked(ctx, target)
+	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return true, absorbGone(ctx, err)
+		}
+		return true, fmt.Errorf("canceling the permission prompt of %q: %w", name, err)
+	}
+	return true, nil
+}
+
 // approvalInPane returns the approval prompt target's agent pane shows, or
 // nil. A Codex overlay is read again from a capture that comes with the
 // pane's geometry, which says where Codex wrapped its rows and whether the
@@ -848,31 +898,48 @@ var (
 //
 // The prompt is the agent's: every capture and the answer key go to its pane
 // (agentPaneTarget), resolved once for this response.
+//
+// A refusal sends nothing, and says why: a session that is gone wraps
+// runtime.ErrSessionNotFound, a pane that could not be read
+// runtime.ErrRuntimeUnavailable, an answer naming a request no longer shown
+// (another prompt, or none) runtime.ErrInteractionGone, and an action the
+// menu does not offer runtime.ErrInteractionActionUnavailable (or, for an
+// action no prompt offers, runtime.ErrInteractionResponseInvalid). An answer
+// naming no request when no prompt shows is a no-op.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
-	target, err := t.agentPaneTarget(name)
-	if err != nil {
+	return t.respond(context.Background(), name, response)
+}
+
+// respond is Respond; its keys run under ctx, so inside a fenced operation
+// (Provider.RespondFenced) they go through the pane guard.
+func (t *Tmux) respond(ctx context.Context, name string, response runtime.InteractionResponse) error {
+	preVerify := func(err error) error {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrSessionNotFound, err)
 		}
-		return fmt.Errorf("pre-verify capture failed: %w", err)
+		return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
+	}
+	target, err := t.agentPaneTarget(name)
+	if err != nil {
+		return preVerify(err)
 	}
 	// Verify the expected approval is still present before sending keys.
 	current, err := t.approvalInPane(target)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrSessionNotFound, err)
-		}
-		return fmt.Errorf("pre-verify capture failed: %w", err)
+		return preVerify(err)
 	}
 	if current == nil {
 		t.approvalDedup().clear(name)
-		return nil // prompt already gone
+		if response.RequestID != "" {
+			return fmt.Errorf("approval %s is gone: %w", response.RequestID, runtime.ErrInteractionGone)
+		}
+		return nil // prompt already gone, and the caller named none
 	}
 	// If caller specified a RequestID, verify it matches the current prompt.
 	if response.RequestID != "" {
 		currentID := "tmux-" + approvalHash(current)
 		if currentID != response.RequestID {
-			return fmt.Errorf("approval prompt changed: expected %s, got %s", response.RequestID, currentID)
+			return fmt.Errorf("approval prompt changed: expected %s, got %s: %w", response.RequestID, currentID, runtime.ErrInteractionGone)
 		}
 	}
 
@@ -884,14 +951,18 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),
 	// so the approval keystroke reaches the prompt instead of being swallowed
 	// by copy-mode.
-	t.cancelCopyModeIfParked(context.Background(), target)
+	t.cancelCopyModeIfParked(inputCtx(ctx), target)
 
 	// Send the keystroke once. key is one digit from 1 to 9
 	// (approvalOptionKey), which tmux types as given, so unlike caller text it
 	// needs no runtime.TmuxLiteralArgs encoding (RUNTIME-CONTRACT-011).
-	if _, err := t.run("send-keys", "-t", target, "-l", key); err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
+	// A key that found no session or no server typed nothing.
+	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
+		case errors.Is(err, ErrNoServer):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return fmt.Errorf("send-keys failed: %w", err)
 	}

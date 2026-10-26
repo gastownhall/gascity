@@ -110,11 +110,16 @@ filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
---watch" (or "show --current --watch", or the "view" alias) on a scope that
-uses bd's proxied-server transport (the default for a new city), where bd
-refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
-seconds and redraws when the bead's status or update time changes, until
-Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+--watch" (or "show --current --watch", or the "view" alias) is served by gc
+on two kinds of scope: one that uses bd's proxied-server transport (the
+default for a new city), where bd refuses watch mode, and one whose store bd
+reaches over http, where enterprise bd refuses it and OSS bd would poll the
+shared server every 2 seconds. gc re-runs "bd show" every 2 seconds on a
+proxied scope and every 10 to 12 seconds on an http scope, and redraws when
+the bead's status or update time changes, until Ctrl+C. A failing read is
+reported once, with bd's error; the last view stays up and the wait between
+reads doubles, up to 5 minutes, until a read succeeds, which is reported
+too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
@@ -703,15 +708,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport
 	// for a new city, and bd cannot call back into gc. gc serves the watch
-	// itself there by polling plain `bd show` reads; every other scope keeps
-	// bd's own watch. Every bd call the watch makes goes through the same
-	// trace and the same silent-fallback / dolt-start stderr checks as this
-	// passthrough. See cmd_bd_show_watch.go.
-	if req, ok := parseBdShowWatchArgs(bdArgs); ok && bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
+	// itself there by polling plain `bd show` reads at bd's own interval. It
+	// does the same on a remote (http) scope, where enterprise bd refuses
+	// --watch and OSS bd would poll the server every 2s, but at the slower
+	// remote interval. Every other scope keeps bd's own watch. Every bd call
+	// the watch makes goes through the same trace and the same
+	// silent-fallback / dolt-start stderr checks as this passthrough. See
+	// cmd_bd_show_watch.go.
+	if req, interval, ok := bdShowWatchServedByGC(bdArgs, cityPath, target, cmd.Env); ok {
 		return serveBdShowWatch(req, &bdWatchRunner{
 			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
 			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
-		}, stdout, stderr)
+		}, interval, stdout, stderr)
 	}
 
 	traceStart := time.Now()
@@ -756,6 +764,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return bdSilentFallbackExitCode
 	}
 
+	// A close the bd subprocess just made reaches the supervisor's run views
+	// only through the city event log, so announce it (bd_close_events.go).
+	announceBdPassthroughCloses(cityPath, guardStore, guardBeads, bdArgs)
 	return 0
 }
 
@@ -809,7 +820,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// The flag sets are the complete value-consuming and boolean (no-value)
 	// flags for this subcommand, in both long and short form, sourced from
-	// `bd <sub> --help` (bd 1.3.1, 2026-09-29). Unknown flags not in either set
+	// `bd <sub> --help` (bd 1.3.2, 2026-10-24). Unknown flags not in either set
 	// make the scan ambiguous.
 	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
 	if ambiguous {

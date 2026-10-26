@@ -57,6 +57,44 @@ func (p *latestCloseProvider) nextWatch() <-chan struct{} {
 	return p.watched
 }
 
+// gatedAttachProvider is a latestCloseProvider whose next Watch, once armed,
+// signals entered and then blocks until released, standing in for a city whose
+// watcher is slow to attach. The stream keeps delivering the other cities
+// while it waits.
+type gatedAttachProvider struct {
+	*latestCloseProvider
+	gateMu  sync.Mutex
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+// arm gates the next Watch. It returns the entered signal and the release
+// function for that Watch; release is idempotent.
+func (p *gatedAttachProvider) arm() (<-chan struct{}, func()) {
+	gate, entered := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.gateMu.Lock()
+	p.gate, p.entered = gate, entered
+	p.gateMu.Unlock()
+	return entered, func() { once.Do(func() { close(gate) }) }
+}
+
+func (p *gatedAttachProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	p.gateMu.Lock()
+	gate, entered := p.gate, p.entered
+	p.gate, p.entered = nil, nil
+	p.gateMu.Unlock()
+	if gate != nil {
+		close(entered)
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return p.latestCloseProvider.Watch(ctx, afterSeq)
+}
+
 // gatedListResolver blocks ListCities while its gate is armed, standing in for
 // a city provider listing that hangs (a stuck city registry or controller).
 type gatedListResolver struct {
@@ -163,4 +201,37 @@ func TestSupervisorGlobalEventStreamRemoveAndReaddResumesWithoutGap(t *testing.T
 	assertTaggedEvent(t, frame, data, "beta", "beta-2", "alpha:1,beta:2")
 	frame, data = stream.nextTaggedEvent(t)
 	assertTaggedEvent(t, frame, data, "beta", "beta-3", "alpha:1,beta:3")
+}
+
+// A city that returns rejoins the composite id at its resume position before
+// its watcher can deliver: a frame sent while the returning city's watcher is
+// still attaching already names it, so no frame the stream sends once it
+// re-attaches the city carries an id a reconnect would resume without it.
+func TestSupervisorGlobalEventStreamReturningCityRejoinsIDBeforeItsWatcherDelivers(t *testing.T) {
+	alpha := newNamedFakeState(t, "alpha", events.NewFake())
+	betaProv := &gatedAttachProvider{latestCloseProvider: newLatestCloseProvider()}
+	beta := newNamedFakeState(t, "beta", betaProv)
+	resolver := newDynamicCityResolver(map[string]*fakeState{"alpha": alpha, "beta": beta})
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
+	stream := openLiveGlobalStream(t, sm, "", "")
+
+	betaProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "beta-1"})
+	frame, data := stream.nextTaggedEvent(t)
+	assertTaggedEvent(t, frame, data, "beta", "beta-1", "alpha:0,beta:1")
+
+	resolver.removeCity(beta)
+	waitSignal(t, betaProv.lastClosed(), "the stream to close city beta's watcher")
+	betaProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "beta-2"})
+
+	entered, release := betaProv.arm()
+	t.Cleanup(release) // runs before the stream's own cleanup stops it
+	resolver.addCity(beta)
+	waitSignal(t, entered, "the stream to start re-attaching city beta")
+	alpha.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "alpha-1"})
+	frame, data = stream.nextTaggedEvent(t)
+	assertTaggedEvent(t, frame, data, "alpha", "alpha-1", "alpha:1,beta:1")
+
+	release()
+	frame, data = stream.nextTaggedEvent(t)
+	assertTaggedEvent(t, frame, data, "beta", "beta-2", "alpha:1,beta:2")
 }

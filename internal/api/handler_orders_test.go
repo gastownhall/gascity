@@ -1166,8 +1166,85 @@ func TestHandleOrderHistoryUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
 	if resp.Entries[0].BeadID != run.ID {
 		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
 	}
-	if !resp.Entries[0].CaptureOutput || !resp.Entries[0].HasOutput {
-		t.Fatalf("entry = %+v, want disabled exec order output metadata", resp.Entries[0])
+	if !resp.Entries[0].CaptureOutput {
+		t.Fatalf("entry = %+v, want capture_output from the disabled exec order", resp.Entries[0])
+	}
+	// The run recorded no output, so it has none to show; capturing exec output
+	// is the order's property, not proof that this run left any.
+	if resp.Entries[0].HasOutput {
+		t.Fatalf("entry = %+v, want has_output false for a run that recorded no output", resp.Entries[0])
+	}
+}
+
+// has_output says whether the history detail has output to serve for a run.
+// It used to be true for every exec-order run, because exec orders capture
+// output, so a run that recorded nothing advertised output the detail then
+// returned empty. capture_output keeps describing the order.
+func TestHandleOrderHistoryHasOutputReflectsRecordedOutput(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.allOrders = []orders.Order{
+		{Name: "nightly-review", Exec: "scripts/nightly.sh", Trigger: "cooldown", Interval: "1h"},
+	}
+
+	withOutput, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "nightly-review run with output",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+		Metadata: map[string]string{
+			"convergence.gate_stdout": "reviewed 3 PRs",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create history bead with output: %v", err)
+	}
+	withoutOutput, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "nightly-review run without output",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create history bead without output: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID        string `json:"bead_id"`
+			CaptureOutput bool   `json:"capture_output"`
+			HasOutput     bool   `json:"has_output"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2; body = %s", len(resp.Entries), w.Body.String())
+	}
+	wantHasOutput := map[string]bool{withOutput.ID: true, withoutOutput.ID: false}
+	for _, entry := range resp.Entries {
+		want, ok := wantHasOutput[entry.BeadID]
+		if !ok {
+			t.Fatalf("unexpected entry %+v", entry)
+		}
+		delete(wantHasOutput, entry.BeadID)
+		if !entry.CaptureOutput {
+			t.Errorf("entry %s capture_output = false, want true for an exec order", entry.BeadID)
+		}
+		if entry.HasOutput != want {
+			t.Errorf("entry %s has_output = %v, want %v", entry.BeadID, entry.HasOutput, want)
+		}
+	}
+	if len(wantHasOutput) != 0 {
+		t.Fatalf("missing entries %v in %s", wantHasOutput, w.Body.String())
 	}
 }
 

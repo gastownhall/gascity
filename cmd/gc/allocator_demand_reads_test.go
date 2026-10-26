@@ -339,7 +339,7 @@ func TestLegacyDemandReadsByteIdenticalToDirectCalls(t *testing.T) {
 // the cached-tier Lists (served by a clean cache, read through a plain store,
 // falling back live past a dirty row), and one unfiltered Ready per cache.
 var legacyCollectorBackingReads = func() map[string][]string {
-	const ready = "Ready [{Assignee: Limit:0 TierMode:2}]"
+	const ready = "Ready [{Assignee: Limit:0 TierMode:2 Unassigned:false MetadataEquals:map[]}]"
 	plain := []string{"List status=in_progress live=false", "List status=open live=true", "List status=open live=false", ready, "List status=open live=true", ready}
 	cached := []string{"List status=open live=true", ready, "List status=open live=true", ready}
 	return map[string][]string{
@@ -415,7 +415,7 @@ func TestV2DemandCachedLegDirtyRowServes(t *testing.T) {
 	if rows, err := newV2DemandReads(now, nil).ReadyAll(cache); err != nil || !slices.Contains(ids(rows), "gc-r1") {
 		t.Errorf("dirty row: ReadyAll = %v, %v; want gc-r1", ids(rows), err)
 	}
-	if ops, want := backing.readLog(), []string{"Ready [{Assignee: Limit:0 TierMode:2}]"}; !slices.Equal(ops, want) {
+	if ops, want := backing.readLog(), []string{"Ready [{Assignee: Limit:0 TierMode:2 Unassigned:false MetadataEquals:map[]}]"}; !slices.Equal(ops, want) {
 		t.Errorf("dirty row: ReadyAll backing reads %q, want %q", ops, want)
 	}
 }

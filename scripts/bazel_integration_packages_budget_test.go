@@ -16,8 +16,10 @@ import (
 
 // integrationPackagesShards: //test:integration_packages' test targets and
 // each one's shard_count (1 when unsharded), i.e. the integration-packages
-// lane's test actions, one per target shard. aquery-verified (81 TestRunner
-// actions) at 2d2b85656c with beads_test at 13 shards; recompute with
+// lane's test actions, one per target shard. aquery-verified (79 TestRunner
+// actions) with beads_test at 11 shards (gascity #8083), plus
+// //test/conversationlane's six targets (OJ-12x, split by its
+// INTEGRATION_SOLO_TESTS on 2026-10-24); recompute with
 //
 //	T=$(bazel query 'tests(//test:integration_packages)' | paste -sd+ | sed 's/+/ + /g')
 //	bazel aquery --define=gotags=integration "mnemonic(\"TestRunner\", $T)" --output=text |
@@ -36,7 +38,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/api:api_test":                                    6,
 	"//internal/bdflags:bdflags_test":                            1,
 	"//internal/beads/exec:exec_test":                            1,
-	"//internal/beads:beads_test":                                13,
+	"//internal/beads:beads_test":                                11,
 	"//internal/credentialprovider:credentialprovider_test":      1,
 	"//internal/orders:orders_test":                              1,
 	"//internal/processgroup:processgroup_test":                  1,
@@ -59,17 +61,26 @@ var integrationPackagesShards = map[string]int{
 	"//cmd/gc:gc_phase2_worker_core_transport_claude_test":       1,
 	"//cmd/gc:gc_phase2_worker_core_transport_codex_test":        1,
 	"//cmd/gc:gc_phase2_worker_core_transport_test":              1,
+	// test/conversationlane/BUILD.bazel: the main target and the five its
+	// INTEGRATION_SOLO_TESTS and INTEGRATION_SOLO_SPLIT_TESTS define.
+	"//test/conversationlane:conversationlane_test":                1,
+	"//test/conversationlane:conversationlane_x12_test":            1,
+	"//test/conversationlane:conversationlane_x2_cli_test":         1,
+	"//test/conversationlane:conversationlane_x2_host_sqlite_test": 1,
+	"//test/conversationlane:conversationlane_x2_host_test":        1,
+	"//test/conversationlane:conversationlane_x8_test":             1,
 }
 
 // integrationPackagesReadBuilds: the packages whose BUILD.bazel
 // //scripts:scripts_test's data carries, so the budget check reads their
 // shard_count under bazel too, not only under `go test`.
-var integrationPackagesReadBuilds = []string{"cmd/gc", "examples/gastown", "internal/beads"}
+var integrationPackagesReadBuilds = []string{"cmd/gc", "examples/gastown", "internal/beads", "test/conversationlane"}
 
 // integrationPackagesTargets expands //test:integration_packages' tests
-// list: go_test labels as they are, and cmd/gc's :gc_integration_solo_tests
-// suite into its INTEGRATION_SOLO_TESTS and INTEGRATION_SOLO_SPLIT_TESTS
-// target names (each a go_variant_test, unsharded).
+// list: go_test labels as they are, and each package's
+// :<name>_integration_solo_tests suite (cmd/gc's, test/conversationlane's)
+// into the target names of that package's INTEGRATION_SOLO_TESTS and
+// INTEGRATION_SOLO_SPLIT_TESTS (each a go_variant_test, unsharded).
 func integrationPackagesTargets(t *testing.T, root string) []string {
 	t.Helper()
 	suite := readFile(t, root, "test/BUILD.bazel")
@@ -77,20 +88,23 @@ func integrationPackagesTargets(t *testing.T, root string) []string {
 	if body == nil {
 		t.Fatal("test/BUILD.bazel has no integration_packages test_suite tests list")
 	}
+	soloSuite := regexp.MustCompile(`^//([a-z0-9_/]+):[a-z0-9_]+_integration_solo_tests$`)
 	var out []string
 	for _, m := range regexp.MustCompile(`"(//[^"]+)"`).FindAllStringSubmatch(body[1], -1) {
-		if m[1] != "//cmd/gc:gc_integration_solo_tests" {
+		solo := soloSuite.FindStringSubmatch(m[1])
+		if solo == nil {
 			out = append(out, m[1])
 			continue
 		}
-		gc := readFile(t, root, "cmd/gc/BUILD.bazel")
+		pkg := solo[1]
+		build := readFile(t, root, pkg+"/BUILD.bazel")
 		for _, table := range []string{"INTEGRATION_SOLO_TESTS", "INTEGRATION_SOLO_SPLIT_TESTS"} {
-			tb := regexp.MustCompile(`(?ms)^` + table + ` = \{\n(.*?)^\}`).FindStringSubmatch(gc)
+			tb := regexp.MustCompile(`(?ms)^` + table + ` = \{\n(.*?)^\}`).FindStringSubmatch(build)
 			if tb == nil {
-				t.Fatalf("cmd/gc/BUILD.bazel has no %s dict", table)
+				t.Fatalf("%s/BUILD.bazel has no %s dict", pkg, table)
 			}
-			for _, e := range regexp.MustCompile(`(?m)^\s+"(gc_[a-z0-9_]+_test)": `).FindAllStringSubmatch(tb[1], -1) {
-				out = append(out, "//cmd/gc:"+e[1])
+			for _, e := range regexp.MustCompile(`(?m)^\s+"([a-z0-9_]+_test)": `).FindAllStringSubmatch(tb[1], -1) {
+				out = append(out, "//"+pkg+":"+e[1])
 			}
 		}
 	}
@@ -217,14 +231,17 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // first scheduling wave. Farm owner maintainer-city-c3's before/after found
 // no lane gain and a farm guard regression (OSS queue-wait p95 8.9s->22.9s),
 // so #7795 was reverted and the lane is back to running in two waves under
-// the inherited --jobs=64. 81 test actions (aquery-verified, see
+// the inherited --jobs=64. 85 test actions (aquery-verified, see
 // integrationPackagesShards above) is accepted as a known, pinned exception
 // so the budget check still catches further growth. If the count grows
 // above this pin, that is this lane asking for a bigger second-wave tail,
 // not a smaller one; split it instead of raising --jobs again (e.g. shard
 // out //cmd/gc:gc_test's long tail) — see beads closed PR #7542 and gascity
-// #7795's before/after for what that tail costs.
-const integrationPackagesTwoWaveExceptionPinned = 81
+// #7795's before/after for what that tail costs. Raised from 81 on
+// 2026-10-24 for //test/conversationlane's split: its one 395-450 s action,
+// the lane's last from #8147 on, became six that run side by side (the
+// longest about 200 s), so its five new actions shorten the lane's tail.
+const integrationPackagesTwoWaveExceptionPinned = 85
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may

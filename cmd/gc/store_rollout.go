@@ -45,6 +45,27 @@ func resolvedConditionalWritesMode(cfg *config.City) gate.Mode {
 	return flags.BeadsConditionalWrites()
 }
 
+// conditionalWritesDefaultAuto reports that flags resolve conditional_writes
+// to auto only because auto is the builtin default. A store that cannot fence
+// under that default is treated as off: the open is quiet
+// (StoreOpenOptions.ConditionalWritesDefaulted), no degrade event is recorded,
+// and status lists no incapable store. Every released bd lacks --if-revision,
+// so a loud default would warn on every command of every bd or exec city. An
+// explicit auto or require, from config or env, stays loud.
+func conditionalWritesDefaultAuto(flags rollout.Flags) bool {
+	return flags.BeadsConditionalWrites() == rollout.Auto &&
+		flags.OriginOf(rollout.KeyBeadsConditionalWrites) == rollout.OriginBuiltin
+}
+
+// conditionalWritesOpenDefaulted reports whether a store open running under
+// mode runs under cfg's builtin default (conditionalWritesDefaultAuto). A
+// caller's boot-latched mode counts as the default when cfg still resolves
+// to it by default.
+func conditionalWritesOpenDefaulted(cfg *config.City, mode gate.Mode) bool {
+	flags, ok := resolvedConditionalWritesFlags(cfg)
+	return ok && mode == rollout.Auto && conditionalWritesDefaultAuto(flags)
+}
+
 // resolvedNativeTransportMode is the store-open view of a city's
 // beads.native_transport, for threading into beads.StoreOpenOptions. A nil cfg
 // yields NativeTransportUnset, which every consumer treats as "auto". The
@@ -64,7 +85,7 @@ func resolvedNativeTransportMode(cfg *config.City) beads.NativeTransportMode {
 // so routine opens pay nothing and an auto-degrade still lands in the city's
 // event log instead of persisting unnoticed.
 func lazyConditionalWritesDegradeEmitter(cityPath, storeID string, flags rollout.Flags, resolved bool) func(beads.ConditionalWritesDegrade) {
-	if !resolved || strings.TrimSpace(cityPath) == "" {
+	if !resolved || strings.TrimSpace(cityPath) == "" || conditionalWritesDefaultAuto(flags) {
 		return nil
 	}
 	return func(d beads.ConditionalWritesDegrade) {
@@ -99,10 +120,11 @@ func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg 
 		mode = flags.BeadsConditionalWrites()
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:         scopeRoot,
-		CityPath:          cityPath,
-		Provider:          provider,
-		ConditionalWrites: mode,
+		ScopeRoot:                  scopeRoot,
+		CityPath:                   cityPath,
+		Provider:                   provider,
+		ConditionalWrites:          mode,
+		ConditionalWritesDefaulted: resolved && conditionalWritesDefaultAuto(flags),
 		OnConditionalWritesDegraded: lazyConditionalWritesDegradeEmitter(
 			cityPath, conditionalWritesStoreID(scopeRoot, cityPath), flags, resolved),
 		OpenBdStore:     openBd,
@@ -149,9 +171,10 @@ func conditionalWritesEventStoreKind(kind string) string {
 // notification into the typed beads.conditional_writes.degraded event,
 // attaching what only the composition root knows: the store scope and the
 // resolved mode's origin. The factory latches invocation once per store
-// instance, so this cannot storm.
+// instance, so this cannot storm. Under the builtin default there is none
+// (conditionalWritesDefaultAuto).
 func conditionalWritesDegradedRecorder(rec events.Recorder, flags rollout.Flags, storeID string) func(beads.ConditionalWritesDegrade) {
-	if rec == nil {
+	if rec == nil || conditionalWritesDefaultAuto(flags) {
 		return nil
 	}
 	return func(d beads.ConditionalWritesDegrade) {

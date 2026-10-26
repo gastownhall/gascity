@@ -80,7 +80,8 @@ func NewMemoryNudgeQueueWithPolicy(policy NudgeQueuePolicy) *MemoryNudgeQueue {
 }
 
 // verbPrologueLocked is the whole-queue recovery a legacy queue runs inside
-// every verb. A contract queue runs none: recovery is Maintain's alone.
+// the verbs VerbsMaintain names. A contract queue runs none: recovery is
+// Maintain's alone.
 func (q *MemoryNudgeQueue) verbPrologueLocked(now time.Time) {
 	if q.policy.VerbsMaintain {
 		q.maintainLocked(now)
@@ -319,10 +320,9 @@ func (q *MemoryNudgeQueue) ListFor(target storebinding.ClaimTarget, now time.Tim
 
 // Snapshot returns every queued item in the canonical bucket order.
 func (q *MemoryNudgeQueue) Snapshot() (nudgequeue.State, error) {
-	pending, inFlight, dead, err := q.listMatching(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
-	if err != nil {
-		return nudgequeue.State{}, err
-	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	pending, inFlight, dead := q.bucketsLocked(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
 	state := nudgequeue.State{Pending: pending, InFlight: inFlight, Dead: dead}
 	nudgequeue.SortState(&state)
 	return state, nil
@@ -448,7 +448,6 @@ func (q *MemoryNudgeQueue) Rollback(item nudgequeue.Item, reason string) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(time.Now().UTC())
 	entry := q.entries[item.ID]
 	if entry == nil {
 		item.DeadAt = time.Now().UTC()
@@ -466,7 +465,6 @@ func (q *MemoryNudgeQueue) Rollback(item nudgequeue.Item, reason string) error {
 func (q *MemoryNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(time.Now().UTC())
 	for _, id := range ids {
 		entry := q.entries[id]
 		if entry == nil || entry.state == memoryQueueTerminal {
@@ -560,7 +558,6 @@ func (q *MemoryNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudge
 func (q *MemoryNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(now)
 	seen := map[string]bool{}
 	var keys []string
 	for _, entry := range q.entries {
@@ -581,7 +578,6 @@ func (q *MemoryNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 func (q *MemoryNudgeQueue) Empty() (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.verbPrologueLocked(time.Now().UTC())
 	for _, entry := range q.entries {
 		if entry.live() || entry.state == memoryQueueDead {
 			return false, nil
@@ -596,7 +592,9 @@ func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) 
 }
 
 // expireLeases records the lease recovery the reads already project: in-flight
-// items whose lease has run out return to pending. It runs only in Maintain.
+// items whose lease has run out return to pending. It runs in Maintain, and
+// under VerbsMaintain in the prologue of the verbs that policy names, where, as
+// the file queue does, the recovered item is due again from that verb's clock.
 func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 	for _, entry := range q.entries {
 		if entry.state != memoryQueueInFlight {
@@ -608,6 +606,9 @@ func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 		entry.state = memoryQueuePending
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
+		if q.policy.VerbsMaintain {
+			entry.item.DeliverAfter = now
+		}
 	}
 }
 
@@ -615,6 +616,13 @@ func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Ite
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.verbPrologueLocked(now)
+	pending, inFlight, dead = q.bucketsLocked(now, match)
+	return pending, inFlight, dead, nil
+}
+
+// bucketsLocked sorts the entries match selects into the buckets they read as
+// at now, each in delivery order.
+func (q *MemoryNudgeQueue) bucketsLocked(now time.Time, match func(nudgequeue.Item) bool) (pending, inFlight, dead []nudgequeue.Item) {
 	for _, id := range q.order {
 		entry := q.entries[id]
 		if entry == nil || !match(entry.item) {
@@ -636,7 +644,7 @@ func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Ite
 	sortByDelivery(pending)
 	sortByDelivery(inFlight)
 	sortByDelivery(dead)
-	return pending, inFlight, dead, nil
+	return pending, inFlight, dead
 }
 
 // expired reports whether item's deliver-by deadline has passed at now.

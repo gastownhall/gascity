@@ -30,7 +30,7 @@ version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
 # pin in lockstep with the registry release and the module dependency.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66c672b5ed00af143158b4eac960523c56b977ee"
 
 # Defense-in-depth: wall-clock restart backstop for the always-on Claude-TUI
 # heartbeat agents (mayor, deacon, boot). The rig-scoped witness already

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -59,10 +60,13 @@ type fakeBdLedger struct {
 	// that cannot testify about its own projection.
 	omitDependencyCount bool
 
+	mu    sync.Mutex // serializes run: a two-tier List runs its two bd reads at once
 	calls [][]string
 }
 
 func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
 	// bd's list and query hide closed rows unless asked for all of them.
@@ -282,10 +286,31 @@ func (f *fakeBdLedger) renderBlocked() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-func (f *fakeBdLedger) renderDepRecords(ids []string) ([]byte, error) {
+// renderDepRecords answers `bd dep list` as real bd does: several ids print
+// the raw dependency records, one id prints the depended-on beads' rows, each
+// carrying its dependency_type.
+func (f *fakeBdLedger) renderDepRecords(args []string) ([]byte, error) {
+	var ids []string
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			ids = append(ids, arg)
+		}
+	}
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		wanted[strings.TrimPrefix(id, "--")] = true
+		wanted[id] = true
+	}
+	if len(ids) == 1 {
+		rows := make([]map[string]string, 0)
+		for _, row := range f.rows {
+			if !wanted[row.id] {
+				continue
+			}
+			for _, dep := range row.deps {
+				rows = append(rows, map[string]string{"id": dep.DependsOnID, "dependency_type": dep.Type})
+			}
+		}
+		return json.Marshal(rows)
 	}
 	out := make([]map[string]string, 0)
 	for _, row := range f.rows {

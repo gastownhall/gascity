@@ -329,6 +329,15 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	return observed, nil
 }
 
+// CodexStartupPending reports whether content shows a Codex pane that has
+// drawn its composer but not yet finished starting: Codex 0.156+ draws the
+// composer before it configures the session, and draws its status line
+// ("<model> · <dir>") under the composer only once startup is done. Text typed
+// into such a pane can be swallowed by a startup dialog drawn after it.
+func CodexStartupPending(content string) bool {
+	return codexStartupPending(content)
+}
+
 func codexStartupPending(content string) bool {
 	// A Codex composer drawn without its status line can still be replaced by
 	// a startup dialog (see watchCodexStartup).

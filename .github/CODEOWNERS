@@ -2,6 +2,10 @@
 /.github/CODEOWNERS @gastownhall/gascity-admin
 /.github/workflows/ @gastownhall/gascity-admin
 /.github/actions/ @gastownhall/gascity-admin
+# Run on rbe-worker-legacy.yml's worker VM before the step that holds the
+# worker certificate.
+/tools/rbe/worker-env-grace @gastownhall/gascity-admin
+/tools/rbe/worker-env-drift @gastownhall/gascity-admin
 /.github/actionlint.yaml @gastownhall/gascity-admin
 /.github/bugflow.toml @gastownhall/gascity-admin
 /.githooks/ @gastownhall/gascity-admin

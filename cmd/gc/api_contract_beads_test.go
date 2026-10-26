@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -65,6 +66,25 @@ func contractBeadsFamily(t *testing.T, h *contractHarness) {
 	if r := mustJSON(t, "ready beads", ready.JSON200, ready); !contractBeadListed(r.Items, rigBead.Id) {
 		t.Fatalf("ready list missing open unblocked bead %s: %s", rigBead.Id, contractBody(ready))
 	}
+
+	// Ready work as gc ready answers it: live, the serving frame, top-N.
+	work, err := c.GetV0CityByCityNameWorkReadyWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkReadyParams{Limit: ptr(int64(50))})
+	expectStatus(t, "ready work", work, err, http.StatusOK)
+	if w := mustJSON(t, "ready work", work.JSON200, work); w.Items == nil || !slices.ContainsFunc(*w.Items, func(b genclient.ReadyBead) bool { return b.Id == rigBead.Id }) {
+		t.Fatalf("ready work missing open unblocked bead %s: %s", rigBead.Id, contractBody(work))
+	}
+	badStatus, err := c.GetV0CityByCityNameWorkReadyWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkReadyParams{MetadataField: &[]string{"=no-key"}})
+	expectStatus(t, "ready work with a malformed filter", badStatus, err, http.StatusBadRequest)
+
+	// A session's step reminder as its hooks read it, live: an identity that
+	// holds no work has no step, and the answer says so by its absence.
+	step, err := c.GetV0CityByCityNameWorkActiveStepWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkActiveStepParams{Assignee: []string{"contract-idle-seat"}})
+	expectStatus(t, "active work step", step, err, http.StatusOK)
+	if s := mustJSON(t, "active work step", step.JSON200, step); s.Step != nil {
+		t.Fatalf("active work step for an idle identity = %s, want no step", contractBody(step))
+	}
+	blank, err := c.GetV0CityByCityNameWorkActiveStepWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkActiveStepParams{Assignee: []string{" "}})
+	expectStatus(t, "active work step for a blank identity", blank, err, http.StatusBadRequest)
 
 	patched, err := c.PatchV0CityByCityNameBeadByIdWithResponse(ctx, city, root.Id,
 		&genclient.PatchV0CityByCityNameBeadByIdParams{XGCRequest: contractCSRF},

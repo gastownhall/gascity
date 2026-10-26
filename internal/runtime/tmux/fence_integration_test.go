@@ -196,7 +196,7 @@ func TestFencedNudgeRealTmuxAdoptsUnfencedPane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r, ok := parseFenceRead(out); !ok || r.own() != f.Digest() {
+	if r, ok := parseFenceRead(out); !ok || r.Own() != f.Digest() {
 		t.Fatalf("pane fence after adoption = %q, want own %s", out, f.Digest())
 	}
 }
@@ -347,6 +347,11 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-parity"}
+	// start runs command in a new session and, when process is set, waits
+	// for the pane to report it. macOS reports a process name cut to 16
+	// bytes, so a process waited on by name keeps a short one; a caller
+	// whose process name varies by host (python3 runs as Python on macOS)
+	// passes "" and waits on what the process paints instead.
 	start := func(t *testing.T, tm *Tmux, name, command, process string, env map[string]string) {
 		t.Helper()
 		maps.Copy(env, fenceEnv(f))
@@ -355,6 +360,9 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = tm.KillSession(name) })
+		if process == "" {
+			return
+		}
 		eventually(t, name+" to run "+process, func() bool {
 			cmd, err := tm.GetPaneCommand(name)
 			return err == nil && cmd == process
@@ -420,9 +428,9 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 	t.Run("submit unconfirmed", func(t *testing.T) {
 		tm := testTmux()
 		dir := t.TempDir()
-		fake := buildBusyOnEnterBinary(t, dir, "fakeclaude-neverbusy")
+		fake := buildBusyOnEnterBinary(t, dir, "fakeclaude-idle")
 		name := fmt.Sprintf("gt-fence-unconfirmed-%d", time.Now().UnixNano()%100000)
-		start(t, tm, name, fake, "fakeclaude-neverbusy", map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "100"})
+		start(t, tm, name, fake, "fakeclaude-idle", map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "100"})
 		err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent("hello-unconfirmed"), immediate(f))
 		if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
@@ -447,7 +455,7 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		const swallow = submitEnterMaxSends + 2
 		name := fmt.Sprintf("gt-fence-staged-%d", time.Now().UnixNano()%100000)
 		cmd := fmt.Sprintf("python3 %s %s %d %.3f 30", shellQuote(script), shellQuote(logPath), swallow, 0.1)
-		start(t, tm, name, cmd, "python3", map[string]string{"GC_PROVIDER": "codex"})
+		start(t, tm, name, cmd, "", map[string]string{"GC_PROVIDER": "codex"})
 		eventually(t, "the fake TUI to paint", captureHas(tm, name, containsFn("fake-codex-tui")))
 		large := "gc-staged-draft-probe " + strings.Repeat("work the claimed bead ", 60)
 		if err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent(large), immediate(f)); err != nil {

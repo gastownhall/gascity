@@ -194,7 +194,7 @@ func (in *Inbox) Counts() (total, unread int) {
 func (in *Inbox) UnreadAutoHandoffs() []mail.Message {
 	var messages []mail.Message
 	for _, b := range in.rows {
-		if hasLabel(b.Labels, "read") || !isInjectedAutoHandoff(b) {
+		if !isUnreadInjectedAutoHandoff(b) {
 			continue
 		}
 		messages = append(messages, beadToMessage(b))
@@ -218,7 +218,7 @@ func (in *Inbox) InjectedAutoHandoffIDs(ids []string) []string {
 	var out []string
 	for _, id := range ids {
 		b, ok := rows[strings.TrimSpace(id)]
-		if !ok || hasLabel(b.Labels, "read") || !isInjectedAutoHandoff(b) {
+		if !ok || !isUnreadInjectedAutoHandoff(b) {
 			continue
 		}
 		out = append(out, b.ID)

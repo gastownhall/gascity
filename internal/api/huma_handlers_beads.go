@@ -512,6 +512,12 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
+//   - Frame: every rig BeadStores holds, suspended ones included. `gc ready`
+//     deliberately does not match this: it federates the serving rigs only,
+//     the frame the controller's demand census reads, so a suspended rig's own
+//     rows are in this answer and absent from the CLI's (ga-h07n0z; see
+//     readyServingRigs in cmd/gc/ready_federation.go). CLI == API holds over a
+//     city with no suspended rig.
 //   - Within a leg: whatever order that leg's own Ready reader emits. For a
 //     work store (CachingStore.Ready) and for the canonical relocated binding
 //     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,

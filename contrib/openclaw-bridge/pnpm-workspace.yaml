@@ -15,7 +15,15 @@ allowBuilds:
 
 # Security pin, mirrored by package.json "overrides" for npm so both lockfiles
 # resolve the same tree (lockfiles_in_sync_test): openclaw 2026.8.35 pins
-# @modelcontextprotocol/sdk 1.30.0 (GHSA-6qxp-vccf-f47h, fixed in 1.31.0, the
-# version openclaw 2026.10.1 ships). Drop both once openclaw pins >= 1.31.0.
+# @modelcontextprotocol/sdk 1.30.0. 1.31.0 fixes GHSA-6qxp-vccf-f47h; 1.32.0
+# fixes GHSA-6prh-2h8m-c8cw, GHSA-22jm-h49p-29qw, GHSA-rvq5-wwqv-78pq and
+# GHSA-46jr-4wx8-v453. Drop both once openclaw pins >= 1.32.0.
+# openclaw 2026.8.35 also exact-pins undici 8.10.2 and zod 4.4.3: undici 8.12.2
+# fixes GHSA-f72v-6w45-q472, GHSA-4qv8-2p9j-2685 and GHSA-xjj6-f33q-929c; zod
+# 4.6.6 fixes GHSA-mrhx-c7xc-m3w5. Drop each once openclaw pins a fixed version.
+# @openclaw/imessage bundles its own zod 4.4.3 (bundleDependencies), which no
+# override can reach.
 overrides:
-  "@modelcontextprotocol/sdk": 1.31.0
+  "@modelcontextprotocol/sdk": 1.32.2
+  undici: 8.12.3
+  zod: 4.6.7

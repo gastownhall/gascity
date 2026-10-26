@@ -276,7 +276,7 @@ func TestStructuredTranscriptFallbackIndexDoesNotSkipLateEvents(t *testing.T) {
 	fs := newSessionFakeState(t)
 	ep := fs.eventProv.(*events.Fake)
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "test", Subject: "seed"})
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)

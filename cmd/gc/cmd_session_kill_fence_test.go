@@ -569,7 +569,7 @@ func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionSuspend = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	final := mustGetBead(t, store, bead.ID)

@@ -216,7 +216,8 @@
               "runbooks/managed-city-endpoints",
               "runbooks/remote-hardened-city",
               "runbooks/split-storage-classes",
-              "runbooks/dolt-compact"
+              "runbooks/dolt-compact",
+              "runbooks/events-mirror"
             ]
           }
         ]

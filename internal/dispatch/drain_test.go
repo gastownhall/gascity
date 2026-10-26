@@ -1868,6 +1868,366 @@ func TestProcessDrainFailureCloseAbortsEnclosingScope(t *testing.T) {
 	}
 }
 
+// TestProcessDrainFailsWhenBlockingPredecessorFailed pins the drain's
+// failed-predecessor gate. A `needs` edge is ordering-only — it is satisfied by
+// the predecessor's close whatever gc.outcome it carries — so a validation step
+// that closed gc.outcome=fail still lets the drain become ready. A drain mints
+// side-effectful work with no agent deciding to (exclusive member
+// reservations, unit convoys, item workflow roots), so it must not expand under
+// a failed predecessor. It closes failed instead, naming that predecessor, so
+// every reader of its outcome (the steps after it, a drain chained behind it,
+// workflow-finalize) sees the failure, and the step that needs it still
+// becomes ready so the run reaches its failure summary and finalizer.
+func TestProcessDrainFailsWhenBlockingPredecessorFailed(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	fx := seedDrainBehindPredecessor(t, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_reason": "context_validation_failed",
+	})
+
+	result, err := ProcessControl(fx.store, mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain behind failed predecessor): %v", err)
+	}
+	if result.Action != drainPredecessorFailedAction || result.Created != 0 {
+		t.Fatalf("result = %+v, want %s with nothing created", result, drainPredecessorFailedAction)
+	}
+	minted, err := fx.store.ListByMetadata(map[string]string{"gc.drain_control_id": fx.drain.ID}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByMetadata(gc.drain_control_id): %v", err)
+	}
+	if len(minted) != 0 {
+		t.Fatalf("drain minted %d unit convoys/item roots under a failed predecessor: %+v", len(minted), minted)
+	}
+	for _, memberID := range fx.memberIDs {
+		member := mustGetBead(t, fx.store, memberID)
+		if got := member.Metadata["gc.exclusive_drain_reservation"]; got != "" {
+			t.Fatalf("member %s reservation = %q, want none", memberID, got)
+		}
+	}
+	drain := mustGetBead(t, fx.store, fx.drain.ID)
+	if drain.Status != "closed" {
+		t.Fatalf("drain status = %q, want closed", drain.Status)
+	}
+	for key, want := range map[string]string{
+		"gc.outcome":         "fail",
+		"gc.failure_class":   "hard",
+		"gc.failure_reason":  "predecessor_failed",
+		"gc.failure_subject": fx.predecessor.ID,
+		"gc.drain_state":     "failed",
+		"close_reason":       drainPredecessorFailedCloseReason,
+	} {
+		if got := drain.Metadata[key]; got != want {
+			t.Errorf("drain %s = %q, want %q", key, got, want)
+		}
+	}
+	if got := drain.Metadata[drainManifestMetadataKey]; got != "" {
+		t.Fatalf("drain manifest = %q, want none (the drain never expanded)", got)
+	}
+	ready, err := fx.store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if !slices.ContainsFunc(ready, func(b beads.Bead) bool { return b.ID == fx.downstream.ID }) {
+		t.Fatalf("downstream step %s not ready after the drain failed; ready = %+v", fx.downstream.ID, ready)
+	}
+}
+
+// TestProcessDrainBehindFailedPredecessorAbortsEnclosingScope pins that the
+// failed-predecessor close is an ordinary failed drain close for the drain's
+// scope too: like any failed scoped drain
+// (TestProcessDrainFailureCloseAbortsEnclosingScope), it aborts the enclosing
+// scope instead of letting the scope settle around a drain that never ran.
+func TestProcessDrainBehindFailedPredecessorAbortsEnclosingScope(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	fx := seedDrainBehindPredecessor(t, map[string]string{"gc.outcome": "fail"})
+	body, err := fx.store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": fx.drain.Metadata["gc.root_bead_id"],
+			"gc.step_ref":     "demo.iter",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"gc.scope_ref":  "demo.iter",
+		"gc.scope_role": "control",
+	} {
+		if err := fx.store.SetMetadata(fx.drain.ID, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+
+	result, err := ProcessControl(fx.store, mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(scoped drain behind failed predecessor): %v", err)
+	}
+	if result.Action != drainPredecessorFailedAction {
+		t.Fatalf("Action = %q, want %s", result.Action, drainPredecessorFailedAction)
+	}
+	for _, id := range []string{fx.drain.ID, body.ID} {
+		if b := mustGetBead(t, fx.store, id); b.Status != "closed" || b.Metadata["gc.outcome"] != "fail" {
+			t.Fatalf("%s (%s) = %s/%q, want closed/fail (a failed scoped drain aborts its scope)", b.Title, id, b.Status, b.Metadata["gc.outcome"])
+		}
+	}
+}
+
+// TestProcessDrainExpandsWhenBlockingPredecessorSucceeded is the gate's
+// positive control: a predecessor that closed pass, or closed with no
+// gc.outcome at all, leaves expansion exactly as before.
+func TestProcessDrainExpandsWhenBlockingPredecessorSucceeded(t *testing.T) {
+	for name, metadata := range map[string]map[string]string{
+		"pass":       {"gc.outcome": "pass"},
+		"no-outcome": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			fx := seedDrainBehindPredecessor(t, metadata)
+
+			result, err := ProcessControl(fx.store, mustGetBead(t, fx.store, fx.drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+			if err != nil {
+				t.Fatalf("ProcessControl(drain behind passed predecessor): %v", err)
+			}
+			if result.Action != "drain-expanded" || result.Created != 4 {
+				t.Fatalf("result = %+v, want drain-expanded with two units and two roots", result)
+			}
+			for _, memberID := range fx.memberIDs {
+				member := mustGetBead(t, fx.store, memberID)
+				if got := member.Metadata["gc.exclusive_drain_reservation"]; got != fx.drain.ID {
+					t.Fatalf("member %s reservation = %q, want %s", memberID, got, fx.drain.ID)
+				}
+			}
+		})
+	}
+}
+
+// TestDrainBehindFailedPredecessorFinalizesRunFailed drives the failed-
+// predecessor gate through the real finalizer, in the two shapes where the
+// failure reaches workflow-finalize only through the drain's own outcome: the
+// drain as the run's sink (validate -> drain, the user guide's prepare-convoy
+// -> implement), and a drain chained behind another drain (validate -> drain
+// -> drain). The validation step failed, so neither drain may expand, each
+// closes failed naming the bead it waited on, and the run finalizes fail with
+// its source work item left open and stamped with the failure — not pass,
+// with the source closed as done and no work done.
+func TestDrainBehindFailedPredecessorFinalizesRunFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		chained bool
+	}{
+		{name: "drain is the sink"},
+		{name: "drain chained behind a drain", chained: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			opts := ProcessOptions{FormulaSearchPaths: []string{dir}}
+			store, first := seedDrainWorkflow(t)
+			rootID := first.Metadata["gc.root_bead_id"]
+			root := mustGetBead(t, store, rootID)
+			members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+			if err != nil {
+				t.Fatalf("Members: %v", err)
+			}
+			source := mustCreateWorkflowBead(t, store, beads.Bead{Title: "work item", Type: "task"})
+			if err := store.SetMetadata(rootID, "gc.source_bead_id", source.ID); err != nil {
+				t.Fatalf("SetMetadata(gc.source_bead_id): %v", err)
+			}
+			if err := store.SetMetadata(first.ID, "gc.drain_member_access", "exclusive"); err != nil {
+				t.Fatalf("SetMetadata(exclusive): %v", err)
+			}
+			validate := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "validate",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.root_bead_id": rootID,
+					"gc.step_ref":     "implement.prepare",
+				},
+			})
+			mustDepAdd(t, store, first.ID, validate.ID, "blocks")
+			drains := []beads.Bead{first}
+			if tc.chained {
+				second := mustCreateWorkflowBead(t, store, beads.Bead{
+					Title: "second drain",
+					Type:  "task",
+					Metadata: map[string]string{
+						"gc.kind":                "drain",
+						"gc.root_bead_id":        rootID,
+						"gc.drain_context":       "separate",
+						"gc.drain_formula":       "drain-item",
+						"gc.drain_member_access": "exclusive",
+					},
+				})
+				mustDepAdd(t, store, second.ID, first.ID, "blocks")
+				drains = append(drains, second)
+			}
+			sink := drains[len(drains)-1]
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "Finalize workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "workflow-finalize",
+					"gc.root_bead_id": rootID,
+				},
+			})
+			mustDepAdd(t, store, finalizer.ID, sink.ID, "blocks")
+			mustDepAdd(t, store, rootID, finalizer.ID, "blocks")
+			if err := updateMetadataAndClose(store, validate.ID, map[string]string{
+				"gc.outcome":        "fail",
+				"gc.failure_reason": "context_validation_failed",
+			}); err != nil {
+				t.Fatalf("close validate: %v", err)
+			}
+
+			// Each drain runs once it is ready, in dependency order, as the
+			// control dispatcher runs them.
+			waitedOn := validate.ID
+			for _, drain := range drains {
+				result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), opts)
+				if err != nil {
+					t.Fatalf("ProcessControl(drain %s): %v", drain.Title, err)
+				}
+				if result.Action != drainPredecessorFailedAction || result.Created != 0 {
+					t.Fatalf("drain %s result = %+v, want %s with nothing created", drain.Title, result, drainPredecessorFailedAction)
+				}
+				minted, err := store.ListByMetadata(map[string]string{"gc.drain_control_id": drain.ID}, 0, beads.IncludeClosed)
+				if err != nil {
+					t.Fatalf("ListByMetadata(gc.drain_control_id): %v", err)
+				}
+				if len(minted) != 0 {
+					t.Fatalf("drain %s minted %d unit convoys/item roots under a failed predecessor: %+v", drain.Title, len(minted), minted)
+				}
+				closed := mustGetBead(t, store, drain.ID)
+				if closed.Status != "closed" {
+					t.Fatalf("drain %s status = %q, want closed", drain.Title, closed.Status)
+				}
+				for key, want := range map[string]string{
+					"gc.outcome":         "fail",
+					"gc.failure_reason":  "predecessor_failed",
+					"gc.failure_subject": waitedOn,
+				} {
+					if got := closed.Metadata[key]; got != want {
+						t.Errorf("drain %s %s = %q, want %q", drain.Title, key, got, want)
+					}
+				}
+				waitedOn = drain.ID
+			}
+			for _, member := range members {
+				if got := mustGetBead(t, store, member.ID).Metadata["gc.exclusive_drain_reservation"]; got != "" {
+					t.Errorf("member %s reservation = %q, want none", member.ID, got)
+				}
+			}
+
+			result, err := ProcessControl(store, mustGetBead(t, store, finalizer.ID), opts)
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if result.Action != "workflow-fail" {
+				t.Errorf("workflow-finalize action = %q, want workflow-fail", result.Action)
+			}
+			root = mustGetBead(t, store, rootID)
+			if root.Status != "closed" || root.Metadata["gc.outcome"] != "fail" {
+				t.Errorf("root = status %q outcome %q, want closed/fail", root.Status, root.Metadata["gc.outcome"])
+			}
+			source = mustGetBead(t, store, source.ID)
+			if source.Status != "open" {
+				t.Errorf("source work item status = %q (outcome %q), want open: a failed run never closes its source as done", source.Status, source.Metadata["gc.outcome"])
+			}
+			for key, want := range map[string]string{
+				"gc.failure_reason":  "predecessor_failed",
+				"gc.failure_class":   "hard",
+				"gc.failure_subject": sink.ID,
+			} {
+				if got := source.Metadata[key]; got != want {
+					t.Errorf("source %s = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+type drainBehindPredecessorFixture struct {
+	store       *beads.MemStore
+	predecessor beads.Bead
+	drain       beads.Bead
+	downstream  beads.Bead
+	memberIDs   []string
+}
+
+// seedDrainBehindPredecessor builds the stock implement shape: a closed
+// predecessor step (closed with predecessorMetadata) blocks an exclusive
+// separate drain that tracks its root, and a downstream step needs the drain.
+func seedDrainBehindPredecessor(t *testing.T, predecessorMetadata map[string]string) drainBehindPredecessorFixture {
+	t.Helper()
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_member_access", "exclusive"); err != nil {
+		t.Fatalf("SetMetadata(exclusive): %v", err)
+	}
+	rootID := drain.Metadata["gc.root_bead_id"]
+	root := mustGetBead(t, store, rootID)
+	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	memberIDs := make([]string, 0, len(members))
+	for _, member := range members {
+		memberIDs = append(memberIDs, member.ID)
+	}
+	predecessor, err := store.Create(beads.Bead{
+		Title: "validate",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": rootID,
+			"gc.step_ref":     "implement.prepare",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downstream, err := store.Create(beads.Bead{
+		Title: "wait for drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": rootID,
+			"gc.step_ref":     "implement.wait-for-drain",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(drain.ID, predecessor.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(drain blocks on predecessor): %v", err)
+	}
+	if err := store.DepAdd(drain.ID, rootID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(drain tracks root): %v", err)
+	}
+	if err := store.DepAdd(downstream.ID, drain.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(downstream blocks on drain): %v", err)
+	}
+	if err := updateMetadataAndClose(store, predecessor.ID, predecessorMetadata); err != nil {
+		t.Fatalf("close predecessor: %v", err)
+	}
+	return drainBehindPredecessorFixture{
+		store:       store,
+		predecessor: mustGetBead(t, store, predecessor.ID),
+		drain:       mustGetBead(t, store, drain.ID),
+		downstream:  downstream,
+		memberIDs:   memberIDs,
+	}
+}
+
 func mustFindDrainItemWorkStep(t *testing.T, store beads.Store, rootID string) beads.Bead {
 	t.Helper()
 	all, err := beads.DirectMembers(store, rootID)

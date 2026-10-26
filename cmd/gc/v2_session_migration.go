@@ -96,6 +96,6 @@ func (m v2SessionMigration) refusal() error {
 		states = " (" + states[1:] + ")"
 	}
 	return fmt.Errorf("enterprise-era session rows: %d open row(s) in a state main does not know%s, %d pool-slot session name(s) shared by open rows, "+
-		"%d configured named session(s) claimed by more than one open row; v2 refuses to boot over them: run gc doctor --check v2-session-migration to list them, or remove session_reconciler to run legacy",
+		"%d configured named session(s) claimed by more than one open row; v2 refuses to boot over them: run gc doctor --check v2-session-migration to list them, or set session_reconciler = \"legacy\"",
 		total, states, len(m.SharedSlotNames), len(m.DuplicateNamed))
 }

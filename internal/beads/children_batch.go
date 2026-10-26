@@ -28,12 +28,14 @@ func ChildrenOfAny(store Store, parentIDs []string, opts ...QueryOpt) ([]Bead, e
 	if batch, ok := store.(ChildrenBatchLister); ok {
 		return batch.ChildrenOfAny(parentIDs, opts...)
 	}
-	return childrenOfAnyPerParent(store, parentIDs, opts...)
+	return ChildrenOfAnyPerParent(store, parentIDs, opts...)
 }
 
-// childrenOfAnyPerParent is the per-parent form of ChildrenOfAny: one Children
-// read per parent, children deduplicated in first-seen order.
-func childrenOfAnyPerParent(store Store, parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+// ChildrenOfAnyPerParent is the per-parent form of ChildrenOfAny: one Children
+// read per parent, children deduplicated in first-seen order. A wrapper that
+// forwards ChildrenBatchLister answers with it when its inner store has no
+// batched read, so the wrapper's own Children rules still apply.
+func ChildrenOfAnyPerParent(store Store, parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
 	var out []Bead
 	seen := make(map[string]bool)
 	for _, parentID := range parentIDs {
@@ -55,18 +57,28 @@ func childrenOfAnyPerParent(store Store, parentIDs []string, opts ...QueryOpt) (
 var _ ChildrenBatchLister = (*BdStore)(nil)
 
 // ChildrenOfAny reads the children of every parent with one
-// `bd dep list <ids> --direction=up --type=parent-child` and then reads the
-// non-ephemeral ones in full with one exact batched `bd show`, two bd calls in
-// place of one `bd list --parent` per parent.
+// `bd dep list <ids> --direction=up --type=parent-child` and then reads them in
+// full with one exact batched `bd show`: two bd calls in place of one
+// `bd list --parent` per parent, plus one `bd query` per parent for a read
+// that includes the wisp tier.
 //
-// It answers exactly what Children(id, IncludeClosed) answers per parent on
-// this store, which ignores tier options: `bd list` never surfaces ephemeral
-// rows, so ephemeral children the dependency read reports are dropped, and the
-// `bd show` rows carry the ParentID and CreatedAt a caller orders by.
-func (s *BdStore) ChildrenOfAny(parentIDs []string, _ ...QueryOpt) ([]Bead, error) {
+// The tier options select rows as ListQuery.TierMode does for a List over
+// ParentID. With none, it answers what Children(id, IncludeClosed) answers per
+// parent on this store: `bd list` never surfaces ephemeral rows, so ephemeral
+// children the dependency read reports are dropped. WithBothTiers keeps them,
+// as List{ParentID, TierMode: TierBoth} does by unioning `bd list --parent`
+// with `bd query "ephemeral=true AND parent=..."`. The bead-policy layer reads
+// children at TierBoth, so the batch it forwards must keep them too. The
+// dependency read reports wisp children because bd keeps their parent-child
+// edges in wisp_dependencies, which `bd dep list` reads; their rows come from
+// the same `bd show`, or from Get's wisp fallback when a bd's show does not
+// answer them. The `bd show` rows carry the ParentID and CreatedAt a caller
+// orders by.
+func (s *BdStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
+	tier := ListQuery{TierMode: TierModeFromOpts(opts)}
 	args := append([]string{"dep", "list"}, parentIDs...)
 	args = append(args, "--direction=up", "--type=parent-child", "--json")
 	out, err := s.runBDTransientRead(args...)
@@ -90,7 +102,7 @@ func (s *BdStore) ChildrenOfAny(parentIDs []string, _ ...QueryOpt) ([]Bead, erro
 	var ids []string
 	listed := make(map[string]bool, len(rows))
 	for _, row := range rows {
-		if row.ID == "" || row.Ephemeral || listed[row.ID] {
+		if row.ID == "" || listed[row.ID] || (row.Ephemeral && tier.TierMode == TierIssues) {
 			continue
 		}
 		listed[row.ID] = true
@@ -105,7 +117,7 @@ func (s *BdStore) ChildrenOfAny(parentIDs []string, _ ...QueryOpt) ([]Bead, erro
 	}
 	children := make([]Bead, 0, len(ids))
 	for _, id := range ids {
-		if bead, ok := found[id]; ok {
+		if bead, ok := found[id]; ok && tier.matchesTier(bead) {
 			children = append(children, bead)
 		}
 	}
@@ -119,7 +131,9 @@ func (s *BdStore) ChildrenOfAny(parentIDs []string, _ ...QueryOpt) ([]Bead, erro
 		if err != nil {
 			return nil, fmt.Errorf("batch children: %w", err)
 		}
-		children = append(children, bead)
+		if tier.matchesTier(bead) {
+			children = append(children, bead)
+		}
 	}
 	return children, nil
 }

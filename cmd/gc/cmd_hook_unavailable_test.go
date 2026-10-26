@@ -17,7 +17,8 @@ import (
 
 // These pin hookStoreUnavailableToken's contract; its doc states the scope. A
 // work query that fails timed-out or transport-class is exit 2 plus the token,
-// never the exit-1 no-work answer.
+// never the exit-1 no-work answer. Plain gc hook exits 2 for any other failed
+// query too (hookExitWorkQueryFailed), without the token.
 
 func TestDoHookStoreUnavailableExitsTwoWithToken(t *testing.T) {
 	runner := func(string, string) (string, error) {
@@ -49,14 +50,14 @@ func TestDoHookTransportClassErrorClassifiedUnavailable(t *testing.T) {
 	}
 }
 
-func TestDoHookOrdinaryErrorStaysExitOne(t *testing.T) {
+func TestDoHookOrdinaryErrorExitsFailedWithoutToken(t *testing.T) {
 	runner := func(string, string) (string, error) {
 		return "", fmt.Errorf("running work query %q: exit status 1: unknown flag --bogus", "bd ready --bogus")
 	}
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready --bogus", "/tmp/work", false, runner, &stdout, &stderr, hookVisibility{})
-	if code != 1 {
-		t.Fatalf("doHook = %d, want 1 for an ordinary work-query failure", code)
+	if code != hookExitWorkQueryFailed {
+		t.Fatalf("doHook = %d, want %d for an ordinary work-query failure (not the no-work exit 1)", code, hookExitWorkQueryFailed)
 	}
 	if strings.Contains(stderr.String(), hookStoreUnavailableToken) {
 		t.Fatalf("stderr %q carries the store-unavailable token for an application error", stderr.String())
@@ -450,8 +451,9 @@ func TestHookCommandRendersFederatedLegTimeoutAsExitTwo(t *testing.T) {
 // the process boundary. The runner quotes the work query's command line into
 // its error, and that command is user-authored shell, so a marker or timeout
 // needle that appears only there says nothing about the store: a query that
-// fails with an application error stays exit 1 with no token. The report still
-// names the command, because only the classification skips it.
+// fails with an application error carries no token (it still exits
+// hookExitWorkQueryFailed, as every failed plain gc hook query does). The
+// report still names the command, because only the classification skips it.
 func TestHookCommandClassifiesStderrNotCommandText(t *testing.T) {
 	for _, needle := range []string{"connection refused", "timed out after"} {
 		t.Run(needle, func(t *testing.T) {
@@ -459,8 +461,8 @@ func TestHookCommandClassifiesStderrNotCommandText(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"hook", "worker"}, &stdout, &stderr)
-			if code != 1 {
-				t.Fatalf("gc hook rendered exit %d, want 1 for an application error whose command text carries %q; stderr=%s", code, needle, stderr.String())
+			if code != hookExitWorkQueryFailed {
+				t.Fatalf("gc hook rendered exit %d, want %d for an application error whose command text carries %q; stderr=%s", code, hookExitWorkQueryFailed, needle, stderr.String())
 			}
 			if strings.Contains(stderr.String(), hookStoreUnavailableToken) {
 				t.Fatalf("stderr %q carries the store-unavailable token for an application error", stderr.String())

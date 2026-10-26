@@ -55,8 +55,16 @@ const (
 	ReasonSessionGone         = "session_gone"
 	ReasonClosedExternally    = "closed_externally"
 	ReasonOther               = "other"
-	RefusedReasonPrefix       = "refused:"
+	// ReasonReplacementNotPrepared is a deliver-now unit's interrupt whose
+	// turn settled but whose session could not be prepared for the message
+	// (X11 D11): the replacement did not complete.
+	ReasonReplacementNotPrepared = "replacement_not_prepared"
+	RefusedReasonPrefix          = "refused:"
 )
+
+// MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and
+// still be the token every outcome reason must be.
+const MaxRefusedWhyLen = maxTokenLen - len(RefusedReasonPrefix)
 
 // Known skipped reasons.
 const (
@@ -72,7 +80,7 @@ const (
 var knownFailedReasons = []string{
 	ReasonExpiredBeforeStart, ReasonDeadlineInFlight, ReasonNoBoundary, ReasonProviderUnavailable,
 	ReasonAmbiguousDelivery, ReasonPoison, ReasonUnsupported, ReasonUnauthorized, ReasonCreateFailed,
-	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther,
+	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther, ReasonReplacementNotPrepared,
 }
 
 var knownSkippedReasons = []string{
@@ -253,8 +261,8 @@ type KillPolicy struct {
 }
 
 // Scope is an op's validity scope: the conversation, one context epoch, or
-// one session generation (with a turn for interrupt, an interaction for
-// respond).
+// one session generation (with a turn for interrupt, an interaction
+// occurrence for respond).
 type Scope struct {
 	Kind        ScopeKind
 	Epoch       int64

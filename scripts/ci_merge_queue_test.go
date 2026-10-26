@@ -12,10 +12,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Merge-queue readiness (TESTING.md "Merge queue"). The queue is dormant
-// until the main ruleset enables it, but every required check must already
-// report on a queue entry's merge-group commit, from a merge_group run that
-// has no github.event.pull_request at all: Check and CI / required
+// Merge queue (TESTING.md "Merge queue"). Every required check must report
+// on a queue entry's merge-group commit, from a merge_group run that has no
+// github.event.pull_request at all: Check and CI / required
 // (ci.yml), the four Analyze checks (codeql.yml), "bazel test
 // (side-by-side)" and "BUILD files in sync" (bazel.yml). These tests
 // simulate that event with evalGHExpr (gh_expr_test.go) and the workflows'
@@ -41,6 +40,7 @@ func mergeGroupCtx(extra map[string]string) map[string]string {
 	ctx := map[string]string{
 		"github.event_name":                          "merge_group",
 		"github.repository":                          mergeQueueRepo,
+		"github.repository_owner":                    "gastownhall",
 		"github.actor":                               mergeQueueBotActor,
 		"github.ref":                                 mergeQueueRef,
 		"github.run_id":                              mergeQueueRunID,
@@ -59,6 +59,8 @@ func mergeGroupCtx(extra map[string]string) map[string]string {
 		"steps.bazel.outcome":                        "success",
 		"steps.llvm.outcome":                         "success",
 		"needs.runner-policy.outputs.use_blacksmith": "true",
+		"needs.runner-policy.outputs.runner_2vcpu":   "blacksmith-2vcpu-ubuntu-2404",
+		"needs.runner-policy.outputs.runner_16vcpu":  "blacksmith-16vcpu-ubuntu-2404",
 	}
 	maps.Copy(ctx, extra)
 	return ctx
@@ -77,6 +79,7 @@ type mqStep struct {
 type mqJob struct {
 	Name     string            `yaml:"name"`
 	If       string            `yaml:"if"`
+	RunsOn   string            `yaml:"runs-on"`
 	Needs    yaml.Node         `yaml:"needs"`
 	Env      map[string]string `yaml:"env"`
 	Steps    []mqStep          `yaml:"steps"`
@@ -249,6 +252,7 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.lane.steps[ci-analytics].env.PR_HINT":                                  "0",
 	"bazel.yml jobs.lane.steps[Save LLVM archive cache].if":                                "false",       // push to main saves
 	"bazel.yml jobs.lane.steps[Save Bazel runner cache].if":                                "false",       // push to main saves
+	"bazel.yml jobs.lane.steps[Save Bazelisk and Bazel].if":                                "false",       // push to main saves
 	"bazel.yml jobs.gate.steps[Evaluate].env.EVENT":                                        "merge_group", // logged only
 	"bazel.yml jobs.coverage.if":                                                           "false",       // nightly/dispatch only
 	"bazel.yml jobs.coverage.steps[worker-env].env.DEFAULT_BRANCH":                         "main",
@@ -263,10 +267,21 @@ var mergeQueueEventExprs = map[string]string{
 	"ci.yml jobs.runner-policy.steps[policy].env.PR_AUTHOR":  "", // runner_policy.py ignores it
 	"ci.yml jobs.changes.steps[filter].with.base":            mergeQueueBaseSHA,
 	"ci.yml jobs.changes.steps[filter].with.ref":             mergeQueueHeadSHA,
-	// codeql.yml
+	// codeql.yml: a merge group reports the required Analyze checks from
+	// the merge-group step alone, on the 2 vCPU runner
+	// (codeql_merge_group_test.go).
 	"codeql.yml jobs.runner-policy.steps[policy].env.EVENT_NAME": "merge_group",
 	"codeql.yml jobs.runner-policy.steps[policy].env.PR_AUTHOR":  "",
+	"codeql.yml jobs.analyze.runs-on":                            "blacksmith-2vcpu-ubuntu-2404",
+	"codeql.yml jobs.analyze.steps[merge-group].if":              "true",
+	"codeql.yml jobs.analyze.steps[Checkout].if":                 "false",
+	"codeql.yml jobs.analyze.steps[Set up Go].if":                "false",
+	"codeql.yml jobs.analyze.steps[Restore Go modules].if":       "false",
+	"codeql.yml jobs.analyze.steps[gocache].if":                  "false",
+	"codeql.yml jobs.analyze.steps[Initialize CodeQL].if":        "false",
+	"codeql.yml jobs.analyze.steps[Autobuild].if":                "false",
 	"codeql.yml jobs.analyze.steps[Save Go build cache].if":      "false", // push to main saves
+	"codeql.yml jobs.analyze.steps[Perform CodeQL Analysis].if":  "false",
 }
 
 // TestMergeQueueEventExpressionsAreAccountedFor evaluates every
@@ -297,6 +312,7 @@ func TestMergeQueueEventExpressionsAreAccountedFor(t *testing.T) {
 		for id, job := range wf.Jobs {
 			prefix := file + " jobs." + id
 			add(prefix+".if", job.If, true)
+			add(prefix+".runs-on", job.RunsOn, false)
 			for k, v := range job.Env {
 				add(prefix+".env."+k, v, false)
 			}

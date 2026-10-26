@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -377,6 +380,175 @@ func TestChooseManagedDoltPortUsesCanonicalSeedForSymlinkedCityPath(t *testing.T
 	}
 }
 
+// TestChooseManagedDoltPortKeepsOwnServerPortWhenDialsFail pins that a
+// restart's port pick does not walk past the port the city's own live server
+// holds just because a dial to it fails. The listener never accepts, so once
+// its backlog is full every new dial times out while the process still holds
+// the port, the same view a client has when the host is out of ephemeral ports.
+func TestChooseManagedDoltPortKeepsOwnServerPortWhenDialsFail(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	server := startTCPListenerProcessInDir(t, port, layout.DataDir)
+
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	saturated := false
+	for i := 0; i < 64; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		if err != nil {
+			saturated = true
+			break
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	if !saturated {
+		t.Skip("listener backlog never filled, so dials to the server still succeed")
+	}
+
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want the port its own live server holds (%d)", got, port)
+	}
+}
+
+// TestChooseManagedDoltPortKeepsOwnServerPortBeforeItListens covers a server
+// that is alive and running in the city's data dir but has not bound its port
+// yet, as during startup.
+func TestChooseManagedDoltPortKeepsOwnServerPortBeforeItListens(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	server := startLockedDelayedTCPListenerProcessInDir(t, filepath.Join(t.TempDir(), "start.lock"), port, layout.DataDir, time.Minute)
+	t.Cleanup(func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	})
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want its own live server's port %d", got, port)
+	}
+}
+
+// TestChooseManagedDoltPortKeepsPublishedHintPortBeforeItsServerListens covers
+// the branch with no provider state file, where the published state names the
+// city's own live server and that server has not bound its port yet.
+func TestChooseManagedDoltPortKeepsPublishedHintPortBeforeItsServerListens(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	server := startLockedDelayedTCPListenerProcessInDir(t, filepath.Join(t.TempDir(), "start.lock"), port, layout.DataDir, time.Minute)
+	t.Cleanup(func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	})
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want the published hint's port %d", got, port)
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("provider state was written for a server no dial reached: %v", err)
+	}
+}
+
+// TestChooseManagedDoltPortSkipsStatePortHeldByAnotherProcess pins the other
+// side: when a different process holds the state port, the city's own live
+// server does not make that port reusable.
+func TestChooseManagedDoltPortSkipsStatePortHeldByAnotherProcess(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	startTCPListenerProcess(t, port)
+	server := startLockedDelayedTCPListenerProcessInDir(t, filepath.Join(t.TempDir(), "start.lock"), reserveRandomTCPPort(t), layout.DataDir, time.Minute)
+	t.Cleanup(func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	})
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != "4406" {
+		t.Fatalf("chooseManagedDoltPort = %q, want the GC_DOLT_PORT fallback 4406 for a port another process holds", got)
+	}
+}
+
 func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
@@ -533,6 +705,84 @@ func TestValidDoltRuntimeStateRejectsAlivePIDThatDoesNotOwnManagedDolt(t *testin
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}, cityPath); got {
 		t.Fatal("validDoltRuntimeState = true, want false when pid is alive but does not own managed Dolt")
+	}
+}
+
+func TestValidDoltRuntimeStateClassifiesDialFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	heldPort := reserveRandomTCPPort(t)
+	freePort := reserveRandomTCPPort(t)
+	for freePort == heldPort {
+		freePort = reserveRandomTCPPort(t)
+	}
+	listener := startTCPListenerProcessInDir(t, heldPort, layout.DataDir)
+
+	cases := []struct {
+		name  string
+		errno syscall.Errno
+		port  int
+		want  bool
+	}{
+		{name: "local dial failure on the pid's own port", errno: syscall.EADDRNOTAVAIL, port: heldPort, want: true},
+		{name: "refused dial on the pid's own port", errno: syscall.ECONNREFUSED, port: heldPort, want: false},
+		{name: "local dial failure on a port the pid does not hold", errno: syscall.EADDRNOTAVAIL, port: freePort, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, dialErrorFor("connect", tc.errno)
+			})
+			got := validDoltRuntimeState(doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      tc.port,
+				DataDir:   layout.DataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}, cityPath)
+			if got != tc.want {
+				t.Fatalf("validDoltRuntimeState(port %d, dial error %v) = %t, want %t", tc.port, tc.errno, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRepairedManagedDoltRuntimeStateClassifiesDialFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+
+	cases := []struct {
+		name   string
+		errno  syscall.Errno
+		wantOK bool
+	}{
+		{name: "local dial failure", errno: syscall.EADDRNOTAVAIL, wantOK: true},
+		{name: "refused dial", errno: syscall.ECONNREFUSED, wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, dialErrorFor("connect", tc.errno)
+			})
+			repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, doltRuntimeState{
+				Port:    port,
+				DataDir: layout.DataDir,
+			})
+			if ok != tc.wantOK {
+				t.Fatalf("repairedManagedDoltRuntimeState(dial error %v) ok = %t, want %t", tc.errno, ok, tc.wantOK)
+			}
+			if ok && repaired.PID != listener.Process.Pid {
+				t.Fatalf("repaired state PID = %d, want the port holder %d", repaired.PID, listener.Process.Pid)
+			}
+		})
 	}
 }
 
@@ -1132,6 +1382,62 @@ func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
 	}
 }
 
+// TestDoltStateProbeManagedCmdKeepsOwnedHolderRunningWhenDialFailsLocally pins
+// that a dial which never left this host leaves the city's own listener
+// counted as running, while a refused dial still counts it as down.
+func TestDoltStateProbeManagedCmdKeepsOwnedHolderRunningWhenDialFailsLocally(t *testing.T) {
+	cases := []struct {
+		name             string
+		dialErr          error
+		wantRunning      string
+		wantInconclusive string
+	}{
+		{name: "dial never leaves this host", dialErr: dialErrorFor("connect", syscall.EADDRNOTAVAIL), wantRunning: "true", wantInconclusive: "true"},
+		{name: "server refuses", dialErr: dialErrorFor("connect", syscall.ECONNREFUSED), wantRunning: "false", wantInconclusive: "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipWithoutProcessInspection(t)
+			cityPath := t.TempDir()
+			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+			}
+			port := reserveRandomTCPPort(t)
+			listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+			if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      port,
+				DataDir:   layout.DataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}); err != nil {
+				t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+			}
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, tc.dialErr
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "probe-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port)}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			for key, want := range map[string]string{
+				"port_holder_owned": "true",
+				"tcp_reachable":     "false",
+				"tcp_inconclusive":  tc.wantInconclusive,
+				"running":           tc.wantRunning,
+			} {
+				if got[key] != want {
+					t.Fatalf("%s = %q, want %q; output=%q", key, got[key], want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
@@ -1175,9 +1481,8 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(data dir): %v", err)
 	}
-	port := reserveRandomTCPPort(t)
 	deletedPath := filepath.Join(layout.DataDir, "held.db")
-	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, layout.DataDir)
+	proc, port := startOpenFileAndTCPListenerProcess(t, deletedPath, layout.DataDir)
 	defer func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
@@ -1331,6 +1636,62 @@ esac
 	}
 }
 
+// TestDoltStateExistingManagedCmdKeepsOwnedServerWhenDialsFailLocally pins
+// that a readiness wait whose dials never left this host keeps the city's own
+// live server, while a refused dial still marks it for replacement.
+func TestDoltStateExistingManagedCmdKeepsOwnedServerWhenDialsFailLocally(t *testing.T) {
+	cases := []struct {
+		name             string
+		dialErr          error
+		wantInconclusive string
+		wantReusable     string
+	}{
+		{name: "dials never leave this host", dialErr: dialErrorFor("connect", syscall.EADDRNOTAVAIL), wantInconclusive: "true", wantReusable: "true"},
+		{name: "server refuses", dialErr: dialErrorFor("connect", syscall.ECONNREFUSED), wantInconclusive: "false", wantReusable: "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipWithoutProcessInspection(t)
+			cityPath := t.TempDir()
+			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+			}
+			port := reserveRandomTCPPort(t)
+			listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+			if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      port,
+				DataDir:   layout.DataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}); err != nil {
+				t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+			}
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, tc.dialErr
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "existing-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "100"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			for key, want := range map[string]string{
+				"managed_owned":      "true",
+				"ready":              "false",
+				"ready_inconclusive": tc.wantInconclusive,
+				"reusable":           tc.wantReusable,
+			} {
+				if got[key] != want {
+					t.Fatalf("%s = %q, want %q; output=%q", key, got[key], want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 func TestDoltStateExistingManagedCmdFallsBackToPublishedRuntimeState(t *testing.T) {
 	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
@@ -1425,9 +1786,8 @@ esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	port := reserveRandomTCPPort(t)
 	deletedPath := filepath.Join(layout.DataDir, "held.db")
-	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, "")
+	proc, port := startOpenFileAndTCPListenerProcess(t, deletedPath, "")
 	defer func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
@@ -1754,60 +2114,120 @@ while True:
 	}
 }
 
-func startOpenFileAndTCPListenerProcess(t *testing.T, path string, port int, dir string) *exec.Cmd {
+// startOpenFileAndTCPListenerProcess starts a python3 child that holds path
+// open and listens on a loopback TCP port, and returns the child and that
+// port. The child binds port 0 and reports the port it got. A port reserved by
+// bind-and-close beforehand can be taken by a concurrent test action before
+// the child binds it, since remote test actions share one loopback port
+// space, and the child then dies with EADDRINUSE (ga-bd8cn1x).
+func startOpenFileAndTCPListenerProcess(t *testing.T, path string, dir string) (*exec.Cmd, int) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	proc, port, err := startOpenFileAndTCPListener(path, dir, filepath.Join(t.TempDir(), "listener.stderr"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	readyPath := filepath.Join(t.TempDir(), "ready")
+	return proc, port
+}
+
+// startOpenFileAndTCPListener starts the child for
+// startOpenFileAndTCPListenerProcess with its stderr in stderrPath. The child
+// prints its port on stdout once it listens. A child that exits first closes
+// stdout, which ends the wait at once, and the error carries its exit status
+// and stderr.
+func startOpenFileAndTCPListener(path, dir, stderrPath string) (*exec.Cmd, int, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, 0, err
+	}
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("create open-file listener stderr: %w", err)
+	}
+	defer stderrFile.Close() //nolint:errcheck // the child writes through its own descriptor
+	portR, portW, err := os.Pipe()
+	if err != nil {
+		return nil, 0, fmt.Errorf("create open-file listener port pipe: %w", err)
+	}
+	defer portR.Close() //nolint:errcheck // read end of the port pipe
 	proc := exec.Command("python3", "-c", `
-import os
 import signal
 import socket
 import sys
 import time
 path = sys.argv[1]
-port = int(sys.argv[2])
-ready_path = sys.argv[3]
 f = open(path, "a+")
 f.write("held")
 f.flush()
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
+sock.bind(("127.0.0.1", 0))
 sock.listen(5)
-with open(ready_path, "w") as f_ready:
-    f_ready.write("ready\n")
+print(sock.getsockname()[1], flush=True)
 def _stop(*_args):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
-`, path, strconv.Itoa(port), readyPath)
+`, path)
+	proc.Stdout = portW
+	proc.Stderr = stderrFile
 	if strings.TrimSpace(dir) != "" {
 		proc.Dir = dir
 	}
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start open-file listener process: %v", err)
+	err = proc.Start()
+	_ = portW.Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("start open-file listener process: %w", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			if _, readyErr := os.Stat(readyPath); readyErr == nil {
-				conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
-				if err == nil {
-					_ = conn.Close()
-					return proc
-				}
-			}
+	type portLine struct {
+		text string
+		err  error
+	}
+	lines := make(chan portLine, 1)
+	go func() {
+		text, err := bufio.NewReader(portR).ReadString('\n')
+		lines <- portLine{text: text, err: err}
+	}()
+	var readyErr error
+	select {
+	case line := <-lines:
+		if line.err != nil {
+			readyErr = fmt.Errorf("child closed stdout before printing its port: %w", line.err)
+		} else if port, err := strconv.Atoi(strings.TrimSpace(line.text)); err != nil {
+			readyErr = fmt.Errorf("parse port line %q: %w", line.text, err)
+		} else {
+			return proc, port, nil
 		}
-		time.Sleep(25 * time.Millisecond)
+	case <-time.After(5 * time.Second):
+		readyErr = errors.New("child printed no port within 5s")
 	}
 	_ = proc.Process.Kill()
-	_ = proc.Wait()
-	t.Fatalf("open file listener %s on %d did not become ready", path, port)
-	return nil
+	waitErr := proc.Wait()
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		stderr = []byte(err.Error())
+	}
+	return nil, 0, fmt.Errorf("open file listener %s did not become ready: %w (child exit: %w); child stderr:\n%s", path, readyErr, waitErr, stderr)
+}
+
+// TestStartOpenFileAndTCPListenerReportsChildStderrWhenChildExits pins the
+// fixture's failure report: a child that dies before it listens ends the wait
+// at once, and the error carries its exit status and stderr (ga-bd8cn1x).
+func TestStartOpenFileAndTCPListenerReportsChildStderrWhenChildExits(t *testing.T) {
+	// A directory cannot be opened for append, so the child exits with a
+	// traceback before it binds.
+	path := t.TempDir()
+	proc, _, err := startOpenFileAndTCPListener(path, "", filepath.Join(t.TempDir(), "listener.stderr"))
+	if err == nil {
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+		t.Fatal("startOpenFileAndTCPListener succeeded, want the child's open failure")
+	}
+	for _, want := range []string{"closed stdout before printing its port", "exit status 1", "IsADirectoryError"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
+	}
 }
 
 func processHoldsDeletedPath(pid int, targetPath string) bool {
@@ -2417,9 +2837,8 @@ esac
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	port := reserveRandomTCPPort(t)
 	deletedPath := filepath.Join(layout.DataDir, "held.db")
-	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, "")
+	proc, port := startOpenFileAndTCPListenerProcess(t, deletedPath, "")
 	t.Cleanup(func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
@@ -2989,6 +3408,138 @@ esac
 	}
 	if published.PID != listener.Process.Pid || published.Port != newPort {
 		t.Fatalf("published state = %+v, want pid=%d port=%d", published, listener.Process.Pid, newPort)
+	}
+}
+
+// TestRecoverManagedDoltProcessKeepsUnmeasuredServerWithoutReportingItHealthy
+// pins recover-managed when the readiness wait on a rebound port only ever
+// failed to dial out of this host: it keeps the server and launches nothing,
+// but reports ready and healthy as false, with ready_inconclusive set.
+func TestRecoverManagedDoltProcessKeepsUnmeasuredServerWithoutReportingItHealthy(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	oldPort := reserveRandomTCPPort(t)
+	newPort := reserveRandomTCPPort(t)
+	for newPort == oldPort {
+		newPort = reserveRandomTCPPort(t)
+	}
+	listener := startTCPListenerProcessInDir(t, newPort, layout.DataDir)
+
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(listener.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      newPort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(layout): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  *)
+    printf 'dolt %s\n' "$*" >> "$INVOCATION_FILE"
+    exit 1
+    ;;
+esac
+`)
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		return nil, dialErrorFor("connect", syscall.EADDRNOTAVAIL)
+	})
+
+	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(oldPort), "root", "warning", 2*time.Second)
+	if err != nil {
+		t.Fatalf("recoverManagedDoltProcess() error = %v", err)
+	}
+	if report.Ready || report.Healthy || !report.ReadyInconclusive || report.Restarted {
+		t.Fatalf("recoverManagedDoltProcess() = %+v, want ready and healthy false, ready_inconclusive true, no restart", report)
+	}
+	if report.Port != newPort {
+		t.Fatalf("recoverManagedDoltProcess().Port = %d, want the kept server's port %d", report.Port, newPort)
+	}
+	if !managedStopPIDAlive(listener.Process.Pid) {
+		t.Fatalf("listener pid %d no longer alive after recovery", listener.Process.Pid)
+	}
+	if invocation, err := os.ReadFile(invocationFile); err == nil && strings.TrimSpace(string(invocation)) != "" {
+		t.Fatalf("recoverManagedDoltProcess() unexpectedly launched dolt:\n%s", string(invocation))
+	}
+}
+
+func TestRecoverManagedDoltProcessWaitsForLockHolderWhenServerIsUnmeasured(t *testing.T) {
+	cases := []struct {
+		name  string
+		errno syscall.Errno
+	}{
+		{name: "unmeasured server", errno: syscall.EADDRNOTAVAIL},
+		{name: "refused server", errno: syscall.ECONNREFUSED},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+				t.Fatalf("MkdirAll(runtime dir): %v", err)
+			}
+			port := reserveRandomTCPPort(t)
+			holder := startLockedDelayedTCPListenerProcessInDir(t, layout.LockFile, port, layout.DataDir, 0)
+			defer func() {
+				_ = holder.Process.Kill()
+				_ = holder.Wait()
+			}()
+			if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(holder.Process.Pid)+"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(pid): %v", err)
+			}
+			if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+				Running:   true,
+				PID:       holder.Process.Pid,
+				Port:      port,
+				DataDir:   layout.DataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}); err != nil {
+				t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+			}
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, dialErrorFor("connect", tc.errno)
+			})
+
+			report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(port), "root", "warning", 2*time.Second)
+			if err == nil || !strings.Contains(err.Error(), "timed out waiting for concurrent managed dolt lifecycle to finish") {
+				t.Fatalf("recoverManagedDoltProcess() error = %v, want it to keep waiting for the lifecycle lock holder", err)
+			}
+			if report.Ready || report.Healthy || report.ReadyInconclusive {
+				t.Fatalf("recoverManagedDoltProcess() = %+v, want ready, healthy and ready_inconclusive false", report)
+			}
+			if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+				t.Fatalf("published dolt runtime state stat error = %v, want not exist while the lock holder owns the lifecycle", err)
+			}
+		})
 	}
 }
 

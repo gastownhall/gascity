@@ -22,8 +22,11 @@ type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metad
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
-	Store                 beads.Store
-	Provider              runtime.Provider
+	Store    beads.Store
+	Provider runtime.Provider
+	// CityPath is the city whose runtime leases the manager's starts and
+	// stops take. A factory whose handles create, start or stop sessions
+	// needs it: without one, those refuse with session.ErrRuntimeLeaseNoCity.
 	CityPath              string
 	SearchPaths           []string
 	Recorder              events.Recorder
@@ -47,6 +50,21 @@ type FactoryConfig struct {
 	// once across requests rather than once per request. Nil gives the factory
 	// a private memo.
 	ActivityMemo *DerivedActivityMemo
+	// ResolveBead reads one work bead by id, wherever it lives. Usage
+	// attribution uses it to find the formula the session's acting bead was
+	// compiled from: the worker takes the lookup as an injected func and never
+	// enumerates stores itself. Nil falls back to the Store's Get, which sees
+	// only the city-resident beads; a caller that serves rig-resident work
+	// injects a resolver over its own stores.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to. A caller
+	// that builds a Factory per request or per tick holds one memo for its
+	// lifetime and passes it here, so the lookup is paid once across
+	// factories. Nil resolves on every batch.
+	FormulaMemo *FormulaNameMemo
+	// DeferredSubmits is where the factory's manager queues a submit a
+	// session cannot take yet. Nil keeps the city's state.json queue.
+	DeferredSubmits sessionpkg.DeferredSubmitQueue
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -54,6 +72,8 @@ type FactoryConfig struct {
 type Factory struct {
 	manager               *sessionpkg.Manager
 	store                 beads.Store
+	resolveBead           func(id string) (beads.Bead, error)
+	formulaMemo           *FormulaNameMemo
 	provider              runtime.Provider
 	searchPaths           []string
 	recorder              events.Recorder
@@ -70,7 +90,7 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 4)
+	opts := make([]sessionpkg.ManagerOption, 0, 5)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
@@ -82,6 +102,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	}
+	if cfg.DeferredSubmits != nil {
+		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
@@ -108,6 +131,8 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 	return &Factory{
 		manager:               manager,
 		store:                 cfg.Store,
+		resolveBead:           factoryBeadResolver(cfg),
+		formulaMemo:           cfg.FormulaMemo,
 		provider:              cfg.Provider,
 		searchPaths:           factorySearchPaths(cfg),
 		recorder:              cfg.Recorder,
@@ -116,6 +141,19 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 		pricing:               cfg.Pricing,
 		activityMemo:          memo,
 	}, nil
+}
+
+// factoryBeadResolver returns the by-id bead lookup usage attribution uses:
+// the injected ResolveBead, else the factory store's Get (city-resident beads
+// only), else nil.
+func factoryBeadResolver(cfg FactoryConfig) func(id string) (beads.Bead, error) {
+	if cfg.ResolveBead != nil {
+		return cfg.ResolveBead
+	}
+	if cfg.Store != nil {
+		return cfg.Store.Get
+	}
+	return nil
 }
 
 // factorySearchPaths returns the transcript search roots for a factory: the
@@ -160,6 +198,8 @@ func (f *Factory) UsageSink() usage.Sink {
 func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 	return NewSessionHandle(SessionHandleConfig{
 		Manager:     f.manager,
+		ResolveBead: f.resolveBead,
+		FormulaMemo: f.formulaMemo,
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Adapter:     f.Adapter(),
 		Recorder:    f.recorder,
@@ -277,14 +317,20 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
-	return NewRuntimeHandle(RuntimeHandleConfig{
+	cfg := RuntimeHandleConfig{
 		Provider:     f.provider,
 		SessionName:  sessionName,
 		ProviderName: providerName,
 		Transport:    transport,
 		ProcessNames: append([]string(nil), processNames...),
 		Recorder:     f.recorder,
-	})
+	}
+	if f.manager != nil {
+		if city, err := f.manager.CityDir(); err == nil {
+			cfg.CityPath = city.Path()
+		}
+	}
+	return NewRuntimeHandle(cfg)
 }
 
 // Adapter returns a transcript adapter configured with the factory's search

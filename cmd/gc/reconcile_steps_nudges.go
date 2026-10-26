@@ -10,17 +10,20 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// The K1 nudges and orphan-release steps (CONTRACT v5 §13 K1 nudges row):
-// legacy's three pool backstops and its orphaned-assignment release, run in
-// the external-reads lane over the planner's last allocation summary (S-14),
-// loaded once per run and never mutated. They write legacy's pacing markers,
+// The K1 work-ladder and orphan-release steps (CONTRACT v5 §13 K1 nudges
+// row; PHASE1-2 W3), run in the external-reads lane over the planner's last
+// allocation summary (S-14), loaded once per run and never mutated. The
+// work-ladder step paces each pool seat's outstanding work
+// (work_ladder_lane.go): CAS writes of its work_ladder cell only, its recycle
+// a message to the planner that arm A16 (C7b1) consumes. With [daemon]
+// work_ladder = "off" it runs legacy's three pool backstops instead (the
+// rollback), which write legacy's pacing markers. The orphan release is
 // releasePoolAssignmentIfCurrent's fenced release and its advisory affinity
-// clear (R1 exception 4). The execution backstop's drain request becomes a
-// message to the planner, which arm A16 (C7b1) consumes.
+// clear (R1 exception 4).
 //
-// The steps run apart, so unlike legacy's tick the claim nudges may still see
-// work the release reopened this pass; a reopened bead's slot is dead, so no
-// nudge reaches it.
+// The steps run apart, so unlike legacy's tick the ladder may still see work
+// the release reopened this pass; a reopened bead's slot is dead, so no nudge
+// reaches it.
 
 // executionStalledRequest is the execution backstop's drain request
 // (NUDGE-022) for the planner: the row, and the generation a fresh read found
@@ -33,14 +36,14 @@ type executionStalledRequest struct {
 // errNoPlannerInbox: the lane has no planner to hand a request to.
 var errNoPlannerInbox = errors.New("no planner for the execution-stalled request")
 
-// addPoolSteps registers the nudges and orphan-release steps over the
+// addPoolSteps registers the work-ladder and orphan-release steps over the
 // planner's last allocation summary and its execution-stalled inbox. Call it
-// before start. Each runs every pass, as legacy runs them every tick; the
-// nudges pace themselves by their markers.
+// before start. Each runs every pass, as legacy runs its backstops every
+// tick; the ladder paces itself by its cell.
 func (l *externalReadsLane) addPoolSteps(summary func() *allocSummary, stalled func(executionStalledRequest)) {
 	l.summary, l.stalled = summary, stalled
 	l.steps = append(l.steps,
-		&laneStep{name: "nudges", legs: sourceNone, run: l.nudges},
+		&laneStep{name: "work-ladder", legs: sourceNone, run: l.workLadder},
 		&laneStep{name: "orphan-release", legs: sourceNone, run: l.orphanRelease})
 }
 
@@ -58,19 +61,33 @@ func (l *externalReadsLane) laneSummary() *allocSummary {
 	return s
 }
 
-// nudges is the nudges step: the claim, continuation and execution
-// backstops, in legacy order, over one live read of the raw session rows
-// whose markers they pace by.
-func (l *externalReadsLane) nudges(ctx context.Context, env externalReadsEnv) {
+// workLadder is the work-ladder step: the ladder over every pool seat, or,
+// with [daemon] work_ladder = "off", the backstops it replaced.
+func (l *externalReadsLane) workLadder(ctx context.Context, env externalReadsEnv) {
 	s := l.laneSummary()
 	if s == nil || env.Cfg == nil || env.CityStore == nil {
 		return
 	}
+	if env.Cfg.Daemon.WorkLadderEnabled() {
+		l.runWorkLadder(ctx, env, s)
+		return
+	}
+	l.legacyBackstops(ctx, env, s)
+}
+
+// legacyBackstops is the rollback: the claim, continuation and execution
+// backstops, in legacy order, over one live read of the raw session rows
+// whose markers they pace by. Their state restarts from scratch when the
+// ladder hands back (a marker for another token is a new assignment), and a
+// release the ladder left pending is dropped, so the hook hands its claim
+// out again.
+func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalReadsEnv, s *allocSummary) {
 	raw, err := loadSessionBeads(env.CityStore)
 	if err != nil {
 		fmt.Fprintf(l.stderr, "external reads: loading sessions for the nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
+	l.clearLadderReleases(env.CityStore, raw)
 	now, sessStore := l.now(), beads.SessionStore{Store: env.CityStore}
 	claim := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claim))

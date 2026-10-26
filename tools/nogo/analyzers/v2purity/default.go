@@ -19,11 +19,12 @@ var Default = Config{
 		"github.com/gastownhall/gascity/internal/runtime.Provider",
 	},
 	// Roots pins the //gc:pure roots: the decide, admission, the dirty
-	// filters, every section's Decide, and every decide a probed section
-	// is given.
+	// filters, the work ladder's decision, every section's Decide, and every
+	// decide a probed section is given.
 	Roots: []string{
 		"github.com/gastownhall/gascity/cmd/gc.decideAllocation", "github.com/gastownhall/gascity/cmd/gc.admit", "github.com/gastownhall/gascity/cmd/gc.decideRow",
 		"github.com/gastownhall/gascity/cmd/gc.newRelevantSet", "github.com/gastownhall/gascity/cmd/gc.beadEventRelevant", "github.com/gastownhall/gascity/cmd/gc.inventoryChanged", "github.com/gastownhall/gascity/cmd/gc.healthChanged",
+		"github.com/gastownhall/gascity/cmd/gc.decideWorkLadder",
 		"section.Decide", "section.Moved", "probed(decide)",
 	},
 	Exempt: map[string]Exemption{

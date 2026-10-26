@@ -2511,6 +2511,47 @@ type = "task"
 	}
 }
 
+func TestCompile_ExtendsPropagatesChildContentHash(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := `
+formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`
+	childContent := `
+formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), []byte(parentContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, []byte(childContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-hash-child", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if recipe.FormulaSource != childPath {
+		t.Fatalf("FormulaSource = %q, want child path %q", recipe.FormulaSource, childPath)
+	}
+	if want := ContentHash([]byte(childContent)); recipe.ContentHash != want {
+		t.Fatalf("ContentHash = %q, want child file hash %q", recipe.ContentHash, want)
+	}
+}
+
 func TestCompile_PropagatesRootMetadata(t *testing.T) {
 	dir := t.TempDir()
 	content := `

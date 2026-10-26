@@ -38,7 +38,12 @@ import (
 // transaction or a connection-scoped operation open while it calls code that
 // opens the same scope: under the memo that open is the same pool, and the
 // inner call would wait on the outer one's connection forever. The hook verbs
-// in invocationStoreMemoCommands make one store call at a time.
+// in invocationStoreMemoCommands hold no transaction or connection-scoped
+// operation across another store call. Where they make calls concurrently —
+// the step reminder's per-identity listings (stepResolution.rootViaRoutedBridge)
+// and the storage routes resolved alongside the city store open
+// (prewarmCLIStorageRoutes) — each call stands alone, so a single-connection
+// store runs them one after another.
 //
 // The memo is opt-in per command. run() enables it only for the one-shot verbs
 // in invocationStoreMemoCommands; long-lived entry points (the supervisor and
