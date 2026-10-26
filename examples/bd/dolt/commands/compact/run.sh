@@ -52,7 +52,8 @@
 #      differ across the flatten. Drift is benign only when every named table
 #      is either already verified or a table the -Am first-committed whose
 #      content diff is added-only; anything else quarantines.
-#   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
+#   5. Run CALL DOLT_GC('--full', '--archive-level=0') to reclaim chunks orphaned
+#      by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
@@ -72,10 +73,11 @@
 #   * Shared-history guard: a database with ANY configured Dolt remote may share
 #     its history with other clones (a team remote, bd's refs/dolt/data, a
 #     federated city), so it is never flattened or force-pushed. It gets a bare
-#     working-set CALL DOLT_GC() instead. .no-sync and --skip-fetch do not
-#     bypass this; GC_DOLT_COMPACT_ALLOW_FEDERATED=1 does (announced windows
-#     only). A pending-GC retry still runs its local DOLT_GC --full but drops the
-#     deferred push; a pending-push marker is held for operator review.
+#     working-set CALL DOLT_GC('--archive-level=0') instead. .no-sync and
+#     --skip-fetch do not bypass this; GC_DOLT_COMPACT_ALLOW_FEDERATED=1 does
+#     (announced windows only). A pending-GC retry still runs its local
+#     DOLT_GC --full but drops the deferred push; a pending-push marker is held
+#     for operator review.
 #   * Provenance watermark: the Dolt tag gc-compact-base, stamped the first time
 #     the compactor sees a database (never under --dry-run). It goes on the root
 #     commit when root's child is a "compaction: flatten history" commit (a
@@ -156,8 +158,9 @@
 #                                         skip the commit-count threshold
 #                                         AND the flatten/full-GC path
 #                                         entirely, and run a bare
-#                                         CALL DOLT_GC() on each
-#                                         discovered database. Decouples
+#                                         CALL DOLT_GC('--archive-level=0')
+#                                         on each discovered database.
+#                                         Decouples
 #                                         the working-set GC pass (which
 #                                         resets the NBS journal range
 #                                         index that grows with write
@@ -180,7 +183,8 @@ set -eu
 # onto the GC_DOLT_COMPACT_* environment defaults (and the gc_only mode) read
 # below, giving operators a discoverable, sanctioned reclaim path without
 # exporting environment variables. --help is intercepted by the bridge.
-#   --gc-only          reclaim orphaned chunks via CALL DOLT_GC('--full') on
+#   --gc-only          reclaim orphaned chunks via
+#                      CALL DOLT_GC('--full', '--archive-level=0') on
 #                      each database, bypassing the commit-count threshold and
 #                      the flatten path — recovery for a database stranded below
 #                      the threshold with orphaned oldgen archives.
@@ -2398,7 +2402,8 @@ clear_compact_marker() {
 }
 
 # explain_full_gc_cancellation DB ERR_FILE ELAPSED
-#   One extra stderr line after a failed CALL DOLT_GC('--full') that ended the
+#   One extra stderr line after a failed
+#   CALL DOLT_GC('--full', '--archive-level=0') that ended the
 #   way a sql-server read deadline ends a statement. The sql-server reports a
 #   statement that outran listener.read_timeout_millis as `connection was
 #   closed` or `row read wait bigger than connection timeout` (the pair
@@ -2455,17 +2460,22 @@ explain_full_gc_cancellation() {
     "$db" "$gc_server" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" "$gc_remedy" >&2
 }
 
+# Every GC here passes --archive-level=0: Dolt 2.3.3-2.5.1 default to
+# SimpleArchive, which duplicates its zstd dictionaries once an archive holds
+# more than 256, and each duplicate pins about 137 KB of C memory for the whole
+# GC, enough to OOM a large store (ga-rgwfyg4). Level 0 writes classic table
+# files instead.
 run_full_gc() {
   db="$1"
   failure_prefix="$2"
   success_prefix="$3"
   start="$4"
 
-  printf 'compact: db=%s — running DOLT_GC --full...\n' "$db"
+  printf "compact: db=%s — running DOLT_GC('--full', '--archive-level=0')...\n" "$db"
   gc_rc=0
   gc_err_tmp=$(mktemp)
   gc_start=$(date +%s)
-  dolt_query "$db" "CALL DOLT_GC('--full')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  dolt_query "$db" "CALL DOLT_GC('--full', '--archive-level=0')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
 
   elapsed=$(( $(date +%s) - start ))
   gc_elapsed=$(( $(date +%s) - gc_start ))
@@ -2900,14 +2910,14 @@ resolve_compact_base() {
   return 0
 }
 
-# run_bare_gc runs a working-set CALL DOLT_GC(): it reclaims journal and
-# working-set garbage without touching history.
+# run_bare_gc runs a working-set CALL DOLT_GC('--archive-level=0'): it reclaims
+# journal and working-set garbage without touching history.
 run_bare_gc() {
   db="$1"
   start=$(date +%s)
   gc_rc=0
   gc_err_tmp=$(mktemp)
-  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  dolt_query "$db" "CALL DOLT_GC('--archive-level=0')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
   elapsed=$(( $(date +%s) - start ))
   if [ "$gc_rc" -ne 0 ]; then
     printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
@@ -3887,9 +3897,9 @@ flatten_database() {
 
   after_count=$(commit_count "$db" || true)
 
-  # CALL DOLT_GC() alone only reclaims working-set chunks — the bulk of
-  # the orphaned history lives in noms/oldgen/ archives that require
-  # --full to rewrite. Since flatten always orphans the entire prior
+  # A bare CALL DOLT_GC('--archive-level=0') only reclaims working-set chunks —
+  # the bulk of the orphaned history lives in noms/oldgen/ archives that
+  # require --full to rewrite. Since flatten always orphans the entire prior
   # commit graph, --full is always appropriate here.
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
@@ -3937,13 +3947,15 @@ bare_gc_database() {
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full
-# CALL DOLT_GC('--full'), with no flatten and no commit-count threshold. This is
+# CALL DOLT_GC('--full', '--archive-level=0'), with no flatten and no
+# commit-count threshold. This is
 # the operator-invoked reclaim path (--gc-only) for a database stranded below
 # the flatten threshold with orphaned oldgen archives: a prior flatten dropped
 # its commit count below the threshold but the post-flatten full GC was
 # deferred, quarantined-then-cleared, or otherwise never ran, so the scheduled
 # threshold-gated compactor skips it forever and never reclaims the orphaned
-# chunks. Unlike bare-GC (working-set CALL DOLT_GC()), --full rewrites oldgen so
+# chunks. Unlike bare-GC (working-set CALL DOLT_GC('--archive-level=0')),
+# --full rewrites oldgen so
 # the orphaned history is actually reclaimed (see
 # docs/troubleshooting/dolt-bloat-recovery.md). Honors GC_DOLT_COMPACT_ONLY_DBS,
 # GC_DOLT_COMPACT_DRY_RUN, and the per-db quarantine marker; does NOT write
