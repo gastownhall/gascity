@@ -1963,6 +1963,33 @@ func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// suspendedRigLookup is a city with rigs alpha and beta, each holding
+// in_progress work assigned to "session-id". alpha sorts first, so a lookup
+// that reads it returns alpha's bead.
+type suspendedRigLookup struct {
+	state     *fakeState
+	alpha     *listCountingStore
+	beta      *listCountingStore
+	alphaWork string
+	betaWork  string
+}
+
+func newSuspendedRigLookup(t *testing.T) suspendedRigLookup {
+	t.Helper()
+	state := newFakeState(t)
+	state.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "/tmp/alpha"},
+		{Name: "beta", Path: "/tmp/beta"},
+	}
+	alpha := &listCountingStore{Store: &beads.MemStore{IDPrefix: "alpha"}}
+	beta := &listCountingStore{Store: &beads.MemStore{IDPrefix: "beta"}}
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	l := suspendedRigLookup{state: state, alpha: alpha, beta: beta}
+	l.alphaWork = addActiveWork(t, alpha.Store, "session-id")
+	l.betaWork = addActiveWork(t, beta.Store, "session-id")
+	return l
+}
+
 // suspendAlphaAtRuntime suspends rig alpha in runtime state the way
 // `gc rig suspend alpha` records it.
 func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
@@ -1970,5 +1997,59 @@ func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
 	suspended := true
 	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "alpha", &suspended); err != nil {
 		t.Fatalf("SetRigSuspended(alpha): %v", err)
+	}
+}
+
+// lookupActiveBead runs the cached or live active-bead lookup.
+func lookupActiveBead(srv *Server, live bool, rig string, assignees ...string) string {
+	if live {
+		return srv.findLiveActiveBeadForAssignees(rig, assignees...)
+	}
+	return srv.findActiveBeadForAssignees(rig, assignees...)
+}
+
+// TestActiveBeadLookupSkipsSuspendedRig: a rig suspended by effective state
+// has no cache, so any read of its store goes to bd and restarts its retired
+// proxy and Dolt (#8162). The unscoped lookup searches the other rigs only.
+func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{{"live", true}, {"cached", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+
+			got := lookupActiveBead(New(l.state), tc.live, "", "session-id")
+
+			if l.alpha.listCalls != 0 {
+				t.Errorf("suspended rig alpha List calls = %d, want 0", l.alpha.listCalls)
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want beta's %q", got, l.betaWork)
+			}
+		})
+	}
+}
+
+// TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias: in legacy
+// shared-file mode every rig aliases one store. A suspended alpha must not
+// hide the store that beta still reaches.
+func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("live=%v", live), func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+			l.state.stores["alpha"] = l.beta
+
+			got := lookupActiveBead(New(l.state), live, "", "session-id")
+
+			if l.beta.listCalls == 0 {
+				t.Error("shared store was not read through beta")
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want %q", got, l.betaWork)
+			}
+		})
 	}
 }
