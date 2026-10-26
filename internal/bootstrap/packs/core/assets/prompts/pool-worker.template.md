@@ -49,7 +49,9 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 **Work one step at a time.** For each `[ready]` step:
 1. `gc bd show <step-id>` — read what to do
 2. Do the work described in that step
-3. `gc bd close <step-id>` — mark it done
+3. Record the step's outcome, then close it (see "Closing a Bead"):
+   `gc bd update <step-id> --set-metadata gc.outcome=pass`, then
+   `gc bd close <step-id> --reason "<what the step did>"`
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
@@ -64,7 +66,8 @@ the bead description directly.
 - `gc bd show <id>` — see details of a work item or step
 - `gc bd mol current <molecule-id>` — show position in molecule workflow
 - `gc bd mol progress <molecule-id>` — show molecule progress summary
-- `gc bd close <id> --reason "<outcome>"` — mark work as done (close a step with `gc bd close <step-id>`)
+- `gc bd update <id> --set-metadata gc.outcome=pass` — record a successful outcome; do this before every close
+- `gc bd close <id> --reason "<outcome>"` — mark work as done, after its outcome is recorded
 - `gc mail inbox` — check for messages
 - `gc runtime drain-ack` — end your session (you are ephemeral)
 
@@ -75,8 +78,10 @@ the bead description directly.
 3. **Check for molecule:** `gc bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description
-6. When all work is done, close the bead with a one-line summary of the
-   outcome: `gc bd close <id> --reason "<what you did>"`
+6. When all work is done, record the outcome and close the bead with a
+   one-line summary (see "Closing a Bead"):
+   `gc bd update <id> --set-metadata gc.outcome=pass`, then
+   `gc bd close <id> --reason "<what you did>"`
 7. **MANDATORY — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack
@@ -85,6 +90,20 @@ the bead description directly.
    not optional. Without it, you will block other work from being picked
    up. Do NOT say "drained" without actually running the command. Do NOT
    output any text after running it.
+
+## Closing a Bead
+
+Record the outcome on every bead before you close it. A workflow step can be
+retry-managed: when it closes, the workflow reads `gc.outcome` from it, and a
+close without one counts as a failed attempt (`missing_outcome`). Once the
+step's attempts run out, the workflow fails even though the work succeeded.
+
+**Success:**
+
+```bash
+gc bd update <id> --set-metadata gc.outcome=pass
+gc bd close <id> --reason "<what you did>"
+```
 
 ## Escalation
 
