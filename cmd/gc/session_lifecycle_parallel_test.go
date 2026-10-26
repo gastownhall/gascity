@@ -8831,21 +8831,24 @@ func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
 // agent moves to a new config dir its old conversation, still under an
 // observed root, reads gone and the start runs fresh instead of a resume the
 // provider will refuse; the old dir named, or none, it resumes. An ambient
-// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is not read.
+// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is searched beside the
+// observed roots, never instead of them (#6677).
 func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 	workDir := t.TempDir()
 	root := observedTranscript(t, workDir) // k-1's transcript, under an observed root
 	moved := t.TempDir()
 	for _, c := range []struct {
-		name     string
-		operator map[string]string
-		ambient  map[string]string
-		resumed  bool
+		name       string
+		operator   map[string]string
+		ambient    map[string]string
+		unobserved bool // no [daemon] observe_paths covers root
+		resumed    bool
 	}{
-		{"no config dir named: the observed roots", nil, nil, true},
-		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, true},
-		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false},
-		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, true},
+		{"no config dir named: the observed roots", nil, nil, false, true},
+		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, false, true},
+		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false, false},
+		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, false, true},
+		{"a passed-through config dir holding the transcript", nil, map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -8857,7 +8860,9 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg := &config.City{}
-			cfg.Daemon.ObservePaths = []string{root}
+			if !c.unobserved {
+				cfg.Daemon.ObservePaths = []string{root}
+			}
 			env := maps.Clone(c.ambient)
 			if env == nil {
 				env = map[string]string{}
@@ -8874,6 +8879,9 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 			got, _ := store.Get(row.ID)
 			if resumed := got.Metadata["session_key"] == "k-1" && strings.Contains(prepared.cfg.Command, "--resume k-1"); resumed != c.resumed {
 				t.Fatalf("stored key %q, command %q; want resumed=%v", got.Metadata["session_key"], prepared.cfg.Command, c.resumed)
+			}
+			if c.resumed && (got.Metadata["started_config_hash"] != "h-1" || got.Metadata["continuation_reset_pending"] != "") {
+				t.Fatalf("metadata %v; want no stale-key clear (started_config_hash h-1, no continuation reset)", got.Metadata)
 			}
 		})
 	}
