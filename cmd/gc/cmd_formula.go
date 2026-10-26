@@ -732,6 +732,18 @@ store, copy them into the binding with
 
 			cookVars := parseFormulaVars(vars)
 
+			// Parse --meta before any bead exists so a malformed flag refuses the
+			// cook write-free: before PrepareInvocation can mint a synthetic input
+			// convoy, and before any root, step or blocking dependency is written,
+			// on whichever arm runs below. The non-attach arms' class-must-not-flip
+			// guard (cookMetaClassFlip) also judges it against the recipe root
+			// before anything is cooked, so a refused stamp leaves no molecule
+			// behind.
+			rootMeta, err := parseMetadataArgs(metadata)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
+
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 				if err != nil {
@@ -996,13 +1008,6 @@ store, copy them into the binding with
 				return nil
 			}
 
-			// --meta is parsed before anything is cooked: the class-must-not-flip
-			// guard below judges it against the recipe root, and a refused
-			// stamp must leave no molecule behind.
-			rootMeta, err := parseMetadataArgs(metadata)
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-			}
 			cookRoutes := cliStorageRoutes(cityPath)
 
 			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)

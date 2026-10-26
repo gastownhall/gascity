@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1062,6 +1063,77 @@ title = "Do work"
 	}
 	if len(items) != 0 {
 		t.Fatalf("created %d bead(s), want none: %#v", len(items), items)
+	}
+}
+
+// TestFormulaCookRefusesMalformedMetaBeforeWriting pins where a malformed
+// --meta flag refuses the cook: before any root, step, synthetic input convoy
+// or blocking dependency exists, on every arm. The --attach arms used to skip
+// the flag entirely (issue #7309), and the standalone path parsed it only
+// after the molecule was already materialized.
+func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
+	rows := []struct {
+		name    string
+		formula string
+		attach  bool
+		badMeta string
+	}{
+		{name: "standalone legacy-work no equals", formula: "legacy-work", badMeta: "novalue"},
+		{name: "standalone legacy-work empty key", formula: "legacy-work", badMeta: "=v"},
+		{name: "standalone graph-work no equals", formula: "graph-work", badMeta: "novalue"},
+		{name: "standalone graph-work empty key", formula: "graph-work", badMeta: "=v"},
+		{name: "attach legacy-work no equals", formula: "legacy-work", attach: true, badMeta: "novalue"},
+		{name: "attach legacy-work empty key", formula: "legacy-work", attach: true, badMeta: "=v"},
+		{name: "attach graph-work no equals", formula: "graph-work", attach: true, badMeta: "novalue"},
+		{name: "attach graph-work empty key", formula: "graph-work", attach: true, badMeta: "=v"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			seedCLIStorageRoutes(t, cityDir, nil)
+			work, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open work store: %v", err)
+			}
+			args := []string{"--meta", row.badMeta}
+			var wantIDs []string
+			if row.attach {
+				target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+				if err != nil {
+					t.Fatalf("create attach bead: %v", err)
+				}
+				args = append([]string{"--attach", target.ID}, args...)
+				wantIDs = []string{target.ID}
+			}
+
+			out, err := cookFormulaErr(t, row.formula, args...)
+			if err == nil {
+				t.Fatalf("gc formula cook %s succeeded with malformed --meta %q: %s", row.formula, row.badMeta, out)
+			}
+			if !strings.Contains(out, "invalid metadata") {
+				t.Fatalf("output %q does not report the malformed --meta flag", out)
+			}
+
+			// IncludeClosed and TierMode both, so a closed or wisp-tier bead a
+			// partial run minted (a failed graph.v2 cook closes its roots) still
+			// counts as a write.
+			items, err := work.List(beads.ListQuery{
+				AllowScan:     true,
+				IncludeClosed: true,
+				TierMode:      beads.TierBoth,
+			})
+			if err != nil {
+				t.Fatalf("list work store: %v", err)
+			}
+			if got := beadIDs(items); !slices.Equal(got, wantIDs) {
+				t.Fatalf("work store holds %v after the refused cook, want %v — a malformed --meta must refuse before any write", got, wantIDs)
+			}
+			if row.attach {
+				if got := blockingDepCount(t, work, wantIDs[0]); got != 0 {
+					t.Fatalf("attach bead %s carries %d blocking deps after the refused cook, want 0", wantIDs[0], got)
+				}
+			}
+		})
 	}
 }
 
