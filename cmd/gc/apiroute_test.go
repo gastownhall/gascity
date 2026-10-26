@@ -133,6 +133,17 @@ func TestAPIClientRouting(t *testing.T) {
 			t.Fatalf("apiClient = %p, want supervisor sentinel %p for a supervisor-hosted city (its [api] port 9443 is not served)", got, sentinel)
 		}
 	})
+
+	t.Run("supervisor-hosted-no-api-port-uses-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		restore(func(string) controllerIdentityReply {
+			return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+		}, func(string) *api.Client { return sentinel })
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		if got := apiClient(dir); got != sentinel {
+			t.Fatalf("apiClient = %p, want supervisor sentinel %p for a supervisor-hosted city", got, sentinel)
+		}
+	})
 }
 
 // TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
