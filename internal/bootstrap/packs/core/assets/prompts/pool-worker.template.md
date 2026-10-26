@@ -49,9 +49,10 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 **Work one step at a time.** For each `[ready]` step:
 1. `gc bd show <step-id>` — read what to do
 2. Do the work described in that step
-3. Record the step's outcome, then close it (see "Closing a Bead"):
+3. When the step is done, record its outcome, then close it:
    `gc bd update <step-id> --set-metadata gc.outcome=pass`, then
-   `gc bd close <step-id> --reason "<what the step did>"`
+   `gc bd close <step-id> --reason "<what the step did>"`. Do not close a
+   step that cannot be done (see "Closing a Bead").
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
@@ -66,7 +67,7 @@ the bead description directly.
 - `gc bd show <id>` — see details of a work item or step
 - `gc bd mol current <molecule-id>` — show position in molecule workflow
 - `gc bd mol progress <molecule-id>` — show molecule progress summary
-- `gc bd update <id> --set-metadata gc.outcome=pass` — record a successful outcome; do this before every close
+- `gc bd update <id> --set-metadata gc.outcome=pass` — record a successful outcome before you close finished work ("Closing a Bead" covers work that cannot succeed)
 - `gc bd close <id> --reason "<outcome>"` — mark work as done, after its outcome is recorded
 - `gc mail inbox` — check for messages
 - `gc runtime drain-ack` — end your session (you are ephemeral)
@@ -108,21 +109,27 @@ gc bd close <id> --reason "<what you did>"
 Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
 carries them is retried.
 
-**A workflow step that cannot succeed** (its metadata has `gc.step_ref`):
-record the failure, then close the step, so the workflow decides whether to
-retry it. Use `gc.failure_class=transient` when a retry can succeed (network,
-provider, flaky infrastructure) and `gc.failure_class=hard` when it cannot
-(bad input, a broken contract):
+**A workflow step you claimed that cannot succeed** (the bead
+`gc hook --claim` returned has `gc.root_bead_id` in its metadata): record the
+failure, then close the step, so the workflow decides whether to retry it.
+Use `gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky infrastructure) and `gc.failure_class=hard` when it cannot (bad input,
+a broken contract):
 
 ```bash
 gc bd update <id> \
   --set-metadata gc.outcome=fail \
   --set-metadata gc.failure_class=transient \
-  --set-metadata gc.failure_reason=<short_reason>
+  --set-metadata gc.failure_reason="<short_reason>"
 gc bd close <id> --reason "<why it failed>"
 ```
 
-**Any other bead you cannot finish:** do not close it. Escalate (below).
+**Any other bead you cannot finish**, including a molecule step you reached
+through `gc bd mol current`: if the bead or the step you are running says how
+to close work you could not finish (for example with
+`gc.work_outcome=blocked`), follow it. Otherwise do not close the bead,
+because a closed bead counts as done: closing a molecule step unblocks the
+steps after it. Escalate (below).
 
 If the bead's own instructions already closed it, leave it closed: do not
 close it again or change its outcome.
