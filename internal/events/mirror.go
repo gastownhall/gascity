@@ -61,6 +61,33 @@ type MirrorOptions struct {
 	// LogInterval bounds how often a persisting failure is reported to stderr.
 	// Zero means one minute.
 	LogInterval time.Duration
+	// Observe, when set, is called from the copier goroutine at each step it
+	// completes (see MirrorProgress), so a caller can wait for the copier
+	// instead of guessing how long it takes. It must not block.
+	Observe func(MirrorProgress)
+}
+
+// MirrorProgressKind names a step of the mirror copier.
+type MirrorProgressKind int
+
+const (
+	// MirrorWatching means the copier opened the mirror and is tailing the
+	// canonical log after Seq.
+	MirrorWatching MirrorProgressKind = iota + 1
+	// MirrorWrote means the event with Seq was appended to the mirror.
+	MirrorWrote
+	// MirrorFailed means a step failed with Err, and the copier retries after
+	// RetryInterval. Reported for every failure, including those stderr
+	// does not show.
+	MirrorFailed
+)
+
+// MirrorProgress is one step of the mirror copier, passed to
+// MirrorOptions.Observe.
+type MirrorProgress struct {
+	Kind MirrorProgressKind
+	Seq  uint64
+	Err  error
 }
 
 // WithMirror makes the recorder copy every event in its log to a mirror file
@@ -232,6 +259,7 @@ func (m *eventMirror) copyOnce(ctx context.Context) error {
 	}
 	defer w.Close() //nolint:errcheck // fileWatcher.Close never fails
 	m.reportRecovered()
+	m.observe(MirrorProgress{Kind: MirrorWatching, Seq: after})
 	for {
 		e, err := w.Next()
 		if err != nil {
@@ -241,6 +269,7 @@ func (m *eventMirror) copyOnce(ctx context.Context) error {
 			return err
 		}
 		m.reportRecovered()
+		m.observe(MirrorProgress{Kind: MirrorWrote, Seq: e.Seq})
 	}
 }
 
@@ -391,6 +420,7 @@ func (m *eventMirror) reportFailure(err error) {
 	if err == nil {
 		return
 	}
+	m.observe(MirrorProgress{Kind: MirrorFailed, Err: err})
 	now := time.Now()
 	if m.failing && now.Sub(m.lastLog) < m.opts.LogInterval {
 		m.suppressed++
@@ -404,6 +434,12 @@ func (m *eventMirror) reportFailure(err error) {
 	m.failing = true
 	m.lastLog = now
 	m.suppressed = 0
+}
+
+func (m *eventMirror) observe(p MirrorProgress) {
+	if m.opts.Observe != nil {
+		m.opts.Observe(p)
+	}
 }
 
 // reportRecovered notes, once, that the mirror is working again after a

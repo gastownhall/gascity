@@ -49,7 +49,7 @@ func TestEventsMirrorOptionsFromConfig(t *testing.T) {
 			if !ok {
 				t.Fatal("eventsMirrorOptions disabled a valid mirror")
 			}
-			if got != tc.want {
+			if got.Path != tc.want.Path || got.Mode != tc.want.Mode || got.MaxSize != tc.want.MaxSize {
 				t.Fatalf("eventsMirrorOptions = %+v, want %+v", got, tc.want)
 			}
 		})
@@ -95,18 +95,46 @@ func mirrorCity(t *testing.T) (cityDir, mirrorPath string) {
 	return cityDir, filepath.Join(mirrorDir, "events.jsonl")
 }
 
-func waitForFileContaining(t *testing.T, path, want string) string {
+// observeEventsMirror routes the mirror copier's progress to the returned
+// channel for the rest of the test.
+func observeEventsMirror(t *testing.T) <-chan events.MirrorProgress {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil && strings.Contains(string(data), want) {
-			return string(data)
+	ch := make(chan events.MirrorProgress, 1024)
+	prev := eventsMirrorObserve
+	eventsMirrorObserve = func(step events.MirrorProgress) {
+		select {
+		case ch <- step:
+		default: // never block the copier
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("%s never contained %q", path, want)
-	return ""
+	t.Cleanup(func() { eventsMirrorObserve = prev })
+	return ch
+}
+
+// waitMirrored waits for the copier to append the next event, then returns
+// the mirror file, which must contain want.
+func waitMirrored(t *testing.T, steps <-chan events.MirrorProgress, path, want string) string {
+	t.Helper()
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case step := <-steps:
+			if step.Kind != events.MirrorWrote {
+				continue
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), want) {
+				t.Fatalf("mirror %s lacks %q after seq %d:\n%s", path, want, step.Seq, data)
+			}
+			return string(data)
+		case <-deadline.C:
+			t.Fatalf("the mirror copier never wrote %q", want)
+		}
+	}
 }
 
 func TestEventsMirrorWrittenOnlyByRotationOwner(t *testing.T) {
@@ -125,13 +153,14 @@ func TestEventsMirrorWrittenOnlyByRotationOwner(t *testing.T) {
 		t.Fatalf("a secondary writer created the mirror (stat err %v)", err)
 	}
 
+	steps := observeEventsMirror(t)
 	owner, err := openSupervisorCityEventsRecorder(cityDir, cfg, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer owner.Close() //nolint:errcheck
 	owner.Record(events.Event{Type: "test.owner", Actor: "tester"})
-	got := waitForFileContaining(t, mirrorPath, `"type":"test.owner"`)
+	got := waitMirrored(t, steps, mirrorPath, `"type":"test.owner"`)
 	if strings.Contains(got, "test.secondary") {
 		t.Fatalf("mirror replayed history from before it was enabled:\n%s", got)
 	}
@@ -142,13 +171,14 @@ func TestEnforceGCPermissionsLeavesEventsMirrorAlone(t *testing.T) {
 	mirrorDir := filepath.Dir(mirrorPath)
 	cfg := config.EventsConfig{Mirror: config.EventsMirrorConfig{Path: mirrorPath}}
 
+	steps := observeEventsMirror(t)
 	owner, err := openStandaloneCityEventsRecorder(cityDir, cfg, true, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer owner.Close() //nolint:errcheck
 	owner.Record(events.Event{Type: "test.perm", Actor: "tester"})
-	waitForFileContaining(t, mirrorPath, `"type":"test.perm"`)
+	waitMirrored(t, steps, mirrorPath, `"type":"test.perm"`)
 
 	enforceGCPermissions(cityDir, os.Stderr)
 
@@ -176,7 +206,7 @@ func TestEnforceGCPermissionsLeavesEventsMirrorAlone(t *testing.T) {
 
 	// The owner keeps mirroring after .gc is tightened.
 	owner.Record(events.Event{Type: "test.after-enforce", Actor: "tester"})
-	waitForFileContaining(t, mirrorPath, `"type":"test.after-enforce"`)
+	waitMirrored(t, steps, mirrorPath, `"type":"test.after-enforce"`)
 }
 
 // TestEventsMirrorInheritsSetgidGroup checks the documented operator setup: a
@@ -193,13 +223,14 @@ func TestEventsMirrorInheritsSetgidGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.EventsConfig{Mirror: config.EventsMirrorConfig{Path: mirrorPath}}
+	steps := observeEventsMirror(t)
 	owner, err := openSupervisorCityEventsRecorder(cityDir, cfg, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer owner.Close() //nolint:errcheck
 	owner.Record(events.Event{Type: "test.group", Actor: "tester"})
-	waitForFileContaining(t, mirrorPath, `"type":"test.group"`)
+	waitMirrored(t, steps, mirrorPath, `"type":"test.group"`)
 	info, err := os.Stat(mirrorPath)
 	if err != nil {
 		t.Fatal(err)

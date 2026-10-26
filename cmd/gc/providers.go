@@ -1216,6 +1216,10 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 	return opts
 }
 
+// eventsMirrorObserve, when set by a test, receives every step of the events
+// mirror copier, so the test can wait for a mirrored event.
+var eventsMirrorObserve func(events.MirrorProgress)
+
 // eventsMirrorOptions converts [events.mirror] into the recorder's mirror
 // options. It reports false when no mirror is configured, or when the
 // configured one is unusable, which it warns about: a bad mirror setting
@@ -1233,6 +1237,7 @@ func eventsMirrorOptions(cfg config.EventsMirrorConfig, stderr io.Writer) (event
 		Path:    cfg.Path,
 		Mode:    mode,
 		MaxSize: cfg.MaxSizeBytesOrDefault(),
+		Observe: eventsMirrorObserve,
 	}, true
 }
 
