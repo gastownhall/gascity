@@ -27,7 +27,17 @@ func driftView(t *testing.T, named bool, f txFence, meta ...string) txView {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return txView{It: intent{Key: c.k}, World: c.w, Row: row, Meta: b.Metadata, Fence: f, Now: gatherNow}
+	return txView{It: intent{Key: c.k}, World: c.w, Alloc: c.a, Row: row, Meta: b.Metadata, Fence: f, Now: gatherNow}
+}
+
+// asDecided is v carrying the kind its row decides on its fresh read, the
+// relaunch fallback's re-decision (TestDriftRelaunchThroughTheEffectPass
+// pins a row that decides another).
+func asDecided(v txView) txView {
+	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
+	fresh, _ := decideRow(&w, v.Alloc, v.It.Key)
+	v.It.Kind = fresh.Kind
+	return v
 }
 
 // Kills a deferral dropped, unbounded, or unstamped (SESS-555, legacy's
@@ -169,6 +179,7 @@ func TestRelaunchResultStep(t *testing.T) {
 	ordinary.prev = relaunched{Err: errors.New("no box")}
 	ordinary.RT = &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: v.Row.ID, Token: v.Row.InstanceToken}}
 	ordinary.Fence = txFence{Read: legAttach | legWork, Work: &txWork{Free: true}}
+	ordinary = asDecided(ordinary)
 	if step := relaunchResultStep(ordinary); !step.Done || step.Write[session.DrainIntentReasonKey] != drainConfigDrift || len(step.Facts.Events) != 1 || step.Facts.Transition == nil {
 		t.Fatalf("ordinary failure: step %+v, want the config-drift drain begun with its transition", step)
 	}
@@ -185,13 +196,15 @@ func TestRelaunchResultStep(t *testing.T) {
 }
 
 // Kills a relaunch past its gates (SESS-556/560, legacy's
-// relaunchAgentForLaunchDrift): a launch-only drift relaunches in the warm
-// box; a provider that cannot relaunch, a prepared config no longer
-// launch-only (skew), a preparation that would mint a speculative resume
-// key, and a refused Relaunch each fail into the fallback, the last two
-// after preparing.
+// relaunchAgentForLaunchDrift), or through a provider other than the leaf
+// its section fenced (C8.7): a launch-only drift relaunches in the warm box,
+// on the fenced leaf, never through the composite, its box hash this
+// binary's or the v6 one's (pool sizing inside); a leaf that cannot
+// relaunch, a prepared config no longer launch-only (skew), a preparation
+// that would mint a speculative resume key, and a refused Relaunch each fail
+// into the fallback, the last two after preparing.
 func TestRelaunchCall(t *testing.T) {
-	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	tp := TemplateParams{TemplateName: "worker", Command: "run", FPExtra: map[string]string{"pool.max": "2"}}
 	probe, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
 	cfg := sessionCoreConfigForHashInfo(tp, probe.w.Census.Rows[probe.k].Info)
 	stale := runtime.FingerprintVersion + ":stale"
@@ -200,14 +213,15 @@ func TestRelaunchCall(t *testing.T) {
 		name     string
 		meta     []string
 		minting  bool
-		sp       func(*runtime.Fake) runtime.Provider
-		relaunch bool // the provider's Relaunch ran and landed
+		leaf     func(*runtime.Fake) runtime.Provider
+		relaunch bool // the fenced leaf's Relaunch ran and landed
 	}{
 		{name: "launch-only", meta: append([]string{"session_key", "k-1"}, launchOnly...), relaunch: true},
-		{name: "no relaunch provider", meta: append([]string{"session_key", "k-1"}, launchOnly...), sp: func(f *runtime.Fake) runtime.Provider { return struct{ runtime.Provider }{f} }},
+		{name: "a v6 launch-only drift", meta: []string{"session_key", "k-1", "started_config_hash", "v6:stale", "started_provision_hash", runtime.PrePolicyProvisionFingerprint(cfg), "started_launch_hash", "v6:old-launch"}, relaunch: true},
+		{name: "a leaf that cannot relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), leaf: func(f *runtime.Fake) runtime.Provider { return struct{ runtime.Provider }{f} }},
 		{name: "skew", meta: []string{"session_key", "k-1", "started_config_hash", stale, "started_provision_hash", runtime.FingerprintVersion + ":other-box", "started_launch_hash", runtime.FingerprintVersion + ":old-launch"}},
 		{name: "a speculative key", meta: launchOnly, minting: true},
-		{name: "a refused relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), sp: func(f *runtime.Fake) runtime.Provider {
+		{name: "a refused relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), leaf: func(f *runtime.Fake) runtime.Provider {
 			f.RelaunchErrors = map[string]error{"s-heal": errors.New("box gone")}
 			return f
 		}},
@@ -223,15 +237,22 @@ func TestRelaunchCall(t *testing.T) {
 			if err := fake.Start(t.Context(), "s-heal", runtime.Config{}); err != nil {
 				t.Fatal(err)
 			}
-			var sp runtime.Provider = fake
-			if tc.sp != nil {
-				sp = tc.sp(fake)
+			var leaf runtime.Provider = fake
+			if tc.leaf != nil {
+				leaf = tc.leaf(fake)
+			}
+			composite := runtime.NewFake() // the start caps' provider, which can relaunch too: the Call must not route through it
+			if err := composite.Start(t.Context(), "s-heal", runtime.Config{}); err != nil {
+				t.Fatal(err)
 			}
 			c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
-			caps := txCaps{start: startCaps{sp: sp}, reads: effectReads{city: c.store}}
-			out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: p, hash: sessionCoreConfigForHashInfo(p, row), name: "s-heal", leaf: fake, now: gatherNow})
+			caps := txCaps{start: startCaps{sp: composite}, reads: effectReads{city: c.store}}
+			out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: p, hash: sessionCoreConfigForHashInfo(p, row), name: "s-heal", leaf: leaf, now: gatherNow})
 			if err != nil || out.OK != tc.relaunch || tc.relaunch != (fake.CountCalls("Relaunch", "s-heal") > 0 && out.Err == nil) {
 				t.Fatalf("relaunch %+v (%v), Relaunch calls %d; want landed %v", out, err, fake.CountCalls("Relaunch", "s-heal"), tc.relaunch)
+			}
+			if n := composite.CountCalls("Relaunch", "s-heal"); n != 0 {
+				t.Fatalf("%d Relaunch call(s) through the composite: the relaunch must go to the leaf it fenced (C8.7)", n)
 			}
 		})
 	}

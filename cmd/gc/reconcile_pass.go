@@ -35,7 +35,7 @@ type passTrace struct {
 	Err                string
 	Admitted, Deferred []intent
 	Rows               []rowTrace
-	IdleDefers         []rowTrace // A15's ladder deferrals, legacy's idle-timeout trace
+	IdleTraces         []rowTrace // A15's ladder deferrals and decided stops, legacy's idle-timeout trace
 	Alerts             []string
 }
 
@@ -91,7 +91,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	a, err := decideAllocation(allocInputs{
 		Now: now, Cfg: cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen, CityPath: e.CityPath, CityName: e.CityName,
 		CitySuspended: w.CitySuspended, SuspendedRigPaths: w.SuspendedRigPaths, Census: w.Census, Demand: w.Demand,
-		ScaleCheck: w.ScaleCheck, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
+		ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
 		Episodes: w.Episodes, SleepPolicies: w.SleepPolicies, TransportRefused: w.TransportRefused, ReadyWaits: w.ReadyWaits,
 		InFlight: w.InFlight, Backoff: w.Backoff,
 	})
@@ -100,7 +100,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		return passResult{}
 	}
 	rec.Alerts = a.Alerts
-	rec.IdleDefers = p.idleWants(&w, &a)
+	rec.IdleTraces = p.idleWants(&w, &a)
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {
@@ -122,6 +122,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 			intents = append(intents, it)
 		}
 	}
+	rec.IdleTraces = append(rec.IdleTraces, p.idle.stopTraces(&w, &a, intents, p.patrol())...)
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
@@ -138,6 +139,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		BootOpen: w.Boot.open(), // P2
 	}, intents)
 	res.Deferred = append(res.Deferred, unregistered...)
+	next = earliest(next, res.NextBackoff) // a row backoff's expiry is a row deadline (v5.10d (b))
 	// The planner state admission leaves is stored before any submit. A
 	// trace-only pass submits nothing, so it keeps no token debit, and no
 	// refill is a reason for a pass.
@@ -229,7 +231,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 	}
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
-		if it.Kind == intentClose && pass.held.release == nil {
+		if (it.Kind == intentClose || it.Kind == intentStop && stopReason(it) == executionStalledDrainReason) && pass.held.release == nil {
 			pass.held.release = newCloseReleases(w, p.stranded, p.stderr)
 		}
 		if it.Kind == intentCreate {
@@ -326,19 +328,27 @@ func createInflightEntry(it intent, leg string) inflightEntry {
 // hard bound passed, alerting on each hard-bound clear (P5), and refreshes
 // w's in-flight view.
 func (p *planner) clearAmbiguous(w *World, now time.Time) {
-	c := inflightCensus{Tokens: make(map[string]bool), Named: make(map[string]bool)}
-	for _, row := range w.Census.Rows {
-		if row.InstanceToken != "" {
-			c.Tokens[row.InstanceToken] = true
-		}
-	}
-	for _, row := range w.Census.Canonical() {
-		if id := strings.TrimSpace(row.Info.ConfiguredNamedIdentity); id != "" && !row.Info.Closed {
-			c.Named[createIdentity{QualifiedInstance: id, Named: true}.key()] = true
-		}
-	}
-	p.alertCleared(p.inflight.clearVisible(c, now))
+	p.alertCleared(p.inflight.clearVisible(inflightCensusOf(w.Census), now))
 	w.InFlight = p.inflight.view()
+}
+
+// inflightCensusOf is what census c shows of the creates in flight: every
+// row's token, and every named identity with an open canonical row (a
+// named identity has one open row, so its row stands for the create
+// whatever token it carries).
+func inflightCensusOf(c *sessionCensus) inflightCensus {
+	out := inflightCensus{Tokens: make(map[string]bool), Named: make(map[string]bool)}
+	for _, row := range c.Rows {
+		if row.InstanceToken != "" {
+			out.Tokens[row.InstanceToken] = true
+		}
+	}
+	for _, row := range c.Canonical() {
+		if id := strings.TrimSpace(row.Info.ConfiguredNamedIdentity); id != "" && !row.Info.Closed {
+			out.Named[createIdentity{QualifiedInstance: id, Named: true}.key()] = true
+		}
+	}
+	return out
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics

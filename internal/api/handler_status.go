@@ -111,11 +111,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
-		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
-		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -137,19 +137,19 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// staleness and suppress the banner `gc status` renders above
 		// cacheAgeBannerThresholdSeconds; reporting only the store age would
 		// hide the SWR delay. The max preserves both.
-		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return &IndexOutput[StatusBody]{
-				Index:     index,
+				Index:     hit.Index,
 				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      body,
+				Body:      hit.Body,
 			}, nil
 		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
+		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
@@ -179,8 +179,9 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 			}
 		}()
 		defer s.endResponseRefresh(cacheKey)
+		index := s.latestIndex()
 		resp := s.buildStatusBody(ctx, lite)
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), indexedResponse[StatusBody]{Index: index, Body: resp})
 	})
 }
 
@@ -199,19 +200,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	// A suspended city's bead stores are not read: a read restarts the
 	// retired bd proxy the controller just stopped, and an open dashboard
 	// polling this would cycle it. The body says so (StoresNotRead) and
 	// carries no work, mail, session-count or store-health figures.
-	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
-	sessionSnapshot := statusSessionSnapshot{
-		bySessionName: make(map[string]statusSessionInfo),
-		byTemplate:    make(map[string][]statusSessionInfo),
-	}
-	if !citySuspended {
-		sessionSnapshot = s.statusSessionSnapshot(ctx)
-	}
+	sessionSnapshot, citySt, citySuspended := s.citySessionSnapshot(ctx, cfg)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
@@ -561,6 +554,23 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
+// citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
+// unless the city is suspended, and returns the city's suspension state with
+// whether it is in effect. A suspended city's snapshot is empty and reads no
+// bead store: a read restarts the retired bd proxy the controller just
+// stopped, and an open dashboard polling a view built on it would cycle it.
+// Every view that reads the session snapshot goes through here.
+func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (statusSessionSnapshot, suspensionstate.State, bool) {
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	if suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()) {
+		return statusSessionSnapshot{
+			bySessionName: make(map[string]statusSessionInfo),
+			byTemplate:    make(map[string][]statusSessionInfo),
+		}, citySt, true
+	}
+	return s.statusSessionSnapshot(ctx), citySt, false
+}
+
 // statusSessionSnapshot reads the session-class beads every session-derived
 // field of the status body is built from: per-agent running/suspended state,
 // named-session status, the unlimited-pool expansion, and the session counts.
@@ -685,12 +695,13 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work the way GET /beads/ready does over the
-// work stores: the city store first, then BeadStores excluding the CityName
-// alias. Stores exposing beads.Counter answer persisted counts without
-// hydrating rows — the caching layer counts matches in memory when its cache is
-// clean (#1896). Stores are queried concurrently; results aggregate in
-// deterministic city/rig order.
+// and federates canonical Ready work over the work-store legs GET /beads/ready
+// reads, in the same order: the city store first, then BeadStores excluding the
+// CityName alias. It reads each leg from a different source, though (see
+// statusReadyStoreWithTimeout). Stores exposing beads.Counter answer persisted
+// counts without hydrating rows — the caching layer counts matches in memory
+// when its cache is clean (#1896). Stores are queried concurrently; results
+// aggregate in deterministic city/rig order.
 //
 // NOT identical to GET /beads/ready on a split city: that handler grew a
 // relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
@@ -966,10 +977,15 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 }
 
-// statusReadyStoreWithTimeout reads the same live canonical Ready projection
-// as GET /beads/ready. Policy-aware stores retain their tier behavior through
-// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
-// cancellation cannot leak a child beyond the status request.
+// statusReadyStoreWithTimeout reads the canonical Ready projection of one leg
+// GET /beads/ready federates, but not from the source that endpoint uses. A
+// beads.ContextReadyReader is read through ReadyContext; for a CachingStore
+// that read is cache-only and fails with beads.ErrCacheUnavailable rather than
+// read live. Any other store is read live through ScopedStoreLike: policy-aware
+// stores retain their tier behavior, and the scoped clone binds bd subprocesses
+// to reqCtx so timeout cancellation cannot leak a child beyond the status
+// request. GET /beads/ready instead reads a leg whose cache cannot answer live
+// (beads.ReadyPreferCache).
 func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
@@ -1074,7 +1090,6 @@ func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, c
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 		seenSessionNames[info.sessionName] = true

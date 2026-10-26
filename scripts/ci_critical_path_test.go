@@ -117,8 +117,11 @@ func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration --keep_going //test:integration_packages`) {
-		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration")
+	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration-packages --keep_going //test:integration_packages`) {
+		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration-packages")
+	}
+	if !regexp.MustCompile(`(?m)^test:integration-packages --config=integration$`).Match(bazelrc) {
+		t.Error(".bazelrc test:integration-packages does not include --config=integration; the lane would skip the process suite")
 	}
 }
 
@@ -474,16 +477,8 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
 	}
-	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**"}
-	filterValue := filterStep.With["filters"]
-	for _, entry := range wantFilterEntries {
-		if !strings.Contains(filterValue, "'"+entry+"'") {
-			t.Errorf("gate filter mac_sensitive list missing %q; want exactly %v", entry, wantFilterEntries)
-		}
-	}
-	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
-		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior, or the macOS setup action every mac job runs", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
-	}
+	// The filter's classification (docs-only or not) is pinned by
+	// TestMacRegressionGateClassifiesDocsOnlyDiffs.
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")
 	}
@@ -494,7 +489,6 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		"PR_HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
 		"PR_DRAFT":     "${{ github.event.pull_request.draft }}",
 		"NEEDS_LABEL":  "${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}",
-		"PATH_HIT":     "${{ steps.filter.outputs.mac_sensitive }}",
 	}
 	for name, want := range wantDecideEnv {
 		if got := decideStep.Env[name]; got != want {

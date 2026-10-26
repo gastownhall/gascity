@@ -1082,6 +1082,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
+	var fanoutControls []formula.RecipeStep
+	fanoutControlByStep := make(map[string]string)
 	var nestedSeedSteps []formula.RecipeStep
 	var nestedSeedDeps []formula.RecipeDep
 
@@ -1200,6 +1202,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
 				fanoutSteps = append(fanoutSteps, fanoutStep)
 				fanoutDeps = append(fanoutDeps, fanoutDep)
+				fanoutControls = append(fanoutControls, fanoutStep)
+				fanoutControlByStep[childStep.ID] = fanoutStep.ID
 			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
@@ -1218,7 +1222,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		}
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	// Fanout convergence gates downstream work in the re-spawned attempt
+	// recipe exactly as it does at compile time: point every dep on an
+	// on_complete child at its <child>-fanout control before the scope-check
+	// pass, so a sibling that needs the child waits for the fanout children
+	// instead of racing them. The fanout controls themselves are appended
+	// after this rewrite and the scope-check pass, so their own
+	// fanout→source edge is never rewritten into a self-block.
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, fanoutControls, fanoutControlByStep)
+	applyAttemptRecipeScopeChecks(recipe, fanoutControlByStep)
 	recipe.Steps = append(recipe.Steps, fanoutSteps...)
 	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 	// Nested-control seed steps are appended after the outer scope-check pass so
@@ -1325,7 +1337,12 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // its subject step, and deps that waited on the subject are rewritten to
 // wait on the scope-check instead — except the one edge that would leave a
 // node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
-func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
+//
+// fanoutControlByStep maps an on_complete subject step ID to its minted
+// <subject>-fanout control. When present, the scope-check also blocks on that
+// fanout control so scope finalization waits for the spawned children, exactly
+// as the compile path's scopeCheckNeeds does.
+func applyAttemptRecipeScopeChecks(recipe *formula.Recipe, fanoutControlByStep map[string]string) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
 	}
@@ -1370,6 +1387,13 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 			DependsOnID: step.ID,
 			Type:        "blocks",
 		})
+		if fanoutID := fanoutControlByStep[step.ID]; fanoutID != "" {
+			controlDeps = append(controlDeps, formula.RecipeDep{
+				StepID:      controlID,
+				DependsOnID: fanoutID,
+				Type:        "blocks",
+			})
+		}
 	}
 
 	if len(controls) == 0 {
@@ -1794,16 +1818,26 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control
-// bead. It lists beads under the workflow root and, on empty result, walks the
-// control's blocks-dependencies; both feed latestAttemptFromCandidates, which
-// matches the durable gc.control_for lineage stamp (with a legacy ref-string
-// fallback for pre-S38 molecules) and returns the max gc.attempt.
+// bead from live reads; see findLatestAttemptInView.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	return findLatestAttemptInView(store, control, ProcessOptions{})
 }
 
-// findLatestAttemptInView is findLatestAttempt answered from the invocation's
-// root view (rootViewMembers) when opts carries one.
+// findLatestAttemptInView finds the most recent attempt/iteration child of a
+// control bead, reading the workflow root's members from the invocation's root
+// view (rootViewMembers) when opts carries one. Both candidate sources feed
+// latestAttemptFromCandidates, which matches the durable gc.control_for lineage
+// stamp (with a legacy ref-string fallback for pre-S38 molecules) and returns
+// the max gc.attempt.
+//
+// The root's members answer alone only for a root known to be open (the gate
+// root ProcessControl read). Otherwise their answer is unioned with the targets
+// of the control's dependency edges: once the root closes, molecule.Attach
+// roots each new attempt at the control, so only the control's blocks edge
+// reaches it. A dependency walk error is therefore returned, never answered
+// with the root's candidate: that candidate can be an attempt the walk would
+// have superseded, and acting on it retries the control on every pass without
+// ever evaluating the newer attempt.
 func findLatestAttemptInView(store beads.Store, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -1811,22 +1845,24 @@ func findLatestAttemptInView(store beads.Store, control beads.Bead, opts Process
 	}
 
 	all, err := rootViewMembers(store, rootID, opts)
+	rootLatest := beads.Bead{}
 	if err == nil {
-		latest := latestAttemptFromCandidates(control, all)
-		if latest.ID != "" {
-			return latest, nil
+		rootLatest = latestAttemptFromCandidates(control, all)
+		rootKnownOpen := opts.gateRoot != nil && opts.gateRoot.ID == rootID && opts.gateRoot.Status != "closed"
+		if rootKnownOpen && rootLatest.ID != "" {
+			return rootLatest, nil
 		}
 	}
 
-	latest, depErr := latestAttemptFromDependencies(store, control)
+	latest, depErr := latestAttemptFromDependencies(store, control, all)
 	if depErr != nil {
 		if err != nil {
 			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
 		}
 		return beads.Bead{}, depErr
 	}
-	if latest.ID != "" {
-		return latest, nil
+	if combined := latestAttemptFromCandidates(control, []beads.Bead{rootLatest, latest}); combined.ID != "" {
+		return combined, nil
 	}
 	if err != nil {
 		return beads.Bead{}, err
@@ -1834,20 +1870,46 @@ func findLatestAttemptInView(store beads.Store, control beads.Bead, opts Process
 	return beads.Bead{}, nil
 }
 
-func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads.Bead, error) {
+// latestAttemptFromDependencies selects the latest attempt among the targets of
+// the control's dependency edges, reusing the beads in known (the root's
+// members) instead of reading them again. A target that is an "external:"
+// reference or no longer exists is skipped: it cannot be an attempt, and
+// failing the walk on it would turn one dangling edge into an error on every
+// pass. Any other read error is returned.
+func latestAttemptFromDependencies(store beads.Store, control beads.Bead, known []beads.Bead) (beads.Bead, error) {
 	deps, err := store.DepList(control.ID, "down")
 	if err != nil {
-		return beads.Bead{}, err
+		return beads.Bead{}, fmt.Errorf("listing dependencies: %w", err)
+	}
+	knownByID := make(map[string]beads.Bead, len(known))
+	for _, b := range known {
+		knownByID[b.ID] = b
 	}
 	candidates := make([]beads.Bead, 0, len(deps))
 	for _, dep := range deps {
+		if isExternalDependencyRef(dep.DependsOnID) {
+			continue
+		}
+		if candidate, ok := knownByID[dep.DependsOnID]; ok {
+			candidates = append(candidates, candidate)
+			continue
+		}
 		candidate, err := store.Get(dep.DependsOnID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
 		if err != nil {
-			return beads.Bead{}, err
+			return beads.Bead{}, fmt.Errorf("reading dependency %s: %w", dep.DependsOnID, err)
 		}
 		candidates = append(candidates, candidate)
 	}
 	return latestAttemptFromCandidates(control, candidates), nil
+}
+
+// isExternalDependencyRef reports whether a dependency target is an
+// "external:" reference, which has no bead on its far end.
+func isExternalDependencyRef(id string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "external:")
 }
 
 // latestAttemptFromCandidates selects the control's latest attempt/iteration

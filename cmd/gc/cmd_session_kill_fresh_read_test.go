@@ -42,6 +42,13 @@ func (p *staleKillProvider) ObserveLivenessSince(name string, _ []string, _ time
 	return runtime.Liveness{Running: running, Alive: running}, p.readErr
 }
 
+// ObserveLivenessWithError makes the fresh read an error-bearing one, so the
+// kill can confirm a runtime gone by it (runtime.FreshReadable).
+func (p *staleKillProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	running := p.Provider.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, p.readErr
+}
+
 func (p *staleKillProvider) Stop(name string) error {
 	if p.atStop != nil {
 		p.atStop()

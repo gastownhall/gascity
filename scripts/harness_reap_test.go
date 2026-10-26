@@ -147,8 +147,9 @@ func (f *reapFixture) startWithOutput(t *testing.T, out *os.File, extraEnv ...st
 	return cmd
 }
 
-// harnessBash returns a bash running script, for tests that drive
-// scripts/lib/harness-reap.sh functions directly rather than through a runner.
+// harnessBash returns a bash running script, for tests that drive a script
+// directly rather than through a runner: scripts/lib/harness-reap.sh's
+// functions, and tools/bazel/rules/go_test_run.sh (go_test_run_script_test.go).
 func harnessBash(script string) *exec.Cmd {
 	return exec.Command("bash", "-c", script)
 }

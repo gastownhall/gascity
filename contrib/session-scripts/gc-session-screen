@@ -2,7 +2,7 @@
 # gc-session-screen — GNU screen session provider for Gas City.
 #
 # Implements the exec session provider protocol.
-# See docs/exec-session-protocol.md for the full protocol specification.
+# See docs/reference/exec-session-provider.md for the full protocol specification.
 #
 # Dependencies: screen, jq, bash
 #

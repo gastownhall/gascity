@@ -11,6 +11,7 @@ go_library(
         "client.go",
         "events.go",
         "launchspec.go",
+        "local_transcripts.go",
         "panebinding.go",
         "provider.go",
         "redaction.go",

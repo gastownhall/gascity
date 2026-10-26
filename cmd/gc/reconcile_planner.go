@@ -92,6 +92,7 @@ const (
 	settledRefused                 // refused before or instead of writing, with a cause
 	settledAmbiguous               // its write began and may have landed, or a create was abandoned
 	settledNoop                    // nothing to do: a start's already-running
+	settleOutcomeEnd               // one past the last: the simulator's census gates each outcome
 )
 
 // plannerInflight is the in-flight map the planner owns: *inflightMap
@@ -153,6 +154,9 @@ type planner struct {
 	// not yet synced (A7's runtime-alias sync): set by the write's fact,
 	// cleared when the sync settles.
 	aliasOwed map[rowKey]bool
+	// claimsSeen is when the planner first saw each open work assignment
+	// (claimsSeenAt), for the scale_check pairing guard.
+	claimsSeen map[workClaim]time.Time
 	// idle is A15's memory (idleState), lost on restart as legacy's
 	// trackers are.
 	idle idleMemory
@@ -466,14 +470,27 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 		p.classified[c.Key] = *c
 	}
 	if n := f.Noted; n != nil && p.observations != nil {
-		if cache := p.observations(); cache != nil {
-			// Listed, running and the agent alive, at the read's issue time,
-			// so a later inventory pass overrides it either way (v5 O4).
+		if cache := p.observations(); cache != nil && (!n.Clears || goneNoted(cache, n.Name)) {
+			// Listed, running and the agent alive (or none of them, for a
+			// runtime gone), at the read's issue time, so a later inventory
+			// pass overrides it either way (v5 O4). An effect's alive read
+			// is written only over a name the cache reads unlisted (noteFresh).
+			v := ObsYes
+			if n.Gone {
+				v = ObsNo
+			}
 			for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
-				cache.Note(n.Name, kind, ObsYes, n.At, SourceProbe, "")
+				cache.Note(n.Name, kind, v, n.At, SourceProbe, "")
 			}
 		}
 	}
+}
+
+// goneNoted reports that the cache reads name unlisted: an effect's gone
+// note, or an inventory's absence, which a newer fresh alive read overrides
+// with nothing of the pass's to lose.
+func goneNoted(cache *ObservationCache, name string) bool {
+	return cache.Snapshot().ByName[name].Listed.Value == ObsNo
 }
 
 // recordDrainTransition, recordAgentQuarantine, recordAgentIdleKill and

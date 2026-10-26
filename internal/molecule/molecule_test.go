@@ -3374,6 +3374,53 @@ func TestInstantiateStampsFormulaHash(t *testing.T) {
 	}
 }
 
+// A root cooked from an extends-based formula must carry the same provenance
+// pair as any other root: the child file as gc.formula_source and that file's
+// hash as gc.formula_hash.
+func TestCookStampsFormulaHashForExtendsFormula(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := []byte(`formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`)
+	childContent := []byte(`formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), parentContent, 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, childContent, 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	result, err := Cook(context.Background(), store, "mol-hash-child", []string{dir}, Options{})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+
+	if got := root.Metadata[beadmeta.FormulaSourceMetadataKey]; got != childPath {
+		t.Errorf("%s = %q, want child path %q", beadmeta.FormulaSourceMetadataKey, got, childPath)
+	}
+	if got, want := root.Metadata[beadmeta.FormulaHashMetadataKey], formula.ContentHash(childContent); got != want {
+		t.Errorf("%s = %q, want child file hash %q", beadmeta.FormulaHashMetadataKey, got, want)
+	}
+}
+
 func TestInstantiateNoHashWhenEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
@@ -3836,6 +3883,11 @@ func TestInstantiateRefusesASessionStep(t *testing.T) {
 			{"a substituted gc:session label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:session"}, nil, "session row"},
 			{"a gc:session label by a var's default (M05)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, nil, map[string]*formula.VarDef{"lbl": {Default: &gcSession}}, "session row"},
 			{"type startup-health-episode (mc-lp7zb)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "startup-health-episode"}, nil, nil, "startup-health episode"},
+			{"type convergence (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Convergence"}, nil, nil, "controller-owned"},
+			{"a ' GC:Session ' label (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{" GC:Session "}}, nil, nil, "controller-owned"},
+			{"a forged order run root (the #7766 review)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"order-run:digest"}, Metadata: map[string]string{"gc.kind": "wisp"}}, nil, nil, "coordination row"},
+			{"a substituted gc:wait label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:wait"}, nil, "coordination row"},
+			{"type message", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Message"}, nil, nil, "coordination row"},
 		} {
 			prev := IsGraphApplyEnabled()
 			SetGraphApplyEnabled(graph)

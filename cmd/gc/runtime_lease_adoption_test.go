@@ -171,7 +171,7 @@ func TestPreWakeIsACompareAndSwap(t *testing.T) {
 	if err := store.SetMetadataBatch(f.cand.info.ID, map[string]string{"state": string(sessionpkg.StateSuspended)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := preWakeCommitUnder(f.cand.info, front, clk, nil); !errors.Is(err, errPreWakeSuperseded) {
+	if _, _, err := preWakeCommitUnder(f.cand.info, front, clk, nil); !errors.Is(err, errPreWakeSuperseded) {
 		t.Fatalf("PreWake over a moved row = %v, want errPreWakeSuperseded", err)
 	}
 	fresh, err := front.Get(f.cand.info.ID)
@@ -180,7 +180,7 @@ func TestPreWakeIsACompareAndSwap(t *testing.T) {
 	}
 	stale := f.hold(t)
 	stale.Release()
-	if _, _, _, err := preWakeCommitUnder(fresh, front, clk, stale); !errors.Is(err, errPreWakeSuperseded) {
+	if _, _, err := preWakeCommitUnder(fresh, front, clk, stale); !errors.Is(err, errPreWakeSuperseded) {
 		t.Fatalf("PreWake under a released lease = %v, want errPreWakeSuperseded", err)
 	}
 	if gen := mustGetBead(t, store, f.cand.info.ID).Metadata["generation"]; gen != "1" {
@@ -188,7 +188,7 @@ func TestPreWakeIsACompareAndSwap(t *testing.T) {
 	}
 	held := f.hold(t)
 	defer held.Release()
-	if _, _, _, err := preWakeCommitUnder(fresh, front, clk, held); err != nil {
+	if _, _, err := preWakeCommitUnder(fresh, front, clk, held); err != nil {
 		t.Fatalf("PreWake under the lease: %v", err)
 	}
 }
@@ -481,7 +481,7 @@ func TestPreWakeRetriesALostFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
-	if _, _, _, err := preWakeCommitUnder(info, front, clk, nil); err != nil || !store.lost {
+	if _, _, err := preWakeCommitUnder(info, front, clk, nil); err != nil || !store.lost {
 		t.Fatalf("PreWake over one lost fence = %v (lost %v), want it to land on the retry", err, store.lost)
 	}
 	if gen := mustGetBead(t, backing, f.cand.info.ID).Metadata["generation"]; gen != "2" {
@@ -512,14 +512,14 @@ func TestRecoveryCommitTakesTheRuntimeLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, batch := recoverRunningPendingCreate(city, sessiontest.SeedBead(t, bead), tp, cfg, store, clk, nil); !ok || batch != nil {
+	if ok, batch := recoverRunningPendingCreate(city, sessiontest.SeedBead(t, bead), tp, cfg, store, nil, clk, io.Discard, nil); !ok || batch != nil {
 		t.Fatalf("recovery under a held lease = (%v, %v), want deferred", ok, batch)
 	}
 	if claim := mustGetBead(t, store, bead.ID).Metadata["pending_create_claim"]; claim != "true" {
 		t.Fatalf("pending_create_claim under a held lease = %q, want untouched", claim)
 	}
 	held.Release()
-	if ok, _ := recoverRunningPendingCreate(city, sessiontest.SeedBead(t, mustGetBead(t, store, bead.ID)), tp, cfg, store, clk, nil); !ok {
+	if ok, _ := recoverRunningPendingCreate(city, sessiontest.SeedBead(t, mustGetBead(t, store, bead.ID)), tp, cfg, store, nil, clk, io.Discard, nil); !ok {
 		t.Fatal("recovery with a free lease did not heal")
 	}
 	meta := mustGetBead(t, store, bead.ID).Metadata

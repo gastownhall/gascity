@@ -230,6 +230,22 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pool_slot":    "2",
 			},
 		},
+		// asleep+sleep_reason=config-drift is freeable (isPoolSessionSlotFreeable*):
+		// a config-drifted pool session is never woken in place (that would run
+		// the agent on stale config), so without this arm a pool whose every slot
+		// drifts goes dark forever with no retirement path (srvcity sr-sxbc7).
+		"asleep-config-drift-freeable": {
+			ID:     "ga-configdrift",
+			Type:   session.BeadType,
+			Title:  "configdrift",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonConfigDrift),
+				"pool_slot":    "2",
+			},
+		},
 		// The remaining freeable sleep reasons. Each arm of the
 		// isPoolSessionSlotFreeable allowlist needs its own fixture: the oracle
 		// compares the bead form against the Info form per fixture, so a reason

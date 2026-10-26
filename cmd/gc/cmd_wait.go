@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
@@ -407,7 +408,7 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		if err := deps.pokeController(); err != nil {
+		if err := deps.pokeController(); err != nil && !noteWorkerSitePoke(stderr, "gc session wait", err) {
 			fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -800,7 +801,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	}
 	now := time.Now().UTC()
 	if state == waitStateReady && w.Status == "closed" {
-		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(nudges), w)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeShadows(nudges), w)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -819,7 +820,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	}
 	switch state {
 	case waitStateReady:
-		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(nudges), w)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeShadows(nudges), w)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -1343,7 +1344,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)
+		queued, err := waitNudgeAttemptQueuedOrResolved(nudgeShadows(nudges), nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
 				stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
@@ -1351,7 +1352,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			}
 			return err
 		}
-		if ok {
+		if queued {
 			continue
 		}
 		message := strings.TrimSpace(wait.Note)
@@ -1384,6 +1385,36 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 	return nil
 }
 
+// waitNudgeAttemptQueuedOrResolved reports whether the wait nudge attempt
+// nudgeID needs no new enqueue: an open shadow is already queued, or a terminal
+// shadow already delivered or failed this attempt. The id embeds the delivery
+// attempt, so a resolved shadow means a delivery acked after this tick's wait
+// prepare; the next prepare finalizes the wait from it. A superseded shadow did
+// not resolve the attempt and is re-queued. A capped terminal lookup is also
+// unresolved: FindIncludingTerminal returns the newest terminal shadow before
+// it checks the cap, so the cap means none of the newest closed shadows
+// delivered or failed the attempt (for example, enqueues rolled back by
+// RollbackEnqueue), and the reminder is re-queued.
+func waitNudgeAttemptQueuedOrResolved(front storebinding.NudgeShadows, nudgeID string) (bool, error) {
+	_, open, err := front.Find(nudgeID)
+	if err != nil || open {
+		return open, err
+	}
+	shadow, ok, err := front.FindIncludingTerminal(nudgeID)
+	if beads.IsLookupLimitError(err) {
+		return false, nil
+	}
+	if err != nil || !ok {
+		return false, err
+	}
+	switch nudgequeue.ClassifyTerminalState(shadow.State) {
+	case nudgequeue.OutcomeDelivered, nudgequeue.OutcomeFailed:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func waitNudgeProviderNeedsPoller(info sessionpkg.Info) bool {
 	switch sessionProviderFamily(info) {
 	case "codex", "pi":
@@ -1414,7 +1445,7 @@ func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.Nudges
 	if nudgeID == "" {
 		return false, nil
 	}
-	nudge, ok, err := nudgeFrontDoor(nudges).FindIncludingTerminal(nudgeID)
+	nudge, ok, err := nudgeShadows(nudges).FindIncludingTerminal(nudgeID)
 	if err != nil {
 		if beads.IsLookupLimitError(err) {
 			stampWaitLookupCapDiagnostic(sessFront, wait.SessionID, err, now, "ready-wait-finalize-nudge")
@@ -1425,10 +1456,10 @@ func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.Nudges
 	if !ok {
 		return false, err
 	}
-	switch nudge.State {
-	case "injected", "accepted_for_injection":
+	switch nudgequeue.ClassifyTerminalState(nudge.State) {
+	case nudgequeue.OutcomeDelivered:
 		return true, sessFront.CloseWaitFromNudge(wait.ID, now, nudgeID, nudge.CommitBoundary)
-	case "expired", "failed":
+	case nudgequeue.OutcomeFailed:
 		return true, sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, nudge.TerminalReason, nudge.CommitBoundary)
 	default:
 		return false, nil
@@ -1520,7 +1551,7 @@ func sessionProviderFamily(info sessionpkg.Info) string {
 	return sessionpkg.ProviderFamilyFromInfo(info, "")
 }
 
-func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) (string, error) {
+func nextWaitDeliveryAttempt(front storebinding.NudgeShadows, wait sessionpkg.WaitInfo) (string, error) {
 	state := wait.State
 	if state == waitStatePending || state == waitStateReady {
 		return "", nil
@@ -1546,8 +1577,13 @@ func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) 
 	return "", nil
 }
 
+// withdrawQueuedWaitNudges withdraws the queued nudges a wait registered. It
+// closes only the work store handle it opened, never the nudges-class store
+// (see openOwnedNudgeBeadStore).
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	defer func() { _ = closeBeadStoreHandle(opened) }()
+	return openNudgeQueue(cityPath, store).Queue.WithdrawQueuedWaitNudges(nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

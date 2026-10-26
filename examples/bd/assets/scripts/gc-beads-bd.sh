@@ -826,7 +826,7 @@ ensure_bd_runtime_issue_prefix() {
 # beads (#1039). Must match doctor.RequiredCustomTypes.
 # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
 gc_custom_types() {
-    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode}"
+    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op}"
 }
 
 valid_custom_types_value() {
@@ -2194,7 +2194,7 @@ data_dir: "$DATA_DIR"
 # shrinking both the unclean-stop corruption window and the recovery blast
 # radius (#3176). Historically OFF to work around dolt#10944 (load-avg gating
 # that never fired); fixed upstream in dolt 2.0.3 and the managed floor is
-# 2.1.0+. Scheduled compaction (gc dolt compact) still handles history
+# 2.6.0+. Scheduled compaction (gc dolt compact) still handles history
 # flattening — see #1918, #1200 for that lineage. Override via city.toml
 # [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
 behavior:

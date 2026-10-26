@@ -722,7 +722,7 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 	}
 	defer tm.CloseHiddenAttachClient(sessionName)
 
-	used, err := tm.sendHiddenAttachedText(sessionName, "HELLO_HIDDEN_ATTACH")
+	used, err := tm.sendHiddenAttachedText(context.Background(), sessionName, "HELLO_HIDDEN_ATTACH")
 	if err != nil {
 		t.Fatalf("sendHiddenAttachedText: %v", err)
 	}
@@ -2479,7 +2479,7 @@ func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Should succeed immediately — no retry needed
-	err := tm.sendKeysLiteralWithRetry(sessionName, "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), sessionName, "hello", 5*time.Second)
 	if err != nil {
 		t.Errorf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2494,7 +2494,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFails(t *testing.T) {
 
 	// Target a session that doesn't exist — should fail immediately, not retry
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-xyz", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-xyz", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2515,7 +2515,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	// Use a nonexistent session — tmux returns "session not found" which is
 	// non-transient, so the function should fail fast (well under the timeout).
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2534,7 +2534,7 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", "large startup prompt", time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2561,7 +2561,7 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2579,7 +2579,7 @@ func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2600,7 +2600,7 @@ func TestSendStartupKeysLiteralWithRetryRecognizesCopilotProviderFamily(t *testi
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "github-copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "github-copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2621,7 +2621,7 @@ func TestSendKeysLiteralWithRetryDoesNotChunkOrdinaryCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendKeysLiteralWithRetry("%1", text, 3*time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", text, 3*time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2642,7 +2642,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T)
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "claude", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "claude", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2665,7 +2665,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *t
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -3380,7 +3380,7 @@ func TestWaitForCodexInterruptBoundary(t *testing.T) {
 		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
 	}()
 
-	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {
+	if err := waitForCodexInterruptBoundary(context.Background(), transcript, since, 2*time.Second); err != nil {
 		t.Fatalf("waitForCodexInterruptBoundary: %v", err)
 	}
 }
@@ -4061,19 +4061,22 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 // zsh dotfiles. How long that lasts depends on host load, $SHELL and $HOME, so
 // an assertion about pane_current_command taken a fixed delay after NewSession
 // races it (ga-kmwwcx). A non-login `sh` with $ENV unset runs no startup
-// files, and once the pane reports "sh" it stays "sh".
+// files, and once the pane reports that shell it stays there.
 func newPlainShellSession(t *testing.T, tm *Tmux, name string) {
 	t.Helper()
 	if err := tm.NewSessionWithCommand(name, "", "exec env -u ENV sh"); err != nil {
 		t.Fatalf("NewSessionWithCommand(%q): %v", name, err)
 	}
-	waitForPaneCommand(t, tm, name, "sh", 10*time.Second)
+	// The pane's sh is whatever POSIX shell the host ships, not always a
+	// process named sh: macOS /bin/sh re-executes bash 3.2 in POSIX mode, so
+	// tmux reports "bash" there, and a host can report its sh as "dash".
+	waitForPaneCommand(t, tm, name, 10*time.Second, "sh", "bash", "dash")
 }
 
-// waitForPaneCommand waits until session's first pane reports want as its
-// pane_current_command, failing the test if that does not happen within
+// waitForPaneCommand waits until session's first pane reports one of want as
+// its pane_current_command, failing the test if that does not happen within
 // timeout.
-func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout time.Duration) {
+func waitForPaneCommand(t *testing.T, tm *Tmux, session string, timeout time.Duration, want ...string) {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -4081,12 +4084,12 @@ func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout ti
 	defer ticker.Stop()
 	for {
 		got, err := tm.GetPaneCommand(session)
-		if err == nil && got == want {
+		if err == nil && slices.Contains(want, got) {
 			return
 		}
 		select {
 		case <-timer.C:
-			t.Fatalf("pane of %q did not report %q within %s (last %q, err %v)", session, want, timeout, got, err)
+			t.Fatalf("pane of %q did not report one of %q within %s (last %q, err %v)", session, want, timeout, got, err)
 		case <-ticker.C:
 		}
 	}

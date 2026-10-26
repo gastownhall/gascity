@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import type { EntityLinkView, LinkNode, LinkNodeType } from 'gas-city-dashboard-shared';
 import { formatRelative } from '../hooks/time';
 

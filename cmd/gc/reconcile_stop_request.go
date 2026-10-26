@@ -9,14 +9,17 @@ import (
 )
 
 // The stop request (CONTRACT v5 D1): one durable stop intent per row
-// incarnation, with one reader. Its controller half is the three
-// drain_intent_* keys, its request half E3's two drain_ack_* keys, and its
-// signaled phase legacy's stop-pending projection. activeStop is the only
-// reader of the keys, and the patch builders below are D1's only writers of
-// them (I6, I14; TestStopRequestLintBansDirectKeyReads). Both halves name
-// the row's generation only, so a rekey, which moves only the token, keeps
-// them. An empty or unparseable generation is generation 0, as legacy's
-// drain tracker reads it (strconv.Atoi).
+// incarnation, with one reader in the reconciler. Its controller half is the
+// three drain_intent_* keys, its request half E3's two drain_ack_* keys, and
+// its signaled phase legacy's stop-pending projection. activeStop is the
+// reconciler's reader of the keys and v2SignaledUnacked legacy's rollback
+// guard's; outside the reconciler, session.ReadStopRequest reads the
+// controller half for the content gate (V2-18). The patch
+// builders below are D1's only writers of them (I6, I14;
+// TestStopRequestLintBansDirectKeyReads). Both halves name the row's
+// generation only, so a rekey, which moves only the token, keeps them. An
+// empty or unparseable generation is generation 0, as legacy's drain tracker
+// reads it (strconv.Atoi).
 
 // rawStopKeys are a row's raw stop-request keys, as the census read them.
 type rawStopKeys struct {
@@ -35,6 +38,16 @@ func readStopKeys(meta map[string]string) rawStopKeys {
 		rawAckAt:             strings.TrimSpace(meta[session.DrainAckAtKey]),
 		rawOperatorDrain:     strings.TrimSpace(meta[session.OperatorDrainKey]),
 	}
+}
+
+// v2SignaledUnacked reports a row whose stop request is v2's own: the
+// controller half at the row's generation, with no ack half at that
+// generation, an agent's or an operator's (an ack of another incarnation
+// acks nothing of this one's; mc-7i9i7). Legacy's rollback guard reads it (v2SignaledStopHeldForAttach,
+// CONTRACT v5.10v): the accessor's projection, so legacy names no key.
+func v2SignaledUnacked(meta map[string]string) bool {
+	k, gen := readStopKeys(meta), strings.TrimSpace(meta["generation"])
+	return k.rawIntentReason != "" && k.rawIntentIncarnation == gen && k.rawAckIncarnation != gen
 }
 
 // stopPhase is how far a stop request has come.
@@ -63,6 +76,14 @@ type stopRequest struct {
 	// later at the same generation (Manager.ensureRunning bumps neither the
 	// generation nor the token) is not stopped for its predecessor's request.
 	Residue bool
+}
+
+// intentStands reports that row carries the controller's stop request for
+// reason at its own incarnation, whether activeStop reads it active or as
+// residue (a row that claims no live runtime).
+func intentStands(row censusRow, reason string) bool {
+	k := row.StopKeys
+	return k.rawIntentReason == reason && k.rawIntentIncarnation == strconv.FormatInt(row.Incarnation, 10)
 }
 
 // activeStop is a row's active stop request, by D1's rules in order:
@@ -174,4 +195,15 @@ func operatorUndrainPatch(meta map[string]string) session.MetadataPatch {
 func rowGeneration(meta map[string]string) int64 {
 	gen, _ := strconv.ParseInt(strings.TrimSpace(meta["generation"]), 10, 64)
 	return gen
+}
+
+// stopRequestStands reports an active stop request on a row read outside
+// the census (info, with its persisted metadata meta): the work ladder's
+// gate, which must not nudge a seat being stopped. It is activeStop's
+// answer, so the reconciler's reads keep one reader.
+func stopRequestStands(info session.Info, meta map[string]string) bool {
+	row := newCensusRow(rowKey{ID: info.ID}, info)
+	row.StopKeys = readStopKeys(meta)
+	_, active := activeStop(row)
+	return active
 }

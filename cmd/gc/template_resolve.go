@@ -124,6 +124,12 @@ type TemplateParams struct {
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
+	// NamedCanonicalOnly marks an on_demand configured named session that is
+	// desired only because the tick's session snapshot held its canonical
+	// bead (no assigned work wants it). syncSessionBeads creates no row for
+	// it when its fresh read finds that bead gone: an operator close won
+	// the race (mc-58gr9).
+	NamedCanonicalOnly bool
 	// ManualSession marks a discovered root created outside pool scale logic
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
@@ -205,24 +211,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
-	var command string
-	switch sessionTransport {
-	case config.SessionTransportACP:
-		command = resolved.ACPCommandString()
-	case "", config.SessionTransportTmux:
-		command = resolved.CommandString()
-	default:
-		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
-	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
 	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
-	if providerFamily == "kimi" && installHooksIncludeFamily(installHooks, "kimi", p.providers) {
-		command = appendKimiHookConfigArg(command)
-	}
-	// Append schema-derived default args (e.g., --dangerously-skip-permissions
-	// from EffectiveDefaults["permission_mode"] = "unrestricted").
-	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-		command = command + " " + shellquote.Join(defaultArgs)
+	// The API persists the same composition as a deferred create's baseline
+	// (config.BuildProviderTemplateLaunchCommand), so keep it shared.
+	command, err := config.ProviderTemplateCommand(resolved, sessionTransport, installHooks, p.providers)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	if p.stderr != nil {
 		for _, pin := range resolved.UnhonoredOptionPins() {
@@ -394,7 +389,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// prompt template to render.
 	defaultBranch := ""
 	if cfgAgent.PromptTemplate != "" {
-		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+		defaultBranch = p.defaultBranch(rigName, workDir)
 	}
 	topo := config.QueryTopology{}
 	if p.city != nil {
@@ -608,7 +603,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// is populated" and § "Stage 2 runtime gate"). Stage-2 eligible
 	// runtimes (tmux for v0.15.1) get a PreStart entry for per-session
 	// materialization into non-scope-root workdirs, and every eligible
-	// agent gets per-skill fingerprint entries so catalog edits drain.
+	// agent gets per-skill FingerprintExtra entries. Those are NextStart
+	// (runtime.FingerprintExtraChangePolicy): a skill edit, or a skill
+	// added or removed while another remains, reaches the next start's
+	// materialization without draining a running session. The PreStart
+	// entry is a Restart input present only while the agent has a skill,
+	// so a non-scope-root agent drains once when its first skill is added
+	// or its last removed, a shared catalog that loads empty included.
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
@@ -677,26 +678,34 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			mcpCity.PackMCPDir = cityMCPDir
 		}
 	}
-	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
+	// Shared-layer servers the provider cannot receive are left out of
+	// mcpCatalog and mcpProjection (the agent starts without them; stage 1
+	// warns), while agent-local ones fail this agent's start. An ACP session
+	// receives every server in-band (session/new), whatever its harness's
+	// file projection can carry.
+	mcpInBand := sessionTransport == config.SessionTransportACP
+	mcp, err := resolveAgentMCPProjection(
 		p.cityPath,
 		mcpCity,
 		cfgAgent,
 		qualifiedName,
 		workDir,
 		resolvedProviderLaunchFamily(resolved),
+		mcpInBand,
 	)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
+	mcpCatalog, mcpProjection := mcp.Catalog, mcp.Projection
+	if resolvedServers := len(mcpCatalog.Servers) + len(mcp.Skipped); mcpCityIsSynthetic && resolvedServers > 0 {
 		return TemplateParams{}, fmt.Errorf(
 			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) - "+
 				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
 				"cannot see import/implicit/bootstrap layers and would diverge from production)",
-			qualifiedName, len(mcpCatalog.Servers),
+			qualifiedName, resolvedServers,
 		)
 	}
-	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
+	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
 		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
 		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
@@ -705,7 +714,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			if stage2Delivers {
 				projectAgent := templateNameFor(cfgAgent, qualifiedName)
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
+				warnStage2MCPAdoptionRefusal(p.cityPath, qualifiedName, mcpProjection, p.fs, p.stderr)
 			}
+		case mcpInBand:
+			// No file reaches this session; session/new carries the servers.
 		default:
 			return TemplateParams{}, fmt.Errorf(
 				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
@@ -714,7 +726,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == config.SessionTransportACP {
+	if mcpInBand {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
 
@@ -795,40 +807,6 @@ func isOperationalScript(rel string) bool {
 		}
 	}
 	return false
-}
-
-func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
-	family = strings.TrimSpace(family)
-	if family == "" {
-		return false
-	}
-	for _, hook := range installHooks {
-		hook = strings.TrimSpace(hook)
-		if hook == "" {
-			continue
-		}
-		if hook == family || config.BuiltinFamily(hook, providers) == family {
-			return true
-		}
-	}
-	return false
-}
-
-func appendKimiHookConfigArg(command string) string {
-	parts := shellquote.Split(command)
-	if len(parts) == 0 {
-		return command
-	}
-	configArgs := []string{"--config-file", ".kimi/config.toml"}
-	if parts[len(parts)-1] == "acp" {
-		withConfig := make([]string, 0, len(parts)+len(configArgs))
-		withConfig = append(withConfig, parts[:len(parts)-1]...)
-		withConfig = append(withConfig, configArgs...)
-		withConfig = append(withConfig, parts[len(parts)-1])
-		return shellquote.Join(withConfig)
-	}
-	parts = append(parts, configArgs...)
-	return shellquote.Join(parts)
 }
 
 // composeStartupPrompt combines the session beacon with the rendered prompt

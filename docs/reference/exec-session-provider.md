@@ -74,17 +74,19 @@ No shell invocation — the script is exec'd directly.
 |------|---------|
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
-| 2 | Unknown operation (treated as success — forward compatible) |
+| 2 | Unknown operation (treated as success — forward compatible). From `start`, and from an operation the script declares, it is not success; see below. |
 | 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
 it as a no-op success. Scripts only need to implement the operations they
 care about. An operation a script declares in its
-[handshake](#protocol-handshake-protocol) cannot be unknown, so two declared
+[handshake](#protocol-handshake-protocol) cannot be unknown, so declared
 operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
-as the command's own exit code, and under `report-attachment`, `is-attached`
-reports it as a failure.
+as the command's own exit code, and under `proc.provision` and
+`report-attachment`, `provision` and `is-attached` report it as a failure.
+`start` cannot be unknown either, so its exit 2 (for example a helper's
+`grep` or `jq` exit status escaping a `set -e` script) is a failed start.
 
 ## Cancellation
 
@@ -113,6 +115,13 @@ trap 'exit 143' TERM                       # turn SIGTERM into an ordinary exit
 my-backend wait-ready "$created"
 trap - EXIT TERM                           # startup succeeded; keep the session
 ```
+
+Each call has a deadline. `start` and `provision` get 120 seconds, `attach`
+none (it holds your terminal), and `watch-startup` runs only while gc clears
+startup dialogs. Every other operation gets 30 seconds, and a caller can
+cancel a call sooner. Two operations are stopped differently from the steps
+above: a canceled `exec` or `watch-startup` call is killed outright, with
+`SIGKILL` to the script process and no `SIGTERM` first.
 
 ## Operations
 
@@ -187,6 +196,7 @@ Capabilities:
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
+| `input-fence` | With `proc.exec`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
@@ -261,9 +271,53 @@ interactive_resume = "10m"   # interactive sessions: needs sleep_capability = fu
 noninteractive = "60s"
 ```
 
+### Fenced input over `exec`
+
+A runtime that declares both `proc.exec` and `input-fence` takes fenced
+input: gc sends a nudge, keys or an interrupt only to the agent incarnation it
+is meant for. The fence is the pane option `@gc_fence` on the agent pane of
+the in-box tmux session `main`, and gc manages it over `exec`. Declare
+`input-fence` only for a runtime that:
+
+- **Runs tmux 3.0 or later in the box.** gc sets and clears the fence with
+  `set-option -p` (pane options), which older tmux rejects. With older tmux
+  every `start` fails and the box is torn down, and a separable launch fails
+  as a whole, because gc appends the fence command to the launch's own tmux
+  command list.
+- **Has the `main` session when `start` returns.** gc publishes the fence
+  right after `start`. A publish that fails fails the start and tears the box
+  down, unless the box was running before the attempt.
+- **Provides `sh` in the box.** gc reads the fence, sends guarded input and
+  loads nudge text into a tmux buffer through short `sh -c` scripts.
+
+A runtime that declares `proc.exec` without `input-fence` starts and takes
+unfenced input as usual: gc touches no fence in its box, and refuses only a
+fenced request to it.
+
+Before a `start` of a box that may already be running, gc reads and clears
+the pane's fence, so a start that reuses the pane never leaves the previous
+incarnation's fence on it. When `start`, or the fence publish after it, then
+fails and the box stays up (it reports that the session already exists, or
+`is-running` said it was running before the attempt), gc puts the fence back
+on the same pane, as long as the pane's root process is unchanged and no
+other fence has been set since.
+
+Fenced input sends nothing until tmux in the box answers the fence read. A
+live tmux server without the `main` session or its agent pane answers that
+the session is absent. A command the box does not answer, because the `exec`
+op fails (its own non-zero exit) or tmux in the box fails (no server, a
+missing tmux, a socket it cannot reach), is an outage
+(`ErrRuntimeUnavailable`), unless `is-running` then answers `false`, which
+makes it an absent session. Either way, a failure after part of the input
+went in (nudge text without its Enter) reports the input as partly
+delivered. An `exec` op that is [canceled](#cancellation) or cannot be run at
+all is an outage too, without asking `is-running`, and it does not say
+whether part of the input went in before it stopped. A pane started before gc
+published fences takes no fenced input until its agent is relaunched.
+
 ### Start Config (JSON on stdin)
 
-The `start` operation receives a JSON object on stdin:
+The `start` and `provision` operations receive a JSON object on stdin:
 
 ```json
 {
@@ -277,14 +331,101 @@ The `start` operation receives a JSON object on stdin:
 }
 ```
 
-All fields are optional (omitted when empty).
+Every field is optional and omitted when empty. The complete set:
+
+| Field | Contents |
+|-------|----------|
+| `work_dir` | The session's working directory, as a path on the orchestrator host |
+| `command` | The agent launch command |
+| `lifecycle` | `"one_shot"` for a command expected to exit after one turn |
+| `env` | The session's environment (see [Session environment](#session-environment)) |
+| `process_names` | The process names the agent runs as |
+| `nudge` | Text to type into the agent once it is ready |
+| `ready_prompt_prefix` | The prompt prefix that shows the agent is ready |
+| `ready_delay_ms` | A fixed delay to wait instead, when there is no prompt to watch for |
+| `pre_start` | Commands to run on the target before the session is created |
+| `session_setup` | Commands to run in the session after it is created |
+| `session_setup_script` | A script on the orchestrator host, run after `session_setup` |
+| `session_live` | Idempotent commands to run after `session_setup` |
+| `pack_overlay_dirs` | Pack overlay directories on the orchestrator host, copied into the work dir first |
+| `overlay_dir` | The agent's overlay directory on the orchestrator host, copied into the work dir last |
+| `copy_files` | `{"src", "rel_dst"}` entries: a file or directory on the orchestrator host to stage at `rel_dst` under the work dir (the work dir itself when `rel_dst` is absent) |
+| `work_dir_exclude` | Patterns for state that must stay on the orchestrator host (see [Work-dir export exclusions](#work-dir-export-exclusions)) |
+
+On a fresh start the agent's startup prompt is not in the start config: gc
+renders it as a command-line argument (`prompt_mode = "arg"`, the default) or
+flag (`"flag"`), and the exec provider passes neither to the script, so the
+agent starts without it. gc puts the prompt at the front of `nudge` instead in
+three cases: with `prompt_mode = "none"`, on a start that resumes an existing
+conversation (any prompt mode), and for a prompt too large for a command line
+on a runtime whose `[runtimes.<name>]` entry sets
+`prompt_delivery = "nudge-fallback"`. A script should handle any non-empty
+`nudge`.
+
+### Session environment
+
+`env` is what gc wants set in the session, to apply over the box's own
+environment. For a configured agent's session it holds:
+
+- `PATH`, `HOME`, `USER`, `LOGNAME`, `TZ`, the locale and XDG directory
+  variables, and a few Claude Code and telemetry settings, from gc's own
+  environment.
+- Every non-empty `GC_*` variable in gc's environment except
+  `GC_CONTROLLER_TOKEN`, and any variable named in `GC_SUPERVISOR_ENV`.
+- Provider credentials from gc's environment: every variable whose name starts
+  with a provider prefix such as `ANTHROPIC_`, `OPENAI_`, `GEMINI_`, `GOOGLE_`,
+  `AZURE_` or `XAI_`, and a fixed list of AWS variables (`AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_PROFILE`
+  and others), not every `AWS_*` variable.
+- The city's `[workspace]` env, then the provider's, then the agent's, then
+  the session's own variables (`GC_AGENT`, `GC_ALIAS`, `GC_CITY`, `GC_DIR`,
+  `GC_SESSION_ID` and more), and last the agent's selected upstream's
+  variables and a few gc-owned settings, the empty `GC_CONTROLLER_TOKEN`
+  among them.
+
+An empty value means the variable must be unset. gc sends some keys empty on
+purpose, `GC_CONTROLLER_TOKEN` among them, so that a value inherited from its
+own environment does not reach the agent. The script itself runs with gc's
+environment, so a script that starts the agent as its own child must apply
+those empty values too.
+
+Provider credentials in the supervisor's environment therefore reach every
+session. `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` does not change that: it only
+keeps them out of the launchd plist or systemd unit that `gc` generates, and
+out of a `gc supervisor run` that `gc` forks. The bundled
+`contrib/session-scripts/gc-session-k8s` copies `env` into the pod spec as
+literal `env` values (it drops or rewrites a few `GC_*` keys), and Kubernetes
+gives a literal `env` entry precedence over the same key from `envFrom`, so a
+credential in the supervisor's environment overrides one you supply through
+`envFrom`.
 
 ### Startup Hints
 
 The JSON config contains fields that the tmux provider uses for multi-step
-startup orchestration. The exec provider itself is fire-and-forget — it
-calls `script start` and returns immediately. Scripts may handle these
-hints or ignore them:
+startup orchestration. The exec provider does not fire `start` and forget it.
+gc first runs `is-running` to learn whether a box already holds the name, then
+runs `start` and waits for it to exit. After a successful `start` it can run
+more operations before it counts the session started: it publishes the
+[input fence](#fenced-input-over-exec) and the [ready prompt](#idle-sleep) for
+a runtime that declares the capabilities they need, and when the start config
+lists `process_names` or the provider declares a bypass-permissions dialog (a
+provider's `accept_startup_dialogs` setting overrides both) it dismisses known
+startup dialogs, such as workspace trust, through `watch-startup`, `peek` and
+`send-keys` (`peek` and `send-keys` go over `exec` when the runtime implements
+it).
+
+If `start` fails or times out, or a step after it fails, gc runs
+`stop <name>` to tear down whatever the attempt created, then reports the
+start as failed. It skips that `stop` when the box belongs to a live session:
+when `is-running` printed `true` before the attempt, or when `start` exited
+non-zero on its own with stderr saying the name is taken (it contains
+`already exists` or `already running`). The stderr check does not apply to a
+`start` that gc canceled at its deadline. A runtime that declares both
+`proc.provision` and `proc.exec` gets `provision` in place of that
+`is-running` and `start`: no `stop` follows a failed `provision`, and one
+always follows a failed agent launch after it.
+
+Scripts may handle these hints or ignore them:
 
 - **`process_names`** — the tmux adapter polls for these process names to
   appear in the session's process tree (30s timeout) before considering the
@@ -297,9 +438,11 @@ hints or ignore them:
   a persistent post-start process for one-shot starts.
 
 - **`nudge`** — text that the tmux adapter types into the session after
-  the agent is ready. Scripts that support interactive input can handle
-  this in `start` (type the text after session creation) or leave it to
-  the separate `nudge` operation which gc calls after `start` returns.
+  the agent is ready. gc does not send it through the `nudge` operation
+  when `start` returns, so a script that wants the agent to receive it
+  types it in itself, in `start`, once the agent is ready. Later nudges,
+  such as `gc session nudge`, go through the `nudge` operation, or over
+  `exec` when the runtime implements it.
 
 - **`pre_start`** — array of shell commands to run on the target
   filesystem **before** the session is created. Used for directory
@@ -327,9 +470,10 @@ the exec protocol):
 - `emits_permission_warning` — bypass-permissions dialog handling
 - `fingerprint_extra` — config change detection metadata
 
-`ready_prompt_prefix` and `ready_delay_ms` are sent, but readiness polling
-(via `peek` after `start` returns) and the fixed delay remain the
-*caller's* responsibility; a script may ignore them. Session setup
+`ready_prompt_prefix` and `ready_delay_ms` are sent, but gc does not wait
+for the agent to show the prompt, or wait out the delay, before it counts
+the start done. A script that must reach a ready agent before it returns
+(to type `nudge`, say) waits itself; otherwise it may ignore them. Session setup
 commands are the *script's* responsibility — they run on the target
 filesystem, not the orchestrator.
 
@@ -464,6 +608,28 @@ and keeps copying the whole work dir.
 - **Empty = unsupported**: `get-last-activity` returning empty stdout means
   the backend doesn't support activity tracking (zero time in Go).
 
+### Session identity
+
+The `env` object in the start config carries the session's identity:
+`GC_SESSION_ID`, `GC_INSTANCE_TOKEN` and `GC_RUNTIME_EPOCH`. When `get-meta`
+returns these keys from the moment `is-running` reports the session, the
+orchestrator can tell which session a running box belongs to. After an
+orchestrator restart it then adopts a session whose start was cut short,
+instead of failing it.
+
+A script whose `get-meta` answers them empty still works. If a session
+created with `gc session new` (or the API) fails to start, or its start is cut
+short, the orchestrator stops any box running under its name before it marks
+the session failed. A box that reports another session's `GC_SESSION_ID` is
+left alone.
+
+That teardown reads the identity keys first, so `get-meta` must print nothing
+and exit 0 both for an unset key and for a session that does not exist. A
+non-zero exit reads as "cannot tell": a failed `gc session new` or API session
+then stays open in `creating` until `get-meta` answers, or until an operator
+runs `gc session close`. A script that runs its backend's CLI under
+`set -e` should catch the "no such session" case and print nothing.
+
 ## Writing Your Own Script
 
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.
@@ -495,6 +661,9 @@ esac
 Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
 state files (metadata, wrappers). If not set, scripts should use a
 reasonable default under `$TMPDIR` or `/tmp`.
+
+A script runs with gc's own environment. The session's environment arrives
+in the start config's `env` (see [Session environment](#session-environment)).
 
 ## Shipped Scripts
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // supervisorCfg returns a minimal *config.City wired for supervisor-mode
@@ -275,6 +277,104 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
 		t.Fatalf("queue not drained: pending=%d inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// dueKeysErrQueue answers DueKeys with its queue's keys beside err, as a store
+// holding a record it cannot decode answers.
+type dueKeysErrQueue struct {
+	storebinding.NudgeQueue
+	err error
+}
+
+func (q dueKeysErrQueue) DueKeys(now time.Time) ([]string, error) {
+	keys, err := q.NudgeQueue.DueKeys(now)
+	if err != nil {
+		return nil, err
+	}
+	return keys, q.err
+}
+
+// TestDispatchQueuedNudgesDeliversThePartialDueKeysRead: a partial DueKeys
+// read still dispatches the keys it returned, and the pass reports its error,
+// even when no key is due; any other DueKeys error abandons the pass before a
+// claim, though the read returned keys beside it.
+func TestDispatchQueuedNudgesDeliversThePartialDueKeysRead(t *testing.T) {
+	partial := &beads.PartialResultError{Op: "nudge queue", Err: errors.New("record n-corrupt did not decode")}
+	failure := errors.New("nudges store unreachable")
+	for _, tc := range []struct {
+		name          string
+		dueKeysErr    error
+		wantPartial   bool
+		enqueue       bool
+		wantDelivered int
+		wantPending   int
+	}{
+		{name: "partial read delivers its keys", dueKeysErr: partial, wantPartial: true, enqueue: true, wantDelivered: 1},
+		{name: "partial read with nothing due", dueKeysErr: partial, wantPartial: true},
+		{name: "failed read delivers nothing", dueKeysErr: failure, enqueue: true, wantPending: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+
+			store := openNudgeBeadStore(dir)
+			fake := runtime.NewFake()
+			mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+			if tc.enqueue {
+				if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+					t.Fatalf("enqueueQueuedNudge: %v", err)
+				}
+			}
+			snapshot, err := loadSessionBeadSnapshot(store.Store)
+			if err != nil {
+				t.Fatalf("loadSessionBeadSnapshot: %v", err)
+			}
+
+			queue := openNudgeQueue(dir, store)
+			queue.Queue = dueKeysErrQueue{NudgeQueue: queue.Queue, err: tc.dueKeysErr}
+			delivered, err := dispatchQueuedNudges(queue, dir, supervisorCfg(), store.Store, store.Store, fake, snapshot, nil)
+			if !errors.Is(err, tc.dueKeysErr) {
+				t.Fatalf("dispatchQueuedNudges error = %v, want it to report %v", err, tc.dueKeysErr)
+			}
+			if got := beads.IsPartialResult(err); got != tc.wantPartial {
+				t.Fatalf("beads.IsPartialResult(%v) = %t, want %t", err, got, tc.wantPartial)
+			}
+			if delivered != tc.wantDelivered {
+				t.Fatalf("delivered = %d, want %d", delivered, tc.wantDelivered)
+			}
+			var nudgeMessages []string
+			for _, call := range fake.Calls {
+				if call.Method == "Nudge" {
+					nudgeMessages = append(nudgeMessages, call.Message)
+				}
+			}
+			if len(nudgeMessages) != tc.wantDelivered {
+				t.Fatalf("nudge calls = %q, want %d", nudgeMessages, tc.wantDelivered)
+			}
+			if tc.wantDelivered > 0 && !strings.Contains(nudgeMessages[0], "review the deploy logs") {
+				t.Fatalf("nudge message = %q, want original reminder", nudgeMessages[0])
+			}
+			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			if len(pending) != tc.wantPending || len(inFlight) != 0 || len(dead) != 0 {
+				t.Fatalf("queue after the pass: pending=%d inFlight=%d dead=%d, want pending=%d and nothing else",
+					len(pending), len(inFlight), len(dead), tc.wantPending)
+			}
+		})
 	}
 }
 
@@ -667,5 +767,187 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 	case <-wakeCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("wakeCh not signaled after enqueue")
+	}
+}
+
+// legBDispatchFixture is a supervisor-mode city with one running worker
+// session (s1) and a second session of the same agent (s3) whose bead is
+// created by create.
+type legBDispatchFixture struct {
+	dir   string
+	store beads.NudgesStore
+	fake  *runtime.Fake
+	s1    session.Info
+	mgr   *session.Manager
+}
+
+func newLegBDispatchFixture(t *testing.T) *legBDispatchFixture {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	f := &legBDispatchFixture{dir: t.TempDir(), fake: runtime.NewFake()}
+	f.store = openNudgeBeadStore(f.dir)
+	f.mgr = newSessionManagerWithConfig(f.dir, f.store.Store, f.fake, nil)
+	f.s1 = f.create(t)
+	if err := f.mgr.Start(context.Background(), testOperatorIn(t, f.dir), f.s1.ID, "", runtime.Config{WorkDir: f.dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	f.fake.Activity = map[string]time.Time{f.s1.SessionName: time.Now().Add(-10 * time.Second)}
+	return f
+}
+
+func (f *legBDispatchFixture) create(t *testing.T) session.Info {
+	t.Helper()
+	return f.createAs(t, "worker")
+}
+
+// createAs creates a session bead of template's agent.
+func (f *legBDispatchFixture) createAs(t *testing.T, template string) session.Info {
+	t.Helper()
+	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: template, Title: template, Command: "codex", WorkDir: f.dir, Provider: "codex", Hints: runtime.Config{WorkDir: f.dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create %s: %v", template, err)
+	}
+	return info
+}
+
+func (f *legBDispatchFixture) nudgeCalls() []string {
+	var msgs []string
+	for _, call := range f.fake.Calls {
+		if call.Method == "Nudge" {
+			msgs = append(msgs, call.Name+": "+call.Message)
+		}
+	}
+	return msgs
+}
+
+// The dispatcher's pass snapshot only lets a claim skip: a session the
+// snapshot does not list (created after it, by another process) is still live
+// to the claim, which reads a live census before it adopts, so a running
+// sibling does not take the nudge fenced to it.
+func TestDispatchDoesNotAdoptForALiveSessionMissingFromTheSnapshot(t *testing.T) {
+	f := newLegBDispatchFixture(t)
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s3 := f.create(t)
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "for s3 only", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if msgs := f.nudgeCalls(); delivered != 0 || len(msgs) != 0 {
+		t.Fatalf("s1 adopted the nudge fenced to live s3 (delivered=%d): %s", delivered, strings.Join(msgs, " | "))
+	}
+	pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+	if err != nil || len(pending) != 1 || pending[0].SessionID != s3.ID {
+		t.Fatalf("pending = %v, %v; want the nudge still fenced to s3", nqCharItems(pending), err)
+	}
+}
+
+// A nudge fenced to an archived session of the same agent (open, but no longer
+// holding its seat) is adopted by a running sibling: the pass's snapshot shows
+// the fence holder gone, and the claim's live census agrees.
+func TestDispatchAdoptsANudgeFencedToAnArchivedSibling(t *testing.T) {
+	f := newLegBDispatchFixture(t)
+	s3 := f.create(t)
+	if err := f.store.SetMetadata(s3.ID, "state", string(session.StateArchived)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, ok := snapshot.FindInfoByID(s3.ID); !ok || sessionHoldsNudgeFence(info) {
+		t.Fatalf("setup: s3 in the snapshot = %+v (found %v), want it open and archived", info, ok)
+	}
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "left for s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	msgs := f.nudgeCalls()
+	if delivered != 1 || len(msgs) != 1 || !strings.Contains(msgs[0], "left for s3") || !strings.HasPrefix(msgs[0], f.s1.SessionName+":") {
+		t.Fatalf("delivered=%d nudges=%v, want s1 to adopt the archived s3's nudge", delivered, msgs)
+	}
+}
+
+// onNudgeProvider runs onNudge after each delivery the fake records.
+type onNudgeProvider struct {
+	*runtime.Fake
+	onNudge func(name string)
+}
+
+func (p onNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	err := p.Fake.Nudge(name, content)
+	p.onNudge(name)
+	return err
+}
+
+func (p onNudgeProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	err := p.Fake.NudgeFenced(ctx, name, content, n)
+	p.onNudge(name)
+	return err
+}
+
+// Each claim of a dispatch pass reads its own live census. A session another
+// process creates between two targets of one pass (after s1's delivery,
+// before helper s2's claim), with a nudge fenced to it, is live to s2's
+// claim, so s2 does not adopt that nudge on a census s1's claim read before
+// the session existed.
+func TestDispatchClaimsReadTheirOwnCensusWithinAPass(t *testing.T) {
+	f := newLegBDispatchFixture(t) // s1: worker, running
+	s2 := f.createAs(t, "helper")
+	if err := f.mgr.Start(context.Background(), testOperatorIn(t, f.dir), s2.ID, "", runtime.Config{WorkDir: f.dir}); err != nil {
+		t.Fatalf("Start s2: %v", err)
+	}
+	f.fake.Activity[s2.SessionName] = time.Now().Add(-10 * time.Second)
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos := snapshot.OpenInfos(); len(infos) != 2 || infos[0].ID != f.s1.ID || infos[1].ID != s2.ID {
+		t.Fatalf("setup: snapshot order %v, want s1 then s2", infos)
+	}
+	// s1's claim meets a nudge fenced to a gone worker, so it reads the
+	// census; s2 matches a helper nudge.
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "left by a gone worker", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: "gc-gone-worker"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("helper", "for any helper", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{})); err != nil {
+		t.Fatal(err)
+	}
+	var s3 session.Info
+	sp := onNudgeProvider{Fake: f.fake, onNudge: func(name string) {
+		if name != f.s1.SessionName || s3.ID != "" {
+			return
+		}
+		s3 = f.createAs(t, "helper")
+		if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("helper", "for s3 only", "session", time.Now().Add(-time.Second), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+			t.Errorf("enqueue for s3: %v", err)
+		}
+	}}
+	delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, sp, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if s3.ID == "" {
+		t.Fatalf("setup: s1 was not delivered to (nudges %v)", f.nudgeCalls())
+	}
+	msgs := f.nudgeCalls()
+	for _, m := range msgs {
+		if strings.Contains(m, "for s3 only") {
+			t.Fatalf("helper s2 adopted the nudge fenced to live helper s3 (delivered=%d): %s", delivered, strings.Join(msgs, " | "))
+		}
+	}
+	if delivered != 2 {
+		t.Fatalf("delivered=%d nudges=%v, want s1 and s2 each delivered once", delivered, msgs)
 	}
 }

@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/session"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2508,6 +2511,47 @@ type = "task"
 	}
 }
 
+func TestCompile_ExtendsPropagatesChildContentHash(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := `
+formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`
+	childContent := `
+formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), []byte(parentContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, []byte(childContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-hash-child", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if recipe.FormulaSource != childPath {
+		t.Fatalf("FormulaSource = %q, want child path %q", recipe.FormulaSource, childPath)
+	}
+	if want := ContentHash([]byte(childContent)); recipe.ContentHash != want {
+		t.Fatalf("ContentHash = %q, want child file hash %q", recipe.ContentHash, want)
+	}
+}
+
 func TestCompile_PropagatesRootMetadata(t *testing.T) {
 	dir := t.TempDir()
 	content := `
@@ -2701,10 +2745,34 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesWhatControllerOwnedNames pins formula.Validate's
+// literal check against coordclass.ControllerOwned and CoordinationOwned
+// (architecture B, the #7742 and #7766 reviews): a step is refused exactly
+// when the bead it compiles to would be owned, for every owned type, the
+// session label and the coordination labels and wait shape in any case and
+// spacing, and for none of the work types or wisps.
+func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
+	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "op", " OP ", "message", " Message ", "task", "bug", "convoy", "molecule", "gate", "Wait", ""} {
+		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"GC:Nudge"}, {"gc:nudge-queue"}, {"order-tracking"}, {"note", "Order-Run:digest"}, {"gc:extmsg-binding"}, {"session:s-1"}, {"session:s-2"}, {"gc:wisp"}, {"gc:session-x"}, {"extmsg:binding:conv:v1:x"}} {
+			for _, meta := range []map[string]string{nil, {"session_id": "s-1"}} {
+				f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels, Metadata: meta}}}
+				refused := f.Validate() != nil
+				b := beads.Bead{Type: typ, Labels: labels, Metadata: meta}
+				if owned := coordclass.ControllerOwned(b) || coordclass.CoordinationOwned(b); refused != owned {
+					t.Errorf("type %q labels %q meta %v: Validate refused %t, owned %t", typ, labels, meta, refused, owned)
+				}
+			}
+		}
+	}
+}
+
 // TestSessionStepMarksAreTheSessionPackages pins sessionStepType,
 // sessionStepLabel and startupHealthStepType to the session package's.
 func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
-	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType {
+	if opStepType != opjournal.BeadType {
+		t.Fatalf("opStepType %q, want opjournal's %q", opStepType, opjournal.BeadType)
+	}
+	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType || convergenceStepType != "convergence" {
 		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
 	}
 }

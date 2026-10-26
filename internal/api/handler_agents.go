@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -97,7 +98,6 @@ type expandedAgent struct {
 	rig           string
 	pool          string
 	suspended     bool
-	provider      string
 	description   string
 }
 
@@ -126,7 +126,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		}}, nil
 	}
@@ -158,7 +157,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -176,7 +174,6 @@ func configuredPoolRow(a config.Agent) expandedAgent {
 		rig:           a.Dir,
 		pool:          qn,
 		suspended:     a.Suspended,
-		provider:      a.Provider,
 		description:   a.Description,
 	}
 }
@@ -245,7 +242,6 @@ func discoverUnlimitedPoolChecked(a config.Agent, poolName, cityName, sessTmpl s
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -394,9 +390,11 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
 
-// findActiveBeadForAssigneesWithFreshness uses a targeted ListQuery with
-// Limit=1 instead of broad scans so active-bead lookup stays cheap even when
-// bead counts are large.
+// findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
+// highest-priority identity: identity order first, then store order, then
+// newest first within a store. Cached reads use a targeted ListQuery with
+// Limit=1 per identity and store, stopping at the first match; live reads go
+// through findLiveActiveBeadInStores.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
@@ -418,24 +416,24 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
+	if live {
+		return findLiveActiveBeadInStores(stores, rigNames, unique)
+	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
 			query := beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
-				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			}
-			if !live {
-				if cached, ok := stores[rn].(cachedListStore); ok {
-					matches, cacheOK := cached.CachedList(query)
-					if cacheOK {
-						if len(matches) > 0 {
-							return matches[0].ID
-						}
-						continue
+			if cached, ok := stores[rn].(cachedListStore); ok {
+				matches, cacheOK := cached.CachedList(query)
+				if cacheOK {
+					if len(matches) > 0 {
+						return matches[0].ID
 					}
+					continue
 				}
 			}
 			matches, err := stores[rn].List(query)
@@ -448,6 +446,56 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	return ""
+}
+
+// findLiveActiveBeadInStores makes one live List call per store for all
+// identities, not one per identity. That bounds the calls, not the backend
+// work: how far a store narrows its call varies. DoltliteReadStore filters
+// with assignee IN (...), NativeDoltStore and BdStore issue one keyed read per
+// identity, and SQLiteStore reads the store's whole in_progress set and
+// filters it client-side. Precedence matches the cached path. Reading stops
+// once the first identity has a match, since no later store can outrank it.
+func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
+	if len(identities) == 0 {
+		return ""
+	}
+	firstByIdentity := make(map[string]string, len(identities))
+	for _, rn := range rigNames {
+		for _, match := range liveActiveWork(stores[rn], rn, identities) {
+			if _, ok := firstByIdentity[match.Assignee]; !ok {
+				firstByIdentity[match.Assignee] = match.ID
+			}
+		}
+		if firstByIdentity[identities[0]] != "" {
+			break
+		}
+	}
+	for _, identity := range identities {
+		if id := firstByIdentity[identity]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// liveActiveWork returns a store's in_progress beads assigned to any of the
+// identities, newest first. A failed read is logged and skipped, but a partial
+// result keeps the rows that did decode: one unreadable bead must not hide the
+// session's own work.
+func liveActiveWork(store beads.Store, rig string, identities []string) []beads.Bead {
+	matches, err := store.List(beads.ListQuery{
+		Assignees: identities,
+		Status:    "in_progress",
+		Live:      true,
+		Sort:      beads.SortCreatedDesc,
+	})
+	if err != nil {
+		log.Printf("api: looking up active work in rig %q: %v", rig, err)
+		if !beads.IsPartialResult(err) {
+			return nil
+		}
+	}
+	return matches
 }
 
 // providerPathCheck returns the binary name to check for PATH availability.
@@ -531,6 +579,31 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 	return provider, strings.ToUpper(provider[:1]) + provider[1:]
 }
 
+// agentProviderName is the provider an agent's sessions run under: its own,
+// else the workspace default. The SDK's control dispatcher
+// (config.IsDeterministicControlDispatcher) is providerless by design — its
+// start_command runs `gc convoy control --serve` — so it inherits none.
+func agentProviderName(a *config.Agent, cfg *config.City) string {
+	if config.IsDeterministicControlDispatcher(a) {
+		return ""
+	}
+	if a.Provider != "" {
+		return a.Provider
+	}
+	return cfg.Workspace.Provider
+}
+
+// agentProviderInfo is resolveProviderInfo for a configured agent, applying
+// agentProviderName: an agent without a provider reports none, and no
+// provider binary gates its availability.
+func agentProviderInfo(a *config.Agent, cfg *config.City) (provider, displayName string) {
+	provider = agentProviderName(a, cfg)
+	if provider == "" {
+		return "", ""
+	}
+	return resolveProviderInfo(provider, cfg)
+}
+
 // computeAgentState derives the state enum from existing agent data.
 func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
 	if suspended {
@@ -596,11 +669,7 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	}
 	count := 0
 	for _, a := range cfg.Agents {
-		provider := a.Provider
-		if provider == "" {
-			provider = cfg.Workspace.Provider
-		}
-		if provider == "claude" {
+		if agentProviderName(&a, cfg) == "claude" {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false

@@ -102,7 +102,8 @@ const codexLifecycleScanBudget = 16 << 20 // 16 MiB
 
 // codexLifecycleTypes are the event_msg payload types that decide activity,
 // quoted as they appear in a rollout line. A line naming none of them is
-// skipped without being parsed.
+// skipped without being parsed. The turn scan's line filter
+// (parseCodexTurnRecord) reuses them.
 var codexLifecycleTypes = [][]byte{
 	[]byte(`"task_started"`),
 	[]byte(`"task_complete"`),
@@ -735,4 +736,36 @@ func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]
 		return nil, err
 	}
 	return ExtractCodexTailUsage(safePath)
+}
+
+// codexHistoryUsage extracts per-invocation usage from every record the full
+// transcript parser read. The first observation of a cumulative total fixes the
+// invocation's timestamp and model: a later duplicate snapshot must not move
+// the usage onto a newer assistant message or relabel it with a newer model.
+func codexHistoryUsage(entries []codexEntry) []TailUsage {
+	var usages []TailUsage
+	seen := make(map[string]bool)
+	var model string
+	for _, entry := range entries {
+		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
+			continue
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.raw.Payload, &payload) != nil {
+			continue
+		}
+		if entry.raw.Type == "turn_context" {
+			if payload.Model != "" {
+				model = payload.Model
+			}
+			continue
+		}
+		usage, ok := codexTokenCountUsage(entry.raw, payload, model)
+		if !ok || seen[usage.MessageID] {
+			continue
+		}
+		seen[usage.MessageID] = true
+		usages = append(usages, usage)
+	}
+	return usages
 }

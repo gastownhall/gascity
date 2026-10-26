@@ -234,6 +234,33 @@ func mergeMCPDirs(sources []MCPDirSource, templateData mcpTemplateDataFunc) (MCP
 	return out, nil
 }
 
+// Filter returns a copy of the catalog holding only the servers keep accepts.
+// Servers, ByName, ByLayer and RawOrder are narrowed to match. Shadows are
+// kept as they are: they record how precedence resolved, whether or not the
+// winner is kept.
+func (c MCPCatalog) Filter(keep func(MCPServer) bool) MCPCatalog {
+	out := MCPCatalog{
+		Servers: make([]MCPServer, 0, len(c.Servers)),
+		Shadows: append([]MCPShadow(nil), c.Shadows...),
+		ByName:  make(map[string]MCPServer, len(c.Servers)),
+		ByLayer: make(map[string][]MCPServer),
+	}
+	for _, server := range c.Servers {
+		if !keep(server) {
+			continue
+		}
+		out.Servers = append(out.Servers, server)
+		out.ByName[server.Name] = server
+		out.ByLayer[server.Layer] = append(out.ByLayer[server.Layer], server)
+	}
+	for _, name := range c.RawOrder {
+		if _, kept := out.ByName[name]; kept {
+			out.RawOrder = append(out.RawOrder, name)
+		}
+	}
+	return out
+}
+
 // NormalizeMCPServer returns the deterministic behavioral representation used
 // for equality and hashing.
 func NormalizeMCPServer(server MCPServer) NormalizedMCPServer {

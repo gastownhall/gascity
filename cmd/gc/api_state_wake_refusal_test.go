@@ -23,7 +23,8 @@ import (
 // hold-transparent (ga-5736js); held OPEN work is neither wake readiness nor
 // keep-awake work, so the latch still refuses. Kills each arm, a false refusal
 // for a session the controller starts, and a will_start claimed for a seat
-// waiting on demand.
+// waiting on demand. An open respawn circuit refuses only under legacy, the
+// one reconciler that reads it: under v2 it is stale state.
 func TestWakeStartRefusal(t *testing.T) {
 	for name, tc := range map[string]struct {
 		agent     config.Agent
@@ -32,6 +33,7 @@ func TestWakeStartRefusal(t *testing.T) {
 		episode   bool
 		work      bool
 		heldWork  string // status of assigned work parked on hold:external; "" for none
+		v2        bool   // the controller latched v2
 		want      string
 		uncertain bool
 	}{
@@ -41,6 +43,7 @@ func TestWakeStartRefusal(t *testing.T) {
 		"asleep pool seat":         {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker", PoolManaged: true, MetadataState: "asleep"}, uncertain: true},
 		"pinned asleep pool seat":  {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker", PoolManaged: true, MetadataState: "asleep", PinAwake: "true"}, uncertain: true},
 		"open circuit":             {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", SessionCircuitState: sessionpkg.SessionCircuitStateOpen}, want: "circuit breaker is open"},
+		"open circuit under v2":    {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", SessionCircuitState: sessionpkg.SessionCircuitStateOpen}, v2: true},
 		"pinned latch":             {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle", PinAwake: "true"}},
 		"latch with work":          {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}, work: true},
 		"startable":                {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker"}},
@@ -72,6 +75,9 @@ func TestWakeStartRefusal(t *testing.T) {
 			cs := &controllerState{cityPath: t.TempDir(), cfg: &config.City{Agents: []config.Agent{tc.agent}, Rigs: tc.rigs}, cityBeadStore: store, sp: runtime.NewFake()}
 			if name == "suspended city" {
 				cs.cfg.Workspace.Suspended = true
+			}
+			if tc.v2 {
+				cs.wake = &controllerWake{planner: &planner{}}
 			}
 			if tc.work {
 				if _, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: "gc-1"}); err != nil {

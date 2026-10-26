@@ -522,11 +522,13 @@ if [ -d "$quarantine_dir" ]; then
   for marker in "$quarantine_dir"/*; do
     [ -f "$marker" ] || continue
     q_db=$(basename "$marker")
-    # compact/run.sh writes transient files into this same directory:
-    # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
-    # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
-    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
-    # and a spurious exit 2.
+    # compact/run.sh stages transient files in this same directory as
+    # dotfiles, which the glob above skips: `.$db.tmp.XXXXXX`
+    # (write_compact_marker) and `.$db.probe.XXXXXX`
+    # (ensure_compact_marker_writable). Earlier releases staged them without
+    # the leading dot, so an interrupted pre-upgrade run can leave a
+    # `$db.tmp.*` or `$db.probe.*` here. Neither is a marker; reading one
+    # yields a phantom entry and a spurious exit 2.
     case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
     # Anchor each key to column 1 with index()==1 — the same reader idiom
     # compact/run.sh uses; the substr offset skips the "reason="/"created_at="

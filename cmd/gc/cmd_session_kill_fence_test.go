@@ -28,6 +28,17 @@ type killHookProvider struct {
 	afterStop  func()
 }
 
+// ObserveLivenessWithError and ObserveLivenessSince read the fixture's Fake,
+// whose sessions map is the runtime: every read is fresh, as tmux's is, so
+// the kill can confirm a runtime gone (runtime.FreshReadable).
+func (p *killHookProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.FullFake{Fake: p.Provider.(*runtime.Fake)}.ObserveLivenessWithError(name, processNames)
+}
+
+func (p *killHookProvider) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
+	return p.ObserveLivenessWithError(name, processNames)
+}
+
 func (p *killHookProvider) Stop(name string) error {
 	if p.beforeStop != nil {
 		p.beforeStop()
@@ -558,7 +569,7 @@ func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionSuspend = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	final := mustGetBead(t, store, bead.ID)

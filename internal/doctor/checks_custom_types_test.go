@@ -337,8 +337,8 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	runBD("init", "--non-interactive", "-p", "tst", "--skip-hooks", "--skip-agents")
 	runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
 
-	// Locate the embedded dolt DB directory the same way production code
-	// does (internal/beads.(*BdStore).embeddedDoltDir), rather than
+	// Locate the embedded dolt DB directory from metadata.json's
+	// dolt_database (bd's own layout: .beads/embeddeddolt/<db>), rather than
 	// hand-deriving the sanitized database name from the prefix.
 	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
 	dbName, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
@@ -838,6 +838,7 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"agent": true, "role": true, "rig": true,
 		"session": true, "spec": true, "convergence": true,
 		"step": true, "startup-health-episode": true,
+		"op": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {

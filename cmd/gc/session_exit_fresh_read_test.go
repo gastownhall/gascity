@@ -101,11 +101,11 @@ func TestExitAccrualAccruesNothingOnAFailedFreshRead(t *testing.T) {
 		check   func(sessionpkg.Info, *sessionpkg.Store) bool
 	}{
 		{"rapid crash", 10 * time.Second, func(i sessionpkg.Info, f *sessionpkg.Store) bool {
-			_, stab := checkStability(i, nil, false, newDrainTracker(), f, clk, nil, nil, nil)
+			_, stab := checkStability(i, nil, false, newDrainTracker(), f, t.TempDir(), clk, nil, nil, nil)
 			return stab
 		}},
 		{"churn", time.Minute, func(i sessionpkg.Info, f *sessionpkg.Store) bool {
-			_, churn := checkChurn(i, nil, false, newDrainTracker(), f, clk)
+			_, churn := checkChurn(i, nil, false, newDrainTracker(), f, t.TempDir(), clk)
 			return churn
 		}},
 	} {

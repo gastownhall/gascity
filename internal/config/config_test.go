@@ -130,7 +130,7 @@ func TestDaemonSessionReconcilerModeParses(t *testing.T) {
 		alias bool
 		ok    bool
 	}{
-		{raw: "", mode: SessionReconcilerLegacy, ok: true},
+		{raw: "", mode: "", ok: true}, // unset: the controller latch resolves it
 		{raw: "legacy", mode: SessionReconcilerLegacy, ok: true},
 		{raw: " Legacy ", mode: SessionReconcilerLegacy, ok: true},
 		{raw: "v2", mode: SessionReconcilerV2, ok: true},
@@ -2803,6 +2803,31 @@ esac
 `)
 	if strings.TrimSpace(out) != "2" {
 		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (routed_to demand)", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryDoesNotCountStructuralLatches(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	rows := `[
+{"id":"expanded","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}},
+{"id":"scope","metadata":{"gc.kind":"scope"}},
+{"id":"spec","metadata":{"gc.kind":"spec"}},
+{"id":"spaced","metadata":{"gc.kind":" workflow ","gc.workflow_expanded":" true "}},
+{"id":"root-only","metadata":{"gc.kind":"workflow"}},
+{"id":"worker"}
+]`
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), map[string]string{"DEMAND_ROWS": rows}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*) printf '%s\n' "$DEMAND_ROWS" ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("worker demand = %q, want 2 (worker and executable root-only workflow)", out)
 	}
 }
 
@@ -5832,6 +5857,23 @@ func TestMailConfigUnreadRetentionTTLParsesFromTOML(t *testing.T) {
 }
 
 // --- WispGC config tests ---
+
+// The work ladder is on unless [daemon] work_ladder says "off" (the
+// rollback to the three backstops), however it is spelled.
+func TestDaemonConfig_WorkLadderEnabled(t *testing.T) {
+	for raw, want := range map[string]bool{"": true, "on": true, "off": false, "OFF": false, "Off": false, "bogus": true} {
+		if got := (DaemonConfig{WorkLadder: raw}).WorkLadderEnabled(); got != want {
+			t.Errorf("work_ladder = %q: enabled %v, want %v", raw, got, want)
+		}
+	}
+	cfg, err := Parse([]byte("[workspace]\nname = \"c\"\n\n[daemon]\nwork_ladder = \"off\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.WorkLadderEnabled() {
+		t.Error(`[daemon] work_ladder = "off" parsed as enabled`)
+	}
+}
 
 func TestDaemonConfig_WispGCDisabledByDefault(t *testing.T) {
 	d := DaemonConfig{}

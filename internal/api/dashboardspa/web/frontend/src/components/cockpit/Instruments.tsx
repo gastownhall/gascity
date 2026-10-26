@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { pipelineWidths, type PipelineSegment, type RunRingModel } from './model';
 
 export function InstrumentNote({ children }: { children: ReactNode }) {

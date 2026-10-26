@@ -22,6 +22,17 @@ import (
 const (
 	drainManifestMetadataKey = beadmeta.DrainManifestMetadataKey
 	defaultDrainMaxUnits     = 100
+
+	// drainPredecessorFailedAction is the ControlResult action of a drain
+	// closed failed, without expanding, because a blocking predecessor failed.
+	drainPredecessorFailedAction = "drain-predecessor-failed"
+	// drainPredecessorFailedReason is that drain's gc.failure_reason.
+	drainPredecessorFailedReason = "predecessor_failed"
+	// drainPredecessorFailedCloseReason is stamped as close_reason on that
+	// drain. It is prose rather than a token for the same reason as
+	// scopeAbortSkippedCloseReason: bd rejects close reasons shorter than 20
+	// characters.
+	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
 )
 
 type drainManifest struct {
@@ -65,6 +76,23 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
+	}
+	if strings.TrimSpace(bead.Metadata[drainManifestMetadataKey]) == "" {
+		failedID, err := failedDrainPredecessor(store, bead, rootID)
+		if err != nil {
+			return ControlResult{}, err
+		}
+		if failedID != "" {
+			opts.tracef("process-control bead=%s kind=drain close reason=%s predecessor=%s", bead.ID, drainPredecessorFailedReason, failedID)
+			return closeDrainControl(store, bead.ID, map[string]string{
+				beadmeta.DrainStateMetadataKey:     beadmeta.DrainStateFailed,
+				beadmeta.OutcomeMetadataKey:        beadmeta.OutcomeFail,
+				beadmeta.FailureClassMetadataKey:   beadmeta.FailureClassHard,
+				beadmeta.FailureReasonMetadataKey:  drainPredecessorFailedReason,
+				beadmeta.FailureSubjectMetadataKey: failedID,
+				"close_reason":                     drainPredecessorFailedCloseReason,
+			}, drainPredecessorFailedAction, opts)
+		}
 	}
 	root, err := store.Get(rootID)
 	if err != nil {
@@ -184,6 +212,48 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		return completeDrain(store, reloaded, opts)
 	}
 	return ControlResult{Processed: true, Action: "drain-expanded", Created: totalCreated}, nil
+}
+
+// failedDrainPredecessor returns the ID of a direct blocking predecessor of
+// the drain, in the drain's own workflow, that closed with a failed outcome
+// (beadOutcomeFailed), or "" when there is none.
+//
+// A `needs` edge is ordering-only: a closed predecessor satisfies it whatever
+// gc.outcome it carries, so a drain becomes ready behind a failed step. A
+// drain then mints side-effectful work with no agent deciding to — exclusive
+// member reservations, unit convoys, item workflow roots that claim
+// worktrees — so it checks its predecessors' outcomes before acting, as a
+// safety net under formulas that do not scope the failure (gc.on_fail =
+// abort_scope) themselves. A drain behind a failed predecessor closes failed,
+// naming it: every reader of the drain's outcome (the steps after it, a drain
+// chained behind it, workflow-finalize) reads skipped as no failure, so a
+// skipped drain would let the run finalize pass and close its source as done.
+// Only same-root predecessors are judged; a blocker outside the workflow (or
+// not resolvable from this store) is not this workflow's verdict to read.
+func failedDrainPredecessor(store beads.Store, drain beads.Bead, rootID string) (string, error) {
+	deps, err := store.DepList(drain.ID, "down")
+	if err != nil {
+		return "", fmt.Errorf("%s: listing drain predecessors: %w", drain.ID, err)
+	}
+	for _, dep := range deps {
+		if dep.Type != "blocks" || dep.DependsOnID == "" || dep.DependsOnID == rootID {
+			continue
+		}
+		predecessor, err := store.Get(dep.DependsOnID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return "", fmt.Errorf("%s: loading drain predecessor %s: %w", drain.ID, dep.DependsOnID, err)
+		}
+		if predecessor.Status != "closed" || strings.TrimSpace(predecessor.Metadata[beadmeta.RootBeadIDMetadataKey]) != rootID {
+			continue
+		}
+		if beadOutcomeFailed(predecessor) {
+			return predecessor.ID, nil
+		}
+	}
+	return "", nil
 }
 
 func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID, itemFormula string, opts ProcessOptions) (drainManifest, []beads.Bead, error) {
@@ -1271,15 +1341,19 @@ func drainUnitConvoyByKey(store beads.Store, unitKey string, opts ProcessOptions
 		owner beads.Store
 	)
 	err := walkDrainUnitConvoyLegs(store, opts, func(probe beads.Store) (bool, error) {
-		existing, err := probe.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: unitKey}, 1, beads.WithBothTiers)
+		existing, err := probe.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: unitKey}, 0, beads.WithBothTiers)
 		if err != nil {
 			return false, err
 		}
-		if len(existing) == 0 {
-			return false, nil
+		// Only a convoy is a unit convoy: another bead carrying the key (a
+		// task's) is no mint to resume (architecture B).
+		for _, b := range existing {
+			if b.Type == "convoy" {
+				found, owner = b, probe
+				return true, nil
+			}
 		}
-		found, owner = existing[0], probe
-		return true, nil
+		return false, nil
 	})
 	if err != nil {
 		return beads.Bead{}, nil, false, err
@@ -1402,7 +1476,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	if err := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); err != nil {
 		return "", false, err
 	}
-	existing, err := store.ListByMetadata(map[string]string{beadmeta.ItemRootKeyMetadataKey: row.ItemRootKey}, 0, beads.IncludeClosed, beads.WithBothTiers)
+	existing, err := sourceworkflow.KeyedRoots(store, beadmeta.ItemRootKeyMetadataKey, row.ItemRootKey, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
 	}
@@ -1515,7 +1589,7 @@ func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string)
 	if store == nil || itemRootKey == "" {
 		return nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.ItemRootKeyMetadataKey: itemRootKey}, 0, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.ItemRootKeyMetadataKey, itemRootKey, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("%s: looking up failed drain item roots for key %s: %w", controlID, itemRootKey, err)
 	}

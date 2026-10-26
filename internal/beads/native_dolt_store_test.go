@@ -270,6 +270,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			if bead.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
+			if bead.SourceStatus != string(tt.upstream) {
+				t.Fatalf("SourceStatus = %q, want bd's %q", bead.SourceStatus, tt.upstream)
+			}
 		})
 	}
 }

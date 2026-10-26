@@ -527,7 +527,8 @@ type effectFacts struct {
 	Transition *drainTransition // legacy's drain telemetry
 	Work       *workVerdict     // a worktree verdict for the work item's backoff
 	// Noted is a fresh read that found the row's runtime alive and Current,
-	// which the planner notes in the observation cache (v5 O4).
+	// or (Gone) found nothing under its name, which the planner notes in the
+	// observation cache (v5 O4; v5.10d (a)).
 	Noted *notedRuntime
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
@@ -558,10 +559,14 @@ type classifiedRuntime struct {
 	Recycle bool
 }
 
-// notedRuntime is a runtime name a fresh read issued at At found alive.
+// notedRuntime is a runtime name a fresh read issued at At found alive, or
+// absent when Gone. An alive note that only Clears is written only over a
+// name the cache reads unlisted (applyFacts: goneNoted).
 type notedRuntime struct {
-	Name string
-	At   time.Time
+	Name   string
+	At     time.Time
+	Gone   bool
+	Clears bool
 }
 
 func (f effectFacts) empty() bool {
@@ -739,6 +744,11 @@ type tx struct {
 	facts       effectFacts
 	pass        any // the concluded step's Pass, to its section's Call
 	view        txView
+	// fresh is the latest fresh read, when it found the name absent on
+	// every hop (rtAbsent) or the row's runtime alive and Current; zero once
+	// a later read finds anything else or a Call starts or stops a runtime.
+	// The settlement publishes it (CONTRACT O4, v5.10g).
+	fresh notedRuntime
 }
 
 // run runs the sections, each under the row's mutation lock.
@@ -787,9 +797,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		}
 		switch sec.callKind {
 		case callStart:
-			t.started = true
+			t.started, t.fresh = true, notedRuntime{}
 		case callStop:
-			t.started, t.stopped = false, true // a stopped runtime writes nothing more
+			t.started, t.stopped, t.fresh = false, true, notedRuntime{} // a stopped runtime writes nothing more
 		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
@@ -802,8 +812,28 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 	}
+	t.noteFresh()
 	s.Facts = t.facts
 	return s
+}
+
+// noteFresh publishes the latest fresh read (CONTRACT O4, amended in
+// v5.10g): the planner notes the name gone at the read's issue time, so the
+// next pass reads what this effect read rather than deciding again on an
+// inventory that lags it; or, where the cache reads the name unlisted (an
+// effect's gone note standing), the row's runtime alive and Current, which
+// clears it. Over an inventory that
+// already lists the runtime an alive note is not written: its listing would
+// not be the pass's enrichment, so the row would read its identity unread,
+// and A9 would hold it until the next pass (#7799 review). A
+// note the effect made itself at or after the read (a start's commit)
+// stands; a later inventory pass overrides either.
+func (t *tx) noteFresh() {
+	f := t.fresh
+	if f.At.IsZero() || f.Name == "" || t.facts.Noted != nil && !t.facts.Noted.At.Before(f.At) {
+		return
+	}
+	t.facts.Noted = &f
 }
 
 // section runs sec's attempts; end ends the effect with the settlement.
@@ -945,6 +975,14 @@ func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 			return refused(cause), false
 		}
 		t.view.RT = rt
+		switch {
+		case rt.Class == rtAbsent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Gone: true}
+		case rt.Alive() && compareIdentity(t.expect, rt.Identity) == identityCurrent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Clears: true}
+		default:
+			t.fresh = notedRuntime{}
+		}
 	}
 	if t.needs.Legs != 0 || t.needs.Idle {
 		if cause := t.readFence(ctx); cause != "" {

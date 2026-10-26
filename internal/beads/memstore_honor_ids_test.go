@@ -202,4 +202,5 @@ func TestMemStoreHonoringIDsPassesStoreConformance(t *testing.T) {
 	beadstest.RunSequentialIDTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunPinnedIDDuplicateConformance(t, func(*testing.T) beads.Store { return factory() })
 }

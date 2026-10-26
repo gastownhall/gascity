@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -398,10 +399,16 @@ func opaqueGenerationID(raw string) string {
 	return sha256Hex([]byte("generation\x00" + raw))
 }
 
-func structuredFallbackHistory(sessionID, providerSessionID, activity string) *SessionStructuredHistory {
+func structuredFallbackHistory(info session.Info, activity string) *SessionStructuredHistory {
+	sessionID := info.ID
 	if sessionID == "" {
 		sessionID = "unknown"
 	}
+	logicalConversationID := info.LogicalConversationID()
+	if logicalConversationID == "" {
+		logicalConversationID = sessionID
+	}
+	providerSessionID := info.SessionKey
 	if providerSessionID == "" {
 		providerSessionID = sessionID
 	}
@@ -411,7 +418,7 @@ func structuredFallbackHistory(sessionID, providerSessionID, activity string) *S
 	streamID := "fallback:" + sessionID
 	return &SessionStructuredHistory{
 		GCSessionID:           sessionID,
-		LogicalConversationID: sessionID,
+		LogicalConversationID: logicalConversationID,
 		ProviderSessionID:     providerSessionID,
 		TranscriptStreamID:    streamID,
 		Generation: SessionStructuredGeneration{

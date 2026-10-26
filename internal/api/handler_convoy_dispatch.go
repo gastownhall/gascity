@@ -8,9 +8,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -289,9 +289,9 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 }
 
 // isWorkflowRoot reports a workflow root: gc.kind=workflow, never on a
-// session row, whose close is the session verbs' (mc-dkblm).
+// controller-owned row, whose close is its owner's (mc-dkblm, architecture B).
 func isWorkflowRoot(bead beads.Bead) bool {
-	return strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow && !session.IsSessionBeadOrRepairable(bead)
+	return strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow && !coordclass.ControllerOwned(bead)
 }
 
 // isGraphConvoyBead reports whether a bead is a formula-compiled graph

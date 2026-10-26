@@ -408,7 +408,7 @@ func (s *touchingStore) ConditionalWritesResolveTarget() beads.Store { return s.
 func refusalFixture(t *testing.T) (cs *controllerState, mem *beads.MemStore, backing *touchingStore, cached *beads.CachingStore, convoy, member beads.Bead) {
 	t.Helper()
 	mem = beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	convoy, _ = mem.Create(beads.Bead{Title: "batch", Type: "convoy"})
@@ -814,6 +814,7 @@ func TestQuiescentCloseReadsNothingAndConvergesAfterResume(t *testing.T) {
 		quiesceOnDispatch bool
 	}{
 		{name: "local close", actor: cacheLocalActor},
+		{name: "local close run after the city went quiescent", actor: cacheLocalActor, quiesceOnDispatch: true},
 		{name: "foreign close run after the city went quiescent", actor: "bd-close", quiesceOnDispatch: true},
 		{name: "scan close", actor: cacheReconcileActor},
 	} {

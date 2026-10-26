@@ -1564,6 +1564,56 @@ func TestUnknownOperation_exit2(t *testing.T) {
 	}
 }
 
+// start cannot be an unknown operation, so its exit 2 (e.g. a `set -e` wrapper
+// whose grep or jq exits 2) is a failed start: Start reports it and runs `stop`
+// to tear down whatever box the adapter already created.
+func TestStart_exit2IsFailureAndCleansUp(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	script := writeScript(t, dir, `
+op="$1"; name="$2"
+case "$op" in
+  start)      cat >/dev/null; echo "start $name" >> "`+logf+`"; exit 2 ;;
+  stop)       echo "stop $name" >> "`+logf+`" ;;
+  is-running) echo false ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "worker", runtime.Config{Command: "agent"})
+	if err == nil {
+		t.Fatal("Start with a start op exiting 2 = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "start worker") {
+		t.Errorf("Start error = %v, want the adapter's start failure", err)
+	}
+	if log := readLog(t, logf); !strings.Contains(log, "start worker\nstop worker\n") {
+		t.Errorf("failed start must run stop for the same name; ops log:\n%s", log)
+	}
+}
+
+// provision runs only for a pack that declared proc.provision, so a declared op
+// cannot be unknown: its exit 2 is a failed provision, not a silent success.
+func TestProvision_exit2IsFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; exit 2 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	if !p.supportsSeparableLaunch() {
+		t.Fatal("supportsSeparableLaunch = false; want true for a proc.provision pack")
+	}
+
+	if err := p.provisionBox(context.Background(), "worker", runtime.Config{Command: "agent"}); err == nil {
+		t.Fatal("provisionBox with a provision op exiting 2 = nil, want an error")
+	}
+}
+
 func TestProvider_StartCancellationTerminatesCooperativeScript(t *testing.T) {
 	for _, termExitCode := range []int{0, 2} {
 		t.Run(fmt.Sprintf("term_exit_%d", termExitCode), func(t *testing.T) {
@@ -1943,3 +1993,36 @@ func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ runtime.Provider = (*Provider)(nil)
+
+// A pack without the exec connection cannot fence input, so a ctx-fenced
+// DismissKnownDialogs is refused before the script runs any op but the
+// handshake, directly and through the seam-backed wrapper
+// (RUNTIME-CONTRACT-009). Unfenced, it still runs the script to peek.
+func TestDismissKnownDialogsRefusesCtxFence(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := writeScript(t, dir, `echo "$1" >> `+calls+`
+echo "$ "
+`)
+	fenced := runtime.WithInputFence(context.Background(), runtime.InputFence{Generation: 1, Epoch: 1, Token: "t"})
+	for name, p := range map[string]runtime.DialogProvider{
+		"raw":         NewProvider(script),
+		"seam-backed": NewSeamBacked(script).(runtime.DialogProvider),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = os.Remove(calls)
+			if err := p.DismissKnownDialogs(fenced, "sess", time.Second); !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+				t.Fatalf("fenced DismissKnownDialogs = %v, want ErrInputFenceUnsupported", err)
+			}
+			if data, err := os.ReadFile(calls); err == nil && strings.TrimSpace(strings.ReplaceAll(string(data), "protocol\n", "")) != "" {
+				t.Fatalf("script ran %q under a fence", data)
+			}
+			if err := p.DismissKnownDialogs(context.Background(), "sess", 200*time.Millisecond); err != nil {
+				t.Fatalf("unfenced DismissKnownDialogs = %v", err)
+			}
+			if data, _ := os.ReadFile(calls); len(data) == 0 {
+				t.Fatal("unfenced DismissKnownDialogs never ran the script, want a peek")
+			}
+		})
+	}
+}

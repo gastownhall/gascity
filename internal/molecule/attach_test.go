@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -939,4 +940,185 @@ func (s *attachFailOnceDepStore) DepAdd(issueID, dependsOnID, depType string) er
 		return s.err
 	}
 	return s.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
+func TestAttachDuplicateReplayMapsStepsWithinSelectedAttachmentOnly(t *testing.T) {
+	for _, order := range [][]string{{"a", "b"}, {"b", "a"}} {
+		t.Run(strings.Join(order, "-then-"), func(t *testing.T) {
+			store := beads.NewMemStore()
+			root := setupWorkflow(t, store)
+			control := setupWorkflowChild(t, store, root.ID, "Control")
+			ctx := context.Background()
+
+			attached := map[string]*AttachResult{}
+			for _, key := range order {
+				result, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: key})
+				if err != nil {
+					t.Fatalf("attach %s: %v", key, err)
+				}
+				attached[key] = result
+			}
+			first := attached[order[0]]
+			for _, id := range []string{first.IDMapping["attempt.run"], first.RootID} {
+				if err := store.Close(id); err != nil {
+					t.Fatalf("close %s: %v", id, err)
+				}
+			}
+
+			for _, key := range order {
+				want := attached[key]
+				got, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: key})
+				if err != nil {
+					t.Fatalf("replay %s: %v", key, err)
+				}
+				if !got.Duplicate || got.RootID != want.RootID {
+					t.Fatalf("replay %s: duplicate=%v root=%s, want duplicate of %s", key, got.Duplicate, got.RootID, want.RootID)
+				}
+				if got.IDMapping["attempt.run"] != want.IDMapping["attempt.run"] {
+					t.Errorf("replay %s: attempt.run mapped to %s, want %s from its own attachment %s",
+						key, got.IDMapping["attempt.run"], want.IDMapping["attempt.run"], want.RootID)
+				}
+			}
+		})
+	}
+}
+
+func TestAttachDuplicateReplayLegacyAttachmentNeverAdoptsAnotherAttachmentsStep(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		closeLegacy bool
+		wantOwn     bool
+	}{
+		{name: "open legacy step maps to itself", wantOwn: true},
+		{name: "closed legacy step stays unmapped", closeLegacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			root := setupWorkflow(t, store)
+			control := setupWorkflowChild(t, store, root.ID, "Control")
+			ctx := context.Background()
+
+			current, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "current"})
+			if err != nil {
+				t.Fatalf("attach current: %v", err)
+			}
+			legacy, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "legacy"})
+			if err != nil {
+				t.Fatalf("attach legacy: %v", err)
+			}
+			legacyStep := legacy.IDMapping["attempt.run"]
+			if err := store.SetMetadata(legacyStep, beadmeta.AttachRootIDMetadataKey, ""); err != nil {
+				t.Fatalf("strip attach root from %s: %v", legacyStep, err)
+			}
+			if tc.closeLegacy {
+				if err := store.Close(legacyStep); err != nil {
+					t.Fatalf("close %s: %v", legacyStep, err)
+				}
+			}
+
+			got, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "legacy"})
+			if err != nil {
+				t.Fatalf("replay legacy: %v", err)
+			}
+			if !got.Duplicate || got.RootID != legacy.RootID {
+				t.Fatalf("replay legacy: duplicate=%v root=%s, want duplicate of %s", got.Duplicate, got.RootID, legacy.RootID)
+			}
+			mapped := got.IDMapping["attempt.run"]
+			if mapped == current.IDMapping["attempt.run"] {
+				t.Fatalf("replay legacy: attempt.run mapped to %s, owned by attachment %s", mapped, current.RootID)
+			}
+			want := ""
+			if tc.wantOwn {
+				want = legacyStep
+			}
+			if mapped != want {
+				t.Fatalf("replay legacy: attempt.run mapped to %q, want %q", mapped, want)
+			}
+		})
+	}
+}
+
+func TestAttachDuplicateReplayRejectsAmbiguousStepWithinAttachment(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	ctx := context.Background()
+
+	first, err := Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title: "stray run",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:   root.ID,
+			beadmeta.AttachRootIDMetadataKey: first.RootID,
+			beadmeta.StepRefMetadataKey:      "attempt.run",
+		},
+	}); err != nil {
+		t.Fatalf("create stray step: %v", err)
+	}
+
+	_, err = Attach(ctx, store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
+	if err == nil || !strings.Contains(err.Error(), "matches beads") {
+		t.Fatalf("replay with two beads for one step = %v, want ambiguity error", err)
+	}
+}
+
+func TestAttachStampsAttachRootOnEveryCreatedStep(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	result, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a"})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	for stepID, beadID := range result.IDMapping {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			t.Fatalf("get %s: %v", beadID, err)
+		}
+		want := result.RootID
+		if beadID == result.RootID {
+			want = ""
+		}
+		if got := bead.Metadata[beadmeta.AttachRootIDMetadataKey]; got != want {
+			t.Errorf("step %s bead %s %s = %q, want %q", stepID, beadID, beadmeta.AttachRootIDMetadataKey, got, want)
+		}
+		if got := bead.Metadata[beadmeta.MoleculeIDMetadataKey]; got != "" {
+			t.Errorf("step %s bead %s %s = %q, want unset", stepID, beadID, beadmeta.MoleculeIDMetadataKey, got)
+		}
+		if got := beadmeta.ResolveRunID(bead.Metadata, bead.ID, ""); got != root.ID {
+			t.Errorf("step %s bead %s ResolveRunID = %q, want workflow root %s", stepID, beadID, got, root.ID)
+		}
+	}
+}
+
+func TestAttachGraphApplyPlanReferencesAttachRootOnEveryStep(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	root := setupWorkflow(t, store.MemStore)
+	control := setupWorkflowChild(t, store.MemStore, root.ID, "Control")
+	if _, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a"}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if store.calls != 1 || store.plan == nil {
+		t.Fatalf("graph apply calls = %d, want 1", store.calls)
+	}
+	for _, node := range store.plan.Nodes {
+		want := "attempt"
+		if node.Key == "attempt" {
+			want = ""
+		}
+		if got := node.MetadataRefs[beadmeta.AttachRootIDMetadataKey]; got != want {
+			t.Errorf("node %s metadata ref %s = %q, want %q", node.Key, beadmeta.AttachRootIDMetadataKey, got, want)
+		}
+		if _, ok := node.Metadata[beadmeta.MoleculeIDMetadataKey]; ok {
+			t.Errorf("node %s carries %s, want unset", node.Key, beadmeta.MoleculeIDMetadataKey)
+		}
+	}
 }

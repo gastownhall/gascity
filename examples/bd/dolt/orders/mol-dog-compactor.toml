@@ -6,3 +6,6 @@ trigger = "cooldown"
 interval = "2h"
 exec = "gc dolt compact"
 timeout = "24h"
+# Dolt-server work: never dispatched for a scope on another backend (http,
+# postgres, doltlite); gc reports it there as inapplicable, not failed.
+requires_backend = ["dolt"]

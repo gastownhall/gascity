@@ -95,7 +95,8 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // DrainReason; for a Sleep entry the row's sleep intent, then idle, then
 // suspended (a configured named row of a suspended city), else
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
-// has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
+// has none. Legacy's live-claim veto is read at the orphaned signal (L5,
+// v5.10a B), not here.
 // drainableLiveness reports a runtime A20 may begin a drain over: alive, or
 // for a named Drain row a dead runtime, which A21 never closes
 // (deadRuntimeCloses excludes named rows; mc-q64l4)
@@ -240,8 +241,11 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // legacy's lowest-bead-id membership) is the agent's own idle ack, and
 // stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
 // its half voided, and the seat stays warm, whatever the allocation
-// wants of it (Keep, Sleep or Drain, as legacy cancels them), while its
-// runtime is alive. A request the row carries outranks the floor: the
+// wants of it (Keep, Sleep or Drain, as legacy cancels them). Unlike
+// legacy, which cancels only on a live runtime, a dead floor seat's ack
+// cancels too: A12 recycles the dead pane in place (mc-7is1r), where
+// legacy stops the seat and the floor recreates it. A request the row
+// carries outranks the floor: the
 // controller's own drains, and an operator's `gc runtime drain`
 // (stopRequest.Operator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
@@ -255,12 +259,22 @@ func armAck(r *rowFacts) (intent, bool) {
 	}
 	// The floor check stays after the stale-ack void: that check records
 	// the runtime rest the probing kind needs, so a cancel decided first
-	// would defer at admission (rests-missing). Legacy cancels only on a
-	// live runtime: a dead floor seat's ack signals, and the seat is
-	// stopped and recreated.
-	// TODO(#7626, mc-7is1r): when A12 restarts a dead pane in place, lift
-	// the liveness gate and assert the seat runs again.
-	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness == livenessAlive {
+	// would defer at admission (rests-missing). A floor seat's ack over a
+	// corpse no token attributes is signaled like any other, not canceled:
+	// its stop finalizes the row and the floor recreates the seat (CONTRACT
+	// v5.10w, §12.2 row 66). Liveness unknown here is that case, since A9
+	// holds every other unknown row (ackedOverCorpse). A cancel would void
+	// the ack and A9 would then hold the row over the corpse for good, and no
+	// restart in place can attribute the corpse.
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness != livenessUnknown {
+		if r.entry.Liveness == livenessDead {
+			// A dead floor seat proposes nothing (§12.2 row 66): A18's
+			// recycle restarts it in place with the ack still on the row, so
+			// its death is a drain's (nothing accrues), and the PreWake
+			// clears the stop request. A cancel first would void the ack and
+			// account a recent wake's death as a crash (mc-7is1r review).
+			return intent{}, false
+		}
 		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
 	reason := req.Reason
@@ -276,11 +290,16 @@ func armAck(r *rowFacts) (intent, bool) {
 // read counts: a runtime replaced between them is newer still. The pass
 // reads no creation, so there it records the rest and reports false; so it
 // does on a backend that does not report one, and for an ack without a
-// time, which armAck voids itself.
+// time, which armAck voids itself. A Foreign object, another row's runtime,
+// is never this row's same-generation replacement (CONTRACT v5.10k-2): an
+// acked drain under a later squatter goes on to its finalize.
 func (r *rowFacts) ackPredatesRuntime(at time.Time) bool {
 	r.rests |= restRuntime
 	if r.fresh == nil || at.IsZero() {
 		return false
+	}
+	if r.fresh.Same && compareIdentity(r.row.Info, r.fresh.Identity) == identityForeign {
+		return false // another row's runtime is no replacement of this row's (v5.10k-2)
 	}
 	for _, l := range []runtime.Liveness{r.fresh.Live, r.fresh.Again} {
 		created, err := strconv.ParseInt(l.ObjectCreated, 10, 64)

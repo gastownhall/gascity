@@ -41,10 +41,41 @@ type activeBeadQueryStore struct {
 }
 
 func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Assignee != "" && query.Status == "in_progress" {
+	if query.Status == "in_progress" && (query.Assignee != "" || len(query.Assignees) > 0) {
 		s.queries = append(s.queries, query)
 	}
 	return s.Store.List(query)
+}
+
+// activeBeadErrStore returns err from every List alongside whatever rows the
+// wrapped store matched, standing in for a live read that fails outright or
+// decodes only some rows.
+type activeBeadErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s activeBeadErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	return rows, s.err
+}
+
+// addActiveWork creates an in_progress bead assigned to assignee in store and
+// returns its ID.
+func addActiveWork(t *testing.T, store beads.Store, assignee string) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Title: "assigned work"})
+	if err != nil {
+		t.Fatalf("Create(%s work): %v", assignee, err)
+	}
+	status := "in_progress"
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(%s): %v", b.ID, err)
+	}
+	return b.ID
 }
 
 func TestAgentList(t *testing.T) {
@@ -1799,5 +1830,121 @@ func TestAgentListProvenancePoolInheritance(t *testing.T) {
 		if item.Pack != "gastown" {
 			t.Errorf("Items[%d] (%s) Pack = %q, want %q", i, item.Name, item.Pack, "gastown")
 		}
+	}
+}
+
+func TestLiveActiveBeadBatchesIdentitiesAndPreservesPrecedence(t *testing.T) {
+	state := newFakeState(t)
+	a := &activeBeadQueryStore{Store: &beads.MemStore{IDPrefix: "a"}}
+	z := &activeBeadQueryStore{Store: &beads.MemStore{IDPrefix: "z"}}
+	state.stores = map[string]beads.Store{"a": a, "z": z}
+	srv := New(state)
+	identities := []string{"session-id", "runtime-name", "alias", "template"}
+	assertReads := func() {
+		t.Helper()
+		for name, store := range map[string]*activeBeadQueryStore{"a": a, "z": z} {
+			if len(store.queries) != 1 {
+				t.Errorf("store %s: %d live active-work reads, want one per store", name, len(store.queries))
+			}
+			for _, q := range store.queries {
+				if !q.Live {
+					t.Errorf("store %s used a stale lookup", name)
+				}
+			}
+			store.queries = nil
+		}
+	}
+	if got := srv.findLiveActiveBeadForAssignees("", identities...); got != "" {
+		t.Fatalf("empty stores returned %q", got)
+	}
+	assertReads()
+	alias := addActiveWork(t, a, "alias")
+	addActiveWork(t, z, "session-id")
+	newest := addActiveWork(t, z, "session-id")
+	if got := srv.findLiveActiveBeadForAssignees("", identities...); got != newest {
+		t.Fatalf("concrete session must win across rigs; got %q, want %q", got, newest)
+	}
+	assertReads()
+	if got := srv.findLiveActiveBeadForAssignees("a", identities...); got != alias {
+		t.Fatalf("rig-scoped alias lookup = %q, want %q", got, alias)
+	}
+	if len(a.queries) != 1 || len(z.queries) != 0 {
+		t.Fatalf("rig filter queried a=%d z=%d times", len(a.queries), len(z.queries))
+	}
+}
+
+func TestLiveActiveBeadStopsOnceTopIdentityMatches(t *testing.T) {
+	state := newFakeState(t)
+	a := &activeBeadQueryStore{Store: &beads.MemStore{IDPrefix: "a"}}
+	z := &activeBeadQueryStore{Store: &beads.MemStore{IDPrefix: "z"}}
+	state.stores = map[string]beads.Store{"a": a, "z": z}
+	own := addActiveWork(t, a, "session-id")
+	addActiveWork(t, z, "template")
+
+	got := New(state).findLiveActiveBeadForAssignees("", "session-id", "template")
+	if got != own {
+		t.Fatalf("active bead = %q, want the session's own %q", got, own)
+	}
+	if len(a.queries) != 1 || len(z.queries) != 0 {
+		t.Fatalf("reads a=%d z=%d, want 1 and 0: no later store can outrank the top identity", len(a.queries), len(z.queries))
+	}
+}
+
+func TestLiveActiveBeadPrefersFirstStoreForSameIdentity(t *testing.T) {
+	state := newFakeState(t)
+	a := &beads.MemStore{IDPrefix: "a"}
+	z := &beads.MemStore{IDPrefix: "z"}
+	state.stores = map[string]beads.Store{"a": a, "z": z}
+	first := addActiveWork(t, a, "alias")
+	addActiveWork(t, z, "alias")
+
+	if got := New(state).findLiveActiveBeadForAssignees("", "session-id", "alias"); got != first {
+		t.Fatalf("active bead = %q, want %q from the first store, as on the cached path", got, first)
+	}
+}
+
+func TestLiveActiveBeadIgnoresBlankIdentities(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	state.stores = map[string]beads.Store{"a": store}
+	addActiveWork(t, store, "")
+
+	if got := New(state).findLiveActiveBeadForAssignees("", "", "  "); got != "" {
+		t.Fatalf("blank identities matched unassigned work %q", got)
+	}
+}
+
+func TestLiveActiveBeadStoreErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantOwn bool
+	}{
+		{
+			name: "failed read skips the store",
+			err:  errors.New("bd list: exit status 1"),
+		},
+		{
+			name:    "partial result keeps decoded rows",
+			err:     &beads.PartialResultError{Op: "bd list", Err: errors.New("decoding an unrelated bead")},
+			wantOwn: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := newFakeState(t)
+			a := &beads.MemStore{IDPrefix: "a"}
+			z := &beads.MemStore{IDPrefix: "z"}
+			state.stores = map[string]beads.Store{"a": activeBeadErrStore{Store: a, err: tt.err}, "z": z}
+			own := addActiveWork(t, a, "session-id")
+			want := addActiveWork(t, z, "template")
+			if tt.wantOwn {
+				want = own
+			}
+
+			if got := New(state).findLiveActiveBeadForAssignees("", "session-id", "template"); got != want {
+				t.Fatalf("active bead = %q, want %q", got, want)
+			}
+		})
 	}
 }

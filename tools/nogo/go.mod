@@ -1,6 +1,6 @@
 module github.com/gastownhall/gascity/tools/nogo
 
-go 1.26.9
+go 1.27.3
 
 require (
 	codeberg.org/polyfloyd/go-errorlint v1.9.0
@@ -12,8 +12,8 @@ require (
 	github.com/kisielk/errcheck v1.10.0
 	github.com/mgechev/revive v1.15.0
 	golang.org/x/mod v0.41.0
-	golang.org/x/tools v0.49.0
-	honnef.co/go/tools v0.7.0
+	golang.org/x/tools v0.50.0
+	honnef.co/go/tools v0.8.1
 	mvdan.cc/unparam v0.0.0-20251027182757-5beb8c8f8f15
 )
 

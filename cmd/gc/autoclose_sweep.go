@@ -5,8 +5,9 @@ package main
 // Convoy, wisp and molecule autoclose run when applyBeadEventToStores sees a
 // bead.closed. Nothing else runs them, so a close that never reaches the bus
 // skipped them forever: the event log can drop the notification
-// (CACHE-LAYERING-REVIEW F2). An unconfirmable scan-derived close
-// (applyInferredClose) is deferred here too.
+// (CACHE-LAYERING-REVIEW F2). A bead.closed whose live read cannot confirm it
+// (applyInferredClose: every close but the cache's own write) is deferred
+// here too.
 //
 // The sweep diffs each live cache's active census (open and in-progress rows,
 // both tiers) against the previous pass. A row that left the census was closed

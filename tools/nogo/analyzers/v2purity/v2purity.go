@@ -23,7 +23,9 @@
 //     checked against the forbidden sets.
 //   - A function on the Exempt list, with its reason, is a leaf: the
 //     reviewed baseline, which only shrinks, and holds no live entry once
-//     the Cutover constant is true (C9).
+//     the Cutover constant is true (C9). An entry accepted at cutover
+//     (class "accepted", CONTRACT v5.10t) is live at run time but allowed
+//     past the gate; only the reviewed baseline may name one.
 //   - The seal: a value of a sealed type (a proof only a fresh read mints)
 //     is built, or a field of one written, only in its minting file
 //     (seal.go).
@@ -74,7 +76,9 @@ type Config struct {
 }
 
 // Exemption is one baseline entry. Class is "live" (reachable in v2 at run
-// time) or "dead" (provably unreachable at run time); Bead tracks its
+// time), "accepted" (live, and accepted at cutover: CONTRACT v5.10t lets
+// these past the Cutover gate, each until its bead) or "dead" (provably
+// unreachable at run time); Bead tracks its
 // removal. A dead entry names in Via the functions every root path to it
 // passes, which the analyzer checks, and its Reason cites the line in one
 // that keeps it from running.
@@ -819,9 +823,9 @@ func (g *graph) checkExempt(reached map[types.Object]bool) {
 			pos = obj.Pos()
 		}
 		switch {
-		case e.Class != "live" && e.Class != "dead", e.Bead == "", e.Reason == "",
+		case e.Class != "live" && e.Class != "accepted" && e.Class != "dead", e.Bead == "", e.Reason == "",
 			e.Class == "dead" && (!strings.Contains(e.Reason, ".go:") || len(e.Via) == 0):
-			g.pass.Reportf(pos, "v2purity exemption %s is malformed: a class (live or dead), a bead and a reason; a dead one names its Via and cites the line that makes it dead", name)
+			g.pass.Reportf(pos, "v2purity exemption %s is malformed: a class (live, accepted or dead), a bead and a reason; a dead one names its Via and cites the line that makes it dead", name)
 		case obj == nil && g.names[name] && e.Class == "dead":
 			g.checkViaByName(name, e.Via, pos)
 		case obj == nil && g.names[name]: // another package's method an interface call reaches
