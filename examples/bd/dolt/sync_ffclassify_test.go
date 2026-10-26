@@ -535,3 +535,81 @@ func TestSyncRejectsInvalidFetchTimeout(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncMultiRemotePrefersGitFileOverGitHttpsRemote covers gc-8317: a Dolt
+// git-protocol remote that is itself a local path (git+file://) must be
+// treated as local, same as a plain file:// remote, since no data leaves the
+// host either way. Before the fix, select_remote's locality check matched
+// only ^file:// and would have called this AMBIGUOUS alongside the git+https
+// remote.
+func TestSyncMultiRemotePrefersGitFileOverGitHttpsRemote(t *testing.T) {
+	t.Parallel()
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+		"usb,git+file:///mnt/usb/beads.git",
+	})
+	out := runFFSync(t, binDir, "--db", "app", "--force", "--dry-run")
+	if !strings.Contains(out, "-> usb:main (git+file:///mnt/usb/beads.git)") {
+		t.Fatalf("expected the local (git+file://) remote to be preferred over git+https.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "-> origin:") {
+		t.Fatalf("git+https remote must never be auto-selected when a local git+file:// alternative exists.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "skipped") || strings.Contains(out, "AMBIGUOUS") {
+		t.Fatalf("a git+file:// remote must count as local, not trigger the no-local-remote skip.\nout:\n%s", out)
+	}
+}
+
+// TestSyncWritesSkippedOutcomeWhenSoleRemoteIsNonLocal covers gc-8317: a
+// patrol run whose only database has no usable local remote must declare a
+// typed "skipped" outcome (contract: core assets/scripts/order_outcome.sh,
+// decoded by cmd/gc/order_outcome.go) instead of exiting 0 with nothing to
+// show for it. Before the fix, sync/run.sh never wrote GC_ORDER_OUTCOME_FILE
+// at all, so the run was indistinguishable from one that pushed everything.
+func TestSyncWritesSkippedOutcomeWhenSoleRemoteIsNonLocal(t *testing.T) {
+	t.Parallel()
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+https://github.com/gastownhall/beads",
+	})
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_ORDER_OUTCOME_FILE=" + outcomeFile}, "--db", "app")
+	if err != nil {
+		t.Fatalf("a remote-skip alone must not fail the sync: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "skipped") || !strings.Contains(out, "no local remote") {
+		t.Fatalf("expected the usual skip message unchanged.\nout:\n%s", out)
+	}
+	outcome, ok := readBackupOutcome(t, outcomeFile)
+	if !ok {
+		t.Fatalf("expected an outcome declaration when the only database was skipped for lacking a local remote.\nout:\n%s", out)
+	}
+	if outcome.Outcome != "skipped" {
+		t.Fatalf("outcome = %q, want \"skipped\" since nothing else ran\nout:\n%s", outcome.Outcome, out)
+	}
+	if len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != "app" {
+		t.Fatalf("outcome scopes = %+v, want exactly one naming \"app\"", outcome.Scopes)
+	}
+}
+
+// TestSyncDoesNotWriteOutcomeFileOnOrdinaryPush is the control for the two
+// tests above: a database that pushes normally against a local remote must
+// not cause any outcome declaration to be written, even when
+// GC_ORDER_OUTCOME_FILE is set. An outcome file is for a run that
+// accomplished less than it looked like, not every successful run.
+func TestSyncDoesNotWriteOutcomeFileOnOrdinaryPush(t *testing.T) {
+	t.Parallel()
+	binDir := t.TempDir()
+	writeSyncFakeDoltClassify(t, binDir, 2, 0)
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_ORDER_OUTCOME_FILE=" + outcomeFile}, "--db", "app")
+	if err != nil {
+		t.Fatalf("ordinary ahead-only push must succeed: %v\n%s", err, out)
+	}
+	if _, ok := readBackupOutcome(t, outcomeFile); ok {
+		t.Fatalf("an ordinary successful push must not write an outcome declaration.\nout:\n%s", out)
+	}
+}

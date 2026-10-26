@@ -326,7 +326,11 @@ select_remote() {
     return 0
   fi
 
-  sr_local=$(printf '%s\n' "$sr_sorted" | awk -F'|' '$2 ~ /^file:\/\// {print; exit}')
+  # "Local" covers both a plain filesystem remote (file://) and a Dolt
+  # git-protocol remote that is itself a local path (git+file://): neither
+  # sends data off the host, which is what the policy actually cares about
+  # (gc-8317). A bare git+ssh/git+https/etc. remote is still non-local.
+  sr_local=$(printf '%s\n' "$sr_sorted" | awk -F'|' '$2 ~ /^(file:\/\/|git\+file:\/\/)/ {print; exit}')
   if [ -n "$sr_local" ]; then
     printf '%s\n' "$sr_local"
     return 0
@@ -457,8 +461,10 @@ sync_database_sql() {
   }
   if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
     if [ "$remote_pair" = "AMBIGUOUS" ]; then
-      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
+      last_remote_skip_reason="no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote"
+      echo "  $name: skipped ($last_remote_skip_reason)"
     else
+      last_remote_skip_reason="no remote configured"
       echo "  $name: skipped (no remote)"
     fi
     return 0
@@ -657,8 +663,10 @@ sync_database_cli() {
   }
   if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
     if [ "$remote_pair" = "AMBIGUOUS" ]; then
-      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
+      last_remote_skip_reason="no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote"
+      echo "  $name: skipped ($last_remote_skip_reason)"
     else
+      last_remote_skip_reason="no remote configured"
       echo "  $name: skipped (no remote)"
     fi
     return 0
@@ -740,6 +748,8 @@ exit_code=0
 fail_count=0
 total_count=0
 failed_summary=""
+remote_skip_count=0
+remote_skip_scopes=""
 server_running=false
 is_running && server_running=true
 if [ -d "$data_dir" ]; then
@@ -755,6 +765,7 @@ if [ -d "$data_dir" ]; then
 
     total_count=$((total_count + 1))
     last_fail_reason=""
+    last_remote_skip_reason=""
     call_rc=0
     if [ "$server_running" = true ]; then
       sync_database_sql "$name" || call_rc=$?
@@ -765,6 +776,14 @@ if [ -d "$data_dir" ]; then
       exit_code=1
       fail_count=$((fail_count + 1))
       failed_summary="$failed_summary$name (${last_fail_reason:-unknown error}); "
+    elif [ -n "$last_remote_skip_reason" ]; then
+      # gc-8317: a database with no usable local remote is neither a failure
+      # (exit_code/fail_count) nor silent success — record it so the order
+      # outcome declaration below can say so, since dispatchExec only keeps a
+      # command's stdout when it FAILS and gc doctor's order-outcome-healthy
+      # check never reads a run's stdout either way.
+      remote_skip_count=$((remote_skip_count + 1))
+      remote_skip_scopes="${remote_skip_scopes:+$remote_skip_scopes,}$(printf '{"scope":"%s","reason":"%s"}' "$name" "$last_remote_skip_reason")"
     fi
   done
 fi
@@ -774,6 +793,28 @@ fi
 # only a bounded tail, so this summary must survive that truncation window.
 if [ "$exit_code" -ne 0 ]; then
   echo "sync: $fail_count/$total_count database(s) failed: $failed_summary" >&2
+fi
+
+# gc-8317: declare a typed skipped/partial outcome (contract: core
+# assets/scripts/order_outcome.sh, decoded by cmd/gc/order_outcome.go) when
+# one or more databases were skipped for lacking a usable local remote, so a
+# run that pushed nothing no longer reports as plain order.completed. A
+# database skipped for a deliberate .no-sync marker, or legitimately
+# up-to-date/behind/diverged against a remote it does have, is excluded from
+# this — those are not the silent-skip bug this declaration exists for.
+if [ "$remote_skip_count" -gt 0 ] && [ -n "${GC_ORDER_OUTCOME_FILE:-}" ]; then
+  if [ "$remote_skip_count" -eq "$total_count" ]; then
+    outcome_kind=skipped
+    outcome_reason="no database had a usable local remote"
+    echo "sync: every database skipped — no local remote (see GC_ORDER_OUTCOME_FILE declaration)" >&2
+  else
+    outcome_kind=partial
+    outcome_reason="some databases had no usable local remote"
+  fi
+  if ! printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$outcome_reason" "$remote_skip_scopes" > "$GC_ORDER_OUTCOME_FILE"; then
+    echo "sync: unable to write order outcome declaration to $GC_ORDER_OUTCOME_FILE" >&2
+  fi
 fi
 
 exit $exit_code
