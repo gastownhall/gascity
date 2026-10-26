@@ -1,7 +1,11 @@
 package core
 
 import (
+	"fmt"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -377,6 +381,168 @@ func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	}
 	if closes == 0 {
 		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}
+
+// molDoWorkCloseStepBlock returns the bash block under the do-work step's
+// "Close this formula step" heading, with the convoy variable rendered as cv-1.
+func molDoWorkCloseStepBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	const marker = "**4. Close this formula step:**"
+	at := strings.Index(step, marker)
+	if at < 0 {
+		t.Fatalf("do-work step has no %q section", marker)
+	}
+	section := step[at:]
+	open := strings.Index(section, "```bash\n")
+	if open < 0 {
+		t.Fatal("close-step section has no bash block")
+	}
+	body := section[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("close-step bash block is unterminated")
+	}
+	return strings.ReplaceAll(body[:end], "{{convoy_id}}", "cv-1")
+}
+
+// closeStepCase is one session shell the do-work close block runs in. The fake
+// gc answers `hook current --id-only` with hookOut/hookRC, `convoy status` with
+// convoy and `bd show` with show (an empty convoy or show fails the read), and
+// exits updateRC for `bd update`.
+type closeStepCase struct {
+	name      string
+	env       []string
+	hookOut   string
+	hookRC    int
+	convoy    string
+	show      string
+	updateRC  int
+	wantClose bool
+}
+
+const (
+	closeStepConvoy  = `{"children":[{"id":"ga-work"}]}`
+	closeStepClaimed = `[{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}]`
+)
+
+// closeStepEnvKeys are the settings each case supplies itself. A live session
+// exports the identity variables, and a stale GC_BEAD_ID or a leaked block
+// variable would otherwise decide the case.
+var closeStepEnvKeys = map[string]struct{}{
+	"GC_BEAD_ID":         {},
+	"GC_TRIGGER_BEAD_ID": {},
+	"GC_SESSION_ID":      {},
+	"GC_SESSION_NAME":    {},
+	"GC_ALIAS":           {},
+	"WORK_BEAD_ID":       {},
+	"STEP_BEAD_ID":       {},
+	"CONVOY_STATUS":      {},
+	"STEP_BEAD":          {},
+}
+
+func (c closeStepCase) fakeGC() string {
+	convoy := "exit 1"
+	if c.convoy != "" {
+		convoy = fmt.Sprintf("printf '%%s\\n' '%s'", c.convoy)
+	}
+	show := "exit 1"
+	if c.show != "" {
+		show = fmt.Sprintf("printf '%%s\\n' '%s'", c.show)
+	}
+	return fmt.Sprintf(`case "$*" in
+"hook current --id-only") printf '%%s\n' '%s'; exit %d ;;
+"convoy status cv-1 --json") %s ;;
+"bd show "*" --json") %s ;;
+"bd update "*) exit %d ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac
+`, c.hookOut, c.hookRC, convoy, show, c.updateRC)
+}
+
+// TestMolDoWorkClosesOnlyItsVerifiedClaimedStep runs the do-work step's close
+// block in a session shell, where GC_BEAD_ID is never exported (issue #7991).
+// The block must close the step `gc hook current --id-only` names once it has
+// verified that step is this session's in-progress do-work step and not the
+// work bead, and must exit non-zero, closing nothing, whenever it cannot.
+func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	block := molDoWorkCloseStepBlock(t)
+	scriptPath := filepath.Join(t.TempDir(), "close-step.sh")
+	if err := os.WriteFile(scriptPath, []byte(block), 0o644); err != nil {
+		t.Fatalf("write close-step block: %v", err)
+	}
+	good := closeStepCase{hookOut: "ga-step", convoy: closeStepConvoy, show: closeStepClaimed, wantClose: true}
+	with := func(name string, edit func(*closeStepCase)) closeStepCase {
+		c := good
+		c.name = name
+		edit(&c)
+		return c
+	}
+	claimed := func(fields string) string {
+		return `[{"id":"ga-step",` + fields + `}]`
+	}
+	cases := []closeStepCase{
+		with("AC-1 assignee is the session id", func(*closeStepCase) {}),
+		with("AC-1 assignee is the session name", func(c *closeStepCase) {
+			c.show = claimed(`"status":"in_progress","assignee":"rig--polecat-1","metadata":{"gc.step_ref":"mol-do-work.do-work"}`)
+		}),
+		with("AC-1 assignee is the alias", func(c *closeStepCase) {
+			c.env = []string{"GC_ALIAS=rig/polecat"}
+			c.show = claimed(`"status":"in_progress","assignee":"rig/polecat","metadata":{"gc.step_ref":"mol-do-work.do-work"}`)
+		}),
+		with("AC-1 GC_BEAD_ID names another bead", func(c *closeStepCase) {
+			c.env = []string{"GC_BEAD_ID=ga-other"}
+		}),
+		with("AC-1 bd show prints an object", func(c *closeStepCase) {
+			c.show = strings.TrimSuffix(strings.TrimPrefix(closeStepClaimed, "["), "]")
+		}),
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, logPath := fakeGCBin(t, tc.fakeGC())
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatalf("create gc log: %v", err)
+			}
+			env := append([]string{"GC_SESSION_ID=gcg-session-me", "GC_SESSION_NAME=rig--polecat-1"}, tc.env...)
+			out, runErr := runPackScript(t, scriptPath, binDir, closeStepEnvKeys, env)
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read gc log: %v", err)
+			}
+			logged := string(data)
+			var updates []string
+			for _, line := range strings.Split(logged, "\n") {
+				if strings.HasPrefix(line, "gc bd update ") {
+					updates = append(updates, line)
+				}
+			}
+			if strings.Contains(logged, "ga-other") {
+				t.Errorf("block named the GC_BEAD_ID bead ga-other:\n%s", logged)
+			}
+			if tc.wantClose {
+				if runErr != nil {
+					t.Fatalf("block failed: %v\noutput:\n%s\ngc calls:\n%s", runErr, out, logged)
+				}
+				want := []string{"gc bd update ga-step --set-metadata gc.outcome=pass --status=closed"}
+				if strings.Join(updates, "\n") != strings.Join(want, "\n") {
+					t.Fatalf("updates = %q, want %q\noutput:\n%s", updates, want, out)
+				}
+				return
+			}
+			if runErr == nil {
+				t.Fatalf("block exited 0 without a verified claimed step\noutput:\n%s\ngc calls:\n%s", out, logged)
+			}
+			if tc.updateRC == 0 && len(updates) != 0 {
+				t.Fatalf("block issued updates %q without a verified claimed step\noutput:\n%s", updates, out)
+			}
+			if strings.TrimSpace(out) == "" {
+				t.Fatal("block failed without a diagnostic")
+			}
+		})
 	}
 }
 
