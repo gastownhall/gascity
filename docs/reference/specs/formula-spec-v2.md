@@ -789,6 +789,7 @@ that run as an infrastructure outcome rather than a verdict:
 | any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
 | none: the script ran past `check.timeout` and was stopped | No verdict — the run is an infrastructure outcome | **No** — re-run attempt-free under the same budget |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
+| none: the script could not start (for example, its working directory is gone) | Fail — a failed start is graded, not held open | Yes |
 | none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
 
 Attempt-free re-runs are themselves bounded by a separate infrastructure
