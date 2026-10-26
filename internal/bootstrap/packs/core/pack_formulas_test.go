@@ -601,6 +601,27 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 	}
 }
 
+// TestMolDoWorkCloseStepNeverReadsGCBeadID pins that the do-work step names
+// its own bead through the hook claim: GC_BEAD_ID never reaches a session
+// shell, so step text that waits on it presents a skipped close as success.
+// The close block must also carry no backslash, which the TOML basic string
+// would decode before the agent sees it.
+func TestMolDoWorkCloseStepNeverReadsGCBeadID(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	if strings.Contains(step, "GC_BEAD_ID") {
+		t.Error("do-work step references GC_BEAD_ID, which a session shell never has")
+	}
+	if !strings.Contains(step, "gc hook current --id-only") {
+		t.Error("do-work step must resolve its own bead with `gc hook current --id-only`")
+	}
+	if strings.Contains(step, "closed when `GC_BEAD_ID` is available") {
+		t.Error("do-work exit criteria still make the step close conditional on GC_BEAD_ID")
+	}
+	if block := molDoWorkCloseStepBlock(t); strings.Contains(block, `\`) {
+		t.Errorf("close-step block contains a backslash:\n%s", block)
+	}
+}
+
 // graphBeadVars are the shell variables core formulas use for workflow
 // infrastructure beads: the claimed formula step, the drain continuation and
 // the workflow root. Every one carries gc.root_bead_id, so on a city that
