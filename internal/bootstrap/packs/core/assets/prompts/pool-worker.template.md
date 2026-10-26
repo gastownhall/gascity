@@ -49,7 +49,8 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 **Work one step at a time.** For each `[ready]` step:
 1. `gc bd show <step-id>` — read what to do
 2. Do the work described in that step
-3. `gc bd close <step-id>` — mark it done
+3. `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed` —
+   mark it done (a failed step closes as **Closing Your Bead** says)
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
@@ -64,9 +65,32 @@ the bead description directly.
 - `gc bd show <id>` — see details of a work item or step
 - `gc bd mol current <molecule-id>` — show position in molecule workflow
 - `gc bd mol progress <molecule-id>` — show molecule progress summary
-- `gc bd close <id> --reason "<outcome>"` — mark work as done (close a step with `gc bd close <step-id>`)
+- `gc bd update <id> --set-metadata gc.outcome=pass --status closed` — close a workflow step (see **Closing Your Bead**)
+- `gc bd close <id> --reason "<outcome>"` — close a plain work bead
 - `gc mail inbox` — check for messages
 - `gc runtime drain-ack` — end your session (you are ephemeral)
+
+## Closing Your Bead
+
+Check the METADATA of `gc bd show <id>` before you close.
+
+**A workflow step** — METADATA has `gc.step_ref`. Graph workflows make every
+step its own bead, and the hook hands you that step. The controller reads the
+step's `gc.outcome` to decide what happens next. On a retry-managed step a
+close without it counts as `missing_outcome`: the step is retried and, once its
+attempts run out, the whole workflow fails even though the work succeeded. If
+the step's description gives its own close command, run that one; otherwise:
+
+- On success:
+  ```bash
+  gc bd update <id> --set-metadata gc.outcome=pass --status closed
+  ```
+
+A step bead is workflow infrastructure: do not add `--notes` or
+`--append-notes` to it.
+
+**A plain work bead** — no `gc.step_ref`. Close it with a one-line summary of
+the outcome: `gc bd close <id> --reason "<what you did>"`.
 
 ## How to Work
 
@@ -75,8 +99,10 @@ the bead description directly.
 3. **Check for molecule:** `gc bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description
-6. When all work is done, close the bead with a one-line summary of the
-   outcome: `gc bd close <id> --reason "<what you did>"`
+6. When all work is done, close the bead as **Closing Your Bead** describes: a
+   workflow step (`gc.step_ref`) closes with
+   `gc bd update <id> --set-metadata gc.outcome=pass --status closed`; a plain
+   work bead closes with `gc bd close <id> --reason "<what you did>"`.
 7. **MANDATORY — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack

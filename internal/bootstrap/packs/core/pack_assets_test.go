@@ -276,6 +276,54 @@ func TestCoreMaintenanceOrdersCarryLegacySkipAliases(t *testing.T) {
 	}
 }
 
+// poolWorkerPromptLines returns the pool-worker prompt's logical lines:
+// backslash-continued command lines are joined and interior whitespace runs
+// collapsed, so a fenced multi-line close command compares as one
+// single-spaced string.
+func poolWorkerPromptLines(t *testing.T) []string {
+	t.Helper()
+	data, err := fs.ReadFile(PackFS, "assets/prompts/pool-worker.template.md")
+	if err != nil {
+		t.Fatalf("reading pool-worker prompt: %v", err)
+	}
+	var lines []string
+	var cur strings.Builder
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimRight(line, " \t\r")
+		if strings.HasSuffix(trimmed, "\\") {
+			cur.WriteString(strings.TrimSuffix(trimmed, "\\"))
+			cur.WriteString(" ")
+			continue
+		}
+		cur.WriteString(line)
+		lines = append(lines, strings.Join(strings.Fields(cur.String()), " "))
+		cur.Reset()
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, strings.Join(strings.Fields(cur.String()), " "))
+	}
+	return lines
+}
+
+// TestPoolWorkerPromptStatesStepOutcomeContract pins the stock-prompt half of
+// issue #7678: a pool with no prompt_template renders this prompt, every
+// worker step of a graph.v2 formula is its own retry-managed bead, and the
+// retry evaluator judges an attempt bead by gc.outcome — a close without it
+// is missing_outcome and hard-fails the workflow once the attempts run out.
+// The prompt must teach the step close graph-worker.md already states and
+// must not tell the worker to close a workflow step with a bare `gc bd close`.
+func TestPoolWorkerPromptStatesStepOutcomeContract(t *testing.T) {
+	lines := poolWorkerPromptLines(t)
+	body := strings.Join(lines, "\n")
+
+	if !strings.Contains(body, "gc bd update <id> --set-metadata gc.outcome=pass --status closed") {
+		t.Error("pool-worker prompt must give the workflow-step success close `gc bd update <id> --set-metadata gc.outcome=pass --status closed`; a bare close is judged missing_outcome")
+	}
+	if strings.Contains(body, "gc bd close <step-id>") {
+		t.Error("pool-worker prompt must not close a workflow step with `gc bd close <step-id>`; workflow steps close through gc.outcome (see Closing Your Bead)")
+	}
+}
+
 // TestClaimProtocolFragmentIsEmbedded pins the go:embed inclusion of
 // template-fragments/. The fragment render tests in cmd/gc read the on-disk
 // source tree, but production cities hydrate the core pack from PackFS —
