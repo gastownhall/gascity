@@ -2,7 +2,6 @@ package herdr
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -11,31 +10,16 @@ import (
 // binds: serverAlive() then always reads false against a healthy server
 // ("did not become ready"), and every retry launches a redundant herdr
 // server contending for the same pane ("agent_pane_busy") — ga-nqlb8q.
-// Verified empirically against the herdr binary itself: `XDG_CONFIG_HOME=X
-// herdr --help` prints "Config: X/herdr/config.toml" regardless of $HOME,
-// and with XDG_CONFIG_HOME unset it falls back to "$HOME/.config/herdr/…" —
-// standard XDG Base Directory precedence, which os.UserConfigDir()
-// implements and the old os.UserHomeDir()+".config" join did not: a sandbox
-// that sets XDG_CONFIG_HOME to the real user's config dir while redirecting
-// $HOME elsewhere (this fleet's agent sandboxes do exactly that) made the
-// old code compute a path no herdr process ever binds.
-//
-// Both tests below are Linux-only: os.UserConfigDir() on darwin ignores
-// XDG_CONFIG_HOME entirely and always resolves under
-// "$HOME/Library/Application Support" (see the Go stdlib implementation),
-// so asserting an XDG- or ".config"-rooted path is only valid on the
-// platforms os.UserConfigDir() treats as XDG-following (this repo's
-// non-Windows, non-Darwin default case). Whether herdr's own binary uses
-// pure-XDG resolution on macOS too is unverified here — the empirical
-// check above was run on Linux only — so the tests skip rather than assert
-// an unconfirmed cross-platform contract.
-
-func skipUnlessXDGPlatform(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME on %s; herdr's own resolution on this platform is unverified (see ga-nqlb8q)", runtime.GOOS)
-	}
-}
+// herdr applies XDG Base Directory precedence on every platform it ships
+// for — $XDG_CONFIG_HOME, else $HOME/.config (herdr src/config/io.rs
+// config_dir) — verified empirically against the herdr binary on Linux
+// (ga-nqlb8q) and against herdr 0.8.2 on macOS (#5770): with
+// XDG_CONFIG_HOME set, `herdr --help` prints "Config: <dir>/herdr/config.toml"
+// regardless of $HOME, and with it unset, "$HOME/.config/herdr/…". The
+// tests below assert that contract on every platform, with no skip:
+// os.UserConfigDir() is not that rule — on darwin it ignores XDG_CONFIG_HOME
+// and resolves under "$HOME/Library/Application Support", a directory herdr
+// never binds in, which is what made every start time out on macOS (#5770).
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 	xdg := t.TempDir()
@@ -54,7 +38,6 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 }
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
-	skipUnlessXDGPlatform(t)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
