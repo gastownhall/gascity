@@ -1700,4 +1700,46 @@ func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
 			t.Errorf("the work ledger holds v1 sub-DAG root %s, grafted onto a bead it does not hold", res.RootID)
 		}
 	})
+
+	t.Run("graph.v2 single-store, task target", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+
+		res := cookFormula(t, "graph-work", append([]string{"--attach", target.ID}, formulaCookAttachMetaArgs...)...)
+
+		requireFormulaCookMeta(t, work, res.RootID)
+		requireNoFormulaCookMeta(t, work, target.ID)
+	})
+
+	t.Run("graph.v2 single-store, convoy target re-cook adopts", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		target, err := work.Create(beads.Bead{Title: "attach target", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+
+		first := cookFormula(t, "graph-work", "--attach", target.ID)
+		second := cookFormula(t, "graph-work", append([]string{"--attach", target.ID}, formulaCookAttachMetaArgs...)...)
+
+		if first.RootID != second.RootID {
+			t.Fatalf("re-cook minted a second workflow root (%s then %s) instead of adopting the live one", first.RootID, second.RootID)
+		}
+		requireFormulaCookMeta(t, work, second.RootID)
+		if got := blockingDepCount(t, work, target.ID); got != 1 {
+			t.Errorf("attach bead %s carries %d blocking deps after two cooks, want 1", target.ID, got)
+		}
+	})
 }
