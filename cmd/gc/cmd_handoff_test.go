@@ -403,20 +403,19 @@ func TestDoHandoffAutoDeduplicatesPendingMailPerSession(t *testing.T) {
 	if !strings.Contains(secondOut.String(), want) {
 		t.Fatalf("second hook output = %q, want %q", secondOut.String(), want)
 	}
-	var payload struct {
-		HookSpecificOutput struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
-	}
-	if err := json.Unmarshal(secondOut.Bytes(), &payload); err != nil {
+	// Codex's PreCompactCommandOutputWire has no HookSpecificOutputWire
+	// counterpart (gastownhall/gascity#6349): PreCompact under codex format
+	// gets the flat shape, not the envelope every other codex hook event
+	// accepts.
+	var raw map[string]any
+	if err := json.Unmarshal(secondOut.Bytes(), &raw); err != nil {
 		t.Fatalf("second hook output is not JSON: %v", err)
 	}
-	if payload.HookSpecificOutput.HookEventName != "PreCompact" {
-		t.Fatalf("hook event = %q, want PreCompact", payload.HookSpecificOutput.HookEventName)
+	if _, ok := raw["hookSpecificOutput"]; ok {
+		t.Fatalf("second hook output = %s, want no hookSpecificOutput envelope for PreCompact under codex format", secondOut.String())
 	}
-	if payload.HookSpecificOutput.AdditionalContext != want {
-		t.Fatalf("additional context = %q, want %q", payload.HookSpecificOutput.AdditionalContext, want)
+	if systemMessage, _ := raw["systemMessage"].(string); systemMessage != want {
+		t.Fatalf("systemMessage = %q, want %q", systemMessage, want)
 	}
 	if len(rec.Events) != 1 {
 		t.Fatalf("mail events = %d, want 1", len(rec.Events))
