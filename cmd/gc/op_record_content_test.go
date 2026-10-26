@@ -508,15 +508,15 @@ func submitOpCity(t *testing.T, mode string, srv *httptest.Server) (*cliOpHarnes
 	}
 	h := newCLIOpHarness(t, env)
 	c := newCLIOpCity(t, h, nil)
-	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
-	apiRouteControllerAliveHook = func(string) int { return 0 }
+	oldIdentity, oldClient := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{} }
 	apiRouteSupervisorClientHook = func(string) *api.Client {
 		if srv == nil {
 			return nil
 		}
 		return api.NewCityScopedClient(srv.URL, filepath.Base(c.dir))
 	}
-	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
+	t.Cleanup(func() { apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = oldIdentity, oldClient })
 	return h, c
 }
 
