@@ -438,6 +438,7 @@ exit 1
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 		"GC_DOLT_DATA_DIR="+dataDir,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT=3306",
@@ -671,6 +672,11 @@ exit 1
 			cmd.Env = append(cmd.Env,
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
+				// Pin the lookup to the lsof fallback these cases exercise:
+				// a missing proc root leaves the TCP tables unreadable, so
+				// the real /proc cannot answer the holder behind the fake
+				// lsof's back (#7553).
+				"GC_DOLT_PROC_ROOT="+filepath.Join(t.TempDir(), "missing"),
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 			)
 			out, err := cmd.CombinedOutput()
@@ -767,6 +773,10 @@ exit 1
 			cmd.Env = append(cmd.Env,
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
+				// Pin the lookup to the lsof/ps fallback paths these cases
+				// exercise; the real /proc would name this test process as
+				// the holder (#7553).
+				"GC_DOLT_PROC_ROOT="+filepath.Join(t.TempDir(), "missing"),
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 			)
 			out, err := cmd.CombinedOutput()
@@ -850,9 +860,16 @@ exit 1
 `)
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
 
+	// Readable TCP tables with no LISTEN rows keep the listener lookup
+	// hermetic — the real /proc on the host running the tests may hold a
+	// listener for this port — while leaving the probe outcome to the fake
+	// nc, exactly as the inconclusive lsof did (#7553).
+	procRoot := writeFakeProcRoot(t, nil, nil)
+
 	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_HOST=",
 		"GC_DOLT_PORT="+port,
 		"GC_DOLT_USER=root",
@@ -876,7 +893,12 @@ func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
 	cityPath := t.TempDir()
 	root := repoRoot(t)
 
-	out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").CombinedOutput()
+	// reachableServerEnv pins the lookup to an empty proc root; override it
+	// with a missing one so the TCP tables are unreadable and this test
+	// keeps exercising the lsof fallback's inconclusive answer (#7553).
+	env := reachableServerEnv(t, root, cityPath)
+	env = overrideEnvEntry(env, "GC_DOLT_PROC_ROOT", filepath.Join(t.TempDir(), "missing"))
+	out, err := newHealthScriptCmd(root, env, "--json").CombinedOutput()
 	if err != nil {
 		t.Fatalf("health.sh failed: %v\n%s", err, out)
 	}
@@ -972,6 +994,7 @@ exec /bin/date "$@"
 				"FAKE_DATE_SECONDS_SECOND=1776740123",
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
+				"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 				"GC_DOLT_HOST=127.0.0.1",
 				"GC_DOLT_PORT="+port,
 				"GC_DOLT_USER=root",
@@ -1276,6 +1299,9 @@ exit 1
 		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		// Readable TCP tables with no LISTEN rows keep the probe outcome on
+		// the fake nc, exactly as the inconclusive lsof did (#7553).
+		"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+port,
 		"GC_DOLT_USER=root",
@@ -1385,7 +1411,6 @@ func runHealthScriptZombieScanExcludesRigLocalServers(t *testing.T, rigConfig st
 	fakeBin := t.TempDir()
 
 	mainPort := "19901"
-	rigPort := "19902"
 
 	mainPID := "424201"
 	rigPID := "424202"
@@ -1422,17 +1447,10 @@ func runHealthScriptZombieScanExcludesRigLocalServers(t *testing.T, rigConfig st
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, rigPID, zombiePID))
 
-	// Fake lsof: maps ports to PIDs.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID, rigPort, rigPID))
+	// Fake proc root maps the city and rig ports to their pids; lsof is a
+	// tripwire that must never run now the TCP tables answer the lookup.
+	procRoot := writeListenerProcRoot(t, map[int]string{19901: mainPID, 19902: rigPID})
+	lsofMarker := writeLsofTripwire(t, fakeBin)
 
 	// Fake ps: handles pid_is_running (`-p <pid> -o pid=`) and the zombie
 	// scan's single process-table pass (`ps -eo pid=,stat=,args=`, #2482).
@@ -1465,6 +1483,7 @@ exit 1
 			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
 		"GC_DOLT_USER=root",
@@ -1493,6 +1512,7 @@ exit 1
 	if !strings.Contains(output, zombiePID) {
 		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
 	}
+	assertLsofNeverRan(t, lsofMarker)
 }
 
 func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
@@ -1576,16 +1596,10 @@ func TestHealthScriptZombieScanExcludesForeignManagedServers(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, foreignPID, zombiePID))
 
-	// Fake lsof: maps main port to mainPID.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID))
+	// Fake proc root maps the main port to mainPID; lsof is a tripwire that
+	// must never run now the TCP tables answer the lookup.
+	procRoot := writeListenerProcRoot(t, map[int]string{19903: mainPID})
+	lsofMarker := writeLsofTripwire(t, fakeBin)
 
 	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
 	// foreign PID's args line WITH `--config <path>` so the awk pass extracts
@@ -1618,6 +1632,7 @@ exit 1
 			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
 		"GC_DOLT_USER=root",
@@ -1641,6 +1656,7 @@ exit 1
 	if !strings.Contains(output, zombiePID) {
 		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
 	}
+	assertLsofNeverRan(t, lsofMarker)
 }
 
 // TestHealthScriptZombieScanFlagsMismatchedForeignPidFile verifies that
@@ -1686,15 +1702,10 @@ func TestHealthScriptZombieScanFlagsMismatchedForeignPidFile(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\n", mainPID, suspectPID))
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID))
+	// Fake proc root maps the main port to mainPID; lsof is a tripwire that
+	// must never run now the TCP tables answer the lookup.
+	procRoot := writeListenerProcRoot(t, map[int]string{19904: mainPID})
+	lsofMarker := writeLsofTripwire(t, fakeBin)
 	// Bounded `ps -eo` pass: the suspect PID carries `--config <path>` but
 	// its sibling dolt.pid records a different PID, so the foreign-managed
 	// check must NOT exclude it.
@@ -1720,6 +1731,7 @@ exit 1
 			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
 		"GC_DOLT_USER=root",
@@ -1739,6 +1751,7 @@ exit 1
 	if !strings.Contains(output, suspectPID) {
 		t.Errorf("suspect PID %s with mismatched dolt.pid should still be flagged as zombie; got:\n%s", suspectPID, output)
 	}
+	assertLsofNeverRan(t, lsofMarker)
 }
 
 // TestHealthScriptZombieScanExcludesExternallyManagedServers verifies that a
@@ -1786,16 +1799,10 @@ func TestHealthScriptZombieScanExcludesExternallyManagedServers(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, externalPID, zombiePID))
 
-	// Fake lsof: maps main port to mainPID.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    -iTCP:%s) echo %s; exit 0 ;;
-  esac
-done
-exit 1
-`, mainPort, mainPID))
+	// Fake proc root maps the main port to mainPID; lsof is a tripwire that
+	// must never run now the TCP tables answer the lookup.
+	procRoot := writeListenerProcRoot(t, map[int]string{19905: mainPID})
+	lsofMarker := writeLsofTripwire(t, fakeBin)
 
 	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
 	// external PID's args line WITH `--config <path>` so the awk pass extracts
@@ -1828,6 +1835,7 @@ exit 1
 			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
 		"GC_DOLT_USER=root",
@@ -1852,6 +1860,7 @@ exit 1
 	if !strings.Contains(output, zombiePID) {
 		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
 	}
+	assertLsofNeverRan(t, lsofMarker)
 }
 
 // TestHealthScriptZombieScanIsBoundedFork is the regression guard for #2482:
@@ -1892,9 +1901,11 @@ func TestHealthScriptZombieScanIsBoundedFork(t *testing.T) {
 
 	// gc fails -> metadata_files falls back to find (no rigs here).
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	// lsof maps the city port to the server PID so server_pid resolves.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
-		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -iTCP:%s) echo %s; exit 0 ;; esac; done\nexit 1\n", mainPort, serverPID))
+	// Fake proc root maps the city port to the server PID so server_pid
+	// resolves; lsof is a tripwire that must never run now the TCP tables
+	// answer the lookup.
+	procRoot := writeListenerProcRoot(t, map[int]string{19901: serverPID})
+	lsofMarker := writeLsofTripwire(t, fakeBin)
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
 
@@ -1925,6 +1936,7 @@ exit 1
 			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_DOLT_PROC_ROOT="+procRoot,
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+mainPort,
 		"GC_DOLT_USER=root",
@@ -1964,6 +1976,7 @@ exit 1
 	if !strings.Contains(string(out), wantCount) {
 		t.Errorf("expected %s (candidates minus the city server); got:\n%s", wantCount, out)
 	}
+	assertLsofNeverRan(t, lsofMarker)
 }
 
 // TestHealthScriptJSONAlwaysExitsZero guards the JSON-mode exit
@@ -2100,6 +2113,9 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		// Readable TCP tables with no LISTEN rows keep the no-server probe
+		// outcome hermetic against whatever the host has listening (#7553).
+		"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT=59998",
 		"GC_DOLT_USER=root",
@@ -2261,6 +2277,9 @@ func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte)
 	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "GC_BACKUP_ARTIFACT_DIR", "GC_HEALTH_BACKUP_STALE_S", "GC_DOCTOR_BACKUP_STALE_S", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		// Readable TCP tables with no LISTEN rows keep the no-server probe
+		// outcome hermetic against whatever the host has listening (#7553).
+		"GC_DOLT_PROC_ROOT="+writeFakeProcRoot(t, nil, nil),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT=59997",
 		"GC_DOLT_USER=root",

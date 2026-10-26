@@ -68,6 +68,9 @@ func proxiedScopeEnv(t *testing.T, root, cityPath string) []string {
 	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		// A missing proc root keeps the hostile tools' failing lsof as the
+		// tripwire if a listener probe ever regresses onto the PATH (#7553).
+		"GC_DOLT_PROC_ROOT="+filepath.Join(t.TempDir(), "missing"),
 		"PATH="+hostileToolPath(t),
 	)
 }

@@ -33,6 +33,10 @@ else
 fi
 DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
 
+# Process-filesystem root the listener-pid lookup reads (see
+# managed_runtime_listener_pid). GC_DOLT_PROC_ROOT overrides it for tests.
+DOLT_PROC_ROOT="${GC_DOLT_PROC_ROOT:-/proc}"
+
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 
 # is_local_dolt_host returns 0 (true) when the argument names the local managed
@@ -168,8 +172,88 @@ pid_is_running() (
   return 1
 )
 
+# managed_runtime_listen_inodes PORT prints the socket inode of every LISTEN
+# row for PORT in $DOLT_PROC_ROOT/net/tcp and net/tcp6 — the kernel field
+# layout the Go side already parses (internal/pidutil): local address in
+# field 2 (port as the hex after the last colon), state in field 4, inode in
+# field 10. Rows without an inode are skipped. Returns 1 only when neither
+# table is readable, so callers can fall back to lsof.
+managed_runtime_listen_inodes() (
+  port="$1"
+
+  want_hex=$(printf '%04X' "$port")
+
+  checked=0
+  for table in net/tcp net/tcp6; do
+    [ -r "$DOLT_PROC_ROOT/$table" ] || continue
+    checked=1
+    LC_ALL=C awk -v want="$want_hex" '
+      {
+        local_port = $2
+        sub(/^.*:/, "", local_port)
+        if (toupper(local_port) != want) next
+        if ($4 != "0A") next
+        if ($10 == "0") next
+        print $10
+      }
+    ' "$DOLT_PROC_ROOT/$table"
+  done
+
+  [ "$checked" -eq 1 ] || return 1
+)
+
+# managed_runtime_socket_holder INODES FDDIR... prints the lowest pid whose
+# <pid>/fd directory (an FDDIR operand, relative to $DOLT_PROC_ROOT) holds a
+# socket:[inode] link for one of the whitespace-separated INODES. A single ls
+# invocation walks every operand: `ls -l` only lstats and readlinks the
+# procfs links — it never stats through them — so an fd onto a stalled FUSE
+# mount cannot block it, and the strict 11-field line shape plus escape
+# quoting keeps a crafted link target from faking a socket entry.
+managed_runtime_socket_holder() (
+  inodes="$1"
+  shift
+
+  cd "$DOLT_PROC_ROOT" || return 1
+
+  LC_ALL=C TIME_STYLE=locale QUOTING_STYLE=escape ls -ln "$@" 2>/dev/null | LC_ALL=C awk \
+    -v want="$inodes" \
+    -v dirs="$*" '
+    BEGIN {
+      for (i = 1; i <= split(want, w, /[^0-9]+/); i++)
+        if (w[i] != "")
+          wanted[w[i]] = 1
+      if (split(dirs, d, /[ \t]+/) == 1 && d[1] != "")
+        cur = d[1]
+      sub(/\/fd$/, "", cur)
+    }
+    $1 ~ /^[0-9]+\/fd:$/ {
+      cur = $1
+      sub(/:$/, "", cur)
+      sub(/\/fd$/, "", cur)
+      next
+    }
+    NF == 11 && $10 == "->" && $11 ~ /^socket:\[[0-9]+\]$/ {
+      ino = substr($11, 9, length($11) - 9)
+      if ((ino in wanted) && cur ~ /^[0-9]+$/ && (best == "" || cur + 0 < best + 0))
+        best = cur
+    }
+    END {
+      if (best != "")
+        print best
+    }
+  '
+)
+
+# managed_runtime_listener_pid PORT [CANDIDATE...] prints the pid of the
+# process holding a TCP socket listening on PORT. With readable kernel TCP
+# tables it answers from $DOLT_PROC_ROOT alone — never lsof, and never a
+# stat through an fd link, so a stalled FUSE mount (which parks lsof in
+# uninterruptible sleep and takes the resolving order down with it, #7553)
+# cannot wedge the lookup. When neither table is readable (darwin) it falls
+# back to the original lsof pipeline.
 managed_runtime_listener_pid() (
   port="$1"
+  shift
 
   case "$port" in
     ''|*[!0-9]*)
@@ -177,22 +261,35 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  if ! command -v lsof >/dev/null 2>&1; then
+  if ! inodes=$(managed_runtime_listen_inodes "$port"); then
+    if ! command -v lsof >/dev/null 2>&1; then
+      return 0
+    fi
+
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+      | while IFS= read -r holder_pid; do
+          case "$holder_pid" in
+            ''|*[!0-9]*)
+              continue
+              ;;
+          esac
+          if pid_is_running "$holder_pid"; then
+            printf '%s\n' "$holder_pid"
+            break
+          fi
+        done
     return 0
   fi
 
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
-    | while IFS= read -r holder_pid; do
-        case "$holder_pid" in
-          ''|*[!0-9]*)
-            continue
-            ;;
-        esac
-        if pid_is_running "$holder_pid"; then
-          printf '%s\n' "$holder_pid"
-          break
-        fi
-      done
+  case "$inodes" in
+    '')
+      return 0
+      ;;
+  esac
+
+  cd "$DOLT_PROC_ROOT" || return 0
+
+  managed_runtime_socket_holder "$inodes" [0-9]*/fd || true
 )
 
 managed_runtime_tcp_reachable() (
