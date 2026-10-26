@@ -384,3 +384,49 @@ func TestCascadeNudgeKeepsAssigneePath(t *testing.T) {
 		})
 	}
 }
+
+// TestCascadeNudgeRetriesFailedRoutedNudge pins that a failed routed nudge
+// neither aborts the run (the script runs under set -e) nor records its pair:
+// the next dependent is still nudged and recorded, and the next run retries
+// the failed pair exactly once without re-nudging the delivered one.
+func TestCascadeNudgeRetriesFailedRoutedNudge(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	run := newCascadeFake(t, cascadeFake{
+		events: blkClosedEvent,
+		deps: `[{"id":"ga-dep-a","status":"open","metadata":{"gc.routed_to":"gascity/pool-a"}},` +
+			`{"id":"ga-dep-b","status":"open","metadata":{"gc.routed_to":"gascity/pool-b"}}]`,
+		members: map[string][]string{"gascity/pool-a": {"a-1"}, "gascity/pool-b": {"b-1"}},
+	})
+	failMarker := filepath.Join(run.failDir, "a-1")
+	if err := os.WriteFile(failMarker, nil, 0o644); err != nil {
+		t.Fatalf("write fail marker: %v", err)
+	}
+	stateDir := filepath.Join(t.TempDir(), "state")
+
+	if out, err := runCascadeNudge(t, run.binDir, stateDir); err != nil {
+		t.Fatalf("run 1: a failed routed nudge must not fail the order: %v\n%s", err, out)
+	}
+	nudges := run.nudgeLines(t)
+	if len(nudges) != 2 || !strings.HasPrefix(nudges[0], "gc session nudge a-1 ") || !strings.HasPrefix(nudges[1], "gc session nudge b-1 ") {
+		t.Fatalf("run 1: nudges = %q, want an attempt to a-1 then a nudge to b-1", nudges)
+	}
+	if got := stateKeys(readCascadeState(t, stateDir)); strings.Join(got, ",") != "ga-blk|ga-dep-b" {
+		t.Fatalf("run 1: state keys = %q, want only the delivered pair ga-blk|ga-dep-b", got)
+	}
+
+	if err := os.Remove(failMarker); err != nil {
+		t.Fatalf("remove fail marker: %v", err)
+	}
+	if out, err := runCascadeNudge(t, run.binDir, stateDir); err != nil {
+		t.Fatalf("run 2: cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+	}
+	nudges = run.nudgeLines(t)
+	if len(nudges) != 1 || !strings.HasPrefix(nudges[0], "gc session nudge a-1 blocker ga-blk closed — routed dependent ga-dep-a ") {
+		t.Fatalf("run 2: nudges = %q, want exactly one retry to a-1 for ga-dep-a", nudges)
+	}
+	if got := stateKeys(readCascadeState(t, stateDir)); strings.Join(got, ",") != "ga-blk|ga-dep-a,ga-blk|ga-dep-b" {
+		t.Fatalf("run 2: state keys = %q, want both pairs", got)
+	}
+}
