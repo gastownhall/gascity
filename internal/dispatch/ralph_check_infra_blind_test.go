@@ -184,3 +184,28 @@ func TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt(t *testing.T) {
 		t.Errorf("gc.check_infra_retry = %q, want empty for an ordinary gate failure", r)
 	}
 }
+
+// TestProcessRalphControlBlindReadDoesNotBurnIteration carries ga-pqlgh to the
+// compiled kind=ralph lane (formula-spec-v2 §3.1): a check that exits 75, or
+// exits nonzero with a typed infrastructure string on stderr, produced no
+// verdict and re-runs attempt-free under the infrastructure budget.
+func TestProcessRalphControlBlindReadDoesNotBurnIteration(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range blindGateCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "blind-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+			beadsBefore := countAllBeads(t, store)
+
+			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if !errors.Is(err, ErrControlPending) {
+				t.Fatalf("ProcessControl on a blind read = (%+v, %v), want ErrControlPending (re-run without spending the iteration)", result, err)
+			}
+			assertRalphControlInfraRetryPending(t, store, control.ID, "1", beadsBefore)
+		})
+	}
+}
