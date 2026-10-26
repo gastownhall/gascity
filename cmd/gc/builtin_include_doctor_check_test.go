@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1516,6 +1517,25 @@ func TestBuiltinImportDoctorCheck_FixAuthErrorReportsCredentialHint(t *testing.T
 				t.Errorf("FixHint = %q, want the gc import install credential hint %q", res.FixHint, want)
 			}
 		})
+	}
+}
+
+func TestBuiltinImportDoctorCheck_FixNonAuthErrorKeepsHint(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+	check := newBuiltinImportDoctorCheck(dir)
+	before := check.Run(nil)
+	if before.FixHint == "" {
+		t.Fatalf("precondition: Run() FixHint is empty; result=%#v", before)
+	}
+	syncErr := errors.New("git ls-remote: exit status 1")
+	stubBuiltinImportFixSync(t, syncErr, nil)
+	res := runDoctorFix(t, check, dir)
+	if res.FixError != syncErr.Error() {
+		t.Errorf("FixError = %q, want %q", res.FixError, syncErr.Error())
+	}
+	if res.FixHint != before.FixHint {
+		t.Errorf("FixHint = %q, want the pre-fix hint %q", res.FixHint, before.FixHint)
 	}
 }
 
