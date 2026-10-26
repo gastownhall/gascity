@@ -257,6 +257,40 @@ func TestCorePoolWorkerPromptRecordsOutcomeBeforeClose(t *testing.T) {
 	}
 }
 
+// TestCorePoolWorkerPromptStatesStepFailureContract guards the failure half
+// of the #7678 outcome contract: a worker whose claimed workflow step cannot
+// succeed must record `gc.outcome=fail` with a failure class and reason
+// before closing, scoped to workflow steps (metadata `gc.step_ref`) so plain
+// work keeps the escalation path. A pass must never carry failure metadata:
+// classifyRetryAttempt retries a pass_with_failure_metadata close.
+func TestCorePoolWorkerPromptStatesStepFailureContract(t *testing.T) {
+	path := filepath.Join(filepath.Dir(coreFormulaSearchPaths(t)[0]), "assets", "prompts", "pool-worker.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"gc.outcome=fail",
+		"gc.failure_class=transient",
+		"gc.failure_class=hard",
+		"gc.failure_reason",
+		"gc.step_ref",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pool-worker.template.md never mentions %q; a workflow step the worker cannot finish has no way to record the failure", want)
+		}
+	}
+	for _, cmd := range joinShellContinuations(body) {
+		if !strings.Contains(cmd, "gc.outcome=pass") {
+			continue
+		}
+		if strings.Contains(cmd, "gc.failure_class") || strings.Contains(cmd, "gc.failure_reason") {
+			t.Errorf("pool-worker.template.md: a success write must not carry failure metadata (a pass_with_failure_metadata close is retried):\n%s", cmd)
+		}
+	}
+}
+
 // joinShellContinuations folds backslash-continued lines into one logical
 // command line so multi-line bd invocations are checked as a whole.
 func joinShellContinuations(text string) []string {

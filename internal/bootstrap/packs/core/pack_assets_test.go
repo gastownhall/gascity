@@ -276,6 +276,23 @@ func TestCoreMaintenanceOrdersCarryLegacySkipAliases(t *testing.T) {
 	}
 }
 
+// TestPoolWorkerPromptStatesStepOutcomeContract guards #7678: retry-managed
+// formula steps (mol-scoped-work) treat an attempt closed without gc.outcome
+// as missing_outcome, so the default worker prompt must tell the worker to
+// record gc.outcome when it closes a step, not just to run gc bd close.
+func TestPoolWorkerPromptStatesStepOutcomeContract(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/prompts/pool-worker.template.md")
+	if err != nil {
+		t.Fatalf("reading pool-worker prompt: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{"gc.outcome=pass", "gc.outcome=fail", "gc.failure_class", "gc.failure_reason"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pool-worker.template.md never mentions %q; steps it closes with bare `gc bd close` hard-fail as missing_outcome", want)
+		}
+	}
+}
+
 // TestClaimProtocolFragmentIsEmbedded pins the go:embed inclusion of
 // template-fragments/. The fragment render tests in cmd/gc read the on-disk
 // source tree, but production cities hydrate the core pack from PackFS —

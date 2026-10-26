@@ -105,6 +105,28 @@ gc bd update <id> --set-metadata gc.outcome=pass
 gc bd close <id> --reason "<what you did>"
 ```
 
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried.
+
+**A workflow step that cannot succeed** (its metadata has `gc.step_ref`):
+record the failure, then close the step, so the workflow decides whether to
+retry it. Use `gc.failure_class=transient` when a retry can succeed (network,
+provider, flaky infrastructure) and `gc.failure_class=hard` when it cannot
+(bad input, a broken contract):
+
+```bash
+gc bd update <id> \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=transient \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close <id> --reason "<why it failed>"
+```
+
+**Any other bead you cannot finish:** do not close it. Escalate (below).
+
+If the bead's own instructions already closed it, leave it closed: do not
+close it again or change its outcome.
+
 ## Escalation
 
 When blocked, escalate — do not wait silently. `human` is the reserved
