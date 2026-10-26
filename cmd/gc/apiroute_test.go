@@ -144,6 +144,20 @@ func TestAPIClientRouting(t *testing.T) {
 			t.Fatalf("apiClient = %p, want supervisor sentinel %p for a supervisor-hosted city", got, sentinel)
 		}
 	})
+
+	t.Run("supervisor-hosted-supervisor-unavailable-returns-nil", func(t *testing.T) {
+		// City not registered or not running under the supervisor: nil is the
+		// caller's local-fallback signal — never a client for the unserved
+		// [api] port.
+		t.Setenv("GC_NO_API", "")
+		restore(func(string) controllerIdentityReply {
+			return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+		}, func(string) *api.Client { return nil })
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 9443\n")
+		if got := apiClient(dir); got != nil {
+			t.Fatalf("apiClient = %p, want nil when the supervisor-managed client is unavailable", got)
+		}
+	})
 }
 
 // TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
