@@ -6628,59 +6628,72 @@ prompt_template = %q
 // TestDoPrimeStrictTemplateRendersLegitimatelyEmpty verifies that --strict
 // does NOT error when a template file exists but produces empty output.
 // Templates with conditional blocks (e.g., `{{if .RigName}}...{{end}}`)
-// can legitimately evaluate to empty under some contexts; strict mode is
-// a typo/missing-file detector, not a check that templates produce
-// substantial content. The absence of this test would let the missing-
-// file strict check quietly regress into a broader empty-render check.
+// can legitimately evaluate to empty under some contexts, and missingkey=
+// zero renders an absent key as empty; strict mode fails on templates
+// that cannot be used as written, not on templates whose valid logic
+// produces little or nothing. The fixture is a .template.md so the body
+// is actually executed. The absence of this test would let the strict
+// render check quietly regress into a non-empty-output check.
 func TestDoPrimeStrictTemplateRendersLegitimatelyEmpty(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
-	dir := t.TempDir()
-	gcDir := filepath.Join(dir, ".gc")
-	if err := os.MkdirAll(gcDir, 0o755); err != nil {
-		t.Fatal(err)
+	rows := []struct {
+		name string
+		body string
+	}{
+		// {{if}} with a missing/empty key (RigName is empty when GC_RIG
+		// isn't set) short-circuits the whole template body.
+		{name: "conditional renders empty", body: `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`},
+		// An absent key is an empty substitution under missingkey=zero,
+		// not an execute error (TestRenderPromptMissingKeyEmptyString).
+		{name: "missing key renders empty", body: `Hello {{.NoSuchKey}}`},
 	}
-	promptDir := filepath.Join(dir, "prompts")
-	if err := os.MkdirAll(promptDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Template file exists but renders to empty string under this context.
-	// {{if}} with a missing/empty key (RigName is empty when GC_RIG isn't set)
-	// short-circuits the whole template body.
-	emptyTemplate := `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`
-	if err := os.WriteFile(filepath.Join(promptDir, "mayor.md"), []byte(emptyTemplate), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	toml := `[workspace]
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			gcDir := filepath.Join(dir, ".gc")
+			if err := os.MkdirAll(gcDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			promptDir := filepath.Join(dir, "prompts")
+			if err := os.MkdirAll(promptDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(promptDir, "mayor.template.md"), []byte(row.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			toml := `[workspace]
 name = "test-city"
 
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "prompts/mayor.template.md"
 `
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	orig, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_CITY_PATH", dir)
+			orig, _ := os.Getwd()
+			t.Cleanup(func() { _ = os.Chdir(orig) })
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_CITY_PATH", dir)
 
-	// Clear GC_RIG so .RigName evaluates to empty and the conditional
-	// short-circuits. Without this, an ambient GC_RIG would produce output.
-	t.Setenv("GC_RIG", "")
-	t.Setenv("GC_RIG_ROOT", "")
-	t.Setenv("GC_AGENT", "")
-	t.Setenv("GC_ALIAS", "")
+			// Clear GC_RIG so .RigName evaluates to empty and the conditional
+			// short-circuits. Without this, an ambient GC_RIG would produce output.
+			t.Setenv("GC_RIG", "")
+			t.Setenv("GC_RIG_ROOT", "")
+			t.Setenv("GC_AGENT", "")
+			t.Setenv("GC_ALIAS", "")
 
-	var stdout, stderr bytes.Buffer
-	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
-	if code != 0 {
-		t.Fatalf("doPrimeWithMode(strict=true, legitimately-empty template) = %d, want 0; stderr: %s", code, stderr.String())
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, %s) = %d, want 0; stderr: %s", row.name, code, stderr.String())
+			}
+		})
 	}
 }
 
