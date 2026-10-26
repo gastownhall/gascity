@@ -925,3 +925,142 @@ func TestMergeSettingsJSON_WrapBareHooks_TwinDropsWhenMatcherlessCopyExists(t *t
 		t.Errorf("surviving entry should be the matcherless form, got %v", arr[0])
 	}
 }
+
+func TestMergeSettingsJSON_WrapBareHooks_CoreHookSurvivesBarePackHook(t *testing.T) {
+	// A category can hold both a core gc hook (matcher "") and a pack's bare
+	// hook. The bare entry must not claim the matcher-"" identity slot: the
+	// core hook survives, the pack hook lands exactly once, and re-projection
+	// stays stable.
+	base := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}]}}`
+	over := []byte(`{"hooks":{"Stop":[{"type":"command","command":"pack-cleanup.sh"}]}}`)
+
+	result, err := MergeSettingsJSON([]byte(base), over, WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		result, err = MergeSettingsJSON(result, over, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("re-merge %d: %v", i, err)
+		}
+	}
+	arr := stopEntries(t, result)
+	if len(arr) != 2 {
+		t.Fatalf("Stop entries = %d, want 2 (core + pack)", len(arr))
+	}
+	core := arr[0].(map[string]any)
+	if core["matcher"] != "" {
+		t.Errorf("first entry matcher = %v, want core entry with matcher \"\"", core["matcher"])
+	}
+	if got := innerCommand(t, arr[0]); got != "gc hook --inject" {
+		t.Errorf("core command = %q, want gc hook --inject (core hook must survive)", got)
+	}
+	if got := innerCommand(t, arr[1]); got != "pack-cleanup.sh" {
+		t.Errorf("pack command = %q, want pack-cleanup.sh", got)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_CoreMatcherReplacedOnUpgrade(t *testing.T) {
+	// The core gc hooks in internal/hooks/config/claude.json occupy the
+	// matcher-"" slot (PreCompact, UserPromptSubmit) and reach the merge with
+	// WithWrapBareHooks via installClaude. Keeping bare pack hooks out of that
+	// slot is what preserves same-matcher replacement here: when a release
+	// changes the command, the new entry must replace the old one rather than
+	// append beside it, or the stale command keeps firing forever.
+	// TestMergeSettingsJSON_SameMatcherReplacement covers the no-wrap path only.
+	base := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --old"}]}]}}`
+	over := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --new"}]}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	arr := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("UserPromptSubmit entries = %d, want 1 (stale core hook must not linger)", len(arr))
+	}
+	if got := innerCommand(t, arr[0]); got != "gc nudge drain --new" {
+		t.Errorf("command = %q, want gc nudge drain --new", got)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_TwinMigratesWhenNotInMatcherSlot(t *testing.T) {
+	// A category can hold several matcher-"" entries, but the identity index
+	// tracks only the last one. When the legacy twin is not the entry holding
+	// that slot, it must still be found by content — otherwise the pack hook
+	// migrates alongside its own legacy copy and fires twice on every tool call,
+	// forever.
+	base := `{"hooks":{"UserPromptSubmit":[` +
+		`{"matcher":"","hooks":[{"type":"command","command":"packcmd"}]},` +
+		`{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}` +
+		`]}}`
+	over := []byte(`{"hooks":{"UserPromptSubmit":[{"type":"command","command":"packcmd"}]}}`)
+
+	result, err := MergeSettingsJSON([]byte(base), over, WithWrapBareHooks())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	arr := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(arr) != 2 {
+		t.Fatalf("UserPromptSubmit entries = %d, want 2 (pack hook + core hook)", len(arr))
+	}
+	copies := 0
+	for _, e := range arr {
+		if innerCommand(t, e) == "packcmd" {
+			copies++
+		}
+	}
+	if copies != 1 {
+		t.Errorf("packcmd copies = %d, want 1 (legacy twin must migrate, not duplicate)", copies)
+	}
+}
+
+func TestMergeSettingsJSON_WrapBareHooks_PackHookCoexistsWithCoreCommands(t *testing.T) {
+	// The real core UserPromptSubmit hook (internal/hooks/config/claude.json)
+	// is one matcher-"" wrapper carrying both gc commands. A pack's bare hook
+	// in the same category (flywheel/mcp-agent-mail ships one) must land once
+	// beside it and leave the core wrapper's two commands intact across ticks.
+	core := `{"matcher":"","hooks":[` +
+		`{"type":"command","command":"gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"},` +
+		`{"type":"command","command":"gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"}` +
+		`]}`
+	over := []byte(`{"hooks":{"UserPromptSubmit":[{"type":"command","command":"agent-mail --check"}]}}`)
+	merged := []byte(`{"hooks":{"UserPromptSubmit":[` + core + `]}}`)
+	for i := 0; i < 4; i++ {
+		var err error
+		merged, err = MergeSettingsJSON(merged, over, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("merge %d: %v", i, err)
+		}
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(merged, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	arr := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(arr) != 2 {
+		t.Fatalf("UserPromptSubmit entries = %d, want 2 (core wrapper + pack hook)\n%s", len(arr), merged)
+	}
+	coreEntry := arr[0].(map[string]any)
+	if coreEntry["matcher"] != "" {
+		t.Errorf("first entry matcher = %v, want core entry with matcher \"\"", coreEntry["matcher"])
+	}
+	inner, ok := coreEntry["hooks"].([]any)
+	if !ok || len(inner) != 2 {
+		t.Errorf("core wrapper inner hooks = %v, want both core commands preserved", coreEntry["hooks"])
+	}
+	if got := innerCommand(t, arr[1]); got != "agent-mail --check" {
+		t.Errorf("pack command = %q, want agent-mail --check", got)
+	}
+}
