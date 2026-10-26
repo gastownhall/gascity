@@ -13,8 +13,8 @@ a stale fd number that the next open() (a SQLite connection) reuses.
 filelock 4.x releases every thread's abandoned hold when the lock object is
 finalized, and when another holder's marker sits at the lock path it overwrites
 the stored fd with b"filelock/released\\n" and truncates it to 18 bytes. That fd
-is now the mail database. filelock 3.x only releases the finalizing thread's own
-hold and never writes through the fd. Review of #8307:
+is now the mail database. filelock 3.29.0 only releases the finalizing thread's
+own hold, and its release only closes the fd and unlinks the path. Review of #8307:
 https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708
 
 The check drives mcp-agent-mail's own AsyncFileLock and
