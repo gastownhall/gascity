@@ -1743,3 +1743,54 @@ func TestFormulaCookAttachStampsMetaOnTheSubDAGRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestFormulaCookRejectsMalformedMetaBeforeWriting pins that a malformed --meta
+// pair is refused before the cook writes anything, on every arm: no root, no
+// steps, no synthetic input convoy (open or closed) and no blocking dep on the
+// attach bead.
+func TestFormulaCookRejectsMalformedMetaBeforeWriting(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		formula string
+		attach  bool
+		meta    string
+	}{
+		{name: "v1 standalone", formula: "legacy-work", meta: "no-equals"},
+		{name: "v1 attach", formula: "legacy-work", attach: true, meta: "no-equals"},
+		{name: "v1 attach, empty key", formula: "legacy-work", attach: true, meta: "=v"},
+		{name: "graph.v2 standalone", formula: "graph-work", meta: "no-equals"},
+		{name: "graph.v2 attach", formula: "graph-work", attach: true, meta: "no-equals"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			seedCLIStorageRoutes(t, cityDir, nil)
+			work, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open work store: %v", err)
+			}
+			target, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+			if err != nil {
+				t.Fatalf("create attach bead: %v", err)
+			}
+			args := []string{"--meta", tc.meta}
+			if tc.attach {
+				args = append(args, "--attach", target.ID)
+			}
+
+			out, err := cookFormulaErr(t, tc.formula, args...)
+
+			if err == nil {
+				t.Fatalf("cook with --meta %q succeeded: %s", tc.meta, out)
+			}
+			if want := fmt.Sprintf("invalid metadata %q (want key=value)", tc.meta); !strings.Contains(out, want) {
+				t.Errorf("cook output = %q, want it to contain %q", out, want)
+			}
+			if got := beadIDs(allBeads(t, work)); len(got) != 1 || got[0] != target.ID {
+				t.Errorf("store holds %v after a refused cook, want only %s", got, target.ID)
+			}
+			if got := blockingDepCount(t, work, target.ID); got != 0 {
+				t.Errorf("attach bead %s carries %d blocking deps after a refused cook, want 0", target.ID, got)
+			}
+		})
+	}
+}

@@ -730,6 +730,12 @@ store, copy them into the binding with
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
+			// Parsed before any arm writes a bead, so a malformed pair leaves
+			// nothing behind: no root, no input convoy, no attach dep.
+			rootMeta, err := parseMetadataArgs(metadata)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
 
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
@@ -908,10 +914,6 @@ store, copy them into the binding with
 					// closure returns closes the synthetic input convoy, which by
 					// now belongs to the live workflow. One stamp covers both the
 					// freshly instantiated and the adopted root.
-					rootMeta, err := parseMetadataArgs(metadata)
-					if err != nil {
-						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-					}
 					if err := setFormulaCookRootMetadata(store, result.RootID, rootMeta); err != nil {
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
@@ -982,10 +984,6 @@ store, copy them into the binding with
 				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
 				// The sub-DAG root lives where molecule.Attach materialized it:
 				// attachStore, which on a split city is the class binding.
-				rootMeta, err := parseMetadataArgs(metadata)
-				if err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
 				if err := setFormulaCookRootMetadata(attachStore, result.RootID, rootMeta); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
@@ -1096,10 +1094,6 @@ store, copy them into the binding with
 				}
 			}
 
-			rootMeta, err := parseMetadataArgs(metadata)
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-			}
 			if err := setFormulaCookRootMetadata(rootStore, result.RootID, rootMeta); err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
