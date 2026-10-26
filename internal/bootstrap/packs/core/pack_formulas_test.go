@@ -573,6 +573,50 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 	hookEmptyEnv.forbidLog = "ga-step"
 	cases = append(cases, hookEmptyEnv)
 
+	// refuse builds the loud-refusal scenario: the named bead fails exactly
+	// one of the checks and nothing may be written.
+	refuse := func(name string) molDoWorkCloseCase {
+		c := pass(name)
+		c.wantUpdate = ""
+		c.wantFail = true
+		c.wantOut = "current claim ga-step is not this session's in-progress do-work step"
+		return c
+	}
+
+	statusClosed := refuse("refuse_a_closed_step")
+	statusClosed.showOut = `{"id":"ga-step","status":"closed","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	cases = append(cases, statusClosed)
+
+	statusOpen := refuse("refuse_an_open_step")
+	statusOpen.showOut = `{"id":"ga-step","status":"open","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	cases = append(cases, statusOpen)
+
+	foreign := refuse("refuse_a_foreign_assignee")
+	foreign.showOut = `{"id":"ga-step","status":"in_progress","assignee":"gcg-session-other","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	cases = append(cases, foreign)
+
+	unassigned := refuse("refuse_an_empty_assignee")
+	unassigned.showOut = `{"id":"ga-step","status":"in_progress","assignee":"","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	cases = append(cases, unassigned)
+
+	drainRef := refuse("refuse_a_drain_step_ref")
+	drainRef.showOut = `{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.drain"}}`
+	cases = append(cases, drainRef)
+
+	noRef := refuse("refuse_a_missing_step_ref")
+	noRef.showOut = `{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{}}`
+	cases = append(cases, noRef)
+
+	prefixRef := refuse("refuse_a_prefixed_step_ref")
+	prefixRef.showOut = `{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"x.mol-do-work.do-work"}}`
+	cases = append(cases, prefixRef)
+
+	workBead := refuse("refuse_the_convoy_work_bead")
+	workBead.hookOut = "ga-work"
+	workBead.showOut = `{"id":"ga-work","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work"}}`
+	workBead.wantOut = "current claim ga-work is not this session's in-progress do-work step"
+	cases = append(cases, workBead)
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir, logPath := fakeGCBin(t, molDoWorkGCFakeBody(tc))
