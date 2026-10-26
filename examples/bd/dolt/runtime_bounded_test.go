@@ -349,13 +349,20 @@ func TestRuntimeScriptPortResolutionFindsHolderWithoutLsof(t *testing.T) {
 
 // TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet is AC-3 of the
 // gascity#7553 fix: when no kernel socket table is readable (no procfs),
-// managed_runtime_listener_pid keeps answering with lsof, exactly as before.
+// managed_runtime_listener_pid keeps answering with lsof, exactly as before:
+// the same argv, and the first holder lsof reports that is still running.
 func TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet(t *testing.T) {
+	dead := reapedChildPID(t)
+	if out, err := exec.Command("ps", "-p", strconv.Itoa(dead), "-o", "pid=").Output(); err == nil && len(strings.Fields(string(out))) > 0 {
+		t.Skipf("PID %d was reused before the shim could report it as a dead holder", dead)
+	}
+
 	bin := t.TempDir()
-	writeExecutable(t, filepath.Join(bin, "lsof"), "#!/bin/sh\nprintf '1\\n'\n")
+	argvLog := filepath.Join(t.TempDir(), "lsof-argv")
+	writeExecutable(t, filepath.Join(bin, "lsof"), fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\nprintf '%d\\n1\\n'\n", shellQuote(argvLog), dead))
 
 	code, out := runRuntimeScriptShell(t, t.TempDir(), bin,
-		"managed_runtime_listener_pid 4406",
+		"managed_runtime_listener_pid 4407",
 		"GC_DOLT_PORT=4406",
 		"GC_DOLT_PROC_ROOT="+t.TempDir(),
 	)
@@ -363,7 +370,14 @@ func TestManagedRuntimeListenerPIDFallsBackToLsofWithoutProcNet(t *testing.T) {
 		t.Fatalf("managed_runtime_listener_pid exited %d\n%s", code, out)
 	}
 	if got := strings.TrimSpace(out); got != "1" {
-		t.Fatalf("managed_runtime_listener_pid = %q, want the lsof shim's 1\n%s", got, out)
+		t.Fatalf("managed_runtime_listener_pid = %q, want 1 (the first running lsof holder, after the reaped %d)\n%s", got, dead, out)
+	}
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("lsof shim never ran: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "-nP -t -iTCP:4407 -sTCP:LISTEN"; got != want {
+		t.Fatalf("lsof argv = %q, want %q", got, want)
 	}
 }
 
