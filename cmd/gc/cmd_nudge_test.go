@@ -7105,8 +7105,8 @@ func claudeFamilyNudgeRows() []struct {
 		name     string
 		resolved *config.ResolvedProvider
 	}{
-		{name: "claude", resolved: &config.ResolvedProvider{Name: "claude", Kind: "claude", BuiltinAncestor: "claude"}},
-		{name: "claude-mux", resolved: &config.ResolvedProvider{Name: "claude-mux", Kind: "claude", BuiltinAncestor: "claude"}},
+		{name: "claude", resolved: &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude"}},
+		{name: "claude-mux", resolved: &config.ResolvedProvider{Name: "claude-mux", BuiltinAncestor: "claude"}},
 	}
 }
 
