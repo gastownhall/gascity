@@ -60,6 +60,19 @@ func TestSleepReasonListDivergence(t *testing.T) {
 	}
 }
 
+// TestSleepReasonKilledIsAnOperatorStop pins the classification the #7308 fix
+// relies on: `gc session kill` (SleepReasonKilled, kill_fence.go) is a
+// deliberate operator stop, so like drained or city-stop it suppresses churn
+// and keeps the continuation on a heal.
+func TestSleepReasonKilledIsAnOperatorStop(t *testing.T) {
+	if !IsDeliberateSleepReason(string(SleepReasonKilled)) {
+		t.Error("killed must be a deliberate sleep reason")
+	}
+	if !resetSuppressed(t, SleepReasonKilled) {
+		t.Error("killed must suppress continuation reset")
+	}
+}
+
 // resetSuppressed reports whether shouldResetContinuation returns false (reset
 // suppressed) for the given reason on an otherwise reset-eligible input.
 func resetSuppressed(t *testing.T, reason SleepReason) bool {
