@@ -6806,7 +6806,7 @@ prompt_template = "prompts/does-not-exist.md"
 // prompts/worker.template.md with the given body, then chdirs into it and
 // points GC_CITY_PATH at it. The .template.md suffix matters: a plain .md
 // prompt_template is returned verbatim and never executed.
-func setupStrictPrimeTemplateCity(t *testing.T, body string) {
+func setupStrictPrimeTemplateCity(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
@@ -6840,6 +6840,7 @@ prompt_template = "prompts/worker.template.md"
 	t.Setenv("GC_RIG_ROOT", "")
 	t.Setenv("GC_AGENT", "")
 	t.Setenv("GC_ALIAS", "")
+	return dir
 }
 
 // TestDoPrimeStrictTemplateParseErrorFails verifies that --strict fails on a
@@ -6901,6 +6902,74 @@ func TestDoPrimeStrictTemplateExecuteErrorFails(t *testing.T) {
 				if !strings.Contains(stderr.String(), want) {
 					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 				}
+			}
+		})
+	}
+}
+
+// TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata
+// verifies that a prompt_template that fails to parse or execute is caught by
+// the strict precondition, before hook side effects persist session_key. The
+// valid row proves the session_key assertion is not vacuous.
+func TestDoPrimeStrictHookModeBrokenTemplateDoesNotUpdateProviderMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantFail bool
+	}{
+		{name: "parse error", body: "Hello {{base_branch}}\n", wantFail: true},
+		{name: "execute error", body: `Hello {{template "no-such-fragment" .}}`, wantFail: true},
+		{name: "valid", body: "Hello {{.AgentName}}\n", wantFail: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := setupStrictPrimeTemplateCity(t, tt.body)
+
+			store, err := openCityStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   "session",
+				Labels: []string{"gc:session", "template:worker"},
+				Metadata: map[string]string{
+					"template":     "worker",
+					"session_name": "worker",
+					"state":        "active",
+					"work_dir":     dir,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const providerSessionID = "provider-session-broken-template"
+			t.Setenv("GC_SESSION_ID", sessionBead.ID)
+			t.Setenv("GC_PROVIDER_SESSION_ID", providerSessionID)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, true, true)
+			if tt.wantFail && code == 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, hook=true, %s) = 0, want non-zero; stderr: %s", tt.name, stderr.String())
+			}
+			if !tt.wantFail && code != 0 {
+				t.Fatalf("doPrimeWithMode(strict=true, hook=true, valid template) = %d, want 0; stderr: %s", code, stderr.String())
+			}
+
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.TrimSpace(updated.Metadata["session_key"])
+			want := providerSessionID
+			if tt.wantFail {
+				want = ""
+			}
+			if got != want {
+				t.Fatalf("session_key = %q, want %q", got, want)
 			}
 		})
 	}
