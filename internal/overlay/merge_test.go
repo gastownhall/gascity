@@ -896,3 +896,27 @@ func TestMergeSettingsJSON_WrapBareHooks_CoreMatcherReplacedOnUpgrade(t *testing
 		t.Errorf("command = %q, want gc nudge drain --new", got)
 	}
 }
+
+func TestMergeSettingsJSON_WrapBareHooks_DistinctBareHooksCoexistAcrossTicks(t *testing.T) {
+	// Two distinct bare hooks in one event each key on their own command
+	// content, so re-projection keeps both — once each, in overlay order —
+	// instead of appending copies or collapsing them into one slot.
+	over := []byte(`{"hooks":{"PreToolUse":[` +
+		`{"type":"command","command":"hook-x"},` +
+		`{"type":"command","command":"hook-z"}` +
+		`]}}`)
+	merged := []byte(`{}`)
+	for i := 0; i < 10; i++ {
+		var err error
+		merged, err = MergeSettingsJSON(merged, over, WithWrapBareHooks())
+		if err != nil {
+			t.Fatalf("merge tick %d: %v", i, err)
+		}
+	}
+	arr := preToolUse(t, merged)
+	if len(arr) != 2 {
+		t.Fatalf("PreToolUse entries after 10 ticks = %d, want 2 (X then Z):\n%s", len(arr), merged)
+	}
+	assertCanonicalEqual(t, arr[0], `{"hooks":[{"type":"command","command":"hook-x"}]}`)
+	assertCanonicalEqual(t, arr[1], `{"hooks":[{"type":"command","command":"hook-z"}]}`)
+}
