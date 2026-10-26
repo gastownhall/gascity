@@ -175,8 +175,9 @@ gc mail inbox
 ```
 
 **Exit criteria:** The work described in the bead is complete, relevant changes
-are committed, the target bead is closed, and the claimed formula step is
-closed when `GC_BEAD_ID` is available."""
+are committed, the target bead is closed, and this session's `do-work` step
+bead is closed. Step 4 exits non-zero, rather than skipping, when it cannot
+name and verify that step."""
 
 [[steps]]
 id = "drain"

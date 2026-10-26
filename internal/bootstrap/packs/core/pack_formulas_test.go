@@ -712,6 +712,29 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 	}
 }
 
+// TestMolDoWorkCloseStepNeverReadsGCBeadID pins the text contract behind the
+// issue #7991 fix: the do-work step never names GC_BEAD_ID (it never exists in
+// a session shell, so any close gated on it silently skips), resolves its own
+// step bead through gc hook current, and its exit criteria no longer present
+// the gated skip as success. The drain step's GC_TRIGGER_BEAD_ID fallback is a
+// separate, deliberate shape and is out of scope here.
+func TestMolDoWorkCloseStepNeverReadsGCBeadID(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+
+	if strings.Contains(step, "GC_BEAD_ID") {
+		t.Error("the do-work step must not reference GC_BEAD_ID: it exists only in the dispatch condition environment, never in a session shell (cmd/gc/cmd_hook_current.go)")
+	}
+	if !strings.Contains(step, "gc hook current --id-only") {
+		t.Error("the do-work step must resolve its own step bead via `gc hook current --id-only`")
+	}
+	if strings.Contains(step, "closed when `GC_BEAD_ID` is available") {
+		t.Error("do-work's exit criteria must not present the GC_BEAD_ID-gated skip as success")
+	}
+	if strings.Contains(molDoWorkCloseStepBlock(t), `\`) {
+		t.Error("the close-step block must contain no backslash: the description is a TOML basic string, which decodes them before the agent sees the text")
+	}
+}
+
 // graphBeadVars are the shell variables core formulas use for workflow
 // infrastructure beads: the claimed formula step, the drain continuation and
 // the workflow root. Every one carries gc.root_bead_id, so on a city that
