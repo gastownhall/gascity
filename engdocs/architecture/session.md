@@ -154,14 +154,26 @@ parked state to store or clear.
   it keeps a free slot: once its open rows (a workless asleep seat the close
   ends this pass aside) reach the bound, its oldest parked seats fall back to
   the stranded path until one slot is free.
-- A parked seat's pin turns into a counted resume when it is ready, and takes
-  its place by bead priority among the other existing seats' requests. At a
-  full rig or city cap it can outrank a live seat, which then finishes its
-  claimed work as an undesired row (SESS-074) before it drains, so the cap is
-  briefly exceeded by that one seat.
+- A parked seat's pin turns into a counted resume when it is ready, and
+  competes by bead priority with the other existing seats' requests, ahead of
+  new demand; a tie keeps the pass's order. At a full rig or city cap the
+  request that loses selects no seat, but the session overlay still keeps
+  every open row of a template the pass selects, so the outcome turns on the
+  loser's template:
+  - While its template keeps a selected row, the loser stays selected: a
+    parked seat wakes for its ready pin, or a live seat keeps running, past
+    the cap.
+  - Otherwise nothing selects it. A parked seat that loses is closed as an
+    orphan by both reconcilers, its pin returned to the pool (SESS-082), as
+    for any asleep seat that loses the cap: a fresh seat runs the pin without
+    the conversation. It does not wait for a slot, so nothing deadlocks on the
+    cap. A live seat the pin displaces finishes its claimed work as an
+    undesired row (SESS-074) before it drains, so the cap is briefly exceeded
+    by that one seat.
 - Everything else strands as before: a seat holding started work, a seat whose
-  runtime died (`runtime-missing`), a fresh-wake seat, a seat past its bound. The
-  stranded repair then returns the pin to the pool.
+  runtime died (`runtime-missing`), a seat its idle timeout stopped
+  (`idle-timeout`; only the voluntary `idle` stop parks), a fresh-wake seat, a
+  seat past its bound. The stranded repair then returns the pin to the pool.
 
 ### Providers
 

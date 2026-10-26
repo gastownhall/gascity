@@ -322,6 +322,30 @@ func TestParkedSeatFixturesEndStates(t *testing.T) {
 				t.Fatalf("%s: pin assignee %q, want its seat", copyName, pin.Assignee)
 			}
 		},
+		"a parked seat whose ready pin loses a full city cap to its own template still wakes": func(t *testing.T, copyName string, o parityOutcome) {
+			row, live := o.rows["gc-1"], o.rows["gc-2"]
+			if row.Status == "closed" || row.Metadata["generation"] == "1" || strandedEvents(o) != 0 {
+				t.Fatalf("%s: row %s %v, want the same row woken for its pin past the cap", copyName, row.Status, row.Metadata)
+			}
+			if pin := o.work["gp-1"]; pin.Assignee != "gc-1" {
+				t.Fatalf("%s: pin assignee %q, want its seat", copyName, pin.Assignee)
+			}
+			if live.Status == "closed" || o.work["gw-2"].Assignee != "gc-2" {
+				t.Fatalf("%s: live seat %s, its work on %q; want it kept on its work", copyName, live.Status, o.work["gw-2"].Assignee)
+			}
+		},
+		"a parked seat whose ready pin loses a full city cap to another template closes as an orphan": func(t *testing.T, copyName string, o parityOutcome) {
+			row, live, pin := o.rows["gc-1"], o.rows["gc-2"], o.work["gp-1"]
+			if row.Status != "closed" || strandedEvents(o) != 0 {
+				t.Fatalf("%s: row %s %v, %d stranded events; want the seat closed as an orphan", copyName, row.Status, row.Metadata, strandedEvents(o))
+			}
+			if pin.Assignee != "" || pin.Status != "open" {
+				t.Fatalf("%s: pin %s/%q, want open and returned to the pool", copyName, pin.Status, pin.Assignee)
+			}
+			if live.Status == "closed" || o.work["gw-2"].Assignee != "gc-2" {
+				t.Fatalf("%s: live seat %s, its work on %q; want it kept on its work", copyName, live.Status, o.work["gw-2"].Assignee)
+			}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			i := slices.IndexFunc(parityFixtures(), func(f parityFixture) bool { return f.Name == name })
