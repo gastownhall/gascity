@@ -935,11 +935,24 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 		return nil, code
 	}
 	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
-	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
-	// failed load yields nil cfg, which the class resolvers treat as identity —
-	// where a relocated class is SERVED from does not depend on it, because the
-	// routes come from cliStorageRoutes, which reads the city's own [storage].
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// completion): loadCityConfig's builtin-pack refresh is inappropriate here.
+	//
+	// A failed load REFUSES on any city that may relocate a class
+	// (split-default audit R1). It used to continue with a nil cfg, and with the
+	// routes read the same way that put a `gc mail send` into the work store of
+	// a split city — a stranded infrastructure row the next boot refuses the
+	// city over. Where messages live is exactly what the unreadable file says,
+	// so the provider does not guess. A provably single-store city keeps the
+	// old behavior: its messages have only ever lived in the work store.
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		if refusal := cityConfigLoadRefusal(cityPath, err); refusal != nil {
+			_ = closeBeadStoreHandle(store)
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, refusal) //nolint:errcheck // best-effort stderr
+			return nil, 1
+		}
+		cfg = nil
+	}
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	return newMailProviderWithSessionStore(msgStore, sessStore), 0
