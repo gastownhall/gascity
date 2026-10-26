@@ -12686,6 +12686,9 @@ type GetV0CityByCityNameWorkReadyParams struct {
 
 	// Status List beads in this status instead of ready work.
 	Status *GetV0CityByCityNameWorkReadyParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Ready With status in_progress, drop rows that have a non-closed blocking dependency before the limit is applied.
+	Ready *bool `form:"ready,omitempty" json:"ready,omitempty"`
 }
 
 // GetV0CityByCityNameWorkReadyParamsSort defines parameters for GetV0CityByCityNameWorkReady.
@@ -37982,6 +37985,22 @@ func NewGetV0CityByCityNameWorkReadyRequest(server string, cityName string, para
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "status", *params.Status, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Ready != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "ready", *params.Ready, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

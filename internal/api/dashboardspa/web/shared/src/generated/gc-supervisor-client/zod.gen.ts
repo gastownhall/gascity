@@ -11318,7 +11318,8 @@ export const zGetV0CityByCityNameWorkReadyQuery = z.object({
         'in_progress',
         'blocked',
         'closed'
-    ]).optional()
+    ]).optional(),
+    ready: z.boolean().optional()
 });
 
 /**

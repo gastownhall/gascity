@@ -57,6 +57,9 @@ func (c *Client) ReadyWork(ctx context.Context, q readywork.Query) ([]readywork.
 		status := genclient.GetV0CityByCityNameWorkReadyParamsStatus(q.Status)
 		params.Status = &status
 	}
+	if q.Ready {
+		params.Ready = &q.Ready
+	}
 	resp, err := c.cw.GetV0CityByCityNameWorkReadyWithResponse(ctx, c.cityName, params)
 	if err != nil {
 		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}

@@ -112,6 +112,7 @@ func TestReadyWorkSendsEveryQueryFieldToTheController(t *testing.T) {
 		Sort:           readywork.SortOldest,
 		Limit:          20,
 		Status:         readywork.StatusInProgress,
+		Ready:          true,
 	}
 	v := reflect.ValueOf(want)
 	for i := range v.NumField() {
