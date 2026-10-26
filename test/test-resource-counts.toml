@@ -1362,8 +1362,13 @@ calls = 1
 
 [[count]]
 path = "examples/bd/dolt/runtime_bounded_test.go"
+resource = "net_listen"
+calls = 6
+
+[[count]]
+path = "examples/bd/dolt/runtime_bounded_test.go"
 resource = "subprocess"
-calls = 1
+calls = 5
 
 [[count]]
 path = "examples/bd/dolt/sql_test.go"
