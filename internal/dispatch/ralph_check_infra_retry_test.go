@@ -77,3 +77,85 @@ func TestProcessRalphCheckInfraRetryBudgetExhaustionBurns(t *testing.T) {
 		t.Fatalf("result = %+v, want processed retry (attempt burned once the infra-retry budget is spent)", result)
 	}
 }
+
+// TestProcessRalphControlInfraTimeoutDoesNotConsumeIteration is the repro for
+// gastownhall/gascity#6947: a compiled kind=ralph control (max_attempts=1)
+// whose exec check times out produced no verdict, so it must take the bounded
+// infra-retry path instead of consuming the iteration and closing failed.
+func TestProcessRalphControlInfraTimeoutDoesNotConsumeIteration(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "slow-check.sh", "#!/bin/bash\nsleep 30\n")
+	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	if err := store.SetMetadata(control.ID, beadmeta.CheckTimeoutMetadataKey, "100ms"); err != nil {
+		t.Fatalf("set check timeout: %v", err)
+	}
+	control = mustGet(t, store, control.ID)
+
+	result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Errorf("ProcessControl on GateTimeout = (%+v, %v), want ErrControlPending (infra re-run without consuming the iteration)", result, err)
+	}
+
+	got := mustGet(t, store, control.ID)
+	if got.Status == "closed" {
+		t.Errorf("ralph control closed (outcome=%q failed_attempt=%q attempt_log=%q), want held open for an infra re-run",
+			got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata[beadmeta.FailedAttemptMetadataKey], got.Metadata[beadmeta.AttemptLogMetadataKey])
+	}
+	if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "1" {
+		t.Errorf("gc.check_infra_retry = %q, want 1", r)
+	}
+}
+
+// TestProcessRalphControlInfraTimeoutDoesNotBurnIteration covers the compiled
+// kind=ralph lane at max_attempts 1 and 2: a gate timeout produced no verdict,
+// so the iteration is not spent — the control pends for an attempt-free re-run
+// and no successor iteration is spawned.
+func TestProcessRalphControlInfraTimeoutDoesNotBurnIteration(t *testing.T) {
+	t.Parallel()
+
+	for _, maxAttempts := range []string{"1", "2"} {
+		t.Run("max_attempts="+maxAttempts, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "slow-check.sh", "#!/bin/bash\nsleep 30\n")
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+			if err := store.SetMetadataBatch(control.ID, map[string]string{
+				beadmeta.MaxAttemptsMetadataKey:  maxAttempts,
+				beadmeta.CheckTimeoutMetadataKey: "100ms",
+			}); err != nil {
+				t.Fatalf("stamp max_attempts/check_timeout: %v", err)
+			}
+			control = mustGet(t, store, control.ID)
+			beadsBefore := countAllBeads(t, store)
+
+			_, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if !errors.Is(err, ErrControlPending) {
+				t.Fatalf("ProcessControl on GateTimeout = %v, want ErrControlPending (infra re-run without burning the iteration)", err)
+			}
+
+			got := mustGet(t, store, control.ID)
+			if got.Status == "closed" {
+				t.Fatalf("control closed (outcome=%q failed_attempt=%q), want held open for an infra re-run",
+					got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata[beadmeta.FailedAttemptMetadataKey])
+			}
+			for _, key := range []string{
+				beadmeta.OutcomeMetadataKey,
+				beadmeta.AttemptLogMetadataKey,
+				beadmeta.FailedAttemptMetadataKey,
+			} {
+				if v := got.Metadata[key]; v != "" {
+					t.Errorf("%s = %q, want empty (no iteration was spent)", key, v)
+				}
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "1" {
+				t.Errorf("gc.check_infra_retry = %q, want 1", r)
+			}
+			if n := countAllBeads(t, store); n != beadsBefore {
+				t.Errorf("bead count = %d, want %d (no successor iteration may be spawned)", n, beadsBefore)
+			}
+		})
+	}
+}

@@ -708,10 +708,11 @@ participates.
 
 `[steps.check]` wraps a step in an inline run/check verification loop:
 after each iteration closes, the orchestrator runs the configured script.
-Exit 0 closes the step; an infrastructure outcome — exit 75, or the narrow
-stderr fallback described below — re-runs the script without spending an
-attempt; any other nonzero exit is a "not yet" verdict that spawns the next
-iteration while budget remains, and exhaustion closes the step as failed.
+Exit 0 closes the step; an infrastructure outcome — exit 75, the narrow
+stderr fallback described below, or a run that outlives `check.timeout` —
+re-runs the script without spending an attempt; any other nonzero exit is a
+"not yet" verdict that spawns the next iteration while budget remains, and
+exhaustion closes the step as failed.
 
 | Key | Purpose |
 |---|---|
@@ -786,6 +787,7 @@ that run as an infrastructure outcome rather than a verdict:
 | `0` | Pass — the step closes | n/a |
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
 | any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| none: the script ran past `check.timeout` and was stopped | No verdict — the run is an infrastructure outcome | **No** — re-run attempt-free under the same budget |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
 | none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
 
