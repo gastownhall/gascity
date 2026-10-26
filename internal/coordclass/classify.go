@@ -181,6 +181,13 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassOrders
 	case hasLabel(labels, labelSession) || beadType == typeSession:
 		return ClassSessions
+	// A startup-health episode is the session class's quarantine record
+	// (session.SaveStartupHealthEpisode, through the sessions store). It
+	// carries no session label, so without this arm it fell to the work
+	// default: migration left it in the work store and quarantine reset at
+	// cutover. Ahead of the workflow arm, like the session arm.
+	case beadType == typeStartupHealthEpisode:
+		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions
 	case beadType == typeOp || hasLabel(labels, labelOp) || hasLabel(labels, labelFact) ||
@@ -197,9 +204,30 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassGraph
 	case beadType == typeConvergence:
 		return ClassGraph
+	// The two coordination-owned shapes that carry no class label of their
+	// own (CoordinationOwnedLabel). Both come AFTER every graph arm on
+	// purpose: an order-poured workflow or wisp root carries the order-run
+	// label too, and a graph gate step can carry a session label, and those
+	// stay graph. What reaches here is the row only its owning route writes.
+	case isOwnSessionWait(beadType, labels, metadata):
+		return ClassSessions
+	case hasLabelPrefix(labels, labelOrderRunPrefix):
+		return ClassOrders
 	default:
 		return ClassWork
 	}
+}
+
+// isOwnSessionWait reports a durable session wait written without gc:wait
+// (session.IsWaitBead): a wait-typed bead whose session:<session_id> label
+// names its own session_id. The per-entity label on any other shape is not a
+// class signal.
+func isOwnSessionWait(beadType string, labels []string, metadata map[string]string) bool {
+	if beadType != typeWait && beadType != typeWaitLegacy {
+		return false
+	}
+	sessionID := metadata["session_id"]
+	return sessionID != "" && hasLabel(labels, labelSessionPrefix+sessionID)
 }
 
 // isWispMetadata mirrors bead_policy_store.isWispPolicyMetadata.

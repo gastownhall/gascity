@@ -79,7 +79,29 @@ func TestClassifyGoldenTable(t *testing.T) {
 		// is why sessions ride the federating Router, not a query-shape adapter.
 		{"per-entity session label alone is NOT a session class signal", beads.Bead{Type: "task", Labels: []string{"session:gc-7"}}, ClassWork},
 
+		// A startup-health episode is the session class's quarantine state
+		// (session.SaveStartupHealthEpisode writes it through the sessions
+		// store). It carries no session label, so before its own arm it fell
+		// to the work default: on maintainer-city 35 episodes sat in the
+		// binding answering to work, and a migration left every city's
+		// episodes in the work store, silently resetting quarantine at cutover.
+		{"startup-health episode", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{"session_name": "worker-1"}}, ClassSessions},
+		{"startup-health episode with stray root_bead_id stays sessions", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassSessions},
+		// A durable session wait written without gc:wait (session.IsWaitBead):
+		// a wait-typed bead whose session:<session_id> label names its own
+		// session_id. The per-entity label on any OTHER shape is still not a
+		// class signal (row above, and the two rows below).
+		{"typed wait by its own session label", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassSessions},
+		{"legacy-typed wait by its own session label", beads.Bead{Type: "wait", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassSessions},
+		{"gate naming another session stays work", beads.Bead{Type: "gate", Labels: []string{"session:s-2"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassWork},
+		{"graph gate step with a session label stays graph", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1", beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
+
 		// ---- ORDERS (order-dispatch tracking) ----
+		// An order's run label alone (no order-tracking, no graph marker) is an
+		// order-owned row only order dispatch writes (CoordinationOwned).
+		{"order run label alone", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent"}}, ClassOrders},
+		{"order-poured workflow root stays graph", beads.Bead{Type: "molecule", Labels: []string{"order-run:rig/agent"}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}}, ClassGraph},
+		{"order-poured wisp root stays graph", beads.Bead{Type: "molecule", Labels: []string{"order-run:rig/agent"}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}}, ClassGraph},
 		{"order-tracking bead", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking"}, NoHistory: true}, ClassOrders},
 
 		// ---- NUDGES (nudge-queue durability mirror + the durable queue itself) ----

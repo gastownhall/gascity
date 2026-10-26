@@ -26,6 +26,7 @@ go_test(
         "coordination_test.go",
         "flip_test.go",
         "guard_test.go",
+        "owned_class_test.go",
         "owned_test.go",
         "testenv_import_test.go",
     ],
