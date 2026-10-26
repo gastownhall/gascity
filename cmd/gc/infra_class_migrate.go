@@ -408,6 +408,13 @@ type infraMigrationReport struct {
 	// written to stderr and nowhere else is a fault they cannot see. "The reason
 	// is above" is not an answer to a reader holding one line.
 	Fault error
+	// Transient marks a Fault that is a READ that failed — a work store or
+	// binding that would not open or list, a manifest or note that would not
+	// read — rather than a verdict about the city. It may clear on the next
+	// attempt, so the CLI does not memoize it and the hook's drain fence keeps
+	// its fail-open contract for it (hookDrainProbeFailsClosed). A stale
+	// marker, a missing manifest or an unresolvable target is not transient.
+	Transient bool
 	// Target is the resolved destination the outcome is about. Its zero value
 	// belongs to the outcomes that resolved nothing.
 	Target infraBindingTarget
@@ -845,7 +852,9 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 
 	state, err := readInfraConvergenceState(target)
 	if err != nil {
-		return say(infraMigrationUncheckable, err)
+		report := say(infraMigrationUncheckable, err)
+		report.Transient = true
+		return report
 	}
 	switch state {
 	case infraConvergenceMarked:
@@ -877,7 +886,9 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	}
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
-		return say(infraMigrationUnconverged, fmt.Errorf("opening the work store to census infrastructure beads: %w", err))
+		report := say(infraMigrationUnconverged, fmt.Errorf("opening the work store to census infrastructure beads: %w", err))
+		report.Transient = true
+		return report
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	rows, err := readInfraSnapshot(source)
@@ -1159,7 +1170,9 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 
 	state, err := readInfraConvergenceState(target)
 	if err != nil {
-		return say(infraMigrationUncheckable, err)
+		report := say(infraMigrationUncheckable, err)
+		report.Transient = true
+		return report
 	}
 
 	// A city with no marker has not proven it ever served from the binding, so
@@ -1484,6 +1497,7 @@ func reportUncheckableConvergence(target infraBindingTarget, logPrefix string, s
 		Outcome: infraMigrationUncheckable,
 		Fault: fmt.Errorf("%s converged (%s records it) and the stranded-write re-check could not run: %w",
 			target.Database, target.MarkerPath(), cause),
+		Transient: true,
 	}
 }
 

@@ -242,7 +242,7 @@ func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled 
 			return refusingStorageRoutes("", refusal), true
 		}
 	}
-	return resolveCLIStorageRoutesFor(cityPath, cfg), false
+	return resolveCLIStorageRoutesFor(cityPath, cfg)
 }
 
 // cityTOMLPresent reports whether the root config file exists. Only a provably
@@ -255,14 +255,18 @@ func cityTOMLPresent(tomlPath string) bool {
 
 // resolveCLIStorageRoutesFor is resolveCLIStorageRoutes once the config has
 // loaded (cfg) or provably does not exist (nil cfg).
-func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) *storageRoutes {
+//
+// unsettled is true for a refusal resting on a read the gate could not make
+// (isTransientStorageGateFault): it is not memoized, so the next resolution
+// tries again.
+func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *storageRoutes, unsettled bool) {
 	if cfg == nil {
 		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, cliStorageStderr)
 		if err != nil {
 			fmt.Fprintln(cliStorageStderr, err) //nolint:errcheck // best-effort stderr
-			return refusingStorageRoutes("", err)
+			return refusingStorageRoutes("", err), isTransientStorageGateFault(err)
 		}
-		return routes
+		return routes, false
 	}
 	// The worker-site verdict comes first, so a binding the descriptor does not
 	// attach is never opened, and never created, in the box (DES-CN §4.4,
@@ -270,7 +274,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) *storageRoute
 	if refusal := workerSiteStorageRefusal(cityPath, cfg.EffectiveStorage()); refusal != nil {
 		fmt.Fprintln(cliStorageStderr, refusal) //nolint:errcheck // best-effort stderr
 		_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
-		return refusingStorageRoutes(binding, refusal)
+		return refusingStorageRoutes(binding, refusal), false
 	}
 	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
 	if err == nil {
@@ -279,13 +283,13 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) *storageRoute
 		// a relocated class land in a store nothing observes; the controller
 		// resolves its routes through openStorageRoutes, never here, so its
 		// side stays exactly as it was. See class_store_emit.go.
-		return routes.withCLIEmission(cityPath)
+		return routes.withCLIEmission(cityPath), false
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
 	fmt.Fprintln(cliStorageStderr, err) //nolint:errcheck // best-effort stderr
 	_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
-	return refusingStorageRoutes(binding, err)
+	return refusingStorageRoutes(binding, err), isTransientStorageGateFault(err)
 }
 
 // cliStorageRoutesResolved reports whether this process has already entered

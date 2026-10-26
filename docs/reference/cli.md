@@ -2159,6 +2159,20 @@ managed Dolt server is not running is named on stderr but does not hold the
 answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
+Before the work query, a session keyed by $GC_SESSION_ID is checked for a
+pending drain (the drain fence), with and without --claim. A draining session
+gets the drain result instead of work. If the session row cannot be read, the
+fence depends on why. A store fault that may clear on its own (a timeout, a
+locked database, a work store the storage gate could not read) fails open:
+the hook proceeds, names the fault on stderr, and records a
+session.drain_fence_unavailable event. A standing storage refusal (the city's
+storage gate refuses to serve its relocated classes, for example a retained
+work store holding infrastructure beads the binding cannot read, or a
+city.toml that does not load on a city that may be split) fails closed:
+nothing is claimed or served, GC_HOOK_STORE_UNAVAILABLE is printed on stderr
+with the refusal, the hook exits 2, and the event says the fence failed
+closed.
+
 The agent is determined from $GC_AGENT or a positional argument.
 
 ```

@@ -95,8 +95,12 @@ func drainFenceUnavailableReason(err error) string {
 // So it fails closed: no claim, no discovery answer, and the store-unavailable
 // exit contract (an unknown answer, not an empty queue and not a drain) so the
 // seat neither idles on a false "no work" nor drains on a row nobody read.
+//
+// A refusal that rests on a read the gate could not make (a hosted work store
+// that timed out during the containment check: storageGateTransientFault) is
+// a transient by this definition, and fails open like any other store fault.
 func hookDrainProbeFailsClosed(err error) bool {
-	return err != nil && storeref.IsStandingRefusal(err)
+	return err != nil && storeref.IsStandingRefusal(err) && !isTransientStorageGateFault(err)
 }
 
 // reportHookDrainFenceClosed renders a fail-closed fence through the shared

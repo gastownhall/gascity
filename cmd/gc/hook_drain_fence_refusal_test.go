@@ -127,3 +127,54 @@ func TestDrainFenceUnavailableReasonNamesTheDirection(t *testing.T) {
 		t.Errorf("refusal reason = %q, want failed closed", refused)
 	}
 }
+
+// Review probe I: a TRANSIENT read failure inside the gate (a hosted work
+// store that times out during the containment check) is not a standing
+// verdict about the city. The class stores still refuse for this attempt, but
+// the drain fence keeps its fail-open contract and the refusal is not
+// memoized: the next resolution, after the store answers, serves.
+func TestHookDrainFenceFailsOpenOnATransientGateFault(t *testing.T) {
+	cityPath, _ := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		return nil, errors.New(`Get "https://hosted-bd/v1/issues": dial tcp: i/o timeout`)
+	}
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+
+	_, err := hookSessionDrainPending(drainPendingTestSessionID)
+	if err == nil {
+		t.Fatal("the probe answered while the gate could not check the city")
+	}
+	if !isTransientStorageGateFault(err) {
+		t.Fatalf("the gate's read failure is not marked transient: %v", err)
+	}
+	if hookDrainProbeFailsClosed(err) {
+		t.Errorf("a transient gate fault fails the drain fence closed: %v", err)
+	}
+
+	e := newDrainPendingClaimEnv()
+	ops := e.ops()
+	ops.DrainPending = hookSessionDrainPending
+	if code := doHookClaim("query", "/rig", e.opts(true), ops, &e.stdout, &e.stderr); code != 0 || len(e.claimed) != 1 {
+		t.Errorf("claim on a transient gate fault = (%d, claimed %v), want the fail-open claim; stderr=%s", code, e.claimed, e.stderr.String())
+	}
+
+	// The store answers again: the same process now resolves served routes.
+	openInfraMigrationSource = prev
+	if _, err := cliSessionStore(beads.NewMemStore(), nil, cityPath).List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Errorf("after the store recovered the session class still refuses (a transient fault was memoized): %v", err)
+	}
+}
+
+// The control: a standing refusal (the stranded city) stays closed.
+func TestStandingGateRefusalIsNotTransient(t *testing.T) {
+	strandedSplitCity(t)
+	_, err := hookSessionDrainPending(drainPendingTestSessionID)
+	if err == nil || isTransientStorageGateFault(err) || !hookDrainProbeFailsClosed(err) {
+		t.Errorf("stranded-city refusal: err=%v transient=%v failsClosed=%v; want a standing, fail-closed refusal", err, isTransientStorageGateFault(err), hookDrainProbeFailsClosed(err))
+	}
+}
