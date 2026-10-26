@@ -17,6 +17,9 @@ type formulaFile struct {
 		ID          string `toml:"id"`
 		Title       string `toml:"title"`
 		Description string `toml:"description"`
+		Retry       *struct {
+			MaxAttempts int `toml:"max_attempts"`
+		} `toml:"retry"`
 	} `toml:"steps"`
 }
 
@@ -319,6 +322,40 @@ func TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	removeAt := strings.Index(step, `rm -rf "$WORKTREE_PATH"`)
 	if guardAt > removeAt {
 		t.Error("commit-and-push runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
+}
+
+// TestCoreRetryManagedStepsStateOutcomeContract requires every core-pack step
+// that declares [steps.retry] to tell the worker how to close it: the retry
+// evaluator classifies an attempt closed without gc.outcome as missing_outcome
+// and, once attempts run out, fails the workflow even though the work succeeded.
+func TestCoreRetryManagedStepsStateOutcomeContract(t *testing.T) {
+	entries, err := fs.ReadDir(PackFS, "formulas")
+	if err != nil {
+		t.Fatalf("reading formulas: %v", err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		f := readFormula(t, entry.Name())
+		for _, step := range f.Steps {
+			if step.Retry == nil {
+				continue
+			}
+			checked++
+			t.Run(entry.Name()+"/"+step.ID, func(t *testing.T) {
+				for _, want := range []string{"gc.outcome=pass", "gc.outcome=fail", "gc.failure_class", "gc.failure_reason"} {
+					if !strings.Contains(step.Description, want) {
+						t.Errorf("retry-managed step %s/%s never mentions %q; a close without gc.outcome fails the step as missing_outcome", entry.Name(), step.ID, want)
+					}
+				}
+			})
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no [steps.retry] step in the core formulas; the scan is not looking where the retry tables are")
 	}
 }
 
