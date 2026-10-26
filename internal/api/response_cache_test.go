@@ -541,6 +541,7 @@ func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
 	if perBuild == 0 {
 		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
 	}
+	builtIndex := responseIndex(t, rec)
 
 	for i := 0; i < 5; i++ {
 		state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
@@ -551,6 +552,11 @@ func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
 		}
 		if store.listByAssigneeCalls != perBuild {
 			t.Fatalf("assignee lookups after event %d = %d, want %d (one build; the cache must survive sequence churn)", i, store.listByAssigneeCalls, perBuild)
+		}
+		// The cached body predates the events recorded since its build, so
+		// the hit must report the build index, not the live head.
+		if got := responseIndex(t, rec); got != builtIndex {
+			t.Fatalf("X-GC-Index after event %d = %d, want the build index %d on a bucket hit", i, got, builtIndex)
 		}
 	}
 }

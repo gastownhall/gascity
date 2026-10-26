@@ -47,12 +47,13 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// The entry is keyed on the time bucket, not the event index: on a
 		// busy city the sequence advances between polls, so an index-keyed
 		// entry missed on nearly every request and paid the per-agent
-		// rebuild (gascity#7149, the class #3186 fixed for /status).
-		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, bucket); ok {
-			return &ListOutput[agentResponse]{
-				Index: index,
-				Body:  body,
-			}, nil
+		// rebuild (gascity#7149, the class #3186 fixed for /status). A hit
+		// can therefore predate events recorded since its build, so it
+		// reports the index captured before that build (indexedResponse),
+		// never this request's index: X-GC-Index tells a client where to
+		// resume or block (docs/reference/api.md "Snapshot index").
+		if hit, ok := cachedResponseAs[indexedResponse[ListBody[agentResponse]]](s, cacheKey, bucket); ok {
+			return &ListOutput[agentResponse]{Index: hit.Index, Body: hit.Body}, nil
 		}
 	}
 
@@ -256,7 +257,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// A partial list reflects a transient backend failure; don't serve it
 	// from cache once the backend recovers.
 	if cacheKey != "" && !body.Partial {
-		s.storeResponse(cacheKey, bucket, body)
+		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[agentResponse]]{Index: index, Body: body})
 	}
 
 	return &ListOutput[agentResponse]{
