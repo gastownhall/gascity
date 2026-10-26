@@ -148,7 +148,7 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-do-work do-work: cannot derive the work bead from convoy {{convoy_id}}; not closing this step" >&2
   exit 1
 fi
-STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+STEP_BEAD_ID=$(gc hook current --id-only) || { echo "mol-do-work do-work: gc hook current failed; not closing this step" >&2; exit 1; }
 if [ -z "$STEP_BEAD_ID" ]; then
   echo "mol-do-work do-work: gc hook current named no claimed step; not closing it" >&2
   exit 1

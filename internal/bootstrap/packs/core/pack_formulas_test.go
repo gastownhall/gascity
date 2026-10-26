@@ -500,6 +500,16 @@ func TestMolDoWorkClosesOnlyItsVerifiedClaimedStep(t *testing.T) {
 		with("AC-1 bd show prints an object", func(c *closeStepCase) {
 			c.show = strings.TrimSuffix(strings.TrimPrefix(closeStepClaimed, "["), "]")
 		}),
+		with("AC-2 hook current fails", func(c *closeStepCase) {
+			c.hookOut, c.hookRC, c.wantClose = "", 1, false
+		}),
+		with("AC-2 hook current prints nothing", func(c *closeStepCase) {
+			c.hookOut, c.wantClose = "", false
+		}),
+		with("AC-2 hook current prints nothing while GC_BEAD_ID is set", func(c *closeStepCase) {
+			c.hookOut, c.wantClose = "", false
+			c.env = []string{"GC_BEAD_ID=ga-step"}
+		}),
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
