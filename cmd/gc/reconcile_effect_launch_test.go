@@ -314,7 +314,8 @@ func TestLaunchDeadlines(t *testing.T) {
 }
 
 // Kills legacy's blind clear and re-mint (S-1), and a clear of an allocated
-// key (mc-keie0): PreWake fills an empty key once and replaces a committed
+// key (mc-keie0): PreWake fills an empty key once, a started row's the
+// live-row guard left keyless too (#5439), and replaces a committed
 // key (a started_config_hash beside it) whose transcript is gone, in its
 // CAS; an allocated key no start committed keeps, with no continuation
 // reset; the launch runs the row's key.
@@ -325,6 +326,7 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		fresh bool // a fresh key, not the row's
 	}{
 		{"no key", nil, true},
+		{"a started row the live-row guard left keyless", []string{"started_config_hash", "h-1", "continuation_epoch", "5"}, true}, // #5439
 		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
 		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
 	} {
