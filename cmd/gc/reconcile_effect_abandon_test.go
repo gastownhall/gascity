@@ -393,7 +393,8 @@ func TestAbandonStepClasses(t *testing.T) {
 }
 
 // Kills a rollback that stops a runtime that is not the row's own, keeps a
-// bead-scoped name's runtime, closes over a runtime it cannot attribute, or
+// bead-scoped name's runtime, stops or closes over a live incarnation of the
+// row's own session (#2081), closes over a runtime it cannot attribute, or
 // counts a corpse as running (C3, O2, C8.2(a), C8.8).
 func TestRollbackRuntime(t *testing.T) {
 	row := sessionInfoFromBead(poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "pending_create_claim", "true"))
@@ -412,7 +413,10 @@ func TestRollbackRuntime(t *testing.T) {
 		{"a corpse counts stopped", named, txRuntime{Class: rtCorpse, Same: true, Identity: id("gc-1", "4", "tok-4")}, false, ""},
 		{"own", named, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-1", "4", "tok-4")}, true, ""},
 		{"own stale epoch is own", named, txRuntime{Class: rtZombie, Same: true, Identity: id("gc-1", "4", "tok-old")}, true, ""},
-		{"an older incarnation is foreign", named, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-1", "3", "tok-old")}, false, ""},
+		{"a live older incarnation holds", named, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-1", "3", "tok-old")}, false, causeLiveIncarnation},
+		{"a live older incarnation under a bead-scoped name holds", row, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-1", "3", "tok-old")}, false, causeLiveIncarnation},
+		{"a live newer incarnation under a bead-scoped name holds", row, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-1", "9", "tok-9")}, false, causeNewerSelf},
+		{"an older incarnation's zombie under a bead-scoped name is stopped", row, txRuntime{Class: rtZombie, Same: true, Identity: id("gc-1", "3", "tok-old")}, true, ""},
 		{"foreign", named, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-9", "1", "theirs")}, false, ""},
 		{"a bead-scoped name is stopped whoever runs it", row, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-9", "1", "theirs")}, true, ""},
 		{"newer self", named, txRuntime{Class: rtAlive, Same: true, Identity: id("gc-1", "9", "tok-9")}, false, causeNewerSelf},
@@ -606,11 +610,10 @@ func TestRollbackEffect(t *testing.T) {
 	}
 
 	// S7: a StaleSelf runtime at the row's generation is its own, stopped;
-	// the relaunch keeps the row, the rollback closes it. An older epoch is
-	// Foreign (CONTRACT v5.9q): a named row is rolled back without a stop,
-	// A18 and A21 owning its name; a pool row's bead-scoped name is its
-	// alone (C8.2(a)), so whatever runs under it is stopped and confirmed
-	// before the rollback lands, leaving no orphan runtime.
+	// the relaunch keeps the row, the rollback closes it. A live older epoch
+	// is another incarnation of the row's session (#2081), named or under a
+	// pool row's bead-scoped name: the row holds open with its claim and
+	// nothing is stopped, its work running there.
 	for _, c := range []struct {
 		name          string
 		epoch         string
@@ -621,8 +624,8 @@ func TestRollbackEffect(t *testing.T) {
 	}{
 		{"own, relaunched", "3", false, true, 1, false, true},
 		{"own, rolled back", "3", false, false, 1, true, false},
-		{"older epoch, a named row: no stop", "2", true, false, 0, true, false},
-		{"older epoch, a pool row's bead-scoped name: stopped first (v5.9q)", "2", false, false, 1, true, false},
+		{"older epoch, a named row: held", "2", true, false, 0, false, true},
+		{"older epoch, a pool row's bead-scoped name: held", "2", false, false, 0, false, true},
 	} {
 		name := "s-gc-1"
 		k = rollback(t, "generation", "3")
@@ -701,6 +704,45 @@ func TestRollbackEffect(t *testing.T) {
 	k.sp.SetPeekOutput("s-gc-1", "Usage limit reached")
 	if s := k.runKind(); s.Closed || k.meta("sleep_reason") != string(session.SleepReasonRateLimit) || k.meta("pending_create_claim") != "" {
 		t.Fatalf("a rate-limit screen: settlement %+v reason %q; want quarantined, not rolled back", s, k.meta("sleep_reason"))
+	}
+}
+
+// Kills the rollback effect stopping a live incarnation of the row's own
+// session under its bead-scoped pool name (#2081): a runtime carrying the
+// row's ID under another token at an older or a newer epoch holds the row
+// open with its claim, nothing stopped; another session's runtime under that
+// name is still stopped and the row rolled back (C8.2(a)).
+func TestRollbackEffectHoldsOverALiveIncarnation(t *testing.T) {
+	pending := []string{"generation", "3", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-11 * time.Minute).Format(time.RFC3339)}
+	for _, c := range []struct {
+		name, id, epoch, cause string
+		held                   bool
+	}{
+		{"older epoch", "gc-1", "2", "live-incarnation", true},
+		{"newer epoch", "gc-1", "4", causeNewerSelf, true},
+		{"another session", "gc-9", "2", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := startKit(t, intentRollback, "creating", pending...)
+			k.it.Deadline = gatherNow.Add(time.Minute)
+			k.sp.put("s-gc-1", c.id, c.epoch, "old")
+			k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+			before, err := k.backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop, cause := rollbackRuntime(sessionInfoFromBead(before), &txRuntime{Class: rtAlive, Identity: runtimeIdentity{Known: true, SessionID: c.id, Epoch: c.epoch, Token: "old"}})
+			s := k.runKind()
+			b, _ := k.backing.Get("gc-1")
+			switch {
+			case c.held && (stop || cause != c.cause):
+				t.Fatalf("rollbackRuntime = (%v, %q), want held %s", stop, cause, c.cause)
+			case c.held && (len(k.sp.kills) != 0 || s.Closed || b.Status == "closed" || b.Metadata["pending_create_claim"] != "true"):
+				t.Fatalf("settlement %+v kills %+v status %q claim %q, want held open with its claim, nothing stopped", s, k.sp.kills, b.Status, b.Metadata["pending_create_claim"])
+			case !c.held && (!stop || len(k.sp.kills) != 1 || !s.Closed):
+				t.Fatalf("rollbackRuntime stop %v, settlement %+v kills %+v, want stopped then rolled back", stop, s, k.sp.kills)
+			}
+		})
 	}
 }
 

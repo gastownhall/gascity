@@ -31,13 +31,14 @@ import (
 //     anchor not past the skew bound) unless its name holds another row's
 //     runtime or the row's own older incarnation (Foreign, StaleSelf);
 //   - PC2 I-S7: at quiescence no pending create rests with a StaleSelf
-//     runtime under its name that S7's exit could take;
+//     runtime at its generation under its name that S7's exit could take;
 //   - PC3 I-lost-commit: a start whose row moved under it (closed, or
 //     retokened) leaves no live runtime it created under the moved token;
 //   - PC4 I-teardown: a rollback that closed its row left nothing C3
 //     required it to stop: the row's own runtime (O2: Current, or StaleSelf
 //     at its generation) or, for a pool row, anything under its bead-scoped
-//     name (C8.2(a), v5.9q).
+//     name (C8.2(a), v5.9q) but a live incarnation of the row's own session,
+//     which holds the rollback (#2081).
 
 func init() {
 	simEffectChecks = append(simEffectChecks, (*sim).markEffect, (*sim).checkLeaseRollback, (*sim).checkLostCommit, (*sim).checkRollbackTeardown)
@@ -334,8 +335,8 @@ func (s *sim) checkLostCommit(e *simEffect) func(settlement) {
 
 // checkStaleCreates is PC2 I-S7 at quiescence: no open pending create on
 // the sessions leg rests with a StaleSelf runtime under its name (its ID,
-// another token, an epoch at or below its generation) that S7's exit can
-// take: one the census reads alive, not attached, whose probe answers, on
+// another token, an epoch at its generation: an older one is a live
+// incarnation the rollback holds over, #2081) that S7's exit can take: one the census reads alive, not attached, whose probe answers, on
 // a row no kill fence or unknown state holds.
 func (s *sim) checkStaleCreates() {
 	_, obs := s.observed()
@@ -358,7 +359,7 @@ func (s *sim) checkStaleCreates() {
 		if stale {
 			epoch, err1 := strconv.Atoi(rt.epoch)
 			gen, err2 := strconv.Atoi(b.Metadata["generation"])
-			stale = err1 == nil && err2 == nil && epoch <= gen
+			stale = err1 == nil && err2 == nil && epoch == gen // an older one is a live incarnation the rollback holds over (#2081)
 		}
 		s.sp.mu.Unlock()
 		if stale {
@@ -462,7 +463,8 @@ func (s *sim) markEffect(e *simEffect) func(settlement) {
 // (I-attached), with the effects it covers: a rollback's teardown and S7's
 // exit (A10, C3) and the start's lost-commit cleanup (S2) stop the row's own
 // runtime (own: O2 Current, or StaleSelf at its generation) or, for a
-// pending create, its bead-scoped name (C8.2(a)), attached or not.
+// pending create, its bead-scoped name (C8.2(a)), attached or not. A live
+// incarnation of the row's own session is never stopped there (#2081).
 func (s *sim) ownRuntimeException(k simKill, row beads.Bead, own bool) bool {
 	if !ownRuntimeEffect(k) {
 		return false
@@ -726,7 +728,9 @@ func TestSimPendingPacedRetries(t *testing.T) {
 // checkRollbackTeardown is PC4 I-teardown: a rollback whose close landed
 // left no live runtime C3 required it to stop, under the name the row held:
 // its own (O2: Current, or StaleSelf at its generation) or, under a pool
-// row's bead-scoped name, any (C8.2(a), v5.9q).
+// row's bead-scoped name, any (C8.2(a), v5.9q). A live incarnation of the
+// row's own session there holds the rollback instead (#2081), so no close
+// lands over it.
 func (s *sim) checkRollbackTeardown(e *simEffect) func(settlement) {
 	l := s.legOf(e.it.Key.Leg)
 	if e.it.Kind != intentRollback || l == nil {

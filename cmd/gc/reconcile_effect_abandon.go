@@ -277,13 +277,19 @@ func ownTeardown(v txView) (teardown, string) {
 	return teardown{stop: &verdict, names: processNamesFor(v.World, v.Row)}, ""
 }
 
+// causeLiveIncarnation holds a pending create's rollback over a live older
+// incarnation of its own session (#2081); a newer one holds causeNewerSelf.
+const causeLiveIncarnation = "live-incarnation"
+
 // rollbackRuntime is C3's attribution of a pending create's fresh read: stop
 // for its own runtime (O2's own-runtime test, or C8.2(a)'s bead-scoped name,
-// stopped whatever its identity, SESS-091); neither for nothing running, a
+// stopped whatever else runs there, SESS-091); hold over a live older or
+// newer incarnation of the row's own session, even under its bead-scoped
+// name, since its work runs there (#2081); neither for nothing running, a
 // corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
-// without a stop, a stale epoch included, S7); else the cause that holds.
-// A corpse counts stopped; the teardown removes it (ownTeardown), so a
-// crash-looping pool create's corpses do not pile up.
+// without a stop, a stale epoch's zombie included, S7); else the cause that
+// holds. A corpse counts stopped; the teardown removes it (ownTeardown), so
+// a crash-looping pool create's corpses do not pile up.
 func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
 	switch rt.Class {
 	case rtUnsupported:
@@ -294,8 +300,15 @@ func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) 
 		return false, causeLivenessUnknown
 	}
 	v := compareIdentity(row, rt.Identity)
+	live := rt.Class == rtAlive
 	switch {
-	case ownsName(row, row.SessionName), ownRuntime(v, row, rt.Identity):
+	case ownRuntime(v, row, rt.Identity):
+		return true, ""
+	case live && v == identityNewerSelf:
+		return false, causeNewerSelf
+	case live && liveIncarnation(row, rt.Identity):
+		return false, causeLiveIncarnation
+	case ownsName(row, row.SessionName):
 		return true, ""
 	case v == identityForeign, v == identityStaleSelf:
 		return false, ""
