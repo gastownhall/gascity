@@ -135,3 +135,40 @@ func TestBDSplitStoreCheck_ProxiedServerNonDoltBackendStaysNeutral(t *testing.T)
 		t.Fatalf("message = %q, want the unknown-store message", r.Message)
 	}
 }
+
+// TestBDSplitStoreCheck_ProxiedServerWarnsWhenOnlyTheUnreadEmbeddedStoreExists
+// is the proxied shape of the false all-clear: an hq under .beads/embeddeddolt
+// and no .beads/dolt yet. The active store is still .beads/dolt, the directory
+// bd roots the proxy at, even before that directory exists — including when the
+// scope is reached through a symlink.
+func TestBDSplitStoreCheck_ProxiedServerWarnsWhenOnlyTheUnreadEmbeddedStoreExists(t *testing.T) {
+	want := "unread bead database beside the active store: active .beads/dolt (metadata.json dolt_mode=proxied-server), unread .beads/embeddeddolt contains 1 Dolt repo(s)"
+	for _, viaSymlink := range []bool{false, true} {
+		name := "direct"
+		if viaSymlink {
+			name = "via symlink"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir, beadsDir := newProxiedSplitStoreScope(t)
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "hq"))
+			scope := dir
+			if viaSymlink {
+				scope = filepath.Join(t.TempDir(), "link")
+				if err := os.Symlink(dir, scope); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			r := NewBDSplitStoreCheck(scope).Run(&CheckContext{})
+			if r.Status != StatusWarning {
+				t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+			}
+			if r.Message != want {
+				t.Fatalf("message = %q, want %q", r.Message, want)
+			}
+			if !strings.Contains(r.FixHint, "export from the inactive store") {
+				t.Fatalf("fix hint = %q, want identified-store guidance", r.FixHint)
+			}
+		})
+	}
+}
