@@ -2921,25 +2921,72 @@ database_journal_corrupt() {
     return "$probe_hit"
 }
 
-# backup_remote_url_for_recovery prints the <db>-backup remote URL recorded in
-# a database's repo_state.json. The file is plain JSON, so the URL is readable
-# even when the noms store itself can no longer be opened. Handles both the
-# object form ("backups": {"db-backup": {"url": "..."}}) and the legacy plain
-# string form.
+# backup_registry_slice prints repo_state.json from the opening brace of its
+# "backups" object onward, so backup name lookups cannot match keys of
+# earlier objects: Dolt writes "remotes" before "backups", and a remote named
+# `default` is not the backup. Prints nothing when no backups object exists.
+backup_registry_slice() {
+    tr -d '\n' < "$1" | sed -n 's/.*"backups"[[:space:]]*:[[:space:]]*{\(.*\)/\1/p'
+}
+
+# backup_registry_has_backup reports whether a backup name is registered as a
+# key under "backups" in repo_state.json. Presence means the key exists, not
+# that its URL is usable: the caller fails closed on an unusable selection
+# rather than silently skipping to a lower-precedence backup.
+backup_registry_has_backup() {
+    local repo_state="$1" name="$2"
+    if command -v jq >/dev/null 2>&1; then
+        jq -e --arg name "$name" '(.backups // {}) | has($name)' "$repo_state" >/dev/null 2>&1
+        return
+    fi
+    # The value-discriminated pattern ({ for the object form, " for the
+    # legacy string form) keeps a nested field such as "name":"default"
+    # inside another backup's object from counting as a registration.
+    backup_registry_slice "$repo_state" | grep -q "\"${name}\"[[:space:]]*:[[:space:]]*"'[{"]'
+}
+
+# backup_registry_backup_url prints the URL recorded for a registered backup
+# name, in either shape repo_state.json has used: the object form
+# ("name": {"url": "..."}) and the legacy plain string form. Prints an empty
+# URL when the entry has none; presence is decided separately.
+backup_registry_backup_url() {
+    local repo_state="$1" name="$2" entry url
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg name "$name" '.backups[$name].url? // .backups[$name] // ""' "$repo_state" 2>/dev/null
+        return
+    fi
+    # Leftmost match only: a later occurrence of the name (for example a
+    # nested "name" field inside another backup's object) must not redirect
+    # the extraction. [^}]* bounds the entry at the close of its own object.
+    entry=$(backup_registry_slice "$repo_state" | grep -o "\"${name}\"[[:space:]]*:[[:space:]]*"'[{"]'"[^}]*" | head -1)
+    url=$(printf '%s' "$entry" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    if [ -z "$url" ]; then
+        url=$(printf '%s' "$entry" | sed -n "s/^\"${name}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+    fi
+    printf '%s\n' "$url"
+}
+
+# backup_remote_url_for_recovery prints the backup a journal-corrupt database
+# should be restored from, as `name<TAB>url`. It selects the first of bd's
+# canonical `default` backup (the name mol-dog-backup has registered via
+# `bd backup init` since #6751) and the legacy <db>-backup name that is
+# registered in the database's repo_state.json. The file is plain JSON, so
+# the entry stays readable even when the noms store itself can no longer be
+# opened. Selection is by presence only; the caller decides usability and
+# fails closed instead of falling through to a lower-precedence backup — the
+# legacy entry stopped being synced when #6751 renamed it. Returns 1 when
+# neither name is registered.
 backup_remote_url_for_recovery() {
-    local recovery_db="$1" recovery_db_dir="$2" repo_state url
+    local recovery_db="$1" recovery_db_dir="$2" repo_state name
     repo_state="$recovery_db_dir/.dolt/repo_state.json"
     [ -f "$repo_state" ] || return 1
-    if command -v jq >/dev/null 2>&1; then
-        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url? // .backups[$name] // empty' "$repo_state" 2>/dev/null)
-    else
-        url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-        if [ -z "$url" ]; then
-            url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+    for name in default "${recovery_db}-backup"; do
+        if backup_registry_has_backup "$repo_state" "$name"; then
+            printf '%s\t%s\n' "$name" "$(backup_registry_backup_url "$repo_state" "$name")"
+            return 0
         fi
-    fi
-    [ -n "$url" ] || return 1
-    printf '%s\n' "$url"
+    done
+    return 1
 }
 
 # backup_restore_source_usable reports whether url points at a local backup
@@ -2959,15 +3006,16 @@ backup_restore_source_usable() {
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load, preserves each corrupt store under
 # $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
-# from its local <db>-backup remote (#3176). Fail-closed: when any corrupt
-# database has no usable backup or the restore fails, its store is moved back
+# from its registered local backup (#3176): bd's canonical `default` backup
+# when present, else the legacy <db>-backup remote. Fail-closed: when the
+# selected backup is unusable or the restore fails, its store is moved back
 # so the server cannot come up silently missing a database, and the function
 # returns 1. Returns 0 only when at least one database was restored and none
 # were left unrecoverable. Everything is logged loudly — restored copies are
 # missing all writes since the last backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
     local aside_root="$PACK_STATE_DIR/corrupt-aside"
-    local ts db_dir db aside url recovered=0
+    local ts db_dir db aside sel backup_name url recovered=0
     ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
     echo "gc-beads-bd: journal corruption reported at startup; probing databases in $DATA_DIR" >&2
     for db_dir in "$DATA_DIR"/*/; do
@@ -2975,9 +3023,16 @@ attempt_journal_corruption_recovery() {
         db=$(basename "$db_dir")
         database_journal_corrupt "$db_dir" || continue
         echo "gc-beads-bd: journal corruption confirmed in database '$db'" >&2
-        url=$(backup_remote_url_for_recovery "$db" "$db_dir") || url=""
+        sel=$(backup_remote_url_for_recovery "$db" "$db_dir") || sel=""
+        if [ -n "$sel" ]; then
+            backup_name=$(printf '%s' "$sel" | cut -f1)
+            url=$(printf '%s' "$sel" | cut -f2)
+        else
+            backup_name=""
+            url=""
+        fi
         if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
-            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (remote url: ${url:-none})" >&2
+            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (backup: ${backup_name:-none}, remote url: ${url:-none})" >&2
             echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
             return 1
         fi
