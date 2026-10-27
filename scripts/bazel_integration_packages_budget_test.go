@@ -68,7 +68,7 @@ var integrationPackagesShards = map[string]int{
 	"//test/conversationlane:conversationlane_x2_cli_test":         1,
 	"//test/conversationlane:conversationlane_x2_host_sqlite_test": 1,
 	"//test/conversationlane:conversationlane_x2_host_test":        1,
-	"//test/conversationlane:conversationlane_x8_test":             1,
+	"//test/conversationlane:conversationlane_x8_ladder_test":      1,
 }
 
 // integrationPackagesReadBuilds: the packages whose BUILD.bazel

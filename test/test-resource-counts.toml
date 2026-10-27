@@ -3101,6 +3101,18 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "test/conversationlane/x12_harness_test.go"
 resource = "fixed_sleep"
 calls = 9
