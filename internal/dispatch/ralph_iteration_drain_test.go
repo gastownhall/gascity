@@ -154,11 +154,11 @@ type ralphDrainFixture struct {
 }
 
 // buildRalphDrainFixture cooks the drain formula on the store tc opens. The
-// check never passes (checkPassFrom 0), so a drained failed iteration always
-// iterates.
-func buildRalphDrainFixture(t *testing.T, tc drainStoreCase, formulaText string) ralphDrainFixture {
+// check passes from iteration checkPassFrom on (0: never), so a drained
+// failed iteration iterations until the budget is spent.
+func buildRalphDrainFixture(t *testing.T, tc drainStoreCase, formulaText string, checkPassFrom int) ralphDrainFixture {
 	t.Helper()
-	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, 0)
+	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, checkPassFrom)
 	base, mem := tc.open(t)
 	cooked, err := molecule.Cook(context.Background(), base, city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
@@ -278,7 +278,7 @@ func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 	for _, tc := range drainUnforcedAbortStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			b := drainBeadByRefSuffix(t, all, "loop.iteration.1.b")
 			drainClaimed(t, fx.store, b)
@@ -354,7 +354,7 @@ func TestCompiledRalphIterationDrainContinuesAfterMemberCloses(t *testing.T) {
 	for _, tc := range drainUnforcedAbortStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
@@ -405,7 +405,7 @@ func TestCompiledRalphIterationDrainHardFailAfterMemberCloses(t *testing.T) {
 	for _, tc := range drainUnforcedAbortStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
@@ -453,7 +453,7 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 	for _, tc := range drainForcedSettleStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFanoutFormula)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFanoutFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
@@ -498,7 +498,7 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 // exists until the claim settles — exactly one after.
 func TestCompiledRalphIterationDrainHoldsRuntimeSpawnedIteration(t *testing.T) {
 	t.Parallel()
-	fx := buildRalphDrainFixture(t, drainUnforcedAbortStores()[0], compiledRalphDrainFormula)
+	fx := buildRalphDrainFixture(t, drainUnforcedAbortStores()[0], compiledRalphDrainFormula, 0)
 	// The pool serves iteration 1 fully but passes by the runtime-spawned
 	// iterations, whose members stay for the test to steer.
 	fx.work = compiledRalphWorker(fx.store, fx.rootID, func(_ string, iteration int) map[string]string {
@@ -544,6 +544,111 @@ func TestCompiledRalphIterationDrainHoldsRuntimeSpawnedIteration(t *testing.T) {
 	drainRequireNoIteration(t, all, 4)
 }
 
+// TestCompiledRalphIterationDrainDrainedIterationVerdictsUnchanged pins the
+// uncontested path: an iteration whose members all closed evaluates in the
+// very pass that finds the control ready — one verdict, no pending deferral,
+// no drain edge on any member (the control's blockers stay the iteration
+// bodies) — and its pass, iterate and exhausted verdicts match the base
+// behavior, on a real store per verdict.
+func TestCompiledRalphIterationDrainDrainedIterationVerdictsUnchanged(t *testing.T) {
+	t.Parallel()
+	// drainRequireControlBlocksOnlyIterations asserts every blocks edge of the
+	// ralph control points at an iteration body: no member, no scope-check,
+	// ever.
+	drainRequireControlBlocksOnlyIterations := func(t *testing.T, store beads.Store, control beads.Bead) {
+		t.Helper()
+		deps, err := store.DepList(control.ID, "down")
+		if err != nil {
+			t.Fatalf("listing deps of %s: %v", control.ID, err)
+		}
+		for _, dep := range deps {
+			target, err := store.Get(dep.DependsOnID)
+			if err != nil {
+				t.Fatalf("loading dep target %s: %v", dep.DependsOnID, err)
+			}
+			isIterationBody := target.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope &&
+				target.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleBody &&
+				strings.Contains(target.Metadata[beadmeta.StepRefMetadataKey], ".iteration.")
+			if !isIterationBody {
+				t.Errorf("ralph control blocks on %s (%s, kind %q, role %q), want an iteration body only",
+					dep.DependsOnID, target.Metadata[beadmeta.StepRefMetadataKey],
+					target.Metadata[beadmeta.KindMetadataKey], target.Metadata[beadmeta.ScopeRoleMetadataKey])
+			}
+		}
+	}
+	drainCloseAllWorkers := func(t *testing.T, store beads.Store, all []beads.Bead, iterationRef string) {
+		t.Helper()
+		for _, ref := range []string{iterationRef + ".a", iterationRef + ".b"} {
+			if err := updateMetadataAndClose(store, drainBeadByRefSuffix(t, all, ref).ID, workerPass); err != nil {
+				t.Fatalf("closing %s: %v", ref, err)
+			}
+		}
+	}
+
+	t.Run("iterate-verdict", func(t *testing.T) {
+		t.Parallel()
+		fx := buildRalphDrainFixture(t, drainUnforcedAbortStores()[0], compiledRalphDrainFormula, 0)
+		all := drainStoreAll(t, fx.store)
+		drainCloseAllWorkers(t, fx.store, all, "loop.iteration.1")
+		if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+			t.Fatalf("a fully drained iteration did not converge in one pass: %v", errs)
+		}
+		all = drainStoreAll(t, fx.store)
+		control := drainBeadByRefSuffix(t, all, ".loop")
+		if control.Status != "open" {
+			t.Fatalf("ralph control = %s, want open blocked on iteration 2", control.Status)
+		}
+		if log := drainAttemptLog(t, control); len(log) != 1 || log[0]["outcome"] != "fail" {
+			t.Errorf("iterate verdict: gc.attempt_log = %v, want one fail entry from the real check", log)
+		}
+		drainBeadByRefSuffix(t, all, "loop.iteration.2")
+		drainRequireControlBlocksOnlyIterations(t, fx.store, control)
+	})
+
+	t.Run("pass-verdict", func(t *testing.T) {
+		t.Parallel()
+		fx := buildRalphDrainFixture(t, drainUnforcedAbortStores()[0], compiledRalphDrainFormula, 1)
+		all := drainStoreAll(t, fx.store)
+		drainCloseAllWorkers(t, fx.store, all, "loop.iteration.1")
+		if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+			t.Fatalf("a fully drained passing iteration did not converge in one pass: %v", errs)
+		}
+		all = drainStoreAll(t, fx.store)
+		control := drainBeadByRefSuffix(t, all, ".loop")
+		if control.Status != "closed" || control.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+			t.Fatalf("ralph control = %s/%s, want closed/pass on a passing check", control.Status, control.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+		if log := drainAttemptLog(t, control); len(log) != 1 || log[0]["outcome"] != "pass" {
+			t.Errorf("pass verdict: gc.attempt_log = %v, want one pass entry", log)
+		}
+		drainRequireNoIteration(t, all, 2)
+		drainRequireControlBlocksOnlyIterations(t, fx.store, control)
+	})
+
+	t.Run("exhausted-verdict", func(t *testing.T) {
+		t.Parallel()
+		tc := drainUnforcedAbortStores()[0]
+		fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
+		fx.work = compiledRalphWorker(fx.store, fx.rootID, func(string, int) map[string]string { return workerPass })
+		if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+			t.Fatalf("the exhausting loop did not converge: %v", errs)
+		}
+		all := drainStoreAll(t, fx.store)
+		control := drainBeadByRefSuffix(t, all, ".loop")
+		if control.Status != "closed" || control.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+			t.Fatalf("ralph control = %s/%s, want closed/fail at max_attempts", control.Status, control.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+		if got := control.Metadata[beadmeta.FailedAttemptMetadataKey]; got != "3" {
+			t.Errorf("ralph gc.failed_attempt = %q, want the 3rd (final) iteration", got)
+		}
+		if log := drainAttemptLog(t, control); len(log) != 3 {
+			t.Errorf("exhausted verdict: gc.attempt_log has %d entries, want one per iteration", len(log))
+		}
+		drainRequireNoIteration(t, all, 4)
+		drainRequireControlBlocksOnlyIterations(t, fx.store, control)
+	})
+}
+
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
 // of iteration 1 fails — with a transient failure class, or a bare close the
 // abort_scope contract counts as failed — while worker B is claimed and
@@ -561,7 +666,7 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 		} {
 			t.Run(tc.name+"/"+failure.name, func(t *testing.T) {
 				t.Parallel()
-				fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
+				fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
 				all := drainStoreAll(t, fx.store)
 				drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 				a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
