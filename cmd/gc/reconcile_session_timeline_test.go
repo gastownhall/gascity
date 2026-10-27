@@ -608,6 +608,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
 	{"a managed suspend drains, then wake", timelineFingerprintV7, "da6d33776ea5"},
+	{"a managed suspend drains, then wake", "fix #6410 (mc-esqo7): currently_processing_bead_id (#6362) now clears on dormancy and re-stamps a pass later than legacy on wake (§12.2#37)", "8b682f935fc0"},
 	{"a manual create read between its two writes", timelineGoldenBaseline, "8c2d0f4552c4"},
 	{"a manual create read between its two writes", timelineFingerprintV7, "544ff5662fa5"},
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
@@ -618,6 +619,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a waiter sleeps", timelineGoldenBaseline, "6b615dd20429"},
 	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "064ac1bc84b8"},
 	{"a waiter sleeps", timelineFingerprintV7, "45ab826dd96e"},
+	{"a waiter sleeps", "fix #6410 (mc-esqo7): currently_processing_bead_id (#6362) now clears on dormancy and re-stamps a pass later than legacy on wake (§12.2#37)", "e561cf247f1b"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
 	{"an unwanted row of a suspended agent", timelineGoldenBaseline, "90405aa55ba7"},
@@ -631,6 +633,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"kill a seat holding a dep-blocked claim", timelineGoldenBaseline, "44f501ec9412"},
 	{"kill a seat holding a ready claim", timelineGoldenBaseline, "a6a3283ef592"},
 	{"kill a seat holding a ready claim", timelineFingerprintV7, "56f71e57af9a"},
+	{"kill a seat holding a ready claim", "fix #6410 (mc-esqo7): currently_processing_bead_id (#6362) now clears on dormancy and re-stamps a pass later than legacy on wake (§12.2#37)", "2d87d5cc4301"},
 	{"suspend, then wake", timelineGoldenBaseline, "14a789f280e4"},
 	{"suspend, then wake", "fix #7417 (mc-esqo7)", "ff88e0c7b075"},
 	{"suspend, then wake", timelineFingerprintV7, "fc327803a54e"},
@@ -1269,6 +1272,13 @@ func operatorTimeline() []timelineFixture {
 	// restarted is a restart both copies make: legacy's runtime metadata
 	// clears and its next tick's active-to-awake heal.
 	restarted := tlMerged(tlIdent(), tlRestarted())
+	// currentBeadLag is §12.2#37: v2 stamps currently_processing_bead_id one
+	// pass after legacy on a fresh wake, since A6 decides on the pass's own
+	// read. Scoped to the two fixtures below that actually hit it -- "suspend,
+	// then wake" and "a provider swap stops the runtime" also wake through
+	// restarted but never had an assigned work bead stamped in the first
+	// place, so they never show the lag.
+	currentBeadLag := map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}
 	unhealed := "suspended-row-heal"
 	// healed is legacy's state heal of the suspended row whose runtime is
 	// gone: asleep, under the hold; v2 keeps it suspended.
@@ -1325,7 +1335,7 @@ func operatorTimeline() []timelineFixture {
 				"provider:SetMeta s-gc-1": "drain-env-clears", "provider:RemoveMeta s-gc-1": "drain-env-clears",
 			}),
 			"past the drain timeout": tlIdent(),
-			"wake":                   tlMerged(restarted, map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears"}),
+			"wake":                   tlMerged(restarted, currentBeadLag, map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears"}),
 			"the next pass":          tlIdent(),
 		})
 	// gc session kill (the fence, then the stop) on a seat holding only an
@@ -1334,7 +1344,7 @@ func operatorTimeline() []timelineFixture {
 	// releases it and closes the seat with no fresh seat (owner ruling B1).
 	kill := func(blocked bool) timelineFixture {
 		name, work := "kill a seat holding a ready claim", tlClaim("open", "gc-1")
-		graced, seed, killed := restarted, tlAliasSeed(), tlIdent()
+		graced, seed, killed := tlMerged(restarted, currentBeadLag), tlAliasSeed(), tlIdent()
 		if blocked {
 			name = "kill a seat holding a dep-blocked claim"
 			work = append(work, parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}})
@@ -1442,10 +1452,12 @@ func operatorTimeline() []timelineFixture {
 				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "drain-stop-lag",
 				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "drain-stop-lag",
 				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "drain-stop-lag",
+				"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag",
 			}),
 			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
 				"row:gc-1:*waitsleep": "wait-sleep-lag", "provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears",
 				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`: "drain-stop-lag",
+				"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag",
 			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}
