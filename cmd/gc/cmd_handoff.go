@@ -47,17 +47,23 @@ For controller-restartable sessions, equivalent to:
 The restart request is recorded on this session's row, bound to this
 session's incarnation: it is recorded only while the session row, or the
 live runtime under the session's name, still carries the GC_INSTANCE_TOKEN
-this process runs under. The restart is refused before the mail is sent when
-this process has no GC_INSTANCE_TOKEN (an agent CLI that scrubs *TOKEN*
-variables from the shells it spawns removes it) or when the session row and
-the live runtime name another incarnation, so a process left over from an
-earlier incarnation sends its successor no handoff mail. Outside a worker
-site the runtime's GC_RESTART_REQUESTED hint follows, then the controller
-poke. gc handoff exits 0 once the request is recorded, even when the controller
+this process runs under. A check before the mail refuses the restart, and
+sends no mail, when this process has no GC_INSTANCE_TOKEN (an agent CLI that
+scrubs *TOKEN* variables from the shells it spawns removes it), when the
+session row and the live runtime name another incarnation, or when the
+session store cannot compare-and-swap where the request needs it (below).
+The write after the mail decides again: a row that moved after the check can
+still refuse it there, with the mail already sent. Outside a worker site the
+runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
+gc handoff exits 0 once the request is recorded, even when the controller
 could not be signaled: a warning says so, and the controller acts at its next
 pass. It exits 1 with no restart recorded and no runtime hint set when the
 request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
-store, or a session whose row and live runtime name another incarnation.
+store, a session whose row and live runtime name another incarnation, or a
+session store that cannot compare-and-swap where the request needs it: a v2
+city records the request only by compare-and-swap, and
+[beads] conditional_writes = "require" refuses any write the store cannot
+fence.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing

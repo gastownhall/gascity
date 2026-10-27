@@ -129,22 +129,22 @@ func TestRowFirstRestartDurableWriteFailedPokeExitsZero(t *testing.T) {
 // TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta (ruling condition
 // 4): when the row write is refused, the command exits non-zero, writes
 // nothing to provider meta, records no event, dials no controller and sends
-// no handoff mail. The stale-incarnation diagnostic gives the refused caller
-// no command that restarts the session: gc session reset is unfenced, so a
-// left-over process that ran it would restart its successor.
+// no handoff mail. Neither diagnostic, the stale incarnation's nor that of a
+// caller with no GC_INSTANCE_TOKEN, gives the refused caller a command that
+// restarts the session: gc session reset is unfenced, so a left-over process
+// that ran it would restart its successor.
 func TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta(t *testing.T) {
 	cases := []struct {
 		name       string
 		setup      func(t *testing.T, fixture explicitRestartFixture)
 		wantStderr string
-		notWant    string
 	}{
 		{"another incarnation", func(t *testing.T, _ explicitRestartFixture) {
 			t.Setenv("GC_INSTANCE_TOKEN", "tok-dead-incarnation")
-		}, "restart not recorded: this process does not run in session worker's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); a process left over from an earlier incarnation must exit, and only an operator on the controller host can restart the session\n", "gc session reset"},
+		}, "restart not recorded: this process does not run in session worker's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); a process left over from an earlier incarnation must exit, and only an operator on the controller host can restart the session\n"},
 		{"no instance token", func(t *testing.T, _ explicitRestartFixture) {
 			t.Setenv("GC_INSTANCE_TOKEN", "")
-		}, "restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of the session it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); keep GC_INSTANCE_TOKEN in the agent's environment, or ask an operator on the controller host to restart session worker (gc session reset worker)\n", ""},
+		}, "restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of session worker it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); keep GC_INSTANCE_TOKEN in the agent's environment, and only an operator on the controller host can restart the session\n"},
 	}
 	for _, v := range restartVerbs {
 		for _, tc := range cases {
@@ -165,8 +165,8 @@ func TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta(t *testing.T) {
 				if got, want := stderr.String(), v.verb+": "+tc.wantStderr; got != want {
 					t.Fatalf("stderr = %q, want %q", got, want)
 				}
-				if tc.notWant != "" && strings.Contains(stderr.String(), tc.notWant) {
-					t.Fatalf("stderr = %q names %q to the refused caller", stderr.String(), tc.notWant)
+				if strings.Contains(stderr.String(), "gc session reset") {
+					t.Fatalf("stderr = %q names gc session reset to the refused caller", stderr.String())
 				}
 				if strings.Contains(stdout.String(), "requesting restart") || strings.Contains(stdout.String(), "Restart requested") {
 					t.Fatalf("stdout = %q, promised a restart it did not record", stdout.String())
@@ -713,6 +713,39 @@ func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 			assertRestartMarkerRecorded(t, localSessionBeads(t, cityDir))
 			if asked != 0 {
 				t.Fatalf("reconciler mode asked %d times, want none on a worker site", asked)
+			}
+		})
+	}
+}
+
+// TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes pins what keeps
+// the worker-site exemption (TestRowFirstRestartWorkerSiteTakesTheCheckedWrite)
+// inside the v2 owner's Q1 condition: a city that places sessions on worker
+// sites, through the exec, a pack, the ssh, the k8s or the hybrid session
+// runtime, never runs v2. An explicit v2 is refused, and an unset key falls
+// back to legacy. When v2 admits one of these runtimes, this fails first:
+// restartRecordsOnlyByCAS must then stop exempting worker sites, or a v2
+// city's box takes the checked write.
+func TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		runtime func(*config.City)
+	}{
+		{"exec", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/runner" }},
+		{"pack runtime", func(c *config.City) {
+			c.Session.Provider = "cloudflare"
+			c.Runtimes = map[string]config.DiscoveredRuntime{"cloudflare": {Name: "cloudflare", PackName: "runtime-cloudflare"}}
+		}},
+		{"ssh", func(c *config.City) { c.Session.Provider = "ssh:ops@box:22" }},
+		{"k8s", func(c *config.City) { c.Session.Provider = "k8s" }},
+		{"hybrid", func(c *config.City) { c.Session.Provider = "hybrid" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if mode, err := latchReconcilerMode(v2City(tc.runtime), noEnv); err == nil {
+				t.Fatalf("an explicit v2 with the %s session runtime latches %s; a v2 city can then have worker sites, which take the checked restart write: revisit restartRecordsOnlyByCAS", tc.name, mode)
+			}
+			if mode, err := latchReconcilerMode(v2DefaultCity(tc.runtime), noEnv); err != nil || mode != reconcilerLegacy {
+				t.Fatalf("an unset session_reconciler with the %s session runtime latches %s (err %v), want the legacy fallback; a v2 city can then have worker sites, which take the checked restart write: revisit restartRecordsOnlyByCAS", tc.name, mode, err)
 			}
 		})
 	}

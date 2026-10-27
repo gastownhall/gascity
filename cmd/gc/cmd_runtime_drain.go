@@ -986,7 +986,11 @@ Exits 0 once the request is recorded, even when the controller could not be
 signaled: a warning says so, and the controller acts at its next pass. Exits 1
 with nothing recorded and no runtime hint set when the request cannot be
 recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
-store, or a session whose row and live runtime name another incarnation.
+store, a session whose row and live runtime name another incarnation, or a
+session store that cannot compare-and-swap where the request needs it: a v2
+city records the request only by compare-and-swap, and
+[beads] conditional_writes = "require" refuses any write the store cannot
+fence.
 
 This command is designed to be called from within a session context.
 It emits a session.draining event once the request is recorded.`,

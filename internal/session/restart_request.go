@@ -54,10 +54,16 @@ const restartRequestAttempts = 5
 // runtime under the row's session name carries instanceToken and names no
 // other row: the caller runs in that runtime, which is the row's current one
 // (a legacy warm reuse mints in PreWake and keeps the running pane). The
-// runtime is read after the row, inside the decision, so a restart after the
-// deciding read loses the swap and the re-decide reads its successor's
-// token. A failed read is no proof. On a worker site the guard refuses
-// runtime metadata, so only the row's token proves the incarnation there.
+// runtime is read after the row, inside the decision, and the proof is
+// fenced to the write that follows it (runtimeProofForWrite): the row is
+// read again and then the runtime's token, the last reads before the write.
+// A relaunch whose start lands during the proof (its mint already moved the
+// row's token, and the pane takes that token without moving the row again)
+// refuses the request, and a restart after the deciding read loses the swap,
+// whose re-decide reads its successor's token. Only the window between the
+// last read and the write is left. A failed read is no proof. On a worker
+// site the guard refuses runtime metadata, so only the row's token proves the
+// incarnation there.
 //
 // instanceToken is a capability: it is never logged or printed.
 func (m *Manager) RequestFreshRestartFenced(id, instanceToken string, casOnly func() bool) error {
@@ -71,7 +77,7 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string, casOnly fu
 			var refusal error
 			due, unasked := false, false
 			written, err := m.PersistedStore().UpdateMetadataFenced(id, restartRequestAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
-				patch, decideErr := decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
+				patch, decideErr := decideRestartRequest(info, instanceToken, m.runtimeProofForWrite)
 				unasked = false
 				if decideErr == nil && len(patch) > 0 {
 					var answered bool
@@ -202,11 +208,7 @@ func decideRestartRequest(info Info, instanceToken string, runtimeCarries func(r
 // alone. Any read error, a missing runtime, or a manager without a provider
 // proves nothing.
 func (m *Manager) runtimeCarriesToken(row Info, instanceToken string) bool {
-	if m.sp == nil || strings.TrimSpace(row.SessionName) == "" {
-		return false
-	}
-	tok, err := runtime.MetaValue(m.sp.GetMeta(row.SessionName, runtime.InstanceTokenEnv))
-	if err != nil || strings.TrimSpace(tok) != instanceToken {
+	if !m.runtimeTokenIs(row.SessionName, instanceToken) {
 		return false
 	}
 	runtimeID, err := runtime.MetaValue(m.sp.GetMeta(row.SessionName, "GC_SESSION_ID"))
@@ -215,4 +217,41 @@ func (m *Manager) runtimeCarriesToken(row Info, instanceToken string) bool {
 	}
 	runtimeID = strings.TrimSpace(runtimeID)
 	return runtimeID == "" || runtimeID == strings.TrimSpace(row.ID)
+}
+
+// runtimeProofForWrite is runtimeCarriesToken fenced to the write that
+// follows the decision. Once the runtime proves the caller, the row is read
+// again and then the runtime's token, the last reads before the write. The
+// proof holds only while the row records the caller's token, or still the
+// one the proof was made against, and the runtime still carries
+// instanceToken. A relaunch moves the row's token at its mint and the
+// runtime's at its start, which does not move the row again, so neither the
+// compare-and-swap nor, without a conditional writer, anything else would see
+// a pane that took its successor's token during the proof.
+func (m *Manager) runtimeProofForWrite(row Info, instanceToken string) bool {
+	if !m.runtimeCarriesToken(row, instanceToken) {
+		return false
+	}
+	again, err := m.PersistedStore().Get(row.ID)
+	if err != nil || again.Closed {
+		return false
+	}
+	switch strings.TrimSpace(again.InstanceToken) {
+	case instanceToken:
+		return true
+	case strings.TrimSpace(row.InstanceToken):
+		return m.runtimeTokenIs(row.SessionName, instanceToken)
+	}
+	return false
+}
+
+// runtimeTokenIs reports whether the live runtime named sessionName carries
+// instanceToken as its GC_INSTANCE_TOKEN. A read error, a missing runtime or
+// a manager without a provider proves nothing.
+func (m *Manager) runtimeTokenIs(sessionName, instanceToken string) bool {
+	if m.sp == nil || strings.TrimSpace(sessionName) == "" {
+		return false
+	}
+	tok, err := runtime.MetaValue(m.sp.GetMeta(sessionName, runtime.InstanceTokenEnv))
+	return err == nil && strings.TrimSpace(tok) == instanceToken
 }

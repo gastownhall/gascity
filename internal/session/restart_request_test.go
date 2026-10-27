@@ -388,6 +388,107 @@ func TestRequestFreshRestartFencedRuntimeProofLosesToARestart(t *testing.T) {
 	assertRestartRequestKeys(t, store, created.ID, "")
 }
 
+// tokenReadHook is a runtime that runs after once, when the first
+// GC_INSTANCE_TOKEN read made while it is armed has returned: a write that
+// lands right after the runtime-token proof read the pane's token.
+type tokenReadHook struct {
+	*runtime.Fake
+	armed, fired bool
+	after        func()
+}
+
+func (p *tokenReadHook) GetMeta(name, key string) (string, error) {
+	v, err := p.Fake.GetMeta(name, key)
+	if key == runtime.InstanceTokenEnv && p.armed && !p.fired {
+		p.fired = true
+		p.after()
+	}
+	return v, err
+}
+
+// TestRequestFreshRestartFencedRuntimeProofIsFencedToTheWrite proves the
+// runtime-token proof holds until the write: a relaunch whose start lands
+// while the proof reads the runtime refuses the request on every store, the
+// one that writes by compare-and-swap included, since the pane taking its
+// minted token moves no row revision. The row is read again after the proof
+// and then the pane's token, so a relaunch that mints the row (or only starts
+// the pane under the token the row already names) leaves the successor's row
+// unwritten. A3 re-keying the row to the caller's token meanwhile still
+// records the request. With casOnly, the interleaving lands in the decision
+// made after casOnly answers, the one the checked write follows.
+func TestRequestFreshRestartFencedRuntimeProofIsFencedToTheWrite(t *testing.T) {
+	const sessName = "s-fence"
+	stores := []struct {
+		name    string
+		store   func(t *testing.T) beads.Store
+		casOnly bool // a casOnly that allows the checked write, and arms the interleaving when asked
+	}{
+		{"no conditional writer", func(*testing.T) beads.Store { return beads.NewMemStore() }, false},
+		{"no conditional writer, casOnly allows the checked write", func(*testing.T) beads.Store { return beads.NewMemStore() }, true},
+		{"compare-and-swap", func(t *testing.T) beads.Store { return stampedMemStore(t, gate.Auto, beads.NewMemStore()) }, false},
+	}
+	interleavings := []struct {
+		name      string
+		during    func(t *testing.T, store beads.Store, sp *runtime.Fake, id string)
+		wantErr   error
+		wantToken string // the row's instance_token afterwards
+	}{
+		{"a relaunch mints and starts", func(t *testing.T, store beads.Store, sp *runtime.Fake, id string) {
+			if err := store.SetMetadataBatch(id, map[string]string{"generation": "5", "instance_token": "tok-relaunched"}); err != nil {
+				t.Fatalf("mint: %v", err)
+			}
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, "tok-relaunched")
+		}, ErrStaleRestartRequest, "tok-relaunched"},
+		{"a relaunch starts under the row's token", func(_ *testing.T, _ beads.Store, sp *runtime.Fake, _ string) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceOtherToken)
+		}, ErrStaleRestartRequest, restartFenceOtherToken},
+		{"A3 re-keys the row to the caller's token", func(t *testing.T, store beads.Store, _ *runtime.Fake, id string) {
+			if err := store.SetMetadata(id, "instance_token", restartFenceToken); err != nil {
+				t.Fatalf("rekey: %v", err)
+			}
+		}, nil, restartFenceToken},
+	}
+	for _, st := range stores {
+		for _, il := range interleavings {
+			t.Run(st.name+"/"+il.name, func(t *testing.T) {
+				store := st.store(t)
+				created := seedRestartFenceSession(t, store, map[string]string{
+					"session_name":   sessName,
+					"generation":     "4",
+					"instance_token": restartFenceOtherToken,
+				})
+				fake := runtime.NewFake()
+				_ = fake.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
+				sp := &tokenReadHook{Fake: fake, armed: !st.casOnly}
+				sp.after = func() { il.during(t, store, fake, created.ID) }
+				var casOnly func() bool
+				if st.casOnly {
+					casOnly = func() bool { sp.armed = true; return false }
+				}
+				m := newTestManager(t, store, sp)
+
+				err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, casOnly)
+				if !sp.fired {
+					t.Fatal("the interleaving never landed inside the proof")
+				}
+				want := ""
+				if il.wantErr == nil {
+					if err != nil {
+						t.Fatalf("RequestFreshRestartFenced: %v", err)
+					}
+					want = "true"
+				} else if !errors.Is(err, il.wantErr) {
+					t.Fatalf("err = %v, want %v", err, il.wantErr)
+				}
+				got := assertRestartRequestKeys(t, store, created.ID, want)
+				if got.Metadata["instance_token"] != il.wantToken {
+					t.Fatalf("instance_token = %q, want %q", got.Metadata["instance_token"], il.wantToken)
+				}
+			})
+		}
+	}
+}
+
 // TestCheckFreshRestartFenced proves the read-only decision answers as
 // RequestFreshRestartFenced would, on a fresh read of the row, and writes
 // nothing: the current incarnation, a pending request and a live runtime that

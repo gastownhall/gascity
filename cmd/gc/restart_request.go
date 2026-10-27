@@ -80,11 +80,12 @@ func (r rowFirstRestart) recordRestart() error {
 // refusedBeforeMail is the request's refusal decided before a self handoff
 // sends its mail, so a refused caller sends none: no token, or a check of the
 // row that refuses this incarnation, the row being closed or it and its live
-// runtime naming another incarnation, or that refuses the write itself (a v2
-// city's store with no conditional writer, or require meeting a store that
-// cannot fence). A check that cannot decide (no session
-// store or row, a failed read) refuses nothing here: the fenced write after
-// the mail stays the authority and reports why it recorded nothing.
+// runtime naming another incarnation, or that refuses the write itself (a
+// store with no conditional writer in a city that records only by
+// compare-and-swap, or require meeting a store that cannot fence). A check
+// that cannot decide (no session store or row, a failed read) refuses nothing
+// here: the fenced write after the mail stays the authority and reports why
+// it recorded nothing.
 func (r rowFirstRestart) refusedBeforeMail() error {
 	if strings.TrimSpace(r.token) == "" {
 		return session.ErrRestartRequestUnfenced
@@ -117,15 +118,16 @@ func (r rowFirstRestart) notifyController() restartNotice {
 }
 
 // notRecorded renders why recordRestart recorded nothing, without the verb.
-// It never contains the token. A refused incarnation is given no command that
-// restarts the session: gc session reset is unfenced, so a process left over
-// from an earlier incarnation that ran it would restart its successor.
+// It never contains the token. A caller refused for its incarnation, or for
+// naming none, is given no command that restarts the session: gc session
+// reset is unfenced, so a process left over from an earlier incarnation that
+// ran it would restart its successor.
 func (r rowFirstRestart) notRecorded(err error) string {
 	switch {
 	case errors.Is(err, session.ErrStaleRestartRequest):
 		return fmt.Sprintf("restart not recorded: this process does not run in session %s's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); a process left over from an earlier incarnation must exit, and only an operator on the controller host can restart the session", r.display)
 	case errors.Is(err, session.ErrRestartRequestUnfenced):
-		return fmt.Sprintf("restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of the session it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); keep GC_INSTANCE_TOKEN in the agent's environment, or ask an operator on the controller host to restart session %s (gc session reset %s)", r.display, r.display)
+		return fmt.Sprintf("restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of session %s it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); keep GC_INSTANCE_TOKEN in the agent's environment, and only an operator on the controller host can restart the session", r.display)
 	default:
 		return fmt.Sprintf("restart not recorded: %v", err)
 	}
@@ -181,9 +183,11 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 // layer asks it only when a write is due on a store with no conditional
 // writer, so the controller is asked its latched mode (cityRunsV2) only then.
 // A worker site takes the checked write: no released bd fences, and its
-// remote controller is not reachable from the box to ask. That is safe while
-// v2 refuses the runtimes that make worker sites (PAR-EXEC); lifting PAR-EXEC
-// must revisit it.
+// remote controller is not reachable from the box to ask. Q1 still holds
+// there only because no v2 city has worker sites: v2 refuses the session
+// runtimes that place sessions on one (exec and pack runtimes, PAR-EXEC; ssh,
+// PAR-SSH; k8s and hybrid, PAR-K8S), explicit or by default. Lifting any of
+// them must revisit this exemption.
 func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
 	return func() bool {
 		return !onWorkerSite(cityPath) && cityRunsV2(cityPath, cfg)

@@ -440,11 +440,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request is written to the session row first, and only while the row or the
   session's live runtime carries the caller's `GC_INSTANCE_TOKEN`, so a
   process left over from an earlier incarnation can no longer restart its
-  successor; a self `gc handoff` refused this way sends no mail. Both
-  commands now exit 1 and record nothing when `GC_INSTANCE_TOKEN` is not
-  set. An agent CLI that scrubs `*TOKEN*` variables from the shells it spawns
-  (for example Claude Code with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) removes
-  it, so keep that variable in the agent's subprocess environment.
+  successor; a self `gc handoff` checks this before its mail and, refused
+  then, sends none. Both commands now exit 1 and record nothing when
+  `GC_INSTANCE_TOKEN` is not set. An agent CLI that scrubs `*TOKEN*`
+  variables from the shells it spawns (for example Claude Code with
+  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) removes it, so keep that variable in
+  the agent's subprocess environment. They also exit 1 and record nothing
+  when the session store cannot compare-and-swap and the request needs it:
+  in a v2 city, and under `[beads] conditional_writes = "require"`.
   `gc runtime request-restart` also exits 1 when the session store does not
   open, where it used to set only the runtime's restart flag. Once the
   request is recorded, a failed controller poke exits 0 with the warning
