@@ -485,3 +485,59 @@ func TestInterruptedCloseKeepsLiveOrUnobservedRuntimeOpen(t *testing.T) {
 		})
 	}
 }
+
+// A tick on a partial store view, or the boot pass that defers session
+// closes, never finishes an interrupted close: it records the skip with both
+// flags, and the next complete steady-state tick finishes it.
+func TestInterruptedCloseWaitsForACompleteSteadyStateTick(t *testing.T) {
+	cases := []struct {
+		name    string
+		partial bool
+		opts    []startExecutionOption
+	}{
+		{name: "store_query_partial", partial: true},
+		{name: "defer_session_closes_on_boot", opts: []startExecutionOption{withDeferSessionClosesOnBoot()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			b := env.createSessionBead("worker-gone", "worker")
+			halfCloseSessionBead(t, env.store, b.ID, "stale-session", env.clk.Now().Add(-time.Hour), nil)
+
+			trace := env.interruptedCloseTick(t, env.sp, tc.partial, tc.opts...)
+
+			got, err := env.store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if got.Status == "closed" {
+				t.Fatal("interrupted close finished on a partial or boot tick, want it left open")
+			}
+			var skips []map[string]any
+			for _, r := range trace.records {
+				if r.SessionName == "worker-gone" &&
+					r.SiteCode == TraceSiteCode("reconciler.session.finish_interrupted_close") &&
+					r.OutcomeCode == TraceOutcomeSkipped {
+					skips = append(skips, r.Fields)
+				}
+			}
+			if len(skips) != 1 {
+				t.Fatalf("finisher skipped records = %d, want 1; records: %+v", len(skips), trace.records)
+			}
+			if skips[0]["store_query_partial"] != tc.partial ||
+				skips[0]["defer_session_closes_on_boot"] != (len(tc.opts) > 0) {
+				t.Fatalf("skipped record fields = %+v, want store_query_partial=%v defer_session_closes_on_boot=%v", skips[0], tc.partial, len(tc.opts) > 0)
+			}
+
+			env.interruptedCloseTick(t, env.sp, false)
+
+			got, err = env.store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("reload after steady-state tick: %v", err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("bead status after a complete steady-state tick = %q, want closed", got.Status)
+			}
+		})
+	}
+}

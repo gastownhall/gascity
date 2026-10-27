@@ -82,6 +82,10 @@ func finishInterruptedClose(
 	stderr io.Writer,
 ) bool {
 	if storeQueryPartial || deferOnBoot {
+		recordInterruptedClose(trace, info, TraceOutcomeSkipped, traceRecordPayload{
+			"store_query_partial":          storeQueryPartial,
+			"defer_session_closes_on_boot": deferOnBoot,
+		})
 		return false
 	}
 	alive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, info.ID)
