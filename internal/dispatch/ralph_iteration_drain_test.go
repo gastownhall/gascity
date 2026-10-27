@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -83,9 +84,11 @@ type ralphDrainFixture struct {
 	rootID string
 }
 
-func buildRalphDrainFixture(t *testing.T, store beads.Store, formulaText string) ralphDrainFixture {
+// buildRalphDrainFixture cooks formulaText on store under a city whose check
+// passes from iteration checkPassFrom on (0: never).
+func buildRalphDrainFixture(t *testing.T, store beads.Store, formulaText string, checkPassFrom int) ralphDrainFixture {
 	t.Helper()
-	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, 0)
+	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, checkPassFrom)
 	cooked, err := molecule.Cook(context.Background(), store, city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
@@ -170,7 +173,7 @@ func TestCompiledRalphIterationDrainNoNextIterationWhileSiblingRuns(t *testing.T
 		for _, failure := range ralphDrainFailures {
 			t.Run(st.name+"/"+failure.name, func(t *testing.T) {
 				t.Parallel()
-				fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+				fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula, 0)
 				fx.claim(t, "loop.iteration.1.beta")
 				fx.finish(t, "loop.iteration.1.alpha", failure.meta)
 				fx.serve(t)
@@ -208,7 +211,7 @@ func TestCompiledRalphIterationDrainBlocksOnClaimedSibling(t *testing.T) {
 	for _, st := range []ralphDrainStore{memDrainStore(), sqliteDrainStore()} {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula, 0)
 			beta := fx.claim(t, "loop.iteration.1.beta")
 			fx.finish(t, "loop.iteration.1.alpha", workerFailure(beadmeta.FailureClassTransient, "rate_limited"))
 			fx.serve(t)
@@ -221,7 +224,7 @@ func TestCompiledRalphIterationDrainBlocksOnClaimedSibling(t *testing.T) {
 // claimed, serves, and checks the pending state before the caller closes beta.
 func drainedSiblingAfterFailure(t *testing.T, st ralphDrainStore) ralphDrainFixture {
 	t.Helper()
-	fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+	fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula, 0)
 	beta := fx.claim(t, "loop.iteration.1.beta")
 	fx.finish(t, "loop.iteration.1.alpha", workerFailure(beadmeta.FailureClassTransient, "rate_limited"))
 	fx.serve(t)
@@ -303,7 +306,7 @@ func TestCompiledRalphIterationDrainRuntimeSpawnedIteration(t *testing.T) {
 	for _, st := range []ralphDrainStore{memDrainStore(), sqliteDrainStore()} {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula, 0)
 			fx.finish(t, "loop.iteration.1.alpha", workerPass)
 			fx.finish(t, "loop.iteration.1.beta", workerPass)
 			fx.serve(t)
@@ -346,7 +349,7 @@ func TestCompiledRalphIterationDrainForcedSettle(t *testing.T) {
 	for _, st := range []ralphDrainStore{bdPolicy, sqliteDrainStore()} {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFanoutFormula)
+			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFanoutFormula, 0)
 			if !ledgerHasRefContaining(fx.ledger(t), "loop.iteration.1.alpha-fanout") {
 				t.Fatal("fixture has no fanout on alpha; the forced settle is not exercised")
 			}
@@ -366,5 +369,182 @@ func TestCompiledRalphIterationDrainForcedSettle(t *testing.T) {
 			fx.serve(t)
 			requireOneIteration(t, fx.ledger(t), 2)
 		})
+	}
+}
+
+// TestCompiledRalphIterationDrainedIterationJudgedInOnePass pins AC-7: an
+// iteration whose members have all closed is judged the first time its
+// control is served, with no drain wait and no edge to a member, and each
+// verdict is the one the loop reached before the drain guard.
+func TestCompiledRalphIterationDrainedIterationJudgedInOnePass(t *testing.T) {
+	t.Parallel()
+	exhaustingFormula := strings.Replace(compiledRalphDrainFormula, "max_attempts = 3", "max_attempts = 1", 1)
+	for _, tc := range []struct {
+		name          string
+		formula       string
+		checkPassFrom int
+		beta          map[string]string
+		check         func(t *testing.T, ledger []ledgerBead)
+	}{
+		{
+			name: "pass", formula: compiledRalphDrainFormula, checkPassFrom: 1, beta: workerPass,
+			check: func(t *testing.T, ledger []ledgerBead) {
+				control := ledgerBeadByRefSuffix(t, ledger, ".loop")
+				if control.Status != "closed" || control.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+					t.Errorf("ralph control status=%s outcome=%q, want closed/pass", control.Status, control.Metadata[beadmeta.OutcomeMetadataKey])
+				}
+				requireNoIteration(t, ledger, 2)
+			},
+		},
+		{
+			name: "iterate", formula: compiledRalphDrainFormula, beta: workerPass,
+			check: func(t *testing.T, ledger []ledgerBead) {
+				requireOneIteration(t, ledger, 2)
+				if log := attemptLogEntries(t, ledgerBeadByRefSuffix(t, ledger, ".loop")); len(log) != 1 || log[0]["attempt"] != "1" || log[0]["outcome"] != "fail" {
+					t.Errorf("gc.attempt_log = %v, want one failed check for iteration 1", log)
+				}
+			},
+		},
+		{
+			name: "exhaust", formula: exhaustingFormula, beta: workerPass,
+			check: func(t *testing.T, ledger []ledgerBead) {
+				control := ledgerBeadByRefSuffix(t, ledger, ".loop")
+				if control.Status != "closed" || control.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail || control.Metadata[beadmeta.FailedAttemptMetadataKey] != "1" {
+					t.Errorf("ralph control status=%s outcome=%q failed_attempt=%q, want closed/fail/1", control.Status, control.Metadata[beadmeta.OutcomeMetadataKey], control.Metadata[beadmeta.FailedAttemptMetadataKey])
+				}
+				requireNoIteration(t, ledger, 2)
+			},
+		},
+		{
+			name: "hard-fail", formula: compiledRalphDrainFormula, beta: workerFailure(beadmeta.FailureClassHard, "external_live_head_changed"),
+			check: func(t *testing.T, ledger []ledgerBead) {
+				requireRalphHardFailed(t, ledger, "loop", 1, "external_live_head_changed")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, beads.NewMemStore(), tc.formula, tc.checkPassFrom)
+			var drainWaits []string
+			fx.opts.Tracef = func(format string, args ...any) {
+				if line := fmt.Sprintf(format, args...); strings.HasPrefix(line, "ralph iteration-drain-pending") {
+					drainWaits = append(drainWaits, line)
+				}
+			}
+			fx.finish(t, "loop.iteration.1.alpha", workerPass)
+			fx.finish(t, "loop.iteration.1.beta", tc.beta)
+			fx.serve(t)
+			ledger := fx.ledger(t)
+
+			if len(drainWaits) != 0 {
+				t.Errorf("drained iteration waited on members: %v", drainWaits)
+			}
+			control := ledgerBeadByRefSuffix(t, ledger, ".loop")
+			for _, suffix := range []string{"loop.iteration.1.alpha", "loop.iteration.1.beta"} {
+				if member := ledgerBeadByRefSuffix(t, ledger, suffix); slices.Contains(control.Blocks, "blocks:"+member.ID) {
+					t.Errorf("ralph control deps = %v, want no edge to member %s", control.Blocks, member.ID)
+				}
+			}
+			tc.check(t, ledger)
+		})
+	}
+}
+
+// compiledRalphGateFormula is the gastownhall/gascity#2519 shape: a ralph with
+// max_attempts >= 2 over several independent children.
+const compiledRalphGateFormula = `formula = "ralph-iteration-gate"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.ralph]
+max_attempts = 3
+
+[steps.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children]]
+id = "alpha"
+title = "Alpha"
+
+[[steps.children]]
+id = "beta"
+title = "Beta"
+
+[[steps.children]]
+id = "gamma"
+title = "Gamma"
+`
+
+// TestCompiledRalphDoesNotSpawnNextIterationWhileMembersInProgress pins the
+// iteration boundary from gastownhall/gascity#2519 on the pass path: while
+// iteration 1 members are still in_progress, the control dispatcher must not
+// run the check or create any iteration 2 bead.
+func TestCompiledRalphDoesNotSpawnNextIterationWhileMembersInProgress(t *testing.T) {
+	t.Parallel()
+	city := newCompiledRalphCity(t, "ralph-iteration-gate", compiledRalphGateFormula, 0)
+	fx := buildCompiledRalphFixture(t, identityStore, city, shapeUnlinked, func(string, int) map[string]string { return workerPass })
+	fx.work = nil
+
+	ledger := snapshotLedger(t, fx.ledger)
+	alpha := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.alpha")
+	beta := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.beta")
+	gamma := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.gamma")
+
+	inProgress := "in_progress"
+	for _, id := range []string{alpha.rawID, beta.rawID, gamma.rawID} {
+		if err := fx.store.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatalf("claiming %s: %v", id, err)
+		}
+	}
+	if err := updateMetadataAndClose(fx.store, alpha.rawID, workerPass); err != nil {
+		t.Fatalf("closing %s: %v", alpha.ID, err)
+	}
+
+	if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+		t.Fatalf("serve loop did not converge: %v", errs)
+	}
+	ledger = snapshotLedger(t, fx.ledger)
+
+	for _, b := range ledger {
+		if strings.Contains(b.Metadata[beadmeta.StepRefMetadataKey], "loop.iteration.2") {
+			t.Errorf("iteration 2 bead %s (%s, status %s) exists while iteration 1 members are in_progress",
+				b.ID, b.Metadata[beadmeta.StepRefMetadataKey], b.Status)
+		}
+	}
+	if iter := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1"); iter.Status == "closed" {
+		t.Errorf("iteration 1 scope closed (outcome %q) while members are in_progress", iter.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if log := ledgerBeadByRefSuffix(t, ledger, ".loop").Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+		t.Errorf("ralph check fired before iteration 1 finished: attempt log %s", log)
+	}
+}
+
+// TestCompiledRalphGateFixtureSpawnsNextIterationAfterMembersClose is the
+// vacuity control for the test above: once every iteration 1 member closes,
+// the failing check fires and iteration 2 is created.
+func TestCompiledRalphGateFixtureSpawnsNextIterationAfterMembersClose(t *testing.T) {
+	t.Parallel()
+	city := newCompiledRalphCity(t, "ralph-iteration-gate", compiledRalphGateFormula, 0)
+	fx := buildCompiledRalphFixture(t, identityStore, city, shapeUnlinked, func(string, int) map[string]string { return workerPass })
+	fx.work = nil
+
+	ledger := snapshotLedger(t, fx.ledger)
+	for _, suffix := range []string{"loop.iteration.1.alpha", "loop.iteration.1.beta", "loop.iteration.1.gamma"} {
+		b := ledgerBeadByRefSuffix(t, ledger, suffix)
+		if err := updateMetadataAndClose(fx.store, b.rawID, workerPass); err != nil {
+			t.Fatalf("closing %s: %v", b.ID, err)
+		}
+	}
+	if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+		t.Fatalf("serve loop did not converge: %v", errs)
+	}
+	if !ledgerHasRefContaining(snapshotLedger(t, fx.ledger), "loop.iteration.2") {
+		t.Fatal("iteration 2 was not spawned after iteration 1 closed under a failing check")
 	}
 }
