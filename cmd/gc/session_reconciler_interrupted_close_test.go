@@ -116,10 +116,10 @@ func (e *interruptedCloseEnv) openSeatRunning(t *testing.T) bool {
 
 // halfClosedSeat stamps the interrupted close onto a freshly minted pool
 // seat and returns the re-read bead.
-func (e *interruptedCloseEnv) halfClosedSeat(t *testing.T, state string, extra map[string]string) beads.Bead {
+func (e *interruptedCloseEnv) halfClosedSeat(t *testing.T, state string) beads.Bead {
 	t.Helper()
 	seat := createCanonicalPoolSession(t, e.store, &e.cfg.Agents[0], e.clk.Now(), 1)
-	e.halfClose(t, seat.ID, state, extra)
+	e.halfClose(t, seat.ID, state, nil)
 	stored, err := e.store.Get(seat.ID)
 	if err != nil {
 		t.Fatalf("reload half-closed seat: %v", err)
@@ -208,7 +208,7 @@ func unknownStateEvents(t *testing.T, rec *events.Fake) []events.Event {
 func TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime(t *testing.T) {
 	t.Run("alive runtime keeps the row open", func(t *testing.T) {
 		env := newInterruptedCloseEnv(t)
-		zombie := env.halfClosedSeat(t, "stale-session", nil)
+		zombie := env.halfClosedSeat(t, "stale-session")
 		name := zombie.Metadata["session_name"]
 		// The name is live — whether the row's own runtime or a twin's: the
 		// probe reads the name.
@@ -245,7 +245,7 @@ func TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime(
 
 	t.Run("liveness error skips the close", func(t *testing.T) {
 		env := newInterruptedCloseEnv(t)
-		zombie := env.halfClosedSeat(t, "stale-session", nil)
+		zombie := env.halfClosedSeat(t, "stale-session")
 		name := zombie.Metadata["session_name"]
 		// The provider cannot observe liveness — the same class a transient
 		// tmux blip produces at runtime.
@@ -297,7 +297,7 @@ func TestReconcileSessionBeads_InterruptedCloseDefersOnPartialObservation(t *tes
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newInterruptedCloseEnv(t)
-			zombie := env.halfClosedSeat(t, "stale-session", nil)
+			zombie := env.halfClosedSeat(t, "stale-session")
 
 			var cycle *SessionReconcilerTraceCycle
 			if tc.startOpt != nil {
@@ -334,6 +334,86 @@ func TestReconcileSessionBeads_InterruptedCloseDefersOnPartialObservation(t *tes
 			}
 		})
 	}
+}
+
+// TestReconcileSessionBeads_InterruptedCloseHonorsWorkGates is the AC-5 guard:
+// the finisher's close takes the recognizer's gate, so the gates mean what
+// they mean everywhere else. A closeGated code (duplicate) refuses while the
+// seat still holds in_progress assigned work — the row stays open and the
+// work keeps its assignee; a closeReleasing code (stale-session) releases the
+// seat's work instead of gating on it — the row closes and the work reopens
+// unassigned for the pool to re-route.
+func TestReconcileSessionBeads_InterruptedCloseHonorsWorkGates(t *testing.T) {
+	inProgressWorkOn := func(t *testing.T, env *interruptedCloseEnv, seat beads.Bead) beads.Bead {
+		t.Helper()
+		work, err := env.store.Create(beads.Bead{
+			Title:  "held work",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				"gc.routed_to": interruptedCloseTemplate,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create work: %v", err)
+		}
+		assignee := seat.ID
+		if err := env.store.Update(work.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			t.Fatalf("assign work to seat: %v", err)
+		}
+		return work
+	}
+
+	t.Run("closeGated duplicate refuses while work is held", func(t *testing.T) {
+		env := newInterruptedCloseEnv(t)
+		zombie := env.halfClosedSeat(t, "duplicate")
+		work := inProgressWorkOn(t, env, zombie)
+
+		cycle, _ := env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp, false)
+
+		got, err := env.store.Get(zombie.ID)
+		if err != nil {
+			t.Fatalf("reload zombie: %v", err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("closeGated half-closed seat closed while holding work: status=%q, want open", got.Status)
+		}
+		stored, err := env.store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reload work: %v", err)
+		}
+		if stored.Assignee != zombie.ID {
+			t.Fatalf("held work lost its assignee under a refused close: assignee=%q, want %q",
+				stored.Assignee, zombie.ID)
+		}
+		decisions := finishInterruptedCloseDecisions(cycle)
+		if len(decisions) != 1 || decisions[0].OutcomeCode != TraceOutcomeNoChange {
+			t.Fatalf("finisher decisions = %+v, want one no_change (gate refused)", decisions)
+		}
+	})
+
+	t.Run("closeReleasing stale-session releases the work", func(t *testing.T) {
+		env := newInterruptedCloseEnv(t)
+		zombie := env.halfClosedSeat(t, "stale-session")
+		work := inProgressWorkOn(t, env, zombie)
+
+		env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp, false)
+
+		got, err := env.store.Get(zombie.ID)
+		if err != nil {
+			t.Fatalf("reload zombie: %v", err)
+		}
+		if got.Status != "closed" || got.Metadata["state"] != "stale-session" {
+			t.Fatalf("closeReleasing half-closed seat not closed: status=%q state=%q", got.Status, got.Metadata["state"])
+		}
+		stored, err := env.store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reload work: %v", err)
+		}
+		if stored.Status != "open" || stored.Assignee != "" {
+			t.Fatalf("released work not reopened unassigned: status=%q assignee=%q, want open/\"\"",
+				stored.Status, stored.Assignee)
+		}
+	})
 }
 
 // TestReconcileSessionBeads_InterruptedCloseFreesAlwaysNamedSession is the
