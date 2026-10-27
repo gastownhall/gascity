@@ -181,7 +181,9 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 // layer asks it only when a write is due on a store with no conditional
 // writer, so the controller is asked its latched mode (cityRunsV2) only then.
 // A worker site takes the checked write: no released bd fences, and its
-// remote controller is not reachable from the box to ask.
+// remote controller is not reachable from the box to ask. That is safe while
+// v2 refuses the runtimes that make worker sites (PAR-EXEC); lifting PAR-EXEC
+// must revisit it.
 func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
 	return func() bool {
 		return !onWorkerSite(cityPath) && cityRunsV2(cityPath, cfg)

@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -859,6 +860,62 @@ func TestDoHandoff_RefusedIncarnationSendsNoMail(t *testing.T) {
 				t.Fatalf("stdout = %q, want nothing", stdout.String())
 			}
 		})
+	}
+}
+
+// TestDoHandoff_RequireRefusalSendsNoMail pins the handoff's pre-mail check
+// of the write itself: under require, a session store that cannot fence
+// refuses the fenced write, so the check refuses before the mail and the
+// handoff exits 1 having sent nothing and recorded nothing.
+func TestDoHandoff_RequireRefusalSendsNoMail(t *testing.T) {
+	rowStore := beads.NewMemStore()
+	if err := beads.StampOpenedStore(rowStore, "MemStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	row, err := rowStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"session_name": "mayor", "state": "awake", "instance_token": testRestartToken,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rowStore.DisableConditionalWrites = true
+	mgr := session.NewManagerWithOptions(rowStore, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	var checkErr error
+	restart.check = func(token string) error {
+		checkErr = mgr.CheckFreshRestartFenced(row.ID, token, nil)
+		return checkErr
+	}
+	restart.record = func(token string) error { return mgr.RequestFreshRestartFenced(row.ID, token, nil) }
+
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
+		[]string{"HANDOFF: context full"}, &stdout, &stderr)
+	if !beads.IsConditionalWritesRequired(checkErr) {
+		t.Fatalf("check err = %v, want the require refusal", checkErr)
+	}
+	if outcome.code != 1 || outcome.restartRequested {
+		t.Fatalf("outcome = %+v, want exit 1 with no restart; stderr: %s", outcome, stderr.String())
+	}
+	if msgs := listOpenMessagesBothTiers(t, store); len(msgs) != 0 {
+		t.Fatalf("messages = %d, want no mail sent when the write is refused", len(msgs))
+	}
+	if want := "gc handoff: restart not recorded: " + checkErr.Error() + "\n"; stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if dops.restartRequested["mayor"] || len(rec.Events) != 0 || stdout.Len() != 0 {
+		t.Fatalf("hint %t, events %v, stdout %q; want nothing", dops.restartRequested["mayor"], rec.Events, stdout.String())
+	}
+	got, err := rowStore.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["restart_requested"] != "" || got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row = %v, want nothing recorded", got.Metadata)
 	}
 }
 

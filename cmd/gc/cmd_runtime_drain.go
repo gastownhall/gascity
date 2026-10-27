@@ -1071,7 +1071,8 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 //
 // It exits 0 once the request is recorded, whether or not the controller was
 // notified, and 1 when nothing was recorded: then no runtime hint is set, no
-// event is recorded and the controller is not dialed.
+// event is recorded and the controller is not poked (a v2 refusal on a store
+// with no conditional writer has asked it for identify, nothing more).
 func doRuntimeRequestRestart(r rowFirstRestart, rec events.Recorder, stdout io.Writer) int {
 	if err := r.recordRestart(); err != nil {
 		fmt.Fprintf(r.stderr, "%s: %s\n", r.verb, r.notRecorded(err)) //nolint:errcheck // best-effort stderr

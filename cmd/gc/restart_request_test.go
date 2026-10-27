@@ -577,7 +577,8 @@ func lastStartEnv(t *testing.T, sp *runtime.Fake, name string) map[string]string
 // write. With the session store resolving no conditional writer (here the
 // agent's environment turns conditional writes off), a city whose controller
 // latched v2 refuses both verbs: exit 1, the row unwritten, no runtime hint,
-// no handoff mail, the controller not dialed. The same store under a legacy
+// no handoff mail, the controller not poked (the stub stands in for the
+// identify dial that answers the latched mode). The same store under a legacy
 // controller still records by the checked write (condition 3).
 func TestRowFirstRestartV2CityNeverTakesTheCheckedWrite(t *testing.T) {
 	original := controllerLatchedReconcilerMode
@@ -648,14 +649,24 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 	var stderr bytes.Buffer
 	restart := testRowFirstRestart("gc runtime request-restart", "worker", hint, &stderr)
 	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	var recordErr error
 	restart.record = func(token string) error {
-		return mgr.RequestFreshRestartFenced(b.ID, token, func() bool { return true })
+		// casOnly is nil, as on a legacy city: only the require refusal can
+		// refuse this write, so the v2 refusal cannot stand in for it.
+		recordErr = mgr.RequestFreshRestartFenced(b.ID, token, nil)
+		return recordErr
 	}
 	poked := false
 	restart.poke = func(string, reconcilekey.Key) error { poked = true; return nil }
 	rec := events.NewFake()
 	if code := doRuntimeRequestRestart(restart, rec, io.Discard); code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !beads.IsConditionalWritesRequired(recordErr) {
+		t.Fatalf("record err = %v, want the require refusal", recordErr)
+	}
+	if want := "gc runtime request-restart: restart not recorded: " + recordErr.Error() + "\n"; stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
 	if hint.restartRequested["worker"] || poked || len(rec.Events) != 0 {
 		t.Fatalf("hint %t, poked %t, events %v; want nothing past the refused write", hint.restartRequested["worker"], poked, rec.Events)
@@ -666,6 +677,44 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 	}
 	if got.Metadata["restart_requested"] != "" || got.Metadata["continuation_reset_pending"] != "" {
 		t.Fatalf("row = %v, want nothing recorded", got.Metadata)
+	}
+}
+
+// TestRowFirstRestartWorkerSiteTakesTheCheckedWrite pins the worker-site
+// exemption as current behavior: on a worker site restartRecordsOnlyByCAS
+// answers false without asking the reconciler mode, so a session store with
+// no conditional writer takes the checked write even under a v2 controller.
+// It is safe today only because v2 refuses exec, k8s, ssh and pack runtimes
+// (PAR-EXEC), so no v2 city has worker sites. Lifting PAR-EXEC must revisit
+// this exemption: a v2 worker site would then take the checked write.
+func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	for _, v := range restartVerbs {
+		t.Run(v.name, func(t *testing.T) {
+			cityDir, _ := newWorkerSiteSessionCity(t, workerSiteRestartSeeds[0].seed)
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_SESSION_NAME", "worker-1")
+			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
+			t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off")
+			asked := 0
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) {
+				asked++
+				return reconcilerV2, true
+			}
+
+			if restartRecordsOnlyByCAS(cityDir, nil)() {
+				t.Fatal("restartRecordsOnlyByCAS = true on a worker site, want false (the exemption)")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := v.run(&stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, want 0 (the checked write); stderr=%s", code, stderr.String())
+			}
+			assertRestartMarkerRecorded(t, localSessionBeads(t, cityDir))
+			if asked != 0 {
+				t.Fatalf("reconciler mode asked %d times, want none on a worker site", asked)
+			}
+		})
 	}
 }
 
