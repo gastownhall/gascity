@@ -21,7 +21,9 @@ import (
 //     touched;
 //   - the corrupt store is preserved (moved aside, never deleted) before any
 //     restore;
-//   - restore only runs from a non-empty local file:// <db>-backup remote;
+//   - restore only runs from a non-empty local file:// backup, selected from
+//     the registered backups by name: bd's "default" first, then the legacy
+//     <db>-backup;
 //   - fail-closed: when no usable backup exists or the restore fails, the
 //     store ends up back in the data dir and the function fails so the server
 //     cannot start silently missing a database.
@@ -41,6 +43,7 @@ func journalRecoveryHarness(t *testing.T) string {
 		"run_with_timeout",
 		"journal_corruption_signature",
 		"database_journal_corrupt",
+		"backup_candidates_for_recovery",
 		"backup_remote_url_for_recovery",
 		"backup_restore_source_usable",
 		"attempt_journal_corruption_recovery",
@@ -341,6 +344,70 @@ func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
 	}
 }
 
+// bdDefaultRepoState is the repo_state.json shape Dolt records for
+// `bd backup init file://<dir>`: bd registers the destination under the name
+// "default", which is what mol-dog-backup syncs.
+func bdDefaultRepoState(backupDir string) string {
+	return `{"head":"refs/heads/main","backups":{"default":{"name":"default","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
+}
+
+// maskJQPrelude hides jq from `command -v` so the sed fallback is exercised
+// regardless of the host toolchain.
+const maskJQPrelude = "command() { case \"$*\" in '-v jq') return 1 ;; esac; builtin command \"$@\"; }\n"
+
+func TestJournalRecoveryRestoresFromBdDefaultBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	for _, tc := range []struct {
+		name   string
+		maskJQ bool
+	}{
+		{name: "without jq", maskJQ: true},
+		{name: "with jq"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.maskJQ {
+				if _, err := exec.LookPath("jq"); err != nil {
+					t.Skip("jq not available; skipping jq-path test")
+				}
+			}
+			env := setupJournalRecoveryEnv(t)
+			if err := os.WriteFile(filepath.Join(env.backupDir, "manifest"), []byte("backup"), 0o644); err != nil {
+				t.Fatalf("seed backup content: %v", err)
+			}
+			bdLog := filepath.Join(env.cityDir, "bd.log")
+			writeExecutable(t, filepath.Join(env.binDir, "bd"), "#!/usr/bin/env bash\necho \"$*\" >> \""+bdLog+"\"\nexit 0\n")
+			env.addDatabase(t, "prod", true, bdDefaultRepoState(env.backupDir))
+
+			harness := journalRecoveryHarness(t)
+			if tc.maskJQ {
+				harness = strings.Replace(harness, "set -u\n", "set -u\n"+maskJQPrelude, 1)
+			}
+			out, err := env.run(t, harness)
+			if err != nil {
+				t.Fatalf("recovery from bd's default backup failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "RESTORED 'prod'") {
+				t.Fatalf("output missing loud restore notice:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(env.dataDir, "prod", "restored-marker")); err != nil {
+				t.Fatalf("prod was not restored from the default backup: %v\n%s", err, out)
+			}
+			asides, err := filepath.Glob(filepath.Join(env.stateDir, "corrupt-aside", "prod.*"))
+			if err != nil || len(asides) != 1 {
+				t.Fatalf("corrupt store must be preserved aside, got %v (err %v)\n%s", asides, err, out)
+			}
+			if _, err := os.Stat(filepath.Join(asides[0], "original-marker")); err != nil {
+				t.Fatalf("aside copy missing original content: %v", err)
+			}
+			if data, err := os.ReadFile(bdLog); err == nil && len(data) > 0 {
+				t.Fatalf("recovery must never call bd, got calls:\n%s", data)
+			}
+		})
+	}
+}
+
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
@@ -438,7 +505,9 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 	if err != nil {
 		t.Fatalf("read script: %v", err)
 	}
-	fn := extractShellFunction(t, string(scriptBytes), "backup_remote_url_for_recovery")
+	script := string(scriptBytes)
+	fn := extractShellFunction(t, script, "backup_candidates_for_recovery") + "\n" +
+		extractShellFunction(t, script, "backup_remote_url_for_recovery")
 
 	tests := []struct {
 		name      string
@@ -467,9 +536,7 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 			}
 			harness := "#!/usr/bin/env bash\nset -u\n"
 			if maskJQ {
-				// The `command` override masks jq so the sed fallback is what
-				// gets exercised regardless of the host toolchain.
-				harness += "command() { case \"$*\" in '-v jq') return 1 ;; esac; builtin command \"$@\"; }\n"
+				harness += maskJQPrelude
 			}
 			harness += fn + "\nbackup_remote_url_for_recovery prod \"$1\"\n"
 			out, err := exec.Command("bash", "-c", harness, "harness", dbDir).CombinedOutput()

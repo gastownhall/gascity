@@ -2921,25 +2921,55 @@ database_journal_corrupt() {
     return "$probe_hit"
 }
 
-# backup_remote_url_for_recovery prints the <db>-backup remote URL recorded in
-# a database's repo_state.json. The file is plain JSON, so the URL is readable
-# even when the noms store itself can no longer be opened. Handles both the
-# object form ("backups": {"db-backup": {"url": "..."}}) and the legacy plain
-# string form.
-backup_remote_url_for_recovery() {
-    local recovery_db="$1" recovery_db_dir="$2" repo_state url
-    repo_state="$recovery_db_dir/.dolt/repo_state.json"
-    [ -f "$repo_state" ] || return 1
+# backup_candidates_for_recovery prints "name<TAB>url" for each backup that a
+# database's repo_state.json registers under a name journal recovery restores
+# from, in precedence order: bd's "default" (what `bd backup init` registers
+# and mol-dog-backup syncs), then the legacy "<db>-backup". A name counts as
+# registered when its key exists under "backups", even if its URL is empty.
+# The file is plain JSON, so it stays readable when the noms store does not.
+# Handles both the object form ("backups": {"default": {"url": "..."}}) and
+# the plain string form. Only the "backups" object is searched: Dolt writes
+# "remotes" before it, and a remote named "default" must never be taken.
+# Returns 1 when no candidate name is registered.
+backup_candidates_for_recovery() {
+    local cand_db="$1" cand_db_dir="$2" cand_state cand_out cand_backups cand_name cand_url
+    cand_state="$cand_db_dir/.dolt/repo_state.json"
+    [ -f "$cand_state" ] || return 1
     if command -v jq >/dev/null 2>&1; then
-        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url? // .backups[$name] // empty' "$repo_state" 2>/dev/null)
+        cand_out=$(jq -r --arg legacy "${cand_db}-backup" '
+            (.backups // {}) as $bk
+            | ("default", $legacy)
+            | select(. as $n | $bk | type == "object" and has($n))
+            | . as $n
+            | "\($n)\t\($bk[$n] | if type == "object" then (.url // "") elif type == "string" then . else "" end)"
+        ' "$cand_state" 2>/dev/null)
     else
-        url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-        if [ -z "$url" ]; then
-            url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-        fi
+        cand_backups=$(tr -d '\n' < "$cand_state" \
+            | sed -n 's/.*"backups"[[:space:]]*:[[:space:]]*{//p' \
+            | sed 's/"branches"[[:space:]]*:.*//')
+        cand_out=$(for cand_name in default "${cand_db}-backup"; do
+            printf '%s' "$cand_backups" | grep -q "\"$cand_name\"[[:space:]]*:" || continue
+            cand_url=$(printf '%s' "$cand_backups" | sed -n "s/.*\"$cand_name\"[[:space:]]*:[[:space:]]*{[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+            if [ -z "$cand_url" ]; then
+                cand_url=$(printf '%s' "$cand_backups" | sed -n "s/.*\"$cand_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+            fi
+            printf '%s\t%s\n' "$cand_name" "$cand_url"
+        done)
     fi
-    [ -n "$url" ] || return 1
-    printf '%s\n' "$url"
+    [ -n "$cand_out" ] || return 1
+    printf '%s\n' "$cand_out"
+}
+
+# backup_remote_url_for_recovery prints the URL of the backup journal
+# recovery restores a database from: the highest-precedence entry listed by
+# backup_candidates_for_recovery. Precedence is final: the selected entry is
+# used even when its URL is empty or unusable, so recovery fails closed
+# rather than silently restoring an older lower-precedence backup.
+backup_remote_url_for_recovery() {
+    local sel_line
+    sel_line=$(backup_candidates_for_recovery "$1" "$2" | head -n 1)
+    [ -n "$sel_line" ] || return 1
+    printf '%s\n' "${sel_line#*	}"
 }
 
 # backup_restore_source_usable reports whether url points at a local backup
@@ -2959,7 +2989,8 @@ backup_restore_source_usable() {
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load, preserves each corrupt store under
 # $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
-# from its local <db>-backup remote (#3176). Fail-closed: when any corrupt
+# from its registered local backup (#3176): bd's "default" backup, else the
+# legacy <db>-backup (see backup_candidates_for_recovery). Fail-closed: when any corrupt
 # database has no usable backup or the restore fails, its store is moved back
 # so the server cannot come up silently missing a database, and the function
 # returns 1. Returns 0 only when at least one database was restored and none
