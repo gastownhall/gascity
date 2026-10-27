@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -90,18 +92,31 @@ func liveIncarnationDeferrals(trace *sessionReconcilerTraceCycle) int {
 	return n
 }
 
+// reconcileLiveIncarnationTick runs one traced legacy reconciler tick over the
+// row on sp.
+func reconcileLiveIncarnationTick(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, id string, trace *sessionReconcilerTraceCycle) {
+	t.Helper()
+	cur, err := env.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), env.city, []beads.Bead{cur}, env.desiredState, cfgNames, env.cfg, sp,
+		env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, trace,
+		env.startOptions...,
+	)
+}
+
 // assertLiveIncarnationHeld ticks the legacy reconciler twice over the row and
 // checks the hold on each: the box runs unstopped, the row stays open with its
 // claim, one Deferred trace per tick, and the standing condition said once.
-func assertLiveIncarnationHeld(t *testing.T, env *reconcilerTestEnv, session beads.Bead, name string) {
+func assertLiveIncarnationHeld(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, session beads.Bead, name string) {
 	t.Helper()
 	for tick := 1; tick <= 2; tick++ {
-		cur, err := env.store.Get(session.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
 		trace := newPoolDesiredStateTestTrace("worker")
-		reconcileTraced(env, []beads.Bead{cur}, trace)
+		reconcileLiveIncarnationTick(t, env, sp, session.ID, trace)
 		got, err := env.store.Get(session.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -135,12 +150,29 @@ func TestPendingCreateRollback_HoldsPoolRowsLiveIncarnation(t *testing.T) {
 			env, session, name := stampLiveIncarnation(t, rowPool, epoch)
 			work := assignLiveIncarnationWork(t, env.store, name)
 
-			assertLiveIncarnationHeld(t, env, session, name)
+			assertLiveIncarnationHeld(t, env, env.sp, session, name)
 
 			got := releaseOrphanedWork(t, env, session.ID, work)
 			if got.Status != "in_progress" || got.Assignee != name {
 				t.Fatalf("work status=%q assignee=%q, want in_progress assigned to %q", got.Status, got.Assignee, name)
 			}
 		})
+	}
+}
+
+// TestPendingCreateRollback_HoldsNamedAndManualRowsLiveIncarnation is AC-2: a
+// configured named or a manual row's expired pending create, whose name holds
+// a live incarnation of the same session on a runtime that stamps identity,
+// is not closed failed-create while that runtime keeps running.
+func TestPendingCreateRollback_HoldsNamedAndManualRowsLiveIncarnation(t *testing.T) {
+	for _, class := range []teardownRowClass{rowNamed, rowManual} {
+		for _, epoch := range []string{"1", "3"} {
+			t.Run(string(class)+"/epoch "+epoch, func(t *testing.T) {
+				env, session, name := stampLiveIncarnation(t, class, epoch)
+				sp := runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: env.sp})
+
+				assertLiveIncarnationHeld(t, env, sp, session, name)
+			})
+		}
 	}
 }
