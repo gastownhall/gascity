@@ -372,6 +372,10 @@ func TestCompiledRalphIterationDrainContinuesAfterMemberCloses(t *testing.T) {
 				t.Fatalf("closing worker A: %v", err)
 			}
 			drainServeHeld(t, fx.crashFixture)
+			// This AC runs from AC-1's end state: pin the hold itself before
+			// releasing it, or the run below would also pass against the
+			// unminted-gate behavior whose wreckage it cleans up.
+			drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
 			body := drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), "loop.iteration.1")
 
 			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, drainStoreAll(t, fx.store),
