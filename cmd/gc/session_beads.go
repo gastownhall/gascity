@@ -154,6 +154,20 @@ func findOpenSessionBeadBySessionName(store beads.Store, sessionName string) (be
 	return beads.Bead{}, false, nil
 }
 
+// sessionStateMayBeRunning reports whether a row in state may hold a running
+// provider process: "" (read as active), active, awake, creating or draining.
+// Such a process may have minted its own conversation id, which only its
+// SessionStart hook reports, so a session_key minted for the row now would
+// name a transcript that does not exist and make the hook's set-once capture
+// drop the real one; the row gets its key at its next start instead.
+func sessionStateMayBeRunning(state string) bool {
+	switch session.State(strings.TrimSpace(state)) {
+	case "", session.StateActive, session.StateAwake, session.StateCreating, session.StateDraining:
+		return true
+	}
+	return false
+}
+
 func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool, sp runtime.Provider) string {
 	if exists {
 		switch session.State(strings.TrimSpace(existing.Metadata["state"])) {
