@@ -289,3 +289,30 @@ func TestPendingCreateRollback_RollsBackOnceLiveIncarnationExits(t *testing.T) {
 		t.Fatalf("work status=%q assignee=%q, want it released", released.Status, released.Assignee)
 	}
 }
+
+// TestPendingCreateRollback_StopsForeignSessionRuntime is AC-5: under the
+// bead-scoped pool name, a live runtime that carries another session's
+// GC_SESSION_ID is no incarnation of the row's: it is still stopped and the
+// row still closes failed-create.
+func TestPendingCreateRollback_StopsForeignSessionRuntime(t *testing.T) {
+	env, session, name := stampLiveIncarnation(t, rowPool, "1")
+	if err := env.sp.SetMeta(name, "GC_SESSION_ID", "gc-other"); err != nil {
+		t.Fatal(err)
+	}
+	trace := newPoolDesiredStateTestTrace("worker")
+	reconcileLiveIncarnationTick(t, env, env.sp, session.ID, trace)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" || got.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
+		t.Fatalf("status=%q state=%q, want the pending create rolled back; stderr=%s", got.Status, got.Metadata["state"], env.stderr.String())
+	}
+	if env.sp.IsRunning(name) || countCalls(env.sp, "Stop") == 0 {
+		t.Fatalf("running=%v stops=%d, want the foreign runtime stopped", env.sp.IsRunning(name), countCalls(env.sp, "Stop"))
+	}
+	if n := liveIncarnationDeferrals(trace); n != 0 {
+		t.Fatalf("live_incarnation deferral records = %d, want 0", n)
+	}
+}
