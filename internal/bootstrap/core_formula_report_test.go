@@ -216,6 +216,38 @@ func TestCorePoolWorkerPromptClosesWorkBeadWithReason(t *testing.T) {
 	}
 }
 
+// TestCorePoolWorkerPromptClosesPlainWorkBeadsWithReason strengthens
+// TestCorePoolWorkerPromptClosesWorkBeadWithReason for the workflow-step
+// split: every `gc bd close` instruction the pool-worker prompt gives must
+// target a plain work bead (`<id>`, a bead with no `gc.step_ref` in its
+// METADATA) and carry --reason, because a workflow step closes through
+// gc.outcome instead — on a retry-managed step a bare close is judged
+// missing_outcome and hard-fails the workflow (issue #7678).
+func TestCorePoolWorkerPromptClosesPlainWorkBeadsWithReason(t *testing.T) {
+	path := filepath.Join(filepath.Dir(coreFormulaSearchPaths(t)[0]), "assets", "prompts", "pool-worker.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	checked := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, "gc bd close") {
+			continue
+		}
+		checked++
+		if strings.Contains(line, "gc bd close <step-id>") {
+			t.Errorf("pool-worker.template.md: a workflow step closes through gc.outcome, not a bare close:\n%s", line)
+			continue
+		}
+		if !strings.Contains(line, "gc bd close <id>") || !closeReasonPattern.MatchString(line) {
+			t.Errorf("pool-worker.template.md: a plain work-bead close must be `gc bd close <id> --reason ...`:\n%s", line)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no 'gc bd close' instructions in pool-worker.template.md; guard pattern is stale")
+	}
+}
+
 // joinShellContinuations folds backslash-continued lines into one logical
 // command line so multi-line bd invocations are checked as a whole.
 func joinShellContinuations(text string) []string {
