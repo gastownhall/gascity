@@ -92,8 +92,10 @@ func isTransientStoreFault(err error) bool {
 	if err == nil {
 		return false
 	}
+	// EBUSY (a busy mount point) needs no guard: nothing in storeGotNoAnswer
+	// reads it, so it is standing by default, and the table test pins it.
 	if errors.Is(err, os.ErrPermission) || errors.Is(err, beads.ErrConditionalWriteUnsupported) ||
-		errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.ENOSPC) {
+		errors.Is(err, syscall.ENOSPC) {
 		return false
 	}
 	text := strings.ToLower(err.Error())

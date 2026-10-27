@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // Regression tests from the second review of #8332.
@@ -303,5 +305,205 @@ func TestDrainFenceReasonForATransientGateFault(t *testing.T) {
 	reason := drainFenceUnavailableReason(err)
 	if strings.Contains(reason, "refused") || !strings.Contains(reason, "failed open") || !strings.Contains(reason, "transient") {
 		t.Errorf("transient gate fault reason = %q", reason)
+	}
+}
+
+// TestRevertOfACityThisBuildMigrated is the other half of
+// TestRevertingToTheWorkBindingAfterAClearRefusesBoot: a city migrated by THIS
+// build's `gc storage migrate` carries the served-binding note too, so its
+// revert is held until the operator removes both notes, and the hold names the
+// served note.
+func TestRevertOfACityThisBuildMigrated(t *testing.T) {
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubStrandedRecoverySource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
+	stubInfraControllerPing(t, 0)
+	var stdout, stderr bytes.Buffer
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("migrate = %d: %s %s", code, stdout.String(), stderr.String())
+	}
+	cityPath := request.CityPath
+	allWork := &config.City{Storage: &config.StorageConfig{Classes: config.StorageClasses{
+		Work: config.StorageWorkBinding, Graph: config.StorageWorkBinding, Sessions: config.StorageWorkBinding,
+		Messaging: config.StorageWorkBinding, Orders: config.StorageWorkBinding, Nudges: config.StorageWorkBinding,
+	}}}
+	_ = os.Remove(infraClearedNotePath(cityPath))
+	_, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("revert with only the cleared note removed = %v, want the served-note hold naming %s", err, bornSplitServedNotePath(cityPath))
+	}
+	if err := os.Remove(bornSplitServedNotePath(cityPath)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{}); err != nil {
+		t.Errorf("revert after removing both notes still refuses: %v", err)
+	}
+}
+
+const splitSourceStorage = `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+`
+
+// Mutant A17: init --from takes the SOURCE's explicit prefix into account, in
+// both directions: an explicit non-reserved prefix makes a reserved-looking
+// name fine, and an explicit reserved prefix makes a plain name refused.
+func TestInitFromASplitSourceHonorsItsExplicitPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix, cityName string
+		refused                bool
+	}{
+		{"explicit gw on gas-city-gateway", "gw", "gas-city-gateway", false},
+		{"explicit gcg on plain-city", "gcg", "plain-city", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			body := "[workspace]\nname = \"declared\"\nprefix = \"" + tc.prefix + "\"\n" + splitSourceStorage
+			if err := os.WriteFile(filepath.Join(src, "city.toml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := initFromReservedPrefixRefusal(fsysOSFSForTest(), filepath.Join(src, "city.toml"), filepath.Join(t.TempDir(), tc.cityName), tc.cityName)
+			if (err != nil) != tc.refused {
+				t.Errorf("refusal = %v, want refused=%v", err, tc.refused)
+			}
+		})
+	}
+}
+
+// Plain `gc init --file` of a split template into a reserved-deriving name is
+// refused before anything is created (the check split-by-default needs).
+func TestInitFromASplitTemplateFileRefusesAReservedDerivedPrefix(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	tmpl := filepath.Join(t.TempDir(), "template.toml")
+	if err := os.WriteFile(tmpl, []byte("[workspace]\nname = \"declared\"\n"+splitSourceStorage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := filepath.Join(t.TempDir(), "gas-city-gateway")
+	var stdout, stderr bytes.Buffer
+	if code := cmdInitFromTOMLFileWithOptions(fsysOSFSForTest(), tmpl, cityPath, "", &stdout, &stderr, true, false); code == 0 {
+		t.Fatalf("gc init --file of a split template into gas-city-gateway succeeded: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gcg") || strings.Contains(stderr.String(), "site.toml") {
+		t.Errorf("stderr = %q, want the new-city refusal naming gcg", stderr.String())
+	}
+	if _, err := os.Stat(cityPath); err == nil {
+		t.Error("the refused init created the city directory")
+	}
+}
+
+func fsysOSFSForTest() fsys.FS { return fsys.OSFS{} }
+
+type censusListFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s censusListFailStore) List(beads.ListQuery) ([]beads.Bead, error) { return nil, s.err }
+
+// Mutants A7/A8: on the no-marker path a census that fails for a STANDING
+// reason (a misconfigured work store, a list the store refused) is not
+// transient.
+func TestNoMarkerCensusMisconfigurationIsStanding(t *testing.T) {
+	for name, tc := range map[string]struct {
+		store   beads.Store
+		openErr error
+	}{
+		"open": {openErr: errors.New(`unknown beads provider "nope"`)},
+		"list": {store: censusListFailStore{beads.NewMemStore(), errors.New("no such table: issues")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			expireUnsettledCLIRoutesImmediately(t)
+			unmarkSplitCity(t)
+			prev := openInfraMigrationSource
+			openInfraMigrationSource = func(string) (beads.Store, error) { return tc.store, tc.openErr }
+			t.Cleanup(func() { openInfraMigrationSource = prev })
+			_, err := hookSessionDrainPending(drainPendingTestSessionID)
+			if err == nil || isTransientStorageGateFault(err) || !hookDrainProbeFailsClosed(err) {
+				t.Errorf("err=%v transient=%v; want a standing, fail-closed refusal", err, isTransientStorageGateFault(err))
+			}
+		})
+	}
+}
+
+// Mutant A11: a genesis failure that is NOT the race (and not store I/O) is
+// standing.
+func TestGenesisFailureOtherThanTheRaceIsStanding(t *testing.T) {
+	expireUnsettledCLIRoutesImmediately(t)
+	unmarkSplitCity(t)
+	prev := inspectInfraGenesis
+	inspectInfraGenesis = func(target infraBindingTarget) error {
+		return infraGenesisOpenFailure(target, errors.New("applying sqlite schema: near \"TABEL\": syntax error"))
+	}
+	t.Cleanup(func() { inspectInfraGenesis = prev })
+	_, err := hookSessionDrainPending(drainPendingTestSessionID)
+	if err == nil || isTransientStorageGateFault(err) {
+		t.Errorf("non-race genesis failure: err=%v transient=%v; want standing", err, isTransientStorageGateFault(err))
+	}
+}
+
+// Mutant A15: the born-split census's list failing for a standing reason is
+// not transient.
+func TestBornSplitCensusListMisconfigurationIsStanding(t *testing.T) {
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		return censusListFailStore{beads.NewMemStore(), errors.New("no such table: issues")}, nil
+	}
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	var stderr bytes.Buffer
+	if report := checkBornSplitDiscipline(t.TempDir(), "gc", &stderr); report.Outcome != infraMigrationUncheckable || report.Transient {
+		t.Errorf("report = %+v, want uncheckable and not transient", report)
+	}
+}
+
+// Mutant A24: a .gc/store that cannot even be stat'ed (here a symlink loop) is
+// not proof that the city has no binding root.
+func TestUnstatableBindingRootIsEvidence(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("store", filepath.Join(dir, ".gc", "store")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"c\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc", "store")); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture: stat of the looping .gc/store = %v, want a non-absence error", err)
+	}
+	if !cityMayRelocateClasses(dir) {
+		t.Error("an unstatable .gc/store was read as no binding root")
+	}
+}
+
+// Mutant A29 (and review probe Q4): `gc storage migrate` whose served-binding
+// note write fails fails loudly, and a re-run completes and writes the note.
+func TestStorageMigrateFailsLoudlyWhenTheServedNoteCannotBeWritten(t *testing.T) {
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	stubStrandedRecoverySource(t)
+	stubInfraControllerPing(t, 0)
+	prev := writeServedBindingNote
+	writeServedBindingNote = func(string, bornSplitServedNote) error { return errors.New("injected ENOSPC") }
+	var stdout, stderr bytes.Buffer
+	code := doStorageMigrate(context.Background(), request, &stdout, &stderr)
+	writeServedBindingNote = prev
+	if code == 0 || !strings.Contains(stderr.String(), "injected ENOSPC") {
+		t.Fatalf("migrate with a failing note write = %d, stderr %q; want a loud failure", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = doStorageMigrate(context.Background(), request, &stdout, &stderr)
+	if _, present, _ := readBornSplitServedNote(request.CityPath); code != 0 || !present {
+		t.Errorf("the re-run = %d (note present=%v): %s %s", code, present, stdout.String(), stderr.String())
 	}
 }

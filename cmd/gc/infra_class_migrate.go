@@ -1193,11 +1193,11 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		return blocked
 	}
 
+	// The operator command, not the gate: Transient (which only the gate's
+	// drain-fence and memo decisions read) is not set here.
 	state, err := readInfraConvergenceState(target)
 	if err != nil {
-		report := say(infraMigrationUncheckable, err)
-		report.Transient = isTransientStoreFault(err)
-		return report
+		return say(infraMigrationUncheckable, err)
 	}
 
 	// A city with no marker has not proven it ever served from the binding, so
