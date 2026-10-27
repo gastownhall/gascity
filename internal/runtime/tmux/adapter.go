@@ -1156,11 +1156,9 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
-			defer cancel()
 			return nil, &runtime.PartialListError{
 				Err:          fmt.Errorf("tmux server unreachable: %w", err),
-				ServerAbsent: p.tm.serverSocketConfirmsAbsence(ctx),
+				ServerAbsent: p.ServerConfirmedDead(),
 			}
 		}
 		return nil, err
