@@ -839,7 +839,8 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 // move, so it is admitted and recorded) or a city whose infrastructure state is
 // still in the work store, which is the refusal that names the command.
 func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
-	say := func(outcome infraMigrationOutcome, err error) infraMigrationReport {
+	say := func(err error) infraMigrationReport {
+		outcome := infraMigrationUncheckable
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		// The fault rides along so the outcome that could not decide can say what
 		// stopped it, wherever that outcome is later rendered.
@@ -850,10 +851,10 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		return blocked
 	}
 
-	state, err := readInfraConvergenceState(target)
+	state, err := inspectInfraConvergenceState(target)
 	if err != nil {
-		report := say(infraMigrationUncheckable, err)
-		report.Transient = true
+		report := say(err)
+		report.Transient = isTransientStoreFault(err)
 		return report
 	}
 	switch state {
@@ -868,7 +869,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		if backedUp, err := infraPathExists(target.RetainedBackupPath()); err == nil && backedUp {
 			remedy = storageRecopyFromBackupInstruction()
 		}
-		return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s is gone; the binding cannot serve until it is re-copied with:  %s",
+		return say(fmt.Errorf("%s claims convergence but %s is gone; the binding cannot serve until it is re-copied with:  %s",
 			target.MarkerPath(), target.Database, remedy))
 	}
 
@@ -882,27 +883,40 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	// store is the expected state of a converged city, and a missing marker
 	// means the binding is not where it should be.
 	if err := infraClearedNoteHold(cityPath, target); err != nil {
-		return say(infraMigrationUncheckable, err)
+		return say(err)
 	}
+	// A census that could not run says nothing about whether this city
+	// migrated, so its failures are uncheckable — never "has not migrated
+	// onto it" — and transient when they are store I/O.
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
-		report := say(infraMigrationUnconverged, fmt.Errorf("opening the work store to census infrastructure beads: %w", err))
-		report.Transient = true
+		report := say(fmt.Errorf("opening the work store to census infrastructure beads: %w", err))
+		report.Transient = isTransientStoreFault(err)
 		return report
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	rows, err := readInfraSnapshot(source)
 	if err != nil {
-		return say(infraMigrationUnconverged, err)
+		report := say(fmt.Errorf("censusing the work store for infrastructure beads: %w", err))
+		report.Transient = isTransientStoreFault(err)
+		return report
 	}
 	if len(rows) > 0 {
 		return infraMigrationReport{Outcome: infraMigrationUnconverged}
 	}
-	if err := recordInfraGenesis(target); err != nil {
-		return say(infraMigrationUnconverged, err)
+	if err := inspectInfraGenesis(target); err != nil {
+		report := say(err)
+		// The genesis race (another process created the binding at the same
+		// moment) clears on the next attempt, which serves from the winner's.
+		report.Transient = errors.Is(err, errInfraGenesisRace) || isTransientStoreFault(err)
+		return report
 	}
 	return infraMigrationReport{Outcome: infraMigrationGenesis}
 }
+
+// inspectInfraGenesis is the genesis the boot gate's inspection records: a
+// seam, so a test can stand in the race.
+var inspectInfraGenesis = recordInfraGenesis
 
 // recordInfraGenesis admits and records a city that has nothing to migrate: it
 // creates the destination, refuses it if anything else already owns rows there,
@@ -944,9 +958,20 @@ func recordInfraGenesis(target infraBindingTarget) error {
 // opener wraps a driver error and neither side of that boundary carries a
 // sentinel for it. Text matching degrades safely here — an unrecognized race
 // falls through to the plain open failure, which is loud rather than silent.
+// errInfraGenesisRace marks the genesis race in infraGenesisOpenFailure.
+var errInfraGenesisRace = errors.New("genesis race")
+
+// infraGenesisRaceError is the genesis race's error: its message is the
+// explanation, and errors.Is matches errInfraGenesisRace.
+type infraGenesisRaceError struct{ err error }
+
+func (e infraGenesisRaceError) Error() string        { return e.err.Error() }
+func (e infraGenesisRaceError) Unwrap() error        { return e.err }
+func (e infraGenesisRaceError) Is(target error) bool { return target == errInfraGenesisRace }
+
 func infraGenesisOpenFailure(target infraBindingTarget, err error) error {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "already exists") {
-		return fmt.Errorf("another process created binding %q at %s at the same moment as this one, and this boot lost the race: %w. Nothing was lost — the process that won records the empty proven copy this city needs. Start the city again and it will serve from the binding the winner created", target.Binding, target.Database, err)
+		return infraGenesisRaceError{fmt.Errorf("another process created binding %q at %s at the same moment as this one, and this boot lost the race: %w. Nothing was lost — the process that won records the empty proven copy this city needs. Start the city again and it will serve from the binding the winner created", target.Binding, target.Database, err)}
 	}
 	return fmt.Errorf("creating binding %q at %s: %w", target.Binding, target.Database, err)
 }
@@ -1171,7 +1196,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	state, err := readInfraConvergenceState(target)
 	if err != nil {
 		report := say(infraMigrationUncheckable, err)
-		report.Transient = true
+		report.Transient = isTransientStoreFault(err)
 		return report
 	}
 
@@ -1391,6 +1416,10 @@ const (
 // An error is never a state. Neither a marker that could not be read nor a
 // database that could not be stat'ed says the city failed to converge, and the
 // caller treats both as undecided rather than as absence.
+// inspectInfraConvergenceState is the marker-state read the boot gate's
+// inspection makes: a seam, so a test can stand in a read that times out.
+var inspectInfraConvergenceState = readInfraConvergenceState
+
 func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState, error) {
 	marked, err := infraPathExists(target.MarkerPath())
 	if err != nil {
@@ -1497,7 +1526,7 @@ func reportUncheckableConvergence(target infraBindingTarget, logPrefix string, s
 		Outcome: infraMigrationUncheckable,
 		Fault: fmt.Errorf("%s converged (%s records it) and the stranded-write re-check could not run: %w",
 			target.Database, target.MarkerPath(), cause),
-		Transient: true,
+		Transient: isTransientStoreFault(cause),
 	}
 }
 

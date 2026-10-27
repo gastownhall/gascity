@@ -460,6 +460,17 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	recordStorageBindingOutcome(rec, report, "")
+	// The served-binding note, now rather than at the first boot: the binding
+	// holds this city's infrastructure state from this moment. Without it a
+	// city migrated but not yet booted carried no evidence outside its config
+	// that it is split, so a truncated city.toml routed every class to the
+	// work store (split-default R1, re-review probe P3). The note is the one
+	// the boot gate writes (recordServedBinding), so the first boot finds it
+	// already current.
+	if err := recordServedBinding(plan, request.CityPath, request.Cfg.EffectiveStorage(), target); err != nil {
+		fmt.Fprintf(stderr, "%s: recording the served binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// The last step, on a converged binding only: every other binding handle
 	// of this command is closed, and the step opens the binding as the
 	// runtime serves it.
