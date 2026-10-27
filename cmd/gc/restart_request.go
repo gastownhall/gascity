@@ -80,7 +80,9 @@ func (r rowFirstRestart) recordRestart() error {
 // refusedBeforeMail is the request's refusal decided before a self handoff
 // sends its mail, so a refused caller sends none: no token, or a check of the
 // row that refuses this incarnation, the row being closed or it and its live
-// runtime naming another incarnation. A check that cannot decide (no session
+// runtime naming another incarnation, or that refuses the write itself (a v2
+// city's store with no conditional writer, or require meeting a store that
+// cannot fence). A check that cannot decide (no session
 // store or row, a failed read) refuses nothing here: the fenced write after
 // the mail stays the authority and reports why it recorded nothing.
 func (r rowFirstRestart) refusedBeforeMail() error {
@@ -90,7 +92,8 @@ func (r rowFirstRestart) refusedBeforeMail() error {
 	if r.check == nil {
 		return nil
 	}
-	if err := r.check(r.token); errors.Is(err, session.ErrStaleRestartRequest) || errors.Is(err, session.ErrSessionClosed) {
+	if err := r.check(r.token); errors.Is(err, session.ErrStaleRestartRequest) || errors.Is(err, session.ErrSessionClosed) ||
+		errors.Is(err, session.ErrRestartRequestNeedsConditionalWrite) || beads.IsConditionalWritesRequired(err) {
 		return err
 	}
 	return nil
@@ -154,7 +157,7 @@ func sessionRestartChecker(cityPath string, sessStore beads.Store, sp runtime.Pr
 // sessionFencedReset runs op with the caller's token on target's worker
 // handle, which must be bound to a session row. A nil sessStore returns nil.
 func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string,
-	op func(worker.FencedResetHandle, context.Context, string) error,
+	op func(worker.FencedResetHandle, context.Context, string, func() bool) error,
 ) func(token string) error {
 	if sessStore == nil {
 		return nil
@@ -168,6 +171,19 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 		if !ok {
 			return fmt.Errorf("session %q has no session row to record the restart on", target)
 		}
-		return op(fenced, context.Background(), token)
+		return op(fenced, context.Background(), token, restartRecordsOnlyByCAS(cityPath, cfg))
+	}
+}
+
+// restartRecordsOnlyByCAS is the fenced restart write's casOnly for the city
+// at cityPath: a v2 city records only by compare-and-swap and never takes the
+// checked write (the v2 owner's sign-off of 2026-10-27, Q1). The session
+// layer asks it only when a write is due on a store with no conditional
+// writer, so the controller is asked its latched mode (cityRunsV2) only then.
+// A worker site takes the checked write: no released bd fences, and its
+// remote controller is not reachable from the box to ask.
+func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
+	return func() bool {
+		return !onWorkerSite(cityPath) && cityRunsV2(cityPath, cfg)
 	}
 }

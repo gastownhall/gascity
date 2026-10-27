@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -90,7 +91,7 @@ func TestRequestFreshRestartFencedRecords(t *testing.T) {
 	rec := &rowWriteRecorder{Store: store}
 	m := newTestManager(t, rec, runtime.NewFake())
 
-	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); err != nil {
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil); err != nil {
 		t.Fatalf("RequestFreshRestartFenced: %v", err)
 	}
 	got := assertRestartRequestKeys(t, store, created.ID, "true")
@@ -149,7 +150,7 @@ func TestRequestFreshRestartFencedLosesToAMint(t *testing.T) {
 	}
 	m := newTestManager(t, w, runtime.NewFake())
 
-	err := m.RequestFreshRestartFenced(created.ID, restartFenceToken)
+	err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil)
 	if !errors.Is(err, ErrStaleRestartRequest) {
 		t.Fatalf("err = %v, want ErrStaleRestartRequest", err)
 	}
@@ -169,7 +170,7 @@ func TestRequestFreshRestartFencedContended(t *testing.T) {
 	}
 	m := newTestManager(t, w, runtime.NewFake())
 
-	err := m.RequestFreshRestartFenced(created.ID, restartFenceToken)
+	err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil)
 	if !errors.Is(err, ErrRestartRequestContended) {
 		t.Fatalf("err = %v, want ErrRestartRequestContended", err)
 	}
@@ -187,11 +188,11 @@ func TestRequestFreshRestartFencedWithoutAConditionalWriter(t *testing.T) {
 	created := seedRestartFenceSession(t, store, nil)
 	m := newTestManager(t, store, runtime.NewFake())
 
-	if err := m.RequestFreshRestartFenced(created.ID, "tok-dead"); !errors.Is(err, ErrStaleRestartRequest) {
+	if err := m.RequestFreshRestartFenced(created.ID, "tok-dead", nil); !errors.Is(err, ErrStaleRestartRequest) {
 		t.Fatalf("stale caller: err = %v, want ErrStaleRestartRequest", err)
 	}
 	assertRestartRequestKeys(t, store, created.ID, "")
-	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); err != nil {
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil); err != nil {
 		t.Fatalf("current caller: %v", err)
 	}
 	assertRestartRequestKeys(t, store, created.ID, "true")
@@ -206,7 +207,7 @@ func TestRequestFreshRestartFencedRequireRefusesAnIncapableStore(t *testing.T) {
 	mem.DisableConditionalWrites = true
 	m := newTestManager(t, store, runtime.NewFake())
 
-	err := m.RequestFreshRestartFenced(created.ID, restartFenceToken)
+	err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil)
 	if !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("err = %v, want the require refusal", err)
 	}
@@ -233,7 +234,7 @@ func TestRequestFreshRestartFencedRefusesNoToken(t *testing.T) {
 	m := newTestManager(t, store, runtime.NewFake())
 
 	for _, token := range []string{"", "  \t"} {
-		if err := m.RequestFreshRestartFenced(created.ID, token); !errors.Is(err, ErrRestartRequestUnfenced) {
+		if err := m.RequestFreshRestartFenced(created.ID, token, nil); !errors.Is(err, ErrRestartRequestUnfenced) {
 			t.Fatalf("token %q: err = %v, want ErrRestartRequestUnfenced", token, err)
 		}
 	}
@@ -253,7 +254,7 @@ func TestRequestFreshRestartFencedCoalesces(t *testing.T) {
 	})
 	m := newTestManager(t, store, runtime.NewFake())
 
-	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); err != nil {
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil); err != nil {
 		t.Fatalf("RequestFreshRestartFenced: %v", err)
 	}
 	got := assertRestartRequestKeys(t, store, created.ID, "true")
@@ -272,7 +273,7 @@ func TestRequestFreshRestartFencedRefusesAClosedRow(t *testing.T) {
 	}
 	m := newTestManager(t, store, runtime.NewFake())
 
-	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); !errors.Is(err, ErrSessionClosed) {
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("err = %v, want ErrSessionClosed", err)
 	}
 	assertRestartRequestKeys(t, store, created.ID, "")
@@ -331,7 +332,7 @@ func TestRequestFreshRestartFencedAcceptsTheLiveRuntimesToken(t *testing.T) {
 			rec := &rowWriteRecorder{Store: store}
 			m := newTestManager(t, rec, sp)
 
-			err := m.RequestFreshRestartFenced(created.ID, restartFenceToken)
+			err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil)
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("RequestFreshRestartFenced: %v", err)
@@ -375,7 +376,7 @@ func TestRequestFreshRestartFencedRuntimeProofLosesToARestart(t *testing.T) {
 	}
 	m := newTestManager(t, w, sp)
 
-	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); !errors.Is(err, ErrStaleRestartRequest) {
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, nil); !errors.Is(err, ErrStaleRestartRequest) {
 		t.Fatalf("err = %v, want ErrStaleRestartRequest", err)
 	}
 	assertRestartRequestKeys(t, store, created.ID, "")
@@ -426,7 +427,7 @@ func TestCheckFreshRestartFenced(t *testing.T) {
 			}
 			m := newTestManager(t, store, sp)
 
-			err = m.CheckFreshRestartFenced(created.ID, tc.token)
+			err = m.CheckFreshRestartFenced(created.ID, tc.token, nil)
 			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
@@ -438,6 +439,183 @@ func TestCheckFreshRestartFenced(t *testing.T) {
 				after.Metadata["continuation_reset_pending"] != before.Metadata["continuation_reset_pending"] {
 				t.Fatalf("row moved from revision %d %v to %d %v; the check must write nothing", before.Revision, before.Metadata, after.Revision, after.Metadata)
 			}
+		})
+	}
+}
+
+// casOnlyProbe is a casOnly predicate that answers want and counts its asks.
+type casOnlyProbe struct {
+	want bool
+	asks int
+}
+
+func (p *casOnlyProbe) ask() bool {
+	p.asks++
+	return p.want
+}
+
+// TestRequestFreshRestartFencedCASOnlyRefusesTheCheckedWrite pins the v2
+// owner's sign-off (2026-10-27, Q1): a city that must record by
+// compare-and-swap (a v2 city) never takes the checked write. When its store
+// resolves no conditional writer the request and its check refuse with
+// ErrRestartRequestNeedsConditionalWrite and nothing is written; under
+// require an incapable store refuses with the require error; a capable store
+// records by CAS without asking; and a refusal the fence decides first (a
+// stale caller, a pending request) is returned without asking either, so the
+// predicate (the CLI's controller probe) runs only when a write is due on a
+// store without a conditional writer.
+func TestRequestFreshRestartFencedCASOnlyRefusesTheCheckedWrite(t *testing.T) {
+	cases := []struct {
+		name      string
+		store     func(t *testing.T, mem *beads.MemStore) beads.Store
+		incapable bool // the store loses its conditional writes after the seed
+		extra     map[string]string
+		token     string
+		casOnly   bool
+		wantErr   error
+		require   bool // wantErr is the require refusal
+		wantKeys  string
+		wantAsks  int
+	}{
+		{
+			name:  "no conditional writer, CAS required",
+			store: func(_ *testing.T, mem *beads.MemStore) beads.Store { return mem },
+			token: restartFenceToken, casOnly: true,
+			wantErr: ErrRestartRequestNeedsConditionalWrite, wantAsks: 1,
+		},
+		{
+			name:  "conditional writes off, CAS required",
+			store: func(t *testing.T, mem *beads.MemStore) beads.Store { return stampedMemStore(t, gate.Off, mem) },
+			token: restartFenceToken, casOnly: true,
+			wantErr: ErrRestartRequestNeedsConditionalWrite, wantAsks: 1,
+		},
+		{
+			name:      "auto over an incapable store, CAS required",
+			store:     func(t *testing.T, mem *beads.MemStore) beads.Store { return stampedMemStore(t, gate.Auto, mem) },
+			incapable: true,
+			token:     restartFenceToken, casOnly: true,
+			wantErr: ErrRestartRequestNeedsConditionalWrite, wantAsks: 1,
+		},
+		{
+			name:      "require over an incapable store",
+			store:     func(t *testing.T, mem *beads.MemStore) beads.Store { return stampedMemStore(t, gate.Require, mem) },
+			incapable: true,
+			token:     restartFenceToken, casOnly: true,
+			require: true, wantAsks: 0,
+		},
+		{
+			name:  "capable store, CAS required",
+			store: func(t *testing.T, mem *beads.MemStore) beads.Store { return stampedMemStore(t, gate.Require, mem) },
+			token: restartFenceToken, casOnly: true,
+			wantKeys: "true", wantAsks: 0,
+		},
+		{
+			name:  "no conditional writer, CAS not required (legacy)",
+			store: func(_ *testing.T, mem *beads.MemStore) beads.Store { return mem },
+			token: restartFenceToken, casOnly: false,
+			wantKeys: "true", wantAsks: 1,
+		},
+		{
+			name:  "no conditional writer, stale caller",
+			store: func(_ *testing.T, mem *beads.MemStore) beads.Store { return mem },
+			token: "tok-dead", casOnly: true,
+			wantErr: ErrStaleRestartRequest, wantAsks: 0,
+		},
+		{
+			name:  "no conditional writer, request already pending",
+			store: func(_ *testing.T, mem *beads.MemStore) beads.Store { return mem },
+			extra: map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"},
+			token: restartFenceToken, casOnly: true,
+			wantKeys: "true", wantAsks: 0,
+		},
+	}
+	for _, op := range []struct {
+		name string
+		run  func(m *Manager, id, token string, casOnly func() bool) error
+	}{
+		{"request", (*Manager).RequestFreshRestartFenced},
+		{"check", (*Manager).CheckFreshRestartFenced},
+	} {
+		for _, tc := range cases {
+			t.Run(op.name+"/"+tc.name, func(t *testing.T) {
+				mem := beads.NewMemStore()
+				store := tc.store(t, mem)
+				created := seedRestartFenceSession(t, store, tc.extra)
+				mem.DisableConditionalWrites = tc.incapable
+				probe := &casOnlyProbe{want: tc.casOnly}
+				err := op.run(newTestManager(t, store, runtime.NewFake()), created.ID, tc.token, probe.ask)
+				switch {
+				case tc.require:
+					if !beads.IsConditionalWritesRequired(err) {
+						t.Fatalf("err = %v, want the require refusal", err)
+					}
+				case tc.wantErr != nil:
+					if !errors.Is(err, tc.wantErr) {
+						t.Fatalf("err = %v, want %v", err, tc.wantErr)
+					}
+				case err != nil:
+					t.Fatalf("err = %v, want nil", err)
+				}
+				wantKeys := tc.wantKeys
+				if op.name == "check" && len(tc.extra) == 0 {
+					wantKeys = "" // the check writes nothing
+				}
+				assertRestartRequestKeys(t, mem, created.ID, wantKeys)
+				if probe.asks != tc.wantAsks {
+					t.Fatalf("casOnly asked %d times, want %d", probe.asks, tc.wantAsks)
+				}
+			})
+		}
+	}
+}
+
+// TestRequestFreshRestartFencedNeverLeaksATokenInItsRefusals mirrors the
+// drain-ack's refusal pin (TestDrainAckRowRefusesAfterPreWakeBetweenReadAndCAS):
+// no refusal of the fenced request or its check, the runtime-token proof's
+// among them, carries the caller's token, the row's, or the runtime's.
+func TestRequestFreshRestartFencedNeverLeaksATokenInItsRefusals(t *testing.T) {
+	const sessName = "s-fence"
+	tokens := []string{restartFenceToken, restartFenceOtherToken, "tok-third"}
+	cases := []struct {
+		name         string
+		runtimeToken string
+		runtimeID    string
+		casOnly      bool
+		mem          bool // a store with no conditional writer
+	}{
+		{name: "row and runtime name other tokens", runtimeToken: "tok-third"},
+		{name: "runtime carries the caller's token but names another row", runtimeToken: restartFenceToken, runtimeID: "gc-another-row"},
+		{name: "runtime proof on a store that cannot CAS", runtimeToken: restartFenceToken, casOnly: true, mem: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			store := beads.Store(mem)
+			if !tc.mem {
+				store = stampedMemStore(t, gate.Auto, mem)
+			}
+			created := seedRestartFenceSession(t, store, map[string]string{"session_name": sessName, "instance_token": restartFenceOtherToken})
+			sp := runtime.NewFake()
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, tc.runtimeToken)
+			if tc.runtimeID != "" {
+				_ = sp.SetMeta(sessName, "GC_SESSION_ID", tc.runtimeID)
+			}
+			m := newTestManager(t, store, sp)
+			casOnly := func() bool { return tc.casOnly }
+			for _, err := range []error{
+				m.RequestFreshRestartFenced(created.ID, restartFenceToken, casOnly),
+				m.CheckFreshRestartFenced(created.ID, restartFenceToken, casOnly),
+			} {
+				if err == nil {
+					t.Fatal("err = nil, want a refusal")
+				}
+				for _, tok := range tokens {
+					if strings.Contains(err.Error(), tok) {
+						t.Fatalf("refusal %q leaks the token %q", err, tok)
+					}
+				}
+			}
+			assertRestartRequestKeys(t, mem, created.ID, "")
 		})
 	}
 }

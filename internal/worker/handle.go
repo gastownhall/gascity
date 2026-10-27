@@ -69,11 +69,13 @@ type FencedKillHandle interface {
 // runtime handle has no row to record the request on.
 type FencedResetHandle interface {
 	// ResetFenced records the restart request when the row's instance token
-	// is instanceToken (session.Manager.RequestFreshRestartFenced).
-	ResetFenced(ctx context.Context, instanceToken string) error
+	// is instanceToken (session.Manager.RequestFreshRestartFenced). casOnly
+	// reports whether the city records only by compare-and-swap (a v2 city);
+	// nil allows the checked write.
+	ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
 	// CheckResetFenced is ResetFenced's decision taken now, with nothing
 	// written (session.Manager.CheckFreshRestartFenced).
-	CheckResetFenced(ctx context.Context, instanceToken string) error
+	CheckResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
 }
 
 // MessagingHandle exposes live input delivery operations.

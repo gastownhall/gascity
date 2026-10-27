@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -19,6 +20,11 @@ var ErrRestartRequestUnfenced = errors.New("the restart request names no incarna
 // attempt to record the restart; nothing was recorded.
 var ErrRestartRequestContended = errors.New("the session row changed on every attempt to record the restart")
 
+// ErrRestartRequestNeedsConditionalWrite reports that the city records a
+// restart request only by compare-and-swap (a v2 city) and its session store
+// resolves no conditional writer; nothing was recorded.
+var ErrRestartRequestNeedsConditionalWrite = errors.New("this city records a restart request only by compare-and-swap, and its session store resolves no conditional writer")
+
 // restartRequestAttempts bounds the re-read and re-decide loop of a fenced
 // restart request (the hook's started write uses the same bound).
 const restartRequestAttempts = 5
@@ -32,9 +38,13 @@ const restartRequestAttempts = 5
 //
 // It decides on a fresh read and writes by compare-and-swap at that read's
 // revision wherever the store resolves a conditional writer (every v2 city),
-// re-reading and re-deciding on a lost swap. Without one (a legacy city) the
-// patch is written right after the deciding read, as UpdateMetadataFenced
-// does; a store that must fence and cannot refuses. A row that already
+// re-reading and re-deciding on a lost swap. Without one the patch is written
+// right after the deciding read, as UpdateMetadataFenced does, only when
+// casOnly allows it: casOnly reports whether the city records only by
+// compare-and-swap (a v2 city), and is asked only when a patch is due and the
+// store resolves no conditional writer, so a v2 city never takes the checked
+// write (ErrRestartRequestNeedsConditionalWrite); a nil casOnly allows it (a
+// legacy city). A store that must fence and cannot refuses. A row that already
 // carries both keys is not written again. The caller's generation is not
 // compared: every start mints a new token, and a rekey moves only the token.
 //
@@ -48,7 +58,7 @@ const restartRequestAttempts = 5
 // runtime metadata, so only the row's token proves the incarnation there.
 //
 // instanceToken is a capability: it is never logged or printed.
-func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
+func (m *Manager) RequestFreshRestartFenced(id, instanceToken string, casOnly func() bool) error {
 	instanceToken = strings.TrimSpace(instanceToken)
 	if instanceToken == "" {
 		return ErrRestartRequestUnfenced
@@ -56,8 +66,15 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
 	return withSessionMutationLock(id, func() error {
 		var refusal error
 		due := false
+		writeRefusal := m.restartWriteRefusal(casOnly)
 		written, err := m.PersistedStore().UpdateMetadataFenced(id, restartRequestAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
 			patch, decideErr := decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
+			if decideErr == nil && len(patch) > 0 {
+				decideErr = writeRefusal()
+			}
+			if decideErr != nil {
+				patch = nil
+			}
 			refusal, due = decideErr, len(patch) > 0
 			return patch
 		})
@@ -75,14 +92,15 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
 
 // CheckFreshRestartFenced is RequestFreshRestartFenced's decision on a fresh
 // read of the row, with nothing written: nil when the request would be
-// recorded or is already pending, else the refusal the request would return.
+// recorded or is already pending, else the refusal the request would return,
+// the checked write's refusal under casOnly among them.
 // A caller that acts on the session before it records the request (a self
 // handoff's mail) decides with it first, so a refused incarnation acts on
 // nothing. The fenced write stays the authority: the row can move between
 // this read and that write.
 //
 // instanceToken is a capability: it is never logged or printed.
-func (m *Manager) CheckFreshRestartFenced(id, instanceToken string) error {
+func (m *Manager) CheckFreshRestartFenced(id, instanceToken string, casOnly func() bool) error {
 	instanceToken = strings.TrimSpace(instanceToken)
 	if instanceToken == "" {
 		return ErrRestartRequestUnfenced
@@ -91,8 +109,38 @@ func (m *Manager) CheckFreshRestartFenced(id, instanceToken string) error {
 	if err != nil {
 		return err
 	}
-	_, err = decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
-	return err
+	patch, err := decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
+	if err != nil || len(patch) == 0 {
+		return err
+	}
+	return m.restartWriteRefusal(casOnly)()
+}
+
+// restartWriteRefusal returns the refusal of a due restart-request write that
+// the decision on the row allowed: the require refusal of a store that must
+// fence and cannot, or ErrRestartRequestNeedsConditionalWrite when the store
+// resolves no conditional writer and casOnly reports that the city records
+// only by compare-and-swap. It resolves the writer and asks casOnly at most
+// once, on its first call, so a re-decide after a lost swap asks nothing new.
+func (m *Manager) restartWriteRefusal(casOnly func() bool) func() error {
+	var (
+		asked   bool
+		refusal error
+	)
+	return func() error {
+		if asked {
+			return refusal
+		}
+		asked = true
+		writer, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: m.store})
+		switch {
+		case err != nil:
+			refusal = err
+		case writer == nil && casOnly != nil && casOnly():
+			refusal = ErrRestartRequestNeedsConditionalWrite
+		}
+		return refusal
+	}
 }
 
 // decideRestartRequest is the fence's decision on one fresh read of the row:

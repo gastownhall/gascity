@@ -5,14 +5,20 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/guard"
 	"github.com/gastownhall/gascity/internal/session"
@@ -45,7 +51,7 @@ func testRowFirstRestart(verb, sessionName string, hint drainOps, stderr io.Writ
 func fencedRecorder(t *testing.T, store beads.Store, sp runtime.Provider, id string) func(string) error {
 	t.Helper()
 	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
-	return func(token string) error { return mgr.RequestFreshRestartFenced(id, token) }
+	return func(token string) error { return mgr.RequestFreshRestartFenced(id, token, nil) }
 }
 
 // restartVerbs are the two in-session restart commands, run end to end
@@ -336,7 +342,14 @@ func TestRowFirstRestartRefusesWithoutToken(t *testing.T) {
 // reaches the controller's cache through the ledger event.
 func simRowFirstRestart(t *testing.T, s *sim, token string, hint drainOps) rowFirstRestart {
 	t.Helper()
-	write := fencedRecorder(t, s.legs[0].backing, runtime.NewFake(), "gc-1")
+	return simRowFirstRestartVia(t, s, s.legs[0].backing, runtime.NewFake(), token, hint)
+}
+
+// simRowFirstRestartVia is simRowFirstRestart with the fenced write made
+// over store and the runtime proof read from sp.
+func simRowFirstRestartVia(t *testing.T, s *sim, store beads.Store, sp runtime.Provider, token string, hint drainOps) rowFirstRestart {
+	t.Helper()
+	write := fencedRecorder(t, store, sp, "gc-1")
 	restart := testRowFirstRestart("gc runtime request-restart", "s-gc-1", hint, nil)
 	restart.token = token
 	restart.record = func(token string) error {
@@ -557,4 +570,340 @@ func lastStartEnv(t *testing.T, sp *runtime.Fake, name string) map[string]string
 	}
 	t.Fatalf("no Start of %q", name)
 	return nil
+}
+
+// TestRowFirstRestartV2CityNeverTakesTheCheckedWrite pins the v2 owner's
+// sign-off (2026-10-27, Q1): a v2 city never records a restart by the checked
+// write. With the session store resolving no conditional writer (here the
+// agent's environment turns conditional writes off), a city whose controller
+// latched v2 refuses both verbs: exit 1, the row unwritten, no runtime hint,
+// no handoff mail, the controller not dialed. The same store under a legacy
+// controller still records by the checked write (condition 3).
+func TestRowFirstRestartV2CityNeverTakesTheCheckedWrite(t *testing.T) {
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	for _, v := range restartVerbs {
+		for _, mode := range []reconcilerMode{reconcilerV2, reconcilerLegacy} {
+			t.Run(v.name+"/"+mode.String(), func(t *testing.T) {
+				fixture := newExplicitRestartFixture(t)
+				t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off")
+				asked := 0
+				controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) {
+					asked++
+					return mode, true
+				}
+				accepted := startFakeControllerSocket(t, fixture.cityPath, "ok\n")
+				dials := countSocketDials(t)
+				var stdout, stderr bytes.Buffer
+				code := v.run(&stdout, &stderr)
+				if asked == 0 {
+					t.Fatal("the reconciler mode was never asked; a store without a conditional writer must ask it")
+				}
+				if mode == reconcilerLegacy {
+					if code != 0 {
+						t.Fatalf("legacy exit = %d, want 0 (the checked write); stderr=%q", code, stderr.String())
+					}
+					got, err := fixture.store.Get(fixture.sessionID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Metadata["restart_requested"] != "true" || got.Metadata["continuation_reset_pending"] != "true" {
+						t.Fatalf("legacy row = %v, want the restart recorded", got.Metadata)
+					}
+					return
+				}
+				if code != 1 {
+					t.Fatalf("v2 exit = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				assertRestartNotRecorded(t, fixture)
+				assertNoControllerReached(t, dials, accepted)
+				if msgs := listOpenMessagesBothTiers(t, fixture.store); len(msgs) != 0 {
+					t.Fatalf("open messages = %d, want no handoff mail when nothing is recorded", len(msgs))
+				}
+				if want := v.verb + ": restart not recorded: " + session.ErrRestartRequestNeedsConditionalWrite.Error() + "\n"; stderr.String() != want {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			})
+		}
+	}
+}
+
+// TestRowFirstRestartRequireRefusesAnIncapableStore pins the other half of
+// the sign-off's Q1 condition: under require, a session store that cannot
+// fence refuses the fenced write, and the command exits 1 with no runtime
+// hint, no event and no poke.
+func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
+	store := beads.NewMemStore()
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"session_name": "worker", "state": "awake", "instance_token": testRestartToken,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.DisableConditionalWrites = true
+	hint := newFakeDrainOps()
+	var stderr bytes.Buffer
+	restart := testRowFirstRestart("gc runtime request-restart", "worker", hint, &stderr)
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	restart.record = func(token string) error {
+		return mgr.RequestFreshRestartFenced(b.ID, token, func() bool { return true })
+	}
+	poked := false
+	restart.poke = func(string, reconcilekey.Key) error { poked = true; return nil }
+	rec := events.NewFake()
+	if code := doRuntimeRequestRestart(restart, rec, io.Discard); code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if hint.restartRequested["worker"] || poked || len(rec.Events) != 0 {
+		t.Fatalf("hint %t, poked %t, events %v; want nothing past the refused write", hint.restartRequested["worker"], poked, rec.Events)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["restart_requested"] != "" || got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row = %v, want nothing recorded", got.Metadata)
+	}
+}
+
+// simPaneIdentity reads a sim runtime's identity environment through
+// GetMeta, as tmux's show-environment reads a pane's: the runtime-token
+// proof's view of the live runtime.
+type simPaneIdentity struct{ *simProvider }
+
+func (p simPaneIdentity) GetMeta(name, key string) (string, error) {
+	env, err := p.GetAllEnvironment(name)
+	if err != nil {
+		return "", err
+	}
+	if v, ok := env[key]; ok {
+		return v, nil
+	}
+	return p.simProvider.GetMeta(name, key)
+}
+
+// casHookStore runs before once, at the first UpdateIfMatch, and then makes
+// it: a write landing between the fenced request's deciding read and its CAS.
+type casHookStore struct {
+	beads.Store
+	before func()
+	fired  bool
+}
+
+func (w *casHookStore) ConditionalWritesModeSource() beads.Store { return w.Store }
+
+func (w *casHookStore) cw() beads.ConditionalWriter {
+	cw, _ := beads.ConditionalWriterFor(w.Store)
+	return cw
+}
+
+func (w *casHookStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if !w.fired {
+		w.fired = true
+		w.before()
+	}
+	return w.cw().UpdateIfMatch(id, rev, opts)
+}
+
+func (w *casHookStore) CloseIfMatch(id string, rev int64) error { return w.cw().CloseIfMatch(id, rev) }
+
+func (w *casHookStore) DeleteIfMatch(id string, rev int64) error {
+	return w.cw().DeleteIfMatch(id, rev)
+}
+
+func (w *casHookStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	return w.cw().CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// TestRowFirstRestartV2StaleSelfRuntimeProof pins the v2 owner's sign-off
+// (2026-10-27) on the runtime-token proof: on a v2 StaleSelf row (a legacy
+// warm reuse minted generation 2 and tok-new on the row while the pane runs
+// generation 1 under tok-1), a request from the pane, proven by the live
+// runtime's token, is recorded, and it produces exactly one restart into a
+// new incarnation, fenced by A13 to the row's incarnation, however A3's rekey
+// of the row to tok-1 interleaves with it:
+//   - "request, then the parked rekey": A3's rekey is admitted before the
+//     request and lands after it;
+//   - "rekey, then request": the rekey lands first and the row's own token
+//     proves the caller;
+//   - "rekey inside the request": the rekey's write (A3's patch, through the
+//     controller's cache) lands between the request's deciding read and its
+//     CAS, as another process's would; the swap loses, and the re-decide
+//     records on the row token. The admitted rekey is released afterwards and
+//     finds nothing to do.
+//
+// In every order the pane is stopped once, and later passes stop nothing.
+func TestRowFirstRestartV2StaleSelfRuntimeProof(t *testing.T) {
+	for _, order := range []string{"request, then the parked rekey", "rekey, then request", "rekey inside the request"} {
+		t.Run(order, func(t *testing.T) {
+			s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "started_config_hash", "h-1", "last_woke_at", rowAt(-time.Hour)), gc1Work())
+			// The warm-reuse residue: the row names (2, tok-new), the live
+			// pane still runs (1, tok-1).
+			s.legs[0].cache.ApplyEvent("bead.updated", s.operator("gc-1", "generation", "2", "instance_token", "tok-new"))
+			proof := simPaneIdentity{s.sp}
+			hint := newDrainOps(s.sp)
+			admitRekey := func() *simEffect {
+				t.Helper()
+				s.inventory()
+				s.pass()
+				for _, e := range s.parked {
+					if e.it.Kind == intentRekey && e.it.Key.ID == "gc-1" {
+						if got := e.it.Patch["instance_token"]; got != "tok-1" {
+							t.Fatalf("A3's rekey patch names %q, want the pane's tok-1", got)
+						}
+						return e
+					}
+				}
+				t.Fatalf("no rekey admitted for the StaleSelf row; parked %d", len(s.parked))
+				return nil
+			}
+			releaseAll := func() {
+				for len(s.parked) > 0 {
+					s.release(0)
+				}
+				s.audit("v2")
+			}
+
+			var restart rowFirstRestart
+			switch order {
+			case "request, then the parked rekey":
+				admitRekey()
+				restart = simRowFirstRestartVia(t, s, s.legs[0].backing, proof, "tok-1", hint)
+				if code := doRuntimeRequestRestart(restart, events.Discard, io.Discard); code != 0 {
+					t.Fatalf("request-restart exit = %d, want 0 (the runtime proves the caller)", code)
+				}
+				releaseAll()
+			case "rekey, then request":
+				s.settle()
+				if got := s.gc1()["instance_token"]; got != "tok-1" {
+					t.Fatalf("row token after A3 = %q, want tok-1", got)
+				}
+				restart = simRowFirstRestartVia(t, s, s.legs[0].backing, proof, "tok-1", hint)
+				if code := doRuntimeRequestRestart(restart, events.Discard, io.Discard); code != 0 {
+					t.Fatalf("request-restart exit = %d, want 0", code)
+				}
+			case "rekey inside the request":
+				rekey := admitRekey()
+				hooked := &casHookStore{Store: s.legs[0].backing}
+				hooked.before = func() {
+					b, err := s.legs[0].backing.Get("gc-1")
+					if err != nil {
+						t.Fatal(err)
+					}
+					cw, ok := beads.ConditionalWriterFor(s.legs[0].cache)
+					if !ok {
+						t.Fatal("the controller's cache has no conditional writer")
+					}
+					if err := cw.UpdateIfMatch("gc-1", b.Revision, beads.UpdateOpts{Metadata: map[string]string(rekey.it.Patch)}); err != nil {
+						t.Fatalf("A3's rekey write: %v", err)
+					}
+					s.audit("v2")
+				}
+				restart = simRowFirstRestartVia(t, s, hooked, proof, "tok-1", hint)
+				if code := doRuntimeRequestRestart(restart, events.Discard, io.Discard); code != 0 {
+					t.Fatalf("request-restart exit = %d, want 0 (the re-decide reads the rekeyed row)", code)
+				}
+				if !hooked.fired {
+					t.Fatal("the rekey never landed inside the request")
+				}
+				releaseAll()
+			}
+			if m := s.gc1(); m["restart_requested"] != "true" && len(s.sp.kills) == 0 {
+				t.Fatalf("row %v: the request was not recorded", m)
+			}
+
+			for range 4 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.settle()
+			b, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.sp.mu.Lock()
+			starts, kills := len(s.sp.starts), len(s.sp.kills)
+			s.sp.mu.Unlock()
+			m := b.Metadata
+			if starts != 1 || kills != 1 || m["instance_token"] == "tok-1" || m["instance_token"] == "tok-new" || !s.livePane(b) || m["restart_requested"] != "" {
+				t.Fatalf("starts %d, kills %d, row %v, live %t; want exactly one restart into a new incarnation", starts, kills, m, s.livePane(b))
+			}
+
+			// Later passes stop nothing more.
+			for range 3 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.sp.mu.Lock()
+			kills = len(s.sp.kills)
+			s.sp.mu.Unlock()
+			if kills != 1 {
+				t.Fatalf("kills = %d after the restart, want 1: a second stop", kills)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// TestRowFirstRestartRuntimeProofNeverLogsAToken pins the capability rule on
+// the runtime-token proof path (the v2 owner's sign-off of 2026-10-27), as
+// the drain-ack's refusal pin does for its self form: when the row names
+// another token than the caller's and only the live runtime can prove the
+// caller, neither token reaches stdout, stderr, the process log or the
+// city's event log, whether the runtime proves the caller (recorded) or not
+// (refused).
+func TestRowFirstRestartRuntimeProofNeverLogsAToken(t *testing.T) {
+	const rowToken = "tok-row-warm-reuse-mint"
+	for _, v := range restartVerbs {
+		for _, proven := range []bool{true, false} {
+			name := v.name + "/refused"
+			if proven {
+				name = v.name + "/proven"
+			}
+			t.Run(name, func(t *testing.T) {
+				fixture := newExplicitRestartFixture(t)
+				if err := fixture.store.SetMetadata(fixture.sessionID, "instance_token", rowToken); err != nil {
+					t.Fatal(err)
+				}
+				paneToken := explicitRestartToken
+				if !proven {
+					paneToken = "tok-pane-successor"
+				}
+				if err := fixture.provider.SetMeta(fixture.sessionKey, runtime.InstanceTokenEnv, paneToken); err != nil {
+					t.Fatal(err)
+				}
+				var logged bytes.Buffer
+				prevOut, prevFlags := log.Writer(), log.Flags()
+				log.SetOutput(&logged)
+				prevSlog := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+				t.Cleanup(func() {
+					log.SetOutput(prevOut)
+					log.SetFlags(prevFlags)
+					slog.SetDefault(prevSlog)
+				})
+				startFakeControllerSocket(t, fixture.cityPath, "ok\n")
+
+				var stdout, stderr bytes.Buffer
+				code := v.run(&stdout, &stderr)
+				if want := map[bool]int{true: 0, false: 1}[proven]; code != want {
+					t.Fatalf("exit = %d, want %d; stderr=%q", code, want, stderr.String())
+				}
+				eventLog, err := os.ReadFile(filepath.Join(fixture.cityPath, citylayout.RuntimeRoot, "events.jsonl"))
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				for where, out := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String(), "log": logged.String(), "event log": string(eventLog)} {
+					for _, tok := range []string{explicitRestartToken, rowToken, paneToken} {
+						if strings.Contains(out, tok) {
+							t.Fatalf("%s carries the token %q: %q", where, tok, out)
+						}
+					}
+				}
+			})
+		}
+	}
 }

@@ -3138,7 +3138,7 @@ func TestSessionHandleResetFencedRecordsForTheCurrentIncarnation(t *testing.T) {
 	}
 	var fenced FencedResetHandle = handle
 
-	if err := fenced.ResetFenced(context.Background(), "tok-dead"); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
+	if err := fenced.ResetFenced(context.Background(), "tok-dead", nil); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
 		t.Fatalf("ResetFenced(stale) err = %v, want ErrStaleRestartRequest", err)
 	}
 	bead, err := store.Get(info.ID)
@@ -3148,7 +3148,7 @@ func TestSessionHandleResetFencedRecordsForTheCurrentIncarnation(t *testing.T) {
 	if bead.Metadata["restart_requested"] != "" {
 		t.Fatalf("stale request wrote restart_requested = %q", bead.Metadata["restart_requested"])
 	}
-	if err := fenced.ResetFenced(context.Background(), "tok-live"); err != nil {
+	if err := fenced.ResetFenced(context.Background(), "tok-live", nil); err != nil {
 		t.Fatalf("ResetFenced: %v", err)
 	}
 	bead, err = store.Get(info.ID)
@@ -3185,10 +3185,10 @@ func TestSessionHandleCheckResetFencedWritesNothing(t *testing.T) {
 	}
 	var fenced FencedResetHandle = handle
 
-	if err := fenced.CheckResetFenced(context.Background(), "tok-dead"); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
+	if err := fenced.CheckResetFenced(context.Background(), "tok-dead", nil); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
 		t.Fatalf("CheckResetFenced(stale) err = %v, want ErrStaleRestartRequest", err)
 	}
-	if err := fenced.CheckResetFenced(context.Background(), "tok-live"); err != nil {
+	if err := fenced.CheckResetFenced(context.Background(), "tok-live", nil); err != nil {
 		t.Fatalf("CheckResetFenced: %v", err)
 	}
 	after, err := store.Get(info.ID)
@@ -3211,10 +3211,10 @@ func TestSessionHandleResetFencedRequiresExistingSession(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	})
-	if err := handle.ResetFenced(context.Background(), "tok"); !errors.Is(err, ErrOperationUnsupported) {
+	if err := handle.ResetFenced(context.Background(), "tok", nil); !errors.Is(err, ErrOperationUnsupported) {
 		t.Fatalf("ResetFenced err = %v, want %v", err, ErrOperationUnsupported)
 	}
-	if err := handle.CheckResetFenced(context.Background(), "tok"); !errors.Is(err, ErrOperationUnsupported) {
+	if err := handle.CheckResetFenced(context.Background(), "tok", nil); !errors.Is(err, ErrOperationUnsupported) {
 		t.Fatalf("CheckResetFenced err = %v, want %v", err, ErrOperationUnsupported)
 	}
 }
