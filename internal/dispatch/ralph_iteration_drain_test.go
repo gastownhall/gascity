@@ -200,6 +200,22 @@ func requireDrainPending(t *testing.T, ledger []ledgerBead, sibling ledgerBead) 
 	}
 }
 
+// TestCompiledRalphIterationDrainBlocksOnClaimedSibling pins AC-2: the
+// pending control waits on the claimed sibling and leaves it alone.
+func TestCompiledRalphIterationDrainBlocksOnClaimedSibling(t *testing.T) {
+	t.Parallel()
+	for _, st := range []ralphDrainStore{memDrainStore(), sqliteDrainStore()} {
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+			beta := fx.claim(t, "loop.iteration.1.beta")
+			fx.finish(t, "loop.iteration.1.alpha", workerFailure(beadmeta.FailureClassTransient, "rate_limited"))
+			fx.serve(t)
+			requireDrainPending(t, fx.ledger(t), beta)
+		})
+	}
+}
+
 // requireOneIteration asserts exactly one set of the loop's iteration n: the
 // body and one bead per child.
 func requireOneIteration(t *testing.T, ledger []ledgerBead, n int) {
