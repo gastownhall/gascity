@@ -47,30 +47,29 @@ func scopeDoltPortMirror(scopeRoot string) (string, error) {
 // so tmux/subprocess providers unset any stale inherited value. BEADS_DOLT_PORT
 // is cleared alongside BEADS_DOLT_SERVER_PORT because bd still honors the
 // legacy alias when the primary key is empty.
-func withholdMirroredManagedDoltPort(env map[string]string, cityPath, scopeRoot string) bool {
+func withholdMirroredManagedDoltPort(env map[string]string, cityPath, scopeRoot string) {
 	if env == nil {
-		return false
+		return
 	}
 	port := strings.TrimSpace(env["GC_DOLT_PORT"])
 	if port == "" {
-		return false
+		return
 	}
 	if strings.TrimSpace(env["GC_DOLT_HOST"]) != "" || strings.TrimSpace(env["BEADS_DOLT_SERVER_SOCKET"]) != "" {
-		return false
+		return
 	}
 	if scopeRoot == "" {
 		scopeRoot = cityPath
 	}
 	if !bdScopeDoltIsGcManaged(cityPath, scopeRoot) {
-		return false
+		return
 	}
 	mirror, err := scopeDoltPortMirror(scopeRoot)
 	if err != nil || mirror != port {
 		log.Printf("gc: session env: keeping projected Dolt port %s for %s: .beads/dolt-server.port mirror %q cannot stand in for it (read error: %v)", port, scopeRoot, mirror, err)
-		return false
+		return
 	}
 	env["GC_DOLT_PORT"] = ""
 	env["BEADS_DOLT_SERVER_PORT"] = ""
 	env["BEADS_DOLT_PORT"] = ""
-	return true
 }

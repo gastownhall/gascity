@@ -888,6 +888,12 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
+	} else {
+		// Same withhold as the city branch, judged against the rig's own
+		// .beads/dolt-server.port mirror: an inherited-city rig session's
+		// raw bd should follow the mirror gc reconciles, not the port dolt
+		// ran on when the session was spawned (gastownhall/gascity#1656).
+		withholdMirroredManagedDoltPort(env, cityPath, rigRoot)
 	}
 	return env, nil
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -65,6 +67,62 @@ func TestSessionBackendEnvWithholdsMirroredCityManagedDoltPort(t *testing.T) {
 	}
 
 	assertWithheldDoltPort(t, env, livePort)
+	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want 0", got)
+	}
+}
+
+// TestSessionBackendEnvWithholdsMirroredInheritedRigDoltPort pins AC-2 of
+// gastownhall/gascity#1656: a rig session under the canonical inherited-city
+// contract must have the managed port withheld when the rig's own
+// .beads/dolt-server.port mirror — the one syncConfiguredDoltPortFiles
+// reconciles to the live port — already carries it, for the same reason as
+// the city scope: bd ranks an env port above the mirror, so projecting it
+// freezes the spawn-time port into the rig session across a managed Dolt
+// restart onto a new port.
+func TestSessionBackendEnvWithholdsMirroredInheritedRigDoltPort(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rigRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigRoot, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The rig contract gc publishes for an inherited-city rig — endpoint
+	// origin inherited_city, no pinned port — with the port mirror carrying
+	// the live managed port, as syncConfiguredDoltPortFiles reconciles it.
+	livePort := strconv.Itoa(writeReachableManagedDoltState(t, cityPath))
+	if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "dolt-server.port"), []byte(livePort), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stale spawn-time values, as a session environment captured before a
+	// Dolt restart would carry them.
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+
+	env, err := sessionBackendEnvWithError(cityPath, rigRoot, []config.Rig{{Name: "repo", Path: rigRoot}})
+	if err != nil {
+		t.Fatalf("sessionBackendEnvWithError: %v", err)
+	}
+
+	assertWithheldDoltPort(t, env, livePort)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for the managed loopback target", got)
+	}
 	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
 		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want 0", got)
 	}
