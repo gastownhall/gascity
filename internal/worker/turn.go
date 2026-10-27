@@ -958,17 +958,19 @@ func turnInterruptResult(id string, err error) error {
 // cause other than a runtime that could not answer
 // (runtime.ErrRuntimeUnavailable) or a wait that read nothing showing the
 // session busy (runtime.ErrWaitUnobserved), and session.TurnEndUnreadError
-// otherwise. A failed follow-up interrupt send counts as running: the stop
+// otherwise. A failed follow-up interrupt send counts as running unless the
+// runtime could not answer it (runtime.ErrRuntimeUnavailable): the stop
 // sends it only after the check (Still) read the turn current past the
 // first key. A restart on failure does not restart on a
-// TurnEndUnreadError: whether the interrupt ended the turn is unknown. A failed read is never taken as the end, nor as the
-// turn running. It runs under the session mutation lock (the stop's
-// Settle), so each read is a locked one (lockedCurrentTurn), as the check's
-// are: its session load and runtime probes are its own, started within the
-// read, so a shared read that began before the lock, holding the session as
-// it was then, never decides the end, nor keeps the settle, which holds the
-// lock, waiting on its answer. Each read is bounded by turnWatchReadBound,
-// as a watcher read's is.
+// TurnEndUnreadError: whether the interrupt ended the turn is unknown. A
+// failed read is never taken as the end, nor as the turn running. It runs
+// under the session mutation lock (the stop's Settle), so each read is a
+// locked one (lockedCurrentTurn), as the check's are: its session load and
+// runtime probes are its own, started within the read, so a shared read that
+// began before the lock, holding the session as it was then, never decides
+// the end, nor keeps the settle, which holds the lock, waiting on its
+// answer. Each read is bounded by turnWatchReadBound, as a watcher read's
+// is.
 func (h *SessionHandle) awaitTurnEnd(ctx context.Context, name, turn string, deadline time.Time, timing turnTiming, cause error) error {
 	what := fmt.Sprintf("interrupted turn %q of %s", turn, name)
 	read := func() (runtime.TurnHistory, error) {
