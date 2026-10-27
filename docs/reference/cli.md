@@ -5203,6 +5203,14 @@ what the binding does.
 The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
 
+A manifest written by an older build may list a work-store row by id alone,
+with no time that says whether it is the bead the copy carried. When the
+binding no longer holds such a row, a CLOSED one is moved. An OPEN one is
+refused and named: it is a snapshot frozen at cutover, and the binding most
+likely closed and collected the live bead, so copying it back would bring it
+back open. Decide per id with --move &lt;id&gt; (copy it in) or --record-carried
+&lt;id&gt; (record it as carried, so the clear deletes it).
+
 ```
 gc storage recover-stranded [flags]
 ```
@@ -5213,6 +5221,8 @@ gc storage recover-stranded [flags]
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+| `--move` | stringSlice |  | for an OPEN work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding (repeatable, comma-separated) |
+| `--record-carried` | stringSlice |  | for an OPEN work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes it (repeatable, comma-separated) |
 
 ## gc storage repair-sequence
 

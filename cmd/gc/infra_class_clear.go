@@ -180,7 +180,7 @@ type infraUnboundedLegacyRows struct {
 }
 
 func (e *infraUnboundedLegacyRows) Error() string {
-	return fmt.Sprintf("the copy manifest %s lists %d work-store infrastructure bead(s) by id alone (%s) and records no time that tells the bead it copied from a later one that reused the id, so they cannot be cleared on its word. `%s` records the ones the binding still holds once it proves them equal; run it, then run this again",
+	return fmt.Sprintf("the copy manifest %s lists %d work-store infrastructure bead(s) by id alone (%s) and records no time that tells the bead it copied from a later one that reused the id, so they cannot be cleared on its word. `%s` resolves them (it records the ones the binding still holds once it proves them equal, moves closed ones the binding no longer holds, and asks per id about open ones: --move or --record-carried); run it, then run this again",
 		e.Manifest, len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
 }
 

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"sort"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // The copy manifest keyed by (id, created_at) (prod-evidence item 2).
@@ -571,19 +574,43 @@ func TestAnnotatedManifestStaysReadableByTheLegacyParser(t *testing.T) {
 	}
 }
 
-// Re-review probe P5 (and mutant N32): an unbounded legacy entry whose binding
-// copy the binding's GC collected used to loop — boot said retained, the clear
-// refused and named recover-stranded, recover-stranded counted it removed
-// since cutover and named the clear. Recover now moves and records it, and
-// the clear then proceeds.
-func TestRecoverMovesAnUnboundedEntryTheBindingCollected(t *testing.T) {
-	cityPath, cfg, source, target := convergedRecoveryCity(t)
+// unboundedCollectedCity is the re-review's P5/Q2 shape: a legacy manifest
+// whose marker records no time (so its entries are unbounded), and a binding
+// that has closed and collected the bead behind one of them. It returns the
+// id of that bead, which is still in the work store as the frozen,
+// cutover-time row.
+func unboundedCollectedCity(t *testing.T, closeWorkRow bool) (cityPath string, cfg *config.City, source beads.Store, target infraBindingTarget, id string) {
+	t.Helper()
+	cityPath, cfg, source, target = convergedRecoveryCity(t)
 	writeLegacyManifest(t, target)
 	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	id := carriedMessageID(t, source)
-	if err := openMigratedDestination(t, target).Delete(id); err != nil {
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range rows {
+		if b.Type == "session" {
+			id = b.ID
+		}
+	}
+	if id == "" {
+		t.Fatal("the fixture carried no session")
+	}
+	if frozen, _ := source.Get(id); frozen.Status == "closed" {
+		t.Fatal("the fixture's frozen session is already closed")
+	}
+	if closeWorkRow {
+		if err := source.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest := openMigratedDestination(t, target)
+	if err := dest.Close(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := dest.Delete(id); err != nil {
 		t.Fatal(err)
 	}
 	var announce bytes.Buffer
@@ -591,23 +618,121 @@ func TestRecoverMovesAnUnboundedEntryTheBindingCollected(t *testing.T) {
 	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); !errors.As(err, &unbounded) {
 		t.Fatalf("precondition: clear = %v, want the unbounded refusal", err)
 	}
+	return cityPath, cfg, source, target, id
+}
 
+func runStrandedRecoveryWith(t *testing.T, cityPath string, cfg *config.City, opts strandedRecoveryOptions) (int, string, string) {
+	t.Helper()
+	stubInfraControllerPing(t, 0)
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code != 0 {
-		t.Fatalf("recover exited %d: %s %s", code, stdout.String(), stderr.String())
+	request := storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}
+	code := doStorageRecoverStranded(context.Background(), request, opts, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func assertClearProceeds(t *testing.T, cityPath string, target infraBindingTarget) {
+	t.Helper()
+	var announce bytes.Buffer
+	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); err != nil {
+		t.Errorf("the clear still refuses (no exit from the loop): %v", err)
+	}
+}
+
+// A CLOSED frozen row is terminal state: recover moves and records it, and the
+// clear then proceeds (re-review P5 and mutant N32).
+func TestRecoverMovesAClosedUnboundedEntryTheBindingCollected(t *testing.T) {
+	cityPath, cfg, _, target, id := unboundedCollectedCity(t, true)
+	if code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{}); code != 0 {
+		t.Fatalf("recover exited %d: %s %s", code, stdout, stderr)
+	}
+	got, err := openMigratedDestination(t, target).Get(id)
+	if err != nil {
+		t.Fatalf("recover did not move the closed unbounded entry %s: %v", id, err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("moved %s arrived %q, want closed", id, got.Status)
+	}
+	assertClearProceeds(t, cityPath, target)
+}
+
+// Re-review round 3, must-fix 1 (probe Q2): an OPEN frozen row whose binding
+// bead was closed and collected is NOT moved — that would resurrect it OPEN
+// (#5987). Recover refuses, names it and the two choices, and writes nothing.
+func TestRecoverRefusesAnOpenUnboundedEntryTheBindingCollected(t *testing.T) {
+	cityPath, cfg, _, target, id := unboundedCollectedCity(t, false)
+	before, err := os.ReadFile(target.ManifestPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code == 0 {
+		t.Fatalf("recover moved or accepted an open frozen row; stdout: %s", stdout)
+	}
+	for _, want := range []string{id, "--" + strandedMoveFlag, "--" + strandedRecordCarriedFlag, "OPEN"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the refusal does not name %q: %s", want, stderr)
+		}
+	}
+	if _, err := openMigratedDestination(t, target).Get(id); err == nil {
+		t.Errorf("the refused recover resurrected %s in the binding", id)
+	}
+	if after, _ := os.ReadFile(target.ManifestPath()); !bytes.Equal(before, after) {
+		t.Error("the refused recover rewrote the manifest")
+	}
+}
+
+// The operator's --move choice: the row is copied in as it is.
+func TestRecoverMovesAnOpenUnboundedEntryOnRequest(t *testing.T) {
+	cityPath, cfg, _, target, id := unboundedCollectedCity(t, false)
+	if code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{Move: map[string]bool{id: true}}); code != 0 {
+		t.Fatalf("recover --move %s exited %d: %s %s", id, code, stdout, stderr)
 	}
 	if _, err := openMigratedDestination(t, target).Get(id); err != nil {
-		t.Errorf("recover did not move the unbounded entry %s the binding had collected: %v", id, err)
+		t.Errorf("recover --move did not copy %s: %v", id, err)
+	}
+	assertClearProceeds(t, cityPath, target)
+}
+
+// The operator's --record-carried choice: the row is NOT copied, it is
+// recorded as the bead the copy carried, and the clear deletes it.
+func TestRecoverRecordsAnOpenUnboundedEntryAsCarriedOnRequest(t *testing.T) {
+	cityPath, cfg, source, target, id := unboundedCollectedCity(t, false)
+	if code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{RecordCarried: map[string]bool{id: true}}); code != 0 {
+		t.Fatalf("recover --record-carried %s exited %d: %s %s", id, code, stdout, stderr)
+	}
+	if _, err := openMigratedDestination(t, target).Get(id); err == nil {
+		t.Errorf("recover --record-carried copied %s into the binding", id)
 	}
 	manifest, _, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := manifest.Created[id]; !ok {
-		t.Errorf("recover did not record %s with its created_at", id)
+		t.Errorf("recover --record-carried did not record %s with its created_at", id)
 	}
-	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); err != nil {
-		t.Errorf("after recover-stranded the clear still refuses (no exit): %v", err)
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("stranded after --record-carried: %v", got)
+	}
+	assertClearProceeds(t, cityPath, target)
+	if _, err := source.Get(id); err == nil {
+		t.Errorf("the clear left the frozen row %s in the work store", id)
+	}
+}
+
+// A choice may only name a row it answers for.
+func TestRecoverRefusesAChoiceForARowThatNeedsNone(t *testing.T) {
+	cityPath, cfg, _, target, id := unboundedCollectedCity(t, false)
+	before, _ := os.ReadFile(target.ManifestPath())
+	code, _, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{Move: map[string]bool{id: true, "gc-nope": true}})
+	if code == 0 || !strings.Contains(stderr, "gc-nope") {
+		t.Errorf("recover accepted a choice for a row that needs none (code %d): %s", code, stderr)
+	}
+	if after, _ := os.ReadFile(target.ManifestPath()); !bytes.Equal(before, after) {
+		t.Error("the refused recover rewrote the manifest")
+	}
+	code, _, stderr = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{Move: map[string]bool{id: true}, RecordCarried: map[string]bool{id: true}})
+	if code == 0 || !strings.Contains(stderr, "choose one") {
+		t.Errorf("recover accepted both choices for %s (code %d): %s", id, code, stderr)
 	}
 }
 
@@ -676,5 +801,28 @@ func TestInfraRetainedIDsListsUnboundedLegacyEntries(t *testing.T) {
 	}
 	if id := carriedMessageID(t, source); !slices.Contains(ids, id) {
 		t.Errorf("retained ids %v omit the unbounded legacy entry %s", ids, id)
+	}
+}
+
+// Mutant A20: the "next: clear" line names the copies the binding still holds
+// apart from those it has since collected.
+func TestRecoverNextLineCountsHeldAndCollectedApart(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	id := carriedMessageID(t, source)
+	if err := openMigratedDestination(t, target).Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a later stranded mail", Type: "message"})
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code != 0 {
+		t.Fatalf("recover exited %d: %s %s", code, stdout, stderr)
+	}
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("still holds %d retained cop(ies) (%d of beads the binding holds, 1 the binding has since collected)", len(rows), len(rows)-1)
+	if !strings.Contains(stdout, want) {
+		t.Errorf("stdout does not say %q:\n%s", want, stdout)
 	}
 }

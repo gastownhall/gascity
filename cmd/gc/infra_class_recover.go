@@ -178,6 +178,8 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		fleetStopped bool
 		dryRun       bool
 		dumpPath     string
+		moveIDs      []string
+		carriedIDs   []string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -200,7 +202,15 @@ re-copy would re-import a serving binding from a source that no longer holds
 what the binding does.
 
 The recovered beads stay in the work store until the migration is run again,
-which clears them exactly as it clears the cutover's own copies.`,
+which clears them exactly as it clears the cutover's own copies.
+
+A manifest written by an older build may list a work-store row by id alone,
+with no time that says whether it is the bead the copy carried. When the
+binding no longer holds such a row, a CLOSED one is moved. An OPEN one is
+refused and named: it is a snapshot frozen at cutover, and the binding most
+likely closed and collected the live bead, so copying it back would bring it
+back open. Decide per id with --move <id> (copy it in) or --record-carried
+<id> (record it as carried, so the clear deletes it).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
@@ -213,7 +223,10 @@ which clears them exactly as it clears the cutover's own copies.`,
 				return errExit
 			}
 			request.FleetStopped = fleetStopped
-			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{DryRun: dryRun, DumpPath: dumpPath}, stdout, stderr))
+			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{
+				DryRun: dryRun, DumpPath: dumpPath,
+				Move: setOf(moveIDs), RecordCarried: setOf(carriedIDs),
+			}, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&fromWork, surface.Flag, false,
@@ -224,16 +237,33 @@ which clears them exactly as it clears the cutover's own copies.`,
 		"report the gap and write the dump without touching the binding or the manifest")
 	cmd.Flags().StringVar(&dumpPath, "dump", "",
 		"write every stranded bead and its source dep edges to this JSON file before any write")
+	cmd.Flags().StringSliceVar(&moveIDs, strandedMoveFlag, nil,
+		"for an OPEN work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding (repeatable, comma-separated)")
+	cmd.Flags().StringSliceVar(&carriedIDs, strandedRecordCarriedFlag, nil,
+		"for an OPEN work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes it (repeatable, comma-separated)")
 	return cmd
 }
 
-// strandedRecoveryOptions are the two knobs the repair carries.
+// The per-id operator choices for an open unbounded legacy row (see
+// doStorageRecoverStranded).
+const (
+	strandedMoveFlag          = "move"
+	strandedRecordCarriedFlag = "record-carried"
+)
+
+// strandedRecoveryOptions are the knobs the repair carries.
 type strandedRecoveryOptions struct {
 	// DryRun reports and dumps without writing to the binding or the manifest.
 	DryRun bool
 	// DumpPath, when set, receives every stranded bead and its source dep edges
 	// as JSON before any write happens.
 	DumpPath string
+	// Move and RecordCarried are the operator's per-id answers for OPEN
+	// work-store rows that an unbounded legacy manifest entry lists and the
+	// binding no longer holds: copy it in, or record it as carried (the clear
+	// then deletes it). Nothing else may be named.
+	Move          map[string]bool
+	RecordCarried map[string]bool
 }
 
 // strandedBeadDump is one stranded bead and the source dep edges it carries, as
@@ -815,14 +845,26 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// When the binding does not hold the id it is stranded, and moves.
 	//
 	// An unbounded legacy entry (infra_copy_manifest.go) is never counted as
-	// removed since cutover here: nothing proves the row is the bead the copy
-	// carried. One the binding still holds goes the unrecorded way (proven
-	// equal, it is recorded with its created_at); one the binding no longer
-	// holds is MOVED like a stranded row and recorded the same way. Either way
-	// the clear can then act on it — leaving it unbounded made the clear refuse
-	// and this command say "next: clear", a loop with no exit. Re-importing a
-	// row the binding's own GC once collected is safe: it is the work store's
-	// row, carried with its id, and the binding's GC collects it again.
+	// removed since cutover on its own: nothing proves the row is the bead the
+	// copy carried, and leaving it so made the clear refuse while this command
+	// said "next: clear" — a loop with no exit. What ends the loop depends on
+	// the row:
+	//
+	//   - the binding still holds the id: the unrecorded way (proven equal, it
+	//     is recorded with its created_at);
+	//   - the binding no longer holds it and the work row is CLOSED: moved like
+	//     a stranded row and recorded. A closed row is terminal state, and
+	//     carrying it in resurrects nothing;
+	//   - the binding no longer holds it and the work row is OPEN: refused,
+	//     named, and left to the operator. The work row is a snapshot frozen at
+	//     cutover; the binding most likely closed and collected the live bead,
+	//     and moving the frozen one would bring it back OPEN beside whatever
+	//     replaced it (#5987). Only the operator knows, so each such id needs
+	//     --move (copy it in) or --record-carried (record it as the bead the
+	//     copy carried; the clear then deletes it).
+	var unboundedOpen []beads.Bead
+	var recordCarried []beads.Bead
+	chosen := map[string]bool{}
 	for _, b := range rows {
 		match := manifest.Match(b)
 		if resolvable[b.ID] {
@@ -831,11 +873,55 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			}
 			continue
 		}
-		if match == infraManifestCarried {
+		switch match {
+		case infraManifestCarried:
 			removedSinceCutover++
 			continue
+		case infraManifestLegacyUnbounded:
+			switch {
+			case opts.Move[b.ID] && opts.RecordCarried[b.ID]:
+				fmt.Fprintf(stderr, "%s: %s is named by both --%s and --%s; choose one\n", logPrefix, b.ID, strandedMoveFlag, strandedRecordCarriedFlag) //nolint:errcheck // best-effort stderr
+				return 1
+			case opts.RecordCarried[b.ID]:
+				chosen[b.ID] = true
+				recordCarried = append(recordCarried, b)
+				removedSinceCutover++
+				continue
+			case opts.Move[b.ID]:
+				chosen[b.ID] = true
+			case b.Status == "closed":
+			default:
+				unboundedOpen = append(unboundedOpen, b)
+				continue
+			}
 		}
 		stranded = append(stranded, b)
+	}
+	// A choice may only name a row it is the answer for: anything else is a
+	// typo or a misunderstanding, and acting on it would move or record a bead
+	// nobody asked about.
+	var misnamed []string
+	for _, ids := range []map[string]bool{opts.Move, opts.RecordCarried} {
+		for id := range ids {
+			if !chosen[id] {
+				misnamed = append(misnamed, id)
+			}
+		}
+	}
+	if len(misnamed) > 0 {
+		sort.Strings(misnamed)
+		fmt.Fprintf(stderr, "%s: --%s/--%s name only OPEN work-store rows that the manifest lists by id alone and the binding no longer holds; these are not: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strings.Join(misnamed, ", ")) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(unboundedOpen) > 0 {
+		ids := make([]string, 0, len(unboundedOpen))
+		for _, b := range unboundedOpen {
+			ids = append(ids, b.ID)
+		}
+		sort.Strings(ids)
+		fmt.Fprintf(stderr, "%s: %d OPEN work-store row(s) are listed by the copy manifest by id alone, with no time that says whether they are the beads the copy carried, and the binding no longer holds them: %s. Each is a snapshot frozen at cutover; the binding most likely closed and collected the live bead, so copying it back would resurrect it OPEN. Nothing was written. Decide per id and run this again with --%s <id> (copy it into the binding) or --%s <id> (record it as carried, so the clear deletes it)\n", //nolint:errcheck // best-effort stderr
+			logPrefix, len(ids), strings.Join(ids, ", "), strandedMoveFlag, strandedRecordCarriedFlag)
+		return 1
 	}
 
 	fmt.Fprintf(stdout, "city:     %s\nbinding:  %s\ndatabase: %s\nmanifest: %s\n", request.CityPath, target.Binding, target.Database, target.ManifestPath())             //nolint:errcheck // best-effort stdout
@@ -932,7 +1018,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 0
 	}
 
-	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 {
+	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 && len(recordCarried) == 0 {
 		fmt.Fprintln(stdout, "nothing to recover: the binding already holds every infrastructure bead the retained work store has that the manifest does not record, with every within-infra edge between them.") //nolint:errcheck // best-effort stdout
 		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
@@ -1122,6 +1208,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// dropped from it turns a bead the binding's own GC legitimately collected
 	// back into a strand, and the city refuses to boot over a row nothing did
 	// wrong to.
+	// The operator's --record-carried answers: recorded with their created_at
+	// as beads the copy carried (the binding has since collected them), so the
+	// clear deletes the frozen work rows.
+	for _, b := range recordCarried {
+		recovered = append(recovered, b.ID)
+	}
+	if len(recordCarried) > 0 {
+		fmt.Fprintf(stdout, "recorded as carried (by --%s): %d bead(s)\n", strandedRecordCarriedFlag, len(recordCarried)) //nolint:errcheck // best-effort stdout
+	}
 	backup, err := backupInfraCopyManifest(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr

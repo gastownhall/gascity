@@ -82,8 +82,11 @@ import (
 //     readable time; an annotated manifest with legacy entries and no
 //     #gc:legacy-written line) a legacy entry is UNBOUNDED. Read-only verdicts
 //     keep the id-only reading they always had; the clear refuses to delete
-//     such a row; recover-stranded upgrades the ones the binding still holds
-//     by proving them field-equal and recording their created_at.
+//     such a row; recover-stranded resolves them: one the binding still holds
+//     is proven field-equal and recorded with its created_at; one it no
+//     longer holds is moved and recorded when the work row is closed, and
+//     needs the operator's per-id --move or --record-carried when it is open
+//     (the frozen row would otherwise come back OPEN, #5987).
 
 const (
 	infraManifestWrittenPrefix       = "#gc:written "
