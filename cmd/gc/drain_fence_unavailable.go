@@ -69,6 +69,11 @@ func drainFenceUnavailableReason(err error) string {
 	if hookDrainProbeFailsClosed(err) {
 		return "drain-pending probe refused by the city's storage gate; claim fence failed closed: " + err.Error()
 	}
+	if isTransientStorageGateFault(err) {
+		// Not a refusal: the gate could not read a store it needed, and the
+		// next attempt may.
+		return "drain-pending probe failed: the storage gate could not read a store it needs (transient); claim fence failed open: " + err.Error()
+	}
 	return "drain-pending probe failed; claim fence failed open: " + err.Error()
 }
 

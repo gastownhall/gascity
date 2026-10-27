@@ -44,7 +44,6 @@ package main
 // copy cannot be on this path.
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -53,18 +52,15 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
@@ -450,36 +446,6 @@ type storageGateTransientFault struct{ err error }
 
 func (e storageGateTransientFault) Error() string { return e.err.Error() }
 func (e storageGateTransientFault) Unwrap() error { return e.err }
-
-// isTransientStoreFault reports whether a read the gate made failed for a
-// reason that may clear on its own: store I/O that did not get an answer (a
-// timeout, a refused or reset connection, a locked database, a store that
-// reports itself unavailable). It is deliberately narrow. A decode error on a
-// local file (a malformed manifest annotation, an undecodable note), a
-// permission error, a corrupt database and a misconfigured store are standing
-// facts about the city that hold until an operator acts, so they are not
-// transient and the drain fence stays closed on them.
-func isTransientStoreFault(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, os.ErrPermission) {
-		return false
-	}
-	if errors.Is(err, beads.ErrStoreUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
-		return true
-	}
-	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EAGAIN, syscall.EBUSY} {
-		if errors.Is(err, errno) {
-			return true
-		}
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-	return dispatch.ClassifyControllerError(err) == dispatch.TierAvailability
-}
 
 // isTransientStorageGateFault reports whether err carries a transient gate
 // fault anywhere in its chain.

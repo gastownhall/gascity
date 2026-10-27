@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1413,14 +1412,16 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 	// a killed work query, lock contention and bd's circuit breaker failing
 	// fast. Its semantic tier is a refusal the store answered with, so it
 	// carries no token.
-	if dispatch.ClassifyControllerError(failure) == dispatch.TierAvailability {
-		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
-	}
+	//
 	// bdTransportRetryableMarkers is shared with the bd managed-retry path, so
 	// a marker added there classifies here too. bdConnectionErrorMarkers
 	// supplies bd's own connection-error vocabulary, including read-phase
-	// disconnects ("lost connection") that neither of the others lists.
-	if messageHasMarker(failure.text, bdTransportRetryableMarkers) || messageHasMarker(failure.text, bdConnectionErrorMarkers) {
+	// disconnects ("lost connection") that neither of the others lists, and
+	// storeNoAnswerMarkers the hosted bd serve answers that mean "try again".
+	// All of it is storeGotNoAnswer, which the storage gate's transient
+	// classification (isTransientStoreFault) reads too, so the two cannot
+	// drift.
+	if storeGotNoAnswer(failure, failure.text) {
 		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 	}
 	return err

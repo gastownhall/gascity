@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,20 +18,48 @@ import (
 
 // Regression tests from the second review of #8332.
 
-// "Transient" means store I/O that got no answer, nothing else.
+// "Transient" means store I/O that got no answer, nothing else: the real
+// vocabulary of hosted bd serve, Dolt/MySQL, SQLite and bd itself, shared with
+// gc hook's store-unavailable classification (storeGotNoAnswer).
 func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
 		want bool
 	}{
+		// transient
 		{"hosted dial timeout", errors.New(`Get "https://hosted-bd/v1/issues": dial tcp: i/o timeout`), true},
+		{"hosted 503 busy", errors.New("bd list: exit status 1: Error: list: bd serve at https://bd.example answered 503 busy: transaction retry budget exhausted"), true},
+		{"hosted 503 db_unavailable", errors.New("bd list: exit status 1: Error: list: bd serve at https://bd.example answered 503 db_unavailable: bd serve cannot reach its database"), true},
+		{"hosted connect EOF", errors.New(`bd list: exit status 1: Error: cannot reach bd serve at https://bd.example: Post "https://bd.example/v1/issues:list": EOF`), true},
+		{"hosted 502", errors.New("bd list: exit status 1: Error: list: bd serve at https://bd.example answered 502"), true},
+		{"hosted 504", errors.New("bd list: exit status 1: Error: list: bd serve at https://bd.example answered 504"), true},
+		{"dolt lost connection", errors.New("bd list: exit status 1: Error: failed to list issues: Error 2013: lost connection to MySQL server during query"), true},
+		{"mysql unexpected EOF text", errors.New("bd list: exit status 1: Error: failed to list issues: [mysql] packets.go:58: unexpected EOF"), true},
+		{"typed unexpected EOF", fmt.Errorf("reading: %w", io.ErrUnexpectedEOF), true},
+		{"closed network connection", errors.New("bd list: exit status 1: read tcp 127.0.0.1:1->127.0.0.1:3307: use of closed network connection"), true},
+		{"bd silent fallback", errors.New("bd list: exit status 1: Importing 12 issues from JSONL into empty database"), true},
+		{"sqlite table locked", errors.New("listing work store: database table is locked (6) (SQLITE_LOCKED)"), true},
+		{"database is locked", errors.New("database is locked (SQLITE_BUSY)"), true},
+		{"bd killed", errors.New("bd list: signal: killed"), true},
+		{"EMFILE", fmt.Errorf("open: %w", syscall.EMFILE), true},
 		{"context deadline", fmt.Errorf("listing: %w", context.DeadlineExceeded), true},
 		{"store unavailable", fmt.Errorf("x: %w", beads.ErrStoreUnavailable), true},
-		{"connection refused", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), true},
-		{"database is locked", errors.New("database is locked (SQLITE_BUSY)"), true},
+		{"ECONNREFUSED", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), true},
+		{"EHOSTUNREACH", fmt.Errorf("dial: %w", syscall.EHOSTUNREACH), true},
+		{"ENETUNREACH", fmt.Errorf("dial: %w", syscall.ENETUNREACH), true},
+		{"net timeout", &net.OpError{Op: "read", Err: timeoutNetError{}}, true},
+		// standing
 		{"permission denied", fmt.Errorf("stat: %w", os.ErrPermission), false},
 		{"EACCES", &os.PathError{Op: "stat", Path: "/x", Err: syscall.EACCES}, false},
+		{"permission on a store that also timed out", fmt.Errorf("%w; %w", os.ErrPermission, context.DeadlineExceeded), false},
+		{"conditional write unsupported", fmt.Errorf("x: %w", beads.ErrConditionalWriteUnsupported), false},
+		{"EBUSY mount", fmt.Errorf("rename: %w", syscall.EBUSY), false},
+		{"ENOSPC", fmt.Errorf("write: %w", syscall.ENOSPC), false},
+		{"sqlite disk I/O error", errors.New("disk I/O error (10) (SQLITE_IOERR)"), false},
+		{"sqlite malformed", errors.New("database disk image is malformed (11)"), false},
+		{"hosted 401", errors.New("bd list: exit status 1: Error: list: bd serve at https://bd.example answered 401 unauthenticated"), false},
+		{"hosted no such host", errors.New(`cannot reach bd serve at https://bd.exmaple: Get "x": dial tcp: lookup bd.exmaple: no such host`), false},
 		{"malformed annotation", errors.New(`reading the infra copy manifest: malformed "#gc:written x" line`), false},
 		{"misconfigured store", errors.New("unknown beads provider \"nope\""), false},
 		{"nil", nil, false},
@@ -39,6 +69,31 @@ func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 		}
 	}
 }
+
+// The hook reads the same no-answer vocabulary: a hosted bd serve answering
+// 503 is an unknown answer (exit 2), not an empty queue.
+func TestHookAndGateShareTheNoAnswerVocabulary(t *testing.T) {
+	for _, msg := range []string{
+		"bd serve at https://bd.example answered 503 busy",
+		"cannot reach bd serve at https://bd.example: EOF",
+		"Error 2013: lost connection to MySQL server during query",
+		"bd list: signal: killed",
+	} {
+		err := errors.New(msg)
+		if !workQueryStoreUnavailable(err) {
+			t.Errorf("gc hook does not read %q as store-unavailable", msg)
+		}
+		if !isTransientStoreFault(err) {
+			t.Errorf("the storage gate does not read %q as transient", msg)
+		}
+	}
+}
+
+type timeoutNetError struct{}
+
+func (timeoutNetError) Error() string   { return "i/o deadline" }
+func (timeoutNetError) Timeout() bool   { return true }
+func (timeoutNetError) Temporary() bool { return true }
 
 // Probe P1: a malformed manifest annotation holds until edited, so it is a
 // standing refusal and the drain fence fails CLOSED on it.
@@ -239,5 +294,14 @@ func TestMigratedUnbootedCityWithATruncatedConfigRefuses(t *testing.T) {
 	}
 	if !cityMayRelocateClasses(request.CityPath) {
 		t.Error("a migrated, unbooted city with a truncated city.toml is judged single-store")
+	}
+}
+
+// The fence event names a transient gate fault as what it is: not a refusal.
+func TestDrainFenceReasonForATransientGateFault(t *testing.T) {
+	err := standingStorageRefusal{err: storageGateTransientFault{err: errors.New("gc: binding could NOT be verified: dial tcp: i/o timeout")}}
+	reason := drainFenceUnavailableReason(err)
+	if strings.Contains(reason, "refused") || !strings.Contains(reason, "failed open") || !strings.Contains(reason, "transient") {
+		t.Errorf("transient gate fault reason = %q", reason)
 	}
 }

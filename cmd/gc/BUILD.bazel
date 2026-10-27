@@ -644,6 +644,7 @@ go_library(
         "storage_boot.go",
         "storage_preflight.go",
         "storage_provider_bundle.go",
+        "store_fault_classify.go",
         "store_health.go",
         "store_rollout.go",
         "store_target_exec.go",
