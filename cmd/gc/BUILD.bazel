@@ -1357,6 +1357,7 @@ go_test(
         "converge_scope_store_test.go",
         "convergence_integration_test.go",
         "conversation_lane_api_test.go",
+        "conversation_lane_cli_control_test.go",
         "conversation_lane_cli_test.go",
         "conversation_lane_content_hold_test.go",
         "conversation_lane_exec_test.go",

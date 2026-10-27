@@ -17,11 +17,16 @@ package main
 // once, with or without a running controller, and so does a busy one whose
 // runtime an immediate nudge can steer (Caps.Steer). The pass never waits
 // for a boundary; a busy session it cannot deliver to leaves the op to the
-// controller's lane host. It is a full pass: it may close any op of the
-// conversation by rule, run control before content, and carry other
-// producers' notices in its batch. The CLI hosts no observer and writes no
-// turn fact; it never requests a wake itself (the lane host's pass does,
-// after the ring). Queue mode runs no pass and makes no runtime call.
+// controller's lane host. A full pass may close any op of the conversation
+// by rule and carry other producers' notices in its batch, but it runs no
+// control (opjournal.Caps.ContentOnly): an interrupt, a respond or a
+// deliver-now unit waits for the controller's lane host, and so does
+// content queued behind one (I10), so a CLI nudge never starts a turn that
+// an earlier stop then kills. An interrupt's waits do not fit the CLI's
+// lease, and the CLI keeps no interrupt record. The CLI hosts no observer
+// and writes no turn fact; it never requests a wake itself (the lane host's
+// pass does, after the ring). Queue mode runs no pass and makes no runtime
+// call.
 //
 // After it reports, a lane-routed nudge rings the controller's lane host
 // (lane:<conversation>:<op id>) once, best effort, so the host refreshes the
@@ -502,14 +507,15 @@ var _ opjournal.Executor = (*cliLaneExec)(nil)
 // Probe implements opjournal.Executor: without the session's input it
 // reports a runtime this process cannot type into, so the pass takes
 // nothing and asks no wake; otherwise the live executor's probe under the
-// CLI's lease.
+// CLI's lease. Either way the pass is content-only (Caps.ContentOnly): it
+// runs no control.
 func (e *cliLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
 	if !e.ownsInput {
 		return opjournal.Probe{
 			Available: true,
 			Fence:     laneFence(conv),
 			TurnLive:  opjournal.TriUnknown,
-			Caps:      opjournal.Caps{Input: opjournal.FenceNone, Text: opjournal.TextReminder, LeaseTTL: cliLaneLeaseTTL},
+			Caps:      opjournal.Caps{Input: opjournal.FenceNone, Text: opjournal.TextReminder, LeaseTTL: cliLaneLeaseTTL, ContentOnly: true},
 		}, nil
 	}
 	p, err := e.conversationLaneExec.Probe(ctx, conv)
@@ -517,5 +523,6 @@ func (e *cliLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView
 		return p, err
 	}
 	p.Caps.LeaseTTL = cliLaneLeaseTTL
+	p.Caps.ContentOnly = true
 	return p, nil
 }

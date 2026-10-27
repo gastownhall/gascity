@@ -59,7 +59,12 @@ const (
 	// turn settled but whose session could not be prepared for the message
 	// (X11 D11): the replacement did not complete.
 	ReasonReplacementNotPrepared = "replacement_not_prepared"
-	RefusedReasonPrefix          = "refused:"
+	// ReasonRestartNotStarted is an interrupt whose restart on failure
+	// stopped the runtime and could not start it again: the turn ended
+	// with the runtime, and the session has none until a start brings one
+	// back. Older builds read it as failed{other}.
+	ReasonRestartNotStarted = "restart_not_started"
+	RefusedReasonPrefix     = "refused:"
 )
 
 // MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and
@@ -81,6 +86,7 @@ var knownFailedReasons = []string{
 	ReasonExpiredBeforeStart, ReasonDeadlineInFlight, ReasonNoBoundary, ReasonProviderUnavailable,
 	ReasonAmbiguousDelivery, ReasonPoison, ReasonUnsupported, ReasonUnauthorized, ReasonCreateFailed,
 	ReasonHeld, ReasonSessionGone, ReasonClosedExternally, ReasonOther, ReasonReplacementNotPrepared,
+	ReasonRestartNotStarted,
 }
 
 var knownSkippedReasons = []string{

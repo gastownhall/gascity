@@ -63,8 +63,10 @@ type StopTurnOptions struct {
 	// one whose Settle saw nothing showing the turn still running
 	// (TurnEndUnreadError), or, without Settle, whose own waits read nothing
 	// showing the session busy (runtime.ErrWaitUnobserved, or a runtime
-	// that could not answer), since that cannot tell either. A restart once
-	// decided runs apart from ctx, within stopTurnRestartBound. As with
+	// that could not answer), since that cannot tell either; and so does a
+	// caller whose ctx deadline leaves less than stopTurnRestartBound by
+	// then, since the restart could outlive it. A restart once decided runs
+	// apart from ctx, within stopTurnRestartBound. As with
 	// Still, whether the runtime runs is a fresh liveness read's
 	// (StopTurnWith).
 	Restart *StopTurnRestart
@@ -278,7 +280,10 @@ func (m *Manager) waitForInterruptSettleLocked(ctx context.Context, b beads.Bead
 // on failure whose interrupted turn was not seen to end (waitErr) but which
 // must not restart, or nil when the restart runs; what names the operation,
 // as the caller's other errors do. Its caller gave up (ctx ended: a city
-// stop, its lease budget), which is no reason to stop the runtime; or the
+// stop, its lease budget), which is no reason to stop the runtime, or its
+// deadline leaves less than stopTurnRestartBound, so the restart, which runs
+// apart from ctx, could outlive the caller's lease and leave a runtime
+// stopped under a lease another host may take; or the
 // check refused the keystroke sequence's follow-up interrupt (refusal), so
 // the turn it names left Current, or the check could not tell, and whatever
 // runs now may be another turn, the ended one's successor, which a restart
@@ -297,6 +302,9 @@ func (m *Manager) waitForInterruptSettleLocked(ctx context.Context, b beads.Bead
 func restartWithheld(ctx context.Context, what string, refusal, waitErr error) error {
 	if cerr := ctx.Err(); cerr != nil {
 		return fmt.Errorf("%s: the caller's context ended before its interrupted turn was seen to end, not restarting it: %w: %w: %w (%s)", what, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, cerr, waitErr.Error())
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < stopTurnRestartBound {
+		return fmt.Errorf("%s: the caller's deadline leaves less than the %s a restart may take, not restarting it: %w: %w (%s)", what, stopTurnRestartBound, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
 	}
 	if refusal != nil {
 		return fmt.Errorf("%s: the check refused the follow-up interrupt (%s), so another turn may run now, not restarting it: %w: %w (%s)", what, refusal.Error(), ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())

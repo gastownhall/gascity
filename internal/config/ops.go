@@ -59,7 +59,7 @@ type OpsConfig struct {
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
 	// of their legacy path. The default is empty, and message is not on by
-	// default anywhere yet. This build accepts message and respond.
+	// default anywhere yet. This build accepts message, interrupt and respond.
 	// Experimental: listing message switches on the producers that write lane
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
@@ -72,9 +72,14 @@ type OpsConfig struct {
 	// runtime can steer it, else at the next boundary. It leaves the rest to
 	// the controller's lane host, and the content gate no longer governs it.
 	// The API's submit and messages, gc session submit, mail --notify, sling
-	// --nudge and wait nudges keep their legacy delivery in this build. No
-	// request surface writes respond ops yet, so listing respond changes no
-	// request's delivery in this build.
+	// --nudge and wait nudges keep their legacy delivery in this build.
+	// Listing interrupt lets the ops route propose interrupt ops, which the
+	// controller's lane host runs; no other request surface writes them yet
+	// (the API's stop and run cancel keep their legacy path in this build).
+	// gc session nudge's inline pass never runs an interrupt, a respond or a
+	// deliver-now unit: it leaves them, and content queued behind them, to
+	// the controller's lane host. No request surface writes respond ops yet,
+	// so listing respond changes no request's delivery in this build.
 	// The city's controller, standalone or supervisor-hosted, runs the lane
 	// host that delivers lane ops, and gc doctor reports a listed kind as an
 	// error when no lane host serves the city. A keystroke-mode runtime (tmux)
@@ -86,12 +91,12 @@ type OpsConfig struct {
 	// A listed kind needs a sessions store with guarded batches. A change
 	// takes effect at the controller's next start; gc session nudge reads it
 	// at once.
-	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=respond"`
+	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
 // execute, so the only kinds [ops] authoritative accepts.
-var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindRespond}
+var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindInterrupt, opjournal.KindRespond}
 
 // LaneExecutes reports whether [ops] authoritative lists kind.
 func (o OpsConfig) LaneExecutes(kind string) bool {
