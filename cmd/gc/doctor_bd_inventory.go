@@ -110,10 +110,11 @@ func (c *bdInventoryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			}
 			continue
 		}
-		// What the cache or a vouch claims, then (in gc doctor) a real walk.
+		// What the cache or a vouch claims, then (in gc doctor) a real walk,
+		// unless the claim was itself one.
 		claimed, claimErr := c.resolve(c.cityPath, bdPath, bdTrustOpts{})
 		v, err := claimed, claimErr
-		if !c.cachedOnce {
+		if !c.cachedOnce && (claimErr != nil || claimed.Source != "walk") {
 			v, err = c.resolve(c.cityPath, bdPath, bdTrustOpts{forceWalk: true})
 		}
 		if claimErr == nil && err == nil && claimed.Inventory != "" && claimed.Inventory != v.Inventory {
@@ -176,13 +177,15 @@ const bdUninventoriedEvent = "gc_bd.uninventoried"
 
 // bdInventoryStartFinding runs the bd-command-inventory check for a starting
 // controller and returns the event to record, or nil when every scope's bd
-// matches (or the city is not split).
+// matches (or the city is not split). A warning — every bd matches, but the
+// vouch file is unreadable — is no event: gc bd works there, and the doctor
+// and gc start's warm-up print it.
 func bdInventoryStartFinding(check *bdInventoryCheck) *events.Event {
 	if check.cfg == nil || workStoreClassHolds(check.cfg) == nil {
 		return nil
 	}
 	r := check.Run(&doctor.CheckContext{CityPath: check.cityPath})
-	if r.Status == doctor.StatusOK {
+	if r.Status != doctor.StatusError {
 		return nil
 	}
 	payload, err := json.Marshal(struct {

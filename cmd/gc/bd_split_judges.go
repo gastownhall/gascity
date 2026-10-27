@@ -4,13 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -199,25 +203,28 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 		// rather than re-derived node by node.
 		return in.refuse("gc bd %s --graph: refused on this split city: a graph plan mints one bead per node, each with its own type, labels, metadata and edges, and gc does not re-derive bd's reading of the plan here. Instead: %s. Nothing was written.", in.path, bdSplitAltSling)
 	}
-	// bd create --parent copies the parent's labels onto the child unless
-	// --no-inherit-labels is set. The parent must be a work bead of this store
-	// (the edge rule below), and a work bead's labels classify as work on any
-	// type — every label arm of Classify fires on the label alone — but the
-	// inherited labels are judged with the child's own anyway.
-	if parent, ok := in.args.Last("--parent"); ok && !in.args.Bool("--no-inherit-labels") {
-		if p, result := in.read(parent); result == bdReadFound {
-			shape.Labels = normalizeBdLabels(append(shape.Labels, p.Labels...))
-		}
-	}
-	if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
-		return in.refuse("%s", classFlipRefusalText("gc bd "+in.path, flip))
-	}
 	var endpoints []string
 	endpoints = append(endpoints, bdDepsEndpoints(in.args.Values("--deps"))...)
 	endpoints = append(endpoints, in.args.Values("--waits-for")...)
 	endpoints = append(endpoints, in.args.Values("--parent")...)
 	if refusal := in.checkEdgeEndpoints(endpoints...); refusal != "" {
 		return in.refuse("%s", refusal)
+	}
+	// bd create --parent copies the parent's labels onto the child unless
+	// --no-inherit-labels is set, reading the parent from its own store (it
+	// refuses a parent it does not find there). The edge rule above only
+	// says the parent is a work bead of SOME work store, so the labels judged
+	// are the ones this store's read returns, and a read that does not find
+	// exactly the parent here is refused rather than judged as no labels.
+	if parent, ok := in.args.Last("--parent"); ok && strings.TrimSpace(parent) != "" && !in.args.Bool("--no-inherit-labels") {
+		p, result := in.read(parent)
+		if refusal := in.readRefusal(parent, result); refusal != "" {
+			return in.refuse("%s", refusal)
+		}
+		shape.Labels = normalizeBdLabels(append(shape.Labels, p.Labels...))
+	}
+	if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
+		return in.refuse("%s", classFlipRefusalText("gc bd "+in.path, flip))
 	}
 	return in.pass()
 }
@@ -721,19 +728,415 @@ func judgeBdDelete(in bdClassGuardInput) bdClassGuard {
 	if in.gcFlag {
 		return in.pass()
 	}
+	id, dependents, err := in.bindingDependentOf(ids)
+	switch {
+	case err != nil:
+		return in.refuse("gc bd delete: refused on this split city: gc could not check the class binding for beads that depend on %s (%v). Nothing was written.", strings.Join(ids, ", "), err)
+	case id != "":
+		return in.refuse("gc bd delete %s: refused on this split city: %s in the class binding depend(s) or wait(s) on it, and deleting it would leave that edge or gate dangling. Close it instead, or re-run with %s if the dangling edge is intended. Nothing was written.", id, strings.Join(dependents, ", "), bdDeleteAllowDanglingFlag)
+	}
+	return in.pass()
+}
+
+// bindingDependentOf returns the first of ids that a class-binding bead
+// depends on, or an open cross-store drain gate waits on
+// (gc.cross_store_blocker), with those binding beads; "" when there is none.
+// Deleting such a work bead leaves the binding's edge or gate dangling, and a
+// dependency on a missing bead is one no Ready computation clears.
+func (in bdClassGuardInput) bindingDependentOf(ids []string) (string, []string, error) {
+	if len(ids) == 0 {
+		return "", nil, nil
+	}
 	if in.bindingDependents == nil {
-		return in.refuse("gc bd delete: refused on this split city: gc cannot check whether a class-binding bead depends on %s. Nothing was written.", strings.Join(ids, ", "))
+		return "", nil, errors.New("gc has no reverse lookup into the class binding here")
 	}
 	deps, err := in.bindingDependents(ids)
 	if err != nil {
-		return in.refuse("gc bd delete: refused on this split city: gc could not check the class binding for beads that depend on %s (%v). Nothing was written.", strings.Join(ids, ", "), err)
+		return "", nil, err
 	}
 	for _, id := range ids {
 		if d := deps[id]; len(d) > 0 {
-			return in.refuse("gc bd delete %s: refused on this split city: %s in the class binding depend(s) or wait(s) on it, and deleting it would leave that edge or gate dangling. Close it instead, or re-run with %s if the dangling edge is intended. Nothing was written.", id, strings.Join(d, ", "), bdDeleteAllowDanglingFlag)
+			return id, d, nil
 		}
 	}
+	return "", nil, nil
+}
+
+// judgeBdMolBurn judges `gc bd mol burn`, which deletes each molecule it
+// names at once: bd resolves the id (a short or partial one to whatever bead
+// it prefixes) and deletes the root and the members its molecule loader finds
+// below it (for a wisp, the ephemeral ones). On a proxied-server store bd
+// deletes a persistent molecule with Cascade, which also deletes every bead
+// that depends on one of its beads, transitively and through any edge; its
+// direct route orphans those beads instead. Like delete, every id must name
+// exactly one bead of this work store, and the burn is refused when a
+// class-binding bead depends on, or an open cross-store drain gate waits on,
+// any bead it could delete: the molecules' beads (bdBurnMembers) and, for a
+// persistent molecule, whatever route bd takes, every bead that depends on
+// them (bdBurnDependents). --dry-run deletes nothing.
+func judgeBdMolBurn(in bdClassGuardInput) bdClassGuard {
+	if in.args.Bool("--dry-run") {
+		return in.pass()
+	}
+	var wispRoots, persistentRoots []string
+	for _, id := range in.args.positionals {
+		root, result := in.read(id)
+		if result != bdReadFound {
+			return in.refuse("%s", in.readRefusal(id, result))
+		}
+		if root.Ephemeral {
+			wispRoots = append(wispRoots, id)
+		} else {
+			persistentRoots = append(persistentRoots, id)
+		}
+	}
+	wispMembers, err := in.bdBurnMembers(wispRoots)
+	if err != nil {
+		return in.refuse("gc bd mol burn: refused on this split city: gc could not list the beads the burn would delete (%v). Nothing was written.", err)
+	}
+	molecules, err := in.bdBurnMembers(persistentRoots)
+	if err != nil {
+		return in.refuse("gc bd mol burn: refused on this split city: gc could not list the beads the burn would delete (%v). Nothing was written.", err)
+	}
+	cascade, err := in.bdBurnDependents(molecules)
+	if err != nil {
+		return in.refuse("gc bd mol burn: refused on this split city: gc could not list the beads that depend on the molecule, which bd's burn of a persistent molecule can delete with it (%v). Nothing was written.", err)
+	}
+	members := append(slices.Clone(molecules), wispMembers...)
+	id, dependents, err := in.bindingDependentOf(members)
+	switch {
+	case err != nil:
+		return in.refuse("gc bd mol burn: refused on this split city: gc could not check the class binding for beads that depend on %s (%v). Nothing was written.", strings.Join(members, ", "), err)
+	case id != "":
+		return in.refuse("gc bd mol burn: refused on this split city: %s in the class binding depend(s) or wait(s) on %s, which the burn would delete, leaving that edge or gate dangling. Close the molecule instead, or delete its beads with gc bd delete %s if the dangling edge is intended. Nothing was written.", strings.Join(dependents, ", "), id, bdDeleteAllowDanglingFlag)
+	}
+	id, dependents, err = in.bindingDependentOf(cascade)
+	switch {
+	case err != nil:
+		return in.refuse("gc bd mol burn: refused on this split city: gc could not check the class binding for beads that depend on %s (%v). Nothing was written.", strings.Join(cascade, ", "), err)
+	case id != "":
+		return in.refuse("gc bd mol burn: refused on this split city: %s in the class binding depend(s) or wait(s) on %s, which depends on the molecule: bd's burn of a persistent molecule can delete every bead that depends on one of its beads, leaving that edge or gate dangling. Close the molecule instead, or delete only its own beads with gc bd delete <id>... --force, which leaves the beads that depend on them in place. Nothing was written.", strings.Join(dependents, ", "), id)
+	}
 	return in.pass()
+}
+
+// bdBurnChildrenArgs lists, in every status, type and plane and unpaged, the
+// beads bd's `list --parent` filter puts under id: its parent-child
+// dependents, and any hierarchical id below it (id.N, id.N.M) that has no
+// parent-child edge at all.
+func bdBurnChildrenArgs(id string) []string {
+	return []string{"list", "--parent=" + id, "--all", "--include-infra", "--include-gates", "--include-templates", "--include-ephemeral", "--limit", "0", "--json"}
+}
+
+// bdBurnMembers returns roots and every bead bd lists below them
+// (bdBurnChildrenArgs), recursively. That covers the molecule bd's burn
+// loads and deletes: its molecule loader (loadTemplateSubgraph, bd 1.3.2 and
+// 1.3.0 Enterprise) walks parent-child dependents, and adds a hierarchical
+// child id.N only when no parent-child edge points it elsewhere. A persistent
+// molecule's burn can delete more (bdBurnDependents).
+func (in bdClassGuardInput) bdBurnMembers(roots []string) ([]string, error) {
+	if len(roots) == 0 {
+		return nil, nil
+	}
+	if in.bdRead == nil {
+		return nil, errors.New("gc cannot read the molecule here")
+	}
+	var members []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			members = append(members, id)
+		}
+	}
+	for _, id := range roots {
+		add(id)
+	}
+	for i := 0; i < len(members); i++ {
+		out, err := in.bdRead(bdBurnChildrenArgs(members[i])...)
+		if err != nil {
+			return nil, err
+		}
+		var children []struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(bytes.NewReader(out)).Decode(&children); err != nil {
+			return nil, fmt.Errorf("reading bd's list of the children of %s: %w", members[i], err)
+		}
+		for _, c := range children {
+			add(c.ID)
+		}
+	}
+	return members, nil
+}
+
+// bdDependentsArgs lists the beads that depend on ids, through any edge type,
+// in either plane and in every status: bd's dep list read upward, one answer
+// for all of ids.
+func bdDependentsArgs(ids []string) []string {
+	return append([]string{"dep", "list", "--direction=up", "--json"}, ids...)
+}
+
+// bdBurnDependents returns the beads outside ids that depend on one of them,
+// transitively and through any edge type, asking bd one level at a time
+// (bdDependentsArgs). That is what bd's proxied-server burn of a persistent
+// molecule deletes beyond the molecule's own beads: it deletes them with
+// Cascade, whose expansion (FindAllDependents, bd 1.3.2 and 1.3.0
+// Enterprise) follows every dependency row pointing into the set, in both
+// planes — the rows dep list reads.
+func (in bdClassGuardInput) bdBurnDependents(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if in.bdRead == nil {
+		return nil, errors.New("gc cannot read the molecule's dependents here")
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	var dependents []string
+	for frontier := ids; len(frontier) > 0; {
+		out, err := in.bdRead(bdDependentsArgs(frontier)...)
+		if err != nil {
+			return nil, err
+		}
+		var rows []struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(bytes.NewReader(out)).Decode(&rows); err != nil {
+			return nil, fmt.Errorf("reading bd's list of the beads that depend on %s: %w", bdTruncateUTF8(strings.Join(frontier, ", "), 200), err)
+		}
+		var next []string
+		for _, r := range rows {
+			if r.ID != "" && !seen[r.ID] {
+				seen[r.ID] = true
+				next = append(next, r.ID)
+			}
+		}
+		dependents = append(dependents, next...)
+		frontier = next
+	}
+	return dependents, nil
+}
+
+// bdWispGCMinAge is the shortest --age `gc bd mol wisp gc` forwards on a split
+// city, and bd's own default. It does not decide what may be deleted: gc
+// deletes only wisps it checked (judgeBdMolWispGC). It keeps that check from
+// refusing the gc over wisps closed a moment ago, whose class-binding gates
+// the gate sweep has not released yet: a wisp idle this long closed long
+// before the sweep last ran (TestBdWispGCMinAgeStaysAboveTheGateSweep).
+const bdWispGCMinAge = time.Hour
+
+// judgeBdMolWispGC judges `gc bd mol wisp gc`, which deletes the work store's
+// abandoned wisps at once: open ones idle past --age, closed ones too with
+// --all, and the unprotected wisps that depend on them. gc asks bd which wisps
+// those are — the same argv with --dry-run --json, which bd answers from the
+// same selection and deletes nothing — and refuses, as delete does, when a
+// class-binding bead depends on, or an open cross-store drain gate waits on,
+// any of them. It then forwards bd's delete of exactly the wisps it checked
+// (bdWispGCDeleteArgs), not the gc: bd's gc would select again, and a wisp
+// that became a candidate after the check, such as a new dependent of an
+// abandoned wisp (bd adds those whatever their age), would be deleted
+// unchecked. A checked wisp that a second dry run no longer selects (one
+// claimed meanwhile, say) is left out, so bd's protection of live wisps holds
+// as of after the check. --closed --force, which deletes every closed wisp
+// whatever its age, is refused, and so is an --age under bdWispGCMinAge. A dry
+// run, and --closed without --force (bd only counts), delete nothing.
+func judgeBdMolWispGC(in bdClassGuardInput) bdClassGuard {
+	if in.args.Bool("--dry-run") {
+		return in.pass()
+	}
+	if in.args.Bool("--closed") {
+		if !in.args.Bool("--force") {
+			return in.pass()
+		}
+		return in.refuse("gc bd mol wisp gc --closed --force: refused on this split city: it deletes every closed wisp whatever its age, including one closed a moment ago whose class-binding gate the gate sweep has not released yet. Use gc bd mol wisp gc --all --age %gh (or longer), which gc checks wisp by wisp. Nothing was written.", bdWispGCMinAge.Hours())
+	}
+	// Without --age (or with an empty one) bd selects at its default, an hour
+	// in every pinned build (TestBdWispGCDefaultAgeMeetsTheFloor).
+	if v, _ := in.args.Last("--age"); v != "" {
+		age, err := time.ParseDuration(v)
+		if err != nil {
+			return in.refuse("gc bd mol wisp gc: refused on this split city: --age %q is not a duration (%v). Nothing was written.", v, err)
+		}
+		if age < bdWispGCMinAge {
+			return in.refuse("gc bd mol wisp gc --age %s: refused on this split city: an age under %gh reaches wisps closed so recently that the gate sweep may not yet have released the class-binding gates waiting on them, and gc refuses the whole gc while one of those gates is open. Use --age %gh or longer. Nothing was written.", v, bdWispGCMinAge.Hours(), bdWispGCMinAge.Hours())
+		}
+	}
+	wisps, err := in.bdWispGCCandidates()
+	if err != nil {
+		return in.refuse("gc bd mol wisp gc: refused on this split city: gc could not ask bd which wisps it would delete (%v). Nothing was written.", err)
+	}
+	id, dependents, err := in.bindingDependentOf(wisps)
+	switch {
+	case err != nil:
+		return in.refuse("gc bd mol wisp gc: refused on this split city: gc could not check the class binding for beads that depend on the %d wisp(s) it would delete (%v). Nothing was written.", len(wisps), err)
+	case id != "":
+		return in.refuse("gc bd mol wisp gc: refused on this split city: %s in the class binding depend(s) or wait(s) on wisp %s, which this gc would delete, leaving that edge or gate dangling. Close that wisp instead, which lets the gate sweep release what waits on it, then run the gc again; or delete it with gc bd delete %s %s if the dangling edge is intended. Nothing was written.", strings.Join(dependents, ", "), id, id, bdDeleteAllowDanglingFlag)
+	}
+	var again []string
+	if len(wisps) > 0 {
+		if again, err = in.bdWispGCCandidates(); err != nil {
+			return in.refuse("gc bd mol wisp gc: refused on this split city: gc could not ask bd again which of the wisps it checked bd still selects (%v). Nothing was written.", err)
+		}
+	}
+	checked := make(map[string]bool, len(wisps))
+	for _, w := range wisps {
+		checked[w] = true
+	}
+	var del []string
+	for _, w := range again {
+		if checked[w] {
+			del = append(del, w)
+			checked[w] = false
+		}
+	}
+	if len(del) == 0 {
+		return bdClassGuard{
+			args:   append(slices.Clone(in.bdArgs), "--dry-run"),
+			notice: "gc bd mol wisp gc: no wisp gc checked is still a candidate, so nothing is deleted; bd's dry run follows\n",
+		}
+	}
+	return bdClassGuard{
+		args:   in.bdWispGCDeleteArgs(del),
+		notice: fmt.Sprintf("gc bd mol wisp gc: deleting the %d wisp(s) bd's dry run selected and gc checked against the class binding (bd delete --force); a wisp that became a candidate after the check is left for the next gc\n", len(del)),
+	}
+}
+
+// bdWispGCDeleteArgs is the argv gc forwards in place of a judged `mol wisp
+// gc`: bd's delete of exactly ids, with the global flags this invocation gave
+// (--json, --actor and the rest, restated as --flag=value). --force makes it
+// the delete the gc itself runs on bd's direct route (deleteBatch with force
+// and no cascade, bd 1.3.2 and 1.3.0 Enterprise): it deletes without asking,
+// removes the wisps' edges, and orphans what depends on them.
+func (in bdClassGuardInput) bdWispGCDeleteArgs(ids []string) []string {
+	args := []string{"delete", "--force"}
+	for _, g := range bdflags.GlobalFlagSpecs() {
+		for _, v := range in.args.Values(g.Long) {
+			args = append(args, g.Long+"="+v)
+		}
+	}
+	return append(args, ids...)
+}
+
+// bdWispGCCandidates asks bd which wisps this `mol wisp gc` argv would
+// delete: the same argv with --dry-run --json, which bd answers from the same
+// selection (findAbandonedWisps, bd 1.3.2 and 1.3.0 Enterprise) and deletes
+// nothing. It does not build that argv past a -- terminator, where the added
+// flags would be arguments and the run real.
+func (in bdClassGuardInput) bdWispGCCandidates() ([]string, error) {
+	if slices.Contains(in.bdArgs, "--") {
+		return nil, errors.New("gc does not ask bd for a dry run of an argv with a -- terminator; drop the --")
+	}
+	if in.bdRead == nil {
+		return nil, errors.New("gc cannot ask bd for a dry run here")
+	}
+	out, err := in.bdRead(append(slices.Clone(in.bdArgs), "--dry-run", "--json")...)
+	if err != nil {
+		return nil, err
+	}
+	var plan struct {
+		CleanedIDs []string `json:"cleaned_ids"`
+		DryRun     bool     `json:"dry_run"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(out)).Decode(&plan); err != nil {
+		return nil, fmt.Errorf("reading bd's dry run: %w", err)
+	}
+	if !plan.DryRun {
+		return nil, fmt.Errorf("bd's answer does not say it was a dry run: %q", bdTruncateUTF8(string(out), 200))
+	}
+	return plan.CleanedIDs, nil
+}
+
+// bdSweepMinAge is the shortest --older-than `gc bd purge` and `gc bd prune`
+// forward on a split city. Unlike delete, mol burn and mol wisp gc, they
+// cannot be checked bead by bead against the class binding: bd's dry run
+// counts the beads it would delete without naming them. Age is what keeps them
+// clear of a work bead an open cross-store drain gate still waits on: the gate
+// sweep releases such a gate once its work blocker closes, and a bead closed a
+// week ago closed long before the sweep last ran. The core reaper's default
+// ages meet it (TestReaperPurgeAgeStaysAboveTheGateSweep).
+const bdSweepMinAge = 7 * 24 * time.Hour
+
+// judgeBdSweep judges `gc bd purge` and `gc bd prune`, which delete the closed
+// beads bd selects at once: purge the closed wisps (with --wisps-plane, every
+// closed row of the wisps table), prune the closed durable beads. bd keeps
+// back a bead that a live bead of the work store depends on (purge) or that an
+// open one cites (prune), but it cannot see the class binding, and gc cannot
+// ask the binding about beads bd does not name, so the deletion is held to age
+// (bdSweepMinAge): --older-than must be given and, read as bd reads it, be at
+// least that. prune's --ignore-references, which also deletes closed beads
+// open beads still cite, is refused. A dry run, and a run without --force (bd
+// only counts), delete nothing.
+func judgeBdSweep(in bdClassGuardInput) bdClassGuard {
+	if in.args.Bool("--dry-run") || !in.args.Bool("--force") {
+		return in.pass()
+	}
+	if in.args.Bool("--ignore-references") {
+		return in.refuse("gc bd %s --ignore-references: refused on this split city: it also deletes closed beads that open beads still cite, and gc does not check the beads bd selects one by one. Delete such a bead with gc bd delete <id> --force, which gc checks against the class binding. Nothing was written.", in.path)
+	}
+	value, _ := in.args.Last("--older-than")
+	if value == "" {
+		return in.refuse("gc bd %s: refused on this split city: without --older-than it deletes closed beads whatever their age, including one closed a moment ago that an open cross-store drain gate in the class binding still waits on, and gc cannot check the beads bd selects one by one. Add --older-than %gh (or longer). Nothing was written.", in.path, bdSweepMinAge.Hours())
+	}
+	age, err := bdOlderThanAge(value)
+	if err != nil {
+		return in.refuse("gc bd %s: refused on this split city: --older-than %q is not an age bd reads (%v). Nothing was written.", in.path, value, err)
+	}
+	if age < bdSweepMinAge {
+		return in.refuse("gc bd %s --older-than %s: refused on this split city: an age under %gh reaches beads closed so recently that an open cross-store drain gate in the class binding may still wait on one, and gc cannot check the beads bd selects one by one. Use --older-than %gh or longer. Nothing was written.", in.path, value, bdSweepMinAge.Hours(), bdSweepMinAge.Hours())
+	}
+	return in.pass()
+}
+
+// bdOlderThanAge reads a purge or prune --older-than value as bd does
+// (parseOlderThan, bd 1.3.2 and 1.3.0 Enterprise): a bare number is days, Nd
+// and Nw are days and weeks, and anything else is a Go duration, the unit
+// letters in either case. A day count that is not positive is an error, as in
+// bd 1.3.2; the Enterprise build does not check it, and there a negative count
+// large enough wraps around to a short age.
+func bdOlderThanAge(value string) (time.Duration, error) {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return 0, errors.New("empty duration")
+	}
+	maxDays := math.MaxInt64 / int64(24*time.Hour)
+	days := func(n int64) (time.Duration, error) {
+		switch {
+		case n <= 0:
+			return 0, errors.New("duration must be positive")
+		case n > maxDays:
+			return 0, fmt.Errorf("duration out of range (at most %d days)", maxDays)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return days(int64(n))
+	}
+	switch unit := s[len(s)-1]; unit {
+	case 'd', 'D', 'w', 'W':
+		n, err := strconv.Atoi(s[:len(s)-1])
+		if err != nil {
+			return 0, fmt.Errorf("invalid number %q", s[:len(s)-1])
+		}
+		count := int64(n)
+		if unit == 'w' || unit == 'W' {
+			if count > maxDays/7 || count < -maxDays/7 {
+				return 0, fmt.Errorf("duration out of range (at most %d days)", maxDays)
+			}
+			count *= 7
+		}
+		return days(count)
+	}
+	age, err := time.ParseDuration(strings.ToLower(s))
+	if err != nil {
+		return 0, err
+	}
+	if age <= 0 {
+		return 0, errors.New("duration must be positive")
+	}
+	return age, nil
 }
 
 // judgeBdInit refuses an issue prefix inside a class binding's reserved

@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -101,6 +102,17 @@ func TestGcBdRefusesAClassFlipOnASplitCity(t *testing.T) {
 		{"import a pre-split archive", withFile("archive.jsonl",
 			`{"id":"demo-1","title":"w","issue_type":"task"}`+"\n"+`{"id":"demo-2","title":"s","issue_type":"session","labels":["gc:session"]}`+"\n",
 			"import", "archive.jsonl"), "--skip-infra"},
+		// bd imports every line as an issue except the _schema header and an
+		// exact `"_type":"memory"`, so these rows are judged like any other.
+		{"import a row whose _type is not issue", withFile("archive.jsonl",
+			`{"_type":"x","id":"demo-1","title":"m","issue_type":"message"}`+"\n",
+			"import", "archive.jsonl"), "1 messaging"},
+		{"import a row whose _type is Issue", withFile("archive.jsonl",
+			`{"_type":"Issue","id":"demo-1","title":"s","labels":["gc:session"]}`+"\n",
+			"import", "archive.jsonl"), "1 sessions"},
+		{"import a row whose _TYPE is memory", withFile("archive.jsonl",
+			`{"_TYPE":"memory","id":"demo-1","title":"w","labels":["wisp"]}`+"\n",
+			"import", "archive.jsonl"), "1 graph"},
 		{"import with no file", args("import"), "name the file"},
 		{"batch create message", withFile("ops.txt", "close demo-abc done\ncreate message 2 hello there\n", "batch", "-f", "ops.txt"), "messaging-class"},
 		{"batch update an unknown key", withFile("ops.txt", "update demo-abc type=message\n", "batch", "--file=ops.txt"), "does not know"},
@@ -203,6 +215,45 @@ func TestGcBdImportSkipInfraImportsOnlyTheWorkRows(t *testing.T) {
 	w = bdParityWrites(res.bd)
 	if res.code != 0 || len(w) != 1 || !strings.Contains(w[0], "import archive.jsonl") || strings.Contains(w[0], "--skip-infra") {
 		t.Fatalf("single-store: exit %d, bd ran %v; want the original import without the gc flag; stderr=%q", res.code, w, res.stderr)
+	}
+}
+
+// TestSplitBdImportRowsMirrorsBdsDispatch: the import judge reads each line as
+// bd's import does (parseImportRecords): a line with a _schema key is the
+// header and an exact `"_type":"memory"` is a memory record, both left to bd
+// unjudged; every other line is an issue, classified, and its dependencies
+// checked, whatever else its _type says.
+func TestSplitBdImportRowsMirrorsBdsDispatch(t *testing.T) {
+	archive := strings.Join([]string{
+		`{"_schema":"beads-jsonl/1","_dolt_branch":"main","_sort":"stable-v1"}`,
+		`{"_type":"memory","key":"k","value":"v"}`,
+		`{"_type":"x","id":"demo-2","title":"m","issue_type":"message"}`,
+		`{"_type":"Issue","id":"demo-3","title":"s","labels":["gc:session"]}`,
+		`{"_TYPE":"memory","id":"demo-4","title":"w","labels":["wisp"]}`,
+		`{"_type":"memory ","id":"demo-5","title":"n","issue_type":"session"}`,
+		`{"_type":5,"id":"demo-6","title":"t","issue_type":"task","dependencies":[{"depends_on_id":"demo-8"}]}`,
+		`{"_type":"issue","id":"demo-7","title":"t","parent":"demo-9"}`,
+		`{"id":"demo-10","title":"gone","status":"tombstone","labels":["gc:session"],"dependencies":[{"depends_on_id":"demo-11"}]}`,
+		`{"id":"demo-12","title":"g","STATUS":"tombstone","issue_type":"message"}`,
+		`{"id":"demo-13","title":"h","status":"Tombstone","labels":["gc:session"]}`,
+	}, "\n") + "\n"
+	split, problem := splitBdImportRows([]byte(archive), workStoreClassHolds(splitGuardTestCity()))
+	if problem != "" {
+		t.Fatal(problem)
+	}
+	if split.skipped != 5 || formatClassCounts(split.byClass) != "1 graph, 1 messaging, 3 sessions" {
+		t.Errorf("left out %d row(s) (%s), want the 5 infrastructure rows bd imports as issues", split.skipped, formatClassCounts(split.byClass))
+	}
+	if len(split.keep) != 6 || !strings.Contains(string(split.keep[0]), "_schema") || !strings.Contains(string(split.keep[1]), `"key":"k"`) {
+		t.Errorf("kept %d line(s), want the header, the memory, the two work rows and the two tombstones: %q", len(split.keep), split.keep)
+	}
+	if !slices.Equal(split.keptIDs, []string{"demo-6", "demo-7"}) || !slices.Equal(split.keptDeps, []string{"demo-8", "demo-9"}) {
+		t.Errorf("kept ids %v and edges %v, want [demo-6 demo-7] and [demo-8 demo-9]", split.keptIDs, split.keptDeps)
+	}
+	for _, line := range []string{`["not","an","object"]`, `{"_type":"x","labels":"gc:session"}`, `{"id":"demo-14","title":"s","status":5}`} {
+		if _, problem := splitBdImportRows([]byte(line+"\n"), workStoreClassHolds(splitGuardTestCity())); problem == "" {
+			t.Errorf("a line bd cannot import was not refused: %s", line)
+		}
 	}
 }
 

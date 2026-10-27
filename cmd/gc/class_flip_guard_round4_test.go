@@ -59,6 +59,40 @@ func TestGcBdSplitCreateParentInheritsLabels(t *testing.T) {
 	if g.refusal != "" {
 		t.Fatalf("--no-inherit-labels was still judged on the parent's labels: %q", g.refusal)
 	}
+
+	// The edge rule finds a parent in any of the city's work stores, but bd
+	// copies the labels of the parent its own store holds: a parent this
+	// store's read does not find exactly is refused, never judged as one
+	// with no labels.
+	deps = splitTestDeps(nil, func(id string) (beads.Bead, bdReadResult) {
+		switch id {
+		case "demo-2":
+			return beads.Bead{}, bdReadFailed
+		case "demo-3":
+			return beads.Bead{}, bdReadCollision
+		}
+		return beads.Bead{}, bdReadNotFound
+	})
+	deps.endpoints = func(ids []string) map[string]bdReadResult {
+		out := map[string]bdReadResult{}
+		for _, id := range ids {
+			out[id] = bdReadFound
+		}
+		return out
+	}
+	for parentID, want := range map[string]string{"demo-2": "could not read", "demo-3": "a short or partial id", "demo-4": `no bead "demo-4"`} {
+		g = bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"create", "--title", "child", "--parent", parentID}, deps)
+		if !strings.Contains(g.refusal, want) {
+			t.Errorf("create --parent %s: refusal = %q, want %q", parentID, g.refusal, want)
+		}
+		g = bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"create", "--title", "child", "--parent", parentID, "--no-inherit-labels"}, deps)
+		if g.refusal != "" {
+			t.Errorf("create --parent %s --no-inherit-labels inherits nothing but was refused: %q", parentID, g.refusal)
+		}
+	}
+	if g = bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"create", "--title", "child", "--parent", ""}, deps); g.refusal != "" {
+		t.Errorf("create --parent \"\" names no parent but was refused: %q", g.refusal)
+	}
 }
 
 // TestGcBdSplitDeleteRefusesABindingDependency: deleting a work bead a
@@ -162,11 +196,12 @@ func TestBdOpenCrossStoreGatesNaming(t *testing.T) {
 	}
 }
 
-// TestReaperPurgeAgeStaysAboveTheGateSweep pins the delete guard's other half:
-// the core reaper deletes closed beads (purge, prune) through gc bd without
-// the dependency check, which is safe only while its ages stay far above the
-// gate-sweep interval that releases a binding gate whose work dependency
-// closed.
+// TestReaperPurgeAgeStaysAboveTheGateSweep pins the age gc holds gc bd purge
+// and gc bd prune to on a split city (bdSweepMinAge): it stays far above the
+// gate-sweep interval that releases a class-binding gate once its work
+// blocker closes, and the core reaper's default ages for its purge
+// (PURGE_AGE) and its session prune (SESSION_PURGE_AGE) meet it, so the
+// reaper's calls at those ages pass the judge on every pinned build.
 func TestReaperPurgeAgeStaysAboveTheGateSweep(t *testing.T) {
 	sweep := readBundledPackFileForTest(t, "core", "orders/gate-sweep.toml")
 	m := regexp.MustCompile(`(?m)^interval\s*=\s*"([^"]+)"`).FindStringSubmatch(sweep)
@@ -177,18 +212,45 @@ func TestReaperPurgeAgeStaysAboveTheGateSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if bdSweepMinAge < 1000*interval {
+		t.Errorf("the purge and prune age floor %s is not well above the gate-sweep interval %s (want >= 1000x)", bdSweepMinAge, interval)
+	}
 	reaper := readBundledPackFileForTest(t, "core", "assets/scripts/reaper.sh")
-	for _, name := range []string{"PURGE_AGE", "SESSION_PURGE_AGE", "STALE_ISSUE_AGE"} {
+	ages := map[string]string{}
+	for _, name := range []string{"PURGE_AGE", "SESSION_PURGE_AGE"} {
 		m := regexp.MustCompile(`(?m)^` + name + `="\$\{GC_REAPER_` + name + `:-([0-9a-z]+)\}"`).FindStringSubmatch(reaper)
 		if m == nil {
 			t.Fatalf("reaper.sh has no %s default", name)
 		}
-		age, err := time.ParseDuration(m[1])
-		if err != nil {
-			t.Fatal(err)
+		if age, err := bdOlderThanAge(m[1]); err != nil || age < bdSweepMinAge {
+			t.Errorf("reaper %s defaults to %s (%v), under the split-city purge and prune floor %s", name, m[1], err, bdSweepMinAge)
 		}
-		if age < 1000*interval {
-			t.Errorf("reaper %s %s is not well above the gate-sweep interval %s (want >= 1000x)", name, age, interval)
+		ages[name] = m[1]
+	}
+	// The reaper's two calls, as reap_scope_purge and the session prune
+	// build them, at those ages.
+	for _, built := range []string{
+		`(purge "$PURGE_PLANE_FLAG" --older-than "$PURGE_AGE" --json)`,
+		`(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")`,
+	} {
+		if !strings.Contains(reaper, built) {
+			t.Fatalf("reaper.sh no longer builds %s; update the calls this test judges", built)
+		}
+	}
+	calls := [][]string{
+		{"purge", "--wisps-plane", "--older-than", ages["PURGE_AGE"], "--json", "--force", "--limit", "500"},
+		{"purge", "--wisps-plane", "--older-than", ages["PURGE_AGE"], "--json", "--dry-run"},
+		{"prune", "--pattern", "gm-*", "--older-than", ages["SESSION_PURGE_AGE"], "--force", "--json"},
+		{"prune", "--pattern", "gm-*", "--older-than", ages["SESSION_PURGE_AGE"], "--dry-run", "--json"},
+	}
+	for _, inv := range bdflags.Inventories() {
+		deps := splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadFailed })
+		pinned := inv
+		deps.inventory = func() (*bdflags.Inventory, error) { return pinned, nil }
+		for _, argv := range calls {
+			if g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), argv, deps); g.refusal != "" {
+				t.Errorf("%s: the reaper's gc bd %s is refused on a split city: %s", inv.Name, strings.Join(argv, " "), g.refusal)
+			}
 		}
 	}
 }

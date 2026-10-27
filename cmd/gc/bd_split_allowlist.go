@@ -135,13 +135,13 @@ var bdSplitAllowlist = map[string]bdSplitCommand{
 	"promote":      {why: "moves a wisp row to the durable table with its type, labels and metadata unchanged"},
 	"duplicate":    {judge: judgeBdEdgeVerb, why: "closes the bead and records an edge; both endpoints must be work-store beads"},
 	"supersede":    {judge: judgeBdEdgeVerb, why: "closes the bead and records an edge; both endpoints must be work-store beads"},
-	"purge":        {why: "deletes closed ephemeral beads (the core reaper)"},
-	"prune":        {why: "deletes old closed beads (the core reaper)"},
+	"purge":        {judge: judgeBdSweep, why: "deletes closed wisps (the core reaper); bd's dry run does not name them, so gc cannot check them against the class binding one by one, and a run that deletes must give an --older-than of at least a week, which keeps it clear of a bead an open cross-store drain gate still waits on"},
+	"prune":        {judge: judgeBdSweep, why: "deletes old closed beads (the core reaper's session prune); held to age as purge, and --ignore-references is refused"},
 	"gate create":  {judge: judgeBdEdgeVerb, why: "mints a type=gate bead (work class); its --type is the gate's await type; the bead it --blocks must be a work-store bead"},
 	"gate resolve": {why: "closes a gate"},
 	"gate check":   {why: "resolves and escalates gates (the core gate-sweep order)"},
-	"mol wisp gc":  {why: "closes abandoned wisps and purges closed ones in the work store (the deacon prompt); it mints nothing and rewrites no class field"},
-	"mol burn":     {why: "closes or deletes a molecule (gastown patrols); binding residents are refused by the by-id door"},
+	"mol wisp gc":  {judge: judgeBdMolWispGC, why: "deletes abandoned wisps (the deacon prompt); refused when a class-binding bead depends on one of the wisps bd's own dry run selects, and otherwise forwarded as bd's delete of exactly the wisps gc checked; --closed --force and an --age under an hour are refused"},
+	"mol burn":     {judge: judgeBdMolBurn, why: "deletes a molecule (gastown patrols); every id must name exactly one work-store bead, and it is refused when a class-binding bead depends on a bead it could delete: the molecule's beads and, for a persistent molecule, every bead that depends on one of them; binding residents are refused by the by-id door"},
 	"backup sync":  {why: "pushes the store to its backup; writes nothing into the store"},
 	"backup init":  {why: "configures the backup destination (the dolt pack's backup order)"},
 	"dolt start":   {why: "starts the scope's server"},
@@ -572,6 +572,12 @@ type bdClassGuardDeps struct {
 	// templates lists the work store's template-labeled beads (bd's legacy
 	// proto lookup for a mol-* name).
 	templates func() ([]beads.Bead, error)
+	// bdRead runs a read-only bd command exactly as gc bd would run the
+	// command being judged (the scope's bd binary, root and environment) and
+	// returns its stdout. The delete-shaped judges ask bd itself which beads
+	// it would remove: a molecule's members (`list --parent`) and the wisps a
+	// wisp gc selects (its own --dry-run).
+	bdRead func(args ...string) ([]byte, error)
 }
 
 // bdClassGuardInput is everything a judge may consult.

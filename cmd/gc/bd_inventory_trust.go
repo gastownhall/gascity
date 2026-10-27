@@ -19,6 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -97,13 +99,15 @@ func statBdBinary(bdPath string) (bdBinaryID, error) {
 	if abs, err = filepath.Abs(abs); err != nil {
 		return bdBinaryID{}, err
 	}
-	var st syscall.Stat_t
-	if err := syscall.Stat(abs, &st); err != nil {
+	// x/sys/unix, not syscall: syscall.Stat_t names the times Mtimespec and
+	// Ctimespec on darwin, unix.Stat_t names them Mtim and Ctim everywhere.
+	var st unix.Stat_t
+	if err := unix.Stat(abs, &st); err != nil {
 		return bdBinaryID{}, fmt.Errorf("reading bd binary %s: %w", abs, err)
 	}
 	return bdBinaryID{
 		Path:  abs,
-		Dev:   uint64(st.Dev), //nolint:unconvert // Dev's type varies by platform
+		Dev:   uint64(st.Dev), //nolint:unconvert // Darwin's field is signed int32.
 		Ino:   st.Ino,
 		Size:  st.Size,
 		MTime: st.Mtim.Nano(),
@@ -742,6 +746,44 @@ func bdBindingDependents(cityPath string, ids []string) (map[string][]string, er
 			return nil, err
 		}
 		out[id] = append(out[id], gates...)
+	}
+	return out, nil
+}
+
+// bdGuardReadTimeout bounds one bd read a split-city judge makes.
+var bdGuardReadTimeout = 2 * time.Minute
+
+// bdGuardRead runs a read-only bd command for a split-city judge exactly as
+// doBd runs the command it judges: the scope's bd binary, in the scope root,
+// with the passthrough's environment. It returns bd's stdout. The run is its
+// own process group, killed whole on timeout.
+func bdGuardRead(cityPath string, cfg *config.City, target execStoreTarget, args []string) ([]byte, error) {
+	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
+	if err != nil {
+		return nil, err
+	}
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bdGuardReadTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bdPath, args...)
+	cmd.Dir = target.ScopeRoot
+	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, bdTruncateUTF8(strings.TrimSpace(stderr.String()), 400))
 	}
 	return out, nil
 }

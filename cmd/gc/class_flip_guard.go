@@ -338,7 +338,7 @@ const bdImportSkipInfraFlag = "--skip-infra"
 
 // bdImportSplit is a bd export JSONL split by class.
 type bdImportSplit struct {
-	keep    [][]byte // rows of a class the store holds, and non-issue records such as memories
+	keep    [][]byte // rows of a class the store holds, and the lines bd imports as no issue (the header, memories)
 	skipped int      // issue rows of a class the store does not hold
 	byClass map[coordclass.Class]int
 	// keptIDs are the kept issue rows' ids; keptDeps every depends_on_id
@@ -347,10 +347,43 @@ type bdImportSplit struct {
 	keptDeps []string
 }
 
+// bdImportNonIssueLine reports whether bd's import reads a JSONL line as
+// something other than an issue, mirroring bd's dispatch exactly
+// (parseImportRecords in cmd/bd/import.go, bd 1.3.2 and 1.3.0 Enterprise): a
+// line carrying a _schema key is the export header and is skipped, a line
+// whose _type key — that exact spelling — holds the string "memory" is a
+// memory record, and an issue whose status is "tombstone" is skipped. bd
+// imports every other line as an issue, whatever else its _type says.
+func bdImportNonIssueLine(raw []byte) (bool, error) {
+	var peek map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		return false, err
+	}
+	if _, header := peek["_schema"]; header {
+		return true, nil
+	}
+	if kind, ok := peek["_type"]; ok {
+		var s string
+		if json.Unmarshal(kind, &s) == nil && s == "memory" {
+			return true, nil
+		}
+	}
+	// bd decodes the issue with encoding/json, as here, and a status that is
+	// not a string fails its whole import.
+	var issue struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &issue); err != nil {
+		return false, err
+	}
+	return issue.Status == "tombstone", nil
+}
+
 // splitBdImportRows splits a bd export JSONL into the lines to keep and counts
 // the rest by class. A row is kept when the target store HOLDS its class — on
 // a split city's work store that is work plus any class the city leaves on
-// work — not merely when it is work.
+// work — not merely when it is work. Every line bd imports as an issue is
+// classified (bdImportNonIssueLine decides which those are).
 func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, string) {
 	split := bdImportSplit{byClass: map[coordclass.Class]int{}}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -362,8 +395,16 @@ func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, st
 		if len(raw) == 0 {
 			continue
 		}
+		nonIssue, err := bdImportNonIssueLine(raw)
+		if err != nil {
+			return bdImportSplit{}, fmt.Sprintf("line %d is not a JSON object gc can classify (%v)", line, err)
+		}
+		keepLine := append([]byte(nil), raw...)
+		if nonIssue {
+			split.keep = append(split.keep, keepLine)
+			continue
+		}
 		var row struct {
-			Kind         string           `json:"_type"`
 			ID           string           `json:"id"`
 			Type         string           `json:"issue_type"`
 			Labels       []string         `json:"labels"`
@@ -375,11 +416,6 @@ func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, st
 		}
 		if err := json.Unmarshal(raw, &row); err != nil {
 			return bdImportSplit{}, fmt.Sprintf("line %d is not a JSON object gc can classify (%v)", line, err)
-		}
-		keepLine := append([]byte(nil), raw...)
-		if row.Kind != "" && row.Kind != "issue" {
-			split.keep = append(split.keep, keepLine)
-			continue
 		}
 		b := beads.Bead{Type: row.Type, Labels: row.Labels}
 		if row.Metadata != nil {

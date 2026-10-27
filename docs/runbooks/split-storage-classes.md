@@ -316,8 +316,8 @@ gc serves its own `release-if-current` itself.
 **Writes that change no field the class depends on:** `close`, `reopen`,
 `assign`, `priority`, `note`, `comment`, `comments add`,
 `heartbeat`, `unclaim`, `reclaim`, `defer`, `undefer`, `dep remove`,
-`dep unrelate`, `promote`, `purge`, `prune`, `gate resolve`, `gate check`,
-`mol burn`, `mol wisp gc`, `backup sync`, `backup init`, `dolt start`,
+`dep unrelate`, `promote`, `gate resolve`, `gate check`,
+`backup sync`, `backup init`, `dolt start`,
 `dolt stop`, `dolt push`, `dolt commit`, and `init` (only `--prefix`,
 `--non-interactive`, `--skip-hooks`, `--skip-agents`, `--init-if-missing` and
 `--recreate-missing`).
@@ -326,7 +326,9 @@ gc serves its own `release-if-current` itself.
 
 - `create` and `q`: the new bead's type, labels and metadata are classified,
   including a `--metadata @file`, which gc reads, and the labels bd copies
-  from a `--parent` (unless `--no-inherit-labels`). An `--id` inside a class
+  from a `--parent` (unless `--no-inherit-labels`). bd copies the labels of
+  the parent its own store holds, so a parent that store's read does not find
+  exactly is refused. An `--id` inside a class
   binding's reserved namespace is refused. `create --graph` is refused: a
   graph plan mints a bead per node and no shipped workflow uses it.
 - `delete` (positionals and `--from-file`): every id must name exactly one
@@ -344,7 +346,49 @@ gc serves its own `release-if-current` itself.
   touches type, labels or metadata is refused.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
-  with `--skip-infra`.
+  with `--skip-infra`. gc reads the file the way bd's import does: a line
+  with a `_schema` key is the export header, a line whose `_type` key is
+  exactly `"memory"` is a memory record, and a row whose status is
+  `tombstone` is skipped. bd imports every other line as an issue, whatever
+  else its `_type` says, so gc classifies every other line.
+- `mol burn` (the gastown patrols): every id must name exactly one bead of
+  the work store, as for `delete`. The burn is refused when a class-binding
+  bead depends on, or an open cross-store drain gate waits on, the molecule
+  or any bead bd lists below it (`bd list --parent`, recursively), because
+  bd deletes all of them at once. For a persistent (non-wisp) molecule it is
+  also refused when one waits on a bead that depends on any of those,
+  through any edge (`bd dep list --direction=up`, transitively): on a
+  proxied-server store bd's burn deletes those beads too. `--dry-run`
+  deletes nothing.
+- `mol wisp gc` (the deacon prompt): gc first asks bd which wisps the same
+  command would delete (it runs it with `--dry-run --json`). It refuses when
+  a class-binding bead depends on, or an open cross-store drain gate waits
+  on, any of them. Otherwise gc has bd delete exactly the wisps it checked
+  (`bd delete --force`, which prints delete's report) instead of running the
+  gc, which would select again: a wisp that becomes a candidate after the
+  check is left for the next gc, and a checked wisp that a second dry run no
+  longer selects is left out. `--closed --force`, which deletes every closed
+  wisp whatever its age, is refused. So is an `--age` under an hour (bd's
+  default): a shorter age reaches wisps closed so recently that the gate
+  sweep may not yet have released the class-binding gates waiting on them,
+  and gc would refuse the whole gc while one of those gates is open.
+- `purge` and `prune` (the core reaper's purge and session prune): bd
+  deletes the closed beads it selects all at once, and its dry run counts
+  them without naming them, so gc cannot check each one against the class
+  binding as it does for `delete`. gc holds a run that deletes (`--force`
+  without `--dry-run`) to age instead: it must give `--older-than`, which gc
+  reads as bd does (`7`, `7d`, `1w`, `168h`), and an age under a week (168h)
+  is refused, as is `prune --ignore-references`. The gate sweep, which runs
+  every 30 seconds, releases a class-binding gate once its work blocker
+  closes, so a bead closed a week ago is clear of the open cross-store drain
+  gates unless the sweep has not run since then. The reaper's default ages
+  (`GC_REAPER_PURGE_AGE` 168h, `GC_REAPER_SESSION_PURGE_AGE` 720h) meet that
+  floor. Set either one under 168h and that reaper step's `gc bd` call is
+  refused each time the step runs: the reaper records an anomaly, and gc
+  records a `gc_bd.refused` event. Age does not cover a dependency edge that a
+  class-binding bead itself holds on a closed work bead (a migration can carry
+  such edges into the binding): `purge` and `prune` can delete that work bead
+  and leave the edge dangling.
 - `batch`: every `create` line is classified.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
@@ -382,11 +426,6 @@ refused, `mol fart` and `protomolecule` included.
 There is no override flag for these. gc cannot verify a backup's age or a
 merged revision's contents against the split, so these commands stay refused.
 No refusal sends you around gc: going around it would skip every check above.
-
-`prune` and `purge` (the core reaper) remove closed work beads without the
-`delete` check. That is safe while their ages (a week and more) stay far above
-the gate-sweep interval (30 seconds) that releases a binding gate once its
-work dependency closes; `TestReaperPurgeAgeStaysAboveTheGateSweep` pins that.
 
 Every refusal also writes a `gc_bd.refused` event to the city's event log,
 with the command path, the verb, the scope, the caller (`GC_AGENT`) and the

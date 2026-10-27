@@ -613,6 +613,43 @@ func TestBdInventoryDoctorRewalksVouchedBinaries(t *testing.T) {
 	if r.Status != doctor.StatusWarning || !strings.Contains(strings.Join(r.Details, "\n"), "is ignored") {
 		t.Fatalf("a malformed vouch file: %+v", r)
 	}
+	// gc bd works there: a starting controller records no
+	// gc_bd.uninventoried, the event that says it does not.
+	if ev := bdInventoryStartFinding(newBdInventoryCheck(c.city, cfg)); ev != nil {
+		t.Fatalf("a malformed vouch file with every bd matching produced a controller-start finding: %+v", ev)
+	}
+}
+
+// TestBdInventoryDoctorWalksEachBinaryOnce: gc doctor checks what the cache or
+// a vouch claims with a real walk, but a claim that was itself a walk (a cache
+// miss) is not walked again.
+func TestBdInventoryDoctorWalksEachBinaryOnce(t *testing.T) {
+	c := newBdParityCity(t, bdParityOpts{storage: bdSQLRefusalSplitStorage})
+	cfg, err := loadBdPassthroughConfig(c.city, os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"walk", "cache", "vouched"} {
+		forced := 0
+		check := newBdInventoryCheck(c.city, cfg)
+		check.resolve = func(_, _ string, opts bdTrustOpts) (bdTrustVerdict, error) {
+			if opts.forceWalk {
+				forced++
+				return bdTrustVerdict{Inventory: "bd-1.3.2", Source: "walk"}, nil
+			}
+			return bdTrustVerdict{Inventory: "bd-1.3.2", Source: source}, nil
+		}
+		if r := check.Run(&doctor.CheckContext{CityPath: c.city}); r.Status != doctor.StatusOK {
+			t.Fatalf("claim from %s: %+v", source, r)
+		}
+		want := 1
+		if source == "walk" {
+			want = 0
+		}
+		if forced != want {
+			t.Errorf("claim from %s: the doctor forced %d walk(s), want %d", source, forced, want)
+		}
+	}
 }
 
 // TestBdTrustWalkScratchAndReadOnlyCity: bd's HOME, cwd and TMPDIR are a

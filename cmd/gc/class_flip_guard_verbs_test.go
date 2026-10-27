@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -375,7 +377,8 @@ func slicesContainsString(xs []string, want string) bool {
 }
 
 // splitTestDeps are guard deps for a split-city unit test: the pinned bd 1.3.2,
-// no bead held by the binding, no template beads.
+// no bead held by the binding, no template beads, and a bd that lists no
+// molecule members, no dependents and no abandoned wisps.
 func splitTestDeps(stdin io.Reader, read func(string) (beads.Bead, bdReadResult)) bdClassGuardDeps {
 	return bdClassGuardDeps{
 		stdin:             stdin,
@@ -384,6 +387,40 @@ func splitTestDeps(stdin io.Reader, read func(string) (beads.Bead, bdReadResult)
 		held:              func([]string) (map[string]bool, error) { return map[string]bool{}, nil },
 		bindingDependents: func([]string) (map[string][]string, error) { return map[string][]string{}, nil },
 		templates:         func() ([]beads.Bead, error) { return nil, nil },
+		bdRead:            fakeBdRead(nil, nil, nil),
+	}
+}
+
+// fakeBdRead is a bd answering the judges' reads as bd's JSON does: a `list
+// --parent=<id>` with the beads children[id] names, a `dep list
+// --direction=up --json <id>...` with the beads dependents[id] names for
+// every id it asks about, and the --dry-run --json of a `mol wisp gc` with
+// wisps as the ids it would clean. Any other read is an error.
+func fakeBdRead(children, dependents map[string][]string, wisps []string) func(args ...string) ([]byte, error) {
+	return func(args ...string) ([]byte, error) {
+		if len(args) > 1 && args[0] == "list" {
+			if parent, ok := strings.CutPrefix(args[1], "--parent="); ok {
+				rows := []map[string]string{}
+				for _, id := range children[parent] {
+					rows = append(rows, map[string]string{"id": id})
+				}
+				return json.Marshal(rows)
+			}
+		}
+		if up := []string{"dep", "list", "--direction=up", "--json"}; len(args) > len(up) && slices.Equal(args[:len(up)], up) {
+			rows := []map[string]string{}
+			for _, id := range args[len(up):] {
+				for _, d := range dependents[id] {
+					rows = append(rows, map[string]string{"id": d, "dependency_type": "blocks"})
+				}
+			}
+			return json.Marshal(rows)
+		}
+		if strings.Contains(strings.Join(args, " "), "mol wisp gc") && len(args) >= 2 && slices.Equal(args[len(args)-2:], []string{"--dry-run", "--json"}) {
+			cleaned := append([]string{}, wisps...)
+			return json.Marshal(map[string]any{"cleaned_ids": cleaned, "cleaned_count": 0, "dry_run": true})
+		}
+		return nil, fmt.Errorf("the fake bd has no answer for %v", args)
 	}
 }
 

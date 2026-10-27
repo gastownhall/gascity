@@ -596,6 +596,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			}
 			return classGuardStore.List(beads.ListQuery{Label: "template", IncludeClosed: true, AllowScan: true})
 		},
+		bdRead: func(args ...string) ([]byte, error) {
+			return bdGuardRead(cityPath, cfg, target, args)
+		},
 		read: func(id string) (beads.Bead, bdReadResult) {
 			if classGuardStore == nil {
 				classGuardStore = bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
