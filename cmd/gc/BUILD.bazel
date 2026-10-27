@@ -1671,6 +1671,7 @@ go_test(
         "order_dispatch_suppression_test.go",
         "order_dispatch_test.go",
         "order_dispatch_tracking_index_race_test.go",
+        "order_dispatch_unscoped_wisp_sweep_test.go",
         "order_dynamic_integration_test.go",
         "order_enabled_filter_test.go",
         "order_gate_budget_test.go",
