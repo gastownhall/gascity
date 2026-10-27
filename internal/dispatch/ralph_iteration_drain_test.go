@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,5 +176,83 @@ func TestCompiledRalphIterationDrainNoNextIterationWhileSiblingRuns(t *testing.T
 				requireNoIteration(t, fx.ledger(t), 2)
 			})
 		}
+	}
+}
+
+// requireDrainPending asserts the state a failed member leaves while its
+// claimed sibling runs: the control open, nothing logged, blocked on the
+// sibling, and the sibling untouched.
+func requireDrainPending(t *testing.T, ledger []ledgerBead, sibling ledgerBead) {
+	t.Helper()
+	control := ledgerBeadByRefSuffix(t, ledger, ".loop")
+	if control.Status != "open" {
+		t.Errorf("ralph control status = %s, want open while %s runs", control.Status, sibling.ID)
+	}
+	if log := control.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+		t.Errorf("ralph control gc.attempt_log = %s, want empty while %s runs", log, sibling.ID)
+	}
+	if !slices.Contains(control.Blocks, "blocks:"+sibling.ID) {
+		t.Errorf("ralph control deps = %v, want a blocks edge to %s", control.Blocks, sibling.ID)
+	}
+	now := ledgerBeadByRefSuffix(t, ledger, strings.TrimPrefix(sibling.ID, "ref:"))
+	if now.Status != "in_progress" || now.Assignee != ralphDrainClaimant {
+		t.Errorf("%s status=%s assignee=%q, want in_progress/%s", now.ID, now.Status, now.Assignee, ralphDrainClaimant)
+	}
+}
+
+// requireOneIteration asserts exactly one set of the loop's iteration n: the
+// body and one bead per child.
+func requireOneIteration(t *testing.T, ledger []ledgerBead, n int) {
+	t.Helper()
+	prefix := "loop.iteration." + strconv.Itoa(n)
+	for _, suffix := range []string{prefix, prefix + ".alpha", prefix + ".beta"} {
+		if got := len(ledgerBeadsByRefSuffix(ledger, suffix)); got != 1 {
+			t.Errorf("beads with step_ref suffix %q = %d, want 1", suffix, got)
+		}
+	}
+}
+
+// compiledRalphDrainFanoutFormula gives alpha an on_complete fanout. A failed
+// source closes its fanout failed, and that exempt control settles the
+// iteration with a forced body close, which no store's close policy refuses.
+var compiledRalphDrainFanoutFormula = strings.Replace(compiledRalphDrainFormula, `id = "alpha"
+title = "Alpha"
+`, `id = "alpha"
+title = "Alpha"
+
+[steps.children.on_complete]
+for_each = "output.items"
+bond = "ralph-drain-item"
+`, 1)
+
+// TestCompiledRalphIterationDrainForcedSettle pins AC-5: the forced settle
+// still closes the iteration failed, on a store that refuses unforced closes
+// of blocked beads as well, and the loop still waits for the claimed sibling.
+func TestCompiledRalphIterationDrainForcedSettle(t *testing.T) {
+	t.Parallel()
+	bdPolicy := ralphDrainStore{name: "bd-close-policy", open: func(*testing.T) beads.Store { return newBdClosePolicyStore() }}
+	for _, st := range []ralphDrainStore{bdPolicy, sqliteDrainStore()} {
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFanoutFormula)
+			if !ledgerHasRefContaining(fx.ledger(t), "loop.iteration.1.alpha-fanout") {
+				t.Fatal("fixture has no fanout on alpha; the forced settle is not exercised")
+			}
+			beta := fx.claim(t, "loop.iteration.1.beta")
+			fx.finish(t, "loop.iteration.1.alpha", workerFailure(beadmeta.FailureClassTransient, "rate_limited"))
+			fx.serve(t)
+			ledger := fx.ledger(t)
+
+			body := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1")
+			if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("iteration body status=%s outcome=%q, want closed/fail by the forced settle", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			requireNoIteration(t, ledger, 2)
+			requireDrainPending(t, ledger, beta)
+
+			fx.finish(t, "loop.iteration.1.beta", workerPass)
+			fx.serve(t)
+			requireOneIteration(t, fx.ledger(t), 2)
+		})
 	}
 }
