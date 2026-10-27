@@ -2822,15 +2822,21 @@ type sessionSubmitOp struct {
 // under the op key key as a message op under the operator principal on both
 // of its paths (DES-O0API §8.4). While ops.content records, the key (minted
 // when key is empty) goes to the API as its Idempotency-Key, and the API
-// records the op; a call that fails so the CLI falls back proposes the same
-// op id locally: absent, it delivers (legacy:cli); closed, it reports that
-// outcome; open under the API, it reports the API accepted the message and
-// exits 0. The gate is read from the city config before the API call, which
-// that config load reports only as the warning that its [ops] gates were not
-// read: the local path loads it again, as it always has, from the
-// invocation's config memo. Under require the local path checks that the op
-// journal can record before it resolves the target, which may materialize a
-// named session's row.
+// records the op, or proposes it as a lane op when its lane host executes
+// message (api.LaneMessageOpPolicy); a call that fails so the CLI falls
+// back proposes the same op id locally: absent, it delivers (legacy:cli);
+// closed, it reports that outcome; open under the API or its lane host, it
+// reports the API accepted the message and exits 0, a lane op once the
+// fallback has consumed the session's operator hold, as the API's resume:
+// true does (resumeForAcceptedLaneOp), and exits 1 when that resume fails.
+// In a city that lists message the fallback proposes it over any sessions
+// store, the builtin default's SQLite-only recording notwithstanding. The
+// gate is read from the city config before the API call, which that config
+// load reports only as the warning that its [ops] gates were not read: the
+// local path loads it again, as it always has, from the invocation's config
+// memo. Under require the local path checks that the op journal can record
+// before it resolves the target, which may materialize a named session's
+// row.
 func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	defer beginInvocationConfigMemo()()
 	target := args[0]
@@ -2850,10 +2856,11 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	if gateErr != nil {
 		gateCfg = nil
 	}
+	lanePolicy := api.LaneMessageOpPolicy(intent)
 	op := newCLIOp(gateCfg, nil, cliOpRequest{
 		verb: "gc session submit", kind: opjournal.KindMessage, key: key,
 		payload: message, policy: api.MessageOpPolicy(intent),
-		asOperator: true, acceptsAPIOp: true, cfgErr: gateErr,
+		asOperator: true, acceptsAPIOp: true, lanePolicy: &lanePolicy, cfgErr: gateErr,
 		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
 	})
 	if op.recording() && key == "" {
@@ -2927,6 +2934,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		id, k, replayed := op.jsonFields()
 		return emitSessionSubmitResult(stdout, stderr, target, intent, op.replayedQueued(), jsonOutput, sessionSubmitOp{id: id, key: k, replayed: replayed})
 	case cliOpAcceptedByAPI:
+		if err := resumeForAcceptedLaneOp(sessStore, op.apiOp); err != nil {
+			fmt.Fprintf(stderr, "gc session submit: resuming %s for op %s: %v (key %s)\n", target, op.apiOp.ID, err, op.requestKey()) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return emitSessionSubmitAccepted(stdout, stderr, target, intent, op.apiOp.ID, op.requestKey(), jsonOutput)
 	}
 	defer op.end()
@@ -2954,6 +2965,24 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	}
 	id, k, replayed := op.jsonFields()
 	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput, sessionSubmitOp{id: id, key: k, replayed: replayed})
+}
+
+// resumeForAcceptedLaneOp is the resume: true that gc session submit sends
+// with every API call, run for a fallback that found its op, apiOp, open
+// under the API's lane host. The API consumes the session's operator hold
+// only once it has proposed the op (api.acceptMessageLane), so a request
+// that died between the two left the op waiting on the hold: the fallback
+// consumes it now, as the API's same-key retry would. Like that retry, it
+// consumes only a hold stamped by the op's proposal (its created_at):
+// session.Store.ResumeHeld writes nothing once that hold is gone, and a
+// hold the operator placed while the message waits stands. An op the API
+// recorded for its own delivery (legacy:api) resumes in that delivery, so
+// it is left alone.
+func resumeForAcceptedLaneOp(sessStore beads.Store, apiOp opjournal.Op) error {
+	if apiOp.Executor != opjournal.ExecutorLane {
+		return nil
+	}
+	return sessionFrontDoor(sessStore).ResumeHeld(apiOp.Conversation, apiOp.CreatedAt, time.Now().UTC())
 }
 
 // emitSessionSubmitAccepted reports a submit whose local fallback found its

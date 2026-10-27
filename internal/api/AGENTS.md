@@ -443,19 +443,51 @@ adopts it.
   operator, keyed by the Idempotency-Key or a minted one, with
   `LaneMessageOpPolicy` (default and follow_up at the boundary,
   interrupt_now as a deliver-now unit, which never hard-restarts), proposed
-  after a configured named session's row is materialized; `resume: true`
-  first runs the operator wake that consumes the hold. The 202 follows the
-  commit, `request_id` the op id, and the acceptance is recorded before the
-  lane is rung (a refused acceptance cancels the op). The terminal event
+  after a configured named session's row is materialized. `resume: true`
+  consumes the session's operator hold once the op is proposed, and
+  nothing else, recording the session's wake in the same write
+  (`session.Store.ResumeHeld`): no wait is canceled and no will-not-start
+  verdict asked. It consumes only a hold stamped at or before the op's
+  `created_at`, so a hold the operator places while the message waits
+  stands through every retry and the CLI fallback's resume. A proposal
+  that fails leaves the hold in place. A closed, closing or archived
+  session is refused 409 and one draining under the operator's suspend
+  409 `session_stopping` before anything is written
+  (`session.Store.ResumeHeldRefusal`), so the key stays free for a retry.
+  A resume refused once the op is written (the row changed since that
+  read, a revision fence lost on every attempt, a store error) cancels the
+  op the request wrote (it created it, or its create committed and
+  answered an error under a key the request minted) before the lane is
+  rung, and the error says the key is spent: a retry under it reports that
+  op instead of sending again. Never reuse `wakeSession` there: it cancels
+  the session's waits. The 202 follows the commit, `request_id` the op
+  id, and the acceptance is recorded before the lane is rung (a refused
+  acceptance cancels the op; a cancel only requested, the lane host's scan
+  having taken it, is logged). The terminal event
   follows `laneSubmitSettle` (5 s) later through `cityOps.emit`: the
   result, queued false, for an op closed succeeded; `request.failed`
   (`messageReplayErrorCode`) for one closed otherwise; the result, queued
   true, for one still open. A same-key retry of a closed op replays it
-  (`storedReplayAnswer`); of an open lane op it is 202 replayed. extmsg
-  member notices are lane notices from `gc:extmsg`. A session create's
-  initial message (`POST /sessions` with `message`) is an operator lane
-  message op at the boundary under a minted key (`deliverInitialMessage`);
-  only a failed proposal fails the create and rolls it back.
+  (`storedReplayAnswer`); an open lane op is accepted again
+  (`answerLaneMessage`: its acceptance recorded, the lane rung and its
+  terminal event emitted after the retry's cursor, so its `request_id`
+  resolves, 409 `in_flight` while a terminal event of the op's stays
+  kept), its `resume: true` run again first, since the request that wrote
+  the op may have died before its own resume (a hold stamped after the
+  op's `created_at` stands); a resume refused there leaves the op open, as
+  an earlier answer may have accepted it. An open legacy op is 409
+  `in_flight`. A legacy op the key names from before the flip answers only
+  the request it recorded (`sameLegacyMessage`). A
+  message over `opjournal.MaxInlinePayload` (16 KiB) is 422
+  `payload_too_large`. extmsg member notices are lane notices from
+  `gc:extmsg`, their inbound text cut to fit that limit (`extmsgNotice`). A
+  provider session create's initial message (`POST /sessions`, `kind:
+  provider`, with `message`) is an operator lane message op at the boundary
+  under a minted key (`deliverInitialMessage`), refused 422 before anything
+  is created when it is over the limit (`checkInitialMessage`); only a
+  failed proposal fails the create and rolls it back. An agent create's
+  message rides its first start's prompt
+  (`template_overrides.initial_message`) and is no lane op.
 - Run cancel (interrupt listed): one op per holder session with a turn to
   stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
   `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that

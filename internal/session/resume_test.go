@@ -407,6 +407,340 @@ func TestRequestWakeFanInWritesOnce(t *testing.T) {
 	}
 }
 
+// heldUntil is an operator suspend's indefinite held_until.
+const heldUntil = "2099-01-01T00:00:00Z"
+
+// operatorSuspendedRow is an operator's suspend on a dormant row, with extra
+// over it.
+func operatorSuspendedRow(extra map[string]string) map[string]string {
+	meta := map[string]string{"state": string(StateSuspended), "sleep_intent": "user-hold", "held_until": heldUntil, "suspended_at": "2026-10-08T09:00:00Z"}
+	maps.Copy(meta, extra)
+	return meta
+}
+
+// TestResumeHeld: an operator's resume that starts nothing consumes the
+// operator's suspend alone, moves a suspended row asleep and, in the same
+// write, records the explicit wake that row now needs, onto which the lane
+// host's wake request that follows coalesces without a write; a wait's hold
+// and a quarantine stand, and a row nothing suspends is not written. Kills a
+// resume that clears every blocker (the wake's), one that leaves a
+// suspended row suspended (the wake request then reads it not dormant), one
+// that consumes the suspend without the wake (a controller pass then reads
+// the row unheld and unwoken, which closes a pool row), one that records a
+// wake on a row something else still holds, and a write on a row it has
+// nothing to consume on.
+func TestResumeHeld(t *testing.T) {
+	slept := resumeNow.Format(time.RFC3339)
+	for name, tc := range map[string]struct {
+		meta    map[string]string
+		written bool
+		// want is what the row reads after, key by key.
+		want map[string]string
+		// woke is whether the resume recorded the explicit wake itself.
+		woke bool
+		// wake is the answer of the wake request that follows.
+		wake WakeRequestOutcome
+	}{
+		"operator suspend": {
+			meta: operatorSuspendedRow(nil), written: true,
+			want: map[string]string{"state": string(StateAsleep), "slept_at": slept, "sleep_intent": "", "held_until": "", "suspended_at": ""},
+			woke: true, wake: WakeRecorded,
+		},
+		"operator suspend with its hold reason": {
+			meta: operatorSuspendedRow(map[string]string{"sleep_reason": string(SleepReasonUserHold)}), written: true,
+			want: map[string]string{"state": string(StateAsleep), "sleep_reason": ""},
+			woke: true, wake: WakeRecorded,
+		},
+		"soft suspend": {
+			meta: map[string]string{"state": string(StateSuspended)}, written: true,
+			want: map[string]string{"state": string(StateAsleep), "slept_at": slept},
+			woke: true, wake: WakeRecorded,
+		},
+		"operator suspend over a wait keeps the wait's hold": {
+			meta: operatorSuspendedRow(map[string]string{"wait_hold": "true"}), written: true,
+			want: map[string]string{"state": string(StateAsleep), "sleep_intent": "", "held_until": "", "wait_hold": "true"},
+			wake: WakeHeld,
+		},
+		"wait hold": {
+			meta: map[string]string{"wait_hold": "true", "sleep_intent": string(SleepReasonWaitHold)},
+			want: map[string]string{"wait_hold": "true", "sleep_intent": string(SleepReasonWaitHold)},
+			wake: WakeHeld,
+		},
+		"quarantine": {
+			meta: map[string]string{"quarantined_until": heldUntil},
+			want: map[string]string{"quarantined_until": heldUntil},
+			wake: WakeHeld,
+		},
+		"unheld asleep": {wake: WakeRecorded},
+		"running": {
+			meta: map[string]string{"state": string(StateActive), "slept_at": ""},
+			want: map[string]string{"state": string(StateActive)},
+			wake: WakeNotDormant,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, id := coalesceRow(t, policyRow(tc.meta))
+			ss := NewStore(beads.SessionStore{Store: store})
+			rev0, _ := rowRevision(t, store, id)
+			if err := ss.ResumeHeld(id, resumeNow, resumeNow); err != nil {
+				t.Fatalf("ResumeHeld: %v", err)
+			}
+			rev1, meta := rowRevision(t, store, id)
+			if written := rev1 != rev0; written != tc.written {
+				t.Fatalf("revision %d -> %d: written %v, want %v (row %v)", rev0, rev1, written, tc.written, meta)
+			}
+			for k, v := range tc.want {
+				if meta[k] != v {
+					t.Fatalf("%s = %q, want %q (row %v)", k, meta[k], v, meta)
+				}
+			}
+			wantWake, wantAt := "", ""
+			if tc.woke {
+				wantWake, wantAt = string(WakeCauseExplicit), slept
+			}
+			if meta["wake_request"] != wantWake || meta["wake_requested_at"] != wantAt {
+				t.Fatalf("wake_request %q at %q, want %q at %q (row %v)", meta["wake_request"], meta["wake_requested_at"], wantWake, wantAt, meta)
+			}
+			if got, err := ss.RequestWakeUnlessHeld(id, false, resumeNow.Add(time.Second)); err != nil || got != tc.wake {
+				t.Fatalf("RequestWakeUnlessHeld after ResumeHeld = %v, %v; want %v", got, err, tc.wake)
+			}
+			if rev2, after := rowRevision(t, store, id); tc.woke && rev2 != rev1 {
+				t.Fatalf("revision %d -> %d: the wake request wrote over the resume's wake (row %v)", rev1, rev2, after)
+			}
+		})
+	}
+}
+
+// TestResumeHeldRefusesWithoutWriting: a closed row is the wake's
+// *WakeConflictError, a suspended row a drain is stopping wraps
+// ErrSessionStopping, and a CAS lost on every attempt wraps
+// ErrWakeRequestContended, none with a write. Kills a resume that writes
+// over a closed row, one that takes a draining row's runtime from its stop,
+// and exhaustion read as success.
+func TestResumeHeldRefusesWithoutWriting(t *testing.T) {
+	t.Run("closed", func(t *testing.T) {
+		store, id := coalesceRow(t, policyRow(operatorSuspendedRow(nil)))
+		if err := store.Close(id); err != nil {
+			t.Fatal(err)
+		}
+		rev0, _ := rowRevision(t, store, id)
+		var conflict *WakeConflictError
+		if err := NewStore(beads.SessionStore{Store: store}).ResumeHeld(id, resumeNow, resumeNow); !errors.As(err, &conflict) || conflict.State != "closed" {
+			t.Fatalf("ResumeHeld = %v, want *WakeConflictError{closed}", err)
+		}
+		if rev1, _ := rowRevision(t, store, id); rev1 != rev0 {
+			t.Fatalf("revision %d -> %d; want no write", rev0, rev1)
+		}
+	})
+	t.Run("draining", func(t *testing.T) {
+		store, id := coalesceRow(t, policyRow(operatorSuspendedRow(map[string]string{"state": string(StateDraining)})))
+		rev0, _ := rowRevision(t, store, id)
+		if err := NewStore(beads.SessionStore{Store: store}).ResumeHeld(id, resumeNow, resumeNow); !errors.Is(err, ErrSessionStopping) {
+			t.Fatalf("ResumeHeld = %v, want ErrSessionStopping", err)
+		}
+		if rev1, _ := rowRevision(t, store, id); rev1 != rev0 {
+			t.Fatalf("revision %d -> %d; want no write", rev0, rev1)
+		}
+	})
+	t.Run("contended", func(t *testing.T) {
+		stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+		b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: policyRow(operatorSuspendedRow(nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+		if err := NewStore(beads.SessionStore{Store: loser}).ResumeHeld(b.ID, resumeNow, resumeNow); !errors.Is(err, ErrWakeRequestContended) {
+			t.Fatalf("ResumeHeld = %v, want ErrWakeRequestContended", err)
+		}
+	})
+}
+
+// TestResumeHeldRefusalAgreesWithResumeHeld: ResumeHeldRefusal answers, on a
+// read and with no write, the refusal ResumeHeld answers for the same row:
+// none for a row the resume consumes a hold on or has nothing to consume on,
+// the wake's *WakeConflictError for a closed row, and ErrSessionStopping for
+// a suspended row a drain is stopping; a row it cannot read is the read's
+// error. Kills a check that misses either refusal, one that refuses a row
+// the resume consumes, and one that writes.
+func TestResumeHeldRefusalAgreesWithResumeHeld(t *testing.T) {
+	for name, tc := range map[string]struct {
+		meta   map[string]string
+		closed bool
+		want   string // resumeRefusalClass of both answers
+	}{
+		"operator suspend":           {meta: operatorSuspendedRow(nil)},
+		"soft suspend":               {meta: map[string]string{"state": string(StateSuspended)}},
+		"wait hold":                  {meta: map[string]string{"wait_hold": "true", "sleep_intent": string(SleepReasonWaitHold)}},
+		"unheld asleep":              {},
+		"running":                    {meta: map[string]string{"state": string(StateActive), "slept_at": ""}},
+		"closed":                     {meta: operatorSuspendedRow(nil), closed: true, want: "conflict"},
+		"operator suspend, draining": {meta: operatorSuspendedRow(map[string]string{"state": string(StateDraining)}), want: "stopping"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, id := coalesceRow(t, policyRow(tc.meta))
+			if tc.closed {
+				if err := store.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ss := NewStore(beads.SessionStore{Store: store})
+			rev0, _ := rowRevision(t, store, id)
+			checked := ss.ResumeHeldRefusal(id, resumeNow)
+			if rev1, meta := rowRevision(t, store, id); rev1 != rev0 {
+				t.Fatalf("revision %d -> %d: ResumeHeldRefusal wrote (row %v)", rev0, rev1, meta)
+			}
+			if got := resumeRefusalClass(t, checked); got != tc.want {
+				t.Fatalf("ResumeHeldRefusal = %v (%q), want %q", checked, got, tc.want)
+			}
+			if got := resumeRefusalClass(t, ss.ResumeHeld(id, resumeNow, resumeNow)); got != tc.want {
+				t.Fatalf("ResumeHeld refused %q where ResumeHeldRefusal answered %q", got, tc.want)
+			}
+		})
+	}
+	store, _ := coalesceRow(t, policyRow(nil))
+	if err := NewStore(beads.SessionStore{Store: store}).ResumeHeldRefusal("gc-missing", resumeNow); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ResumeHeldRefusal of a missing row = %v, want beads.ErrNotFound", err)
+	}
+}
+
+// resumeRefusalClass classifies a resume's answer: "" no refusal,
+// "conflict" a *WakeConflictError, "stopping" ErrSessionStopping. Any other
+// error fails t.
+func resumeRefusalClass(t *testing.T, err error) string {
+	t.Helper()
+	var conflict *WakeConflictError
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &conflict):
+		return "conflict"
+	case errors.Is(err, ErrSessionStopping):
+		return "stopping"
+	}
+	t.Fatalf("resume answered an unclassified error: %v", err)
+	return ""
+}
+
+// TestResumeHeldLeavesWaitsOpen: the resume cancels none of the row's
+// durable waits, unlike an operator's wake. Kills a resume that reuses
+// WakeSession, whose wake cancels every open wait.
+func TestResumeHeldLeavesWaitsOpen(t *testing.T) {
+	store, id := coalesceRow(t, policyRow(operatorSuspendedRow(map[string]string{"wait_hold": "true"})))
+	ss := NewStore(beads.SessionStore{Store: store})
+	wait, err := ss.CreateWait(WaitSpec{SessionID: id, Kind: "deps", DepIDs: []string{"gc-dep"}, DepMode: "all", Now: resumeNow})
+	if err != nil {
+		t.Fatalf("CreateWait: %v", err)
+	}
+	if err := ss.ResumeHeld(id, resumeNow, resumeNow); err != nil {
+		t.Fatalf("ResumeHeld: %v", err)
+	}
+	got, err := ss.GetWait(wait.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" || got.State != waitStatePending {
+		t.Fatalf("wait after ResumeHeld = %s/%s, want it open and pending", got.Status, got.State)
+	}
+}
+
+// TestResumeHeldLeavesASuspendStampedAfterItsMessage: the resume consumes
+// only a suspend stamped at or before its message's proposal (notAfter). A
+// suspend stamped later stands, with nothing written and nothing refused,
+// even on a row a drain is stopping. One stamped at notAfter, in its second
+// (suspended_at is whole seconds), or with no readable stamp is consumed.
+// Kills a resume that ignores the bound (a same-key retry of a waiting
+// message consumes the suspend the operator placed after it), one that
+// refuses for a suspend it leaves standing, and a bound that misses a
+// suspend in force when the message was proposed.
+func TestResumeHeldLeavesASuspendStampedAfterItsMessage(t *testing.T) {
+	const stamp = "2026-10-08T11:00:00Z"
+	at, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := at.Add(-time.Second)
+	for name, tc := range map[string]struct {
+		meta     map[string]string
+		notAfter time.Time
+		consumed bool
+	}{
+		"operator suspend stamped after":   {meta: operatorSuspendedRow(map[string]string{"suspended_at": stamp}), notAfter: before},
+		"operator suspend after, draining": {meta: operatorSuspendedRow(map[string]string{"suspended_at": stamp, "state": string(StateDraining)}), notAfter: before},
+		"soft suspend stamped after":       {meta: map[string]string{"state": string(StateSuspended), "suspended_at": stamp}, notAfter: before},
+		"operator suspend stamped at":      {meta: operatorSuspendedRow(map[string]string{"suspended_at": stamp}), notAfter: at, consumed: true},
+		"operator suspend in its second":   {meta: operatorSuspendedRow(map[string]string{"suspended_at": stamp}), notAfter: at.Add(500 * time.Millisecond), consumed: true},
+		"operator suspend, no stamp":       {meta: operatorSuspendedRow(map[string]string{"suspended_at": ""}), notAfter: before, consumed: true},
+		"operator suspend, unreadable":     {meta: operatorSuspendedRow(map[string]string{"suspended_at": "yesterday"}), notAfter: before, consumed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, id := coalesceRow(t, policyRow(tc.meta))
+			ss := NewStore(beads.SessionStore{Store: store})
+			rev0, was := rowRevision(t, store, id)
+			if err := ss.ResumeHeld(id, tc.notAfter, resumeNow); err != nil {
+				t.Fatalf("ResumeHeld: %v", err)
+			}
+			rev1, meta := rowRevision(t, store, id)
+			if tc.consumed {
+				if meta["state"] != string(StateAsleep) || meta["sleep_intent"] != "" || meta["suspended_at"] != "" || meta["wake_request"] != string(WakeCauseExplicit) {
+					t.Fatalf("row = %v; want the suspend consumed and its wake recorded", meta)
+				}
+				return
+			}
+			if rev1 != rev0 || meta["state"] != was["state"] || meta["suspended_at"] != stamp || meta["wake_request"] != "" {
+				t.Fatalf("revision %d -> %d (row %v); want the later suspend standing and nothing written", rev0, rev1, meta)
+			}
+		})
+	}
+}
+
+// TestResumeHeldConfirmsAgainstTheLiveRow: a row with no suspend to consume
+// is not written, the one verdict that skips the CAS, so it must not rest
+// on a cached read that lags another process's write. Kills (a) a resume
+// whose cached read missed an operator suspend written out of process,
+// answered as done with the suspend standing, and (b) a fresh cache paying
+// for a write it does not need.
+func TestResumeHeldConfirmsAgainstTheLiveRow(t *testing.T) {
+	t.Run("suspended out of process", func(t *testing.T) {
+		cache, backing, id := cachedCoalesceRow(t, policyRow(nil))
+		if err := backing.SetMetadataBatch(id, operatorSuspendedRow(nil)); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewStore(beads.SessionStore{Store: cache}).ResumeHeld(id, resumeNow, resumeNow); err != nil {
+			t.Fatalf("ResumeHeld: %v", err)
+		}
+		if _, meta := rowRevision(t, backing, id); meta["state"] != string(StateAsleep) || meta["sleep_intent"] != "" || meta["wake_request"] != string(WakeCauseExplicit) {
+			t.Fatalf("live row = %v; want the suspend consumed and its wake recorded", meta)
+		}
+	})
+
+	t.Run("fresh cache, nothing to consume", func(t *testing.T) {
+		cache, backing, id := cachedCoalesceRow(t, policyRow(nil))
+		rev0, _ := rowRevision(t, backing, id)
+		if err := NewStore(beads.SessionStore{Store: cache}).ResumeHeld(id, resumeNow, resumeNow); err != nil {
+			t.Fatalf("ResumeHeld: %v", err)
+		}
+		if rev1, meta := rowRevision(t, backing, id); rev1 != rev0 {
+			t.Fatalf("live row revision %d -> %d (row %v); want no write", rev0, rev1, meta)
+		}
+	})
+}
+
+// TestResumeHeldFailsWhenTheLiveRowIsUnreadable: a no-write verdict that
+// cannot be confirmed on a live read is an error, not a resume done. Kills
+// swallowing the live read's error, which answers the resume as done on an
+// unconfirmed cached read.
+func TestResumeHeldFailsWhenTheLiveRowIsUnreadable(t *testing.T) {
+	store, id := coalesceRow(t, policyRow(nil))
+	rev0, _ := rowRevision(t, store, id)
+	sentinel := errors.New("backing unreachable")
+	if err := NewStore(beads.SessionStore{Store: failingLiveStore{Store: store, err: sentinel}}).ResumeHeld(id, resumeNow, resumeNow); !errors.Is(err, sentinel) {
+		t.Fatalf("ResumeHeld = %v, want an error wrapping %v", err, sentinel)
+	}
+	if rev1, meta := rowRevision(t, store, id); rev1 != rev0 {
+		t.Fatalf("row revision %d -> %d (row %v); want no write", rev0, rev1, meta)
+	}
+}
+
 // wakeCASLoser makes every UpdateIfMatch lose to an unrelated write.
 type wakeCASLoser struct {
 	*rowWriteRecorder

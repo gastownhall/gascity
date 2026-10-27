@@ -329,6 +329,9 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	if body.Async {
 		return nil, apierr.InvalidRequest.Msg("async session creation is only supported for configured agent templates")
 	}
+	if err := s.checkInitialMessage(body.Message); err != nil {
+		return nil, err
+	}
 
 	workDir := s.state.CityPath()
 
