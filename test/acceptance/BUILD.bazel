@@ -181,6 +181,7 @@ go_test(
         "import_named_sessions_regression_test.go",
         "init_lifecycle_test.go",
         "integration_selfhost_ux_test.go",
+        "managed_session_dolt_port_move_test.go",
         "mcp_adoption_test.go",
         "mcp_capability_test.go",
         "migration_regression_test.go",
