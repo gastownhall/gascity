@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -430,4 +431,97 @@ func TestHealthyIsToldOfEachAnsweredClose(t *testing.T) {
 		adm.Finish(Result{Outcome: opjournal.Outcome{Arm: "bogus"}})
 		check(t, healthy)
 	})
+}
+
+// TestDegradeStoreCannotRecord pins which degrades name a store that cannot
+// record ops at all: an open that failed for want of conditional writes or a
+// namespace. A store fault, contention, an unregistered type, or a
+// capability gap at a later stage (a store that opened and then lost it) is
+// not one.
+func TestDegradeStoreCannotRecord(t *testing.T) {
+	cases := []struct {
+		stage, reason string
+		want          bool
+	}{
+		{StageOpen, DegradeConditionalWritesUnsupported, true},
+		{StageOpen, DegradeNoNamespace, true},
+		{StageOpen, DegradeNotRecordedByDefault, true},
+		{StageOpen, DegradeStoreError, false},
+		{StageOpen, DegradeContention, false},
+		{StageOpen, DegradeTypeUnregistered, false},
+		{StagePropose, DegradeTypeUnregistered, false},
+		{StageClose, DegradeConditionalWritesUnsupported, false},
+		{StageSweep, DegradeNoNamespace, false},
+	}
+	for _, c := range cases {
+		d := Degrade{Stage: c.stage, Reason: c.reason}
+		if got := d.StoreCannotRecord(); got != c.want {
+			t.Errorf("Degrade{%s, %s}.StoreCannotRecord() = %t, want %t", c.stage, c.reason, got, c.want)
+		}
+	}
+}
+
+// A recorder with QuietCannotRecord, as a gate that is auto only by its
+// builtin default builds, treats a store that cannot record ops at all as
+// off: that open degrade logs at Debug and never reaches the Degraded hook. A
+// store fault still logs at Warn and reaches it, as does a store that cannot
+// record under a recorder without the flag. Every request runs unrecorded.
+func TestQuietCannotRecordDegrade(t *testing.T) {
+	unsupported := fmt.Errorf("opening op store: %w", beads.ErrConditionalWriteUnsupported)
+	for _, c := range []struct {
+		name          string
+		err           error
+		quietRecorder bool
+		quiet         bool
+	}{
+		{"no conditional writes", unsupported, true, true},
+		{"no namespace", fmt.Errorf("opening op store: %w", opjournal.ErrNoNamespace), true, true},
+		{"not recorded by default", &opjournal.NotRecordedByDefaultError{Backend: beads.ConditionalWritesBackend{Kind: "NativeDoltStore", DoltServed: true}}, true, true},
+		{"store fault", errors.New("transport: refused"), true, false},
+		{"no conditional writes without the flag", unsupported, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			h := &recordHandler{}
+			r := apiRecorder(e, gate.Auto)
+			r.Logger = slog.New(h)
+			r.QuietCannotRecord = c.quietRecorder
+			hooked := 0
+			r.Degraded = func(Degrade) { hooked++ }
+			r.Open = func() (*opjournal.Store, error) { return nil, c.err }
+			adm, err := r.Admit(msg("", "hello"))
+			if err != nil || adm.Decision != Execute {
+				t.Fatalf("Admit = %+v, %v; want an unrecorded Execute", adm, err)
+			}
+			wantHooked, wantLevel := 1, slog.LevelWarn
+			if c.quiet {
+				wantHooked, wantLevel = 0, slog.LevelDebug
+			}
+			h.mu.Lock()
+			var levels []slog.Level
+			for _, rec := range h.records {
+				levels = append(levels, rec.Level)
+			}
+			h.mu.Unlock()
+			if hooked != wantHooked || !slices.Equal(levels, []slog.Level{wantLevel}) {
+				t.Fatalf("hook heard %d, log levels %v; want %d and [%v]", hooked, levels, wantHooked, wantLevel)
+			}
+		})
+	}
+}
+
+// A NotRecordedByDefaultError classifies as its own degrade reason, which
+// CannotRecord treats as a store the default records nothing on, and counts
+// its unrecorded request under its own reason.
+func TestNotRecordedByDefaultClassifies(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", &opjournal.NotRecordedByDefaultError{Backend: beads.ConditionalWritesBackend{Kind: "BdStore", DoltServed: true}})
+	if got := DegradeReason(err); got != DegradeNotRecordedByDefault {
+		t.Fatalf("DegradeReason = %q, want %q", got, DegradeNotRecordedByDefault)
+	}
+	if !CannotRecord(DegradeNotRecordedByDefault) {
+		t.Fatal("CannotRecord(not_recorded_by_default) = false")
+	}
+	if got := openReason(err); got != ReasonNotRecordedByDefault {
+		t.Fatalf("openReason = %q, want %q", got, ReasonNotRecordedByDefault)
+	}
 }

@@ -217,7 +217,7 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | 1.3.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
@@ -249,11 +249,12 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires a final Dolt 2.1.0 or newer. Older and pre-release builds
-are below the managed bd/Dolt compatibility floor; releases before 1.86.2 can
-also miss the upstream GC/writer deadlock fix in dolthub/dolt commit
-`ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
-your version:
+Gas City requires a final Dolt 2.6.0 or newer. Older and pre-release builds
+are below the managed bd/Dolt compatibility floor: 2.6.0 is the first Dolt
+built with a Go toolchain that distrusts the compromised eMudhra CA
+intermediates. Releases before 1.86.2 can also miss the upstream GC/writer
+deadlock fix in dolthub/dolt commit `ccf7bde206`, which can hang
+`dolt_backup sync` under heavy write load. Check your version:
 
 ```bash
 dolt version
@@ -1103,7 +1104,7 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires `make` and Go 1.26.4 or newer:
+Building from source requires `make` and Go 1.27.3 or newer:
 
 ```bash
 make --version

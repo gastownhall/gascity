@@ -1655,11 +1655,36 @@
         "rotation": {
           "$ref": "#/$defs/EventsRotationConfig",
           "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
+        },
+        "mirror": {
+          "$ref": "#/$defs/EventsMirrorConfig",
+          "description": "Mirror configures an optional second copy of the city's event log,\nwritten outside .gc so a log shipper can read it. Absent or with an\nempty path, nothing is mirrored."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "EventsConfig holds events provider settings."
+    },
+    "EventsMirrorConfig": {
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path is the absolute path of the mirror file, outside the city's .gc\ndirectory. Its directory must already exist and be writable only by\nthe city's user: gc creates only the file and never creates or changes\nthe directory. gc writes only a regular file there: it does not follow\na symbolic link at the path. Empty disables the mirror. Read when the\ncontroller opens the city's event log: a change takes effect at the\nnext controller start."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Mode is the octal permission of the mirror file as a quoted string,\nfor example \"0640\"; an unquoted TOML integer (0o640) is a type error\nthat stops the config from loading. gc creates the file with it and\nsets it on every open. Defaults to \"0640\". The file's group follows\nthe directory's: give the directory the shipper's group with the\nsetgid bit (mode 2750) so the file inherits it.",
+          "default": "0640"
+        },
+        "max_size_bytes": {
+          "type": "integer",
+          "description": "MaxSizeBytes is the size at which the mirror is renamed to \u003cpath\u003e.1\n(replacing the previous one) and a new file is started, so it stays\nunder about twice this on disk. 0 turns gc's mirror rotation off for an\nexternal logrotate, which may rename the file away or copytruncate it.\nDefaults to 104857600 (100 MiB).",
+          "default": 104857600
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsMirrorConfig configures the events mirror: a JSONL file outside the city's .gc directory that receives a copy of every line of .gc/events.jsonl, for a log shipper that may not enter .gc (which gc keeps at 0700)."
     },
     "EventsRotationConfig": {
       "properties": {
@@ -2128,8 +2153,8 @@
             "auto",
             "require"
           ],
-          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"off\" is the shipped default for all three\ngates. \"auto\" records where the store can and degrades loudly where it\ncannot. \"require\" refuses a request it cannot record before any effect.\nExperimental: each mode takes effect as each request surface gains op\nrecording. A change takes effect at the next process start.",
-          "default": "off"
+          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"auto\" is the default for all three gates.\nLeft unset, it records only over a SQLite sessions store and runs\nunrecorded, quietly, over any other (a Dolt-served one included). Set\nto \"auto\", it records where the store can and warns where it cannot; a\nstore served through bd can record once that bd supports --if-revision,\nwhich no released bd does yet. \"off\" records nothing. \"require\" (opt-in) refuses a request it\ncannot record before any effect. A change takes effect at the next\nprocess start.",
+          "default": "auto"
         },
         "control": {
           "type": "string",
@@ -2138,8 +2163,8 @@
             "auto",
             "require"
           ],
-          "description": "Records interrupt (stop) and respond requests as ops. \"off\" is the\nshipped default. \"auto\" records where the store can and degrades loudly\nwhere it cannot. \"require\" refuses a request it cannot record before any\neffect. Experimental: each mode takes effect as each request surface\ngains op recording. A change takes effect at the next process start.",
-          "default": "off"
+          "description": "Records interrupt (stop) and respond requests as ops. \"auto\" is the\ndefault. Left unset, it records only over a SQLite sessions store and\nruns unrecorded, quietly, over any other (a Dolt-served one included).\nSet to \"auto\", it records where the store can and warns where it\ncannot; a store served through bd can record once that bd supports\n--if-revision, which no released bd does yet. \"off\" records nothing. \"require\" (opt-in)\nrefuses a request it cannot record before any effect. A change takes\neffect at the next process start.",
+          "default": "auto"
         },
         "lifecycle": {
           "type": "string",
@@ -2148,8 +2173,8 @@
             "auto",
             "require"
           ],
-          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"off\" is the shipped default. \"auto\" records where the store can and\ndegrades loudly where it cannot. \"require\" refuses a request it cannot\nrecord before any effect. Experimental: each mode takes effect as each\nrequest surface gains op recording. A change takes effect at the next\nprocess start.",
-          "default": "off"
+          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"auto\" is the default. Left unset, it records only over a SQLite\nsessions store and runs unrecorded, quietly, over any other (a\nDolt-served one included). Set to \"auto\", it records where the store\ncan and warns where it cannot; a store served through bd can record\nonce that bd supports --if-revision, which no released bd does yet.\n\"off\" records nothing.\n\"require\" (opt-in) refuses a request it cannot record before any\neffect. A change takes effect at the next process start.",
+          "default": "auto"
         },
         "authoritative": {
           "items": {

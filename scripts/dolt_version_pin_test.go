@@ -9,7 +9,7 @@ import (
 
 func TestDoltVersionPins(t *testing.T) {
 	const doltPin = "2.6.0"
-	const doltFloor = "2.1.0"
+	const doltFloor = "2.6.0"
 	repoRoot := repoRoot(t)
 
 	assertContains := func(rel, want string) {

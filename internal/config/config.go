@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -2044,6 +2045,10 @@ type EventsConfig struct {
 	// Rotation configures file-backed JSONL rotation. Defaults are applied
 	// by EventsRotationConfig helper methods when this table is absent.
 	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+	// Mirror configures an optional second copy of the city's event log,
+	// written outside .gc so a log shipper can read it. Absent or with an
+	// empty path, nothing is mirrored.
+	Mirror EventsMirrorConfig `toml:"mirror,omitempty"`
 }
 
 // UsageConfig holds usage-fact sink settings.
@@ -2123,6 +2128,92 @@ func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
 // return zero, which keeps all archives.
 func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 	return durationOr(c.ArchiveRetainAge, 0)
+}
+
+const (
+	// DefaultEventsMirrorMode is the default mode of the events mirror file.
+	DefaultEventsMirrorMode os.FileMode = 0o640
+	// DefaultEventsMirrorMaxSizeBytes is the default size at which the events
+	// mirror is renamed to <path>.1 and restarted.
+	DefaultEventsMirrorMaxSizeBytes int64 = 100 * 1024 * 1024
+)
+
+// EventsMirrorConfig configures the events mirror: a JSONL file outside the
+// city's .gc directory that receives a copy of every line of .gc/events.jsonl,
+// for a log shipper that may not enter .gc (which gc keeps at 0700). The
+// canonical .gc/events.jsonl is unchanged and stays what gc reads. The mirror
+// is written by the city's controller (or the supervisor running the city),
+// which tails the canonical log; a failing mirror never blocks or fails an
+// event write. Lines are copied as they are, redaction included: filtering
+// what leaves the host is the shipper's job.
+type EventsMirrorConfig struct {
+	// Path is the absolute path of the mirror file, outside the city's .gc
+	// directory. Its directory must already exist and be writable only by
+	// the city's user: gc creates only the file and never creates or changes
+	// the directory. gc writes only a regular file there: it does not follow
+	// a symbolic link at the path. Empty disables the mirror. Read when the
+	// controller opens the city's event log: a change takes effect at the
+	// next controller start.
+	Path string `toml:"path,omitempty"`
+	// Mode is the octal permission of the mirror file as a quoted string,
+	// for example "0640"; an unquoted TOML integer (0o640) is a type error
+	// that stops the config from loading. gc creates the file with it and
+	// sets it on every open. Defaults to "0640". The file's group follows
+	// the directory's: give the directory the shipper's group with the
+	// setgid bit (mode 2750) so the file inherits it.
+	Mode string `toml:"mode,omitempty" jsonschema:"default=0640"`
+	// MaxSizeBytes is the size at which the mirror is renamed to <path>.1
+	// (replacing the previous one) and a new file is started, so it stays
+	// under about twice this on disk. 0 turns gc's mirror rotation off for an
+	// external logrotate, which may rename the file away or copytruncate it.
+	// Defaults to 104857600 (100 MiB).
+	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=104857600"`
+}
+
+// Enabled reports whether a mirror path is configured.
+func (c EventsMirrorConfig) Enabled() bool {
+	return strings.TrimSpace(c.Path) != ""
+}
+
+// ModeOrDefault parses Mode, returning DefaultEventsMirrorMode when it is
+// empty. A value that is not an octal permission within 0777 is an error.
+func (c EventsMirrorConfig) ModeOrDefault() (os.FileMode, error) {
+	raw := strings.TrimSpace(c.Mode)
+	if raw == "" {
+		return DefaultEventsMirrorMode, nil
+	}
+	n, err := strconv.ParseUint(raw, 8, 32)
+	if err != nil || n > 0o777 || n == 0 {
+		return 0, fmt.Errorf("mode %q is not an octal permission between 0001 and 0777", c.Mode)
+	}
+	return os.FileMode(n), nil
+}
+
+// MaxSizeBytesOrDefault returns the configured rotation size.
+func (c EventsMirrorConfig) MaxSizeBytesOrDefault() int64 {
+	if c.MaxSizeBytes == nil {
+		return DefaultEventsMirrorMaxSizeBytes
+	}
+	return *c.MaxSizeBytes
+}
+
+// Problem reports why the configured mirror cannot be used, or "" when it can
+// (or none is configured). A mirror with a problem is skipped with a warning;
+// it never stops the city.
+func (c EventsMirrorConfig) Problem() string {
+	if !c.Enabled() {
+		return ""
+	}
+	if !filepath.IsAbs(c.Path) {
+		return fmt.Sprintf("path %q is not absolute", c.Path)
+	}
+	if _, err := c.ModeOrDefault(); err != nil {
+		return err.Error()
+	}
+	if c.MaxSizeBytes != nil && *c.MaxSizeBytes < 0 {
+		return fmt.Sprintf("max_size_bytes %d is negative", *c.MaxSizeBytes)
+	}
+	return ""
 }
 
 const (

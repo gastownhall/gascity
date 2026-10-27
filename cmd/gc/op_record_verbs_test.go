@@ -904,19 +904,28 @@ func cliOpWakeCase(t *testing.T) cliOpVerbCase {
 }
 
 // A city config that does not load leaves its [ops] gates unread: the verb
-// says so instead of silently running unrecorded, and a gate set in the
+// says so, each gate takes its builtin default, and a gate set in the
 // environment still applies.
 func TestSessionVerbOpConfigLoadFailure(t *testing.T) {
 	const broken = "\n[ops]\nlifecycle = \"require\"\ncontent = \"bogus\"\n"
 	t.Run("warns that the gates were not read", func(t *testing.T) {
 		f := newCLIOpVerbFixture(t, cliOpWakeCase(t), nil)
 		appendCityTOML(t, f.c.dir, broken)
-		r := f.run("", false)
+		r := f.run("k-1", false)
 		if r.code != 0 {
 			t.Fatalf("wake = %d; stderr=%s", r.code, r.stderr)
 		}
-		if !strings.Contains(r.stderr, "[ops] gates were not read") {
-			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read", r.stderr)
+		if !strings.Contains(r.stderr, "[ops] gates were not read, so each takes its builtin default") {
+			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read and take their builtin defaults", r.stderr)
+		}
+		// The lifecycle gate's builtin default is auto, which records only
+		// over a SQLite sessions store: over this city's it runs unrecorded,
+		// and the --key run says why.
+		if !strings.Contains(r.stderr, "op journal open failed ("+legacyop.DegradeNotRecordedByDefault+")") {
+			t.Fatalf("stderr = %q, want the builtin auto default's not-recorded warning for a --key run", r.stderr)
+		}
+		if ops := cliOpRows(t, f.h.opStore); len(ops) != 0 {
+			t.Fatalf("op rows = %+v, want none under the builtin auto default over a non-SQLite store", ops)
 		}
 	})
 	t.Run("an environment require still refuses", func(t *testing.T) {
@@ -1160,7 +1169,7 @@ func TestSessionWakeOpJSONReplayNotesTheOpOnStderr(t *testing.T) {
 // With the gate off --key is not read at all: an invalid one draws no
 // warning.
 func TestSessionWakeOpOffIgnoresAnInvalidKey(t *testing.T) {
-	newCLIOpHarness(t, nil)
+	newCLIOpHarness(t, cliOpsOffEnv())
 	f := newCLIOpWakeFixture(t)
 	code, _, stderr := f.run(t, " padded", false)
 	if code != 0 || stderr != "" {

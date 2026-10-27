@@ -9,17 +9,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, CI, the agent base image
+- **The op journal now records session requests by default on a SQLite
+  sessions store.** The three `[ops]` rollout gates, `content` (submit,
+  messages, nudge, mail notify), `control` (interrupt, respond) and
+  `lifecycle` (wake, suspend, reset, kill, close), now default to `auto`
+  instead of `off`. Left unset, `auto` records only when the city's sessions
+  store writes to SQLite: a city whose sessions class is bound to a
+  `sqlite-beads` storage binding, such as a split city whose work stays on
+  Dolt. There each request is recorded as an op beside its unchanged legacy
+  execution, so a same-key retry is deduplicated across restarts and each
+  request gets one typed outcome. Delivered text is unchanged.
+  - **Natively served Dolt cities stop recording by default.** This
+    reverses the earlier unreleased default (#8325), under which a city
+    whose sessions store a Dolt server serves natively recorded every
+    request. A Dolt-served sessions store, native or through bd, now records
+    nothing under the default, whatever the bd on `PATH` supports, so a bd
+    that gains `--if-revision` does not start recording either. The check is
+    an allowlist of SQLite, so any other store (file, exec, memory) records
+    nothing too. Under the default such a store is treated as `off`: no CLI
+    warning, no `ops.recording_degraded` event, a `gc doctor` OK ("auto
+    (default) records nothing on a Dolt-served sessions store", and whether
+    an explicit gate could record there: a released bd cannot), one line in
+    the controller log, and no `bd update --help` capability probe on the
+    commands it would record. A run with `--key` still warns that it ran
+    unrecorded. The controller's op sweeper still closes expired ops an
+    earlier recording left behind, then goes idle.
+  - **Opting in on Dolt.** Set `content`, `control` and `lifecycle` to
+    `"auto"` (or `"require"`) in `[ops]`, or through `GC_OPS_CONTENT`,
+    `GC_OPS_CONTROL` and `GC_OPS_LIFECYCLE`. An explicit gate records over
+    any sessions store that can record ops (conditional writes and an id
+    prefix), Dolt included, and warns where the store cannot.
+  - **What recording costs on Dolt.** Recording adds two store writes per
+    request (open and close). In the X12 load test the added p50 latency on
+    the API's 202 path was about 8 ms on SQLite, and on a bd-provisioned
+    Dolt server read natively it went from about 145 ms with `off` to 313 to
+    318 ms (about +170 ms, 2.1x). Most of that is the beads
+    library's per-write cost on Dolt: an op create runs 38 SQL statements,
+    about half its time in two no-op `is_blocked` recomputes. Op rows are
+    already no-history: they land in bd's `dolt_ignore`d wisps table and
+    make no Dolt commits. The 208 KB per op the X12 Dolt arm reported is
+    chunk-journal garbage from a harness that turned Dolt auto-GC off; after
+    a GC about 1.4 to 3 KB per op is retained, and gc's managed Dolt server
+    runs auto-GC.
+  - **Opting out.** Set `content`, `control` and `lifecycle` to `"off"` in
+    `[ops]`. `GC_OPS_CONTENT`, `GC_OPS_CONTROL` and `GC_OPS_LIFECYCLE` set
+    to `off` also work, but they are break-glass overrides, which
+    `gc doctor` reports as a warning per gate. `require`, which refuses a
+    request it cannot record, stays opt-in.
+
+- **Dolt 2.6.0 or newer is now required.** `gc init` and `gc start` readiness,
+  `gc doctor`'s `dolt-version` check and the dolt pack's `check-dolt` doctor
+  now refuse a final Dolt below 2.6.0 (the floor was 2.1.0) and still refuse
+  every pre-release, naming the version found and the 2.6.0 they need. 2.6.0
+  is the first Dolt built with a Go toolchain that distrusts the compromised
+  eMudhra CA intermediates (https://emudhra.we-have-a-problem.com/), and the
+  Dolt that CI, the images and the rbe-west workers run. Upgrade with
+  `brew upgrade dolt` or from the
+  [Dolt releases](https://github.com/dolthub/dolt/releases), and upgrade a
+  shared Dolt server before the `gc` that uses it, backing it up first
+  (below).
+
+- **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, the CI workflows'
+  `DOLT_VERSION` pins (macOS regression, nightly, RC Gate, Ollama,
+  fork-verify), the Bazel test Dolt (`dolt_bin_v2_6_0`), the agent base image
   (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
   requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
-  2.6.0, the first Dolt release patched for the eMudhra CA distrust. Dolt
-  2.6.0 changes behaviour: `dolt_merge()` walks the full commit graph, so a
-  merge can now report conflicts that 2.2.0 resolved silently; the default
-  `sql_mode` is MySQL 8.0 strict (NO_ZERO_IN_DATE, NO_ZERO_DATE,
-  ERROR_FOR_DIVISION_BY_ZERO); and the server may migrate its on-disk storage
-  on first start. That migration is forward-only, so back up the data
-  directory before upgrading a server: going back means restoring that
-  backup, not reverting the image. The minimum supported Dolt is unchanged.
+  2.6.0, the first Dolt release patched for the eMudhra CA distrust. Moving
+  from 2.2.0 to 2.6.0 crosses several behaviour changes (release notes for
+  [2.3.3](https://github.com/dolthub/dolt/releases/tag/v2.3.3),
+  [2.4.0](https://github.com/dolthub/dolt/releases/tag/v2.4.0),
+  [2.5.0](https://github.com/dolthub/dolt/releases/tag/v2.5.0) and
+  [2.6.0](https://github.com/dolthub/dolt/releases/tag/v2.6.0)):
+  - Since 2.3.3, the default `sql_mode` is MySQL 8.0 strict: it adds
+    NO_ZERO_IN_DATE, NO_ZERO_DATE and ERROR_FOR_DIVISION_BY_ZERO.
+  - Since 2.4.0, `INSERT ... ON DUPLICATE KEY UPDATE` needs the UPDATE
+    privilege, and several error codes match MySQL's.
+  - Since 2.5.0, one transaction may commit to several branches.
+  - In 2.6.0, `dolt_merge()` changes only for histories with more than one
+    merge base (criss-cross merges): like git, it now merges against a
+    virtual base built from them. Such a merge can report conflicts that
+    earlier releases resolved silently, and some spurious conflicts go away.
+
+  Rollback is not a downgrade. Once Dolt 2.3.3 or newer creates or alters a
+  schema with a descending index column (bd's schema has them), a Dolt below
+  2.3.3 can no longer write to that database (`table has unknown fields`).
+  Treat the upgrade as one-way: back up the data directory first; going back
+  means restoring that backup, not reverting the image.
+
+- **gc is now built with Go 1.27.3.** On macOS and Windows, a set
+  `SSL_CERT_FILE` or `SSL_CERT_DIR` now replaces the system trust store
+  (the keychain, the Windows certificate store) for gc's HTTPS connections,
+  as it already did on Linux. If you export either variable for other tools
+  and rely on a root that only the system store holds (a corporate or MDM
+  root, for example), add that root to the bundle or unset the variable for
+  `gc`. gc on macOS now needs macOS 13 (Ventura) or newer.
 
 - **An agent now starts without a shared MCP server its provider cannot
   receive.** A server from the city's `mcp/` directory, a pack, or an
@@ -354,6 +437,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
+  for a log shipper that may not enter `.gc` (which gc keeps at `0700`). The
+  city's controller tails `.gc/events.jsonl` and appends every event line to
+  `path` (absolute, in an operator-provisioned directory gc never creates or
+  changes), with `mode` (default `0640`), renaming it to `<path>.1` at
+  `max_size_bytes` (default 100 MiB; `0` for external logrotate). It resumes
+  after the last event the mirror holds, and a failing mirror is reported at a
+  bounded rate and never blocks event recording. Unset, nothing changes. See
+  the "Ship the Event Log" runbook.
+
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
@@ -386,6 +479,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim for different packs fails the add.
 
 ### Changed
+
+- **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
+  analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
+  the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
+  now needs Go 1.27.3 or newer. The rbe-west worker host moves with it: its
+  workers install `go.mod`'s Go and, from rbe-worker `80d70774`, Dolt 2.6.0.
+  Contributors: a golangci-lint built with Go 1.26 refuses this module, which
+  breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
+  `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
 - **`gc init` pins the gastown pack to registry release 0.1.11.** Fresh
   cities, `examples/gastown`, and the pinned-import examples in the docs now
@@ -459,6 +561,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the prompt (`global_fragments`, `inject_fragments`, `append_fragments`)
   still only warn when missing or broken. Without `--strict` the raw-text
   fallback is unchanged. (#8149)
+
+- **A rotation that stops after renaming the event log no longer hides its
+  events from the log's head or from a resuming watcher.** A rotation renames
+  `.gc/events.jsonl` to an `events.jsonl.rotating-*` file and then writes the
+  fresh log's first event; when that write fails (a full disk), the fresh log
+  stays empty until the next event. Meanwhile `gc events --seq` reported a
+  head below the rotated events, and a watcher resuming from a seq among
+  them, such as `gc events --follow --after <seq>`, skipped the rest. The
+  head now counts the rotating file, and a resume replays it, with or without
+  an active log.
 
 - **An MCP server one agent's provider cannot receive no longer stops the
   city.** Servers from the city's `mcp/` directory, a rig pack, or an import

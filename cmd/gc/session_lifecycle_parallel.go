@@ -318,6 +318,12 @@ type startResult struct {
 	// providerStartCalled reports that the attempt reached provider Start (a
 	// warm reuse does not). Only such a start can prove endpoint capacity.
 	providerStartCalled bool
+	// abandoned reports that the wave stopped waiting for this start (its
+	// deadline lapsed or its ctx ended) or never launched it. The result is a
+	// Deferred with no error: nothing is known about the runtime, so the
+	// commit touches only the store (clears the pending-start lease) and the
+	// planner leaves the runtime alone. Set only by executePreparedStartWaveForCity.
+	abandoned bool
 	// capacityRefused selects the capacity commit arm: the endpoint refused
 	// the start (runtime.ErrProviderCapacity), a guard admitted it, and the
 	// poison valve did not trip. Set only by resolveStartCapacity.
@@ -1791,6 +1797,32 @@ func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
 	}
 }
 
+// waveDeadlineSlack is what a start wave may run past its startup timeout
+// before the caller stops waiting for it. A healthy slow start finishes inside
+// startupTimeout plus the serial waits that follow provider Start: the
+// ErrStateSync recovery observation, the post-startup observation and the
+// failure probes. The slack must clear all three
+// (TestWaveDeadlineSlackOutgrowsEveryStartPathBound); it is a variable so
+// tests can shrink it.
+var waveDeadlineSlack = 4 * postStartObservationBound
+
+// waveCtxGrace is how long a wave keeps waiting for in-flight starts after its
+// ctx ends. A start that honors ctx reports its own canceled result inside it;
+// one stuck in a call that takes no ctx is abandoned when it lapses. It is a
+// variable so tests can shrink it.
+var waveCtxGrace = time.Second
+
+// executePreparedStartWaveForCity runs the prepared starts, at most
+// maxParallel at a time, and returns one result per input, in input order.
+//
+// The wait is bounded. With startupTimeout > 0 the wave has a deadline of
+// startupTimeout + waveDeadlineSlack from its start, and an ended ctx gives it
+// waveCtxGrace more. When either lapses the wave stops waiting: every start
+// that has not reported is returned as an abandoned deferral (abandoned set,
+// TraceOutcomeDeferred, no error) and every start the wave had not yet
+// launched is returned the same way and never launched. Abandoned goroutines
+// keep running and write only to the wave's own slice, never to the returned
+// one. startupTimeout <= 0 sets no deadline; ctx still ends the wait.
 func executePreparedStartWaveForCity(
 	ctx context.Context,
 	prepared []preparedStart,
@@ -1815,12 +1847,55 @@ func executePreparedStartWaveForCity(
 		}
 	}
 	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
+	waveStarted := time.Now()
+	var deadline <-chan time.Time
+	if startupTimeout > 0 {
+		timer := time.NewTimer(startupTimeout + waveDeadlineSlack)
+		defer timer.Stop()
+		deadline = timer.C
+	}
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+	var grace <-chan time.Time
+	// armGrace turns the ctx ending into the grace window that bounds the
+	// wait; the ctx case is disarmed so it fires once.
+	armGrace := func() {
+		ctxDone = nil
+		grace = time.After(waveCtxGrace)
+	}
+
+	// started goroutines write results; the caller reads only out.
 	results := make([]startResult, len(prepared))
+	out := make([]startResult, len(prepared))
+	finished := make([]bool, len(prepared))
 	sem := make(chan struct{}, maxParallel)
 	done := make(chan int, len(prepared))
+	launched := 0
+	gaveUp := false
+launch:
 	for i, item := range prepared {
 		i, item := i, item
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		default:
+			for acquired := false; !acquired; {
+				select {
+				case sem <- struct{}{}:
+					acquired = true
+				case <-deadline:
+					gaveUp = true
+					break launch
+				case <-ctxDone:
+					armGrace()
+				case <-grace:
+					gaveUp = true
+					break launch
+				}
+			}
+		}
+		launched++
 		go func() {
 			defer func() {
 				<-sem
@@ -1831,10 +1906,45 @@ func executePreparedStartWaveForCity(
 			results[i] = runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 		}()
 	}
-	for range prepared {
-		<-done
+	received := 0
+collect:
+	for received < launched && !gaveUp {
+		select {
+		case i := <-done:
+			out[i], finished[i] = results[i], true
+			received++
+		case <-deadline:
+			break collect
+		case <-ctxDone:
+			armGrace()
+		case <-grace:
+			break collect
+		}
 	}
-	return results
+	// Reports already delivered are real results; take them before giving up.
+	for drained := false; !drained && received < launched; {
+		select {
+		case i := <-done:
+			out[i], finished[i] = results[i], true
+			received++
+		default:
+			drained = true
+		}
+	}
+	abandonedAt := time.Now()
+	for i := range out {
+		if finished[i] {
+			continue
+		}
+		out[i] = startResult{
+			prepared:  prepared[i],
+			outcome:   TraceOutcomeDeferred,
+			started:   waveStarted,
+			finished:  abandonedAt,
+			abandoned: true,
+		}
+	}
+	return out
 }
 
 // startLeaseWatchEvery is how often a start reads that its runtime lease is
@@ -4950,6 +5060,17 @@ func executePlannedStartsTraced(
 				if result.outcome == TraceOutcomeStartEnqueued {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), string(result.outcome), result.started, result.finished, nil)
 					wakeCount++
+					continue
+				}
+				if result.abandoned {
+					// The wave stopped waiting for this start and nothing is known
+					// about its runtime: commit the store-only deferral and leave
+					// the runtime alone (no drain-ack clear, no stale stop).
+					if stderr != nil {
+						fmt.Fprintf(stderr, "session lifecycle: op=start wave=%d session=%s bead=%s outcome=abandoned_at_wave_deadline waited=%s\n", //nolint:errcheck // best-effort diagnostics
+							wave, result.prepared.candidate.name(), result.prepared.candidate.info.ID, result.finished.Sub(result.started).Round(time.Millisecond))
+					}
+					commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace)
 					continue
 				}
 				if result.err == nil && result.outcome != TraceOutcomeSessionInitializing {

@@ -84,6 +84,37 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-12-07
     statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.10, 1.27.3). GO-2026-6809 is a client-side crypto/x509 flaw, in that Certificate.Verify lacks the fixed releases' denylist of compromised publicly trusted intermediate certificates, so it matters only when a chain is verified against public roots. kubectl in this image runs in the gc-controller pod with no kubeconfig (contrib/session-scripts/gc-controller-k8s mounts none and sets no context), so client-go uses its in-cluster config and verifies the API server against the service-account ca.crt alone. client-go builds that trust pool from the CA file and never adds system roots, so a chain through one of the denylisted public intermediates cannot verify there, and the missing denylist cannot change a trust decision kubectl makes here; kubectl's only TLS peer is the API server, since apply and replace read their manifests from stdin. The residual risk returns only if an operator points kubectl at a kubeconfig whose API server presents a publicly issued certificate, which contrib/k8s does not do. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-10-25 the newest releases (v1.36.5, v1.37.1) are both built with Go 1.26.8, so none clears it yet; drop this entry once one ships that does.
+  # gc-mcp-mail Python packages, added 2026-10-26. The repo owner decided to hold
+  # filelock below 4 and GitPython on 3.1.x after the review of #8307
+  # (https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708)
+  # found two regressions on the fixed lines. filelock 4.x truncated the mail
+  # SQLite database at exit through a lock fd that mcp-agent-mail's emergency
+  # cleanup had closed and SQLite had reused; this is reproduced by
+  # .github/scripts/mcp-mail-filelock-exit-regression.py, which the container scan
+  # runs in the image. GitPython 3.2 made archive commits 1.5-2.9x slower, enough
+  # to lose a fifth to a quarter of a 400-message burst to archive-lock timeouts.
+  # The two HIGH advisories those lines fix are not reachable from this image,
+  # and each statement says why. The LOW filelock advisories (GHSA-567q-5qvw-pf92,
+  # GHSA-9vhv-jxww-xfm5) are Windows only and below the gate.
+  #
+  # Each entry names the dist-info path of the exact release the lock pins, so
+  # moving that pin stops the waiver from matching and the scan re-checks the
+  # new release. TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease holds them to
+  # the lock. The three-month horizon matches the fix it waits on: an upstream
+  # change (filelock checking the fd's identity before writing, or mcp-agent-mail
+  # not closing fds a live lock owns; a GitPython release without the commit
+  # slowdown) that no project has scheduled. At expiry, re-run the regression
+  # script and the burst measurement against the then-current releases.
+  - id: CVE-2026-112940
+    paths:
+      - "usr/local/lib/python3.12/site-packages/filelock-3.29.0.dist-info/METADATA"
+    expired_at: 2027-01-26
+    statement: GHSA-v4x8-3wr5-3wq8, filelock 3.29.0 (fixed in 4.2.1). The flaw is in filelock.ReadWriteLock, which reopens its SQLite lock database by name, so a planted symlink or journal file redirects writes. Nothing in gc-mcp-mail uses ReadWriteLock or AsyncReadWriteLock; mcp-agent-mail uses SoftFileLock, huggingface-hub FileLock and SoftFileLock, and cachecontrol FileLock. The lock is held below filelock 4 because 4.x truncates the mail database at exit (review of #8307; .github/scripts/mcp-mail-filelock-exit-regression.py). Drop this entry once the lock moves to a filelock release that passes that script.
+  - id: CVE-2026-114145
+    paths:
+      - "usr/local/lib/python3.12/site-packages/gitpython-3.1.62.dist-info/METADATA"
+    expired_at: 2027-01-26
+    statement: GHSA-83vg-56qc-22m7, GitPython 3.1.62 (fixed in 3.2.1, with no 3.1.x backport). The flaw is in Repo.create_submodule / Submodule.add, which clone a submodule before rejecting a path inside .git, so a submodule can plant a git hook. mcp-agent-mail never creates, adds or updates submodules (no submodule API appears anywhere in the package). It uses GitPython for its own mail archive (Repo.init, index commits, and Repo.clone_from of a local backup bundle during restore) and to open agent workspace repos read-only for branch and remote URL lookups. The lock is held on 3.1.x because GitPython 3.2 makes archive commits 1.5-2.9x slower and drops mail under bursts (review of #8307). Drop this entry once the lock moves to a GitPython release without that slowdown.
   # main's time-boxed waiver bridge (#5885) is fully retired: its thrift entry
   # went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached 0.24.0 and
   # its GitPython entries went when .github/requirements/mcp-agent-mail.txt

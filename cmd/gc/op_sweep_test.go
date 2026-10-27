@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -34,6 +36,18 @@ func (opSweepStore) IDPrefix() string { return "gc" }
 
 func newOpSweepStore() opSweepStore {
 	return opSweepStore{beadstest.NewOpRecordingStore(&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true})}
+}
+
+// newOpSweepSQLiteStore is a SQLite sessions store under the gc prefix, the
+// one store the builtin auto default records over.
+func newOpSweepSQLiteStore(t *testing.T) beads.Store {
+	t.Helper()
+	st, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.(interface{ CloseStore() error }).CloseStore() })
+	return st
 }
 
 // opSweepLists counts the op-row reads the store saw.
@@ -57,8 +71,21 @@ func opSweepWrites(rec *beadstest.OpRecordingStore) int {
 	return n
 }
 
+// opsGatesOff turns all three ops gates off, the opt-out from their auto
+// default (D-GATES), so a test starts from a city that records no ops and
+// turns on only the gates it names after it.
+func opsGatesOff(opts ...rollout.ForTestOption) []rollout.ForTestOption {
+	return append([]rollout.ForTestOption{
+		rollout.WithOpsContent(rollout.Off),
+		rollout.WithOpsControl(rollout.Off),
+		rollout.WithOpsLifecycle(rollout.Off),
+	}, opts...)
+}
+
+// newOpSweepCS is a controller over store with every ops gate off but those
+// opts turn on.
 func newOpSweepCS(store beads.Store, opts ...rollout.ForTestOption) *controllerState {
-	return &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(opts...), beadsQuiescent: new(atomic.Bool)}
+	return &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(opsGatesOff(opts...)...), beadsQuiescent: new(atomic.Bool)}
 }
 
 // opSweepClock is a fake clock safe to move while the loop goroutine reads it.
@@ -696,6 +723,122 @@ func TestOpSweepGatesOffIncapableStoreStops(t *testing.T) {
 	}
 }
 
+// opSweepIncapableCases are sessions stores that cannot record ops, each
+// over a recording store that sees their reads.
+var opSweepIncapableCases = []struct {
+	name   string
+	store  func(*beadstest.OpRecordingStore) beads.Store
+	reason string
+}{
+	{"no conditional writes", func(rec *beadstest.OpRecordingStore) beads.Store {
+		return incapableStore{opSweepStore{rec}}
+	}, legacyop.DegradeConditionalWritesUnsupported},
+	{"no namespace", func(rec *beadstest.OpRecordingStore) beads.Store { return rec }, legacyop.DegradeNoNamespace},
+}
+
+// TestOpSweepDefaultAutoIncapableStoreIdles proves the builtin default
+// (every ops gate auto, none set) over a store that cannot record ops runs
+// as if every gate were off: no degrade event and one log line saying why.
+// The loop keeps its ticker, as the gates are on, but a tick over that same
+// store reads nothing. An explicit auto over the same store degrades and
+// keeps ticking.
+func TestOpSweepDefaultAutoIncapableStoreIdles(t *testing.T) {
+	for _, tc := range opSweepIncapableCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := beadstest.NewOpRecordingStore(&beads.MemStore{HonorExplicitIDs: true})
+			cs := &controllerState{cityBeadStore: tc.store(rec), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+			h := newOpSweepHarness(cs)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := runOpSweep(ctx, h)
+			h.tick(t)
+			h.tick(t) // the first tick's pass has finished
+			cancel()
+			waitOpSweep(t, done)
+			if n := h.tickers.Load(); n != 1 {
+				t.Fatalf("started %d ticker(s) under the builtin default over an incapable store, want 1", n)
+			}
+			if n := opSweepLists(rec); n != 1 {
+				t.Fatalf("passes read the store %d time(s), want only the boot pass's submitted-op probe", n)
+			}
+			if d := h.degraded(); len(d) != 0 {
+				t.Fatalf("degrade hook heard %+v, want nothing under the builtin default", d)
+			}
+			// The builtin default records only over SQLite, so it leaves this
+			// store unopened before any capability check.
+			if l := h.logLines("auto by default"); len(l) != 1 || !strings.Contains(l[0], legacyop.DegradeNotRecordedByDefault) {
+				t.Fatalf("log lines = %q, want one naming %s", l, legacyop.DegradeNotRecordedByDefault)
+			}
+
+			explicitStore := tc.store(beadstest.NewOpRecordingStore(&beads.MemStore{HonorExplicitIDs: true}))
+			explicit := newOpSweepHarness(newOpSweepCS(explicitStore, rollout.WithOpsContent(rollout.Auto)))
+			explicit.s.safePass()
+			if d := explicit.degraded(); len(d) != 1 || d[0].Reason != tc.reason {
+				t.Fatalf("explicit auto: degrades = %+v, want one %s", d, tc.reason)
+			}
+			if !explicit.s.wantsTicker() {
+				t.Fatal("explicit auto: the sweeper stopped ticking")
+			}
+		})
+	}
+}
+
+// TestOpSweepDefaultAutoSweepsAStoreThatCanRecordOnceSwappedIn proves the
+// builtin default's incapable latch holds only for the store it was found
+// on: after an incapable boot pass, once a reload swaps in a SQLite sessions
+// store, the next tick opens that store and sweeps it, as the API and the CLI
+// record over it from then on.
+func TestOpSweepDefaultAutoSweepsAStoreThatCanRecordOnceSwappedIn(t *testing.T) {
+	for _, tc := range opSweepIncapableCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := beadstest.NewOpRecordingStore(&beads.MemStore{HonorExplicitIDs: true})
+			cs := &controllerState{cityBeadStore: tc.store(rec), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+			h := newOpSweepHarness(cs)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := runOpSweep(ctx, h)
+			h.tick(t)
+			h.tick(t) // the first tick's pass, over the incapable store, has finished
+
+			capable := newOpSweepSQLiteStore(t)
+			op := seedOp(t, capable, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyAPI, "after-reload")
+			h.clk.Set(op.FinishBy.Add(time.Second))
+			cs.mu.Lock()
+			cs.cityBeadStore = capable
+			cs.mu.Unlock()
+			h.tick(t)
+			h.tick(t) // a pass over the swapped-in store has finished
+			cancel()
+			waitOpSweep(t, done)
+			if got := getOp(t, capable, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+				t.Fatalf("the expired op on the swapped-in store = %+v, want closed failed{deadline_in_flight}", got)
+			}
+			if d := h.degraded(); len(d) != 0 {
+				t.Fatalf("degrade hook heard %+v, want nothing", d)
+			}
+		})
+	}
+}
+
+// TestOpSweepDefaultAutoCapableStoreTicks proves the builtin default over a
+// SQLite store opens the op store and keeps the sweeper's ticker, as an
+// explicit auto does.
+func TestOpSweepDefaultAutoCapableStoreTicks(t *testing.T) {
+	cs := &controllerState{cityBeadStore: newOpSweepSQLiteStore(t), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("the pass panicked")
+	}
+	if !h.s.hasStore() || h.s.incapableNow() {
+		t.Fatal("the builtin default did not open the op store over SQLite")
+	}
+	if !h.s.wantsTicker() {
+		t.Fatal("the builtin default over a capable store stopped ticking")
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrades = %+v, want none", d)
+	}
+}
+
 // TestOpSweepGatesOffNilStoreRetries is the boot whose best-effort city-store
 // open failed (cityBeadStore nil): with every gate off the boot pass neither
 // panics nor ends the loop, and once a reload installs the store the next
@@ -1132,4 +1275,137 @@ func TestOpSweepClassifiesSweepFailures(t *testing.T) {
 	if len(d) != 1 || d[0].Stage != legacyop.StageSweep || d[0].Reason != legacyop.DegradeConditionalWritesUnsupported || d[0].Mode != rollout.Require {
 		t.Fatalf("degrades = %+v, want one require/sweep/conditional_writes_unsupported", d)
 	}
+}
+
+// TestOpSweepDefaultAutoNonSQLiteStoreSweepsLeftoversThenIdles proves the
+// builtin default over a sessions store that can record ops but is not
+// SQLite-backed (a Dolt-served one in production) sweeps like a gates-off
+// pass: the op an earlier explicit gate left expired is closed, nothing
+// degrades, and once nothing is left a tick over that same store reads
+// nothing. An explicit auto over the same store sweeps under auto.
+func TestOpSweepDefaultAutoNonSQLiteStoreSweepsLeftoversThenIdles(t *testing.T) {
+	store := newOpSweepStore()
+	op := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyAPI, "left-by-explicit")
+	cs := &controllerState{cityBeadStore: store, rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	h := newOpSweepHarness(cs)
+	h.clk.Set(op.FinishBy.Add(time.Second))
+	if h.s.safePass() {
+		t.Fatal("the pass panicked")
+	}
+	if got := getOp(t, store, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+		t.Fatalf("the expired op = %+v, want closed failed{deadline_in_flight}", got)
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrade hook heard %+v, want nothing under the builtin default", d)
+	}
+	if !h.s.incapableNow() {
+		t.Fatal("the gates-off pass cleared the latch for a store the default does not record on")
+	}
+	h.s.safePass() // the leftover sweep's pass left no work
+	reads := opSweepLists(store.OpRecordingStore)
+	h.s.safePass()
+	if n := opSweepLists(store.OpRecordingStore); n != reads {
+		t.Fatalf("an idle pass read the store %d more time(s), want none", n-reads)
+	}
+
+	explicitStore := newOpSweepStore()
+	explicit := newOpSweepHarness(newOpSweepCS(explicitStore, rollout.WithOpsContent(rollout.Auto)))
+	if explicit.s.safePass() {
+		t.Fatal("explicit auto: the pass panicked")
+	}
+	if !explicit.s.hasStore() || explicit.s.incapableNow() {
+		t.Fatal("explicit auto: the op store did not open over a capable non-SQLite store")
+	}
+	if d := explicit.degraded(); len(d) != 0 {
+		t.Fatalf("explicit auto: degrades = %+v, want none", d)
+	}
+}
+
+// The builtin auto default must see through every production wrapper around a
+// split city's SQLite sessions store: the controller's cache, the CLI's
+// emitting wrapper, and the stores the sweeper and doctor open. A wrapper that
+// stops pointing at what it wraps would quietly turn recording off by default.
+
+// opSweepSplitRoutes opens the production split routes (sqlite-beads binding
+// for every infra class) the way storage boot does.
+func opSweepSplitRoutes(t *testing.T, root string, cfg *config.City) *storageRoutes {
+	t.Helper()
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan: %v", err)
+	}
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+	if err != nil {
+		t.Fatalf("openStorageRoutes: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	return routes
+}
+
+func TestOpsBuiltinDefaultRecordsOnARealSplitCity(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	work := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+
+	// Controller composition: CachingStore over the stamped SQLite engine.
+	ctlRoutes := opSweepSplitRoutes(t, root, cfg).withControllerCache(context.Background(), nil)
+	ctlSess := beads.SessionStore{Store: resolveSessionStore(ctlRoutes, work, cfg, root, nil)}
+	if b := beads.ResolveConditionalWritesBackend(ctlSess); !b.SQLite {
+		t.Fatalf("controller split sessions store resolves to %+v (%T), want SQLite", b, ctlSess.Store)
+	}
+	if err := opjournal.CheckRecordsByDefault(ctlSess); err != nil {
+		t.Fatalf("controller split sessions store: CheckRecordsByDefault = %v", err)
+	}
+	if _, err := opjournal.NewStore(ctlSess, clock.Real{}); err != nil {
+		t.Fatalf("controller split sessions store: NewStore = %v", err)
+	}
+
+	// Sweeper over a controllerState that routes sessions to that cache.
+	cs := &controllerState{cityBeadStore: work, storageRoutes: ctlRoutes, cfg: cfg, cityPath: root, rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	if got := cs.SessionsBeadStore().Store; got != ctlSess.Store {
+		t.Fatalf("cs.SessionsBeadStore = %T, want the routed cache", got)
+	}
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("pass panicked")
+	}
+	if !h.s.hasStore() || h.s.incapableNow() {
+		t.Fatalf("sweeper under the builtin default did not open the op store over the split SQLite sessions store; logs=%q", h.logLines(""))
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrades = %+v", d)
+	}
+
+	// CLI composition: the funnel's emitting wrapper over the engine, then
+	// withMainStoreEmission (cliSessionStore's shape).
+	cliRoutes := opSweepSplitRoutes(t, root, cfg).withCLIEmission(root)
+	cliSess := withMainStoreEmission(resolveSessionStore(cliRoutes, work, cfg, root, nil), root)
+	if b := beads.ResolveConditionalWritesBackend(beads.SessionStore{Store: cliSess}); !b.SQLite {
+		t.Fatalf("CLI split sessions store resolves to %+v (%T), want SQLite", b, cliSess)
+	}
+	h2 := newCLIOpHarness(t, nil)
+	h2.opStore = nil
+	cliOpenOpStore = func(s beads.Store) (*opjournal.Store, error) {
+		h2.opens++
+		return opjournal.NewStore(beads.SessionStore{Store: s}, cliOpClock)
+	}
+	op := newCLIOp(&config.City{}, cliSess, cliOpRequest{verb: "gc session wake", kind: opjournal.KindWake, stderr: new(strings.Builder)})
+	if op.rec.Mode != rollout.Auto || !op.rec.QuietCannotRecord {
+		t.Fatalf("recorder mode=%s quiet=%t, want builtin auto", op.rec.Mode, op.rec.QuietCannotRecord)
+	}
+	st, err := op.rec.Open()
+	if err != nil || st == nil {
+		t.Fatalf("CLI builtin default over the split SQLite sessions store: Open = %v, %v", st, err)
+	}
+
+	// Doctor over the CLI composition.
+	c := newOpsRecordingDoctorCheck(root, cfg, rollout.ForTest(), nil)
+	c.open = func() (beads.Store, error) { return work, nil }
+	c.sessions = func(beads.Store) beads.Store { return cliSess }
+	c.clk = &clock.Fake{Time: opSweepT0}
+	r := c.Run(&doctor.CheckContext{})
+	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "can record ops") {
+		t.Fatalf("doctor = %v %q, want OK recording", r.Status, r.Message)
+	}
+	t.Logf("doctor: %s", r.Message)
 }

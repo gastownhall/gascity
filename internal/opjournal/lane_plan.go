@@ -847,6 +847,11 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	if batch != nil {
 		tp.busy = false
 	}
+	// A busy boundary that names its deadline wakes the pass there; a
+	// deadline at or before now is stale, and the host's backoff finds it.
+	if tp.busy && boundary == TriNo && probe.BoundaryAt.After(now) {
+		tp.next = minTime(tp.next, probe.BoundaryAt)
+	}
 	return batch
 }
 
