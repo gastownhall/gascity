@@ -71,9 +71,9 @@ func TestCompactScriptPendingPushToRemovedRemoteReportsUnsatisfiableOnce(t *test
 			markerBefore := readCompactFile(t, marker)
 			fetchesBefore := strings.Count(readCompactFile(t, fixture.doltLog), "DOLT_FETCH")
 
-			// below_threshold reports no origin remote, as after `dolt remote remove origin`.
+			// remote_removed reports no origin remote, as after `dolt remote remove origin`.
 			for cycle := 1; cycle <= 2; cycle++ {
-				out, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+				out, err := fixture.run(t, "remote_removed", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 				if err == nil {
 					t.Fatalf("cycle %d: an unsatisfiable pending push must stay a failure for manual review:\n%s", cycle, out)
 				}
@@ -118,7 +118,7 @@ func TestCompactScriptDryRunDoesNotReportUnsatisfiablePendingPush(t *testing.T) 
 	fixture, marker := stagePendingPushMarker(t, true)
 	markerBefore := readCompactFile(t, marker)
 
-	out, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+	out, err := fixture.run(t, "remote_removed", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
 	if err != nil {
 		t.Fatalf("dry run should succeed: %v\n%s", err, out)
 	}

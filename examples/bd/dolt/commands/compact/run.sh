@@ -3219,6 +3219,45 @@ report_held_pending_push() {
   return 0
 }
 
+# pending_push_remote_is_gone DB REMOTE
+#   True only when the existence probe answered and REMOTE is not configured.
+#   A probe that fails or returns anything else proves nothing, so it is not
+#   "gone" and the marker keeps its existing handling.
+pending_push_remote_is_gone() {
+  gone_db="$1"
+  gone_remote="$2"
+  gone_count=$(remote_exists "$gone_db" "$gone_remote" 2>/dev/null) || return 1
+  [ "$gone_count" = "0" ]
+}
+
+# report_unsatisfiable_pending_push DB REMOTE
+#   A pending-push marker whose remote was removed can never be retried: the
+#   retry would fail forever and the stale-age alert would re-fire every cycle.
+#   Report it once as its own defect (compact-pending-push-unsatisfiable): the
+#   event fires every run, the mail only on first sight or when the reason
+#   changes (backstop 0). Bookkeeping lives in the notify-state sidecar; the
+#   evidence marker is never rewritten. The database stays blocked until an
+#   operator reconciles or clears the marker.
+report_unsatisfiable_pending_push() {
+  unsat_db="$1"
+  unsat_remote="$2"
+  unsat_marker=$(compact_marker_path "$pending_push_dir" "$unsat_db")
+  unsat_created_at=$(compact_marker_value "$pending_push_dir" "$unsat_db" created_at || true)
+  unsat_reason="pending push to remote=$unsat_remote can never complete: the remote no longer exists; restore the remote or clear the pending-push marker after reconciling the database manually"
+  emit_compact_quarantine_event "$unsat_db" "compact-pending-push-unsatisfiable" "$unsat_marker" "$unsat_reason" "${unsat_created_at:-<unknown>}"
+  if marker_should_notify "$pending_push_dir" "$unsat_db" "$unsat_reason" 0; then
+    quarantine_notify_error=""
+    if mail_compact_quarantine_alert "$unsat_db" "compact-pending-push-unsatisfiable" "$unsat_marker" "$unsat_reason" "${unsat_created_at:-<unknown>}"; then
+      record_marker_notify_state "$pending_push_dir" "$unsat_db" "$unsat_reason" 1
+    else
+      record_marker_notify_state "$pending_push_dir" "$unsat_db" "$unsat_reason" 0 "$quarantine_notify_error"
+    fi
+  else
+    record_marker_notify_state "$pending_push_dir" "$unsat_db" "$unsat_reason" 0
+  fi
+  return 0
+}
+
 # compact_shared_history_database handles a database the shared-history guard
 # protects: never flatten, never push. A pending-GC marker (an earlier run
 # already flattened locally) still gets its local DOLT_GC --full, with the
@@ -3546,6 +3585,17 @@ flatten_database() {
           return 1
           ;;
       esac
+    fi
+    if [ "$legacy_pending_push_recovered" != "1" ] && pending_push_remote_is_gone "$db" "$pending_remote"; then
+      if [ -n "$dry_run" ]; then
+        printf 'compact: db=%s pending_push=present but remote=%s no longer exists — dry-run (would report unsatisfiable pending push)\n' \
+          "$db" "$pending_remote"
+        return 0
+      fi
+      printf 'compact: db=%s pending_push=present but remote=%s no longer exists — unsatisfiable, manual review required\n' \
+        "$db" "$pending_remote" >&2
+      report_unsatisfiable_pending_push "$db" "$pending_remote"
+      return 1
     fi
     if [ "$legacy_pending_push_recovered" != "1" ]; then
       ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
