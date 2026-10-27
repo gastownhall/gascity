@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -559,4 +562,224 @@ func TestReconcileSessionBeads_InterruptedCloseFreesMaxOnePoolSeat(t *testing.T)
 			}
 		})
 	}
+}
+
+// metadataWritesBeyondS20 lists metadata changes other than the three S20
+// throttle markers: AC-6's "no write beyond S20's markers".
+func metadataWritesBeyondS20(before, after map[string]string) []string {
+	var writes []string
+	for k, v := range after {
+		old, ok := before[k]
+		if ok {
+			if old != v {
+				writes = append(writes, fmt.Sprintf("changed %s: %q -> %q", k, old, v))
+			}
+			continue
+		}
+		switch k {
+		case unknownStateFirstSeenKey, unknownStateValueKey, unknownStateEscalatedKey:
+		default:
+			writes = append(writes, fmt.Sprintf("added %s=%q", k, v))
+		}
+	}
+	return writes
+}
+
+// TestReconcileSessionBeads_InterruptedCloseLeavesUnrecognizedStatesToS20 is
+// the AC-6 guard: the recognizer's vocabulary is exactly this binary's own
+// close codes. A row whose state merely LOOKS like one — archived, draining,
+// hibernating, a padded " duplicate", duplicate-repair — or a passthrough
+// code in the wrong shape (idle-timeout on a named row, or on a row the pool
+// does not manage) is NOT an interrupted close. With no runtime under it, the
+// row must sit untouched for as long as it likes: never closed, no metadata
+// write beyond S20's throttle markers, and S20 emitting and escalating
+// exactly as at base — one first-sight event, silence while throttled, one
+// escalated event past the 30-minute threshold. The control subtest proves
+// the guard is not inertness: a genuinely recognized code in the same shape
+// closes.
+func TestReconcileSessionBeads_InterruptedCloseLeavesUnrecognizedStatesToS20(t *testing.T) {
+	poolSeat := func(state string) func(*testing.T, *interruptedCloseEnv) beads.Bead {
+		return func(t *testing.T, env *interruptedCloseEnv) beads.Bead {
+			return env.halfClosedSeat(t, state)
+		}
+	}
+	cases := []struct {
+		name  string
+		state string
+		mint  func(t *testing.T, env *interruptedCloseEnv) beads.Bead
+	}{
+		{name: "archived pool seat", state: "archived", mint: poolSeat("archived")},
+		{name: "draining pool seat", state: "draining", mint: poolSeat("draining")},
+		{name: "hibernating pool seat", state: "hibernating", mint: poolSeat("hibernating")},
+		{name: "padded duplicate pool seat", state: " duplicate", mint: poolSeat(" duplicate")},
+		{name: "duplicate-repair pool seat", state: "duplicate-repair", mint: poolSeat("duplicate-repair")},
+		{name: "idle-timeout on a named row", state: "idle-timeout", mint: func(t *testing.T, env *interruptedCloseEnv) beads.Bead {
+			// A configured always-mode named session, half-closed in a
+			// passthrough code: the recognizer must not take it (a named row
+			// is not a pool sleep row).
+			env.cfg.Agents = []config.Agent{{Name: "warlord", StartCommand: "true"}}
+			env.cfg.NamedSessions = []config.NamedSession{{Template: "warlord", Mode: "always"}}
+			named, err := env.store.Create(beads.Bead{
+				Title:  "warlord",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"template":                   "warlord",
+					"agent_name":                 "warlord",
+					"session_name":               config.NamedSessionRuntimeName(env.cityName, env.cfg.Workspace, "warlord"),
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: "warlord",
+					namedSessionModeMetadata:     "always",
+					"sleep_reason":               "idle-timeout",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create named row: %v", err)
+			}
+			env.halfClose(t, named.ID, "idle-timeout", nil)
+			stored, err := env.store.Get(named.ID)
+			if err != nil {
+				t.Fatalf("reload named row: %v", err)
+			}
+			return stored
+		}},
+		{name: "idle-timeout on a non-pool row", state: "idle-timeout", mint: func(t *testing.T, env *interruptedCloseEnv) beads.Bead {
+			// A plain session row of the template with no pool markers: the
+			// pool does not manage it, so its sleep code is not a pool close.
+			plain, err := env.store.Create(beads.Bead{
+				Title:  "polecat drift",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"template":     interruptedCloseTemplate,
+					"agent_name":   "polecat",
+					"session_name": env.cityName + "/polecat-drift",
+					"sleep_reason": "idle-timeout",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create non-pool row: %v", err)
+			}
+			env.halfClose(t, plain.ID, "idle-timeout", nil)
+			stored, err := env.store.Get(plain.ID)
+			if err != nil {
+				t.Fatalf("reload non-pool row: %v", err)
+			}
+			return stored
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newInterruptedCloseEnv(t)
+			row := tc.mint(t, env)
+			before := map[string]string{}
+			for k, v := range row.Metadata {
+				before[k] = v
+			}
+
+			reload := func() beads.Bead {
+				t.Helper()
+				got, err := env.store.Get(row.ID)
+				if err != nil {
+					t.Fatalf("reload row: %v", err)
+				}
+				return got
+			}
+			assertUntouched := func(stage string) {
+				t.Helper()
+				got := reload()
+				if got.Status != "open" {
+					t.Fatalf("%s: unrecognized row closed: status=%q, want open", stage, got.Status)
+				}
+				if got.Metadata["state"] != tc.state {
+					t.Fatalf("%s: state=%q, want the raw %q unchanged", stage, got.Metadata["state"], tc.state)
+				}
+				if writes := metadataWritesBeyondS20(before, got.Metadata); len(writes) != 0 {
+					t.Fatalf("%s: writes beyond S20's markers: %v", stage, writes)
+				}
+			}
+			tick := func() (*SessionReconcilerTraceCycle, *events.Fake) {
+				t.Helper()
+				rows, err := loadSessionBeads(env.store)
+				if err != nil {
+					t.Fatalf("load session beads: %v", err)
+				}
+				return env.tracedTick(t, rows, env.store, env.sp, false)
+			}
+			payloadOf := func(t *testing.T, ev events.Event) api.SessionUnknownStatePayload {
+				t.Helper()
+				var p api.SessionUnknownStatePayload
+				if err := json.Unmarshal(ev.Payload, &p); err != nil {
+					t.Fatalf("unmarshal session.unknown_state payload: %v", err)
+				}
+				return p
+			}
+
+			// First sight: S20 emits once, un-escalated; the finisher never
+			// fires and the skip site still signals.
+			cycle, rec := tick()
+			assertUntouched("first sight")
+			if decisions := finishInterruptedCloseDecisions(cycle); len(decisions) != 0 {
+				t.Fatalf("finisher decisions = %+v, want none — state %q is not this binary's close", decisions, tc.state)
+			}
+			if !unknownStateSkipRecorded(cycle) {
+				t.Fatal("S20's unknown_state_skipped decision missing — the skip must still signal, exactly as at base")
+			}
+			evs := unknownStateEvents(t, rec)
+			if len(evs) != 1 {
+				t.Fatalf("first sight: session.unknown_state events = %d, want exactly 1", len(evs))
+			}
+			if p := payloadOf(t, evs[0]); p.State != tc.state || p.Escalated {
+				t.Fatalf("first-sight payload = %+v, want raw state %q un-escalated", p, tc.state)
+			}
+			if reload().Metadata[unknownStateFirstSeenKey] == "" {
+				t.Fatal("S20 first-seen marker not stamped")
+			}
+
+			// Mid-window: throttled silent, still untouched.
+			env.clk.Advance(5 * time.Minute)
+			_, rec = tick()
+			assertUntouched("mid-window")
+			if evs := unknownStateEvents(t, rec); len(evs) != 0 {
+				t.Fatalf("mid-window: session.unknown_state events = %d, want 0 (throttled)", len(evs))
+			}
+
+			// Past the 30-minute threshold: exactly one escalated emit, the
+			// escalation marker stamped, still never closed.
+			env.clk.Advance(26 * time.Minute)
+			_, rec = tick()
+			assertUntouched("escalation")
+			evs = unknownStateEvents(t, rec)
+			if len(evs) != 1 {
+				t.Fatalf("escalation: session.unknown_state events = %d, want exactly 1", len(evs))
+			}
+			if p := payloadOf(t, evs[0]); !p.Escalated || p.State != tc.state {
+				t.Fatalf("escalation payload = %+v, want escalated with raw state %q", p, tc.state)
+			}
+			if reload().Metadata[unknownStateEscalatedKey] == "" {
+				t.Fatal("S20 escalation marker not stamped")
+			}
+		})
+	}
+
+	// The control that keeps the guard honest: a genuinely recognized code in
+	// the same shape (half-closed pool seat, no runtime) DOES close, so the
+	// cases above stay open because they are unrecognized, not because the
+	// finisher is inert.
+	t.Run("control recognized code in the same shape closes", func(t *testing.T) {
+		env := newInterruptedCloseEnv(t)
+		zombie := env.halfClosedSeat(t, "stale-session")
+		rows, err := loadSessionBeads(env.store)
+		if err != nil {
+			t.Fatalf("load session beads: %v", err)
+		}
+		env.tracedTick(t, rows, env.store, env.sp, false)
+		got, err := env.store.Get(zombie.ID)
+		if err != nil {
+			t.Fatalf("reload zombie: %v", err)
+		}
+		if got.Status != "closed" || got.Metadata["state"] != "stale-session" {
+			t.Fatalf("control row status=%q state=%q, want closed/stale-session — the finisher must be live", got.Status, got.Metadata["state"])
+		}
+	})
 }
