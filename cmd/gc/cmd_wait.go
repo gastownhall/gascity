@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1341,6 +1342,10 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 	if err != nil {
 		return err
 	}
+	// The controller's lane host for this sessions store, when it executes
+	// message: a ready wait's nudge is then a lane notice for a session it
+	// serves (wait_lane_notice.go).
+	lane := plannerNoticeLaneFor(sessFront.Store().Store)
 	for _, wait := range waits {
 		if wait.State != waitStateReady {
 			continue
@@ -1360,6 +1365,20 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if nudgeID == "" {
 			continue
 		}
+		message := strings.TrimSpace(wait.Note)
+		if message == "" {
+			message = "Wait satisfied."
+		}
+		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
+		if lane != nil {
+			handled, err := dispatchWaitNotice(lane, sessFront, sessionInfo, wait, nudgeID, message)
+			if err != nil {
+				return err
+			}
+			if handled {
+				continue
+			}
+		}
 		queued, err := waitNudgeAttemptQueuedOrResolved(nudgeShadows(nudges), nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
@@ -1371,11 +1390,6 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if queued {
 			continue
 		}
-		message := strings.TrimSpace(wait.Note)
-		if message == "" {
-			message = "Wait satisfied."
-		}
-		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
 		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
 			ID:                nudgeID,
 			SessionID:         sessionID,
@@ -1455,6 +1469,10 @@ func cachedSessionCanReceiveWaitNudge(info sessionpkg.Info) bool {
 // shadow nudge lookup. Identity today (both wrap the same work store).
 func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
 	nudgeID := wait.NudgeID
+	if opjournal.IsOpID(nudgeID) {
+		// A lane notice's op (wait_lane_notice.go).
+		return finalizeWaitFromNotice(sessFront, wait, nudgeID, now)
+	}
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
 	}
@@ -1597,9 +1615,16 @@ func nextWaitDeliveryAttempt(front storebinding.NudgeShadows, wait sessionpkg.Wa
 // closes only the work store handle it opened, never the nudges-class store
 // (see openOwnedNudgeBeadStore).
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
+	ops, queued := splitWaitNudgeIDs(nudgeIDs)
 	store, opened := openOwnedNudgeBeadStore(cityPath)
 	defer func() { _ = closeBeadStoreHandle(opened) }()
-	return openNudgeQueue(cityPath, store).Queue.WithdrawQueuedWaitNudges(nudgeIDs)
+	err := openNudgeQueue(cityPath, store).Queue.WithdrawQueuedWaitNudges(queued)
+	if len(ops) == 0 {
+		return err
+	}
+	// A wait's lane notice lives in the sessions class's op journal.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return errors.Join(err, withdrawWaitNotices(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}, ops))
 }
 
 func waitLifecycleEnabled() error {

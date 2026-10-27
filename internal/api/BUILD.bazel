@@ -527,6 +527,7 @@ go_test(
         "test_helpers_test.go",
         "testenv_import_test.go",
         "title_generate_test.go",
+        "wait_nudges_test.go",
         "wake_serialization_conflict_test.go",
         "webhook_dedup_test.go",
         "webhook_ratelimit_test.go",

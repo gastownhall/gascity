@@ -531,6 +531,10 @@ adopts it.
   failed proposal fails the create and rolls it back. An agent create's
   message rides its first start's prompt
   (`template_overrides.initial_message`) and is no lane op.
+- Wait withdrawal (`withdrawQueuedWaitNudges`): a wait whose nudge is a lane
+  notice holds its op id as `nudge_id`; an op id (`opjournal.IsOpID`) is
+  canceled in the op journal as `gc:wait`, any other id goes to the nudge
+  queue as before.
 - Run cancel (interrupt listed): one op per holder session with a turn to
   stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
   `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that
