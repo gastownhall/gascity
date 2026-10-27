@@ -18,3 +18,12 @@ func OpenRealNativeDoltStoreForTest(t *testing.T) Store {
 	}
 	return s
 }
+
+// StartTestDoltServerForTest launches a throwaway dolt sql-server listening
+// on a free loopback port and returns that port, skipping when no dolt
+// binary is on PATH, for external integration tests that need a shared
+// server a bd scope can be pointed at.
+func StartTestDoltServerForTest(t *testing.T) int {
+	t.Helper()
+	return startTestDoltServer(t)
+}

@@ -16,6 +16,9 @@ import (
 //   - every bd_bin_v* archive downloads that version's linux_amd64 release
 //     with the sha256 .github/scripts/install-bd-archive.sh pins for it;
 //   - //test/acceptance:bd_cli_contract_prev_test runs BD_PREV_VERSION's bd;
+//   - //internal/beads:bd_metadata_compose_floor_test (bd first on PATH
+//     through GC_TEST_TOOL_PATHS, plus the pinned dolt) runs
+//     BD_PREV_VERSION's bd;
 //   - //test/acceptance:bd_cli_contract_current_test and
 //     //internal/beads:bd_conditional_release_contract_test (bd first on
 //     PATH through GC_TEST_TOOL_PATHS) run BD_CURRENT_VERSION's bd. BD_CURRENT_REF is the commit that release was
@@ -125,22 +128,44 @@ func TestBdContractCellsRunTheDepsEnvPins(t *testing.T) {
 			t.Errorf("bd_conditional_release_contract_test lacks %s:\n%s", want, r)
 		}
 	}
+	// The #1596 floor cell pins BD_PREV_VERSION's bd (and the pinned dolt,
+	// whose sql-server the scope is pointed at): the concurrent different-key
+	// --set-metadata composition row must hold at the minimum-supported bd
+	// too — v1.3.0 is the first release with the in-transaction per-key
+	// merge — so the floor cannot quietly move past the fix.
+	floor := rule(beadsBuild, "bd_metadata_compose_floor_test")
+	for _, want := range []string{
+		`args = ["-test.run=^TestBdStoreConcurrentDifferentKeySetMetadataComposesOnSharedServer$$"],`,
+		`gotags = ["integration"],`,
+		`"GC_TEST_TOOL_PATHS": "$(rootpath @` + repoFor(prev) + `//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",`,
+		`"@` + repoFor(prev) + `//:bd",`,
+	} {
+		if !strings.Contains(floor, want) {
+			t.Errorf("bd_metadata_compose_floor_test lacks %s:\n%s", want, floor)
+		}
+	}
+
 	files, err := filepath.Glob(filepath.Join(root, "internal", "beads", "*_test.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found bool
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
+	definesIntegrationTest := func(name string) bool {
+		for _, f := range files {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := string(data)
+			if strings.HasPrefix(src, "//go:build integration\n") && strings.Contains(src, "\nfunc "+name+"(t *testing.T) {") {
+				return true
+			}
 		}
-		src := string(data)
-		if strings.HasPrefix(src, "//go:build integration\n") && strings.Contains(src, "\nfunc "+testName[1]+"(t *testing.T) {") {
-			found = true
-		}
+		return false
 	}
-	if !found {
+	if !definesIntegrationTest(testName[1]) {
 		t.Errorf("no //go:build integration test file in internal/beads defines %s; the contract target would select nothing", testName[1])
+	}
+	if !definesIntegrationTest("TestBdStoreConcurrentDifferentKeySetMetadataComposesOnSharedServer") {
+		t.Errorf("no //go:build integration test file in internal/beads defines TestBdStoreConcurrentDifferentKeySetMetadataComposesOnSharedServer; the floor target would select nothing")
 	}
 }
