@@ -153,6 +153,43 @@ func TestGcBdUpdateRunsPassthroughOnce(t *testing.T) {
 	}
 }
 
+// TestGcBdUpdateSetMetadataPassesThroughVerbatim pins that a
+// `--set-metadata` write crosses the passthrough as bd's own flag pair:
+// exactly one update invocation, the pair verbatim, and no `--metadata`
+// document. The #1596 composition contract — concurrent different-key
+// --set-metadata writes both land — holds only because bd resolves the pair
+// against the row inside its write transaction; a gc-side pre-merge (read
+// the bead, rewrite the flag as a whole `--metadata` document) would
+// reintroduce the lost update one layer up while every exit code stayed 0,
+// and this row is what fails the day someone writes it.
+func TestGcBdUpdateSetMetadataPassesThroughVerbatim(t *testing.T) {
+	log := newSingleExecTestCity(t)
+	args := []string{"update", "demo-abc", "--set-metadata", "k1=v1"}
+	var stdout, stderr bytes.Buffer
+	if got := doBd(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(update --set-metadata) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	var updates, reads int
+	for _, call := range singleExecBdCalls(t, log) {
+		switch {
+		case strings.HasPrefix(call, "update "):
+			updates++
+			got := strings.Fields(call)
+			want := []string{"update", "demo-abc", "--set-metadata", "k1=v1"}
+			if strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Fatalf("update argv = %q, want the passthrough pair verbatim %q", got, want)
+			}
+		case strings.HasPrefix(call, "show "):
+			reads++ // the deliberate exact-ID collision guard (gcy-g4o)
+		default:
+			t.Fatalf("unexpected bd invocation %q", call)
+		}
+	}
+	if updates != 1 || reads != 1 {
+		t.Fatalf("bd update invocations = %d, guard reads = %d; want 1 and 1 (calls %q)", updates, reads, singleExecBdCalls(t, log))
+	}
+}
+
 // TestResolveBdScopeTargetSkipsProbesThatCannotChangeTheAnswer pins the probe
 // rule directly. An existence probe opens a store and reads the bead, a whole
 // bd round trip, so it runs only when its answer could pick a different store
