@@ -10,7 +10,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -818,22 +817,19 @@ var laneRespondAnswerBound = 20 * time.Second
 
 // respondSessionLane is /respond under lane authority (respond listed): a
 // respond op keyed by the interaction occurrence it answers, which the lane
-// host runs at most once. key is the Idempotency-Key header.
+// host runs at most once, awaited at most until ctx ends. key is the
+// Idempotency-Key header.
 //
-// A key that already names a respond is its retry, followed through the row
-// the first request left under the key: an open op is awaited and a closed
-// one replayed, so a retry never resolves the occurrence again, and never
-// answers an identical prompt raised later. Otherwise the front door reads
-// the pending interaction as today and writes nothing on a refusal (no
-// pending 409 no_pending, another request id 409 invalid_interaction,
-// unsupported 501). The occurrence is the latest unresolved raising of the
-// pending request id, or the next one recorded now (Store.RecordRaising),
-// numbered as the lane numbers it, and the op is keyed RespondKey of it:
-// a different answer to the same occurrence from the same principal is 409
-// key_reuse, and the first answer wins. A request that carries a key also
-// leaves an API-executed respond row under it, of the legacy op's frozen
-// shape, closed skipped{coalesced_into: the lane op}.
-func (s *Server) respondSessionLane(mgr *session.Manager, store beads.Store, id, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+// A key that already names a respond is its retry (retryLaneRespond).
+// Otherwise the front door reads the pending interaction as today and writes
+// nothing on a refusal (laneRespondPending). The occurrence is the latest
+// unresolved raising of the pending request id, or the next one recorded now
+// (Store.RecordRaising), numbered as the lane numbers it, and the op is keyed
+// RespondKey of it: a different answer to the same occurrence from the same
+// principal is 409 key_reuse, and the first answer wins. A request that
+// carries a key also leaves an API-executed respond row under it, of the
+// legacy op's frozen shape, closed skipped{coalesced_into: the lane op}.
+func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, store beads.Store, id, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return syncAnswer{}, err
@@ -843,22 +839,11 @@ func (s *Server) respondSessionLane(mgr *session.Manager, store beads.Store, id,
 		return syncAnswer{}, err
 	}
 	if retry {
-		target, err := followCoalesced(st, prior)
-		if err != nil {
-			return syncAnswer{}, err
-		}
-		return s.answerLaneRespond(st, id, target, true)
+		return s.retryLaneRespond(ctx, st, id, key, prior, resp)
 	}
-	pending, supported, err := mgr.Pending(id)
-	switch {
-	case err != nil:
-		return syncAnswer{}, humaSessionManagerError(err)
-	case !supported:
-		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("session %s: %w", id, session.ErrInteractionUnsupported))
-	case pending == nil || pending.RequestID == "":
-		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("session %s: %w", id, session.ErrNoPendingInteraction))
-	case resp.RequestID != "" && resp.RequestID != pending.RequestID:
-		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%w: pending interaction %q does not match request %q", session.ErrInteractionMismatch, pending.RequestID, resp.RequestID))
+	pending, err := laneRespondPending(mgr, id, resp)
+	if err != nil {
+		return syncAnswer{}, err
 	}
 	scope, why, whyErr := sessionOpScope(store, id)
 	if why != "" {
@@ -902,7 +887,99 @@ func (s *Server) respondSessionLane(mgr *session.Manager, store beads.Store, id,
 			return syncAnswer{}, err
 		}
 	}
-	return s.answerLaneRespond(st, id, op, !created)
+	return s.answerLaneRespond(ctx, st, id, key, op, !created)
+}
+
+// laneRespondPending is a lane /respond's front door, OJ-4's: the pending
+// interaction of session id that resp answers, or the legacy refusal,
+// nothing written, when the runtime cannot report one (501), none is pending
+// (409 no_pending), or resp names another request (409
+// invalid_interaction).
+func laneRespondPending(mgr *session.Manager, id string, resp runtime.InteractionResponse) (*runtime.PendingInteraction, error) {
+	pending, supported, err := mgr.Pending(id)
+	switch {
+	case err != nil:
+		return nil, humaSessionManagerError(err)
+	case !supported:
+		return nil, humaSessionManagerError(fmt.Errorf("session %s: %w", id, session.ErrInteractionUnsupported))
+	case pending == nil || pending.RequestID == "":
+		return nil, humaSessionManagerError(fmt.Errorf("session %s: %w", id, session.ErrNoPendingInteraction))
+	case resp.RequestID != "" && resp.RequestID != pending.RequestID:
+		return nil, humaSessionManagerError(fmt.Errorf("%w: pending interaction %q does not match request %q", session.ErrInteractionMismatch, pending.RequestID, resp.RequestID))
+	}
+	return pending, nil
+}
+
+// retryLaneRespond answers resp, a /respond of session id whose
+// Idempotency-Key key names prior, a respond. A request that asks again what
+// prior recorded (sameRespondRequest) is its retry, followed through the row
+// the first request left under the key: an open op is awaited and a closed
+// one replayed, so a retry never resolves the occurrence again, and never
+// answers an identical prompt raised later. One that asks anything else is
+// 422 idempotency_mismatch, nothing written, as OJ-4 answers it.
+func (s *Server) retryLaneRespond(ctx context.Context, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
+	same, err := sameRespondRequest(st, prior, resp)
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	if !same {
+		return syncAnswer{}, apierr.IdempotencyMismatch.Msgf("idempotency_mismatch: Idempotency-Key reused with a different request: it names respond op %s, which records another answer or request_id", prior.ID)
+	}
+	target, err := followCoalesced(st, prior)
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	return s.answerLaneRespond(ctx, st, id, key, target, true)
+}
+
+// sameRespondRequest reports whether resp asks again what prior, the respond
+// a /respond's Idempotency-Key names, recorded: its request_id, when it names
+// one, is the request prior answers, and its answer is prior's. A lane op is
+// compared by its answer's canonical form (sameLaneRespond). A row of the
+// legacy op's frozen shape (OJ-4's op, or the row a lane respond left under
+// its key) is compared by its request digest under its own scope, as OJ-4's
+// admission compares a same-key retry, which adopts that scope.
+func sameRespondRequest(st *opjournal.Store, prior opjournal.Op, resp runtime.InteractionResponse) (bool, error) {
+	if prior.Executor == opjournal.ExecutorLane {
+		return sameLaneRespond(prior, resp)
+	}
+	if resp.RequestID != "" && resp.RequestID != prior.Scope.Interaction {
+		return false, nil
+	}
+	payload, err := encodeRespondOpPayload(resp)
+	if err != nil {
+		return false, err
+	}
+	again, err := st.Preview(opjournal.Request{
+		Conversation: prior.Conversation,
+		Kind:         opjournal.KindRespond,
+		Executor:     prior.Executor,
+		ClientKey:    prior.ClientKey,
+		Producer:     prior.Producer,
+		Payload:      payload,
+		Policy:       respondOpPolicy,
+		Scope:        prior.Scope,
+	})
+	if err != nil {
+		return false, proposeError(err)
+	}
+	return again.PayloadDigest == prior.PayloadDigest, nil
+}
+
+// sameLaneRespond is sameRespondRequest for prior, a lane respond: resp's
+// request_id, when it names one, is the request of the occurrence prior
+// answers, and its answer in canonical form (EncodeRespondPayload) is
+// prior's payload. An answer the canonical form refuses is not prior's.
+func sameLaneRespond(prior opjournal.Op, resp runtime.InteractionResponse) (bool, error) {
+	requestID, _, err := opjournal.ParseInteractionOccurrence(prior.Scope.Interaction)
+	if err != nil {
+		return false, apierr.Internal.Msgf("reading the occurrence op %s answers: %v", prior.ID, err)
+	}
+	if resp.RequestID != "" && resp.RequestID != requestID {
+		return false, nil
+	}
+	payload, err := opjournal.EncodeRespondPayload(opjournal.RespondPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	return err == nil && payload == prior.Payload, nil
 }
 
 // recordLaneRespondUnderKey records, under a lane /respond's
@@ -911,13 +988,9 @@ func (s *Server) respondSessionLane(mgr *session.Manager, store beads.Store, id,
 // at_least_once), closed skipped{coalesced_into: target}, so a retry under
 // the key follows it back. A key that already names a row is left as it is.
 func recordLaneRespondUnderKey(st *opjournal.Store, conv, key string, scope opjournal.Scope, resp runtime.InteractionResponse, target string) error {
-	payload := respondOpPayload{Action: resp.Action, Text: resp.Text}
-	if len(resp.Metadata) > 0 {
-		payload.Metadata = resp.Metadata
-	}
-	raw, err := json.Marshal(payload)
+	payload, err := encodeRespondOpPayload(resp)
 	if err != nil {
-		return apierr.Internal.Msg("encoding the respond row payload: " + err.Error())
+		return err
 	}
 	row, created, err := st.Propose(opjournal.Request{
 		Conversation: conv,
@@ -925,7 +998,7 @@ func recordLaneRespondUnderKey(st *opjournal.Store, conv, key string, scope opjo
 		Executor:     opjournal.ExecutorLegacyAPI,
 		ClientKey:    key,
 		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
-		Payload:      string(raw),
+		Payload:      payload,
 		Policy:       respondOpPolicy,
 		Scope:        scope,
 	})
@@ -944,13 +1017,14 @@ func recordLaneRespondUnderKey(st *opjournal.Store, conv, key string, scope opjo
 }
 
 // answerLaneRespond awaits op, the respond a /respond of session id proposed
-// or found, at most laneRespondAnswerBound, and answers from its outcome:
-// succeeded is 202 accepted with the op; skipped{stale} 409 no_pending;
-// failed{unsupported} 501; refused:action the runtime's refusal, 409
-// invalid_interaction; any other failure, or a cancel, 409
-// op_already_failed; and an op still open 202 accepted with the open op. A
-// legacy op a key names is answered as OJ-4 replays it.
-func (s *Server) answerLaneRespond(st *opjournal.Store, id string, op opjournal.Op, replayed bool) (syncAnswer, error) {
+// or found, at most laneRespondAnswerBound or until ctx ends, and answers
+// from its outcome: succeeded is 202 accepted with the op, a failure the
+// refusal laneRespondRefusal maps it to, and an op still open a provisional
+// 202 accepted with the open op, which the Idempotency-Key LRU does not keep.
+// The answer carries key, the request's Idempotency-Key, or the op's own key
+// when the request carried none. A legacy op a key names is answered as OJ-4
+// replays it.
+func (s *Server) answerLaneRespond(ctx context.Context, _ *opjournal.Store, id, key string, op opjournal.Op, replayed bool) (syncAnswer, error) {
 	if op.Executor != opjournal.ExecutorLane {
 		if op.Status != opjournal.StatusClosed {
 			return syncAnswer{}, requestInFlight()
@@ -961,26 +1035,50 @@ func (s *Server) answerLaneRespond(st *opjournal.Store, id string, op opjournal.
 		return syncAnswer{}, replayedSyncError(op, humaSessionManagerError)
 	}
 	if op.Status != opjournal.StatusClosed {
+		actx, cancel := context.WithTimeout(ctx, laneRespondAnswerBound)
+		defer cancel()
 		var err error
-		if op, err = s.awaitLaneOp(context.Background(), id, op.ID, laneRespondAnswerBound); err != nil {
+		if op, err = s.awaitLaneOp(actx, id, op.ID); err != nil {
 			return syncAnswer{}, err
 		}
 	}
-	ok := syncAnswer{ID: id, syncOpFields: syncOpFields{IdempotencyKey: op.ClientKey, Replayed: replayed, Op: conversationOpWire(op)}}
-	if op.Status != opjournal.StatusClosed {
-		return ok, nil
+	if key == "" {
+		key = op.ClientKey
 	}
+	answer := syncAnswer{ID: id, syncOpFields: syncOpFields{IdempotencyKey: key, Replayed: replayed, Op: conversationOpWire(op)}}
+	if op.Status != opjournal.StatusClosed {
+		answer.provisional = true
+		return answer, nil
+	}
+	if err := laneRespondRefusal(op); err != nil {
+		return syncAnswer{}, err
+	}
+	return answer, nil
+}
+
+// laneRespondRefusal is the refusal a closed lane respond answers with, nil
+// when it succeeded: skipped{stale} is 409 no_pending; failed{unsupported}
+// 501; refused:action the runtime's refusal, 409 invalid_interaction; and
+// any other failure, or a cancel, 409 op_already_failed. That last one
+// offers a resend under a new Idempotency-Key only when nothing was sent. An
+// answer that may have reached its prompt (maybe_delivered, or
+// failed{ambiguous_delivery}) is never sent again, and a prompt pending now
+// may be a later, identical one, which a resend would answer as the next
+// occurrence (opjournal.RespondKey); so that answer offers none.
+func laneRespondRefusal(op opjournal.Op) error {
 	arm, reason := op.Outcome.Effective()
 	closed := fmt.Sprintf("op %s closed %s", op.ID, laneOutcomeText(op))
 	switch {
 	case arm == opjournal.ArmSucceeded:
-		return ok, nil
+		return nil
 	case arm == opjournal.ArmSkipped && reason == opjournal.ReasonStale:
-		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%s: the prompt it answers is no longer pending: %w", closed, session.ErrNoPendingInteraction))
+		return humaSessionManagerError(fmt.Errorf("%s: the prompt it answers is no longer pending: %w", closed, session.ErrNoPendingInteraction))
 	case arm == opjournal.ArmFailed && reason == opjournal.ReasonUnsupported:
-		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%s: %w", closed, session.ErrInteractionUnsupported))
+		return humaSessionManagerError(fmt.Errorf("%s: %w", closed, session.ErrInteractionUnsupported))
 	case arm == opjournal.ArmFailed && op.Outcome.Reason == opjournal.ReasonRefusedAction:
-		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%s: %w: %w", closed, session.ErrInteractionMismatch, runtime.ErrInteractionActionUnavailable))
+		return humaSessionManagerError(fmt.Errorf("%s: %w: %w", closed, session.ErrInteractionMismatch, runtime.ErrInteractionActionUnavailable))
+	case op.MaybeDelivered > 0 || reason == opjournal.ReasonAmbiguousDelivery:
+		return apierr.OpAlreadyFailed.Msg(fmt.Sprintf("%s: %s: the answer may have reached its prompt, so it is never sent again; read the session's pending interaction before answering again", opAlreadyFailedCode, closed))
 	}
-	return syncAnswer{}, apierr.OpAlreadyFailed.Msg(fmt.Sprintf("%s: %s; resend with a new Idempotency-Key to act again", opAlreadyFailedCode, closed))
+	return apierr.OpAlreadyFailed.Msg(fmt.Sprintf("%s: %s with nothing sent; resend with a new Idempotency-Key to act again", opAlreadyFailedCode, closed))
 }

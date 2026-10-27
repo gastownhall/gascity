@@ -146,11 +146,19 @@ type syncOpFields struct {
 }
 
 // syncAnswer is a session command's answer: the session it acted on and its
-// op fields. The Idempotency-Key LRU caches it.
+// op fields. The Idempotency-Key LRU caches it unless it is provisional.
 type syncAnswer struct {
 	ID string
 	syncOpFields
+	// provisional says the command stopped awaiting its op while the op was
+	// still open (a lane /respond past laneRespondAnswerBound): the answer is
+	// not the op's outcome, so a same-key retry must read the op again.
+	provisional bool
 }
+
+// final reports whether a is the command's outcome, which the
+// Idempotency-Key LRU may keep: it is not provisional.
+func (a syncAnswer) final() bool { return !a.provisional }
 
 // okWithID is the OKWithIDResponse of answer a.
 func (a syncAnswer) okWithID() *OKWithIDResponse {
@@ -869,6 +877,16 @@ type respondOpPayload struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
+// encodeRespondOpPayload is resp as a legacy /respond op's payload
+// (respondOpPayload).
+func encodeRespondOpPayload(resp runtime.InteractionResponse) (string, error) {
+	raw, err := json.Marshal(respondOpPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	if err != nil {
+		return "", apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
+	}
+	return string(raw), nil
+}
+
 // respondOpPolicy is a legacy /respond's policy: at_least_once, the guarantee
 // it has always been recorded with. Nothing acts on it for a legacy op; it
 // keeps the request digest of rows a previous build recorded.
@@ -877,9 +895,9 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 // respondSession answers target's pending interaction with resp, recorded as
 // a respond op under ops.control, and returns the answer. key is the
 // Idempotency-Key header. When the city's lane host executes respond, the
-// answer is a lane op instead (respondSessionLane), and ops.control does not
-// govern it.
-func (s *Server) respondSession(target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+// answer is a lane op instead (respondSessionLane), awaited at most until
+// ctx ends, and ops.control does not govern it.
+func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -890,7 +908,7 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 	}
 	mgr := s.sessionManager(store.Store)
 	if s.laneExecutes(opjournal.KindRespond) {
-		return s.respondSessionLane(mgr, store.Store, id, key, resp)
+		return s.respondSessionLane(ctx, mgr, store.Store, id, key, resp)
 	}
 	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
@@ -934,15 +952,11 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 // door with the answer the legacy respond gives (no_pending, or
 // unsupported), nothing sent.
 func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req syncOpRequest, resp runtime.InteractionResponse) (syncOpRequest, error) {
-	payload := respondOpPayload{Action: resp.Action, Text: resp.Text}
-	if len(resp.Metadata) > 0 {
-		payload.Metadata = resp.Metadata
-	}
-	raw, err := json.Marshal(payload)
+	payload, err := encodeRespondOpPayload(resp)
 	if err != nil {
-		return req, apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
+		return req, err
 	}
-	req.payload = string(raw)
+	req.payload = payload
 	scope, why, whyErr := sessionOpScope(store, req.conv)
 	if why != "" {
 		req.unrecordable, req.unrecordableErr = why, whyErr

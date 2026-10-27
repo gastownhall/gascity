@@ -1263,22 +1263,24 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
 
-func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+func (s *Server) humaHandleSessionRespond(ctx context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
 	// Idempotency: deliver the interaction response at most once per
 	// Idempotency-Key. The cached value is the answer, so a replay rebuilds
 	// the identical body without a second Respond (which would fail with
 	// no_pending once the first one cleared the interaction). Under a
 	// recording ops.control gate the op row backs the cache across restarts.
-	answer, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
+	// A lane respond's answer whose op is still open is not cached: a retry
+	// reads the op through the row under its key (respondSessionLane).
+	answer, err := withIdempotencyKeeping(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
 		func() (syncAnswer, error) {
 			// Huma validates Body.Action (minLength:1); no handler guard needed.
-			return s.respondSession(input.ID, input.IdempotencyKey, runtime.InteractionResponse{
+			return s.respondSession(ctx, input.ID, input.IdempotencyKey, runtime.InteractionResponse{
 				RequestID: input.Body.RequestID,
 				Action:    input.Body.Action,
 				Text:      input.Body.Text,
 				Metadata:  input.Body.Metadata,
 			})
-		})
+		}, syncAnswer.final)
 	if err != nil {
 		return nil, err
 	}
