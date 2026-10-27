@@ -127,3 +127,76 @@ func TestInterruptedCloseFinishesPoolSeatAndReplacementStarts(t *testing.T) {
 		})
 	}
 }
+
+// An always-mode configured named session whose bead was half-closed as
+// stale-session closes on the first complete tick, stays closed, and the named
+// identity comes back up on a fresh bead.
+func TestInterruptedCloseFinishesNamedSeatAndIdentityRestarts(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "lead",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "lead", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "lead")
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Now().UTC()
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	seat, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "lead",
+			"template":                   "lead",
+			"state":                      "active",
+			"generation":                 "2",
+			"instance_token":             "tok-1",
+			"continuation_epoch":         "1",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "lead",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named seat: %v", err)
+	}
+	halfCloseSessionBead(t, store, seat.ID, "stale-session", now.Add(-time.Hour), nil)
+
+	dops := newDrainOps(sp)
+	dt := newDrainTracker()
+	tracker := &asyncStartTracker{}
+	var out strings.Builder
+	restarted := false
+	for tick := 0; tick < 6 && !restarted; tick++ {
+		drainAckRewakeTick(t, cityPath, cfg, sp, store, dops, dt, tracker, clk, &out)
+		dumpDrainAckRewakeState(t, store, sp, tick)
+		got, err := store.Get(seat.ID)
+		if err != nil {
+			t.Fatalf("reload seat: %v", err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("tick %d: half-closed named seat %s status = %q, want closed from the first tick on\n%s", tick, seat.ID, got.Status, out.String())
+		}
+		open, err := loadSessionBeads(store)
+		if err != nil {
+			t.Fatalf("loadSessionBeads: %v", err)
+		}
+		for _, b := range open {
+			if b.ID != seat.ID && b.Metadata["session_name"] == sessionName && sp.IsRunning(sessionName) {
+				restarted = true
+			}
+		}
+		clk.Advance(30 * time.Second)
+	}
+	if !restarted {
+		t.Fatalf("named identity %s never came back up on a fresh bead after its interrupted close was finished\n%s", sessionName, out.String())
+	}
+}
