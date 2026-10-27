@@ -292,3 +292,70 @@ dolt.auto-start: false
 		}
 	})
 }
+
+// TestSessionBackendEnvLeavesUnmirroredTopologiesUnchanged guards AC-6 of
+// gastownhall/gascity#1656: topologies that never project a managed TCP port —
+// a proxied-server city, a storage-bound scope, and a doltlite city — get
+// exactly the env base produced for them. The withhold's first precondition
+// (a projected GC_DOLT_PORT) never holds, so neither the withhold nor the
+// shared-server pin it carries may appear; the proxied city keeps the
+// opt-out applySessionSharedServerOptOut already gave it at base.
+func TestSessionBackendEnvLeavesUnmirroredTopologiesUnchanged(t *testing.T) {
+	assertNoPortKeys := func(t *testing.T, env map[string]string) {
+		t.Helper()
+		for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+			if got := env[key]; got != "" {
+				t.Fatalf("%s = %q, want empty: this topology projects no managed TCP port", key, got)
+			}
+		}
+	}
+
+	t.Run("proxied server city", func(t *testing.T) {
+		cityPath, _ := proxiedEnvTestCity(t)
+		// A gc-owned journaled proxied scope: the only proxied shape whose
+		// session env pins the shared server off, and it does so at base
+		// (applySessionSharedServerOptOut), not through this change.
+		journalProxiedScope(t, cityPath, cityPath, true)
+		env, err := sessionBackendEnvWithError(cityPath, "", nil)
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		assertNoPortKeys(t, env)
+		assertSharedServerPinnedOff(t, "gc-owned proxied session env", env)
+	})
+
+	t.Run("storage-bound scope", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeScopeBeadsMetadata(t, cityPath, `{"backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
+		env, err := sessionBackendEnvWithError(cityPath, "", nil)
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		assertNoPortKeys(t, env)
+		// A storage-bound scope is not proxied and not dolt: base pins no
+		// shared-server value, and the withhold must not add one.
+		if got := env["BEADS_DOLT_SHARED_SERVER"]; got != "" {
+			t.Fatalf("BEADS_DOLT_SHARED_SERVER = %q, want unset as at base", got)
+		}
+		if got := env["BD_DOLT_SHARED_SERVER"]; got != "" {
+			t.Fatalf("BD_DOLT_SHARED_SERVER = %q, want unset as at base", got)
+		}
+	})
+
+	t.Run("doltlite city", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeDoltliteCityScaffold(t, cityPath)
+		env, err := sessionBackendEnvWithError(cityPath, "", nil)
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		assertNoPortKeys(t, env)
+		if got := env["BEADS_DOLT_SHARED_SERVER"]; got != "" {
+			t.Fatalf("BEADS_DOLT_SHARED_SERVER = %q, want unset as at base", got)
+		}
+		if got := env["BD_DOLT_SHARED_SERVER"]; got != "" {
+			t.Fatalf("BD_DOLT_SHARED_SERVER = %q, want unset as at base", got)
+		}
+	})
+}
