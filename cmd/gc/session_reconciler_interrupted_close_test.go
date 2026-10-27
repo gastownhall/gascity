@@ -200,3 +200,78 @@ func TestInterruptedCloseFinishesNamedSeatAndIdentityRestarts(t *testing.T) {
 		t.Fatalf("named identity %s never came back up on a fresh bead after its interrupted close was finished\n%s", sessionName, out.String())
 	}
 }
+
+// createAssignedInProgressWork creates in_progress work routed to template and
+// assigned to the seat's bead ID.
+func createAssignedInProgressWork(t *testing.T, store beads.Store, template, assignee string) beads.Bead {
+	t.Helper()
+	work, err := store.Create(beads.Bead{
+		Title:    "work held by the half-closed seat",
+		Type:     "task",
+		Assignee: assignee,
+		Metadata: map[string]string{"gc.routed_to": template},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	return work
+}
+
+// A finished close keeps the gate of the close it finishes: a duplicate close
+// is work-gated, so a half-closed duplicate holding in_progress work stays
+// open and keeps it; a stale-session close releases the seat's work, so the
+// half-closed stale seat closes and its work returns to the pool unassigned.
+func TestInterruptedCloseKeepsTheInterruptedCloseGate(t *testing.T) {
+	t.Run("duplicate_is_work_gated", func(t *testing.T) {
+		now := time.Now().UTC()
+		cityPath, cfg, store, sp, seat := newInterruptedClosePoolCity(t, now)
+		work := createAssignedInProgressWork(t, store, "repo/worker", seat.ID)
+		halfCloseSessionBead(t, store, seat.ID, "duplicate", now.Add(-time.Hour), nil)
+
+		var out strings.Builder
+		drainAckRewakeTick(t, cityPath, cfg, sp, store, newDrainOps(sp), newDrainTracker(), &asyncStartTracker{}, &clock.Fake{Time: now}, &out)
+
+		got, err := store.Get(seat.ID)
+		if err != nil {
+			t.Fatalf("reload seat: %v", err)
+		}
+		if got.Status == "closed" {
+			t.Fatalf("half-closed duplicate seat %s closed while it holds in_progress work %s; a duplicate close is work-gated\n%s", seat.ID, work.ID, out.String())
+		}
+		gotWork, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reload work: %v", err)
+		}
+		if gotWork.Assignee != seat.ID || gotWork.Status != "in_progress" {
+			t.Fatalf("work = status %q assignee %q, want in_progress assigned to %s", gotWork.Status, gotWork.Assignee, seat.ID)
+		}
+	})
+	t.Run("stale_session_releases", func(t *testing.T) {
+		now := time.Now().UTC()
+		cityPath, cfg, store, sp, seat := newInterruptedClosePoolCity(t, now)
+		work := createAssignedInProgressWork(t, store, "repo/worker", seat.ID)
+		halfCloseSessionBead(t, store, seat.ID, "stale-session", now.Add(-time.Hour), nil)
+
+		var out strings.Builder
+		drainAckRewakeTick(t, cityPath, cfg, sp, store, newDrainOps(sp), newDrainTracker(), &asyncStartTracker{}, &clock.Fake{Time: now}, &out)
+
+		got, err := store.Get(seat.ID)
+		if err != nil {
+			t.Fatalf("reload seat: %v", err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("half-closed stale-session seat %s status = %q, want closed: a stale-session close releases its work\n%s", seat.ID, got.Status, out.String())
+		}
+		gotWork, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reload work: %v", err)
+		}
+		if gotWork.Assignee != "" || gotWork.Status != "open" {
+			t.Fatalf("work = status %q assignee %q, want open and unassigned", gotWork.Status, gotWork.Assignee)
+		}
+	})
+}
