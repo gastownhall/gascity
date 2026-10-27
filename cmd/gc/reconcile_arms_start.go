@@ -20,8 +20,9 @@ import (
 const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
-	decideStaleCreate       = "stale-create-exit"             // v5 S7: a pending create's StaleSelf runtime
-	decideRollbackHeld      = "rollback-held:occupant-corpse" // v5.10i: a foreign corpse inside the lease
+	decideStaleCreate       = "stale-create-exit"              // v5 S7: a pending create's StaleSelf runtime
+	decideRollbackHeld      = "rollback-held:occupant-corpse"  // v5.10i: a foreign corpse inside the lease
+	decideRollbackLive      = "rollback-held:live-incarnation" // #2081: another incarnation of this session runs
 	decideStart             = "start"
 	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
@@ -58,8 +59,9 @@ func armAdopt(r *rowFacts) (intent, bool) {
 // whose live runtime reads StaleSelf. At the row's generation it is the
 // row's own runtime: the effect stops it, then a configured named row the
 // allocation wants awake is kept for A18 to relaunch on the same bead
-// (Relaunch) and any other is rolled back. An older epoch is another
-// incarnation's, Foreign: rolled back without a stop.
+// (Relaunch) and any other is rolled back. An older or newer epoch is
+// another incarnation of the row's session (#2081): the row holds while it
+// runs, under any desire, and rolls back once it is gone.
 func armRollback(r *rowFacts) (intent, bool) {
 	e, info := r.entry, r.row.Info
 	if !info.PendingCreateClaim || e == nil {
@@ -67,6 +69,8 @@ func armRollback(r *rowFacts) (intent, bool) {
 	}
 	reason, relaunch, occupant := decideRollback, false, false
 	switch {
+	case e.Liveness == livenessAlive && liveIncarnation(info, r.w.Observed[r.k].Identity):
+		return intent{Reason: decideRollbackLive}, true // its work runs there: never stopped by the rollback
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
 	case e.Liveness == livenessOccupied && r.occupantCorpseInLease():

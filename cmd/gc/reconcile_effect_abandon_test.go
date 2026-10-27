@@ -855,7 +855,7 @@ func TestArmRollbackMarksItsOccupant(t *testing.T) {
 			k := rowKeyOf(row.ID)
 			w := &World{Observed: map[rowKey]rowObservation{}}
 			if c.stale {
-				w.Observed[k] = rowObservation{Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "old"}}
+				w.Observed[k] = rowObservation{Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "old"}}
 			}
 			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
 			it, ok := armRollback(r)
@@ -905,9 +905,10 @@ func TestArmRollback(t *testing.T) {
 }
 
 // Kills the S7 exit missed or mis-shaped (v5 S7): a pending create whose
-// live runtime reads StaleSelf is rolled back, and kept for A18's relaunch
-// only when it is the row's own runtime (its epoch the row's generation),
-// configured named and wanted awake. A Current one is A10's adopt.
+// own live runtime (its epoch the row's generation) reads StaleSelf is rolled
+// back, and kept for A18's relaunch only when configured named and wanted
+// awake. A Current one is A10's adopt; an older epoch holds
+// (TestArmRollbackHoldsOverALiveIncarnation).
 func TestArmRollbackStaleCreate(t *testing.T) {
 	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "session_name", "chat", "pool_managed", ""}
 	for _, c := range []struct {
@@ -922,7 +923,6 @@ func TestArmRollbackStaleCreate(t *testing.T) {
 		{"own, configured named, wanted: relaunched", "3", "old", true, desireWake, true, true},
 		{"own, configured named, unwanted: rolled back", "3", "old", true, desireNone, true, false},
 		{"own, pool: rolled back", "3", "old", false, desireWake, true, false},
-		{"older epoch, configured named: rolled back", "2", "old", true, desireWake, true, false},
 		{"Current: the adopt's", "3", "tok", true, desireWake, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -942,6 +942,44 @@ func TestArmRollbackStaleCreate(t *testing.T) {
 				t.Fatalf("armRollback = (%+v, %v), want proposed %v relaunch %v", it, ok, c.propose, c.relaunch)
 			}
 		})
+	}
+}
+
+// Kills A10 rolling back a pending create over a live incarnation of its own
+// session (#2081): a live runtime carrying the row's ID under another token
+// at an older or a newer epoch holds the row under any desire, with no Kind;
+// at the row's own generation it is still S7's stale-create exit.
+func TestArmRollbackHoldsOverALiveIncarnation(t *testing.T) {
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "session_name", "chat", "pool_managed", ""}
+	for _, class := range []struct {
+		name string
+		meta []string
+	}{{"pool", nil}, {"configured named", named}} {
+		for _, desired := range []desire{desireWake, desireNone, desireDrain} {
+			for _, c := range []struct {
+				epoch string
+				held  bool
+			}{{"2", true}, {"4", true}, {"3", false}} {
+				t.Run(fmt.Sprintf("%s/%s/epoch %s", class.name, desired, c.epoch), func(t *testing.T) {
+					row := poolRow("gc-1", "worker", 1, "creating", slices.Concat([]string{"generation", "3", "instance_token", "tok", "pending_create_claim", "true"}, class.meta)...)
+					k := rowKeyOf(row.ID)
+					cfg := workerCity(1)
+					cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+					cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
+					w := &World{Env: &reconcileEnv{Cfg: cfg}, Observed: map[rowKey]rowObservation{k: {Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: c.epoch, Token: "old"}}}}
+					r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: desired, Liveness: livenessAlive}}
+					it, ok := armRollback(r)
+					switch {
+					case !ok:
+						t.Fatalf("armRollback declined, want a decision")
+					case c.held && (it.Kind != "" || it.Reason != "rollback-held:live-incarnation"):
+						t.Fatalf("armRollback = (%q, %q), want held rollback-held:live-incarnation", it.Kind, it.Reason)
+					case !c.held && (it.Kind != intentRollback || it.Reason != decideStaleCreate):
+						t.Fatalf("armRollback = (%q, %q), want S7's stale-create exit", it.Kind, it.Reason)
+					}
+				})
+			}
+		}
 	}
 }
 
