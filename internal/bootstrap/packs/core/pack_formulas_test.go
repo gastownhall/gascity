@@ -14,9 +14,10 @@ import (
 type formulaFile struct {
 	Formula string `toml:"formula"`
 	Steps   []struct {
-		ID          string `toml:"id"`
-		Title       string `toml:"title"`
-		Description string `toml:"description"`
+		ID          string            `toml:"id"`
+		Title       string            `toml:"title"`
+		Description string            `toml:"description"`
+		Metadata    map[string]string `toml:"metadata"`
 	} `toml:"steps"`
 }
 
@@ -377,6 +378,39 @@ func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	}
 	if closes == 0 {
 		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}
+
+// TestMolScopedWorkStepsSetOutcomeBeforeClose pins the formula half of
+// gastownhall/gascity#7678: every mol-scoped-work worker step is
+// retry-managed (max_attempts=3, on_exhausted=hard_fail), and the retry
+// evaluator treats an attempt bead closed without gc.outcome as
+// missing_outcome — three bare closes hard-fail the workflow even when the
+// work succeeded. Each worker-facing step must therefore tell the agent to
+// set gc.outcome on the claimed step bead before closing it, the same
+// contract graph-worker.md documents. Scope latch beads (gc.kind=scope) are
+// closed by scope-check control beads, not by the worker, so they are exempt.
+func TestMolScopedWorkStepsSetOutcomeBeforeClose(t *testing.T) {
+	f := readFormula(t, "mol-scoped-work.toml")
+	workerSteps := 0
+	for _, step := range f.Steps {
+		if step.Metadata["gc.kind"] == "scope" || step.Metadata["gc.kind"] == "workflow" {
+			continue
+		}
+		workerSteps++
+		for _, want := range []string{
+			"--set-metadata gc.outcome=pass",
+			"gc.outcome=fail",
+			"gc.failure_class",
+			"gc.failure_reason",
+		} {
+			if !strings.Contains(step.Description, want) {
+				t.Errorf("mol-scoped-work step %q does not instruct %q; a worker that closes the step without gc.outcome is retried as missing_outcome and hard-fails after max_attempts", step.ID, want)
+			}
+		}
+	}
+	if workerSteps == 0 {
+		t.Fatal("found no worker-facing steps in mol-scoped-work.toml; the scan is not looking where the steps are")
 	}
 }
 

@@ -61,6 +61,23 @@ gc bd show "$WORK_BEAD_ID"
 gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'
 gc mail inbox
 ```
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
+```
 """
 metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -106,6 +123,23 @@ fi
 cd "$WORKTREE"
 {{setup_command}}
 ```
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -125,6 +159,23 @@ Run the configured checks before implementation.
 {{lint_command}}
 {{test_command}}
 ```
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -139,6 +190,23 @@ needs = ["preflight-tests"]
 description = """
 Make the code changes for convoy `{{convoy_id}}` in the worktree. Commit focused changes
 as needed and keep the branch scoped to this work.
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -161,6 +229,23 @@ git diff origin/{{base_branch}}...HEAD
 {{test_command}}
 git status
 ```
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -181,6 +266,23 @@ Perform the city-specific finalization for this work item. Examples:
 
 This is intentionally generic so cities can opt into the graph contract
 without inheriting Gastown's exact human workflow.
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
+```
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -219,6 +321,23 @@ if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
   fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+```
+
+**Close contract:** before closing this step, record its outcome on the
+claimed step bead — a close without `gc.outcome` is retried as
+`missing_outcome` and hard-fails after `max_attempts`, even when the work
+succeeded:
+
+```bash
+# Success:
+gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass
+gc bd close "$GC_BEAD_ID" --reason "<one-line summary>"
+# Failure (gc.failure_class is transient or hard):
+gc bd update "$GC_BEAD_ID" \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=<transient|hard> \
+  --set-metadata gc.failure_reason=<short_reason>
+gc bd close "$GC_BEAD_ID" --reason "<what happened>"
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }

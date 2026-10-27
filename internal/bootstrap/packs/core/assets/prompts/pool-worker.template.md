@@ -49,7 +49,9 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 **Work one step at a time.** For each `[ready]` step:
 1. `gc bd show <step-id>` — read what to do
 2. Do the work described in that step
-3. `gc bd close <step-id>` — mark it done
+3. Record the outcome, then close it:
+   `gc bd update <step-id> --set-metadata gc.outcome=pass`, then
+   `gc bd close <step-id> --reason "<what you did>"`
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
@@ -64,6 +66,8 @@ the bead description directly.
 - `gc bd show <id>` — see details of a work item or step
 - `gc bd mol current <molecule-id>` — show position in molecule workflow
 - `gc bd mol progress <molecule-id>` — show molecule progress summary
+- `gc bd update <id> --set-metadata gc.outcome=pass` — record the outcome
+  before closing (a close without it retries the step as `missing_outcome`)
 - `gc bd close <id> --reason "<outcome>"` — mark work as done (close a step with `gc bd close <step-id>`)
 - `gc mail inbox` — check for messages
 - `gc runtime drain-ack` — end your session (you are ephemeral)
@@ -75,8 +79,23 @@ the bead description directly.
 3. **Check for molecule:** `gc bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description
-6. When all work is done, close the bead with a one-line summary of the
-   outcome: `gc bd close <id> --reason "<what you did>"`
+6. When all work is done, record the outcome and close the bead. Retry-managed
+   formula steps treat a close without `gc.outcome` as `missing_outcome` and
+   retry — then hard-fail — the step no matter how the work went, so set the
+   outcome before closing. On success:
+   ```bash
+   gc bd update <id> --set-metadata gc.outcome=pass
+   gc bd close <id> --reason "<what you did>"
+   ```
+   On failure, record the failure instead — `gc.failure_class=transient` when
+   the failure is worth retrying, `gc.failure_class=hard` when it is not:
+   ```bash
+   gc bd update <id> \
+     --set-metadata gc.outcome=fail \
+     --set-metadata gc.failure_class=<transient|hard> \
+     --set-metadata gc.failure_reason=<short_reason>
+   gc bd close <id> --reason "<what happened>"
+   ```
 7. **MANDATORY — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack

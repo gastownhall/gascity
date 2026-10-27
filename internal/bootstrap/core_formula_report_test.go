@@ -216,6 +216,43 @@ func TestCorePoolWorkerPromptClosesWorkBeadWithReason(t *testing.T) {
 	}
 }
 
+// TestCorePoolWorkerPromptSetsOutcomeBeforeClose pins the fix for
+// gastownhall/gascity#7678: retry-managed formula steps (mol-scoped-work sets
+// max_attempts with on_exhausted=hard_fail on every worker step) treat an
+// attempt bead that closes without gc.outcome as missing_outcome and hard-fail
+// the workflow after the retries run out — even when the work succeeded. The
+// stock pool-worker prompt is what a pool agent gets when prompt_template is
+// unset, so it must teach the outcome contract itself: set gc.outcome on the
+// claimed bead before closing it, with gc.failure_class and gc.failure_reason
+// on failure, exactly as graph-worker.md documents.
+func TestCorePoolWorkerPromptSetsOutcomeBeforeClose(t *testing.T) {
+	path := filepath.Join(filepath.Dir(coreFormulaSearchPaths(t)[0]), "assets", "prompts", "pool-worker.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"--set-metadata gc.outcome=pass",
+		"--set-metadata gc.outcome=fail",
+		"gc.failure_class=transient",
+		"gc.failure_class=hard",
+		"gc.failure_reason",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pool-worker.template.md missing outcome-contract instruction %q; a close without gc.outcome hard-fails retry-managed steps as missing_outcome", want)
+		}
+	}
+
+	// Every close instruction must come after an outcome-set instruction: a
+	// worker that reads top to bottom must meet gc.outcome before any close.
+	firstClose := strings.Index(body, "gc bd close")
+	firstOutcome := strings.Index(body, "--set-metadata gc.outcome=pass")
+	if firstClose >= 0 && (firstOutcome < 0 || firstOutcome > firstClose) {
+		t.Error("pool-worker.template.md closes a bead before it ever sets gc.outcome; the outcome contract must precede the first close instruction")
+	}
+}
+
 // joinShellContinuations folds backslash-continued lines into one logical
 // command line so multi-line bd invocations are checked as a whole.
 func joinShellContinuations(text string) []string {
