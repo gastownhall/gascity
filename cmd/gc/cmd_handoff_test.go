@@ -80,7 +80,7 @@ func TestHandoffSuccess(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, store, rec, dops, nil, "mayor", "mayor",
+	code := doHandoff(store, store, rec, dops, testRowFirstRestart("gc handoff", "mayor", dops, &stderr), "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -556,10 +556,12 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	dops.restartRequested["mayor"] = true
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	restart.record = func(string) error {
 		persistCalled = true
 		return nil
-	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
+	}
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
@@ -629,7 +631,7 @@ func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 		t.Fatalf("set configured_named_mode: %v", err)
 	}
 
-	outcome := doHandoffWithOutcome(store, store, rec, dops, nil, "mayor", "mayor",
+	outcome := doHandoffWithOutcome(store, store, rec, dops, testRowFirstRestart("gc handoff", "mayor", dops, &stderr), "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 1 {
 		t.Fatalf("code = %d, want 1", outcome.code)
@@ -669,10 +671,12 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	restart.record = func(string) error {
 		persistCalled = true
 		return nil
-	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
+	}
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
@@ -693,19 +697,19 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 }
 
-// TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart covers Fix 1: a
-// pinned named session (pin_awake == "true") is kill-protected by the
-// reconciler unless an explicit controller reset is persisted, so
-// persistRestart is mandatory rather than best-effort for pinned sessions.
-// When it is unavailable or fails, doHandoffWithOutcome must report failure
-// and must not promise a restart it cannot guarantee.
-func TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart(t *testing.T) {
+// TestDoHandoff_RowWriteFailureRecordsNothing pins SG-3's contract for a
+// restartable handoff, pinned or not: the row write is the request, so when it
+// is unavailable or fails the handoff exits 1, sets no runtime hint, records
+// no session.draining and promises no restart.
+func TestDoHandoff_RowWriteFailureRecordsNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		persistRestart func() error
+		name   string
+		pinned bool
+		record func(string) error
 	}{
-		{name: "nil persistRestart"},
-		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+		{name: "no session store"},
+		{name: "row write error", record: func(string) error { return errors.New("worker boundary unavailable") }},
+		{name: "pinned, row write error", pinned: true, record: func(string) error { return errors.New("worker boundary unavailable") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -720,35 +724,39 @@ func TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seeding session bead: %v", err)
 			}
-			if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
-				t.Fatalf("set session_name: %v", err)
+			meta := map[string]string{
+				"session_name":             "mayor",
+				"configured_named_session": "true",
+				"configured_named_mode":    "always",
 			}
-			if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
-				t.Fatalf("set configured_named_session: %v", err)
+			if tc.pinned {
+				meta["pin_awake"] = "true"
 			}
-			if err := store.SetMetadata(b.ID, "configured_named_mode", "always"); err != nil {
-				t.Fatalf("set configured_named_mode: %v", err)
+			if err := store.SetMetadataBatch(b.ID, meta); err != nil {
+				t.Fatalf("seed metadata: %v", err)
 			}
-			if err := store.SetMetadata(b.ID, "pin_awake", "true"); err != nil {
-				t.Fatalf("set pin_awake: %v", err)
-			}
+			restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+			restart.record = tc.record
 
-			outcome := doHandoffWithOutcome(store, store, rec, dops, tc.persistRestart, "mayor", "mayor",
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
 				[]string{"HANDOFF: context full"}, &stdout, &stderr)
 			if outcome.code != 1 {
 				t.Fatalf("code = %d, want 1; stderr: %s", outcome.code, stderr.String())
 			}
 			if outcome.restartRequested {
-				t.Fatal("restartRequested = true, want false when persistRestart is unavailable for a pinned session")
+				t.Fatal("restartRequested = true, want false when the row write fails")
+			}
+			if dops.restartRequested["mayor"] {
+				t.Error("runtime restart hint set although the row write failed")
 			}
 			if strings.Contains(stdout.String(), "requesting restart") {
-				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", stdout.String())
+				t.Errorf("stdout = %q, must not promise a restart the row does not record", stdout.String())
 			}
-			if len(rec.Events) != 1 {
-				t.Fatalf("got %d events, want 1 (mail only, no SessionDraining); events=%v", len(rec.Events), rec.Events)
+			if !strings.Contains(stderr.String(), "restart not recorded") {
+				t.Errorf("stderr = %q, want the not-recorded diagnostic", stderr.String())
 			}
-			if rec.Events[0].Type != events.MailSent {
-				t.Fatalf("event[0].Type = %q, want %q", rec.Events[0].Type, events.MailSent)
+			if len(rec.Events) != 1 || rec.Events[0].Type != events.MailSent {
+				t.Fatalf("events = %v, want the mail only (no SessionDraining)", rec.Events)
 			}
 		})
 	}
@@ -760,7 +768,7 @@ func TestHandoffWithMessage(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
+	code := doHandoff(store, store, rec, dops, testRowFirstRestart("gc handoff", "gc-city-polecat-1", dops, &stderr), "polecat-1", "gc-city-polecat-1",
 		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
 		&stdout, &stderr)
 	if code != 0 {

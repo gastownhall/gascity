@@ -967,22 +967,25 @@ func newRuntimeRequestRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "request-restart",
 		Short: "Request controller restart this session (returns immediately)",
-		Long: `Signal the controller to stop and restart this session.
+		Long: `Ask the controller to stop this session and start it again fresh.
 
-Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
-an immediate reconcile tick, and returns without waiting. Control-plane
-authority over the actual stop/start stays with the controller's reconcile
-loop; this command only signals it so the request need not wait for the next
-periodic patrol tick.
+Records the restart request on this session's row (the request the
+controller acts on). Outside a worker site it then sets the runtime's
+GC_RESTART_REQUESTED hint. Then it pokes the controller for an immediate
+reconcile. It returns without waiting for the restart.
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, the command exits 1 with a diagnostic —
-the restart request itself remains durably set, so the controller still
-picks it up on its next periodic reconcile tick regardless.
+The request is bound to this session's incarnation. It is recorded only while
+the session row still names the GC_INSTANCE_TOKEN this process runs under, so
+a process left over from an earlier incarnation cannot restart its successor.
+
+Exits 0 once the request is recorded, even when the controller could not be
+signaled: a warning says so, and the controller acts at its next pass. Exits 1
+with nothing recorded and no runtime hint set when the request cannot be
+recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
+store, or a session row that names another incarnation.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before signaling the controller.`,
+It emits a session.draining event once the request is recorded.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdRuntimeRequestRestart(stdout, stderr) != 0 {
@@ -994,51 +997,48 @@ It emits a session.draining event before signaling the controller.`,
 }
 
 func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
+	const verb = "gc runtime request-restart"
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
+	r := rowFirstRestart{
+		verb:        verb,
+		cityPath:    current.cityPath,
+		sessionName: current.sessionName,
+		display:     current.display,
+		token:       os.Getenv(runtime.InstanceTokenEnv),
+		poke:        pokeControllerForRestart,
+		stderr:      stderr,
+	}
+	// No token refuses before anything is opened or read.
+	if strings.TrimSpace(r.token) == "" {
+		fmt.Fprintf(stderr, "%s: %s\n", verb, r.notRecorded(session.ErrRestartRequestUnfenced)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	sp, err := newSessionProvider()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s\n", verb, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	dops := newDrainOps(sp)
-	store, storeErr := openCityStoreAt(current.cityPath)
-	if storeErr != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
+	store, err := openCityStoreAt(current.cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %s\n", verb, r.notRecorded(fmt.Errorf("opening store: %w", err))) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	// Route the SESSION-class access (restart persist through the worker
+	// Route the SESSION-class access (the restart record, through the worker
 	// boundary) to the session coordination-class store so a
 	// [beads.classes.sessions] relocation reaches gc runtime request-restart.
 	// The routing cfg is loaded refresh-free (the full cfg loads later, for
-	// timeout/template resolution). Identity today, so byte-identical.
-	var sessStore beads.Store
-	if store != nil {
-		routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
-		sessStore = cliSessionStore(store, routeCfg, current.cityPath)
-	}
+	// template resolution).
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+	sessStore := cliSessionStore(store, routeCfg, current.cityPath)
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
-	var persistRestart func() error
-	if store != nil {
-		persistRestart = func() error {
-			handle, err := workerHandleForSessionTargetWithConfig(current.cityPath, sessStore, sp, cfg, current.sessionName)
-			if err != nil {
-				return err
-			}
-			return handle.Reset(context.Background())
-		}
-	}
-	_, pinned, err := sessionRestartableByController(sessStore, current.sessionName)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return doRuntimeRequestRestart(dops, persistRestart, pinned, rec, current.display, current.sessionName,
-		current.cityPath, stdout, stderr)
+	r.record = sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName)
+	r.hint = restartHintOps(current.cityPath, sp)
+	return doRuntimeRequestRestart(r, rec, stdout)
 }
 
 // controllerRestartTimeout computes the bounded timeout for waiting on the
@@ -1060,66 +1060,33 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 	return d
 }
 
-// doRuntimeRequestRestart sets the restart-requested flag, pokes the
-// controller for an immediate reconcile tick, and returns without waiting for
-// the controller to act. Control-plane authority over the actual stop/start
-// stays with the controller's reconcile loop; this call only signals it so
-// the request need not wait for the next periodic tick.
+// doRuntimeRequestRestart records the restart request row first (SG-3), then
+// emits session.draining and pokes the controller, returning without waiting
+// for the controller to act. Control-plane authority over the actual
+// stop/start stays with the controller's reconcile loop.
 //
-// pinned marks a kill-protected named session (pin_awake == "true"): the
-// reconciler refuses to collaterally kill such a session on a bare runtime
-// restart-requested flag, so for pinned sessions persistRestart (which lands
-// continuation_reset_pending, the explicit-reset escape hatch) is mandatory
-// rather than best-effort. See sessionRestartableByController.
-//
-// On a worker site the guard holds no runtime flag to set, so that marker is
-// the whole request and is mandatory for every session: the remote
-// controller's reconciler reads it at its next reconcile, and no poke reaches
-// that controller from the box.
-func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned bool, rec events.Recorder,
-	targetName, sn, cityPath string, stdout, stderr io.Writer,
-) int {
-	markerRequired, subject := pinned, "pinned session"
-	if err := dops.setRestartRequested(sn); err != nil {
-		if !restartFlagNotApplicable(err) {
-			fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		markerRequired, subject = true, "worker-site session"
-	}
-	if markerRequired {
-		if persistRestart == nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: %s %q has no restart persistence available; not requesting restart\n", subject, sn) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: could not persist restart marker for %s %q; not requesting restart: %v\n", subject, sn, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	} else if persistRestart != nil {
-		// Also persist the request through the worker boundary so it survives
-		// tmux session death. Non-fatal here: the runtime flag above is primary.
-		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
+// It exits 0 once the request is recorded, whether or not the controller was
+// notified, and 1 when nothing was recorded: then no runtime hint is set, no
+// event is recorded and the controller is not dialed.
+func doRuntimeRequestRestart(r rowFirstRestart, rec events.Recorder, stdout io.Writer) int {
+	if err := r.recordRestart(); err != nil {
+		fmt.Fprintf(r.stderr, "%s: %s\n", r.verb, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
-		Actor:   targetName,
-		Subject: targetName,
+		Actor:   r.display,
+		Subject: r.display,
 		Message: "restart requested by session",
 	})
-
-	// Name-only key: sn is authoritative here, while GC_SESSION_ID can be stale.
-	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
-		if !noteWorkerSitePoke(stderr, "gc runtime request-restart", err) {
-			fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	switch r.notifyController() {
+	case restartNotified:
+		fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
+	case restartRemote:
 		fmt.Fprint(stdout, "Restart requested; the remote controller restarts this session at its next reconcile.\n") //nolint:errcheck // best-effort stdout
-		return 0
+	default:
+		fmt.Fprint(stdout, "Restart requested; the controller restarts this session at its next pass.\n") //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
 	return 0
 }
 

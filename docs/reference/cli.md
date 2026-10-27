@@ -2052,11 +2052,15 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, gc handoff exits 1 with a diagnostic — the
-restart request itself remains durably set, so the controller still picks it
-up on its next periodic reconcile tick regardless.
+The restart request is recorded on this session's row, bound to this
+session's incarnation: it is recorded only while the session row still names
+the GC_INSTANCE_TOKEN this process runs under. Outside a worker site the
+runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
+gc handoff exits 0 once the request is recorded, even when the controller
+could not be signaled: a warning says so, and the controller acts at its next
+pass. It exits 1 with no restart recorded and no runtime hint set when the
+request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
+store, or a session row that names another incarnation.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -4202,22 +4206,25 @@ gc runtime heartbeat [flags]
 
 ## gc runtime request-restart
 
-Signal the controller to stop and restart this session.
+Ask the controller to stop this session and start it again fresh.
 
-Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
-an immediate reconcile tick, and returns without waiting. Control-plane
-authority over the actual stop/start stays with the controller's reconcile
-loop; this command only signals it so the request need not wait for the next
-periodic patrol tick.
+Records the restart request on this session's row (the request the
+controller acts on). Outside a worker site it then sets the runtime's
+GC_RESTART_REQUESTED hint. Then it pokes the controller for an immediate
+reconcile. It returns without waiting for the restart.
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, the command exits 1 with a diagnostic —
-the restart request itself remains durably set, so the controller still
-picks it up on its next periodic reconcile tick regardless.
+The request is bound to this session's incarnation. It is recorded only while
+the session row still names the GC_INSTANCE_TOKEN this process runs under, so
+a process left over from an earlier incarnation cannot restart its successor.
+
+Exits 0 once the request is recorded, even when the controller could not be
+signaled: a warning says so, and the controller acts at its next pass. Exits 1
+with nothing recorded and no runtime hint set when the request cannot be
+recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
+store, or a session row that names another incarnation.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before signaling the controller.
+It emits a session.draining event once the request is recorded.
 
 ```
 gc runtime request-restart

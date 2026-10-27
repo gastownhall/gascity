@@ -305,7 +305,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 //
 // cmd_handoff.go routes its full SESSION arm — restartability
 // (sessionRestartableByController), restart-request clear (clearRestartRequest ->
-// sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
+// sessionFrontDoor(sessStore).ApplyPatch), restart record (sessionRestartRecorder),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
 // beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its messaging

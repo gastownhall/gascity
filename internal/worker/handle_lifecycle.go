@@ -115,6 +115,23 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 	return err
 }
 
+// ResetFenced is Reset for a request made from inside the session: it records
+// the restart only while the session row still records the caller's
+// incarnation, instanceToken being the caller's GC_INSTANCE_TOKEN
+// (session.Manager.RequestFreshRestartFenced). instanceToken is never logged.
+func (h *SessionHandle) ResetFenced(ctx context.Context, instanceToken string) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		err = fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		return err
+	}
+	err = h.manager.RequestFreshRestartFenced(id, instanceToken)
+	return err
+}
+
 // Stop suspends the worker runtime while preserving conversation state.
 //
 // This carries OPERATOR intent: it has targeted, single-session callers (the

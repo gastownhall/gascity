@@ -1968,17 +1968,20 @@ func assertNoControllerReached(t *testing.T, dials *atomic.Int32, accepted <-cha
 	}
 }
 
+// workerSiteRestartToken is the incarnation the worker-site restart seeds
+// record; a test sets it as the caller's GC_INSTANCE_TOKEN (SG-3's fence).
+const workerSiteRestartToken = "tok-worker-site"
+
 // workerSiteRestartSeeds are the sessions a restart request reaches: an
-// ordinary one, whose bead marker backs up the runtime flag on a Local city,
-// and a pinned named one, whose marker is mandatory there. On a worker site
-// the marker is the whole request for both.
+// ordinary one and a pinned named one. The row marker is the whole request
+// for both, everywhere (SG-3); on a worker site no runtime hint follows it.
 var workerSiteRestartSeeds = []struct {
 	name string
 	seed map[string]string
 }{
-	{name: "session", seed: map[string]string{"state": "awake", "alias": "worker"}},
+	{name: "session", seed: map[string]string{"state": "awake", "alias": "worker", "instance_token": workerSiteRestartToken}},
 	{name: "pinned named session", seed: map[string]string{
-		"state": "awake", "alias": "worker",
+		"state": "awake", "alias": "worker", "instance_token": workerSiteRestartToken,
 		"configured_named_session": "true", "configured_named_mode": "always", "pin_awake": "true",
 	}},
 }
@@ -2007,6 +2010,7 @@ func TestWorkerSiteRequestRestartRecordsTheBeadMarker(t *testing.T) {
 			cityDir, _ := newWorkerSiteSessionCity(t, tc.seed)
 			t.Setenv("GC_ALIAS", "worker")
 			t.Setenv("GC_SESSION_NAME", "worker-1")
+			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
 			accepted := startFakeControllerSocket(t, cityDir, "ok\n")
 			dials := countSocketDials(t)
 
@@ -2025,23 +2029,27 @@ func TestWorkerSiteRequestRestartRecordsTheBeadMarker(t *testing.T) {
 }
 
 // TestWorkerSiteRestartWithoutItsMarkerRequestsNothing: the marker is the
-// whole request on a worker site, so request-restart and handoff fail without
-// it and promise no restart, for an ordinary session as for a pinned one.
+// whole request, so request-restart and handoff fail without it and promise no
+// restart, for an ordinary session as for a pinned one. No runtime hint is
+// attempted on a worker site.
 func TestWorkerSiteRestartWithoutItsMarkerRequestsNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		persistRestart func() error
+		name   string
+		record func(string) error
 	}{
 		{name: "no restart persistence"},
-		{name: "marker write fails", persistRestart: func() error { return errors.New("ledger unreachable") }},
+		{name: "marker write fails", record: func(string) error { return errors.New("ledger unreachable") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearGCEnv(t)
 			dops := newDrainOps(guard.New())
+			restart := testRowFirstRestart("gc runtime request-restart", "worker", nil, nil)
+			restart.record = tc.record
 
 			rec := events.NewFake()
 			var stdout, stderr bytes.Buffer
-			if code := doRuntimeRequestRestart(dops, tc.persistRestart, false, rec, "worker", "worker", t.TempDir(), &stdout, &stderr); code != 1 {
+			restart.stderr = &stderr
+			if code := doRuntimeRequestRestart(restart, rec, &stdout); code != 1 {
 				t.Fatalf("request-restart = %d, want 1; stderr=%s", code, stderr.String())
 			}
 			if strings.Contains(stdout.String(), "Restart requested") || len(rec.Events) != 0 {
@@ -2055,7 +2063,8 @@ func TestWorkerSiteRestartWithoutItsMarkerRequestsNothing(t *testing.T) {
 			rec = events.NewFake()
 			stdout.Reset()
 			stderr.Reset()
-			outcome := doHandoffWithOutcome(store, store, rec, dops, tc.persistRestart, "worker", "worker", []string{"HANDOFF: context full"}, &stdout, &stderr)
+			restart.verb = "gc handoff"
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "worker", "worker", []string{"HANDOFF: context full"}, &stdout, &stderr)
 			if outcome.code != 1 || outcome.restartRequested || strings.Contains(stdout.String(), "requesting restart") {
 				t.Fatalf("handoff = %+v, stdout = %q; want 1 and no restart promised; stderr=%s", outcome, stdout.String(), stderr.String())
 			}
@@ -2080,6 +2089,7 @@ func TestWorkerSiteHandoffRecordsTheRestart(t *testing.T) {
 			cityDir, _ := newWorkerSiteSessionCity(t, tc.seed)
 			t.Setenv("GC_ALIAS", "worker")
 			t.Setenv("GC_SESSION_NAME", "worker-1")
+			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
 			accepted := startFakeControllerSocket(t, cityDir, "ok\n")
 			dials := countSocketDials(t)
 

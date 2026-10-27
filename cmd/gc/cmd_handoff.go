@@ -6,15 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -46,11 +45,15 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS <subject> [message]
   gc runtime request-restart
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, gc handoff exits 1 with a diagnostic — the
-restart request itself remains durably set, so the controller still picks it
-up on its next periodic reconcile tick regardless.
+The restart request is recorded on this session's row, bound to this
+session's incarnation: it is recorded only while the session row still names
+the GC_INSTANCE_TOKEN this process runs under. Outside a worker site the
+runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
+gc handoff exits 0 once the request is recorded, even when the controller
+could not be signaled: a warning says so, and the controller acts at its next
+pass. It exits 1 with no restart recorded and no runtime hint set when the
+request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
+store, or a session row that names another incarnation.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -175,26 +178,26 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	dops := newDrainOps(sp)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
-	persistRestart := sessionRestartPersister(current.cityPath, sessStore, sp, cfg, current.sessionName)
+	r := rowFirstRestart{
+		verb:        "gc handoff",
+		cityPath:    current.cityPath,
+		sessionName: current.sessionName,
+		display:     current.display,
+		token:       os.Getenv(runtime.InstanceTokenEnv),
+		record:      sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName),
+		hint:        restartHintOps(current.cityPath, sp),
+		poke:        pokeControllerForRestart,
+		stderr:      stderr,
+	}
 
-	outcome := doHandoffWithOutcome(msgStore, sessStore, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr)
-	if outcome.code != 0 {
+	outcome := doHandoffWithOutcome(msgStore, sessStore, rec, newDrainOps(sp), r, current.display, current.sessionName, args, stdout, stderr)
+	if outcome.code != 0 || !outcome.restartRequested {
 		return outcome.code
 	}
-	if !outcome.restartRequested {
-		return 0
-	}
-
-	// Name-only key: the env-derived GC_SESSION_ID can be stale.
-	if err := pokeControllerForRestart(current.cityPath, reconcilekey.SessionNamed(current.sessionName)); err != nil {
-		if noteWorkerSitePoke(stderr, "gc handoff", err) {
-			return 0
-		}
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	// The request is recorded: the poke is only a hint and never fails the
+	// command (notifyController prints why the controller was not notified).
+	r.notifyController()
 	return 0
 }
 
@@ -245,45 +248,42 @@ func cmdHandoffRemoteWithForce(args []string, target string, force bool, stdout,
 	return doHandoffRemoteWithForce(cityPath, msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
 }
 
-func sessionRestartPersister(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
-	if sessStore == nil {
-		return nil
-	}
-	return func() error {
-		handle, err := workerHandleForSessionTargetWithConfig(cityPath, sessStore, sp, cfg, target)
-		if err != nil {
-			return err
-		}
-		return handle.Reset(context.Background())
-	}
-}
-
 type handoffOutcome struct {
 	code             int
 	restartRequested bool
 }
 
-// doHandoff sends a handoff mail to self and requests restart when the
-// controller can restart the current session. Testable: does not block.
-func doHandoff(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
+// doHandoff sends a handoff mail to self and records a restart request when
+// the controller can restart the current session. Testable: does not block.
+func doHandoff(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, r rowFirstRestart,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) int {
-	return doHandoffWithOutcome(msgStore, sessStore, rec, dops, persistRestart, sessionAddress, sessionName, args, stdout, stderr).code
+	return doHandoffWithOutcome(msgStore, sessStore, rec, dops, r, sessionAddress, sessionName, args, stdout, stderr).code
 }
 
-func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
+// doHandoffWithOutcome checks restartability, sends the handoff mail and, for
+// a restartable session, records the restart request row first (SG-3). A
+// restartable handoff whose caller names no incarnation is refused before the
+// mail, so a retry does not send it twice. dops clears a stale runtime restart
+// flag of a session the controller does not restart.
+func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, r rowFirstRestart,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
+	restartable, err := sessionRestartableByController(sessStore, sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		return handoffOutcome{code: 1}
+	}
+	if restartable && strings.TrimSpace(r.token) == "" {
+		fmt.Fprintf(stderr, "gc handoff: %s\n", r.notRecorded(session.ErrRestartRequestUnfenced)) //nolint:errcheck // best-effort stderr
+		return handoffOutcome{code: 1}
+	}
+
 	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return handoffOutcome{code: 1}
 	}
 
-	restartable, pinned, err := sessionRestartableByController(sessStore, sessionName)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-		return handoffOutcome{code: 1}
-	}
 	if !restartable {
 		if err := clearRestartRequest(sessStore, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -293,35 +293,9 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		return handoffOutcome{code: 0}
 	}
 
-	// Pinned named sessions are kill-protected by the reconciler unless an
-	// explicit controller reset (continuation_reset_pending) is persisted
-	// through the worker boundary: without it, the reconciler's collateral-skip
-	// clears the runtime flag set below and leaves the session running
-	// indefinitely. Persisting is therefore mandatory for pinned sessions. On a
-	// worker site the guard holds no runtime flag to set, so the bead marker is
-	// the whole request and is mandatory for every session. Everywhere else the
-	// runtime flag is primary and the bead write stays best-effort backup.
-	markerRequired, subject := pinned, "pinned session"
-	if err := dops.setRestartRequested(sessionName); err != nil {
-		if !restartFlagNotApplicable(err) {
-			fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1}
-		}
-		markerRequired, subject = true, "worker-site session"
-	}
-	if markerRequired {
-		if persistRestart == nil {
-			fmt.Fprintf(stderr, "gc handoff: %s %q has no restart persistence available; not requesting restart\n", subject, sessionName) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1}
-		}
-		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: could not persist restart marker for %s %q; not requesting restart: %v\n", subject, sessionName, err) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1}
-		}
-	} else if persistRestart != nil {
-		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
+	if err := r.recordRestart(); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: sent mail %s; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		return handoffOutcome{code: 1}
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
@@ -416,32 +390,27 @@ func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Reco
 }
 
 // sessionRestartableByController reports whether the controller is willing to
-// restart the named session (restartable) and whether it is a pinned,
-// kill-protected named session (pinned). pinned mirrors the reconciler's own
-// pinnedConfiguredNamedSessionKillProtected predicate (isNamedSessionInfo &&
-// pin_awake == "true") so callers can predict whether the reconciler will
-// refuse a collateral kill absent an explicit controller reset. Both facts
-// come off the single bead read so callers needing both (gc handoff) do not
-// pay for a second store round-trip.
-func sessionRestartableByController(sessStore beads.Store, sessionName string) (restartable, pinned bool, err error) {
+// restart the named session: every session but a named one outside "always"
+// mode. A session with no row is restartable.
+func sessionRestartableByController(sessStore beads.Store, sessionName string) (bool, error) {
 	if sessStore == nil || sessionName == "" {
-		return true, false, nil
+		return true, nil
 	}
 	id, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return true, false, nil
+			return true, nil
 		}
-		return false, false, fmt.Errorf("resolving session %q: %w", sessionName, err)
+		return false, fmt.Errorf("resolving session %q: %w", sessionName, err)
 	}
 	b, err := sessStore.Get(id)
 	if err != nil {
-		return false, false, fmt.Errorf("loading session %q: %w", id, err)
+		return false, fmt.Errorf("loading session %q: %w", id, err)
 	}
 	if !isNamedSessionBead(b) {
-		return true, false, nil
+		return true, nil
 	}
-	return namedSessionMode(b) == "always", strings.TrimSpace(b.Metadata["pin_awake"]) == "true", nil
+	return namedSessionMode(b) == "always", nil
 }
 
 func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName string) error {
@@ -479,7 +448,7 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {
-	restartable, _, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -3116,3 +3116,79 @@ func TestSessionHandleHistoryDoesNotStitchFreshWakeThatKeepsEpoch(t *testing.T) 
 		t.Fatalf("LogicalConversationID = %q before and after a fresh wake, want a new logical conversation", after.LogicalConversationID)
 	}
 }
+
+// TestSessionHandleResetFencedRecordsForTheCurrentIncarnation proves a
+// session handle exposes the in-session restart request and records it only
+// for the row's own incarnation (SG-3).
+func TestSessionHandleResetFencedRecordsForTheCurrentIncarnation(t *testing.T) {
+	handle, store, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"instance_token": "tok-live"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	var fenced FencedResetHandle = handle
+
+	if err := fenced.ResetFenced(context.Background(), "tok-dead"); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
+		t.Fatalf("ResetFenced(stale) err = %v, want ErrStaleRestartRequest", err)
+	}
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if bead.Metadata["restart_requested"] != "" {
+		t.Fatalf("stale request wrote restart_requested = %q", bead.Metadata["restart_requested"])
+	}
+	if err := fenced.ResetFenced(context.Background(), "tok-live"); err != nil {
+		t.Fatalf("ResetFenced: %v", err)
+	}
+	bead, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if bead.Metadata["restart_requested"] != "true" || bead.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("row = %v, want both restart keys", bead.Metadata)
+	}
+}
+
+// TestSessionHandleResetFencedRequiresExistingSession proves a handle with
+// no session row records nothing.
+func TestSessionHandleResetFencedRequiresExistingSession(t *testing.T) {
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err := handle.ResetFenced(context.Background(), "tok"); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("ResetFenced err = %v, want %v", err, ErrOperationUnsupported)
+	}
+}
+
+// TestRuntimeHandleIsNotAFencedResetHandle proves a bare runtime handle,
+// which has no row to record on, does not offer the fenced request.
+func TestRuntimeHandleIsNotAFencedResetHandle(t *testing.T) {
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     runtime.NewFake(),
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+	var h Handle = handle
+	if _, ok := h.(FencedResetHandle); ok {
+		t.Fatal("RuntimeHandle implements FencedResetHandle; want no row-backed reset")
+	}
+}
