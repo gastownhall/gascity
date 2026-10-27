@@ -65,7 +65,8 @@ func interruptedCloseGate(info sessionpkg.Info) (closeGate, bool) {
 // runtime is confirmed not running, release of the row's own runtime lease,
 // then closeSeat with the interrupted close's own code and gate, which rewrites
 // the same ClosePatch and runs the same guards and cascade. Any refusal leaves
-// the row to the unknown-state skip.
+// the row to the unknown-state skip. Each refusal is recorded on trace at
+// TraceSiteReconcilerFinishInterruptedClose.
 func finishInterruptedClose(
 	cityPath string,
 	store beads.Store,
@@ -76,6 +77,7 @@ func finishInterruptedClose(
 	info sessionpkg.Info,
 	gate closeGate,
 	storeQueryPartial, deferOnBoot bool,
+	trace *sessionReconcilerTraceCycle,
 	clk clock.Clock,
 	stderr io.Writer,
 ) bool {
@@ -85,12 +87,17 @@ func finishInterruptedClose(
 	alive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, info.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: skipping interrupted close of '%s': liveness observation failed: %v\n", info.SessionNameMetadata, err) //nolint:errcheck
+		recordInterruptedClose(trace, info, TraceOutcomeSkippedLivenessError, traceRecordPayload{
+			"liveness_error": err.Error(),
+		})
 		return false
 	}
 	if alive {
+		recordInterruptedClose(trace, info, TraceOutcomeKeptOpen, nil)
 		return false
 	}
 	if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, clk.Now())) {
+		recordInterruptedClose(trace, info, TraceOutcomeKeptOpen, nil)
 		return false
 	}
 	if !closeSeat(store, sw, info, closeWhy{reason: info.MetadataState, gate: gate}, clk.Now().UTC(), stderr) {
@@ -100,4 +107,12 @@ func finishInterruptedClose(
 		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
 	}
 	return true
+}
+
+// recordInterruptedClose records the finisher's decision for info on trace.
+func recordInterruptedClose(trace *sessionReconcilerTraceCycle, info sessionpkg.Info, outcome TraceOutcomeCode, payload traceRecordPayload) {
+	if trace == nil {
+		return
+	}
+	trace.RecordDecision(TraceSiteReconcilerFinishInterruptedClose, TraceReasonInterruptedClose, outcome, info.Template, info.SessionNameMetadata, payload)
 }

@@ -2292,7 +2292,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// (finishInterruptedClose). The skip is a throttled, durable
 		// session.unknown_state signal (folded onto the tick snapshot).
 		if !isKnownStateInfo(info) {
-			if gate, ok := interruptedCloseGate(info); ok && finishInterruptedClose(cityPath, store, sw, sp, cfg, dt, info, gate, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, stderr) {
+			if gate, ok := interruptedCloseGate(info); ok && finishInterruptedClose(cityPath, store, sw, sp, cfg, dt, info, gate, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, trace, clk, stderr) {
 				tick.markClosed(id)
 				continue
 			}

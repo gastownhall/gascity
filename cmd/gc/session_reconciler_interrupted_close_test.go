@@ -421,3 +421,67 @@ func TestInterruptedCloseLeavesUnrecognizedStatesToTheSkip(t *testing.T) {
 		})
 	}
 }
+
+// An interrupted close is finished only once the row's runtime is confirmed not
+// running: a live runtime, or a liveness probe that cannot tell, keeps the row
+// open with its state unchanged, stops nothing, and leaves the row to the
+// unknown-state skip exactly as before.
+func TestInterruptedCloseKeepsLiveOrUnobservedRuntimeOpen(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome TraceOutcomeCode
+		sp      func(*runtime.Fake) runtime.Provider
+	}{
+		{name: "runtime_alive", outcome: TraceOutcomeKeptOpen, sp: func(f *runtime.Fake) runtime.Provider { return f }},
+		{name: "liveness_error", outcome: TraceOutcomeSkippedLivenessError, sp: func(f *runtime.Fake) runtime.Provider {
+			return &startUnavailableLivenessProvider{Fake: f}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			rec := &capturingRecorder{}
+			env.rec = rec
+			b := env.createSessionBead("worker-zombie", "worker")
+			halfCloseSessionBead(t, env.store, b.ID, "stale-session", env.clk.Now().Add(-time.Hour), nil)
+			if err := env.sp.Start(context.Background(), "worker-zombie", runtime.Config{}); err != nil {
+				t.Fatalf("start runtime: %v", err)
+			}
+
+			trace := env.interruptedCloseTick(t, tc.sp(env.sp), false)
+
+			got, err := env.store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if got.Status == "closed" || got.Metadata["state"] != "stale-session" {
+				t.Fatalf("bead status=%q state=%q, want open with state stale-session", got.Status, got.Metadata["state"])
+			}
+			var finisher, skipped int
+			for _, r := range trace.records {
+				if r.SessionName != "worker-zombie" {
+					continue
+				}
+				if r.SiteCode == TraceSiteCode("reconciler.session.finish_interrupted_close") &&
+					r.ReasonCode == TraceReasonCode("interrupted_close") && r.OutcomeCode == tc.outcome {
+					finisher++
+				}
+				if r.ReasonCode == TraceReasonUnknownStateSkipped {
+					skipped++
+				}
+			}
+			if finisher != 1 || skipped != 1 {
+				t.Fatalf("finisher %s records = %d, unknown_state_skipped records = %d, want 1 each; records: %+v", tc.outcome, finisher, skipped, trace.records)
+			}
+			if events := unknownStateEventsFor(t, rec, b.ID); len(events) != 1 || events[0].Escalated {
+				t.Fatalf("session.unknown_state events = %+v, want one first-sight event", events)
+			}
+			if n := providerStops(env.sp); n != 0 {
+				t.Fatalf("provider Stop calls = %d, want 0", n)
+			}
+			if !env.sp.IsRunning("worker-zombie") {
+				t.Fatal("runtime worker-zombie stopped, want it left running")
+			}
+		})
+	}
+}
