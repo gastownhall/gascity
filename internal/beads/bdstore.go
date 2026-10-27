@@ -2069,9 +2069,10 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
-// SetMetadataBatch sets multiple key-value metadata pairs on a bead via
-// sequential bd update calls. Note: not truly atomic for external stores,
-// but each individual call is idempotent.
+// SetMetadataBatch sets multiple key-value metadata pairs on a bead in one
+// bd update call carrying every pair. bd resolves the pairs against the row
+// inside its write transaction, so a concurrent write to a different key
+// composes with this one; for the same key the last writer wins.
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	noteSessionKeysByID(s.Get, id, kvs)
 	if len(kvs) == 0 {
