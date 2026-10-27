@@ -85,8 +85,11 @@ type OpsConfig struct {
 	// its path.
 	// gc session nudge's inline pass never runs an interrupt, a respond or a
 	// deliver-now unit: it leaves them, and content queued behind them, to
-	// the controller's lane host. No request surface writes respond ops yet,
-	// so listing respond changes no request's delivery in this build.
+	// the controller's lane host. Listing respond switches the API's POST
+	// /v0/city/{cityName}/session/{id}/respond onto the lane: it proposes a
+	// respond op keyed by the interaction occurrence it answers, which the
+	// lane host runs at most once, and answers from its outcome (202 with
+	// the op still open after 20 s).
 	// The city's controller, standalone or supervisor-hosted, runs the lane
 	// host that delivers lane ops, and gc doctor reports a listed kind as an
 	// error when no lane host serves the city. A keystroke-mode runtime (tmux)

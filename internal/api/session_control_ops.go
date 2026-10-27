@@ -876,7 +876,9 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 
 // respondSession answers target's pending interaction with resp, recorded as
 // a respond op under ops.control, and returns the answer. key is the
-// Idempotency-Key header.
+// Idempotency-Key header. When the city's lane host executes respond, the
+// answer is a lane op instead (respondSessionLane), and ops.control does not
+// govern it.
 func (s *Server) respondSession(target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -887,6 +889,9 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 		return syncAnswer{}, humaResolveError(err)
 	}
 	mgr := s.sessionManager(store.Store)
+	if s.laneExecutes(opjournal.KindRespond) {
+		return s.respondSessionLane(mgr, store.Store, id, key, resp)
+	}
 	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
 		if req, err = s.respondOpRequest(mgr, store.Store, req, resp); err != nil {

@@ -10,6 +10,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -806,4 +807,180 @@ func (s *Server) proposeRunCancelInterrupt(st *opjournal.Store, store beads.Stor
 		}
 		req.ClientKey = runCancelRetryKey(runID, scope.Generation, op.ID)
 	}
+}
+
+// --- /respond ---
+
+// laneRespondAnswerBound is how long a /respond under lane authority awaits
+// its op before it answers 202 accepted with the op still open, 202's
+// meaning since OJ-4. A var so tests can shorten it.
+var laneRespondAnswerBound = 20 * time.Second
+
+// respondSessionLane is /respond under lane authority (respond listed): a
+// respond op keyed by the interaction occurrence it answers, which the lane
+// host runs at most once. key is the Idempotency-Key header.
+//
+// A key that already names a respond is its retry, followed through the row
+// the first request left under the key: an open op is awaited and a closed
+// one replayed, so a retry never resolves the occurrence again, and never
+// answers an identical prompt raised later. Otherwise the front door reads
+// the pending interaction as today and writes nothing on a refusal (no
+// pending 409 no_pending, another request id 409 invalid_interaction,
+// unsupported 501). The occurrence is the latest unresolved raising of the
+// pending request id, or the next one recorded now (Store.RecordRaising),
+// numbered as the lane numbers it, and the op is keyed RespondKey of it:
+// a different answer to the same occurrence from the same principal is 409
+// key_reuse, and the first answer wins. A request that carries a key also
+// leaves an API-executed respond row under it, of the legacy op's frozen
+// shape, closed skipped{coalesced_into: the lane op}.
+func (s *Server) respondSessionLane(mgr *session.Manager, store beads.Store, id, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+	st, err := s.conversationOpStore()
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	prior, retry, err := keyedLaneOp(st, opjournal.KindRespond, id, key)
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	if retry {
+		target, err := followCoalesced(st, prior)
+		if err != nil {
+			return syncAnswer{}, err
+		}
+		return s.answerLaneRespond(st, id, target, true)
+	}
+	pending, supported, err := mgr.Pending(id)
+	switch {
+	case err != nil:
+		return syncAnswer{}, humaSessionManagerError(err)
+	case !supported:
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("session %s: %w", id, session.ErrInteractionUnsupported))
+	case pending == nil || pending.RequestID == "":
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("session %s: %w", id, session.ErrNoPendingInteraction))
+	case resp.RequestID != "" && resp.RequestID != pending.RequestID:
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%w: pending interaction %q does not match request %q", session.ErrInteractionMismatch, pending.RequestID, resp.RequestID))
+	}
+	scope, why, whyErr := sessionOpScope(store, id)
+	if why != "" {
+		cause := why
+		if whyErr != nil {
+			cause += ": " + whyErr.Error()
+		}
+		return syncAnswer{}, apierr.OpJournalUnavailable.Msg(fmt.Sprintf("op_journal_unavailable: the operation journal cannot record this respond (%s); nothing was done", cause))
+	}
+	raising, _, err := st.RecordRaising(id, scope.Generation, pending.RequestID, opjournal.FactBasisObserved, time.Now())
+	if err != nil {
+		return syncAnswer{}, apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: recording the interaction's raising: %v", err)
+	}
+	laneKey, err := opjournal.RespondKey(raising.Raised)
+	if err != nil {
+		return syncAnswer{}, apierr.Internal.Msgf("keying the respond: %v", err)
+	}
+	payload, err := opjournal.EncodeRespondPayload(opjournal.RespondPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	if err != nil {
+		return syncAnswer{}, apierr.ValidationFailed.Msg("invalid_request: " + err.Error())
+	}
+	laneScope := scope
+	laneScope.Interaction = raising.Raised.Interaction
+	op, created, err := s.proposeLaneOp(st, opjournal.Request{
+		Conversation: id,
+		Kind:         opjournal.KindRespond,
+		Executor:     opjournal.ExecutorLane,
+		ClientKey:    laneKey,
+		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Payload:      payload,
+		Policy:       opjournal.Policy{Guarantee: opjournal.GuaranteeAtMostOnce},
+		Scope:        laneScope,
+	})
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	if key != "" {
+		rowScope := scope
+		rowScope.Interaction = pending.RequestID
+		if err := recordLaneRespondUnderKey(st, id, key, rowScope, resp, op.ID); err != nil {
+			return syncAnswer{}, err
+		}
+	}
+	return s.answerLaneRespond(st, id, op, !created)
+}
+
+// recordLaneRespondUnderKey records, under a lane /respond's
+// Idempotency-Key, that lane op target answers it: an API-executed respond
+// row of the legacy op's frozen shape (the request-id scope, respondOpPayload,
+// at_least_once), closed skipped{coalesced_into: target}, so a retry under
+// the key follows it back. A key that already names a row is left as it is.
+func recordLaneRespondUnderKey(st *opjournal.Store, conv, key string, scope opjournal.Scope, resp runtime.InteractionResponse, target string) error {
+	payload := respondOpPayload{Action: resp.Action, Text: resp.Text}
+	if len(resp.Metadata) > 0 {
+		payload.Metadata = resp.Metadata
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return apierr.Internal.Msg("encoding the respond row payload: " + err.Error())
+	}
+	row, created, err := st.Propose(opjournal.Request{
+		Conversation: conv,
+		Kind:         opjournal.KindRespond,
+		Executor:     opjournal.ExecutorLegacyAPI,
+		ClientKey:    key,
+		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Payload:      string(raw),
+		Policy:       respondOpPolicy,
+		Scope:        scope,
+	})
+	if err != nil {
+		return proposeError(err)
+	}
+	if !created {
+		return nil
+	}
+	if _, err := st.Close(row.ID, opjournal.Outcome{
+		Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonCoalescedInto, Result: opjournal.Result{CoalescedInto: target},
+	}, "api"); err != nil {
+		return apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: recording the respond under its Idempotency-Key: %v", err)
+	}
+	return nil
+}
+
+// answerLaneRespond awaits op, the respond a /respond of session id proposed
+// or found, at most laneRespondAnswerBound, and answers from its outcome:
+// succeeded is 202 accepted with the op; skipped{stale} 409 no_pending;
+// failed{unsupported} 501; refused:action the runtime's refusal, 409
+// invalid_interaction; any other failure, or a cancel, 409
+// op_already_failed; and an op still open 202 accepted with the open op. A
+// legacy op a key names is answered as OJ-4 replays it.
+func (s *Server) answerLaneRespond(st *opjournal.Store, id string, op opjournal.Op, replayed bool) (syncAnswer, error) {
+	if op.Executor != opjournal.ExecutorLane {
+		if op.Status != opjournal.StatusClosed {
+			return syncAnswer{}, requestInFlight()
+		}
+		if syncOpReplaysAsSuccess(op) {
+			return syncAnswer{ID: id, syncOpFields: syncOpFields{IdempotencyKey: op.ClientKey, Replayed: true, Op: conversationOpWire(op)}}, nil
+		}
+		return syncAnswer{}, replayedSyncError(op, humaSessionManagerError)
+	}
+	if op.Status != opjournal.StatusClosed {
+		var err error
+		if op, err = s.awaitLaneOp(context.Background(), id, op.ID, laneRespondAnswerBound); err != nil {
+			return syncAnswer{}, err
+		}
+	}
+	ok := syncAnswer{ID: id, syncOpFields: syncOpFields{IdempotencyKey: op.ClientKey, Replayed: replayed, Op: conversationOpWire(op)}}
+	if op.Status != opjournal.StatusClosed {
+		return ok, nil
+	}
+	arm, reason := op.Outcome.Effective()
+	closed := fmt.Sprintf("op %s closed %s", op.ID, laneOutcomeText(op))
+	switch {
+	case arm == opjournal.ArmSucceeded:
+		return ok, nil
+	case arm == opjournal.ArmSkipped && reason == opjournal.ReasonStale:
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%s: the prompt it answers is no longer pending: %w", closed, session.ErrNoPendingInteraction))
+	case arm == opjournal.ArmFailed && reason == opjournal.ReasonUnsupported:
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%s: %w", closed, session.ErrInteractionUnsupported))
+	case arm == opjournal.ArmFailed && op.Outcome.Reason == opjournal.ReasonRefusedAction:
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("%s: %w: %w", closed, session.ErrInteractionMismatch, runtime.ErrInteractionActionUnavailable))
+	}
+	return syncAnswer{}, apierr.OpAlreadyFailed.Msg(fmt.Sprintf("%s: %s; resend with a new Idempotency-Key to act again", opAlreadyFailedCode, closed))
 }
