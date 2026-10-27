@@ -295,21 +295,19 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("attach bead %s: %w", attachBeadID, err)
 	}
 
-	// Resolve the sub-DAG's workflow root through the canonical run chain
-	// (workflow_id -> molecule_id -> gc.root_bead_id -> the parent's own id),
-	// not gc.root_bead_id alone. A wisp/source bead grafted mid-workflow carries
-	// the true top root in workflow_id/molecule_id (written by sling) but no
-	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
-	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
-	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via
-	// beads.DirectMembers(<wrong root>) and burned ralph attempts
-	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
-	// with no run chain still self-roots via its own id (ResolveRunID's
-	// selfID fallback).
-	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+	// Resolve the sub-DAG's workflow root from the keys that name a container of
+	// the parent (workflow_id -> gc.root_bead_id -> the parent's own id). A
+	// wisp/source bead grafted mid-workflow carries the true top root in
+	// workflow_id but no gc.root_bead_id of its own; ignoring workflow_id would
+	// root the sub-DAG at the parent and stamp a wrong gc.root_bead_id on every
+	// child, burning ralph attempts (maintainer-city incident gcg-wisp-y785sz).
+	// molecule_id is deliberately not consulted: sling writes it on a source bead
+	// as a forward pointer to that bead's own v1 attachment, never to a container
+	// of it, so nesting there would adopt an unrelated molecule (ga-crz5ege). A
+	// genuine top-level head with no container key self-roots via its own id.
+	rootBeadID := beadmeta.ResolveNestingRootID(parentBead.Metadata, attachBeadID)
 
-	// A resolved run-chain root may point at a molecule that has since fully
+	// A resolved container root may point at a molecule that has since fully
 	// closed (e.g. re-attaching a content bead to a fresh formula after its
 	// prior review round-trip closed cleanly) -- a dead pointer, not a live
 	// upstream workflow to honor. Only a still-open chain root is trusted;

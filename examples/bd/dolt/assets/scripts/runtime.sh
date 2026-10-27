@@ -168,6 +168,85 @@ pid_is_running() (
   return 1
 )
 
+# managed_runtime_listener_pids prints every PID holding a LISTEN socket on
+# PORT, ascending and deduplicated. On a host with a readable kernel socket
+# table the answer comes from that table plus the /proc/<pid>/fd link text
+# and lsof is never run: an -i-only lsof query stats every /proc/<pid>/fd
+# entry before it filters, so a single stalled FUSE mount anywhere on the
+# host parks lsof in uninterruptible sleep — unkillable, and with it every
+# dolt order that waits on the probe (gascity#7553). Only when no table is
+# readable (no procfs) does the probe fall back to lsof. GC_DOLT_PROC_ROOT
+# repoints the proc root for tests.
+managed_runtime_listener_pids() (
+  port="$1"
+
+  case "$port" in
+    ''|*[!0-9]*)
+      return 0
+      ;;
+  esac
+
+  proc_root="${GC_DOLT_PROC_ROOT:-/proc}"
+
+  set --
+  for table in "$proc_root/net/tcp" "$proc_root/net/tcp6"; do
+    if [ -r "$table" ]; then
+      set -- "$@" "$table"
+    fi
+  done
+
+  if [ $# -eq 0 ]; then
+    command -v lsof >/dev/null 2>&1 || return 0
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null
+    return 0
+  fi
+
+  # One awk pass over the readable tables collects the socket inodes of every
+  # LISTEN row on PORT ($4 is the connection state, 0A is TCP_LISTEN; the
+  # port is the hex field after the last colon of the local address; rows
+  # without an inode, like TIME_WAIT, are skipped). An empty answer is a
+  # definitive no-listener; lsof is not consulted as a second opinion,
+  # because that call is the one the kernel tables exist to replace.
+  port_hex=$(printf '%04X' "$port")
+
+  inodes=$(awk -v want="$port_hex" '
+    NF >= 10 && $4 == "0A" && $10 ~ /^[1-9][0-9]*$/ {
+      local_address = $2
+      sub(/.*:/, "", local_address)
+      if (local_address == want) {
+        print $10
+      }
+    }
+  ' "$@")
+
+  [ -n "$inodes" ] || return 0
+
+  # One find maps the inodes to their holders. -lname matches the text of
+  # each /proc/<pid>/fd symlink — the kernel-rendered socket:[inode] name —
+  # and never stats the link target, so the scan cannot block on any mounted
+  # filesystem. The brackets in each pattern are escaped: unescaped, find
+  # reads them as an fnmatch character class. Unreadable fd directories
+  # (other users, processes that exit mid-scan) are skipped.
+  set --
+  for inode in $inodes; do
+    if [ $# -gt 0 ]; then
+      set -- "$@" -o
+    fi
+    set -- "$@" -lname 'socket:\['"$inode"'\]'
+  done
+
+  find "$proc_root" -mindepth 3 -maxdepth 3 \
+    -path "$proc_root/[0-9]*/fd/[0-9]*" \
+    \( "$@" \) 2>/dev/null \
+    | while IFS= read -r fd_path; do
+        pid_path=${fd_path%/fd/*}
+        printf '%s\n' "${pid_path##*/}"
+      done \
+    | sort -n -u
+)
+
+# managed_runtime_listener_pid prints the PID of the first running process
+# holding a LISTEN socket on PORT, or nothing when there is none.
 managed_runtime_listener_pid() (
   port="$1"
 
@@ -177,11 +256,7 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  if ! command -v lsof >/dev/null 2>&1; then
-    return 0
-  fi
-
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+  managed_runtime_listener_pids "$port" \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)

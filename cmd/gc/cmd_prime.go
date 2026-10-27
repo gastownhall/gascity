@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -88,14 +89,22 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute
 
 Without --strict, a prompt_template that cannot be read is reported on
-stderr and the default prompt is output.
+stderr and the default prompt is output; one that fails to parse or
+execute is reported on stderr and its raw unrendered text is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
 to empty output from valid conditional logic, or on suspended states
-(city or agent) — those are legitimate quiet states, not mistakes.`,
+(city or agent) — those are legitimate quiet states, not mistakes.
+
+Fragments appended to the prompt (global_fragments, inject_fragments,
+append_fragments) do not fail --strict: one that is missing or fails to
+render is reported on stderr and left out of the prompt. gc lint
+reports a pack's missing or failing inject_fragments and
+append_fragments.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
@@ -127,7 +136,7 @@ to empty output from valid conditional logic, or on suspended states
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
-	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or a prompt_template that cannot be read or rendered instead of falling back")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
 }
@@ -224,7 +233,7 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 
 // doPrimeWithMode's strict-mode contract: only states that would indicate
 // a user mistake (missing city config, no agent name, unknown agent name,
-// unreadable prompt_template file) error out. Supported minimal configs
+// a prompt_template that cannot be read, parsed, or executed) error out. Supported minimal configs
 // (agent with no prompt_template at all, or a template that legitimately
 // renders to empty output via conditional logic) and intentional quiet
 // states (suspended city/agent) remain silent even under --strict —
@@ -433,20 +442,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
 			return 1, nil
 		}
-		// renderPrompt returns "" both when the template file cannot be read
-		// and when a valid template legitimately renders empty. Readability is
-		// the strict precondition, so check it before hook side effects.
-		for _, a := range resolvedAgents {
-			if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
-				continue
-			}
-			if a.PromptTemplate == "" {
-				continue
-			}
-			if _, fErr := os.ReadFile(promptTemplateSourcePath(cityPath, a.PromptTemplate)); fErr != nil {
-				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
-				return 1, nil
-			}
+		// A prompt_template that cannot be read, parsed, or executed is a
+		// strict failure; an empty render from valid template logic is not.
+		// Check it here, before hook side effects and before any stdout write.
+		if !primeStrictTemplatesRender(cityPath, cityName, cfg, resolvedAgents, hookMode, sessionTemplateContext, stderr) {
+			return 1, nil
 		}
 		// Strict preconditions passed; now it's safe to update provider resume metadata.
 		runHookSideEffects()
@@ -478,7 +478,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				maybeStartNudgePoller(target)
 			}
 		}
-		if hookMode && isClientProviderChat(&a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS")) {
+		if primeHookClientChat(hookMode, &a) {
 			// A client's provider chat gets no worker persona (see
 			// isClientProviderChat); the controller's launch channel drops
 			// it with the same predicate. Unlike the unmanaged-hook exit
@@ -488,77 +488,32 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0, nil
 		}
-		var ctx PromptContext
-		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
-			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
-			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
+		ctx, rendered := primeAgentPrompt(cityPath, cityName, cfg, &a, hookMode || sessionTemplateContext, stderr)
+		if rendered.Text == "" {
+			// The prompt rendered empty (a legitimate, if unusual, minimal
+			// config), the prompt_template could not be read (reported on
+			// stderr), or no builtin prompt fits the agent: try the next
+			// candidate, then the default fallback.
+			continue
 		}
-		if a.PromptTemplate != "" {
-			fragments := effectivePromptFragments(
-				cfg.Workspace.GlobalFragments,
-				a.InjectFragments,
-				a.AppendFragments,
-				a.InheritedAppendFragments,
-				cfg.AgentDefaults.AppendFragments,
-			)
-			packDirs := cfg.PackDirsForRig(ctx.RigName)
-			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				packDirs, fragments, nil)
-			if prompt != "" {
-				var budget *promptBudgetJSON
-				if strictMode {
-					var budgetErr error
-					budget, budgetErr = reportPromptDeliveryBudget(prompt, &a, cfg, resolved, stderr)
-					if budgetErr != nil {
-						return 1, budget
-					}
-				}
-				injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
-				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
-				return 0, budget
-			}
-			// The template rendered empty (a legitimate, if unusual, minimal
-			// config) or could not be read (reported on stderr above) — emit
-			// the default fallback.
-		}
-		// Agents without a prompt_template: read a builtin prompt shipped by
-		// the core bootstrap pack, resolved from the composed pack dirs.
-		// When formula_v2 is enabled, all agents use graph-worker.md.
-		// Otherwise pool agents use pool-worker.template.md.
-		// Pool instances have Pool=nil after resolution, so also check the
-		// template agent via findAgentByName.
-		//
-		// The read goes through renderPrompt, not os.ReadFile, so a builtin
-		// prompt that composes a core-pack template fragment (pool-worker
-		// pulls in "claim-protocol") resolves it here exactly as it does on
-		// the prompt_template path above. graph-worker.md is a plain .md and
-		// renders verbatim.
-		if a.PromptTemplate == "" {
-			promptFile := ""
-			if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-				if cfg.Daemon.FormulaV2Enabled() {
-					promptFile = filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
-				} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
-					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
-				}
-			}
-			if promptFile != "" {
-				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
-					cfg.PackDirsForRig(ctx.RigName), nil, nil)
-				if content != "" {
-					injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
-					return 0, nil
-				}
+		var budget *promptBudgetJSON
+		if strictMode && a.PromptTemplate != "" {
+			var budgetErr error
+			budget, budgetErr = reportPromptDeliveryBudget(rendered.Text, &a, cfg, resolved, stderr)
+			if budgetErr != nil {
+				return 1, budget
 			}
 		}
+		injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
+		writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, rendered.Text, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+		return 0, budget
 	}
 
 	// Fallback: default run-once prompt. Under strict, this is only reached
-	// when the agent has no prompt_template and doesn't match a builtin
-	// worker prompt — a supported config shape, so the default prompt is
-	// the correct output even under --strict.
+	// when no candidate's prompt renders: its prompt_template legitimately
+	// renders empty, or it has none and no builtin worker prompt fits it.
+	// Both are supported config shapes, so the default prompt is the correct
+	// output even under --strict.
 	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
@@ -1057,6 +1012,114 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
 	return buildPrimeContextFor(cityPath, cityName, a, rigs, config.QueryTopology{}, stderr)
+}
+
+// primeAgentPromptContext builds the PromptContext gc prime renders an
+// agent's prompt_template with, including the agent's provider identity.
+func primeAgentPromptContext(cityPath, cityName string, cfg *config.City, a *config.Agent, stderr io.Writer) PromptContext {
+	ctx := buildPrimeContextFor(cityPath, cityName, a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
+	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &cfg.Workspace, cfg.Providers)
+	ctx.InstructionsFile = instructionsFileForAgent(a, &cfg.Workspace, cfg.Providers)
+	return ctx
+}
+
+// primeStrictTemplatesRender is gc prime --strict's prompt_template check. It
+// renders, silently and before any hook side effect, the prompt of each
+// resolved agent the output loop of doPrimeWithHookFormatOpts reaches, and
+// stops where that loop stops: at a suspended agent (a quiet success), at a
+// hook for a client's provider chat (no persona), and at the first agent whose
+// prompt renders non-empty (the prompt gc prime outputs). When an agent's
+// prompt_template cannot be read, parsed, or executed, it writes the check's
+// warnings to stderr, then a line naming the template and that agent, and
+// reports false. On success it drops the warnings; the output render prints
+// them.
+func primeStrictTemplatesRender(cityPath, cityName string, cfg *config.City, agents []config.Agent, hookMode, sessionTemplateContext bool, stderr io.Writer) bool {
+	var warnings bytes.Buffer
+	for _, a := range agents {
+		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) || primeHookClientChat(hookMode, &a) {
+			return true
+		}
+		_, rendered := primeAgentPrompt(cityPath, cityName, cfg, &a, hookMode || sessionTemplateContext, &warnings)
+		if rendered.Err != nil {
+			_, _ = stderr.Write(warnings.Bytes())
+			fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, a.QualifiedName(), rendered.Err) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		if rendered.Text != "" {
+			return true
+		}
+	}
+	return true
+}
+
+// primeHookClientChat reports whether a hook invocation primes a client's
+// provider chat of agent a, which gets no worker persona (see
+// isClientProviderChat).
+func primeHookClientChat(hookMode bool, a *config.Agent) bool {
+	return hookMode && isClientProviderChat(a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS"))
+}
+
+// primeAgentPrompt renders the prompt gc prime outputs for resolved agent a
+// and returns it with the context it was rendered with. That prompt is a's
+// prompt_template, or, when a has none, the core pack's builtin worker prompt
+// that fits a (see primeBuiltinPromptFile). An empty Text sends gc prime on to
+// its next candidate. Err reports a prompt_template that could not be used as
+// written (see PromptRenderResult); a builtin prompt never sets it.
+// sessionContext builds a's context for a builtin prompt too, as a hook or a
+// session's template context renders it; otherwise a builtin prompt renders
+// with the zero context.
+func primeAgentPrompt(cityPath, cityName string, cfg *config.City, a *config.Agent, sessionContext bool, stderr io.Writer) (PromptContext, PromptRenderResult) {
+	var ctx PromptContext
+	if a.PromptTemplate != "" || sessionContext {
+		ctx = primeAgentPromptContext(cityPath, cityName, cfg, a, stderr)
+	}
+	if a.PromptTemplate != "" {
+		return ctx, renderPrimeAgentPrompt(cityPath, cityName, cfg, a, ctx, stderr)
+	}
+	promptFile := primeBuiltinPromptFile(cfg, a)
+	if promptFile == "" {
+		return ctx, PromptRenderResult{}
+	}
+	// The read goes through renderPrompt, not os.ReadFile, so a builtin prompt
+	// that composes a core-pack template fragment (pool-worker pulls in
+	// "claim-protocol") resolves it exactly as a prompt_template does.
+	// graph-worker.md is a plain .md and renders verbatim.
+	return ctx, PromptRenderResult{Text: renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
+		cfg.PackDirsForRig(ctx.RigName), nil, nil)}
+}
+
+// primeBuiltinPromptFile returns the builtin prompt gc prime outputs for an
+// agent without a prompt_template, shipped by the core bootstrap pack and
+// resolved from the composed pack dirs: graph-worker.md for every agent when
+// formula_v2 is enabled, else pool-worker.template.md for pool agents. A pool
+// instance has Pool=nil after resolution, so isPoolInstance matches it to its
+// pool agent by name. It returns "" when the core pack is absent or no builtin
+// prompt fits the agent.
+func primeBuiltinPromptFile(cfg *config.City, a *config.Agent) string {
+	coreDir := cfg.PackDirByName("core")
+	switch {
+	case coreDir == "":
+		return ""
+	case cfg.Daemon.FormulaV2Enabled():
+		return filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
+	case a.SupportsInstanceExpansion() || isPoolInstance(cfg, *a):
+		return filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+	}
+	return ""
+}
+
+// renderPrimeAgentPrompt renders an agent's prompt_template with the
+// fragments and rig-scoped pack dirs gc prime uses.
+func renderPrimeAgentPrompt(cityPath, cityName string, cfg *config.City, a *config.Agent, ctx PromptContext, stderr io.Writer) PromptRenderResult {
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		a.InjectFragments,
+		a.AppendFragments,
+		a.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	return renderPromptWithMeta(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
+		cfg.PackDirsForRig(ctx.RigName), fragments, nil)
 }
 
 func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {

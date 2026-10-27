@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -220,6 +221,86 @@ func TestDoctor_FixFails(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "fix failed: fix failed") {
 		t.Errorf("output missing fix error: %q", buf.String())
+	}
+}
+
+// hintedFixCheck fails with a FixHint and a fixable remediation whose Fix
+// returns fixErr.
+type hintedFixCheck struct {
+	fixErr error
+}
+
+func (c *hintedFixCheck) Name() string { return "hinted-fix" }
+func (c *hintedFixCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:    "hinted-fix",
+		Status:  StatusError,
+		Message: "imports out of sync",
+		FixHint: "run the sync",
+	}
+}
+func (c *hintedFixCheck) CanFix() bool              { return true }
+func (c *hintedFixCheck) Fix(_ *CheckContext) error { return c.fixErr }
+func (c *hintedFixCheck) WarmupEligible() bool      { return false }
+
+func TestDoctor_FixHintErrorReplacesHint(t *testing.T) {
+	cause := errors.New("sync failed")
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: fmt.Errorf("syncing: %w", &FixHintError{
+		Err:  cause,
+		Hint: "register a pack credential:\n  gc import credential add github.com/acme",
+	})})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if len(r.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(r.Results))
+	}
+	res := r.Results[0]
+	if res.FixError != "syncing: sync failed" {
+		t.Errorf("FixError = %q, want the wrapped error text unchanged", res.FixError)
+	}
+	if want := "register a pack credential:\n  gc import credential add github.com/acme"; res.FixHint != want {
+		t.Errorf("FixHint = %q, want %q", res.FixHint, want)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "      fix failed: syncing: sync failed\n") {
+		t.Errorf("output missing fix error: %q", out)
+	}
+	if !strings.Contains(out, "      hint: register a pack credential:\n              gc import credential add github.com/acme\n") {
+		t.Errorf("output missing replaced, aligned hint: %q", out)
+	}
+	if strings.Contains(out, "run the sync") {
+		t.Errorf("pre-fix hint must be replaced: %q", out)
+	}
+}
+
+func TestDoctor_PlainFixErrorKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: errors.New("lockfile write")})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	res := r.Results[0]
+	if res.FixError != "lockfile write" || res.FixHint != "run the sync" {
+		t.Errorf("FixError/FixHint = %q/%q, want %q/%q", res.FixError, res.FixHint, "lockfile write", "run the sync")
+	}
+	if out := buf.String(); strings.Contains(out, "credential") {
+		t.Errorf("non-auth fix failure printed a credential hint: %q", out)
+	}
+}
+
+func TestDoctor_FixHintErrorEmptyHintKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: &FixHintError{Err: errors.New("sync failed")}})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if got := r.Results[0].FixHint; got != "run the sync" {
+		t.Errorf("FixHint = %q, want the pre-fix hint kept", got)
 	}
 }
 

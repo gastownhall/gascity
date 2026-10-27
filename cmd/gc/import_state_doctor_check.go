@@ -149,15 +149,25 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	}
 	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
 		return err
 	}
 	if _, err := installLockedImports(c.cityPath); err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	return nil
+}
+
+// withCredentialFixHint wraps an auth-classified import fetch failure so
+// gc doctor --fix reports the same credential remediation gc import install
+// prints; any other error is returned unchanged.
+func withCredentialFixHint(err error) error {
+	if hint, ok := credentialHint(err); ok {
+		return &doctor.FixHintError{Err: err, Hint: hint}
+	}
+	return err
 }
 
 // supersededBundledPinDetails reports bundled imports pinned at a

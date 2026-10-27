@@ -16,6 +16,12 @@ import (
 // in the city's pack.toml and which are unused. It does NOT perform a live
 // network probe — that is a deferred follow-up (see the credentialed-pack-imports
 // plan) so doctor gains no new network surface here.
+//
+// The check never infers that an import needs a credential: offline it cannot
+// tell a public import from a private one, so an import no rule matches is
+// reported as information, not a warning. Authentication is classified when a
+// fetch runs (gc import install, gc doctor --fix), which reports the credential
+// remediation for an auth-classified failure.
 type PackCredentialsCheck struct {
 	imports map[string]config.Import
 }
@@ -65,23 +71,18 @@ func (c *PackCredentialsCheck) Run(ctx *CheckContext) *CheckResult {
 	sort.Strings(details)
 	r.Details = details
 
-	if len(unmatchedRemotes) > 0 {
-		sort.Strings(unmatchedRemotes)
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("%d remote import(s) have no matching credential rule", len(unmatchedRemotes))
-		r.FixHint = "register a credential for each host: gc import credential add <host> --helper 'gh auth token'"
-		r.Details = append(r.Details, unmatchedRemotes...)
-		return r
-	}
+	sort.Strings(unmatchedRemotes)
+	r.Details = append(r.Details, unmatchedRemotes...)
 
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("%d pack credential rule(s) configured", len(loaded))
 	return r
 }
 
-// remoteImportsWithoutRule returns the redacted clone URLs of networked remote
-// imports that no credential rule matches. A public import legitimately has no
-// rule, so this is advisory only (StatusWarning), not an error.
+// remoteImportsWithoutRule returns one Details line, "<redacted clone URL> —
+// no matching credential rule", per networked remote import that no credential
+// rule matches. A public import legitimately has no rule, so these are
+// informational Details only: the result stays StatusOK with no FixHint.
 func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []string {
 	var missing []string
 	for _, imp := range c.imports {
@@ -91,7 +92,7 @@ func (c *PackCredentialsCheck) remoteImportsWithoutRule(rules *gitcred.Rules) []
 		if _, ok := rules.MatchSource(imp.Source); ok {
 			continue
 		}
-		missing = append(missing, gitcred.RedactUserinfo(remotesource.Parse(imp.Source).CloneURL))
+		missing = append(missing, gitcred.RedactUserinfo(remotesource.Parse(imp.Source).CloneURL)+" — no matching credential rule")
 	}
 	return missing
 }

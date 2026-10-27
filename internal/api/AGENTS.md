@@ -92,7 +92,13 @@ narrows the call varies by store (see `findLiveActiveBeadInStores`). Preserve
 assignee priority across stores and newest-first order within a store, so a
 concrete session's work wins over a template fallback. Stop reading stores once
 the first identity (the session id, when known) has a match, and keep a store's
-partial rows instead of dropping the store.
+partial rows instead of dropping the store. Neither the live nor the cached
+lookup reads a store that only rigs suspended by effective state reach (the
+set `statusWorkCounts` skips, `cacheColdRigNames`); a store such a rig shares
+with a rig that is not suspended, as in legacy shared-file mode, is read
+through that rig. A lookup scoped to a suspended rig reads only that shared
+store, or nothing, and never falls back to the other rigs' stores
+(`activeBeadSearchScope`).
 
 ## Deferred creation baseline
 

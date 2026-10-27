@@ -40,6 +40,7 @@ const (
 // IsDeliberateSleepReason reports whether a sleep_reason records an
 // intentional stop rather than a crash, so the death must not accrue churn.
 // "city-stop" mirrors the CLI's stop sleep reason.
+// "killed" is the gc session kill operator stop (SleepReasonKilled, kill_fence.go).
 // "provider-terminal-error" is a classified, non-retryable provider failure
 // (set by markProviderTerminalError); it is suppressed here so a session
 // already parked terminal cannot also accrue a spurious wake failure, making
@@ -53,8 +54,9 @@ func IsDeliberateSleepReason(reason string) bool {
 	switch SleepReason(strings.TrimSpace(reason)) {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
-		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
-		SleepReasonFailedCreate, SleepReasonProviderTerminalError:
+		SleepReasonKilled, SleepReasonUserHold, SleepReasonWaitHold,
+		SleepReasonRateLimit, SleepReasonFailedCreate,
+		SleepReasonProviderTerminalError:
 		return true
 	default:
 		return false
