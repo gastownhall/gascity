@@ -300,7 +300,8 @@ adopts it.
 - Run cancel (interrupt listed): one op per live holder session, keyed
   `run-cancel:<run id>` with the run as causation, awaited together;
   `succeeded` is interrupted, a failure or an op still open is a failure,
-  and `skipped` neither.
+  and `skipped` neither. A later cancel that finds a holder's op closed
+  failed or canceled retries it under a minted key, never replaying it.
 
 ## The producer API and journal-row events
 

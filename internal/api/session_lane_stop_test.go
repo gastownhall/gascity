@@ -342,6 +342,57 @@ func TestRunCancelUnderLaneProposesOneInterruptPerHolder(t *testing.T) {
 	}
 }
 
+// A run cancel that finds its run-cancel:<run id> op of a holder closed
+// failed or canceled does not replay that failure: it retries the interrupt
+// under a minted key, as a /stop retries a failed stop of its turn. One that
+// found the op succeeded, or skipped, answers from it again.
+func TestRunCancelUnderLaneRetriesAFailedInterrupt(t *testing.T) {
+	f := newRunCancelInterruptFixture(t)
+	mem, ok := f.fs.cityBeadStore.(*beads.MemStore)
+	if !ok {
+		t.Fatalf("city bead store is %T, want *beads.MemStore", f.fs.cityBeadStore)
+	}
+	mem.HonorExplicitIDs = true
+	f.fs.sessionsBeadStore = prefixedStore{MemStore: mem}
+	ops := newOpsTestStoreOver(t, f.fs)
+	st := &lanePokeState{fakeState: f.fs, kinds: []string{"interrupt"}, ops: ops}
+	failItem := true
+	st.onPoke = func(conv string) {
+		reason := ""
+		arm := opjournal.ArmSucceeded
+		if conv == f.itemWorker.ID && failItem {
+			arm, reason = opjournal.ArmFailed, opjournal.ReasonNoBoundary
+		}
+		scriptLanePass(t, ops, conv, outcome(arm, reason))
+	}
+	s := New(st)
+	// A later cancel of the run reaches its holders again only after an
+	// earlier one failed mid-wind-down (the root left open), so this drives
+	// the holders' interrupts twice directly.
+	holders := []string{f.stepWorker.ID, f.itemWorker.ID}
+	interrupt := func() ([]string, map[string]error) {
+		t.Helper()
+		failed := map[string]error{}
+		got := s.interruptRunHoldersLane(context.Background(), f.fs.cityBeadStore, f.runID, holders, func(id string, err error) { failed[id] = err })
+		slices.Sort(got)
+		return got, failed
+	}
+	if _, failed := interrupt(); len(failed) != 1 || failed[f.itemWorker.ID] == nil {
+		t.Fatalf("first interrupt failures = %v, want the item worker's", failed)
+	}
+	failItem = false
+	got, failed := interrupt()
+	want := slices.Clone(holders)
+	slices.Sort(want)
+	if !slices.Equal(got, want) || len(failed) != 0 {
+		t.Fatalf("second interrupt interrupted %v, failures %v; want %v and none", got, failed, want)
+	}
+	keyed, _ := opjournal.DeriveID(ops.Prefix(), f.itemWorker.ID, "operator", runCancelLaneKey(f.runID))
+	if op, err := ops.Get(keyed); err != nil || op.Outcome.Arm != opjournal.ArmFailed {
+		t.Fatalf("item worker's run-cancel op = %+v, %v; want it left closed failed, the retry a new op", op, err)
+	}
+}
+
 // newOpsTestStoreOver is the op store the API opens over fs's sessions store.
 func newOpsTestStoreOver(t *testing.T, fs *fakeState) *opjournal.Store {
 	t.Helper()

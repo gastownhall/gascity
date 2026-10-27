@@ -333,10 +333,23 @@ func laneOutcomeText(op opjournal.Op) string {
 // for each holder session.
 func runCancelLaneKey(runID string) string { return "run-cancel:" + runID }
 
+// runCancelInterruptFailed reports whether op, a holder's run-cancel
+// interrupt, closed failed or canceled: neither interrupted the holder nor
+// found nothing to interrupt.
+func runCancelInterruptFailed(op opjournal.Op) bool {
+	if op.Status != opjournal.StatusClosed {
+		return false
+	}
+	arm, _ := op.Outcome.Effective()
+	return arm != opjournal.ArmSucceeded && arm != opjournal.ArmSkipped
+}
+
 // interruptRunHoldersLane is interruptRunHolders under lane authority: one
 // interrupt op per holder session ids names, keyed run-cancel:<run id> with
 // the run as its causation, awaited together at most
-// laneControlAnswerBound. A session that closed succeeded is interrupted;
+// laneControlAnswerBound. A later cancel that finds a holder's op closed
+// failed or canceled retries it under a minted key, so a failure is never
+// replayed. A session that closed succeeded is interrupted;
 // one whose op failed, or is still open at the bound, is a failure; one
 // that closed skipped (nothing to stop) is neither.
 func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store, runID string, ids []string, fail func(string, error)) []string {
@@ -358,7 +371,7 @@ func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store,
 			fail(id, fmt.Errorf("the operation journal cannot record its interrupt (%s): %w", why, errors.Join(whyErr, errors.New("nothing sent"))))
 			continue
 		}
-		op, _, err := s.proposeLaneOp(st, opjournal.Request{
+		req := opjournal.Request{
 			Conversation: id,
 			Kind:         opjournal.KindInterrupt,
 			Executor:     opjournal.ExecutorLane,
@@ -367,7 +380,18 @@ func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store,
 			Policy:       interruptOpPolicy,
 			Scope:        scope,
 			Causation:    runID,
-		})
+		}
+		op, _, err := s.proposeLaneOp(st, req)
+		if err == nil && runCancelInterruptFailed(op) {
+			// A failed interrupt of the holder never uses the run's key up:
+			// this cancel retries it under a minted key.
+			if req.ClientKey, err = legacyop.MintKey(); err == nil {
+				req.MintedKey = true
+				op, _, err = s.proposeLaneOp(st, req)
+			} else {
+				err = apierr.Internal.Msg(err.Error())
+			}
+		}
 		if err != nil {
 			fail(id, err)
 			continue
