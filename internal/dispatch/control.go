@@ -51,7 +51,9 @@ type attemptEvaluation struct {
 // The two live implementations (retry, ralph) differ only in how they classify
 // a closed attempt, what extra metadata a pass carries, and how an exhausted
 // attempt is disposed. kind/subjectNoun/missingNoun carry the control-kind
-// trace and error wording (control kinds, not role names).
+// trace and error wording (control kinds, not role names). evaluate may
+// return ErrControlPending to defer the verdict once it has made the control
+// wait on whatever it defers to; nothing is then written for the attempt.
 type controlAttemptStrategy struct {
 	kind        string // "retry" | "ralph" — trace text only
 	subjectNoun string // "attempt" | "iteration" — error/trace text
@@ -284,12 +286,22 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
-// runs the check script. An iteration that failed hard closes the control as a
-// hard failure without running the check; a GatePass closes the control; a
-// run without a verdict re-runs the check attempt-free while the
-// infrastructure budget lasts (spendCheckInfraRetry); anything else spawns the
-// next iteration or exhausts.
+// runs the check script. An iteration body closes failed beside members still
+// in flight when an aborting member skips only the unclaimed ones, so until
+// every member of the iteration has closed, the control blocks on the live
+// ones and defers the verdict (ErrControlPending). An iteration that failed
+// hard closes the control as a hard failure without running the check; a
+// GatePass closes the control; a run without a verdict re-runs the check
+// attempt-free while the infrastructure budget lasts (spendCheckInfraRetry);
+// anything else spawns the next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
+	live, err := ralphIterationLiveMembers(store, bead, iteration, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: reading live members of %s: %w", bead.ID, iteration.ID, err)
+	}
+	if len(live) > 0 {
+		return attemptEvaluation{}, awaitRalphIterationDrain(store, bead, iteration, iterationNum, live, opts)
+	}
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
 	// review.verdict) visible on the ralph bead for check scripts that read
@@ -373,6 +385,51 @@ func ralphIterationHardFailure(store beads.Store, control, iteration beads.Bead,
 	}
 	culprit, ok := firstHardFailedMember(iterationScopeMembers(all, rootID, iterationRef), iteration.ID)
 	return culprit, ok, nil
+}
+
+// ralphIterationLiveMembers returns the members of a closed ralph iteration
+// that have not closed yet, sorted by ID: the scope members and nested
+// retry/ralph descendants scopeMembersInState selects, in any non-closed
+// state. A childless ralph's iteration is its work bead and has no members.
+func ralphIterationLiveMembers(store beads.Store, control, iteration beads.Bead, opts ProcessOptions) ([]beads.Bead, error) {
+	iterationRef := strings.TrimSpace(iteration.Metadata[beadmeta.StepRefMetadataKey])
+	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope || iterationRef == "" {
+		return nil, nil
+	}
+	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := rootViewMembers(store, rootID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("reading members of root %s: %w", rootID, err)
+	}
+	live := scopeMembersInState(iterationScopeMembers(all, rootID, iterationRef), all, iteration.ID, func(b beads.Bead) bool { return b.Status != "closed" })
+	out := make([]beads.Bead, 0, len(live))
+	for _, id := range sortedPendingIDs(live) {
+		out = append(out, live[id])
+	}
+	return out, nil
+}
+
+// awaitRalphIterationDrain blocks the ralph control on each live member of
+// its closed iteration and returns ErrControlPending, so the control leaves
+// the ready queue until they close. Store errors go through the controller
+// spawn boundary, as for a pending attempt.
+func awaitRalphIterationDrain(store beads.Store, control, iteration beads.Bead, iterationNum int, live []beads.Bead, opts ProcessOptions) error {
+	described := make([]string, 0, len(live))
+	for _, member := range live {
+		if err := ensureBlockingDependency(store, control.ID, member.ID); err != nil {
+			if controllerSpawnBoundaryPending(store, control.ID, err, opts) {
+				return ErrControlPending
+			}
+			return fmt.Errorf("%s: blocking on live member %s of %s: %w", control.ID, member.ID, iteration.ID, err)
+		}
+		described = append(described, member.ID+":"+member.Status)
+	}
+	opts.tracef("ralph iteration-drain-pending bead=%s iteration=%s attempt=%d live=%s",
+		control.ID, iteration.ID, iterationNum, strings.Join(described, ","))
+	return ErrControlPending
 }
 
 // iterationScopeMembers returns the members of the scope whose body carries

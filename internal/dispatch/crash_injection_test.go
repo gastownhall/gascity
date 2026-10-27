@@ -305,7 +305,7 @@ var crashVolatileMetadataKeys = map[string]bool{
 	beadmeta.DurationMsMetadataKey: true,
 }
 
-func snapshotLedger(t *testing.T, stores []*beads.MemStore, ignoreKeys ...string) []ledgerBead {
+func snapshotLedger[S beads.Store](t *testing.T, stores []S, ignoreKeys ...string) []ledgerBead {
 	t.Helper()
 	var out []ledgerBead
 	for i, store := range stores {

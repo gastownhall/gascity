@@ -916,40 +916,7 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 		}
 		all = loaded
 	}
-	pending := make(map[string]beads.Bead)
-	for _, member := range s.members {
-		if member.ID == skipControlID || member.Status != "open" {
-			continue
-		}
-		if member.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
-			continue
-		}
-		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
-		case "body", "teardown":
-			continue
-		}
-		pending[member.ID] = member
-	}
-	for _, member := range s.members {
-		switch strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey]) {
-		case "retry", "ralph":
-		default:
-			continue
-		}
-		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
-		case "body", "teardown":
-			continue
-		}
-		for _, candidate := range all {
-			if candidate.Status != "open" {
-				continue
-			}
-			if !isLogicalDescendant(member, candidate) {
-				continue
-			}
-			pending[candidate.ID] = candidate
-		}
-	}
+	pending := scopeMembersInState(s.members, all, skipControlID, func(b beads.Bead) bool { return b.Status == "open" })
 
 	skipped := 0
 	// Termination: nothing is ever added to pending below, and every round that
@@ -1002,6 +969,47 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 
 	return skipped, nil
+}
+
+// scopeMembersInState selects, by ID, the scope's work in the state inState
+// accepts: its members other than excludeID, the body, the teardown and spec
+// beads, plus every bead in all that is a logical descendant of a nested retry
+// or ralph member. A scope abort skips this set in the open state; a ralph
+// control waits for it to leave every non-closed state before it judges the
+// iteration.
+func scopeMembersInState(members, all []beads.Bead, excludeID string, inState func(beads.Bead) bool) map[string]beads.Bead {
+	selected := make(map[string]beads.Bead)
+	for _, member := range members {
+		if member.ID == excludeID || !inState(member) {
+			continue
+		}
+		if member.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case "body", "teardown":
+			continue
+		}
+		selected[member.ID] = member
+	}
+	for _, member := range members {
+		switch strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey]) {
+		case "retry", "ralph":
+		default:
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case "body", "teardown":
+			continue
+		}
+		for _, candidate := range all {
+			if !inState(candidate) || !isLogicalDescendant(member, candidate) {
+				continue
+			}
+			selected[candidate.ID] = candidate
+		}
+	}
+	return selected
 }
 
 // describeStuckScopeMembers renders the members that are still pending after a
