@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
@@ -216,6 +217,20 @@ func TestCompiledRalphIterationDrainBlocksOnClaimedSibling(t *testing.T) {
 	}
 }
 
+// drainedSiblingAfterFailure cooks the fixture, fails alpha while beta is
+// claimed, serves, and checks the pending state before the caller closes beta.
+func drainedSiblingAfterFailure(t *testing.T, st ralphDrainStore) ralphDrainFixture {
+	t.Helper()
+	fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+	beta := fx.claim(t, "loop.iteration.1.beta")
+	fx.finish(t, "loop.iteration.1.alpha", workerFailure(beadmeta.FailureClassTransient, "rate_limited"))
+	fx.serve(t)
+	ledger := fx.ledger(t)
+	requireNoIteration(t, ledger, 2)
+	requireDrainPending(t, ledger, beta)
+	return fx
+}
+
 // requireOneIteration asserts exactly one set of the loop's iteration n: the
 // body and one bead per child.
 func requireOneIteration(t *testing.T, ledger []ledgerBead, n int) {
@@ -225,6 +240,42 @@ func requireOneIteration(t *testing.T, ledger []ledgerBead, n int) {
 		if got := len(ledgerBeadsByRefSuffix(ledger, suffix)); got != 1 {
 			t.Errorf("beads with step_ref suffix %q = %d, want 1", suffix, got)
 		}
+	}
+}
+
+// attemptLogEntries decodes a control's gc.attempt_log.
+func attemptLogEntries(t *testing.T, control ledgerBead) []map[string]string {
+	t.Helper()
+	var log []map[string]string
+	if err := json.Unmarshal([]byte(control.Metadata[beadmeta.AttemptLogMetadataKey]), &log); err != nil {
+		t.Fatalf("decoding %s gc.attempt_log %q: %v", control.ID, control.Metadata[beadmeta.AttemptLogMetadataKey], err)
+	}
+	return log
+}
+
+// TestCompiledRalphIterationDrainIteratesOnceSiblingCloses pins AC-3: once
+// the claimed sibling closes, the failed iteration iterates exactly once, on
+// the existing synthetic fail verdict.
+func TestCompiledRalphIterationDrainIteratesOnceSiblingCloses(t *testing.T) {
+	t.Parallel()
+	for _, st := range []ralphDrainStore{memDrainStore(), sqliteDrainStore()} {
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			fx := drainedSiblingAfterFailure(t, st)
+			fx.finish(t, "loop.iteration.1.beta", workerPass)
+			fx.serve(t)
+			ledger := fx.ledger(t)
+
+			requireOneIteration(t, ledger, 2)
+			body := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1")
+			log := attemptLogEntries(t, ledgerBeadByRefSuffix(t, ledger, ".loop"))
+			if len(log) != 1 {
+				t.Fatalf("gc.attempt_log = %v, want exactly one entry", log)
+			}
+			if want := "attempt subject " + body.rawID + " already failed"; log[0]["attempt"] != "1" || log[0]["reason"] != want {
+				t.Errorf("gc.attempt_log[0] = %v, want attempt 1 with reason %q", log[0], want)
+			}
+		})
 	}
 }
 
