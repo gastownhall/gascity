@@ -25,6 +25,7 @@ func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookFormat string
 	var jsonOut bool
 	var force bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "handoff [subject] [message]",
 		Short: "Send handoff mail and restart controller-managed sessions",
@@ -79,6 +80,11 @@ For controller-restartable targets, equivalent to:
   gc mail send <target> <subject> [message]
   gc session kill <target>
 
+While the op journal records ops, a restartable self-handoff is recorded as a
+restart{fresh} op and a notice op to self; a rerun with the same --key reports
+the first run's outcome without sending the mail again. --auto and --target
+record no ops and refuse --key.
+
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
 or ID. Subject is required unless --auto is set.`,
@@ -93,18 +99,11 @@ or ID. Subject is required unless --auto is set.`,
 			if jsonOut {
 				out = io.Discard
 			}
-			if cmdHandoffWithForce(args, target, auto, hookFormat, force, out, stderr) != 0 {
+			if cmdHandoff(handoffRun{
+				args: args, target: target, auto: auto, hookFormat: hookFormat, force: force,
+				key: key, asJSON: jsonOut, stdout: out, jsonOut: stdout, stderr: stderr,
+			}) != 0 {
 				return errExit
-			}
-			if jsonOut {
-				return writeCLIJSONLineOrErr(stdout, stderr, "gc handoff", handoffJSONResult{
-					SchemaVersion: "1",
-					OK:            true,
-					Mode:          handoffJSONMode(target, auto),
-					Target:        target,
-					Auto:          auto,
-					Subject:       handoffJSONSubject(args, auto),
-				})
 			}
 			return nil
 		},
@@ -114,6 +113,7 @@ or ID. Subject is required unless --auto is set.`,
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&force, "force", false, "destroy a target even when it has live background subagents")
+	addOpKeyFlag(cmd, &key, cliOpKeyRestartedNote)
 	return cmd
 }
 
@@ -124,6 +124,12 @@ type handoffJSONResult struct {
 	Target        string `json:"target,omitempty"`
 	Auto          bool   `json:"auto"`
 	Subject       string `json:"subject,omitempty"`
+	// OpID, NoticeOpID, Key and Replayed name the restart op and notice op
+	// that back a recorded self-handoff (OJ-6).
+	OpID       string `json:"op_id,omitempty"`
+	NoticeOpID string `json:"notice_op_id,omitempty"`
+	Key        string `json:"key,omitempty"`
+	Replayed   bool   `json:"replayed,omitempty"`
 }
 
 func handoffJSONMode(target string, auto bool) string {
@@ -146,26 +152,73 @@ func handoffJSONSubject(args []string, auto bool) string {
 	return "HANDOFF: context cycle"
 }
 
-func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat string, force bool, stdout, stderr io.Writer) int {
+// cmdHandoff runs gc handoff and, under --json, writes its result to
+// run.jsonOut once it succeeds.
+func cmdHandoff(run handoffRun) int {
+	code, ops := runHandoff(run)
+	if code != 0 || !run.asJSON {
+		return code
+	}
+	return writeCLIJSONLineOrExit(run.jsonOut, run.stderr, "gc handoff", handoffJSONResult{
+		SchemaVersion: "1",
+		OK:            true,
+		Mode:          handoffJSONMode(run.target, run.auto),
+		Target:        run.target,
+		Auto:          run.auto,
+		Subject:       handoffJSONSubject(run.args, run.auto),
+		OpID:          ops.opID,
+		NoticeOpID:    ops.noticeOpID,
+		Key:           ops.key,
+		Replayed:      ops.replayed,
+	})
+}
+
+// handoffRun is one gc handoff invocation.
+type handoffRun struct {
+	args       []string
+	target     string
+	auto       bool
+	hookFormat string
+	force      bool
+	// key is --key; asJSON is --json, under which an op refusal's failure
+	// envelope goes to jsonOut while the text output (stdout) is discarded.
+	key     string
+	asJSON  bool
+	stdout  io.Writer
+	jsonOut io.Writer
+	stderr  io.Writer
+}
+
+// errHandoffKeyWithoutOps refuses --key on a handoff that records no ops.
+var errHandoffKeyWithoutOps = errors.New("--key applies only to a self handoff: --auto and --target record no ops")
+
+// runHandoff runs gc handoff and returns its exit code and the op fields of
+// its JSON result.
+func runHandoff(run handoffRun) (int, handoffOpFields) {
+	args, target, auto, hookFormat, force, stdout, stderr := run.args, run.target, run.auto, run.hookFormat, run.force, run.stdout, run.stderr
+	if run.key != "" && (auto || target != "") {
+		fmt.Fprintf(stderr, "gc handoff: %v\n", errHandoffKeyWithoutOps) //nolint:errcheck // best-effort stderr
+		return 1, handoffOpFields{}
+	}
 	if target != "" {
 		if auto {
 			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
-			return 1
+			return 1, handoffOpFields{}
 		}
-		return cmdHandoffRemoteWithForce(args, target, force, stdout, stderr)
+		return cmdHandoffRemoteWithForce(args, target, force, stdout, stderr), handoffOpFields{}
 	}
 
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return 1, handoffOpFields{}
 	}
 
 	store, err := openCityStoreAt(current.cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err)                    //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return 1
+		return 1, handoffOpFields{}
 	}
 	// Route the handoff's SESSION-class access (restartability, restart-request
 	// clear/persist, and beadmail's session-addressing arm) to the session
@@ -180,15 +233,15 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 	msgStore := cliMailStore(store, routeCfg, current.cityPath).Store
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	if auto {
-		return doHandoffAuto(msgStore, sessStore, rec, current.display, args, hookFormat, stdout, stderr)
+		return doHandoffAuto(msgStore, sessStore, rec, current.display, args, hookFormat, stdout, stderr), handoffOpFields{}
 	}
 
 	sp, err := newSessionProvider()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return 1, handoffOpFields{}
 	}
-	cfg, _ := loadCityConfig(current.cityPath, stderr)
+	cfg, cfgErr := loadCityConfig(current.cityPath, stderr)
 	r := rowFirstRestart{
 		verb:        "gc handoff",
 		cityPath:    current.cityPath,
@@ -200,16 +253,17 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 		hint:        restartHintOps(current.cityPath, sp),
 		poke:        pokeControllerForRestart,
 		stderr:      stderr,
+		ops:         newRestartOps(cfg, cfgErr, sessStore, run.key, current.sessionName, current.display, run.asJSON, run.jsonOut, stderr),
 	}
 
 	outcome := doHandoffWithOutcome(msgStore, sessStore, rec, newDrainOps(sp), r, current.display, current.sessionName, args, stdout, stderr)
 	if outcome.code != 0 || !outcome.restartRequested {
-		return outcome.code
+		return outcome.code, r.ops.jsonFields()
 	}
 	// The request is recorded: the poke is only a hint and never fails the
 	// command (notifyController prints why the controller was not notified).
 	r.notifyController()
-	return 0
+	return 0, r.ops.jsonFields()
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
@@ -296,7 +350,28 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		}
 	}
 
+	// A restartable handoff proposes its restart op, then its notice op,
+	// before the mail (OJ-6). A replay of a successful run sends nothing.
+	if restartable {
+		switch r.ops.startHandoff(r.verb) {
+		case cliOpRefused:
+			return handoffOutcome{code: 1}
+		case cliOpReplayed:
+			handoffReplayNote(r.verb, stderr)
+			fmt.Fprint(stdout, "Handoff: restart requested.\n") //nolint:errcheck // best-effort stdout
+			return handoffOutcome{code: 0}
+		}
+		defer r.ops.end()
+	}
+
 	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
+	if restartable {
+		var mailErr error
+		if !ok {
+			mailErr = errHandoffMailFailed
+		}
+		r.ops.mailSent(mailErr)
+	}
 	if !ok {
 		return handoffOutcome{code: 1}
 	}

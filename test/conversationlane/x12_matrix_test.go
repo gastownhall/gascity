@@ -50,6 +50,12 @@ type x12Verb struct {
 	// points apply, and the CLI falls back to local delivery when the API
 	// dies under it.
 	viaAPI bool
+	// inSession CLI verbs run from inside their session (OJ-6's restart
+	// requests): the child carries the session's alias, runtime name and
+	// instance token.
+	inSession bool
+	// noJSON CLI verbs have no --json: a refusal's code is read from stderr.
+	noJSON bool
 }
 
 // recorder is the surface that records the verb's op.
@@ -81,6 +87,10 @@ var x12Verbs = []x12Verb{
 	{name: "cli-submit-api", surface: surfaceCLI, cli: []string{"session", "submit"}, kind: opjournal.KindMessage, shape: "api-submit", via: "legacy.delivered", viaAPI: true},
 	{name: "cli-submit-local", surface: surfaceCLI, cli: []string{"session", "submit"}, kind: opjournal.KindMessage, shape: "cli-submit-local", ctlDown: true, via: "legacy.delivered"},
 	{name: "cli-mail-notify", surface: surfaceCLI, cli: []string{"mail", "send", "--notify"}, kind: opjournal.KindMessage, shape: "cli-mail-notify", own: true, via: "legacy.queued"},
+	// OJ-6: the in-session restart requests. A handoff restarts only a
+	// session the controller restarts, so it runs on the always-on worker.
+	{name: "cli-request-restart", surface: surfaceCLI, cli: []string{"runtime", "request-restart"}, kind: opjournal.KindRestart, own: true, inSession: true, noJSON: true, via: "legacy"},
+	{name: "cli-handoff", surface: surfaceCLI, cli: []string{"handoff"}, kind: opjournal.KindRestart, inSession: true, via: "legacy"},
 }
 
 // x12LoadOnlyVerbs are the load's message shapes the matrix does not run.
@@ -105,7 +115,20 @@ func (v x12Verb) message() bool { return v.kind == opjournal.KindMessage }
 // notify's payload is its subject; its key is its message's.
 func (v x12Verb) cliArgs(s x12Session, key, payload string) []string {
 	args := append([]string(nil), v.cli...)
-	args = append(args, "--json")
+	if !v.noJSON {
+		args = append(args, "--json")
+	}
+	if v.inSession {
+		// The session is the caller's own: a handoff's payload is its
+		// subject, and a request-restart takes no argument.
+		if key != "" {
+			args = append(args, "--key", key)
+		}
+		if v.name == "cli-handoff" {
+			args = append(args, payload)
+		}
+		return args
+	}
 	switch {
 	case v.name == "cli-mail-notify":
 		return append(args, "-s", payload, s.name, "x12 mail body")
@@ -190,6 +213,8 @@ func x12GatingCells() [][]x12CellSpec {
 			{v("reset"), "k1", true},
 		},
 		{ // CLI
+			{v("cli-request-restart"), "k3", true},
+			{v("cli-handoff"), "k4", true},
 			{v("cli-nudge-wait"), "k1", true},
 			{v("cli-nudge-wait"), "k3", true},
 			{v("cli-nudge-wait"), "k4", true},
@@ -461,7 +486,7 @@ func (c *x12City) runCell(cell *x12Cell, baselines map[string]x12Shape) {
 	// Settle what the first execution set going before the retry reads it.
 	if effected(point) {
 		switch v.endpoint + strings.Join(v.cli, " ") {
-		case "reset", "session reset":
+		case "reset", "session reset", "runtime request-restart", "handoff":
 			c.waitRow(cell.sess.id, "restarted", 2*time.Minute, func(b beads.Bead) bool { return generation(b) > cell.sess.gen && c.rowRunning(b) })
 		case "wake", "session wake":
 			c.waitRow(cell.sess.id, "running", 2*time.Minute, c.rowRunning)
@@ -812,7 +837,7 @@ func (c *x12City) lifecycleTransition(v x12Verb, s x12Session) (string, func(bea
 		return "running", c.rowRunning
 	case "suspend":
 		return "stopped", c.rowStopped
-	case "reset":
+	case "reset", "request-restart", "handoff":
 		return "restarted", func(b beads.Bead) bool { return generation(b) > s.gen && c.rowRunning(b) }
 	case "kill":
 		return "killed", func(b beads.Bead) bool { return !c.rowRunning(b) || generation(b) != s.gen }

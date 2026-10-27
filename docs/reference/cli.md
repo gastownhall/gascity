@@ -2087,6 +2087,11 @@ For controller-restartable targets, equivalent to:
   gc mail send &lt;target&gt; &lt;subject&gt; [message]
   gc session kill &lt;target&gt;
 
+While the op journal records ops, a restartable self-handoff is recorded as a
+restart&#123;fresh&#125; op and a notice op to self; a rerun with the same --key reports
+the first run's outcome without sending the mail again. --auto and --target
+record no ops and refuse --key.
+
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
 or ID. Subject is required unless --auto is set.
@@ -2101,6 +2106,7 @@ gc handoff [subject] [message] [flags]
 | `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, even after the session restarted under the same ID; ignored when the gate is off (default: a new key each run) |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -4242,12 +4248,20 @@ city records the request only by compare-and-swap, and
 [beads] conditional_writes = "require" refuses any write the store cannot
 fence.
 
+While the op journal records lifecycle ops, the request is recorded as a
+restart&#123;fresh&#125; op; a rerun with the same --key reports the first run's
+outcome instead of requesting again.
+
 This command is designed to be called from within a session context.
 It emits a session.draining event once the request is recorded.
 
 ```
-gc runtime request-restart
+gc runtime request-restart [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, even after the session restarted under the same ID; ignored when the gate is off (default: a new key each run) |
 
 ## gc runtime undrain
 

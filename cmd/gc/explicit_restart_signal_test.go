@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -110,13 +111,13 @@ func TestExplicitRestartCommandsPokeControllerWithoutPeriodicTick(t *testing.T) 
 		{
 			name: "runtime request-restart",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdRuntimeRequestRestart(stdout, stderr)
+				return cmdRuntimeRequestRestart("", stdout, stderr)
 			},
 		},
 		{
 			name: "self handoff",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdHandoffWithForce([]string{"context cycle", "resume from the durable brief"}, "", false, "", false, stdout, stderr)
+				return handoffForTest([]string{"context cycle", "resume from the durable brief"}, "", false, stdout, stderr)
 			},
 		},
 	}
@@ -140,8 +141,8 @@ func TestExplicitRestartCommandsPokeControllerWithoutPeriodicTick(t *testing.T) 
 			if got := strings.ToLower(stdout.String()); strings.Contains(got, "waiting") {
 				t.Fatalf("stdout = %q, explicit restart must return asynchronously instead of waiting for a patrol tick", stdout.String())
 			}
-			if stderr.Len() != 0 {
-				t.Fatalf("stderr = %q, want empty on accepted restart", stderr.String())
+			if got := withoutOpJournalConfigWarning(stderr.String()); got != "" {
+				t.Fatalf("stderr = %q, want empty on accepted restart", got)
 			}
 		})
 	}
@@ -154,7 +155,7 @@ func TestExplicitRestartControllerUnavailableIsTruthfulAndDurable(t *testing.T) 
 	fixture := newExplicitRestartFixture(t)
 	var stdout, stderr bytes.Buffer
 
-	if code := cmdRuntimeRequestRestart(&stdout, &stderr); code != 0 {
+	if code := cmdRuntimeRequestRestart("", &stdout, &stderr); code != 0 {
 		t.Fatalf("command exit = %d, want 0 once the request is recorded; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if got, want := stdout.String(), "Restart requested; the controller restarts this session at its next pass.\n"; got != want {
@@ -170,7 +171,7 @@ func TestExplicitRestartSignalFailureIsTruthfulAndDurable(t *testing.T) {
 	accepted := startFakeControllerSocket(t, fixture.cityPath, "")
 	var stdout, stderr bytes.Buffer
 
-	if code := cmdRuntimeRequestRestart(&stdout, &stderr); code != 0 {
+	if code := cmdRuntimeRequestRestart("", &stdout, &stderr); code != 0 {
 		t.Fatalf("command exit = %d, want 0 when the controller drops the signal reply after the request is recorded; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	select {
@@ -189,7 +190,7 @@ func TestExplicitRestartRepeatedRequestIsIdempotentAndRepokes(t *testing.T) {
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		var stdout, stderr bytes.Buffer
-		if code := cmdRuntimeRequestRestart(&stdout, &stderr); code != 0 {
+		if code := cmdRuntimeRequestRestart("", &stdout, &stderr); code != 0 {
 			t.Fatalf("attempt %d exit = %d, want 0; stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
 		}
 		assertExplicitRestartPersisted(t, fixture)
@@ -227,8 +228,20 @@ func assertNoDirectRestartSideEffects(t *testing.T, fixture explicitRestartFixtu
 	}
 }
 
+// withoutOpJournalConfigWarning drops the op journal's warning that the
+// fixture's PackV1 city config did not load, so its [ops] gates take their
+// builtin defaults (OJ-6 records the restart ops under those gates).
+func withoutOpJournalConfigWarning(stderr string) string {
+	return opJournalConfigWarning.ReplaceAllString(stderr, "")
+}
+
+// opJournalConfigWarning matches the op journal's (multi-line) warning that
+// the city config did not load.
+var opJournalConfigWarning = regexp.MustCompile(`(?s)[^\n]*: warning: op journal: city config did not load.*?unless its environment override is set\n`)
+
 func assertRestartSignalFailure(t *testing.T, diagnostic string) {
 	t.Helper()
+	diagnostic = withoutOpJournalConfigWarning(diagnostic)
 	if !strings.HasPrefix(diagnostic, "gc runtime request-restart: warning: restart recorded; controller not notified, it will act on its next pass: ") {
 		t.Fatalf("stderr = %q, want the pinned recorded-but-not-notified warning", diagnostic)
 	}
@@ -249,7 +262,7 @@ func TestExplicitRestartAlreadyStoppedStillPersistsAndPokes(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 
-	if code := cmdRuntimeRequestRestart(&stdout, &stderr); code != 0 {
+	if code := cmdRuntimeRequestRestart("", &stdout, &stderr); code != 0 {
 		t.Fatalf("command exit = %d, want 0 for already-stopped runtime; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	assertExplicitRestartPersisted(t, fixture)

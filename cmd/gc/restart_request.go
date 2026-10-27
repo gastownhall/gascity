@@ -37,6 +37,9 @@ type rowFirstRestart struct {
 	// poke signals the controller (pokeControllerForRestart).
 	poke   func(cityPath string, key reconcilekey.Key) error
 	stderr io.Writer
+	// ops records the request as operation-journal ops (OJ-6); nil records
+	// nothing.
+	ops *restartOps
 }
 
 // restartNotice is what notifyController learned about the controller.
@@ -58,23 +61,38 @@ var errRestartNoSessionStore = errors.New("the session store is unavailable")
 
 // recordRestart writes the fenced row marker and then, outside a worker site,
 // the runtime hint, whose failure is only a warning. A refused or failed row
-// write returns its error and has written nothing anywhere.
+// write returns its error and has written nothing anywhere. A recorded
+// restart op closes from the row write, before the hint.
 func (r rowFirstRestart) recordRestart() error {
+	err := r.recordRow()
+	r.ops.finishRestart(err)
+	if err != nil {
+		return err
+	}
+	r.setHint()
+	return nil
+}
+
+// recordRow writes the fenced row marker: the request itself.
+func (r rowFirstRestart) recordRow() error {
 	if strings.TrimSpace(r.token) == "" {
 		return session.ErrRestartRequestUnfenced
 	}
 	if r.record == nil {
 		return errRestartNoSessionStore
 	}
-	if err := r.record(r.token); err != nil {
-		return err
+	return r.record(r.token)
+}
+
+// setHint sets the runtime's restart hint outside a worker site; a failure
+// is a warning, since the row already records the request.
+func (r rowFirstRestart) setHint() {
+	if r.hint == nil {
+		return
 	}
-	if r.hint != nil {
-		if err := r.hint.setRestartRequested(r.sessionName); err != nil && !restartFlagNotApplicable(err) {
-			fmt.Fprintf(r.stderr, "%s: warning: restart recorded; the runtime restart hint was not set: %v\n", r.verb, err) //nolint:errcheck // best-effort stderr
-		}
+	if err := r.hint.setRestartRequested(r.sessionName); err != nil && !restartFlagNotApplicable(err) {
+		fmt.Fprintf(r.stderr, "%s: warning: restart recorded; the runtime restart hint was not set: %v\n", r.verb, err) //nolint:errcheck // best-effort stderr
 	}
-	return nil
 }
 
 // refusedBeforeMail is the request's refusal decided before a self handoff

@@ -62,10 +62,10 @@ var restartVerbs = []struct {
 	run        func(stdout, stderr *bytes.Buffer) int
 }{
 	{"request-restart", "gc runtime request-restart", false, func(stdout, stderr *bytes.Buffer) int {
-		return cmdRuntimeRequestRestart(stdout, stderr)
+		return cmdRuntimeRequestRestart("", stdout, stderr)
 	}},
 	{"self handoff", "gc handoff", true, func(stdout, stderr *bytes.Buffer) int {
-		return cmdHandoffWithForce([]string{"context cycle", "resume from the brief"}, "", false, "", false, stdout, stderr)
+		return handoffForTest([]string{"context cycle", "resume from the brief"}, "", false, stdout, stderr)
 	}},
 }
 
@@ -116,7 +116,7 @@ func TestRowFirstRestartDurableWriteFailedPokeExitsZero(t *testing.T) {
 				t.Fatalf("open messages = %d, want %d", got, wantMail)
 			}
 			want := v.verb + ": warning: restart recorded; controller not notified, it will act on its next pass: "
-			if !strings.HasPrefix(stderr.String(), want) {
+			if !strings.HasPrefix(withoutOpJournalConfigWarning(stderr.String()), want) {
 				t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
 			}
 			if strings.Contains(stderr.String(), explicitRestartToken) || strings.Contains(stdout.String(), explicitRestartToken) {
