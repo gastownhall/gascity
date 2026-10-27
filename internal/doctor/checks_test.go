@@ -1507,6 +1507,162 @@ func TestBDSplitStoreCheck_ProxiedServerActiveWarnsWhenEmbeddedStoreHasRepos(t *
 	}
 }
 
+// TestBDSplitStoreCheck_ProxiedServerWarnsWhenOnlyTheUnreadEmbeddedStoreExists
+// is the proxied-server twin of WarnsWhenOnlyTheUnreadStoreExists: bd's own
+// bootstrap hint writes .beads/embeddeddolt/hq beside a proxied scope whose
+// .beads/dolt root does not exist yet (#2587), and a check that cannot name
+// the active store reports a false all-clear for exactly that scope.
+func TestBDSplitStoreCheck_ProxiedServerWarnsWhenOnlyTheUnreadEmbeddedStoreExists(t *testing.T) {
+	clearProxiedRootEnv(t)
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "hq"))
+
+	r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d (%q), want Warning; a proxied scope with only .beads/embeddeddolt must not read as clean", r.Status, r.Message)
+	}
+	want := "unread bead database beside the active store: active .beads/dolt (metadata.json dolt_mode=proxied-server), unread .beads/embeddeddolt contains 1 Dolt repo(s)"
+	if !strings.Contains(r.Message, want) {
+		t.Fatalf("message = %q, want %q", r.Message, want)
+	}
+}
+
+// TestBDSplitStoreCheck_ProxiedServerRelocatedRootStaysNeutral is the
+// fail-closed budget for the proxied-server arm: the mode's root can be
+// relocated without metadata changing, and every relocated root must leave
+// the store unknown — the neutral message and guidance — rather than name a
+// local directory bd is not serving.
+func TestBDSplitStoreCheck_ProxiedServerRelocatedRootStaysNeutral(t *testing.T) {
+	clearProxiedRootEnv(t)
+	relocated := t.TempDir()
+	tests := map[string]func(t *testing.T, beadsDir string){
+		"sidecar root_path elsewhere": func(t *testing.T, beadsDir string) {
+			writeDoctorSidecar(t, filepath.Dir(beadsDir), fmt.Sprintf(`{"root_path":%q}`, relocated))
+		},
+		"BEADS_PROXIED_SERVER_ROOT_PATH": func(t *testing.T, _ string) {
+			t.Setenv(proxyendpoint.RootPathEnv, relocated)
+		},
+		"BEADS_DOLT_DATA_DIR": func(t *testing.T, _ string) {
+			t.Setenv(proxyendpoint.DoltDataDirEnv, relocated)
+		},
+		"metadata dolt_data_dir": func(t *testing.T, beadsDir string) {
+			meta := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq","dolt_data_dir":%q}`, relocated)
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"malformed sidecar": func(t *testing.T, beadsDir string) {
+			writeDoctorSidecar(t, filepath.Dir(beadsDir), `{`)
+		},
+	}
+	for name, relocate := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeDoctorProxiedMetadata(t, dir, "hq")
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "hq"))
+			relocate(t, beadsDir)
+
+			r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+			if r.Status != StatusWarning {
+				t.Fatalf("status = %d (%q), want Warning; the split store is still real", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "no active local store was identified") {
+				t.Fatalf("message = %q, want the neutral unknown-store message", r.Message)
+			}
+			if strings.Contains(r.Message, "active .beads/dolt") {
+				t.Fatalf("message = %q, must not name .beads/dolt active when the proxied root is relocated", r.Message)
+			}
+			if !strings.Contains(r.FixHint, "current or intended active store") {
+				t.Fatalf("fix hint = %q, want neutral active-store guidance", r.FixHint)
+			}
+		})
+	}
+}
+
+// TestBDSplitStoreCheck_ProxiedServerFreshInitLayoutStaysOK guards the
+// false-positive side: a gc-created proxied scope holds .beads/dolt and
+// nothing beside it, and naming it active must not warn on its only ledger.
+func TestBDSplitStoreCheck_ProxiedServerFreshInitLayoutStaysOK(t *testing.T) {
+	clearProxiedRootEnv(t)
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+
+	if r := NewBDSplitStoreCheck(dir).Run(&CheckContext{}); r.Status != StatusOK {
+		t.Fatalf("status = %d (%q), want OK on a fresh proxied scope's only ledger", r.Status, r.Message)
+	}
+}
+
+// TestBDSplitStoreCheck_ProxiedModeOnNonDoltBackendStaysNeutral pins the guard
+// order: a non-Dolt backend is classified before any Dolt-mode arm, so a
+// proxied-server mode string on a sqlite scope names no local store.
+func TestBDSplitStoreCheck_ProxiedModeOnNonDoltBackendStaysNeutral(t *testing.T) {
+	clearProxiedRootEnv(t)
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"sqlite","backend":"sqlite","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "hq"))
+
+	r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if strings.Contains(r.Message, "active .beads/dolt") {
+		t.Fatalf("message = %q, should not treat non-Dolt proxied mode as active dolt", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "current or intended active store") {
+		t.Fatalf("fix hint = %q, want neutral guidance", r.FixHint)
+	}
+}
+
+// TestBDSplitStoreCheck_ProxiedServerSymlinkedScopeStillWarns pins the path
+// comparison, not the mode mapping: in the unread-store shape the scope's
+// .beads/dolt does not exist, so the root must compare through the nearest
+// existing ancestor for a scope reached over a symlink to still name
+// .beads/dolt active.
+func TestBDSplitStoreCheck_ProxiedServerSymlinkedScopeStillWarns(t *testing.T) {
+	clearProxiedRootEnv(t)
+	realRoot := t.TempDir()
+	link := filepath.Join(t.TempDir(), "city")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	beadsDir := filepath.Join(link, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorProxiedMetadata(t, link, "hq")
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "hq"))
+
+	r := NewBDSplitStoreCheck(link).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d (%q), want Warning through the symlinked scope path", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "active .beads/dolt (metadata.json dolt_mode=proxied-server)") {
+		t.Fatalf("message = %q, want the symlinked scope's default root named active", r.Message)
+	}
+}
+
 // TestBDSplitStoreCheck_OneStoreScopesStayOK is the false-positive budget for
 // the check above. Every scope here has exactly one ledger, which is what a gc
 // -created city looks like, and a warning on any of them would train operators
