@@ -3877,6 +3877,9 @@ const (
 // read and stays runtimeTokenAbsent.
 type pendingCreateIdentity struct {
 	id, token, generation runtimeTokenVerdict
+	// epoch is the runtime's GC_RUNTIME_EPOCH value when the generation was
+	// read ("" when it was not), reported by the live-incarnation deferral.
+	epoch string
 	// expectsToken reports that the pending create carries an instance token.
 	expectsToken bool
 	// failed names each unverifiable key with its read error.
@@ -3906,24 +3909,24 @@ func readPendingCreateIdentityVia(info sessionpkg.Info, sp runtime.Provider, get
 	if sp == nil {
 		return r
 	}
-	read := func(key, expected string) runtimeTokenVerdict {
+	read := func(key, expected string) (runtimeTokenVerdict, string) {
 		actual, err := getMeta(key)
 		verdict := classifyRuntimeInstanceToken(actual, err, expected)
 		if verdict == runtimeTokenUnverifiable {
 			r.failed = append(r.failed, fmt.Sprintf("%s: %v", key, err))
 		}
-		return verdict
+		return verdict, strings.TrimSpace(actual)
 	}
-	r.id = read("GC_SESSION_ID", info.ID)
+	r.id, _ = read("GC_SESSION_ID", info.ID)
 	if r.id == runtimeTokenMismatch || r.id == runtimeTokenGone {
 		return r
 	}
-	r.token = read("GC_INSTANCE_TOKEN", info.InstanceToken)
+	r.token, _ = read("GC_INSTANCE_TOKEN", info.InstanceToken)
 	expectedGeneration := strings.TrimSpace(info.Generation)
 	if expectedGeneration != "" &&
 		(r.token == runtimeTokenMismatch && r.id != runtimeTokenAbsent ||
 			r.token == runtimeTokenUnverifiable && r.id == runtimeTokenMatch) {
-		r.generation = read("GC_RUNTIME_EPOCH", expectedGeneration)
+		r.generation, r.epoch = read("GC_RUNTIME_EPOCH", expectedGeneration)
 	}
 	return r
 }
@@ -3941,7 +3944,10 @@ func (r pendingCreateIdentity) attribution() pendingCreateAttribution {
 		return pendingCreateRuntimeForeign
 	case runtimeTokenMismatch:
 		// Another token is another incarnation, unless the runtime carries
-		// this session's ID and no conflicting generation.
+		// this session's ID and no conflicting generation. One that does
+		// carry a conflicting epoch is this session's own other-epoch
+		// incarnation (otherEpochOfThisSession): callers that would stop the
+		// runtime or close the row over it defer on that predicate first.
 		switch {
 		case r.id == runtimeTokenAbsent, r.generation == runtimeTokenMismatch, r.generation == runtimeTokenGone:
 			return pendingCreateRuntimeForeign
@@ -3977,6 +3983,16 @@ func (r pendingCreateIdentity) attribution() pendingCreateAttribution {
 // (releaseRowOwnedRuntime, staleAsyncStartRuntimeAttribution).
 func (r pendingCreateIdentity) unstamped() bool {
 	return r.id == runtimeTokenAbsent && r.token == runtimeTokenAbsent
+}
+
+// otherEpochOfThisSession reports a runtime stamped with this session's own
+// ID under another token and another epoch: an earlier or later incarnation
+// of the same session, never another session's runtime. attribution() reads
+// that shape foreign (a token drift with a conflicting generation), so a
+// rollback that would stop the runtime or close the row over it must check
+// this predicate first and defer while the runtime lives (#2081).
+func (r pendingCreateIdentity) otherEpochOfThisSession() bool {
+	return r.id == runtimeTokenMatch && r.token == runtimeTokenMismatch && r.generation == runtimeTokenMismatch
 }
 
 // attributePendingCreateRuntime is startPreparedStartCandidate's attribution

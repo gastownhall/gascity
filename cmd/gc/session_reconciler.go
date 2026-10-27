@@ -3113,6 +3113,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
+				if identity.otherEpochOfThisSession() {
+					// The live runtime is this session's own earlier or later
+					// incarnation (#2081): the row's own GC_SESSION_ID,
+					// another token, another epoch. attribution reads that
+					// shape foreign, but stopping it (a bead-scoped pool row's
+					// teardown stops the runtime by name) or closing the row
+					// over it (configured named and manual rows) kills this
+					// session's own work. Like the unknown arm below, hold the
+					// row — claim kept, runtime untouched — and re-decide
+					// every tick; once the runtime exits, the lease-expired
+					// rollback below settles the row.
+					logStandingCondition(dt, stderr, id, "live_incarnation.pending_create_rollback", fmt.Sprintf(
+						"session reconciler: pending-create rollback of %s deferred: a live runtime of this session holds the name (live_incarnation: runtime epoch %s, row generation %s)", name, identity.epoch, strings.TrimSpace(infoPostZombie.Generation)), clk.Now())
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollback, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+							"session_bead_id": id,
+							"attribution":     "live_incarnation",
+						})
+					}
+					continue
+				}
 				live, leaseErr := ownStartNotLive, error(nil)
 				if identity.unstamped() {
 					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
@@ -3168,7 +3189,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// The live runtime may be this create's own, and the rollback
 				// stops a row-owned runtime by name, so neither roll back
 				// nor adopt it. Once it dies the lease-expired rollback below
-				// applies; while it lives this re-attributes every tick.
+				// applies; while it lives this re-attributes every tick. The
+				// live-incarnation hold above is the same shape one step
+				// further: the identity read succeeded and named this
+				// session's own other-epoch incarnation.
 				logStandingCondition(dt, stderr, id, "attribution_unknown.pending_create_rollback", fmt.Sprintf(
 					"session reconciler: pending-create rollback of %s deferred: live runtime identity could not be read (attribution_unknown)", name), clk.Now())
 				if trace != nil {
