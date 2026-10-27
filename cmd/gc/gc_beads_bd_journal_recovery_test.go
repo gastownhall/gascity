@@ -478,6 +478,37 @@ func TestJournalRecoveryPrefersBdDefaultOverLegacyBackup(t *testing.T) {
 	}
 }
 
+// Cities whose backup dog has not re-registered since the move to
+// `bd backup init` still carry only the legacy <db>-backup entry, sometimes
+// in the plain string form; recovery must keep restoring from it.
+func TestJournalRecoveryRestoresFromLegacyStringFormBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	if err := os.WriteFile(filepath.Join(env.backupDir, "manifest"), []byte("backup"), 0o644); err != nil {
+		t.Fatalf("seed backup content: %v", err)
+	}
+	legacyURL := "file://" + env.backupDir
+	env.addDatabase(t, "prod", true, `{"head":"refs/heads/main","backups":{"prod-backup":"`+legacyURL+`"}}`)
+	callsFile := filepath.Join(env.cityDir, "restore-calls")
+
+	out, err := env.run(t, journalRecoveryHarness(t), "FAKE_RESTORE_CALLS="+callsFile)
+	if err != nil {
+		t.Fatalf("recovery from the legacy string-form backup failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(env.dataDir, "prod", "restored-marker")); err != nil {
+		t.Fatalf("prod was not restored from the legacy backup: %v\n%s", err, out)
+	}
+	calls, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatalf("read restore calls: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(calls)); got != legacyURL {
+		t.Fatalf("restore calls = %q, want one restore from %q\n%s", got, legacyURL, out)
+	}
+}
+
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
