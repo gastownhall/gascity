@@ -113,6 +113,89 @@ func (e *interruptedCloseEnv) openSeatRunning(t *testing.T) bool {
 	return false
 }
 
+// TestReconcileSessionBeads_InterruptedCloseFreesAlwaysNamedSession is the
+// AC-2 companion of the pool-seat guard: the same half-closed row (state
+// stale-session, no runtime) on an always-mode configured named session. The
+// named identity is controller-managed every tick, but an open bead owns its
+// session_name, so the half-closed row pins the identity forever. One
+// complete non-boot tick finishes the close; the closed row's own close code
+// refuses the configured-named reopen (closedNamedSessionReopenEligible), so
+// the identity must come back on a DIFFERENT open bead with its runtime
+// running — and the closed row stays closed.
+func TestReconcileSessionBeads_InterruptedCloseFreesAlwaysNamedSession(t *testing.T) {
+	env := newInterruptedCloseEnv(t)
+	// Reconfigure as a named-session city: one agent template, one
+	// mode=always named session over it.
+	env.cfg.Agents = []config.Agent{{Name: "warlord", StartCommand: "true"}}
+	env.cfg.NamedSessions = []config.NamedSession{{Template: "warlord", Mode: "always"}}
+	sessionName := config.NamedSessionRuntimeName(env.cityName, env.cfg.Workspace, "warlord")
+
+	zombie, err := env.store.Create(beads.Bead{
+		Title:  "warlord",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                   "warlord",
+			"agent_name":                 "warlord",
+			"session_name":               sessionName,
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "warlord",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named zombie: %v", err)
+	}
+	env.halfClose(t, zombie.ID, "stale-session", nil)
+
+	// One complete non-boot tick finishes the interrupted close.
+	env.tick(t)
+
+	got, err := env.store.Get(zombie.ID)
+	if err != nil {
+		t.Fatalf("reload named zombie: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("half-closed named session status = %q, want closed after one tick; metadata=%v", got.Status, got.Metadata)
+	}
+	if got.Metadata["state"] != "stale-session" {
+		t.Fatalf("closed named bead state = %q, want stale-session", got.Metadata["state"])
+	}
+
+	// The identity comes back on a different open bead within 6 ticks.
+	freshRunning := func() bool {
+		rows, err := loadSessionBeads(env.store)
+		if err != nil {
+			t.Fatalf("load session beads: %v", err)
+		}
+		for _, b := range rows {
+			if b.Status != "open" || b.ID == zombie.ID {
+				continue
+			}
+			if b.Metadata["session_name"] == sessionName && env.sp.IsRunning(sessionName) {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i < 5 && !freshRunning(); i++ {
+		env.tick(t)
+	}
+	if !freshRunning() {
+		rows, _ := loadSessionBeads(env.store)
+		t.Fatalf("named identity %q not running on a fresh open bead after the interrupted close; session beads: %+v", sessionName, rows)
+	}
+
+	// The finished close is terminal: later ticks do not resurrect it.
+	stored, err := env.store.Get(zombie.ID)
+	if err != nil {
+		t.Fatalf("reload named zombie after later ticks: %v", err)
+	}
+	if stored.Status != "closed" {
+		t.Fatalf("closed named bead status = %q after later ticks, want closed (stays closed)", stored.Status)
+	}
+}
+
 // TestReconcileSessionBeads_InterruptedCloseFreesMaxOnePoolSeat is the AC-1
 // regression guard for gastownhall/gascity#2085. A max=1 pool's only seat is
 // half-closed — the close's ClosePatch landed (state carries this binary's
