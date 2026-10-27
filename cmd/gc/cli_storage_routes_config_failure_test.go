@@ -264,6 +264,22 @@ func TestCityMayRelocateClassesEvidence(t *testing.T) {
 		{"BOM before [storage] in a fragment", map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "\ufeff[storage]\n"}, true},
 		{"fragment does not parse, no storage text", map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "[[[\n"}, false},
 		{"served-binding note", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/storage-served-binding.json": `{"binding":"infra","provider":"sqlite-beads","location":"/x"}`}, true},
+		// Mutant N22: the cleared note is evidence too.
+		{"cleared note", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/storage-infra-cleared.json": `{"binding":"infra","complete":true}`}, true},
+		// The default binding root inside the city.
+		{"binding root at .gc/store", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store/infra.migrated": "infrastructure classes migrated\n"}, true},
+		// Mutant N20: an include of a shape this scan cannot read.
+		{"include is not a list of strings", map[string]string{"city.toml": "include = 5\n[workspace]\nname = \"c\"\n"}, true},
+		{"include list holds a non-string", map[string]string{"city.toml": "include = [\"a.toml\", 5]\n"}, true},
+		// Re-review: a quoted key spelled with an escape in an unparseable root
+		// or fragment ("incl\u0075de", [ "stor\u0061ge" ]).
+		{"root does not parse, escaped include key", map[string]string{"city.toml": "\"incl\\u0075de\" = [\"x.toml\"]\nthis is not toml\n"}, true},
+		{"root does not parse, escaped storage header", map[string]string{"city.toml": "[ \"stor\\u0061ge\".classes ]\nthis is not toml\n"}, true},
+		{"fragment does not parse, escaped storage header", map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "[\"stor\\u0061ge\"]\n[[[\n"}, true},
+		// The BOM is stripped before parsing: a parseable root behind a BOM whose
+		// only fragment is silent is single-store (unstripped, the parse fails
+		// and the bare "include" would over-refuse).
+		{"BOM before a parseable root with a silent fragment", map[string]string{"city.toml": "\ufeffinclude = [\"frag.toml\"]\n[workspace]\nname = \"c\"\n", "frag.toml": "[workspace]\nname = \"c\"\n"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -391,5 +407,23 @@ func TestCLIStorageRoutesTreatAMissingCityTOMLAsNoStorage(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "failed to load") {
 		t.Errorf("a missing city.toml was reported as a load failure: %v", err)
+	}
+}
+
+// Mutant N30: each distinct refusal is printed once per process, even when the
+// answer is re-resolved every call.
+func TestCLIStorageRefusalIsPrintedOncePerProcess(t *testing.T) {
+	expireUnsettledCLIRoutesImmediately(t)
+	cityPath, _ := migratedOneShotCLICity(t)
+	stderr := captureCLIStorageStderr(t)
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	breakSplitCityConfig(t, cityPath)
+	for i := 0; i < 3; i++ {
+		_ = cliStorageRoutes(cityPath)
+	}
+	if n := strings.Count(stderr.String(), "refusing to route"); n != 1 {
+		t.Errorf("the refusal was printed %d times across three re-resolutions, want once:\n%s", n, stderr.String())
 	}
 }

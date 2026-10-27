@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
@@ -24,14 +28,17 @@ import (
 // "May" is decided from evidence that does not need the composed config, and
 // every unknown counts as yes:
 //
-//   - the city has served a split, or cleared its work store (the durable
-//     notes storageBootGate already holds a revert with);
+//   - the city has served a split or migrated onto one, or cleared its work
+//     store (the durable notes storageBootGate already holds a revert with;
+//     `gc storage migrate` writes the served note too), or has a binding root
+//     at the default .gc/store;
 //   - city.toml, or a fragment its include list names, cannot be read or is
 //     remote;
 //   - any of those files declares a storage table or key;
 //   - city.toml does not parse, so its include list is unknown — unless its
 //     text names neither "include" nor "storage" at all, in which case there
-//     is no list to hide and no table to miss. (A bare-word scan, so it errs
+//     is no list to hide and no table to miss — and no quoted key spelled
+//     with a backslash escape, which could spell either. (A bare-word scan, so it errs
 //     toward refusing: a comment mentioning either word is enough.) The
 //     commonest load failure is a syntax error in a single-store city, and
 //     that exemption is what keeps it working.
@@ -65,6 +72,11 @@ func cityMayRelocateClasses(cityPath string) bool {
 	if _, present, err := readInfraClearedNote(cityPath); present || err != nil {
 		return true
 	}
+	// The default binding root inside the city: a binding has been created
+	// here, whatever the config now says.
+	if _, err := os.Stat(filepath.Join(cityPath, config.DefaultSQLiteStoragePath)); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return true
@@ -73,7 +85,7 @@ func cityMayRelocateClasses(cityPath string) bool {
 	root := map[string]any{}
 	if _, err := toml.Decode(string(data), &root); err != nil {
 		text := strings.ToLower(string(data))
-		return strings.Contains(text, "include") || strings.Contains(text, "storage")
+		return strings.Contains(text, "include") || strings.Contains(text, "storage") || escapedQuotedKey.Match(data)
 	}
 	if _, declared := root["storage"]; declared {
 		return true
@@ -93,6 +105,11 @@ func cityMayRelocateClasses(cityPath string) bool {
 	return false
 }
 
+// escapedQuotedKey matches a quoted key (or table header) whose spelling uses
+// a backslash escape, e.g. "incl\u0075de" or [ "stor\u0061ge" ]: a key the
+// bare-word scan cannot read in an unparseable file, so it counts as unknown.
+var escapedQuotedKey = regexp.MustCompile(`(?m)^[ \t]*\[{0,2}[ \t]*"[^"\n]*\\`)
+
 // fragmentMayDeclareStorage reports whether one include fragment declares, or
 // may declare, a storage table: unreadable, or parsed with a storage key, or
 // unparseable with storage anywhere in its text.
@@ -104,7 +121,7 @@ func fragmentMayDeclareStorage(path string) bool {
 	data = stripUTF8BOM(data)
 	table := map[string]any{}
 	if _, err := toml.Decode(string(data), &table); err != nil {
-		return strings.Contains(strings.ToLower(string(data)), "storage")
+		return strings.Contains(strings.ToLower(string(data)), "storage") || escapedQuotedKey.Match(data)
 	}
 	_, declared := table["storage"]
 	return declared

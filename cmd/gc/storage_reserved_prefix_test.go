@@ -101,7 +101,7 @@ func TestCityRuntimeReloadRefusesAReservedPrefixOnASplitCity(t *testing.T) {
 	if reply.Outcome != reloadOutcomeFailed {
 		t.Fatalf("reply.Outcome = %q, want %q; a reserved rig prefix was accepted on a split city", reply.Outcome, reloadOutcomeFailed)
 	}
-	if !strings.Contains(reply.Error, "gcg") || !strings.Contains(reply.Error, "keeping old config") {
+	if !strings.Contains(reply.Error, "gcg") || !strings.Contains(reply.Error, "keeping old config") || !strings.Contains(reply.Error, "hook process") {
 		t.Errorf("the refusal = %q, want the gcg collision and the kept config", reply.Error)
 	}
 	if !strings.Contains(stderr.String(), "gcg") {

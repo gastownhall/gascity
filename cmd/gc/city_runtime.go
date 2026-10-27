@@ -2703,7 +2703,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// (R10): the booted binding mints in that namespace, so the new ids would
 	// collide with it. Refused whole, like a changed [storage].
 	if refusal := config.ReservedPrefixSplitRefusal(nextCfg); refusal != nil {
-		err := fmt.Errorf("config reload: %w (keeping old config)", refusal)
+		err := fmt.Errorf("config reload: %w (keeping old config; until city.toml is fixed, every gc CLI and hook process reading it refuses this city's coordination classes)", refusal)
 		fmt.Fprintf(cr.stderr, "%s: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
