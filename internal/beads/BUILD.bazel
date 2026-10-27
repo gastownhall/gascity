@@ -64,6 +64,7 @@ go_test(
         "bdstore_http_notfound_internal_test.go",
         "bdstore_inline_deps_internal_test.go",
         "bdstore_internal_test.go",
+        "bdstore_metadata_compose_integration_test.go",
         "bdstore_parent_projection_test.go",
         "bdstore_query_quoting_integration_test.go",
         "bdstore_ready_projection_capability_internal_test.go",
@@ -466,7 +467,26 @@ go_variant_test(
     test = ":beads_test",
 )
 
-# scripts/bd_contract_pins_test.go pins bd_conditional_release_contract_test.
+# The gascity#1596 different-key --set-metadata compose row against
+# deps.env BD_PREV_VERSION's bd (the minimum-supported v1.3.0, @bd_bin_v1_3_0)
+# on a private dolt sql-server. The integration build runs the same row
+# against BD_CURRENT_VERSION's bd; this is the floor cell.
+go_variant_test(
+    name = "bd_metadata_compose_floor_test",
+    args = ["-test.run=^TestBdStoreConcurrentDifferentKeySetMetadataComposesOnSharedServer$$"],
+    data = [
+        "@bd_bin_v1_3_0//:bd",
+        "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
+    ],
+    env = {
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_0//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+    },
+    gotags = ["integration"],
+    test = ":beads_test",
+)
+
+# scripts/bd_contract_pins_test.go pins bd_conditional_release_contract_test
+# and bd_metadata_compose_floor_test.
 exports_files(
     ["BUILD.bazel"],
     visibility = ["//scripts:__pkg__"],
