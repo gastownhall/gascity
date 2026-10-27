@@ -264,3 +264,28 @@ func TestCommitAsyncStart_SessionExistsWithLiveIncarnationDefers(t *testing.T) {
 		})
 	}
 }
+
+// TestPendingCreateRollback_RollsBackOnceLiveIncarnationExits is AC-4: a row
+// held over its live incarnation is rolled back by the next tick after that
+// runtime exits, and its work is released.
+func TestPendingCreateRollback_RollsBackOnceLiveIncarnationExits(t *testing.T) {
+	env, session, name := stampLiveIncarnation(t, rowPool, "1")
+	work := assignLiveIncarnationWork(t, env.store, name)
+	assertLiveIncarnationHeld(t, env, env.sp, session, name)
+
+	if err := env.sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	reconcileLiveIncarnationTick(t, env, env.sp, session.ID, newPoolDesiredStateTestTrace("worker"))
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" || got.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
+		t.Fatalf("status=%q state=%q, want the pending create rolled back once its live incarnation exited; stderr=%s",
+			got.Status, got.Metadata["state"], env.stderr.String())
+	}
+	if released := releaseOrphanedWork(t, env, session.ID, work); released.Status != "open" || released.Assignee != "" {
+		t.Fatalf("work status=%q assignee=%q, want it released", released.Status, released.Assignee)
+	}
+}
