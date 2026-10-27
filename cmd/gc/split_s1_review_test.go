@@ -122,6 +122,45 @@ provider = "sqlite-beads"
 	}
 }
 
+// The new city gets every rig its source composes, so a reserved prefix on a
+// rig the source declares only in an include fragment is refused before
+// anything is copied, exactly as one in the root is.
+func TestInitFromASplitCityRefusesAReservedPrefixOnAFragmentRig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	srcDir := t.TempDir()
+	for file, body := range map[string]string{
+		"city.toml": "include = [\"rigs.toml\"]\n[workspace]\nname = \"declared-city\"\n" + `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+`,
+		"rigs.toml": "[[rigs]]\nname = \"gas-city-ops\"\npath = \"/tmp/x\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(srcDir, file), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityPath := filepath.Join(t.TempDir(), "my-city")
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, "my-city", &stdout, &stderr, true); code == 0 {
+		t.Fatalf("gc init --from a split source whose fragment declares rig gas-city-ops succeeded; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `"gas-city-ops"`) || !strings.Contains(stderr.String(), "gco") {
+		t.Errorf("stderr = %q, want the reserved-prefix refusal naming the fragment's rig", stderr.String())
+	}
+	if _, err := os.Stat(cityPath); err == nil {
+		entries, _ := os.ReadDir(cityPath)
+		t.Errorf("the refused init left %d entr(ies) behind at %s", len(entries), cityPath)
+	}
+}
+
 // M25: `gc start` refuses a split city whose rig prefix is reserved, at its
 // own validation step (beside ValidateRigs), before the storage gate.
 func TestStartRefusesASplitCityWithAReservedRigPrefix(t *testing.T) {
@@ -184,5 +223,28 @@ name = "gas-city-gateway"
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "store")); err == nil {
 		t.Error("the refused start created a binding")
+	}
+}
+
+// `gc storage status` is the deploy gate the upgrade order runs first, so it
+// refuses a split city that boot refuses over a reserved prefix (R10). It
+// exited 0 there, and the deploy then met a city that cannot start.
+func TestStorageStatusRefusesAReservedPrefixOnASplitCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code != 0 {
+		t.Fatalf("precondition: status on the converged city exited %d:\n%s%s", code, stdout.String(), stderr.String())
+	}
+	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "gas-city-gateway", Path: t.TempDir()})
+	if config.ReservedPrefixSplitRefusal(cfg) == nil {
+		t.Fatal("precondition: the rig's derived prefix is not reserved")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status exited 0 on a split city boot refuses over a reserved prefix:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `rig "gas-city-gateway" bead prefix "gcg" is in the reserved "gcg" namespace`) {
+		t.Errorf("status does not name the reserved-prefix refusal:\n%s", stdout.String())
 	}
 }

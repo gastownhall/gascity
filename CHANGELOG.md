@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Stop a split city whose storage check refuses before you deploy, and
+  repair it with the new `gc`: `gc hook` now stops claiming there.** Before
+  `gc hook` claims work for a session, it reads that session's drain state
+  from the binding. When the city's storage check refuses (`gc storage
+  status` exits non-zero, for example because the work store holds
+  infrastructure beads the binding cannot read), the hook now fails closed:
+  it claims nothing, prints `GC_HOOK_STORE_UNAVAILABLE` on stderr, and exits
+  2. Earlier builds failed open and went on claiming from the work store, so
+  a city can have been refused for a long time while every session kept
+  working; deploying onto it stops every session's claims at its next hook.
+  A store that only timed out still fails open. Run the repair with this
+  build, not the one it replaces: an earlier `gc storage migrate` refuses a
+  converged city over infrastructure beads that rig scopes still hold, an
+  earlier `recover-stranded` has no per-id choices, and an earlier clear
+  matches the copy manifest by bare id, so it can delete a bead the copy
+  never carried. A stopped city runs no `gc hook`, so installing this build
+  while the city is stopped stops no claims.
+  1. Before you install this build, run its `gc storage status` in each
+     split city's directory, by the new binary's path. It is read-only, so
+     it is safe on a running city. Where it exits 0, deploy as usual: there
+     is nothing else to do.
+  2. Run `gc stop` in every city where it does not, then install the new
+     `gc`. Run every step below with it, in each stopped city.
+  3. Run `gc storage recover-stranded --from-work --dry-run --dump <file>`
+     and read the dump. Recovery copies each stranded bead into the binding
+     as it is, so an open message there is delivered: close any that must
+     not be, such as stale handoff mail, with `bd close <id>` from the city
+     directory.
+  4. Run `gc storage recover-stranded --from-work --fleet-stopped`. If it
+     names an id the binding holds for a different bead, decide per id with
+     `--replace-binding-row <id>` or `--drop-work-row <id>`. If it names a
+     row the copy manifest lists by id alone, decide per id with `--move
+     <id>` or `--record-carried <id>`.
+  5. Run `gc storage migrate --from-work --fleet-stopped`. On a converged
+     city it copies nothing and clears the retained copies, so
+     infrastructure beads left in rig scopes do not stop it.
+  6. Check that `gc storage status` exits 0, then `gc start`.
+
+  The split-storage runbook walks through it under "Upgrading a city whose
+  storage check refuses".
+
 - **The op journal now records session requests by default on a SQLite
   sessions store.** The three `[ops]` rollout gates, `content` (submit,
   messages, nudge, mail notify), `control` (interrupt, respond) and

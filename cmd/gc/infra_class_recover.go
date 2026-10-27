@@ -39,7 +39,9 @@ package main
 // it. It is a scoped repair built from the same primitives, and everything it
 // moves is additive: it copies only ids the binding does not hold and the
 // manifest does not record, it never deletes a destination row, and it never
-// writes to the source.
+// writes to the source. The one exception is an operator's per-id answer for a
+// work-store row whose id the binding holds for a different bead, which removes
+// one of the two rows after backing it up (infra_class_recover_held.go).
 //
 // # What it will not guess at
 //
@@ -56,12 +58,13 @@ package main
 //
 // # Copy before delete, verify before record
 //
-// Nothing is deleted, from either side. The source keeps its rows verbatim, as
-// it does after the migration, so a bad outcome here is a duplicate rather than
-// a loss. The manifest — the record every later boot classifies absence
-// against — is extended only after every moved bead has been re-read from a
-// CLOSED AND REOPENED destination and proven field-, class- and dep-equal to
-// the source, by the migration's own comparators.
+// Nothing is deleted, from either side, except by an operator's per-id choice
+// for a reused id (backed up and proven first). The source keeps its rows
+// verbatim, as it does after the migration, so a bad outcome here is a
+// duplicate rather than a loss. The manifest — the record every later boot
+// classifies absence against — is extended only after every moved bead has
+// been re-read from a CLOSED AND REOPENED destination and proven field-,
+// class- and dep-equal to the source, by the migration's own comparators.
 //
 // # The topology is repaired over the whole resident set, not over the copy
 //
@@ -104,11 +107,12 @@ package main
 //
 // So the residue is a bucket of its own: every source infrastructure bead the
 // binding holds that the manifest does not record is re-proven against the
-// reopened destination by the same comparators the moved rows face, and folded
-// into the manifest. One that cannot be proven — a row under that id that is not
-// the source's row — is named and left unrecorded, because the manifest's
-// meaning is "the copy was proven to deliver this id" and recording an unproven
-// one would be a proof nobody made.
+// reopened destination and folded into the manifest. The proof is identity —
+// the same id, created in the same second (infraHeldRowIsThisBead) — because
+// the binding has served the row since and may have changed it. One that
+// cannot be proven — a row under that id that is another bead — is named and
+// left unrecorded, because the manifest's meaning is "the copy was proven to
+// deliver this id" and recording an unproven one would be a proof nobody made.
 //
 // This is the asymmetry with the migration, stated so it is not re-introduced:
 // an interrupted runInfraClassMigration self-heals, because the manifest is
@@ -119,9 +123,9 @@ package main
 //
 // # The rig census is deliberately not repeated here
 //
-// doStorageMigrate refuses while any rig scope holds an infrastructure bead,
-// because the copy's source is the city work store and a rig-scoped row would
-// be silently omitted from a cutover that then declares itself proven. This
+// doStorageMigrate refuses a copy while any rig scope holds an infrastructure
+// bead, because the copy's source is the city work store and a rig-scoped row
+// would be silently omitted from a cutover that then declares itself proven. This
 // repair makes no such declaration: it extends a manifest with ids it copied
 // out of the city work store and asserts nothing about any other scope, and the
 // containment re-check it feeds reads the same one store. Refusing on a rig
@@ -180,6 +184,8 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		dumpPath     string
 		moveIDs      []string
 		carriedIDs   []string
+		replaceIDs   []string
+		dropIDs      []string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -189,10 +195,11 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		Long: `Copy the infrastructure beads a converged city's proven copy never carried
 out of the retained work store and into the binding that is already serving.
 
-This is the recovery the stranded-write refusal names. It is additive: it moves
-only ids the binding does not hold and the proven-copy manifest does not record,
-it deletes nothing from either store, and it extends the manifest only after
-every moved bead has been proven equal against a closed and reopened
+This is the recovery the stranded-write refusal names. Unless you name a row
+with --replace-binding-row or --drop-work-row (below), it is additive: it
+moves only ids the binding does not hold and the proven-copy manifest does not
+record, it deletes nothing from either store, and it extends the manifest only
+after every moved bead has been proven equal against a closed and reopened
 destination. A bead whose class it cannot state is named and left where it is.
 
 It refuses on a city that has NOT converged — the whole copy is still owed
@@ -205,15 +212,27 @@ The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
 
 A manifest written by an older build may list a work-store row by id alone,
-with no time that says whether it is the bead the copy carried. When the
-binding no longer holds such a row, a closed one is moved. One that is not
-closed is refused and shown (status, type, timestamps, title): nothing here
-can tell whether the binding collected the bead the copy carried or never
-received it. Decide per id with --move <id> (copy it in as it is) or
---record-carried <id> (record it as carried; the clear then deletes its
-work-store row, and the clear's backup keeps it). Both also accept closed
-rows. --dry-run and --dump show these rows without writing, and naming an
-already-resolved id again is a no-op.`,
+with nothing that says whether it is the bead the copy carried: no time
+bounds the entry, the row carries no created_at, or the row is younger than
+the manifest, which an older recover-stranded extended with the id of every
+row it carried. When the binding no longer holds such a row, a closed one is
+moved. One that is not closed is refused and shown (status, type,
+timestamps, title): nothing here can tell whether the binding collected the
+bead the copy carried or never received it. Decide per id with --move <id>
+(copy it in as it is) or --record-carried <id> (record it as carried; the
+clear then deletes its work-store row, and the clear's backup keeps it).
+Both also accept closed rows. --dry-run and --dump show these rows without
+writing, and naming an already-resolved id again is a no-op.
+
+A work-store row can also reuse an id the binding still holds for a
+different bead: the work store minted the id again after the copy carried
+the original. No copy can carry it under that id, so it is named and left
+unrecorded until you decide per id: --replace-binding-row <id> (the
+work-store row replaces the binding's) or --drop-work-row <id> (the
+work-store row is removed and the binding's stays). These are the only
+choices that remove a row, and each first backs up the row it removes, with
+every edge touching it, to infra.recover-choices.jsonl at the binding root.
+--dry-run shows both rows of each such id.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
@@ -229,6 +248,7 @@ already-resolved id again is a no-op.`,
 			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{
 				DryRun: dryRun, DumpPath: dumpPath,
 				Move: setOf(moveIDs), RecordCarried: setOf(carriedIDs),
+				ReplaceBindingRow: setOf(replaceIDs), DropWorkRow: setOf(dropIDs),
 			}, stdout, stderr))
 		},
 	}
@@ -244,11 +264,15 @@ already-resolved id again is a no-op.`,
 		"for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated)")
 	cmd.Flags().StringSliceVar(&carriedIDs, strandedRecordCarriedFlag, nil,
 		"for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated)")
+	cmd.Flags().StringSliceVar(&replaceIDs, strandedReplaceBindingRowFlag, nil,
+		"for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated)")
+	cmd.Flags().StringSliceVar(&dropIDs, strandedDropWorkRowFlag, nil,
+		"for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated)")
 	return cmd
 }
 
-// The per-id operator choices for an open unbounded legacy row (see
-// doStorageRecoverStranded).
+// The per-id operator choices for an open row the manifest lists by id alone
+// (see doStorageRecoverStranded).
 const (
 	strandedMoveFlag          = "move"
 	strandedRecordCarriedFlag = "record-carried"
@@ -262,11 +286,18 @@ type strandedRecoveryOptions struct {
 	// as JSON before any write happens.
 	DumpPath string
 	// Move and RecordCarried are the operator's per-id answers for OPEN
-	// work-store rows that an unbounded legacy manifest entry lists and the
-	// binding no longer holds: copy it in, or record it as carried (the clear
-	// then deletes it). Nothing else may be named.
+	// work-store rows the manifest lists by id alone, with nothing that proves
+	// whether each is the bead the copy carried, and the binding no longer
+	// holds: copy it in, or record it as carried (the clear then deletes it).
+	// Nothing else may be named.
 	Move          map[string]bool
 	RecordCarried map[string]bool
+	// ReplaceBindingRow and DropWorkRow are the operator's per-id answers for
+	// a work-store row whose id the binding holds for a different bead
+	// (infra_class_recover_held.go): the work-store row replaces the
+	// binding's, or the work-store row is removed. Nothing else may be named.
+	ReplaceBindingRow map[string]bool
+	DropWorkRow       map[string]bool
 }
 
 // strandedBeadDump is one stranded bead and the source dep edges it carries, as
@@ -617,6 +648,11 @@ type infraEdgePlan struct {
 	// and the binding no longer holds. The binding's own GC took the row and the
 	// edge with it; re-adding it would dangle a reference to a deliberate delete.
 	collected int
+	// occupied counts edges into an id the binding holds for a different bead
+	// that this run leaves in place (infra_class_recover_held.go). Written,
+	// the edge would point at that other bead; it waits on the operator's
+	// per-id choice, which names the id.
+	occupied int
 	// dropped names the edges whose far endpoint is an infrastructure bead this
 	// run REFUSED to move. These are within-infra edges this repair is dropping,
 	// and nothing retains them — infraMigrationRow nils both Dependencies and
@@ -634,7 +670,14 @@ type infraEdgePlan struct {
 // it owes lands in missing — which is why the plan can be built before the copy
 // and still describe the state after it. That ordering is what lets --dry-run
 // report the topology it would restore without writing anything.
-func planInfraEdges(rows []beads.Bead, resident, infra, proven map[string]bool,
+//
+// The operator's per-id choices for reused ids (infra_class_recover_held.go)
+// shape it the same way. An occupied id — one the binding holds for a
+// different bead this run leaves in place — is not resident as the source's
+// bead: none of its edges are planned, and an edge into it is counted, not
+// written. A replacing id's binding row is removed before the copy with every
+// edge touching it, so the binding is read as holding none of them.
+func planInfraEdges(rows []beads.Bead, resident, infra, proven, occupied, replacing map[string]bool,
 	edgesFor func(beads.Bead) ([]beads.Dep, bool, error), destination beads.Store,
 ) (infraEdgePlan, error) {
 	plan := infraEdgePlan{}
@@ -650,12 +693,17 @@ func planInfraEdges(rows []beads.Bead, resident, infra, proven map[string]bool,
 		if len(want) == 0 {
 			continue
 		}
-		have, err := destination.DepList(b.ID, "down")
-		if err != nil {
-			return infraEdgePlan{}, fmt.Errorf("listing the binding's dep edges of %s: %w", b.ID, err)
+		var have []beads.Dep
+		if !replacing[b.ID] {
+			have, err = destination.DepList(b.ID, "down")
+			if err != nil {
+				return infraEdgePlan{}, fmt.Errorf("listing the binding's dep edges of %s: %w", b.ID, err)
+			}
 		}
 		for _, d := range want {
 			switch {
+			case occupied[d.DependsOnID]:
+				plan.occupied++
 			case !infra[d.DependsOnID]:
 				plan.crossBoundary++
 			case !resident[d.DependsOnID]:
@@ -664,7 +712,7 @@ func planInfraEdges(rows []beads.Bead, resident, infra, proven map[string]bool,
 					continue
 				}
 				plan.dropped = append(plan.dropped, fmt.Sprintf("%s -> %s (%s): the far endpoint is an infrastructure bead this repair declined to move", b.ID, d.DependsOnID, d.Type))
-			case infraDepEdgeHeld(d, have):
+			case !replacing[d.DependsOnID] && infraDepEdgeHeld(d, have):
 				plan.held++
 			default:
 				// The near id is this bead's, not the entry's own IssueID: on the
@@ -790,7 +838,10 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
-	rows, err := readInfraSnapshot(source)
+	// Selected under the manifest's classifier generation, exactly as the
+	// containment check selects: a row the copy's classifier left as work is
+	// no strand, and moving it would carry frozen pre-cutover state.
+	rows, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -847,27 +898,32 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// folded in; the residue of an interrupted run of this repair passes it.
 	// When the binding does not hold the id it is stranded, and moves.
 	//
-	// An unbounded legacy entry (infra_copy_manifest.go) is never counted as
-	// removed since cutover on its own: nothing proves the row is the bead the
-	// copy carried, and leaving it so made the clear refuse while this command
-	// said "next: clear" — a loop with no exit. What ends the loop depends on
-	// the row:
+	// Two verdicts on a row the manifest lists by id alone say nothing proves
+	// the row is or is not the bead the copy carried: an unbounded legacy
+	// entry, and a presumed reused one, a bare id younger than the legacy bound
+	// that an older build's recover-stranded may have appended for this very
+	// row (infra_copy_manifest.go). Neither is counted as removed since
+	// cutover on its own: leaving an unbounded one so made the clear refuse
+	// while this command said "next: clear" — a loop with no exit. What ends it
+	// depends on the row:
 	//
-	//   - the binding still holds the id: the unrecorded way (proven equal, it
-	//     is recorded with its created_at);
+	//   - the binding still holds the id: the unrecorded way (proven the same
+	//     bead, it is recorded with its created_at);
 	//   - the binding no longer holds it and the work row is CLOSED: moved like
 	//     a stranded row and recorded. A closed row is terminal state, and
 	//     carrying it in resurrects nothing;
 	//   - the binding no longer holds it and the work row is OPEN: refused,
-	//     named, and left to the operator. The work row is a snapshot frozen at
-	//     cutover; the binding most likely closed and collected the live bead,
-	//     and moving the frozen one would bring it back OPEN beside whatever
-	//     replaced it (#5987). Only the operator knows, so each such id needs
-	//     --move (copy it in) or --record-carried (record it as the bead the
-	//     copy carried; the clear then deletes it).
-	var unboundedOpen []beads.Bead
+	//     named, and left to the operator. The work row may be a frozen
+	//     snapshot of a bead the binding has since closed and collected, and
+	//     moving it would bring that bead back OPEN beside whatever replaced
+	//     it (#5987); or it may be the only copy of a bead the binding never
+	//     received. Only the operator knows, so each such id needs --move
+	//     (copy it in) or --record-carried (record it as the bead the copy
+	//     carried; the clear then deletes it).
+	var idOnlyOpen []beads.Bead
 	var recordCarried []beads.Bead
-	chosen := map[string]bool{}
+	// chosen maps each row a per-id flag answered to that flag.
+	chosen := map[string]string{}
 	for _, b := range rows {
 		match := manifest.Match(b)
 		if resolvable[b.ID] {
@@ -880,82 +936,169 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		case infraManifestCarried:
 			removedSinceCutover++
 			continue
-		case infraManifestLegacyUnbounded:
+		case infraManifestLegacyUnbounded, infraManifestPresumedReused:
 			switch {
 			case opts.Move[b.ID] && opts.RecordCarried[b.ID]:
 				fmt.Fprintf(stderr, "%s: %s is named by both --%s and --%s; choose one\n", logPrefix, b.ID, strandedMoveFlag, strandedRecordCarriedFlag) //nolint:errcheck // best-effort stderr
 				return 1
 			case opts.RecordCarried[b.ID]:
-				chosen[b.ID] = true
+				chosen[b.ID] = strandedRecordCarriedFlag
 				recordCarried = append(recordCarried, b)
 				removedSinceCutover++
 				continue
 			case opts.Move[b.ID]:
-				chosen[b.ID] = true
+				chosen[b.ID] = strandedMoveFlag
 			case b.Status == "closed":
 			default:
-				unboundedOpen = append(unboundedOpen, b)
+				idOnlyOpen = append(idOnlyOpen, b)
 				continue
 			}
 		}
 		stranded = append(stranded, b)
 	}
+	// An unrecorded row whose id the binding holds for a different bead
+	// (infraHeldRowIsThisBead: created at another time, because bd minted the
+	// id again after the copy, or, for a row with no created_at, written by no
+	// copy). No copy can carry it under the id, so only the operator's per-id
+	// answer resolves it (infra_class_recover_held.go). Without one it stays
+	// unrecorded, and the proof below names it. A row the binding no longer
+	// holds has no bead to choose against; the proof names it too.
+	heldRows := map[string]beads.Bead{}
+	var replace, drop, awaitingHeld []beads.Bead
+	provable := make([]beads.Bead, 0, len(unrecorded))
+	for _, b := range unrecorded {
+		got, held, err := readInfraHeldRow(destination, b.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if !held || infraHeldRowIsThisBead(b, got) {
+			provable = append(provable, b)
+			continue
+		}
+		heldRows[b.ID] = got
+		switch {
+		case opts.ReplaceBindingRow[b.ID] && opts.DropWorkRow[b.ID]:
+			fmt.Fprintf(stderr, "%s: %s is named by both --%s and --%s; choose one\n", logPrefix, b.ID, strandedReplaceBindingRowFlag, strandedDropWorkRowFlag) //nolint:errcheck // best-effort stderr
+			return 1
+		case opts.ReplaceBindingRow[b.ID]:
+			chosen[b.ID] = strandedReplaceBindingRowFlag
+			replace = append(replace, b)
+		case opts.DropWorkRow[b.ID]:
+			chosen[b.ID] = strandedDropWorkRowFlag
+			drop = append(drop, b)
+		default:
+			provable = append(provable, b)
+			awaitingHeld = append(awaitingHeld, b)
+		}
+	}
+	unrecorded = provable
 	// A choice may only name a row it is the answer for: anything else is a
-	// typo or a misunderstanding, and acting on it would move or record a bead
-	// nobody asked about. A choice for a row an earlier run already resolved
-	// (now recorded, or held by the binding after a copy that failed before
-	// the manifest was extended) is a no-op with a note, so re-running with
-	// the same flags is safe and a copy failure's re-run stays a resume.
+	// typo or a misunderstanding, and acting on it would move, record or
+	// remove a bead nobody asked about. A choice for a row an earlier run
+	// already resolved (now recorded, held by the binding after a copy that
+	// failed before the manifest was extended, or removed by --drop-work-row)
+	// is a no-op with a note, so re-running with the same flags is safe and a
+	// copy failure's re-run stays a resume.
 	resolved := map[string]bool{}
+	inWork := map[string]bool{}
 	for _, b := range rows {
+		inWork[b.ID] = true
+		if _, different := heldRows[b.ID]; different {
+			continue
+		}
 		if resolvable[b.ID] || manifest.Match(b) == infraManifestCarried {
 			resolved[b.ID] = true
 		}
 	}
-	var misnamed, already []string
-	for _, ids := range []map[string]bool{opts.Move, opts.RecordCarried} {
+	strandedSet := map[string]bool{}
+	for _, b := range stranded {
+		strandedSet[b.ID] = true
+	}
+	choicesBefore, err := infraRecoverChoiceIDs(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	var misnamedLegacy, misnamedHeld, already, movedAnyway []string
+	for flag, ids := range map[string]map[string]bool{strandedMoveFlag: opts.Move, strandedRecordCarriedFlag: opts.RecordCarried} {
 		for id := range ids {
 			switch {
-			case chosen[id]:
+			case chosen[id] == flag:
 			case resolved[id]:
 				already = append(already, id)
 			default:
-				misnamed = append(misnamed, id)
+				misnamedLegacy = append(misnamedLegacy, id)
 			}
 		}
 	}
-	if len(misnamed) > 0 {
-		sort.Strings(misnamed)
-		fmt.Fprintf(stderr, "%s: --%s/--%s name only work-store rows that the manifest lists by id alone and the binding no longer holds; these are not: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strings.Join(misnamed, ", ")) //nolint:errcheck // best-effort stderr
+	// A replaced or dropped row whose work-store copy is gone (the clear took
+	// a replaced one; a drop took its own) is known from the backup the
+	// choice wrote.
+	for id := range opts.ReplaceBindingRow {
+		switch {
+		case chosen[id] == strandedReplaceBindingRowFlag:
+		case resolved[id], choicesBefore[strandedReplaceBindingRowFlag][id] && !inWork[id]:
+			already = append(already, id)
+		case strandedSet[id] && chosen[id] == "":
+			// The binding holds no row under the id (an earlier replace
+			// removed it before its copy finished): the work-store row is
+			// moved like any stranded row, which is what the choice asks.
+			movedAnyway = append(movedAnyway, id)
+		default:
+			misnamedHeld = append(misnamedHeld, id)
+		}
+	}
+	for id := range opts.DropWorkRow {
+		switch {
+		case chosen[id] == strandedDropWorkRowFlag:
+		case choicesBefore[strandedDropWorkRowFlag][id] && !inWork[id]:
+			already = append(already, id)
+		default:
+			misnamedHeld = append(misnamedHeld, id)
+		}
+	}
+	if len(misnamedLegacy) > 0 {
+		sort.Strings(misnamedLegacy)
+		fmt.Fprintf(stderr, "%s: --%s/--%s name only work-store rows that the manifest lists by id alone and the binding no longer holds; these are not: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strings.Join(misnamedLegacy, ", ")) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(misnamedHeld) > 0 {
+		sort.Strings(misnamedHeld)
+		fmt.Fprintf(stderr, "%s: --%s/--%s name only work-store rows whose id the binding holds for a different bead; these are not: %s. Nothing was written\n", logPrefix, strandedReplaceBindingRowFlag, strandedDropWorkRowFlag, strings.Join(misnamedHeld, ", ")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if len(already) > 0 {
 		sort.Strings(already)
 		fmt.Fprintf(stdout, "note: already resolved by an earlier run, nothing to do: %s\n", strings.Join(already, ", ")) //nolint:errcheck // best-effort stdout
 	}
+	if len(movedAnyway) > 0 {
+		sort.Strings(movedAnyway)
+		fmt.Fprintf(stdout, "note: the binding holds no row under %s any more, so each is moved like any stranded row\n", strings.Join(movedAnyway, ", ")) //nolint:errcheck // best-effort stdout
+	}
 	// The evidence an operator decides each open row on. The refusal states
 	// the two answers and what each does; it does not lean toward either.
-	reportUnboundedOpen := func(w io.Writer) {
-		for _, b := range unboundedOpen {
+	reportIDOnlyOpen := func(w io.Writer) {
+		for _, b := range idOnlyOpen {
 			fmt.Fprintf(w, "  %s  status=%s  type=%s  created=%s  updated=%s  title=%q\n", //nolint:errcheck // best-effort output
 				b.ID, b.Status, b.Type, b.CreatedAt.UTC().Format(time.RFC3339), b.UpdatedAt.UTC().Format(time.RFC3339), b.Title)
 		}
 	}
-	unboundedOpenRefusal := func() {
-		fmt.Fprintf(stderr, "%s: %d work-store row(s) that are not closed are listed by the copy manifest by id alone, with no time that says whether each is the bead the copy carried, and the binding no longer holds them. Nothing here can tell whether the binding collected the bead the copy carried (then the work row is a snapshot frozen at cutover) or never received it (then the work row is the only copy). Nothing was written. Decide per id and run this again with --%s <id> (copy the row into the binding as it is) or --%s <id> (record it as the bead the copy carried; the clear then deletes its work-store row, and the clear's backup keeps it). --%s and --%s show the rows without writing:\n", //nolint:errcheck // best-effort stderr
-			logPrefix, len(unboundedOpen), strandedMoveFlag, strandedRecordCarriedFlag, "dry-run", "dump")
-		reportUnboundedOpen(stderr)
+	idOnlyOpenRefusal := func() {
+		fmt.Fprintf(stderr, "%s: %d work-store row(s) that are not closed are listed by the copy manifest by id alone, and the binding no longer holds them. Nothing records whether each is the bead the copy carried: no time bounds its entry, the row carries no created_at, or the row is younger than the legacy manifest, which an older build's recover-stranded extended with the id of every row it carried. Nothing here can tell whether the binding collected that bead (then the work row is a frozen snapshot) or never received it (then the work row is the only copy). Nothing was written. Decide per id and run this again with --%s <id> (copy the row into the binding as it is) or --%s <id> (record it as the bead the copy carried; the clear then deletes its work-store row, and the clear's backup keeps it). --%s and --%s show the rows without writing:\n", //nolint:errcheck // best-effort stderr
+			logPrefix, len(idOnlyOpen), strandedMoveFlag, strandedRecordCarriedFlag, "dry-run", "dump")
+		reportIDOnlyOpen(stderr)
 	}
 	// Refused now unless the operator asked to look: a dry run or a dump
 	// carries on to show them, and refuses before any write.
-	if len(unboundedOpen) > 0 && !opts.DryRun && opts.DumpPath == "" {
-		unboundedOpenRefusal()
+	if len(idOnlyOpen) > 0 && !opts.DryRun && opts.DumpPath == "" {
+		idOnlyOpenRefusal()
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "city:     %s\nbinding:  %s\ndatabase: %s\nmanifest: %s\n", request.CityPath, target.Binding, target.Database, target.ManifestPath())             //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "source infrastructure beads: %d\nbinding beads: %d\nproven copy: %d\nremoved since cutover: %d\nstranded: %d\nin the binding, unrecorded: %d\n", //nolint:errcheck // best-effort stdout
-		len(rows), len(held), len(proven), removedSinceCutover, len(stranded), len(unrecorded))
+	fmt.Fprintf(stdout, "city:     %s\nbinding:  %s\ndatabase: %s\nmanifest: %s\n", request.CityPath, target.Binding, target.Database, target.ManifestPath())                                                                     //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "source infrastructure beads: %d\nbinding beads: %d\nproven copy: %d\nremoved since cutover: %d\nstranded: %d\nin the binding, unrecorded: %d\nunder an id the binding holds for a different bead: %d\n", //nolint:errcheck // best-effort stdout
+		len(rows), len(held), len(proven), removedSinceCutover, len(stranded), len(unrecorded)-len(awaitingHeld), len(heldRows))
 
 	probeID := ""
 	if len(stranded) > 0 {
@@ -974,12 +1117,16 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// this split relocates, whose class would change in the crossing, or whose
 	// dependency topology this source cannot state, is one nobody can say
 	// belongs in this binding in the shape it would arrive in.
+	//
+	// A row the operator chose to put in place of the binding's row is held to
+	// the same checks, before anything is removed: one that fails them keeps
+	// the binding's row where it is.
 	allowed := infraRecoverableClasses()
 	byClass := map[string]int{}
 	var movable []beads.Bead
 	var ambiguous []string
-	wantEdges := make(map[string][]beads.Dep, len(stranded))
-	for _, b := range stranded {
+	wantEdges := make(map[string][]beads.Dep, len(stranded)+len(replace))
+	for _, b := range append(append([]beads.Bead(nil), stranded...), replace...) {
 		class := coordclass.Classify(b)
 		if !allowed[class] {
 			ambiguous = append(ambiguous, fmt.Sprintf("%s (classifies as %s, which binding %q does not serve)", b.ID, class, target.Binding))
@@ -1008,7 +1155,8 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	if opts.DumpPath != "" {
 		// The rows awaiting a per-id choice are dumped too: the dump is how an
 		// operator inspects them before choosing.
-		dumped := append(append([]beads.Bead(nil), stranded...), unboundedOpen...)
+		dumped := append(append([]beads.Bead(nil), stranded...), idOnlyOpen...)
+		dumped = append(append(append(dumped, replace...), drop...), awaitingHeld...)
 		if err := writeStrandedDump(opts.DumpPath, target, depReader, dumped); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1021,12 +1169,30 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// cutover into one this run recovers is the dispatcher's normal wiring
 	// direction, and reading only the copied rows' outbound edges drops every one
 	// of them silently.
+	//
+	// An id the binding holds for a different bead is resident only once this
+	// run replaces that bead with the source's: until then the binding's row
+	// under it is not the source's, and no edge of the source's bead belongs
+	// on it.
 	resident := make(map[string]bool, len(resolvable)+len(movable))
 	for id := range resolvable {
 		resident[id] = true
 	}
+	replacing := map[string]bool{}
+	var replaceMovable []beads.Bead
 	for _, b := range movable {
 		resident[b.ID] = true
+		if _, different := heldRows[b.ID]; different {
+			replacing[b.ID] = true
+			replaceMovable = append(replaceMovable, b)
+		}
+	}
+	occupied := map[string]bool{}
+	for id := range heldRows {
+		if !replacing[id] {
+			occupied[id] = true
+			delete(resident, id)
+		}
 	}
 	edgesFor := func(b beads.Bead) ([]beads.Dep, bool, error) {
 		if cached, ok := wantEdges[b.ID]; ok {
@@ -1034,7 +1200,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 		return depReader.deps(b)
 	}
-	plan, err := planInfraEdges(rows, resident, infraIDs, proven, edgesFor, destination)
+	plan, err := planInfraEdges(rows, resident, infraIDs, proven, occupied, replacing, edgesFor, destination)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1050,25 +1216,35 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		for _, b := range recordCarried {
 			fmt.Fprintf(stdout, "would record as carried: %s (the clear then deletes its work-store row; the backup keeps it)\n", b.ID) //nolint:errcheck // best-effort stdout
 		}
-		if len(unboundedOpen) > 0 {
-			fmt.Fprintf(stdout, "awaiting a choice (--%s or --%s): %d row(s)\n", strandedMoveFlag, strandedRecordCarriedFlag, len(unboundedOpen)) //nolint:errcheck // best-effort stdout
-			reportUnboundedOpen(stdout)
+		if len(idOnlyOpen) > 0 {
+			fmt.Fprintf(stdout, "awaiting a choice (--%s or --%s): %d row(s)\n", strandedMoveFlag, strandedRecordCarriedFlag, len(idOnlyOpen)) //nolint:errcheck // best-effort stdout
+			reportIDOnlyOpen(stdout)
+		}
+		for _, b := range replaceMovable {
+			fmt.Fprintf(stdout, "would replace the binding's row under %s with the work-store row (the binding's row is backed up to %s first)\n", b.ID, target.RecoverChoicesBackupPath()) //nolint:errcheck // best-effort stdout
+		}
+		for _, b := range drop {
+			fmt.Fprintf(stdout, "would remove the work-store row %s and keep the binding's (the work-store row is backed up to %s first)\n", b.ID, target.RecoverChoicesBackupPath()) //nolint:errcheck // best-effort stdout
+		}
+		if len(awaitingHeld) > 0 {
+			fmt.Fprintf(stdout, "awaiting a choice (--%s or --%s): %d row(s) under an id the binding holds for a different bead\n", strandedReplaceBindingRowFlag, strandedDropWorkRowFlag, len(awaitingHeld)) //nolint:errcheck // best-effort stdout
+			reportInfraHeldDifferent(stdout, awaitingHeld, heldRows)
 		}
 		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
-		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unboundedOpen) > 0 {
+		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(idOnlyOpen) > 0 || len(awaitingHeld) > 0 {
 			return 1
 		}
 		return 0
 	}
 	// A dump was asked for; the rows awaiting a choice are in it, and nothing
 	// is written until each has one.
-	if len(unboundedOpen) > 0 {
-		unboundedOpenRefusal()
+	if len(idOnlyOpen) > 0 {
+		idOnlyOpenRefusal()
 		return 1
 	}
 
-	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 && len(recordCarried) == 0 {
+	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 && len(recordCarried) == 0 && len(drop) == 0 {
 		fmt.Fprintln(stdout, "nothing to recover: the binding already holds every infrastructure bead the retained work store has that the manifest does not record, with every within-infra edge between them.") //nolint:errcheck // best-effort stdout
 		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
@@ -1083,6 +1259,21 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: binding store cannot preserve bead ids: %T does not implement ForeignIDCreator\n", logPrefix, destination) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// The operator's per-id answers for reused ids, before anything is copied:
+	// every row they remove is backed up and proven from disk first. A replaced
+	// id's work-store row is then copied with the rest of movable.
+	if len(replaceMovable)+len(drop) > 0 {
+		if err := applyInfraHeldChoices(target, source, destination, replaceMovable, drop, heldRows); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintln(stdout, infraHeldChoiceSummary(target, replaceMovable, drop)) //nolint:errcheck // best-effort stdout
+	}
+	removedByChoice := ""
+	if len(replaceMovable)+len(drop) > 0 {
+		removedByChoice = fmt.Sprintf(" apart from the rows the per-id choices removed (backed up in %s)", target.RecoverChoicesBackupPath())
+	}
 	copied := 0
 	for _, b := range movable {
 		if _, err := destination.Get(b.ID); err == nil {
@@ -1091,8 +1282,8 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			continue
 		}
 		if _, err := creator.CreateWithForeignID(infraMigrationRow(b)); err != nil {
-			fmt.Fprintf(stderr, "%s: copying bead %s into %s: %v\n", logPrefix, b.ID, target.Database, err)                                                                                                                                                                       //nolint:errcheck // best-effort stderr
-			fmt.Fprintf(stderr, "%s: %d bead(s) were copied before this failed. Nothing was deleted and the manifest was not extended; the rows already copied are recorded by the NEXT run rather than by this one, which is what makes a re-run a resume\n", logPrefix, copied) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: copying bead %s into %s: %v\n", logPrefix, b.ID, target.Database, err)                                                                                                                                                                                           //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: %d bead(s) were copied before this failed. Nothing was deleted%s, and the manifest was not extended; the rows already copied are recorded by the NEXT run rather than by this one, which is what makes a re-run a resume\n", logPrefix, copied, removedByChoice) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		copied++
@@ -1111,8 +1302,8 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "copied: %d bead(s)\nedges: %d restored, %d already in the binding, %d cross-boundary edge(s) into work left as metadata linkage, %d into a bead the binding's own GC collected\n", //nolint:errcheck // best-effort stdout
-		copied, len(plan.missing), plan.held, plan.crossBoundary, plan.collected)
+	fmt.Fprintf(stdout, "copied: %d bead(s)\nedges: %d restored, %d already in the binding, %d cross-boundary edge(s) into work left as metadata linkage, %d into a bead the binding's own GC collected, %d into an id the binding holds for a different bead\n", //nolint:errcheck // best-effort stdout
+		copied, len(plan.missing), plan.held, plan.crossBoundary, plan.collected, plan.occupied)
 
 	// Proven against durable bytes, not against the handle that wrote them:
 	// closed and reopened, exactly as verifyInfraCopy insists.
@@ -1219,11 +1410,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 	}
 
-	// The residue an interrupted predecessor left, proven by the same
-	// comparators the moved rows face before it is recorded. The manifest's
-	// meaning is "the copy was proven to deliver this id", so a binding row that
-	// is not the source's row is named and left unrecorded rather than folded in
-	// under a proof nobody made.
+	// The rows the binding already holds that the manifest does not record — an
+	// interrupted predecessor's residue, or a row an older build's
+	// recover-stranded carried — proven before they are recorded. The
+	// manifest's meaning is "the copy was proven to deliver this id", so a
+	// binding row that is not the source's bead is named and left unrecorded
+	// rather than folded in under a proof nobody made. The proof is identity
+	// (infraHeldRowDifference), not the moved rows' field equality: the binding
+	// has been serving these rows, and a row it has since changed is still the
+	// bead it carried.
 	var recovered []string
 	var unprovable []string
 	for _, b := range unrecorded {
@@ -1232,11 +1427,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			unprovable = append(unprovable, fmt.Sprintf("%s (the reopened binding cannot read it: %v)", b.ID, err))
 			continue
 		}
-		if diff := beadCopyDifference(b, got); diff != "" {
-			unprovable = append(unprovable, fmt.Sprintf("%s (%s)", b.ID, diff))
-			continue
-		}
-		if diff := infraCopyClassDifference(b, got); diff != "" {
+		if diff := infraHeldRowDifference(b, got); diff != "" {
 			unprovable = append(unprovable, fmt.Sprintf("%s (%s)", b.ID, diff))
 			continue
 		}
@@ -1245,12 +1436,18 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	for _, b := range movable {
 		recovered = append(recovered, b.ID)
 	}
-	fmt.Fprintf(stdout, "verified: %d bead(s) re-read field-, class- and dep-equal from the closed and reopened %s\n", len(recovered), target.Database) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "verified: %d bead(s) re-read from the closed and reopened %s (%d copied, field-, class- and dep-equal; %d it already held, the same bead)\n", //nolint:errcheck // best-effort stdout
+		len(recovered), target.Database, len(movable), len(recovered)-len(movable))
 	if len(unprovable) > 0 {
 		fmt.Fprintf(stdout, "NOT RECORDED: %d bead(s) the binding holds under a source id whose row this repair cannot prove is the source's; the manifest does not claim them:\n", len(unprovable)) //nolint:errcheck // best-effort stdout
 		for _, entry := range unprovable {
 			fmt.Fprintf(stdout, "  %s\n", entry) //nolint:errcheck // best-effort stdout
 		}
+	}
+	if len(awaitingHeld) > 0 {
+		fmt.Fprintf(stdout, "Under %d of those ids the binding holds a different bead, and only one row can keep the id. Decide per id and run this again with --%s <id> (the work-store row replaces the binding's) or --%s <id> (the work-store row is removed and the binding's stays); each first backs up the row it removes, with every edge touching it, to %s:\n", //nolint:errcheck // best-effort stdout
+			len(awaitingHeld), strandedReplaceBindingRowFlag, strandedDropWorkRowFlag, target.RecoverChoicesBackupPath())
+		reportInfraHeldDifferent(stdout, awaitingHeld, heldRows)
 	}
 
 	// Only now the manifest, and only as a SUPERSET: the previous proven set is
@@ -1291,20 +1488,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	// created_at carries over for every id already recorded, and a recovered
-	// row's own created_at replaces it: when a recovered row reused an id, the
-	// bead the binding now holds under that id is the recovered one.
-	extendedCreated := make(map[string]time.Time, len(extended))
-	for id, at := range manifest.Created {
-		extendedCreated[id] = at
-	}
-	for id, at := range infraManifestCreatedOf(rows, recovered) {
-		extendedCreated[id] = at
-	}
-	// The legacy bound passes through unchanged. #gc:written moves forward
-	// with this write; the bound that judges the entries with no created_at
-	// must not, or every id reused since the legacy manifest was written
-	// would read as the bead it copied.
-	if err := writeInfraCopyManifestRecord(target, extended, extendedCreated, manifest.LegacyBound); err != nil {
+	// row's own created_at replaces it (infraManifestRecordCreated).
+	extendedCreated := infraManifestRecordCreated(manifest.Created, rows, recovered)
+	// The bounds pass through unchanged. The legacy bound must not move, or
+	// every id reused since the legacy manifest was written would read as the
+	// bead it copied; #gc:written must not either, because it bounds the bare
+	// ids an older build appends later (infra_copy_manifest.go, "The write
+	// time"). The classifier generation passes through too: this run moved
+	// only what that generation selects.
+	if err := rewriteInfraCopyManifest(target, manifest, extended, extendedCreated); err != nil {
 		fmt.Fprintf(stderr, "%s: %v. The previous manifest is at %s\n", logPrefix, err, backup) //nolint:errcheck // best-effort stderr
 		return 1
 	}

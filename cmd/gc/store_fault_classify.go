@@ -54,6 +54,8 @@ func storeGotNoAnswer(err error, lowerText string) bool {
 			return true
 		}
 	}
+	// A syscall.Errno is a net.Error too, and EAGAIN (EWOULDBLOCK) is a
+	// timeout: the no-answer gc hook --help promises it.
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true

@@ -142,6 +142,49 @@ provider = "sqlite-beads"
 	}
 }
 
+// A city being created gets every rig its source composes, so a reserved
+// prefix on a rig declared only in an include fragment is refused before the
+// city exists, wherever the source declares its [storage].
+func TestReservedPrefixSplitRefusalForNewCitySeesAFragmentRig(t *testing.T) {
+	const storage = `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+`
+	for name, root := range map[string]string{
+		"storage in the root":     "include = [\"rigs.toml\"]\n[workspace]\nname = \"my-city\"\n" + storage,
+		"storage in the fragment": "include = [\"rigs.toml\", \"storage.toml\"]\n[workspace]\nname = \"my-city\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			for file, body := range map[string]string{
+				"rigs.toml":    "[[rigs]]\nname = \"gas-city-ops\"\npath = \"/tmp/x\"\n",
+				"storage.toml": storage,
+				"city.toml":    root,
+			} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tomlPath := filepath.Join(dir, "city.toml")
+			next, err := Parse([]byte(root))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ReservedPrefixSplitRefusalForNewCity(fsys.OSFS{}, tomlPath, next); err == nil || !strings.Contains(err.Error(), `"gas-city-ops"`) || !strings.Contains(err.Error(), "gco") {
+				t.Errorf("ForNewCity with the gco rig only in a fragment = %v, want the gco refusal naming the rig", err)
+			}
+		})
+	}
+}
+
 func TestReservedPrefixSplitRefusalSeesARigPatchPrefix(t *testing.T) {
 	cfg := splitCityNamed("my-city", Rig{Name: "alpha", Prefix: "al"})
 	reserved := "gcs-alpha"

@@ -45,6 +45,7 @@ func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 		{"database is locked", errors.New("database is locked (SQLITE_BUSY)"), true},
 		{"bd killed", errors.New("bd list: signal: killed"), true},
 		{"EMFILE", fmt.Errorf("open: %w", syscall.EMFILE), true},
+		{"EAGAIN", fmt.Errorf("read: %w", syscall.EAGAIN), true},
 		{"context deadline", fmt.Errorf("listing: %w", context.DeadlineExceeded), true},
 		{"store unavailable", fmt.Errorf("x: %w", beads.ErrStoreUnavailable), true},
 		{"ECONNREFUSED", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), true},
@@ -68,6 +69,8 @@ func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 		{"db_unavailable alone", errors.New("bd serve cannot reach its database: db_unavailable"), true},
 		{"too many open files text alone", errors.New("open /x: too many open files"), true},
 		{"EMFILE typed alone", opaqueErr{"accept failed", syscall.EMFILE}, true},
+		// A syscall.Errno is a net.Error, and EAGAIN (EWOULDBLOCK) is a timeout.
+		{"EAGAIN typed alone", opaqueErr{"read failed", syscall.EAGAIN}, true},
 		{"ENOSPC typed alone", opaqueErr{"write failed", syscall.ENOSPC}, false},
 		{"ENOSPC typed behind a no-answer marker", opaqueErr{"dolt server unreachable while writing", syscall.ENOSPC}, false},
 		// A standing marker wins over a no-answer marker in the same text
@@ -102,6 +105,12 @@ func TestHookAndGateShareTheNoAnswerVocabulary(t *testing.T) {
 		}
 		if !isTransientStoreFault(err) {
 			t.Errorf("the storage gate does not read %q as transient", msg)
+		}
+	}
+	// gc hook --help promises exit 2 with the token for EMFILE and EAGAIN.
+	for _, errno := range []syscall.Errno{syscall.EMFILE, syscall.EAGAIN} {
+		if err := (opaqueErr{"work query failed", errno}); !workQueryStoreUnavailable(err) {
+			t.Errorf("gc hook does not read a typed %v as store-unavailable", errno)
 		}
 	}
 }

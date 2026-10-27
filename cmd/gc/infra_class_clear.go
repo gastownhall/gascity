@@ -167,20 +167,21 @@ type infraUnprovenSourceRows struct {
 }
 
 func (e *infraUnprovenSourceRows) Error() string {
-	return fmt.Sprintf("the work store holds %d infrastructure bead(s) the proven copy never carried (%s), so nothing proves the binding holds them and they cannot be cleared. Copy them in with `%s` first, then run this again",
-		len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
+	return fmt.Sprintf("the work store holds %d infrastructure bead(s) the proven copy never carried (%s), so nothing proves the binding holds them and they cannot be cleared. Copy them in with `%s` first (it asks per id, --%s or --%s, about any whose id the binding holds for a different bead), then run this again",
+		len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction(), strandedReplaceBindingRowFlag, strandedDropWorkRowFlag)
 }
 
-// infraUnboundedLegacyRows is the clear's refusal for work-store rows a legacy
-// manifest entry lists by id alone, when the manifest carries no trustworthy
-// time to tell the copied bead from a later one that reused its id.
+// infraUnboundedLegacyRows is the clear's refusal for work-store rows the
+// manifest lists with no time that tells the copied bead from a later one that
+// reused its id: a legacy entry with no trustworthy bound, or a row that
+// carries no created_at for an entry to be judged against.
 type infraUnboundedLegacyRows struct {
 	IDs      []string
 	Manifest string
 }
 
 func (e *infraUnboundedLegacyRows) Error() string {
-	return fmt.Sprintf("the copy manifest %s lists %d work-store infrastructure bead(s) by id alone (%s) and records no time that tells the bead it copied from a later one that reused the id, so they cannot be cleared on its word. `%s` resolves them (it records the ones the binding still holds once it proves them equal, moves closed ones the binding no longer holds, and asks per id about open ones: --move or --record-carried); run it, then run this again",
+	return fmt.Sprintf("the copy manifest %s lists %d work-store infrastructure bead(s) (%s) with no time that tells the bead it copied from a later one that reused the id: the manifest records none, or the row carries no created_at. They cannot be cleared on its word. `%s` resolves them (it records the ones the binding still holds once it proves them the same bead, moves closed ones the binding no longer holds, and asks per id about open ones: --move or --record-carried); run it, then run this again",
 		e.Manifest, len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
 }
 
@@ -228,7 +229,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
-	rows, err := readInfraSnapshot(source)
+	rows, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
 		return result, err
 	}
@@ -243,9 +244,10 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 
 	var unproven, unbounded, retained []beads.Bead
 	// Carried, by (id, created_at): a row that merely reuses a manifest id was
-	// never copied, and deleting it here would destroy the only copy. A legacy
-	// entry with no trustworthy bound is not carried either: nothing says the
-	// row is not younger than the entry, so it is not deleted on a guess.
+	// never copied, and deleting it here would destroy the only copy. Nor is a
+	// row carried when a bare id only presumes it reused, when its legacy entry
+	// has no trustworthy bound, or when it has no created_at to judge: nothing
+	// says it is the bead the copy carried, so it is not deleted on a guess.
 	for _, b := range rows {
 		switch manifest.Match(b) {
 		case infraManifestCarried:
@@ -397,7 +399,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		result.Kept = append(result.Kept, edge)
 	}
 
-	after, err := readInfraSnapshot(source)
+	after, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
 		return result, fmt.Errorf("re-reading the work store after the clear: %w", err)
 	}

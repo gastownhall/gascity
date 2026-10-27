@@ -1991,11 +1991,6 @@ func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, std
 	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
 }
 
-// rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
-// city identity. When the source declares rig paths, those paths are stripped
-// from cfg and persisted to .gc/site.toml instead; the stripped bindings are
-// returned so later writers of the same city.toml can re-supply them and avoid
-// erasing the site bindings just written.
 // initFromReservedPrefixRefusal refuses `gc init --from` a split source when
 // the city it would create mints under a reserved class prefix (split-default
 // R10): its first boot, and every CLI process, would refuse it. It reads the
@@ -2038,6 +2033,11 @@ func initReservedPrefixRefusal(fs fsys.FS, tomlPath string, cfg *config.City, ci
 	return config.ReservedPrefixSplitRefusalForNewCity(fs, tomlPath, &next)
 }
 
+// rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
+// city identity. When the source declares rig paths, those paths are stripped
+// from cfg and persisted to .gc/site.toml instead; the stripped bindings are
+// returned so later writers of the same city.toml can re-supply them and avoid
+// erasing the site bindings just written.
 func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	data, err := fs.ReadFile(copiedToml)

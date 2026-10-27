@@ -167,6 +167,54 @@ func TestClassifyGoldenTable(t *testing.T) {
 	}
 }
 
+// TestClassifyAtLegacyDiffersOnlyInTheOwnedSessionArms pins the generation
+// boundary. A copy manifest written by an earlier build is re-read with
+// GenerationLegacy, so that generation must be today's classifier minus
+// exactly the two GenerationOwnedSessions arms: one more difference, and an
+// upgrade would strand (or hide) rows the earlier copy classified otherwise.
+func TestClassifyAtLegacyDiffersOnlyInTheOwnedSessionArms(t *testing.T) {
+	ownSessionWait := beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}
+	cases := []struct {
+		name   string
+		bead   beads.Bead
+		legacy Class
+	}{
+		// The two arms GenerationOwnedSessions added.
+		{"startup-health episode", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{"session_name": "worker-1"}}, ClassWork},
+		{"startup-health episode with stray root_bead_id", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
+		{"typed wait by its own session label", ownSessionWait, ClassWork},
+		{"legacy-typed wait by its own session label", beads.Bead{Type: "wait", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassWork},
+		// Every other arm answers the same in both generations.
+		{"plain task", beads.Bead{Type: "task"}, ClassWork},
+		{"session bead", beads.Bead{Type: "session"}, ClassSessions},
+		{"wait with gc:wait", beads.Bead{Type: "gate", Labels: []string{"gc:wait", "session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassSessions},
+		{"episode carrying gc:wait", beads.Bead{Type: "startup-health-episode", Labels: []string{"gc:wait"}}, ClassSessions},
+		{"graph gate step with a session label", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1", beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
+		{"gate naming another session", beads.Bead{Type: "gate", Labels: []string{"session:s-2"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassWork},
+		{"mail message", beads.Bead{Type: "message"}, ClassMessaging},
+		{"op row", beads.Bead{Type: "op", Labels: []string{"gc:op"}}, ClassSessions},
+		{"nudge queue bead", beads.Bead{Type: "chore", Labels: []string{"gc:nudge-queue"}}, ClassNudges},
+		{"order-tracking bead", beads.Bead{Type: "task", Labels: []string{"order-tracking"}}, ClassOrders},
+		{"wisp", beads.Bead{Type: "task", Labels: []string{"gc:wisp"}}, ClassGraph},
+		{"convergence root", beads.Bead{Type: "convergence"}, ClassGraph},
+		{"synthetic convoy", beads.Bead{Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}}, ClassWork},
+		{"order run label alone", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent"}}, ClassWork},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyAt(tc.bead, GenerationLegacy); got != tc.legacy {
+				t.Errorf("ClassifyAt(%s, legacy) = %s, want %s", tc.name, got, tc.legacy)
+			}
+			if got, want := ClassifyAt(tc.bead, CurrentGeneration), Classify(tc.bead); got != want {
+				t.Errorf("ClassifyAt(%s, current) = %s, want Classify's %s", tc.name, got, want)
+			}
+		})
+	}
+	if got := ClassifyAt(ownSessionWait, CurrentGeneration+1); got != ClassSessions {
+		t.Errorf("a generation newer than this build's classified an own-session wait as %s, want the current generation's sessions", got)
+	}
+}
+
 func TestClassifyGraphPlan(t *testing.T) {
 	t.Run("nil plan is work", func(t *testing.T) {
 		if got := ClassifyGraphPlan(nil); got != ClassWork {

@@ -179,3 +179,50 @@ func TestStandingGateRefusalIsNotTransient(t *testing.T) {
 		t.Errorf("stranded-city refusal: err=%v transient=%v failsClosed=%v; want a standing, fail-closed refusal", err, isTransientStorageGateFault(err), hookDrainProbeFailsClosed(err))
 	}
 }
+
+// Upgrading a city an earlier build migrated. That build's classifier called a
+// startup-health episode and an own-session wait work, so its copy left them in
+// the work store, unlisted. They are not strands: a fence that failed closed
+// over them would stop every seat's claims on the first hook after the
+// upgrade. A real strand under the same earlier manifest still fails closed
+// (the control row).
+func TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen(t *testing.T) {
+	cases := []struct {
+		name        string
+		plant       beads.Bead
+		failsClosed bool
+	}{
+		{"startup-health episode", reclassifiedShapes()[0], false},
+		{"own-session wait without gc:wait", reclassifiedShapes()[1], false},
+		{"mail message stranded after the copy", beads.Bead{Title: "auto-handoff", Type: "message"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := migratedOneShotCLICity(t)
+			captureCLIStorageStderr(t)
+			writeLegacyManifest(t, mustResolveInfraTarget(t, cityPath, cfg))
+			if err := closeCLIStorageRoutes(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := hookSessionDrainPending(drainPendingTestSessionID); err != nil && hookDrainProbeFailsClosed(err) {
+				t.Fatalf("control: the earlier build's city is refused before anything is planted: %v", err)
+			}
+			if err := closeCLIStorageRoutes(); err != nil {
+				t.Fatal(err)
+			}
+			work, err := openCityStoreAt(cityPath)
+			if err != nil {
+				t.Fatalf("opening the work store: %v", err)
+			}
+			if _, err := work.Create(tc.plant); err != nil {
+				t.Fatalf("planting %+v: %v", tc.plant, err)
+			}
+			_ = closeBeadStoreHandle(work)
+
+			_, err = hookSessionDrainPending(drainPendingTestSessionID)
+			if got := err != nil && hookDrainProbeFailsClosed(err); got != tc.failsClosed {
+				t.Errorf("drain fence fails closed = %v, want %v (probe error: %v)", got, tc.failsClosed, err)
+			}
+		})
+	}
+}

@@ -169,7 +169,23 @@ func ReservedPrefixSplitRefusalForEdit(fs fsys.FS, tomlPath string, next *City) 
 // config it will be created with, tomlPath the file its include fragments
 // resolve against, and the remedy names renaming the city or changing the
 // source config, never a file of the city being created.
+//
+// Unlike an edit, which introduces only what it writes, a new city gets every
+// rig its config composes, so with include fragments the check runs on the
+// composed city (next's identity, the composed rigs with their patches
+// applied, and the composed [storage]): a rig declared only in a fragment
+// counts. A composed load that fails falls back to the raw check; the boot
+// gate still refuses what that misses.
 func ReservedPrefixSplitRefusalForNewCity(fs fsys.FS, tomlPath string, next *City) error {
+	if next != nil && len(next.Include) > 0 && fs != nil && tomlPath != "" {
+		if composed, _, err := LoadWithIncludes(fs, tomlPath); err == nil {
+			check := *next
+			check.Rigs = composed.Rigs
+			check.Patches.Rigs = nil
+			check.Storage = composed.Storage
+			return reservedPrefixSplitRefusal(&check, reservedPrefixFixesForNewCity)
+		}
+	}
 	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForNewCity)
 }
 

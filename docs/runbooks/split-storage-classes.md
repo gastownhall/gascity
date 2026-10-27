@@ -103,7 +103,7 @@ The checks that most often stop a real cutover, and what each wants from you:
 
 | Block | What it means | What to do |
 | --- | --- | --- |
-| `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. |
+| `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. On a city that already converged this row is a `[note]`: the migration copies nothing there, so it does not stop for them. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
 | `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing in your data: this city's work store runs on an engine that cannot report edge payloads, so this binary cannot split it. The block is permanent until the work store is on an engine that can (SQLite or native Dolt). |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
@@ -146,7 +146,10 @@ What the command does, in order:
 4. Censuses every rig's bead scope for infrastructure beads and **refuses by
    id and rig** if it finds any. The copy reads the city work store only, so a
    bead sitting in a rig scope would be left unreachable. Move those into the
-   city work store first.
+   city work store first. A city that already converged copies nothing on a
+   re-run, so the census is skipped there: the run only clears the retained
+   copies, rig beads stay as unreachable as they already were, and `gc storage
+   preflight` still names them.
 5. Copies every infrastructure bead with its id and within-class dependency
    topology preserved.
 6. Closes the destination, reopens it, and proves field-level equality against
@@ -471,6 +474,95 @@ If the city also holds a stranded write, the command names it and clears
 nothing; run `gc storage recover-stranded --from-work --fleet-stopped` first,
 then the migration again.
 
+## Upgrading a city whose storage check refuses
+
+Before `gc hook` claims work for a session, it reads that session's drain
+state from the binding. On a city whose storage check refuses (`gc storage
+status` exits non-zero), that read fails and the hook fails closed: it claims
+nothing, prints `GC_HOOK_STORE_UNAVAILABLE` on stderr, and exits 2. Builds
+before this behavior kept claiming from the work store, so a city can have
+been refused for a long time while its sessions kept working. Deploying onto
+it stops every session's claims at its next hook.
+
+So stop such a city before the new `gc` is installed, and repair it with the
+new `gc` before you start it. The `gc` you are replacing cannot finish the
+repair: its `migrate` refuses a converged city over infrastructure beads that
+rig scopes still hold, its `recover-stranded` has no per-id choices, and its
+clear matches the copy manifest by bare id, so it can delete a bead the copy
+never carried. A stopped city runs no `gc hook`, so installing the new `gc`
+while it is stopped stops no claims.
+
+```
+# before you install it, in each split city's directory, with the new build
+# (read-only, so safe on a running city):
+/path/to/new/gc storage status   # exits 0: nothing to do for this city
+# in each city where it does not exit 0:
+gc stop
+# install the new gc; then, with it, in each stopped city:
+gc storage recover-stranded --from-work --dry-run --dump /tmp/stranded.json
+# close what must not be delivered (below)
+gc storage recover-stranded --from-work --fleet-stopped
+gc storage migrate --from-work --fleet-stopped
+gc storage status        # must exit 0
+gc start
+```
+
+Recovery copies every stranded bead into the binding as it is, so an open
+message there is delivered and an open wait or session comes back to life.
+Read the dump first, and close in the work store, with `bd close <id>` from
+the city directory, any bead that must not: stale handoff mail, for example.
+A store that only timed out does not stop claims; the hook goes on and names
+the fault.
+
+On a city that already converged, the `migrate` step copies nothing: it
+clears the retained copies, and infrastructure beads that rig scopes still
+hold from before the split do not stop it.
+
+### A reused id the binding still holds
+
+The work store can mint a short id again once its own bead under that id is
+gone. If an infrastructure bead lands under such an id while the binding still
+holds the bead the migration carried under it, no copy can carry the new one:
+the id is taken. Boot and `gc storage status` name these ids, and
+`recover-stranded` lists them under `NOT RECORDED` with both beads side by
+side. Two beads are told apart by when they were created: a bead the binding
+holds under the id with the same creation time is the same bead, changed since
+it was carried, and `recover-stranded` records it instead of asking. A
+work-store bead with no creation time is the same bead when the binding's row
+under its id was copied from the work store, which the copy marks on the row.
+Decide per id which bead keeps it:
+
+| Flag | Keeps the id | Removes |
+|---|---|---|
+| `--replace-binding-row <id>` | the work store's bead, copied into the binding | the binding's bead |
+| `--drop-work-row <id>` | the binding's bead | the work store's bead |
+
+Each choice first writes the bead it removes, with every dependency edge
+touching it, to `infra.recover-choices.jsonl` at the binding root, re-reads
+the file, and only then removes anything. Those edges go with the bead: kept,
+they would point at the other bead under the same id. `--dry-run` shows both
+beads of each id without writing, and repeating a choice that already took
+effect is a no-op.
+
+### A bead the copy manifest lists by id alone
+
+A manifest written by an earlier `gc` lists some beads by id alone. When the
+binding no longer holds such a bead, the manifest may not say whether the
+work-store row is the bead the copy carried: it records no time to judge it
+by, the row has no creation time, or the row is younger than the manifest. An
+earlier `recover-stranded` added the id of every bead it copied, so the
+binding may since have delivered, closed and collected that very bead.
+`recover-stranded` moves such a row when it is closed. An open one it refuses
+and lists with its status, type, times and title, because moving a bead the
+binding already delivered would deliver it again. Decide per id:
+
+| Flag | What it does with the work-store row |
+|---|---|
+| `--move <id>` | copies it into the binding as it is |
+| `--record-carried <id>` | records it as the bead the copy carried; `migrate` then clears it, and the clear's backup keeps it |
+
+`--dry-run` and `--dump` list these rows without writing.
+
 ## Watching a cutover from outside
 
 A boot that reaches a verdict about the binding publishes one
@@ -751,3 +843,10 @@ proven-copy manifest.
 - A check that could not run is reported as a failed check, not as a city that
   never converged, and the boot refuses rather than serving from a binding it
   could not verify.
+
+The manifest also records which rules decided what counts as infrastructure
+when the copy ran, and every later check classifies the work store by those
+rules. A newer `gc` that counts more kinds of bead as infrastructure, such as
+startup-health episodes, does not report the ones an earlier copy left in the
+work store as stranded. They stay where that copy left them, and no check
+names them.

@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -383,7 +384,8 @@ func TestStorageRecoverStrandedRecordsAResidueLeftByAnUnwritableBindingRoot(t *t
 
 // TestStorageRecoverStrandedRefusesToRecordAResidueItCannotProve is the other
 // side of the residue fold: a row the binding holds under an id the source also
-// holds is recorded ONLY if it is provably the source's row.
+// holds is recorded ONLY if it is provably the source's bead — the same id,
+// created in the same second (infraHeldRowIsThisBead).
 //
 // The manifest's meaning is "the copy was proven to deliver this id". Folding in
 // an id whose binding row is a different bead would record a proof nobody made,
@@ -396,8 +398,8 @@ func TestStorageRecoverStrandedRefusesToRecordAResidueItCannotProve(t *testing.T
 	cityPath, cfg, source, target := convergedRecoveryCity(t)
 	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
 
-	// A row under the same id that is NOT the source's row: what an id
-	// collision, or a hand-repair, leaves behind.
+	// A row under the same id that is NOT the source's bead, created at
+	// another time: what an id collision leaves behind.
 	binding := openMigratedDestination(t, target)
 	creator, ok := binding.(beads.ForeignIDCreator)
 	if !ok {
@@ -405,6 +407,8 @@ func TestStorageRecoverStrandedRefusesToRecordAResidueItCannotProve(t *testing.T
 	}
 	divergent := infraMigrationRow(stranded)
 	divergent.Title = "a different bead that happens to share the id"
+	divergent.CreatedAt = stranded.CreatedAt.Add(-time.Hour)
+	divergent.UpdatedAt = divergent.CreatedAt
 	if _, err := creator.CreateWithForeignID(divergent); err != nil {
 		t.Fatalf("seeding the divergent row: %v", err)
 	}

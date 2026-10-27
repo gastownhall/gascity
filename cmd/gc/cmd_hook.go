@@ -73,8 +73,7 @@ locked database, a work store the storage gate could not read) fails open:
 the hook proceeds, names the fault on stderr, and records a
 session.drain_fence_unavailable event. A standing storage refusal (the city's
 storage gate refuses to serve its relocated classes, for example a retained
-work store holding infrastructure beads the binding cannot read, or a
-city.toml that does not load on a city that may be split) fails closed:
+work store holding infrastructure beads the binding cannot read) fails closed:
 nothing is claimed or served, GC_HOOK_STORE_UNAVAILABLE is printed on stderr
 with the refusal, the hook exits 2, and the event says the fence failed
 closed.

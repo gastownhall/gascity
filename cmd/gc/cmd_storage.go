@@ -381,9 +381,10 @@ func resolveStorageOperatorRequest() (storageOperatorRequest, error) {
 //
 // Structural validation first, because a plan boot would refuse must not be
 // migrated toward; then the writers, because a copy of a moving source proves
-// nothing; then the guard, because two migrators are worse than one; then the
-// rig census, because a bead this city's own scopes hold outside the work store
-// is one the copy will never see; and only then the copy itself.
+// nothing; then the guard, because two migrators are worse than one; then,
+// unless the city already converged and nothing is copied, the rig census,
+// because a bead this city's own scopes hold outside the work store is one the
+// copy will never see; and only then the copy itself.
 func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) int {
 	const logPrefix = "gc storage migrate"
 
@@ -438,9 +439,19 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		}
 	}()
 
-	if err := censusRigInfraResidue(request.CityPath, request.Cfg); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
+	// The rig census guards a COPY: a bead a rig scope holds is one the copy
+	// never sees. A city that already converged copies nothing on this run —
+	// it re-checks containment and clears the retained copies — so a rig row
+	// is exactly as unreachable after it as before, and refusing over one
+	// would put the clear, the only step that ends the retained copies boot
+	// refuses over, out of reach. `gc storage preflight` still names those
+	// rows. A state that cannot be read is censused, and the migration below
+	// reports the read.
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
+		if err := censusRigInfraResidue(request.CityPath, request.Cfg); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	from := infraMigrationFromWork
@@ -520,6 +531,12 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			fmt.Fprintf(stdout, "boot plan: REFUSED — a city boot would not serve this configuration: %v\n", planErr) //nolint:errcheck // best-effort stdout
 			exitCode = 1
 		}
+		// Boot refuses a split city whose HQ or rig prefix is a reserved
+		// class prefix (R10) before it resolves a plan.
+		if err := config.ReservedPrefixSplitRefusal(request.Cfg); err != nil {
+			fmt.Fprintf(stdout, "boot plan: REFUSED — a city boot would not serve this configuration: %v\n", err) //nolint:errcheck // best-effort stdout
+			exitCode = 1
+		}
 	}
 
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
@@ -591,13 +608,29 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A converged city's work store is counted under its manifest's classifier
+	// generation, the one every verdict below judges it by: rows the copy's
+	// classifier left as work are not infrastructure that city retains.
+	var manifest infraCopyManifest
+	recorded := false
+	if state == infraConvergenceMarked {
+		manifest, recorded, err = readInfraCopyManifestRecord(target)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+	generation := coordclass.CurrentGeneration
+	if recorded {
+		generation = manifest.Generation
+	}
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
-	rows, err := readInfraSnapshot(source)
+	rows, err := readInfraSnapshotAt(source, generation)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -638,11 +671,6 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	}
 	reportBindingRelics(target, logPrefix, stdout, stderr)
 
-	manifest, recorded, err := readInfraCopyManifestRecord(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if !recorded {
 		fmt.Fprintln(stdout, "converged: yes (no proven-copy manifest, so stranded-write detection is off for this city)") //nolint:errcheck // best-effort stdout
 		return exitCode
@@ -661,6 +689,9 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		// an operator would reach for after a non-zero `gc storage status` said
 		// nothing about how to make it zero again.
 		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
+		if len(gap.HeldDifferent) > 0 {
+			fmt.Fprintf(stdout, "  held for a different bead: %s\n  %s\n", strings.Join(gap.HeldDifferent, ", "), infraHeldDifferentAdvice(gap.HeldDifferent)) //nolint:errcheck // best-effort stdout
+		}
 		return 1
 	}
 	note, notePresent, err := readInfraClearedNote(request.CityPath)
@@ -682,6 +713,12 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "  retained ids: %s\n", infraStrandedIDList(gap.Retained)) //nolint:errcheck // best-effort stdout
 		// The same refusal boot makes: a second row under an id the binding
 		// owns is served to every reader that reaches the work store first.
+		// The clear removes only the copies the manifest records, so the
+		// others are named with the command that records them.
+		if len(gap.Unrecorded) > 0 {
+			fmt.Fprintf(stdout, "  unrecorded ids: %s\nblocking invariant: the work store still holds copies of beads the binding owns, and readers that reach it first are served the frozen copy. The copy manifest does not record %d of them as beads the copy carried, and the clear removes only the copies it records. Stop the city, record them with `%s`, then clear them with `%s`\n", infraStrandedIDList(gap.Unrecorded), len(gap.Unrecorded), storageRecoveryInstruction(), storageClearInstruction()) //nolint:errcheck // best-effort stdout
+			return 1
+		}
 		fmt.Fprintf(stdout, "blocking invariant: the work store still holds copies of beads the binding owns, and readers that reach it first are served the frozen copy. Stop the city and clear them with `%s`\n", storageClearInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
@@ -826,8 +863,9 @@ func cityMigrationGuardDirectory(cityPath string) string {
 // census. Overridden by tests, which have no real rig workspaces to open.
 var openStorageScopeStore = openStoreAtForCity
 
-// censusRigInfraResidue refuses a migration while any rig scope holds a bead
-// this migration classifies as infrastructure.
+// censusRigInfraResidue refuses a copy while any rig scope holds a bead this
+// migration classifies as infrastructure. A city that already converged copies
+// nothing and is not censused (doStorageMigrate).
 //
 // The copy's source is the CITY work store, and every later boot re-checks
 // containment against that same store. A rig scope is neither: an

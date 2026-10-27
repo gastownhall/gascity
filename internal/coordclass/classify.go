@@ -118,8 +118,37 @@ const (
 // before the broad workflow arm (which matches any bead carrying gc.root_bead_id)
 // exactly as policyNameForBead does, so a tracker or session bead is never
 // misrouted to ClassGraph.
+//
+// Classify applies CurrentGeneration; ClassifyAt applies an earlier one.
 func Classify(b beads.Bead) Class {
-	return classifyFields(b.Type, b.Labels, b.Metadata, nil)
+	return ClassifyAt(b, CurrentGeneration)
+}
+
+// Generation numbers the classifier's rules. It advances whenever a change
+// moves a bead shape that already exists off ClassWork, so a record of what an
+// earlier generation selected can be re-read under the rules it was written
+// with. The storage migration's copy manifest records the generation its copy
+// classified with, and the checks judged against that manifest select
+// work-store rows with that generation (cmd/gc/infra_copy_manifest.go): a
+// later widening cannot turn rows the copy deliberately left as work into
+// strands.
+type Generation int
+
+const (
+	// GenerationLegacy is every classifier before GenerationOwnedSessions.
+	GenerationLegacy Generation = 1
+	// GenerationOwnedSessions moves two session-owned shapes off ClassWork to
+	// ClassSessions: a startup-health episode, and a wait-typed bead whose
+	// session:<session_id> label names its own session (isOwnSessionWait).
+	GenerationOwnedSessions Generation = 2
+	// CurrentGeneration is the generation Classify applies.
+	CurrentGeneration = GenerationOwnedSessions
+)
+
+// ClassifyAt returns the class generation gen of the classifier gives b. A
+// generation this build does not know yet classifies as CurrentGeneration.
+func ClassifyAt(b beads.Bead, gen Generation) Class {
+	return classifyFields(b.Type, b.Labels, b.Metadata, nil, gen)
 }
 
 // ClassifyGraphPlan returns the [Class] for an entire graph-apply plan. A
@@ -134,7 +163,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 		return ClassWork
 	}
 	for _, node := range plan.Nodes {
-		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs) == ClassGraph {
+		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs, CurrentGeneration) == ClassGraph {
 			return ClassGraph
 		}
 	}
@@ -145,7 +174,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 			break
 		}
 	}
-	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs)
+	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs, CurrentGeneration)
 }
 
 // classifyFields is the shared decision used by both Classify and
@@ -155,8 +184,9 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 // for a beads.Bead, whose metadata is already merged into a single map; the
 // workflow arm consults both maps so a graph step node whose only
 // gc.root_bead_id marker lives in MetadataRefs routes to ClassGraph, matching
-// the storage-tier policyNameForGraphPlan classifier.
-func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string) Class {
+// the storage-tier policyNameForGraphPlan classifier. gen gates the arms a
+// later Generation added.
+func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string, gen Generation) Class {
 	switch {
 	// The order-tracking exclusion is the one deliberate divergence from
 	// cmd/gc's policyNameForBead, and it fixes a real collision rather than
@@ -186,7 +216,7 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 	// carries no session label, so without this arm it fell to the work
 	// default: migration left it in the work store and quarantine reset at
 	// cutover. Ahead of the workflow arm, like the session arm.
-	case beadType == typeStartupHealthEpisode:
+	case gen >= GenerationOwnedSessions && beadType == typeStartupHealthEpisode:
 		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions
@@ -215,7 +245,7 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 	// single-store cities in production (or-l50geh, pl-vm0tw, tr-b6glw). An
 	// arm would move them to orders and make `gc bd create` refuse them on a
 	// split city.
-	case isOwnSessionWait(beadType, labels, metadata):
+	case gen >= GenerationOwnedSessions && isOwnSessionWait(beadType, labels, metadata):
 		return ClassSessions
 	default:
 		return ClassWork
