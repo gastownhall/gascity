@@ -94,6 +94,12 @@ concrete session's work wins over a template fallback. Stop reading stores once
 the first identity (the session id, when known) has a match, and keep a store's
 partial rows instead of dropping the store.
 
+Both the cached and the live lookup skip cache-cold rigs (rigs suspended by
+effective state, `cacheColdRigNames`). Such a rig has no cache, so a read goes
+to bd and restarts its retired proxy and Dolt, once per session row. Its
+in-progress work is not reported as a session's active bead, the same trade-off
+`statusWorkCounts` makes for its counts.
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves
