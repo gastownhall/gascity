@@ -26,14 +26,15 @@ import (
 // Start refusal causes, beside the shared ones (causeRouteUnknown,
 // causeLivenessUnknown, causeNotPresent). A refusal backs the row off (P4).
 const (
-	causeTemplate       = "template-unresolved"
-	causeAlreadyRunning = "already-running"
-	causeTokenDrift     = "token-drift"
-	causeNewerSelf      = "newer-self"
-	causeOccupied       = "occupied"
-	causeAttribution    = "attribution-unknown"
-	causeDead           = "dead" // C5a3 classifies and recycles
-	causePrepare        = "prepare"
+	causeTemplate        = "template-unresolved"
+	causeAlreadyRunning  = "already-running"
+	causeTokenDrift      = "token-drift"
+	causeNewerSelf       = "newer-self"
+	causeLiveIncarnation = "live-incarnation" // #2081: this session's live runtime at another epoch
+	causeOccupied        = "occupied"
+	causeAttribution     = "attribution-unknown"
+	causeDead            = "dead" // C5a3 classifies and recycles
+	causePrepare         = "prepare"
 )
 
 // adoptSections are the adopt's one section: the verb, which never

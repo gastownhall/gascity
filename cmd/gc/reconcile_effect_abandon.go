@@ -278,12 +278,14 @@ func ownTeardown(v txView) (teardown, string) {
 }
 
 // rollbackRuntime is C3's attribution of a pending create's fresh read: stop
-// for its own runtime (O2's own-runtime test, or C8.2(a)'s bead-scoped name,
-// stopped whatever its identity, SESS-091); neither for nothing running, a
-// corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
-// without a stop, a stale epoch included, S7); else the cause that holds.
-// A corpse counts stopped; the teardown removes it (ownTeardown), so a
-// crash-looping pool create's corpses do not pile up.
+// for its own runtime (O2's own-runtime test) or another session's runtime
+// under C8.2(a)'s bead-scoped name (stopped whatever its identity,
+// SESS-091); neither for nothing running, a corpse (C8.8 counts it stopped)
+// or another row's runtime on a name it owns (F3: rolled back without a
+// stop); else the cause that holds — a live runtime of this session at
+// another epoch first among them, an incarnation the rollback never stops
+// nor closes over (#2081). A corpse counts stopped; the teardown removes it
+// (ownTeardown), so a crash-looping pool create's corpses do not pile up.
 func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
 	switch rt.Class {
 	case rtUnsupported:
@@ -295,12 +297,16 @@ func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) 
 	}
 	v := compareIdentity(row, rt.Identity)
 	switch {
-	case ownsName(row, row.SessionName), ownRuntime(v, row, rt.Identity):
+	case ownRuntime(v, row, rt.Identity):
 		return true, ""
-	case v == identityForeign, v == identityStaleSelf:
-		return false, ""
 	case v == identityNewerSelf:
 		return false, causeNewerSelf
+	case v == identityStaleSelf: // an epoch below the row's generation: the own one left with the case above
+		return false, causeLiveIncarnation
+	case ownsName(row, row.SessionName):
+		return true, ""
+	case v == identityForeign:
+		return false, ""
 	}
 	return false, causeAttribution
 }
