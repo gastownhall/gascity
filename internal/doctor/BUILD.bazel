@@ -124,6 +124,7 @@ go_test(
         "checks_rig_worktrees_test.go",
         "checks_semantic_test.go",
         "checks_service_secrets_test.go",
+        "checks_split_store_proxied_test.go",
         "checks_ssh_keepalive_test.go",
         "checks_supervisor_binary_test.go",
         "checks_supervisor_http_test.go",

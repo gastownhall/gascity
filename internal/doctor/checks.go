@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
@@ -1061,9 +1062,37 @@ func activeBDStoreFromMetadata(path string) (string, string) {
 		return "metadata.json dolt_mode=" + mode, "dolt"
 	case "embedded", "local":
 		return "metadata.json dolt_mode=" + mode, "embeddeddolt"
+	case "proxied-server":
+		if proxiedRootIsScopeDoltDir(filepath.Dir(path)) {
+			return "metadata.json dolt_mode=" + mode, "dolt"
+		}
+		return "metadata.json dolt_mode=" + mode, ""
 	default:
 		return mode, ""
 	}
+}
+
+// proxiedRootIsScopeDoltDir reports whether bd roots a proxied-server scope's
+// proxy at that scope's own .beads/dolt. Unlike server and embedded, the
+// proxied-server mode alone does not say which local directory bd reads: its
+// root moves with BEADS_PROXIED_SERVER_ROOT_PATH, the sidecar's root_path,
+// shared-server mode, BEADS_DOLT_DATA_DIR and metadata.json's dolt_data_dir, so
+// the check resolves bd's root (proxyendpoint.ProviderRoot) instead of mapping
+// the mode. Any root elsewhere, or a resolver error such as a malformed sidecar
+// (reported by the proxied endpoint check), leaves the active store unknown.
+//
+// ProviderRoot does not mirror two of bd's arms: dolt.shared-server declared in
+// config.yaml, and the legacy absolute `database` key. A scope relying on either
+// resolves to .beads/dolt here and is named active rather than unknown. gc-owned
+// scopes are unaffected because gc projects BEADS_DOLT_SHARED_SERVER=0 into
+// every bd it runs; a user-managed bd scope using either arm can be
+// misattributed.
+func proxiedRootIsScopeDoltDir(beadsDir string) bool {
+	root, err := proxyendpoint.ProviderRoot(filepath.Dir(beadsDir))
+	if err != nil || root == "" {
+		return false
+	}
+	return pathutil.NormalizePathForCompare(root) == pathutil.NormalizePathForCompare(filepath.Join(beadsDir, "dolt"))
 }
 
 func sameDoctorScope(a, b string) bool {
