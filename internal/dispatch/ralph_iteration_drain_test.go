@@ -213,6 +213,69 @@ func drainServeHeld(t *testing.T, fx crashFixture) {
 	t.Fatal("serving never quiesced into the drain hold")
 }
 
+// TestCompiledRalphIterationDrainControlBlocksLiveMember pins AC-2: through
+// the hold, the ralph control stays open with no attempt spent — no
+// gc.attempt_log, no check has fired — parked behind a blocks edge on the
+// claimed member, which keeps running with its assignee.
+func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
+	t.Parallel()
+	for _, tc := range drainUnforcedAbortStores() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
+			all := drainStoreAll(t, fx.store)
+			b := drainBeadByRefSuffix(t, all, "loop.iteration.1.b")
+			drainClaimed(t, fx.store, b)
+			a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
+			if err := updateMetadataAndClose(fx.store, a.ID, workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+
+			drainServeHeld(t, fx.crashFixture)
+
+			all = drainStoreAll(t, fx.store)
+			control := drainBeadByRefSuffix(t, all, ".loop")
+			if control.Status != "open" {
+				t.Fatalf("ralph control status = %s, want open (no verdict yet)", control.Status)
+			}
+			if log := control.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+				t.Errorf("ralph control gc.attempt_log = %s, want empty: the check must not fire before the iteration drains", log)
+			}
+			bAfter := drainBeadByID(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b").ID)
+			if bAfter.Status != "in_progress" || bAfter.Assignee != "pool-worker" {
+				t.Errorf("worker B = %s/%s, want still claimed in_progress by pool-worker", bAfter.Status, bAfter.Assignee)
+			}
+			if !drainBlocksOn(t, fx.store, control, bAfter.ID) {
+				t.Errorf("ralph control %s has no blocks edge on the live member %s", control.ID, bAfter.ID)
+			}
+		})
+	}
+}
+
+// drainBlocksOn reports whether blocker carries a blocks edge on targetID.
+func drainBlocksOn(t *testing.T, store beads.Store, blocker beads.Bead, targetID string) bool {
+	t.Helper()
+	deps, err := store.DepList(blocker.ID, "down")
+	if err != nil {
+		t.Fatalf("listing deps of %s: %v", blocker.ID, err)
+	}
+	for _, dep := range deps {
+		if dep.Type == "blocks" && dep.DependsOnID == targetID {
+			return true
+		}
+	}
+	return false
+}
+
+func drainBeadByID(t *testing.T, store beads.Store, id string) beads.Bead {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("loading %s: %v", id, err)
+	}
+	return b
+}
+
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
 // of iteration 1 fails — with a transient failure class, or a bare close the
 // abort_scope contract counts as failed — while worker B is claimed and
