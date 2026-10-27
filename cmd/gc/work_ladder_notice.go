@@ -13,6 +13,11 @@ package main
 // work-ladder:<token>:<bead>[/<store>]:<episode>:<ordinal> (the entry's Since
 // in Unix nanoseconds, and its Attempts+Paused after the nudge), so no key
 // ever recurs. Otherwise the nudge is delivered as before (ladderDeliver).
+// A route that cannot be read (the lane's op store, or the seat's runtime
+// row) refuses the nudge, as a seat that cannot take one does: its attempt
+// lands, is re-counted as paused, and reported (work.nudge_failed, with the
+// nudge_refused alert at the third refusal in a row), so the seat stays paced
+// and the recycle, release and alerts decided with the nudge still run.
 //
 // The commit that reserves a lane nudge's attempt stamps the entry with a
 // notice mark naming the op (workladder.NoticeMark). While the mark stands
@@ -69,13 +74,18 @@ var (
 )
 
 // ladderRoute is how one seat's nudges are delivered this pass: as notices
-// through lane, whose op store is st, or, with lane nil, directly.
+// through lane, whose op store is st; with lane nil, directly; or, when the
+// route could not be read (err), not at all: the nudge is refused.
 type ladderRoute struct {
 	lane plannerNoticeLane
 	st   *opjournal.Store
+	err  error
 }
 
 func (r *ladderRoute) viaLane() bool { return r != nil && r.lane != nil }
+
+// unreadable reports whether the route could not be read.
+func (r *ladderRoute) unreadable() bool { return r != nil && r.err != nil }
 
 // ladderNoticeResult is what a pass read of a marked notice: still pending,
 // or its fate, with the reason its event or log carries, and the generation
@@ -89,12 +99,16 @@ type ladderNoticeResult struct {
 }
 
 // ladderSettled is a fate a commit folded into the cell: the entry as it
-// landed, the mark it cleared, and whether it raised the refusal alert.
+// landed, the mark it cleared, the attempt and generation the mark was
+// reserved at (the entry's count and the cell's generation before the fold),
+// and whether it raised the refusal alert.
 type ladderSettled struct {
-	res   ladderNoticeResult
-	entry workladder.Entry
-	mark  workladder.NoticeMark
-	alert bool
+	res     ladderNoticeResult
+	entry   workladder.Entry
+	mark    workladder.NoticeMark
+	attempt int
+	gen     int64
+	alert   bool
 }
 
 // noticeLane is the lane planner notices for the pass's sessions store go to
@@ -121,9 +135,21 @@ func (p *ladderPass) opStore() (*opjournal.Store, error) {
 	return p.ops, p.opsErr
 }
 
-// route is row's delivery route: the lane when a host executes message and
-// serves the seat, else direct.
-func (p *ladderPass) route(row beads.Bead) (ladderRoute, error) {
+// route is row's delivery route this pass (readRoute), or the error that kept
+// it from being read: then the seat's nudge is refused (routeRefused).
+func (p *ladderPass) route(row beads.Bead) *ladderRoute {
+	r, err := p.readRoute(row)
+	if err != nil {
+		p.routeFailed(row, err)
+		return &ladderRoute{err: err}
+	}
+	p.routeRecovered(row)
+	return &r
+}
+
+// readRoute reads row's delivery route: the lane when a host executes message
+// and serves the seat, else direct.
+func (p *ladderPass) readRoute(row beads.Bead) (ladderRoute, error) {
 	lane := p.noticeLane()
 	if lane == nil {
 		return ladderRoute{}, nil
@@ -143,14 +169,26 @@ func (p *ladderPass) route(row beads.Bead) (ladderRoute, error) {
 }
 
 // routeFailed logs that row's route could not be read, at most once per
-// laneErrorLogInterval: the seat gets no nudge this pass.
+// laneErrorLogInterval: the seat's nudge is refused.
 func (p *ladderPass) routeFailed(row beads.Bead, err error) {
 	if lane := p.noticeLane(); lane != nil {
 		if _, logNow := lane.noticeFailed(ladderRouteTallyKey(row.ID)); !logNow {
 			return
 		}
 	}
-	fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its notice route: %v; no nudge this pass\n", row.ID, err) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its notice route: %v; its nudge is refused\n", row.ID, err) //nolint:errcheck // best-effort stderr
+}
+
+// routeRefused reports nudge n, whose attempt landed while its seat's route
+// could not be read (err): it was never sent, so, as a nudge the seat could
+// not take, it is re-counted as paused, with work.nudge_failed and the
+// nudge_refused alert at the third refusal in a row.
+func (p *ladderPass) routeRefused(row beads.Bead, n workladder.Nudge, gen int64, err error) {
+	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused, Reason: "notice route unreadable: " + err.Error()}
+	p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
+	if !n.Paused && p.refused(row.ID, n) {
+		p.event(events.WorkEscalated, row, n.Key, gen, workLadderEventFields{Reason: workladder.AlertNudgeRefused})
+	}
 }
 
 // routeRecovered clears row's route-failure tally.
@@ -310,13 +348,13 @@ func foldLadderNotices(r workladder.Record, outs []ladderNoticeResult) (workladd
 		if i < 0 {
 			continue
 		}
-		m := r.Entries[i].Notice
+		m, attempt := r.Entries[i].Notice, r.Entries[i].Attempts
 		next, alert, ok := workladder.SettleNotice(r, o.op, o.fate)
 		if !ok {
 			continue
 		}
 		r = next
-		settled = append(settled, ladderSettled{res: o, entry: r.Entries[i], mark: m, alert: alert})
+		settled = append(settled, ladderSettled{res: o, entry: r.Entries[i], mark: m, attempt: attempt, gen: r.Gen, alert: alert})
 	}
 	return r, settled
 }
@@ -339,14 +377,17 @@ func droppedMarks(prev, next workladder.Record) []string {
 // noticeSettled reports a fate the commit folded in: work.nudged for a
 // notice that reached the seat, work.nudge_failed (and the refusal alert at
 // the third in a row) for one that failed or was refused, a log line for one
-// withdrawn. The events carry the generation the notice was scoped to, not
+// withdrawn. As a direct nudge's, the events carry the attempt the notice was
+// reserved as, not one a refusal re-counted, and the generation it was
+// scoped to (the cell's before the fold when the op could not be read), not
 // the one the fold landed at.
-func (p *ladderPass) noticeSettled(row beads.Bead, gen int64, s ladderSettled) {
+func (p *ladderPass) noticeSettled(row beads.Bead, s ladderSettled) {
+	gen := s.gen
 	if s.res.gen > 0 {
 		gen = s.res.gen
 	}
 	e := s.entry
-	fields := workLadderEventFields{Kind: e.Kind.String(), Rung: e.Rung.String(), Attempt: e.Attempts, Paused: s.mark.Paused}
+	fields := workLadderEventFields{Kind: e.Kind.String(), Rung: e.Rung.String(), Attempt: s.attempt, Paused: s.mark.Paused}
 	switch s.res.fate {
 	case workladder.NoticeDelivered:
 		p.event(events.WorkNudged, row, e.Key, gen, fields)

@@ -315,28 +315,12 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	outs := p.noticeOutcomes(row, prev, ladderGate(info, row.Metadata, p.now))
 	folded, _ := foldLadderNotices(prev, outs)
 	hold := map[workladder.ClaimKey]bool{}
-	var route *ladderRoute
-	routeTried := false
 	var d workladder.Decision
-	for range len(targets) + 2 { // each round settles a re-read or the route: work gone is dropped, work unreadable waits
+	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
 		d = decideWorkLadder(folded, p.observe(info, row.Metadata, folded, targets, hold, live))
 		gone, held := recheckActed(d, targets, hold)
 		if len(gone) == 0 && len(held) == 0 {
-			n, nudges := ladderNudgeOf(d)
-			if !nudges || route != nil {
-				break
-			}
-			if !routeTried {
-				routeTried = true
-				r, err := p.route(row)
-				if err == nil {
-					p.routeRecovered(row)
-					route = &r
-					break
-				}
-				p.routeFailed(row, err)
-			}
-			held = map[workladder.ClaimKey]bool{n.Key: true} // a route that cannot be read: no nudge for the seat this pass
+			break
 		}
 		targets = slices.DeleteFunc(targets, func(t ladderTarget) bool { return gone[t.work.Key] })
 		for k := range held {
@@ -345,6 +329,10 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	}
 	if !d.Changed && len(d.Actions) == 0 && len(outs) == 0 {
 		return
+	}
+	var route *ladderRoute
+	if _, nudges := ladderNudgeOf(d); nudges {
+		route = p.route(row)
 	}
 	landed, ok := p.commit(row, targets, hold, live, outs, route)
 	if !ok {
@@ -582,7 +570,8 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 // a nudge that lands on the lane route is marked with the op it reserves. A
 // nudge lands only on a pass that resolved its route (route non-nil): on
 // another, its key is held and the decision taken again, and a release that
-// decision newly writes is re-proved like any other.
+// decision newly writes is re-proved like any other. A route that could not
+// be read lands its nudge unmarked, for act to refuse.
 func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime, outs []ladderNoticeResult, route *ladderRoute) (ladderLanded, bool) {
 	id := row.ID
 	landed := ladderLanded{row: row}
@@ -640,7 +629,7 @@ func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[wor
 				}
 				fmt.Fprintf(p.l.stderr, "work-ladder: %s: deriving its notice about %s: %v\n", id, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
 			}
-			hold[n.Key] = true // no route read for this row, or no op id for its notice: no nudge this pass
+			hold[n.Key] = true // no route resolved for this row, or no op id for its notice: no nudge this pass
 			d = decideWorkLadder(prev, obs)
 		}
 		landed = ladderLanded{d: d, row: freshRow, settled: settled, dropped: droppedMarks(prev, d.Next), mark: mark}
@@ -690,13 +679,13 @@ func newRelease(prev workladder.Record, d workladder.Decision) (workladder.Claim
 
 // act performs what landed: the settled notices' events and the dropped
 // marks' withdrawals, the releases (a claim given back needs no nudge), then
-// the nudge (a lane notice when its attempt landed marked, else direct), the
-// recycle and the alerts.
+// the nudge (a lane notice when its attempt landed marked, refused when its
+// route could not be read, else direct), the recycle and the alerts.
 func (p *ladderPass) act(l ladderLanded, route *ladderRoute) {
 	row, d := l.row, l.d
 	gen := d.Next.Gen
 	for _, s := range l.settled {
-		p.noticeSettled(row, gen, s)
+		p.noticeSettled(row, s)
 	}
 	p.withdrawDropped(row, l.dropped)
 	released := map[workladder.ClaimKey]ladderReleaseOutcome{}
@@ -726,6 +715,8 @@ func (p *ladderPass) act(l ladderLanded, route *ladderRoute) {
 				p.settleMark(row.ID, l.mark.Op, workladder.NoticeWithdrawn)
 			case !l.mark.IsZero() && e.Notice.Op == l.mark.Op:
 				p.proposeNotice(row, a, e, gen, l.mark, route)
+			case route.unreadable():
+				p.routeRefused(row, a, gen, route.err)
 			default:
 				p.nudge(row, a, gen, refusedOf(d.Next, a.Key))
 			}
