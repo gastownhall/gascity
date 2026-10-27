@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -155,10 +156,19 @@ type ralphDrainFixture struct {
 
 // buildRalphDrainFixture cooks the drain formula on the store tc opens. The
 // check passes from iteration checkPassFrom on (0: never), so a drained
-// failed iteration iterations until the budget is spent.
+// failed iteration iterations until the budget is spent. Each call is a
+// fresh city; a caller that rebuilds the fixture for write-by-write
+// comparison must create the city once (newRalphDrainCity) and use
+// cookRalphDrainFixture, or the ledger's gc.formula_source paths diverge.
 func buildRalphDrainFixture(t *testing.T, tc drainStoreCase, formulaText string, checkPassFrom int) ralphDrainFixture {
 	t.Helper()
 	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, checkPassFrom)
+	return cookRalphDrainFixture(t, tc, city)
+}
+
+// cookRalphDrainFixture cooks one shared drain city on the store tc opens.
+func cookRalphDrainFixture(t *testing.T, tc drainStoreCase, city compiledRalphCity) ralphDrainFixture {
+	t.Helper()
 	base, mem := tc.open(t)
 	cooked, err := molecule.Cook(context.Background(), base, city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
@@ -679,5 +689,85 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 				drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
 			})
 		}
+	}
+}
+
+// TestCrashInjectionCompiledRalphIterationDrain proves the drain gate is
+// crash-safe and idempotent over its own write window: a dispatcher killed
+// at, or failing, any store write of the abort that closes the body, the gate
+// pass that parks the control, and the verdict that ends iteration 1
+// converges on the uninterrupted end state — the aborted iteration drains,
+// exactly one iteration 2 follows, the control carries its drain edge, and
+// the loop exhausts as before the gate. The unforced route (MemStore) and the
+// forced-settle route (the bd close-policy double) are both covered.
+//
+// The fault window stops at the first attach create: molecule's
+// crash-recovery of a partially attached iteration does not rebuild the
+// children a crash cut short (adoptExistingAttach adopts whatever exists),
+// a gap that predates the drain gate and is out of scope here.
+func TestCrashInjectionCompiledRalphIterationDrain(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []crashScenario{
+		iterationDrainCrashScenario(t, "unforced-abort", drainUnforcedAbortStores()[0], compiledRalphDrainFormula),
+		iterationDrainCrashScenario(t, "forced-settle", drainForcedSettleStores()[0], compiledRalphDrainFanoutFormula),
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runCrashScenario(t, tc)
+		})
+	}
+}
+
+// iterationDrainCrashScenario builds the #2519 drain shape for the crash
+// harness: worker A already failed, worker B claimed, and a pool worker that
+// closes the claim — and every ready work bead after it, iterations included
+// — once the dispatcher has nothing left to retry. The on_complete source must
+// close with the output the fanout contract requires, so worker passes carry
+// an empty items payload (the fanout of the failed worker never expands).
+func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, formulaText string) crashScenario {
+	t.Helper()
+	// One city for every rebuild: the formula source path is ledger metadata,
+	// so per-build cities would differ from the uninterrupted run's.
+	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, 0)
+	return crashScenario{
+		name: name,
+		// The gate's fault window only: the sweep stops at the first
+		// molecule.Attach create, whose partial-attach recovery is out of
+		// scope (see the test comment).
+		stopWritesBeforePrefix: "Create",
+		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
+			fx := cookRalphDrainFixture(t, tc, city)
+			all := drainStoreAll(t, fx.store)
+			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
+			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+			fx.work = compiledRalphWorker(fx.store, fx.rootID, func(string, int) map[string]string {
+				return map[string]string{
+					beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+					beadmeta.OutputJSONMetadataKey: `{"items":[]}`,
+				}
+			})
+			fx.dispatch = wrap(fx.store)
+			return fx.crashFixture
+		},
+		check: func(t *testing.T, ledger []ledgerBead) {
+			control := ledgerBeadByRefSuffix(t, ledger, ".loop")
+			if control.Status != "closed" || control.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("uninterrupted run: ralph control = %s/%s, want closed/fail after exhausting its attempts", control.Status, control.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			if got := control.Metadata[beadmeta.FailedAttemptMetadataKey]; got != "3" {
+				t.Fatalf("uninterrupted run: ralph gc.failed_attempt = %q, want 3", got)
+			}
+			b := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.b")
+			if !slices.Contains(control.Blocks, "blocks:"+b.ID) {
+				t.Errorf("uninterrupted run: ralph control has no drain edge on %s", b.ID)
+			}
+			body2 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.2")
+			if body2.Status != "closed" {
+				t.Errorf("uninterrupted run: iteration 2 = %s, want closed", body2.Status)
+			}
+		},
 	}
 }
