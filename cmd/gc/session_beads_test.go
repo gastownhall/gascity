@@ -10723,3 +10723,62 @@ func TestFailedCreateCloseClearsTheHolds(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncSessionBeads_ClaudeAgentsSharingWorkDirEachGetSessionKey reproduces
+// ga-k98e78 (gastownhall/gascity#5439): two supervisor-created claude sessions
+// sharing one work_dir must each carry a distinct session_key, resolved through
+// the real builtin claude provider, and start with --session-id <that key>, so
+// `gc session logs` never falls back to the ambiguous workdir match.
+func TestSyncSessionBeads_ClaudeAgentsSharingWorkDirEachGetSessionKey(t *testing.T) {
+	store, ds, workDir := syncSharedWorkDirClaudeSessions(t)
+	got := allSessionBeads(t, store)
+	seen := map[string]bool{}
+	for _, b := range got {
+		key := b.Metadata["session_key"]
+		if key == "" {
+			t.Fatalf("session %s (%s) has no session_key on shared work_dir %q", b.ID, b.Metadata["template"], workDir)
+		}
+		if seen[key] {
+			t.Fatalf("session_key %q shared by two sessions", key)
+		}
+		seen[key] = true
+		tp := ds[b.Metadata["template"]]
+		if cmd := resolveSessionCommand(tp.Command, key, "", tp.ResolvedProvider, true, false); !strings.HasSuffix(cmd, " --session-id "+key) {
+			t.Fatalf("session %s first-start command = %q, want it to end in --session-id %s", b.ID, cmd, key)
+		}
+	}
+}
+
+// syncSharedWorkDirClaudeSessions creates, through one syncSessionBeads tick,
+// the rows of two agents ("alpha", "beta") whose provider resolves from
+// builtin:claude and that share one work_dir.
+func syncSharedWorkDirClaudeSessions(t *testing.T) (beads.Store, map[string]TemplateParams, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
+	workDir := t.TempDir()
+	ds := map[string]TemplateParams{}
+	for _, name := range []string{"alpha", "beta"} {
+		ds[name] = builtinClaudeTemplate(t, name, workDir)
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, runtime.NewFake(), allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, store); len(got) != 2 {
+		t.Fatalf("session beads = %d, want 2; stderr=%s", len(got), stderr.String())
+	}
+	return store, ds, workDir
+}
+
+// builtinClaudeTemplate is name's template with its provider resolved from
+// builtin:claude, working in workDir.
+func builtinClaudeTemplate(t *testing.T, name, workDir string) TemplateParams {
+	t.Helper()
+	base := config.BasePrefixBuiltin + "claude"
+	providers := map[string]config.ProviderSpec{"claude": {Base: &base}}
+	resolved, err := config.ResolveProvider(&config.Agent{Name: name, Provider: "claude"}, &config.Workspace{}, providers,
+		func(n string) (string, error) { return n, nil })
+	if err != nil {
+		t.Fatalf("resolving claude provider for %s: %v", name, err)
+	}
+	return TemplateParams{TemplateName: name, Command: resolved.Command, WorkDir: workDir, ResolvedProvider: resolved}
+}
