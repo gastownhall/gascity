@@ -2134,6 +2134,20 @@ func runPreparedStartCandidate(
 		unattributedErr = unattributedStartError(err, identity)
 		err = nil
 		rollbackPending = false
+	case attribution == pendingCreateRuntimeForeign && identity.otherEpochOfThisSession():
+		// The runtime answering the name is this row's own earlier or later
+		// incarnation (#2081): the row's GC_SESSION_ID, another token,
+		// another epoch. attribution reads it foreign, but the rollback stops
+		// a row-owned runtime by name (releaseRowOwnedRuntime) or closes the
+		// row over the live one, so defer like the unknown case above: the
+		// reconciler's live-incarnation hold re-decides every tick and the
+		// lease-expired rollback settles the row once the runtime exits.
+		// Like that case, this stays ahead of the context arms: a timed-out
+		// start rolls back too.
+		outcome = TraceOutcomeDeferred
+		unattributedErr = liveIncarnationStartError(err, identity, item.candidate.info.Generation)
+		err = nil
+		rollbackPending = false
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -2400,6 +2414,16 @@ func commitAsyncStartResultWithContext(
 			// or a capacity refusal keeps its own commit arm, as there.
 			if !refreshed.rateLimitScreen && !refreshed.capacityRefused {
 				refreshed.unattributedErr = unattributedStartError(refreshed.err, identity)
+				refreshed.err = nil
+				refreshed.outcome = TraceOutcomeDeferred
+				refreshed.rollbackPending = false
+			}
+		case pendingCreateRuntimeForeign:
+			// Same deferral as runPreparedStartCandidate's: no rollback over a
+			// live incarnation of this session (#2081). A rate-limit screen or
+			// a capacity refusal keeps its own commit arm, as there.
+			if identity.otherEpochOfThisSession() && !refreshed.rateLimitScreen && !refreshed.capacityRefused {
+				refreshed.unattributedErr = liveIncarnationStartError(refreshed.err, identity, refreshed.prepared.candidate.info.Generation)
 				refreshed.err = nil
 				refreshed.outcome = TraceOutcomeDeferred
 				refreshed.rollbackPending = false
@@ -4007,6 +4031,14 @@ func attributePendingCreateRuntime(info sessionpkg.Info, sessionName string, sp 
 // sets aside, annotated with the identity reads that failed.
 func unattributedStartError(err error, identity pendingCreateIdentity) error {
 	return fmt.Errorf("%w (attribution_unknown: %s)", err, strings.Join(identity.failed, "; "))
+}
+
+// liveIncarnationStartError is the start error a deferral on a live
+// incarnation of this session sets aside, annotated with the epochs that
+// deferred it. Like unattributedStartError it wraps the original error, so a
+// wrapped runtime.ErrSessionExists still reads as a colliding create.
+func liveIncarnationStartError(err error, identity pendingCreateIdentity, rowGeneration string) error {
+	return fmt.Errorf("%w (live_incarnation: runtime epoch %s, row generation %s)", err, identity.epoch, strings.TrimSpace(rowGeneration))
 }
 
 // rollbackPendingCreateClears is the pending-create rollback: the failed-create

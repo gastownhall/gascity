@@ -358,6 +358,123 @@ func TestExecutePreparedStartWave_TimedOutStartWithUnknownAttributionDefers(t *t
 	}
 }
 
+// TestExecutePreparedStartWave_StartErrorWithLiveIncarnationDefers is the
+// #2081 twin of the unknown-attribution deferral: the start collided with a
+// live runtime of this session's own row (its GC_SESSION_ID, another token,
+// another epoch), which attribution reads foreign — without the deferral the
+// failure rolls the create back and stops the incumbent by name or closes
+// the row over it. Once the incarnation exits, the failure is no longer set
+// aside.
+func TestExecutePreparedStartWave_StartErrorWithLiveIncarnationDefers(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	stampLiveIncarnation(t, sp, "worker", "gc-1", "3")
+
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{unattributedWorkerStart()}, t.TempDir(), sp, nil, nil, 10*time.Second, 1)
+	if r := results[0]; r.err != nil || r.rollbackPending || r.outcome != TraceOutcomeDeferred {
+		t.Fatalf("result err=%v rollbackPending=%v outcome=%q, want a deferral", r.err, r.rollbackPending, r.outcome)
+	}
+	if r := results[0]; !errors.Is(r.unattributedErr, runtime.ErrSessionExists) || !strings.Contains(r.unattributedErr.Error(), "live_incarnation: runtime epoch 3, row generation 2") {
+		t.Fatalf("unattributedErr = %v, want the colliding start error annotated with the epochs", r.unattributedErr)
+	}
+
+	// The deferral is bounded by the incarnation's liveness: once it exits,
+	// its identity reads report the session gone, and the same start failure
+	// is handed to the rollback again.
+	if err := sp.Stop("worker"); err != nil {
+		t.Fatal(err)
+	}
+	sp.StartErrors["worker"] = errors.New("launcher exited")
+	gone := fmt.Errorf("reading meta: %w", runtime.ErrSessionNotFound)
+	sp.GetMetaErrors["worker"] = map[string]error{"GC_SESSION_ID": gone}
+	results = executePreparedStartWaveForCity(context.Background(), []preparedStart{unattributedWorkerStart()}, t.TempDir(), sp, nil, nil, 10*time.Second, 1)
+	if r := results[0]; r.err == nil || !r.rollbackPending {
+		t.Fatalf("gone incarnation: err=%v rollbackPending=%v, want the rollback", r.err, r.rollbackPending)
+	}
+}
+
+// TestCommitAsyncStart_SessionExistsWithLiveIncarnationDefers covers the
+// async commit's converge-or-rollback decision for #2081: a failed start
+// whose name a live incarnation of this session's own row holds is neither
+// converged on nor rolled back — the rollback would stop the bead-scoped box
+// by name or close the row over it.
+func TestCommitAsyncStart_SessionExistsWithLiveIncarnationDefers(t *testing.T) {
+	now := time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	info := createBeadScopedPoolRowWithBox(t, store, sp, now)
+	name := info.SessionNameMetadata
+	stampLiveIncarnation(t, sp, name, info.ID, "3")
+	result := successfulPoolStartResult(info, now)
+	result.err = fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+	result.outcome = TraceOutcomeSessionExists
+	result.rollbackPending = true
+	result.provider = sp
+
+	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, &clock.Fake{Time: now}, events.Discard, 0, io.Discard, io.Discard, nil) {
+		t.Fatal("live-incarnation session-exists result reported committed")
+	}
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" || got.Metadata["pending_create_claim"] != boolMetadata(true) {
+		t.Fatalf("row status=%q claim=%q, want the pending create held", got.Status, got.Metadata["pending_create_claim"])
+	}
+	if !sp.IsRunning(name) {
+		t.Fatalf("box %q was stopped although a live incarnation of this session holds it", name)
+	}
+}
+
+// TestCommitAsyncStart_LiveIncarnationKeepsRateLimitAndCapacityArms matches
+// the unknown-attribution arm: a rate-limit screen or a capacity refusal
+// keeps its own commit arm even when a live incarnation of this session
+// holds the name.
+func TestCommitAsyncStart_LiveIncarnationKeepsRateLimitAndCapacityArms(t *testing.T) {
+	now := time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)
+	for _, tc := range []struct {
+		name            string
+		rateLimitScreen bool
+		capacityRefused bool
+	}{
+		{name: "rate-limit screen", rateLimitScreen: true},
+		{name: "capacity refused", capacityRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			info := createBeadScopedPoolRowWithBox(t, store, sp, now)
+			name := info.SessionNameMetadata
+			stampLiveIncarnation(t, sp, name, info.ID, "3")
+			result := successfulPoolStartResult(info, now)
+			result.err = errors.New("launcher exited")
+			result.outcome = TraceOutcomeProviderError
+			result.rollbackPending = true
+			result.rateLimitScreen = tc.rateLimitScreen
+			result.capacityRefused = tc.capacityRefused
+			result.provider = sp
+			var stderr strings.Builder
+
+			commitAsyncStartResultWithContext(context.Background(), result, sp, store, &clock.Fake{Time: now}, events.Discard, 0, io.Discard, &stderr, nil)
+			if strings.Contains(stderr.String(), "outcome="+string(TraceOutcomeDeferred)) {
+				t.Fatalf("stderr = %q, want the %s arm, not the attribution deferral", stderr.String(), tc.name)
+			}
+			got, err := store.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tc.rateLimitScreen && got.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonRateLimit):
+				t.Fatalf("sleep_reason = %q, want the rate-limit hold", got.Metadata["sleep_reason"])
+			case tc.capacityRefused && !strings.Contains(stderr.String(), "endpoint refused (capacity)"):
+				t.Fatalf("stderr = %q, want the capacity refusal", stderr.String())
+			}
+		})
+	}
+}
+
 // TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth shows the
 // deferral spares only the runtime: a provider Start that failed still accrues
 // the startup-health episode and quarantines the name after
