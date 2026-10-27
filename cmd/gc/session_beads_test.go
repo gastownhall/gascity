@@ -10785,3 +10785,59 @@ func TestSyncSessionBeads_ClaudeAgentsSharingWorkDirEachGetSessionKey(t *testing
 		}
 	}
 }
+
+// TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow holds the legacy
+// sync arm to the row-metadata verb's rule (ga-k98e78): a keyless row whose
+// sync state may hold a running process keeps no minted key (an unset state
+// and awake collapse to active through syncSessionCachedState); a stopped row
+// still gets its backfilled key.
+func TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	ws := &config.Workspace{}
+	base := config.BasePrefixBuiltin + "claude"
+	providers := map[string]config.ProviderSpec{"claude": {Base: &base}}
+	resolved, err := config.ResolveProvider(&config.Agent{Name: "alpha", Provider: "claude"}, ws, providers,
+		func(n string) (string, error) { return n, nil })
+	if err != nil {
+		t.Fatalf("resolving claude provider: %v", err)
+	}
+	ds := map[string]TemplateParams{"alpha": {TemplateName: "alpha", Command: resolved.Command, ResolvedProvider: resolved}}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	rows := allSessionBeads(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("session beads = %d, want 1; stderr=%s", len(rows), stderr.String())
+	}
+	if rows[0].Metadata["session_key"] == "" {
+		t.Fatal("the created row carries no session_key")
+	}
+	for _, tc := range []struct {
+		state    string
+		wantMint bool
+	}{
+		{"active", false},
+		{"creating", false},
+		{"draining", false},
+		{"", false}, // collapses to active in syncSessionCachedState
+		{"awake", false},
+		{"asleep", true},
+		{"start-pending", true},
+		{"suspended", true},
+		{"drained", true},
+		{"quarantined", true},
+	} {
+		if err := store.SetMetadataBatch(rows[0].ID, map[string]string{"session_key": "", "state": tc.state}); err != nil {
+			t.Fatal(err)
+		}
+		syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+		b, err := store.Get(rows[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key := b.Metadata["session_key"]; (key != "") != tc.wantMint {
+			t.Fatalf("state %q: session_key %q, want minted %v", tc.state, key, tc.wantMint)
+		}
+	}
+}

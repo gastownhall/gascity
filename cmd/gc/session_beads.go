@@ -178,6 +178,22 @@ func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool
 	return "stopped"
 }
 
+// sessionStateMayBeRunning reports whether a row in this state may hold a
+// provider process: "", active, awake, creating and draining may (an unset
+// state reads as active, as syncSessionCachedState and the row-metadata
+// arm's work_dir guard already treat it). A running process reports its real
+// session id only through its SessionStart hook, so a key minted for such a
+// row names a transcript that does not exist and the hook's set-once guard
+// then drops the real id. A row the mint skips still gets a key and its
+// provider's --session-id on its next start.
+func sessionStateMayBeRunning(state string) bool {
+	switch session.State(strings.TrimSpace(state)) {
+	case "", session.StateActive, session.StateAwake, session.StateCreating, session.StateDraining:
+		return true
+	}
+	return false
+}
+
 func canonicalDuplicateSessionBead(incumbent, candidate beads.Bead) beads.Bead {
 	incumbentOwnsName := beadOwnsPoolSessionName(incumbent)
 	candidateOwnsName := beadOwnsPoolSessionName(candidate)
@@ -2318,9 +2334,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
+		// Backfill session_key for beads created before this fix, unless the
+		// row may be running (ga-k98e78): a minted key would name a transcript
+		// that does not exist and drop the provider's real id at its hook.
 		if b.Metadata["session_key"] == "" &&
-			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
+			!sessionStateMayBeRunning(state) {
 			if key, err := session.GenerateSessionKey(); err == nil {
 				queueMeta("session_key", key)
 			}
