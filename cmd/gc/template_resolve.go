@@ -868,6 +868,12 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
+		} else {
+			// The projection carries the live port; withhold it when the
+			// scope's own port mirror already carries the same fact, so the
+			// session's raw bd follows the mirror across a managed Dolt
+			// restart onto a new port (gastownhall/gascity#1656).
+			withholdMirroredManagedDoltPort(env, cityPath, cityPath)
 		}
 		return env, nil
 	}
