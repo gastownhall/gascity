@@ -76,11 +76,13 @@ type OpsConfig struct {
 	// --nudge and wait nudges keep their legacy delivery in this build.
 	// Listing interrupt switches the API's POST
 	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
-	// each proposes an interrupt op the controller's lane host runs, and
-	// answers from its outcome (409 in_flight, naming the op, when it is
-	// still running after 45 s); the ops route proposes interrupt ops too,
-	// and the control gate no longer governs them. gc stop's graceful
-	// interrupt wave is lifecycle and keeps its path.
+	// each proposes interrupt ops the controller's lane host runs, and
+	// answers from their outcomes. A stop still running after 45 s answers
+	// 409 in_flight, naming the op; run cancel lists a holder whose interrupt
+	// is still running then, or failed, in its interrupt_failures. The ops
+	// route proposes interrupt ops too, and the control gate no longer
+	// governs them. gc stop's graceful interrupt wave is lifecycle and keeps
+	// its path.
 	// gc session nudge's inline pass never runs an interrupt, a respond or a
 	// deliver-now unit: it leaves them, and content queued behind them, to
 	// the controller's lane host. No request surface writes respond ops yet,

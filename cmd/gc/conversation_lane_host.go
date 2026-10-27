@@ -334,8 +334,8 @@ type conversationLaneHost struct {
 	retryingRows bool
 	rowsGivenUp  int64
 	// passEnds holds, per conversation with a waiter, the channel the end
-	// of its next pass closes (AwaitConversationOp).
-	passEnds map[string]chan struct{}
+	// of its next pass closes and its waiters (AwaitConversationOp).
+	passEnds map[string]*passEndWait
 	// noticeFailures tallies, per planner notice action (an attempt's
 	// proposal or a reminder's read, plannerNoticeTallyKey), its failures in
 	// a row; nil until the first. An entry is deleted when its action

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,10 +30,6 @@ import (
 // Go client's 60 s timeout, and above an interrupt's settle. A var so tests
 // can shorten it.
 var laneControlAnswerBound = 45 * time.Second
-
-// laneAwaitPoll is how often awaitLaneOp re-reads an op when the State's
-// lane host offers no pass-end wakeup.
-const laneAwaitPoll = 250 * time.Millisecond
 
 // laneExecutes reports whether the city's running lane host executes kind.
 func (s *Server) laneExecutes(kind opjournal.Kind) bool {
@@ -55,34 +52,20 @@ func (s *Server) proposeLaneOp(st *opjournal.Store, req opjournal.Request) (opjo
 // awaitLaneOp waits, at most bound, for op id of conv to close, and returns
 // it as last read: closed, or still open at the bound. It waits through the
 // lane host's AwaitConversationOp, which wakes at the end of each pass over
-// conv; it polls the op store when the State offers no lane host. A read
-// that fails is 503 op_journal_unavailable.
-func (s *Server) awaitLaneOp(ctx context.Context, st *opjournal.Store, conv, id string, bound time.Duration) (opjournal.Op, error) {
+// conv. A read that fails is 503 op_journal_unavailable, as is a State with
+// no lane host, which executes no kind (laneExecutes).
+func (s *Server) awaitLaneOp(ctx context.Context, conv, id string, bound time.Duration) (opjournal.Op, error) {
+	h, ok := s.state.(ConversationLaneHost)
+	if !ok {
+		return opjournal.Op{}, apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: awaiting op %s: no conversation lane host runs", id)
+	}
 	actx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
-	if h, ok := s.state.(ConversationLaneHost); ok {
-		op, err := h.AwaitConversationOp(actx, conv, id)
-		if err != nil {
-			return op, apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: awaiting op %s: %v", id, err)
-		}
-		return op, nil
+	op, err := h.AwaitConversationOp(actx, conv, id)
+	if err != nil {
+		return op, apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: awaiting op %s: %v", id, err)
 	}
-	for {
-		op, err := st.Get(id)
-		if err != nil {
-			return op, apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: reading op %s: %v", id, err)
-		}
-		if op.Status == opjournal.StatusClosed {
-			return op, nil
-		}
-		t := time.NewTimer(laneAwaitPoll)
-		select {
-		case <-actx.Done():
-			t.Stop()
-			return op, nil
-		case <-t.C:
-		}
-	}
+	return op, nil
 }
 
 // keyedLaneOp reads the op the operator's client key names on conv, kind
@@ -138,13 +121,9 @@ func laneOpInFlight(op opjournal.Op) error {
 // the Idempotency-Key header and named the turn the request names, "" for
 // none.
 //
-// A key that already names a stop is that stop's retry: an open lane op is
-// awaited, a closed op replayed, and the row a named stop left under its
-// key followed to the turn's op. A named turn keeps OJ-4's front-door
-// checks (a refusal writes nothing), is keyed stop:<generation>:<turn> and
-// scoped to that turn, and leaves a row under the request's own key that
-// coalesced into it; a target-keyed op that closed without success is
-// retried under the request's key. Without a named turn the op is
+// A key that already names a stop is that stop's retry (retryLaneStop). A
+// named turn keeps OJ-4's front-door checks (a refusal writes nothing) and
+// is stopped by its turn's op (stopTurnLane). Without a named turn the op is
 // session(generation)-scoped under the request's key, or a minted one, and
 // the executor reads the turn itself.
 func (s *Server) stopSessionLane(ctx context.Context, store beads.Store, id, key, named string) (syncAnswer, error) {
@@ -157,54 +136,85 @@ func (s *Server) stopSessionLane(ctx context.Context, store beads.Store, id, key
 		return syncAnswer{}, err
 	}
 	if retry {
-		if named != "" && prior.Scope.Turn != "" && prior.Scope.Turn != named {
-			return syncAnswer{}, apierr.IdempotencyMismatch.Msg(fmt.Sprintf("idempotency_mismatch: Idempotency-Key reused with a different request: it names a stop of turn %q, not turn %q", prior.Scope.Turn, named))
-		}
-		target, err := followCoalesced(st, prior)
-		if err != nil {
-			return syncAnswer{}, err
-		}
-		return s.answerLaneStop(ctx, st, id, target, target.Scope.Turn != "", true)
+		return s.retryLaneStop(ctx, st, id, prior, named)
 	}
 	if named != "" {
 		if _, err := s.namedStopPlan(ctx, store, id, named); err != nil {
 			return syncAnswer{}, err
 		}
 	}
+	req, err := laneStopRequest(store, id, key)
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	if named != "" {
+		return s.stopTurnLane(ctx, st, id, req, named)
+	}
+	op, created, err := s.proposeLaneOp(st, req)
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	return s.answerLaneStop(ctx, id, op, false, !created)
+}
+
+// retryLaneStop answers a /stop whose Idempotency-Key already names a stop,
+// prior: an open lane op is awaited, a closed op replayed, and the row a
+// named stop left under its key followed to the turn's op. A retry that
+// names a turn prior did not stop, a session-scoped stop's included, is
+// idempotency_mismatch, as OJ-4's is (stopOpRequest).
+func (s *Server) retryLaneStop(ctx context.Context, st *opjournal.Store, id string, prior opjournal.Op, named string) (syncAnswer, error) {
+	if named != "" && prior.Scope.Turn != named {
+		return syncAnswer{}, apierr.IdempotencyMismatch.Msg(fmt.Sprintf("idempotency_mismatch: Idempotency-Key reused with a different request: it names a stop of turn %q, not turn %q", prior.Scope.Turn, named))
+	}
+	target, err := followCoalesced(st, prior)
+	if err != nil {
+		return syncAnswer{}, err
+	}
+	return s.answerLaneStop(ctx, id, target, target.Scope.Turn != "", true)
+}
+
+// laneStopRequest is the interrupt op request of a /stop of session id under
+// lane authority: session(generation)-scoped, under key, or a minted key
+// when the request carries none. A session whose generation cannot be read
+// is 503 op_journal_unavailable, nothing done.
+func laneStopRequest(store beads.Store, id, key string) (opjournal.Request, error) {
 	scope, why, whyErr := sessionOpScope(store, id)
 	if why != "" {
 		cause := why
 		if whyErr != nil {
 			cause += ": " + whyErr.Error()
 		}
-		return syncAnswer{}, apierr.OpJournalUnavailable.Msg(fmt.Sprintf("op_journal_unavailable: the operation journal cannot record this stop (%s); nothing was done", cause))
-	}
-	clientKey, minted := key, false
-	if clientKey == "" {
-		if clientKey, err = legacyop.MintKey(); err != nil {
-			return syncAnswer{}, apierr.Internal.Msg(err.Error())
-		}
-		minted = true
+		return opjournal.Request{}, apierr.OpJournalUnavailable.Msg(fmt.Sprintf("op_journal_unavailable: the operation journal cannot record this stop (%s); nothing was done", cause))
 	}
 	req := opjournal.Request{
 		Conversation: id,
 		Kind:         opjournal.KindInterrupt,
 		Executor:     opjournal.ExecutorLane,
-		ClientKey:    clientKey,
-		MintedKey:    minted,
+		ClientKey:    key,
 		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
 		Policy:       interruptOpPolicy,
 		Scope:        scope,
 	}
-	if named == "" {
-		op, created, err := s.proposeLaneOp(st, req)
+	if key == "" {
+		minted, err := legacyop.MintKey()
 		if err != nil {
-			return syncAnswer{}, err
+			return opjournal.Request{}, apierr.Internal.Msg(err.Error())
 		}
-		return s.answerLaneStop(ctx, st, id, op, false, !created)
+		req.ClientKey, req.MintedKey = minted, true
 	}
-	req.Scope.Turn = named
-	targetKey, err := opjournal.InterruptKey(scope.Generation, named)
+	return req, nil
+}
+
+// stopTurnLane is a /stop of turn under lane authority, req its
+// session-scoped request (laneStopRequest): the op is keyed
+// stop:<generation>:<turn> and scoped to the turn, so stops of one turn
+// share it, and a request key of the client's own gets a row that coalesced
+// into it (recordLaneStopUnderKey). A turn-keyed op that closed without
+// success never uses the turn up: this request retries it under its own
+// key.
+func (s *Server) stopTurnLane(ctx context.Context, st *opjournal.Store, id string, req opjournal.Request, turn string) (syncAnswer, error) {
+	req.Scope.Turn = turn
+	targetKey, err := opjournal.InterruptKey(req.Scope.Generation, turn)
 	if err != nil {
 		return syncAnswer{}, apierr.ValidationFailed.Msg("invalid_turn: " + err.Error())
 	}
@@ -220,14 +230,14 @@ func (s *Server) stopSessionLane(ctx context.Context, store beads.Store, id, key
 		if op, created, err = s.proposeLaneOp(st, req); err != nil {
 			return syncAnswer{}, err
 		}
-		return s.answerLaneStop(ctx, st, id, op, true, !created)
+		return s.answerLaneStop(ctx, id, op, true, !created)
 	}
-	if key != "" {
+	if !req.MintedKey {
 		if err := recordLaneStopUnderKey(st, req, op.ID); err != nil {
 			return syncAnswer{}, err
 		}
 	}
-	return s.answerLaneStop(ctx, st, id, op, true, !created)
+	return s.answerLaneStop(ctx, id, op, true, !created)
 }
 
 // recordLaneStopUnderKey records, under a named stop's own Idempotency-Key
@@ -270,7 +280,7 @@ func laneStopSucceeded(op opjournal.Op) bool {
 // other failure, or a cancel, 409 op_already_failed; and an op still open
 // at laneControlAnswerBound 409 in_flight. A legacy op a key names is
 // answered as OJ-4 replays it.
-func (s *Server) answerLaneStop(ctx context.Context, st *opjournal.Store, id string, op opjournal.Op, named, replayed bool) (syncAnswer, error) {
+func (s *Server) answerLaneStop(ctx context.Context, id string, op opjournal.Op, named, replayed bool) (syncAnswer, error) {
 	if op.Executor != opjournal.ExecutorLane {
 		if op.Status != opjournal.StatusClosed {
 			return syncAnswer{}, requestInFlight()
@@ -282,7 +292,7 @@ func (s *Server) answerLaneStop(ctx context.Context, st *opjournal.Store, id str
 	}
 	if op.Status != opjournal.StatusClosed {
 		var err error
-		if op, err = s.awaitLaneOp(ctx, st, id, op.ID, laneControlAnswerBound); err != nil {
+		if op, err = s.awaitLaneOp(ctx, id, op.ID, laneControlAnswerBound); err != nil {
 			return syncAnswer{}, err
 		}
 		if op.Status != opjournal.StatusClosed {
@@ -329,29 +339,39 @@ func laneOutcomeText(op opjournal.Op) string {
 	return text
 }
 
-// runCancelLaneKey is the client key of the interrupt a run cancel proposes
-// for each holder session.
-func runCancelLaneKey(runID string) string { return "run-cancel:" + runID }
+// runCancelLaneKey is the client key of the interrupt a cancel of run runID
+// proposes for a holder session in generation gen: one op per run and holder
+// incarnation, so a holder that restarted since an earlier cancel of the run
+// gets an op of its own.
+func runCancelLaneKey(runID string, gen int64) string {
+	return "run-cancel:" + runID + ":" + strconv.FormatInt(gen, 10)
+}
 
-// runCancelInterruptFailed reports whether op, a holder's run-cancel
-// interrupt, closed failed or canceled: neither interrupted the holder nor
-// found nothing to interrupt.
-func runCancelInterruptFailed(op opjournal.Op) bool {
+// runCancelRetryKey is the client key of the interrupt that retries missed,
+// the id of a holder's run-cancel interrupt in generation gen that closed
+// without interrupting it (runCancelInterruptMissed): one retry per missed
+// op, which every later cancel of the run finds again.
+func runCancelRetryKey(runID string, gen int64, missed string) string {
+	return runCancelLaneKey(runID, gen) + ":retry:" + missed
+}
+
+// runCancelInterruptMissed reports whether op, a holder's run-cancel
+// interrupt, closed without interrupting the holder: failed, canceled, or
+// skipped (no turn to stop when it ran).
+func runCancelInterruptMissed(op opjournal.Op) bool {
 	if op.Status != opjournal.StatusClosed {
 		return false
 	}
 	arm, _ := op.Outcome.Effective()
-	return arm != opjournal.ArmSucceeded && arm != opjournal.ArmSkipped
+	return arm != opjournal.ArmSucceeded
 }
 
 // interruptRunHoldersLane is interruptRunHolders under lane authority: one
-// interrupt op per holder session ids names, keyed run-cancel:<run id> with
-// the run as its causation, awaited together at most
-// laneControlAnswerBound. A later cancel that finds a holder's op closed
-// failed or canceled retries it under a minted key, so a failure is never
-// replayed. A session that closed succeeded is interrupted;
-// one whose op failed, or is still open at the bound, is a failure; one
-// that closed skipped (nothing to stop) is neither.
+// interrupt op per live holder session ids names
+// (proposeRunCancelInterrupt), awaited together at most
+// laneControlAnswerBound. A session whose op closed succeeded is
+// interrupted; one whose op failed, or is still open at the bound, is a
+// failure; one whose op closed skipped (nothing to stop) is neither.
 func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store, runID string, ids []string, fail func(string, error)) []string {
 	st, err := s.conversationOpStore()
 	if err != nil {
@@ -366,32 +386,7 @@ func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store,
 	}
 	var ops []proposed
 	for _, id := range ids {
-		scope, why, whyErr := sessionOpScope(store, id)
-		if why != "" {
-			fail(id, fmt.Errorf("the operation journal cannot record its interrupt (%s): %w", why, errors.Join(whyErr, errors.New("nothing sent"))))
-			continue
-		}
-		req := opjournal.Request{
-			Conversation: id,
-			Kind:         opjournal.KindInterrupt,
-			Executor:     opjournal.ExecutorLane,
-			ClientKey:    runCancelLaneKey(runID),
-			Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
-			Policy:       interruptOpPolicy,
-			Scope:        scope,
-			Causation:    runID,
-		}
-		op, _, err := s.proposeLaneOp(st, req)
-		if err == nil && runCancelInterruptFailed(op) {
-			// A failed interrupt of the holder never uses the run's key up:
-			// this cancel retries it under a minted key.
-			if req.ClientKey, err = legacyop.MintKey(); err == nil {
-				req.MintedKey = true
-				op, _, err = s.proposeLaneOp(st, req)
-			} else {
-				err = apierr.Internal.Msg(err.Error())
-			}
-		}
+		op, err := s.proposeRunCancelInterrupt(st, store, runID, id)
 		if err != nil {
 			fail(id, err)
 			continue
@@ -405,7 +400,7 @@ func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store,
 	done := make(chan int, len(ops))
 	for i, p := range ops {
 		go func() {
-			results[i], errs[i] = s.awaitLaneOp(actx, st, p.id, p.op.ID, laneControlAnswerBound)
+			results[i], errs[i] = s.awaitLaneOp(actx, p.id, p.op.ID, laneControlAnswerBound)
 			done <- i
 		}()
 	}
@@ -429,4 +424,40 @@ func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store,
 		}
 	}
 	return interrupted
+}
+
+// proposeRunCancelInterrupt proposes the interrupt a cancel of run runID
+// sends holder session id, live now, and returns the op the cancel answers
+// from. The holder's ops for the run form a chain per incarnation: the first
+// keyed run-cancel:<run id>:<generation> (runCancelLaneKey), with the run as
+// its causation, and each op that closed without interrupting the holder
+// (runCancelInterruptMissed) followed by its retry (runCancelRetryKey). The
+// cancel walks the chain to its first op that did not miss, proposing it
+// when no earlier cancel did. So cancels of the run share one open op per
+// holder, await it while it is open, answer from it once it closed
+// succeeded, and never replay a miss for a holder live now.
+func (s *Server) proposeRunCancelInterrupt(st *opjournal.Store, store beads.Store, runID, id string) (opjournal.Op, error) {
+	scope, why, whyErr := sessionOpScope(store, id)
+	if why != "" {
+		return opjournal.Op{}, fmt.Errorf("the operation journal cannot record its interrupt (%s): %w", why, errors.Join(whyErr, errors.New("nothing sent")))
+	}
+	req := opjournal.Request{
+		Conversation: id,
+		Kind:         opjournal.KindInterrupt,
+		Executor:     opjournal.ExecutorLane,
+		ClientKey:    runCancelLaneKey(runID, scope.Generation),
+		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Policy:       interruptOpPolicy,
+		Scope:        scope,
+		Causation:    runID,
+	}
+	for {
+		// An op this cancel created is new, so the walk ends there: it only
+		// ever steps past an op an earlier cancel proposed.
+		op, created, err := s.proposeLaneOp(st, req)
+		if err != nil || created || !runCancelInterruptMissed(op) {
+			return op, err
+		}
+		req.ClientKey = runCancelRetryKey(runID, scope.Generation, op.ID)
+	}
 }

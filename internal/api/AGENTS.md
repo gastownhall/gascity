@@ -289,19 +289,27 @@ outcome, or 409 `in_flight` naming the op and its key, under which a retry
 adopts it.
 
 - `/stop` (interrupt listed): a key that names a stop is its retry (an open
-  lane op awaited, a closed op replayed, a coalesced row followed). A named
-  turn keeps OJ-4's front-door checks, is keyed `stop:<gen>:<turn>` and
-  scoped to the turn, and leaves an API-executed row under the request's
-  own key closed `skipped{coalesced_into}` (`recordLaneStopUnderKey`); a
-  target-key op that closed without success is retried under the request's
-  key. Without a named turn the op is `session(gen)` under the request's key
-  or a minted one, and the executor reads the turn. `skipped{stale}` is 200
-  for an unnamed stop and 409 `turn_not_current` for a named one.
+  lane op awaited, a closed op replayed, a coalesced row followed); one
+  naming a turn the stop did not name, a session-scoped stop's included, is
+  422 `idempotency_mismatch`, as under OJ-4. A named turn keeps OJ-4's
+  front-door checks, is keyed `stop:<gen>:<turn>` and scoped to the turn,
+  and leaves an API-executed row under the request's own key closed
+  `skipped{coalesced_into}` (`recordLaneStopUnderKey`); a target-key op
+  that closed without success is retried under the request's key. Without
+  a named turn the op is `session(gen)` under the request's key or a minted
+  one, and the executor reads the turn. `skipped{stale}` is 200 for an
+  unnamed stop and 409 `turn_not_current` for a named one.
 - Run cancel (interrupt listed): one op per live holder session, keyed
-  `run-cancel:<run id>` with the run as causation, awaited together;
+  `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that
+  restarted gets its own) with the run as causation, awaited together;
   `succeeded` is interrupted, a failure or an op still open is a failure,
-  and `skipped` neither. A later cancel that finds a holder's op closed
-  failed or canceled retries it under a minted key, never replaying it.
+  and `skipped` neither. An op that closed any other way than `succeeded`
+  (failed, canceled, or skipped) is never replayed for a holder live now:
+  its retry is keyed `run-cancel:<run id>:<gen>:retry:<that op's id>`, so a
+  holder's ops form a chain (`proposeRunCancelInterrupt`). A cancel walks
+  it to the first op that did not miss: it awaits that op while it is open,
+  replays it once it closed `succeeded`, and proposes it when no earlier
+  cancel did. Overlapping cancels share one open op per holder.
 
 ## The producer API and journal-row events
 

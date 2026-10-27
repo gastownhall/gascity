@@ -87,50 +87,79 @@ func (h *conversationLaneHost) awaitOp(ctx context.Context, conv, id string) (op
 		return opjournal.Op{}, err
 	}
 	for {
-		// Taken before the read, so a pass that ends between the read and
-		// the wait still wakes it.
-		ended := h.passEnd(conv)
-		op, err := st.Get(id)
-		switch {
-		case err != nil:
-			return op, fmt.Errorf("reading op %s: %w", id, err)
-		case op.Conversation != conv:
-			return op, fmt.Errorf("op %s is not an op of conversation %s", id, conv)
-		case op.Status == opjournal.StatusClosed:
-			return op, nil
+		op, done, err := h.awaitOpOnce(ctx, st, conv, id)
+		if done {
+			return op, err
 		}
-		fire, stop := h.newTimer(laneAwaitReread)
-		select {
-		case <-ctx.Done():
-			stop()
-			return op, nil
-		case <-ended:
-		case <-fire:
-		}
-		stop()
 	}
 }
 
-// passEnd is the channel the end of the next pass over conv closes.
-func (h *conversationLaneHost) passEnd(conv string) <-chan struct{} {
+// awaitOpOnce reads op id of conv and, while it is open, waits for the end
+// of the next pass over conv, laneAwaitReread, or ctx. done reports that the
+// await is over: the op closed, ctx ended, or the read failed (err).
+func (h *conversationLaneHost) awaitOpOnce(ctx context.Context, st *opjournal.Store, conv, id string) (op opjournal.Op, done bool, err error) {
+	// Taken before the read, so a pass that ends between the read and the
+	// wait still wakes it, and released on every return, so an await that
+	// ends with no pass over conv leaves no waiter behind.
+	ended, release := h.passEnd(conv)
+	defer release()
+	op, err = st.Get(id)
+	switch {
+	case err != nil:
+		return op, true, fmt.Errorf("reading op %s: %w", id, err)
+	case op.Conversation != conv:
+		return op, true, fmt.Errorf("op %s is not an op of conversation %s", id, conv)
+	case op.Status == opjournal.StatusClosed:
+		return op, true, nil
+	}
+	fire, stop := h.newTimer(laneAwaitReread)
+	defer stop()
+	select {
+	case <-ctx.Done():
+		return op, true, nil
+	case <-ended:
+	case <-fire:
+	}
+	return op, false, nil
+}
+
+// passEndWait is the channel the end of the next pass over a conversation
+// closes, and how many awaits hold it.
+type passEndWait struct {
+	ch      chan struct{}
+	waiters int
+}
+
+// passEnd is the channel the end of the next pass over conv closes, and the
+// release its caller runs once it no longer waits on it. The pass's end
+// drops the channel (passEndedLocked); so does the last release before it.
+func (h *conversationLaneHost) passEnd(conv string) (<-chan struct{}, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.passEnds == nil {
-		h.passEnds = map[string]chan struct{}{}
+		h.passEnds = map[string]*passEndWait{}
 	}
-	ch, ok := h.passEnds[conv]
+	w, ok := h.passEnds[conv]
 	if !ok {
-		ch = make(chan struct{})
-		h.passEnds[conv] = ch
+		w = &passEndWait{ch: make(chan struct{})}
+		h.passEnds[conv] = w
 	}
-	return ch
+	w.waiters++
+	return w.ch, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		w.waiters--
+		if w.waiters == 0 && h.passEnds[conv] == w {
+			delete(h.passEnds, conv)
+		}
+	}
 }
 
 // passEndedLocked wakes the waiters on the end of a pass over conv
 // (passEnd). h.mu is held.
 func (h *conversationLaneHost) passEndedLocked(conv string) {
-	if ch, ok := h.passEnds[conv]; ok {
-		close(ch)
+	if w, ok := h.passEnds[conv]; ok {
+		close(w.ch)
 		delete(h.passEnds, conv)
 	}
 }

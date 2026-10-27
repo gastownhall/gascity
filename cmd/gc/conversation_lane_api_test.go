@@ -102,3 +102,128 @@ func TestControllerAwaitConversationOpReturnsAtClose(t *testing.T) {
 		t.Fatalf("await = %+v, %v; want it closed succeeded by the host's pass", got.Outcome, err)
 	}
 }
+
+// awaitOp wakes at the end of a pass over its conversation, not only at its
+// re-read: with a re-read timer that never fires, an op a pass closed is
+// returned once that pass ends.
+func TestConversationLaneHostAwaitOpWakesAtPassEnd(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message", "interrupt")
+	st, _, err := hh.h.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	op := f.propose(t, st, f.msg("now-1", opjournal.RolePrompt, "hello"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	got := make(chan opjournal.Op, 1)
+	go func() {
+		o, err := hh.h.awaitOp(ctx, f.id, op.ID)
+		if err != nil {
+			t.Errorf("awaitOp: %v", err)
+		}
+		got <- o
+	}()
+	// The await read the op open and waits on its re-read timer, which this
+	// test never fires.
+	if tm := hh.nextTimer(t); tm.d != laneAwaitReread {
+		t.Fatalf("await timer = %v, want the re-read's %v", tm.d, laneAwaitReread)
+	}
+	if _, err := st.Close(op.ID, opjournal.Outcome{Arm: opjournal.ArmSucceeded}, "lane:test"); err != nil {
+		t.Fatalf("closing op: %v", err)
+	}
+	hh.h.notePass(f.id, opjournal.PassResult{}, nil)
+	select {
+	case o := <-got:
+		if o.Status != opjournal.StatusClosed {
+			t.Fatalf("await = %+v, want the op closed", o)
+		}
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the await did not wake at the pass's end")
+	}
+}
+
+// An await that returns with no pass over its conversation leaves no
+// pass-end waiter behind: one that found its op closed, and one whose
+// context ended. One leaving does not take the channel from another await
+// still waiting on it, which the pass's end then wakes.
+func TestConversationLaneHostAwaitOpLeavesNoWaiter(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message", "interrupt")
+	st, _, err := hh.h.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	closed := f.propose(t, st, f.msg("closed-1", opjournal.RolePrompt, "hello"))
+	if _, err := st.Close(closed.ID, opjournal.Outcome{Arm: opjournal.ArmSucceeded}, "lane:test"); err != nil {
+		t.Fatalf("closing op: %v", err)
+	}
+	if got, err := hh.h.awaitOp(context.Background(), f.id, closed.ID); err != nil || got.Status != opjournal.StatusClosed {
+		t.Fatalf("await of a closed op = %+v, %v; want it closed", got, err)
+	}
+	if n := passEndsHeld(hh.h); n != 0 {
+		t.Fatalf("an await of a closed op left %d pass-end channels", n)
+	}
+
+	// awaitUntil awaits op id in the background until ctx ends; it returns
+	// once the await waits on its re-read timer, which this test never
+	// fires, so only the end of a pass or ctx wakes it.
+	awaitUntil := func(ctx context.Context, id string) <-chan opjournal.Op {
+		t.Helper()
+		got := make(chan opjournal.Op, 1)
+		go func() {
+			o, err := hh.h.awaitOp(ctx, f.id, id)
+			if err != nil {
+				t.Errorf("awaitOp(%s): %v", id, err)
+			}
+			got <- o
+		}()
+		hh.nextTimer(t)
+		return got
+	}
+	returned := func(what string, got <-chan opjournal.Op) opjournal.Op {
+		t.Helper()
+		select {
+		case o := <-got:
+			return o
+		case <-time.After(laneWaitBudget):
+			t.Fatalf("%s did not return", what)
+			return opjournal.Op{}
+		}
+	}
+	leaving := f.propose(t, st, f.msg("open-1", opjournal.RolePrompt, "hello"))
+	ctx, cancel := context.WithCancel(context.Background())
+	sole := awaitUntil(ctx, leaving.ID)
+	cancel()
+	if o := returned("an await whose context ended", sole); o.Status == opjournal.StatusClosed {
+		t.Fatalf("await = %+v, want the op open when its context ended", o)
+	}
+	if n := passEndsHeld(hh.h); n != 0 {
+		t.Fatalf("an await whose context ended left %d pass-end channels", n)
+	}
+
+	staying := f.propose(t, st, f.msg("open-2", opjournal.RolePrompt, "hello"))
+	ctx, cancel = context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	left := awaitUntil(ctx, leaving.ID)
+	stays := awaitUntil(context.Background(), staying.ID)
+	cancel()
+	returned("the await that left", left)
+	if _, err := st.Close(staying.ID, opjournal.Outcome{Arm: opjournal.ArmSucceeded}, "lane:test"); err != nil {
+		t.Fatalf("closing op: %v", err)
+	}
+	hh.h.notePass(f.id, opjournal.PassResult{}, nil)
+	if o := returned("the await still waiting at the pass's end", stays); o.Status != opjournal.StatusClosed {
+		t.Fatalf("await = %+v, want the op closed by the pass", o)
+	}
+	if n := passEndsHeld(hh.h); n != 0 {
+		t.Fatalf("finished awaits left %d pass-end channels", n)
+	}
+}
+
+// passEndsHeld is how many conversations h holds a pass-end channel for.
+func passEndsHeld(h *conversationLaneHost) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.passEnds)
+}

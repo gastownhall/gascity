@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -616,7 +617,7 @@ func inProgressAssignees(members []beads.Bead, exclude func(beads.Bead) bool) []
 //
 // When the city's lane host executes interrupt, each live session's
 // interrupt is a lane op the host runs (interruptRunHoldersLane), keyed
-// run-cancel:<run id>.
+// run-cancel:<run id>:<generation>.
 //
 // Best-effort: the run is already durably marked canceling, so a failure is
 // logged and returned for the response rather than failing the cancel. Distinct sessions
@@ -667,18 +668,8 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 
 	sp := s.state.SessionProvider()
 	if s.laneExecutes(opjournal.KindInterrupt) {
-		live := make([]string, 0, len(ids))
-		for _, id := range ids {
-			info, err := s.sessionManager(store).Get(id)
-			switch {
-			case err != nil:
-				fail(id, err)
-			case info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName):
-			default:
-				live = append(live, id)
-			}
-		}
-		return s.interruptRunHoldersLane(ctx, store, runID, live, fail), failures
+		interrupted := s.interruptRunHoldersLane(ctx, store, runID, s.liveRunHolders(store, sp, ids, fail), fail)
+		return interrupted, failures
 	}
 	results := make([]error, len(ids))
 	skipped := make([]bool, len(ids))
@@ -693,10 +684,10 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 				results[i] = err
 				return
 			}
-			// StopTurn's own guard (a suspended or stopped session has no
-			// turn), checked first so such a session is neither waited on nor
-			// reported as interrupted.
-			if info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName) {
+			// StopTurn's own guard (holderHasNoTurn), checked first so a
+			// session without a turn is neither waited on nor reported as
+			// interrupted.
+			if holderHasNoTurn(info, sp) {
 				skipped[i] = true
 				return
 			}
@@ -716,6 +707,30 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 		}
 	}
 	return interrupted, failures
+}
+
+// holderHasNoTurn reports whether a run holder's session has no turn to
+// interrupt: closed, suspended, or its runtime not running (StopTurn's own
+// guard).
+func holderHasNoTurn(info session.Info, sp runtime.Provider) bool {
+	return info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName)
+}
+
+// liveRunHolders is the sessions among ids with a turn to interrupt, as
+// interruptRunHolders skips the rest (holderHasNoTurn); one that cannot be
+// read is a failure.
+func (s *Server) liveRunHolders(store beads.Store, sp runtime.Provider, ids []string, fail func(string, error)) []string {
+	live := make([]string, 0, len(ids))
+	for _, id := range ids {
+		info, err := s.sessionManager(store).Get(id)
+		switch {
+		case err != nil:
+			fail(id, err)
+		case !holderHasNoTurn(info, sp):
+			live = append(live, id)
+		}
+	}
+	return live
 }
 
 // findWorkflowRoots returns the graph-workflow roots in store that match runID
