@@ -1,0 +1,129 @@
+package main
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+)
+
+// Interrupted closes (#2085). A store without an atomic terminal close commits
+// a session close as two writes: the ClosePatch metadata, then the status
+// Close. When the Close is lost the bead stays open carrying this binary's own
+// close code as its state. These tests pin that the reconciler finishes such a
+// close instead of skipping the row as an unknown state forever, and that every
+// other unrecognized state keeps the notify-only skip.
+
+// halfCloseSessionBead writes the metadata half of a session close, as a
+// two-write close whose status Close was lost leaves it.
+func halfCloseSessionBead(t *testing.T, store beads.Store, id, code string, now time.Time, extra map[string]string) {
+	t.Helper()
+	patch := map[string]string(sessionpkg.ClosePatch(now, code))
+	for k, v := range extra {
+		patch[k] = v
+	}
+	if err := store.SetMetadataBatch(id, patch); err != nil {
+		t.Fatalf("half-close %s as %q: %v", id, code, err)
+	}
+}
+
+// newInterruptedClosePoolCity is a max=1 pool city whose only seat is the
+// canonical pool identity, with ready work routed to the pool's template.
+func newInterruptedClosePoolCity(t *testing.T, now time.Time) (string, *config.City, beads.Store, *runtime.Fake, beads.Bead) {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeCityTOML(t, cityPath, "trace-town", "worker")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "trace-town"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "repo",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	store := beads.NewMemStore()
+	seat := createCanonicalPoolSession(t, store, &cfg.Agents[0], now, 1)
+	setPoolSessionActive(t, store, seat.ID)
+	return cityPath, cfg, store, runtime.NewFake(), seat
+}
+
+// A max=1 pool's only seat, half-closed in any of this binary's own close
+// codes, closes on the first complete tick with the close it was interrupted
+// in, and the pool's canonical identity then starts a replacement seat for the
+// routed work it was holding back.
+func TestInterruptedCloseFinishesPoolSeatAndReplacementStarts(t *testing.T) {
+	cases := []struct {
+		code  string
+		extra map[string]string
+	}{
+		{code: "duplicate"},
+		{code: "reconfigured"},
+		{code: "gc_swept"},
+		{code: "stale-session"},
+		{code: "dead-runtime"},
+		{code: "stranded-repair"},
+		{code: "idle-timeout", extra: map[string]string{"sleep_reason": "idle-timeout"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			now := time.Now().UTC()
+			cityPath, cfg, store, sp, seat := newInterruptedClosePoolCity(t, now)
+			if _, err := store.Create(beads.Bead{
+				Title:    "ready work behind the half-closed seat",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "repo/worker"},
+			}); err != nil {
+				t.Fatalf("create routed work: %v", err)
+			}
+			halfCloseSessionBead(t, store, seat.ID, tc.code, now.Add(-time.Hour), tc.extra)
+
+			dops := newDrainOps(sp)
+			dt := newDrainTracker()
+			tracker := &asyncStartTracker{}
+			clk := &clock.Fake{Time: now}
+			var out strings.Builder
+			replacementRan := false
+			for tick := 0; tick < 6 && !replacementRan; tick++ {
+				drainAckRewakeTick(t, cityPath, cfg, sp, store, dops, dt, tracker, clk, &out)
+				dumpDrainAckRewakeState(t, store, sp, tick)
+				if tick == 0 {
+					got, err := store.Get(seat.ID)
+					if err != nil {
+						t.Fatalf("reload seat: %v", err)
+					}
+					if got.Status != "closed" {
+						t.Fatalf("half-closed %q seat %s status = %q after the first tick, want closed\n%s", tc.code, seat.ID, got.Status, out.String())
+					}
+					if got.Metadata["state"] != tc.code {
+						t.Errorf("closed seat state = %q, want %q", got.Metadata["state"], tc.code)
+					}
+					if want := sessionpkg.CanonicalCloseReason(tc.code); got.Metadata["close_reason"] != want {
+						t.Errorf("closed seat close_reason = %q, want %q", got.Metadata["close_reason"], want)
+					}
+				}
+				open, err := loadSessionBeads(store)
+				if err != nil {
+					t.Fatalf("loadSessionBeads: %v", err)
+				}
+				for _, b := range open {
+					if b.ID != seat.ID && b.Metadata["template"] == "repo/worker" && sp.IsRunning(b.Metadata["session_name"]) {
+						replacementRan = true
+					}
+				}
+				clk.Advance(30 * time.Second)
+			}
+			if !replacementRan {
+				t.Fatalf("no replacement seat started for the pool's routed work after finishing the %q close\n%s", tc.code, out.String())
+			}
+		})
+	}
+}
