@@ -1370,15 +1370,11 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			message = "Wait satisfied."
 		}
 		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
-		if lane != nil {
-			handled, err := dispatchWaitNotice(lane, sessFront, sessionInfo, wait, nudgeID, message)
-			if err != nil {
-				return err
-			}
-			if handled {
-				continue
-			}
-		}
+		// Each attempt is delivered by whichever path recorded it first, so
+		// flipping message into or out of [ops] authoritative never sends it
+		// twice: a queue item for it stays the attempt's (checked before the
+		// lane), and a lane notice for it stays the attempt's after a
+		// rollback (checked before the queue; an open notice still drains).
 		queued, err := waitNudgeAttemptQueuedOrResolved(nudgeShadows(nudges), nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
@@ -1388,6 +1384,22 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			return err
 		}
 		if queued {
+			continue
+		}
+		if lane != nil {
+			handled, err := dispatchWaitNotice(lane, sessFront, sessionInfo, wait, nudgeID, message)
+			if err != nil {
+				return err
+			}
+			if handled {
+				continue
+			}
+		}
+		noticed, err := waitNoticeRecorded(sessFront, wait, nudgeID)
+		if err != nil {
+			return err
+		}
+		if noticed {
 			continue
 		}
 		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{

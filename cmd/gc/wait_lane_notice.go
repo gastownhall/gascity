@@ -10,7 +10,10 @@ package main
 // names one. The wait's nudge_id then holds the op id, which its finalize
 // and withdraw read (opjournal.IsOpID) in place of a queue shadow's. One
 // path serves both reconcilers: dispatchReadyWaitNudgesWithSnapshot and
-// finalizeReadyWaitFromNudge are their shared entry points.
+// finalizeReadyWaitFromNudge are their shared entry points. An attempt stays
+// with the path that recorded it first across a flip or rollback of message
+// in [ops] authoritative: a queued attempt gets no notice, and a noticed one
+// no queue item (waitNoticeRecorded).
 
 import (
 	"errors"
@@ -91,6 +94,36 @@ func dispatchWaitNotice(lane plannerNoticeLane, sessFront *sessionpkg.Store, inf
 		lane.Poke(info.ID)
 	}
 	return true, nil
+}
+
+// waitNoticeRecorded reports whether wait's nudge attempt nudgeID is a lane
+// notice: the wait's nudge_id is the op its attempt's key names in the op
+// journal over sessFront's store, and that op exists, open or closed. The
+// legacy queue then takes no item for the attempt: an open notice still
+// drains after a rollback, and a closed one resolved the attempt.
+func waitNoticeRecorded(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, nudgeID string) (bool, error) {
+	if !opjournal.IsOpID(wait.NudgeID) {
+		return false, nil
+	}
+	st, err := opjournal.NewStore(sessFront.Store(), clock.Real{})
+	if err != nil {
+		return false, fmt.Errorf("opening the op journal for wait %s: %w", wait.ID, err)
+	}
+	id, err := opjournal.DeriveID(st.Prefix(), wait.SessionID, waitNoticePrincipal, waitNoticeKey(nudgeID))
+	if err != nil {
+		return false, fmt.Errorf("deriving wait %s's notice: %w", wait.ID, err)
+	}
+	if id != wait.NudgeID {
+		return false, nil
+	}
+	switch _, err := st.Get(id); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, beads.ErrNotFound):
+		return false, nil
+	default:
+		return false, fmt.Errorf("reading wait %s's notice %s: %w", wait.ID, id, err)
+	}
 }
 
 // finalizeWaitFromNotice closes ready wait from its lane notice opID: a

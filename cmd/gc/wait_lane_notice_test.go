@@ -189,3 +189,49 @@ func TestWaitNudgeWithoutLaneKeepsTheQueue(t *testing.T) {
 		t.Fatalf("open ops = %+v, %v; want none", open, err)
 	}
 }
+
+// Flipping the switch: a ready wait whose attempt is already a queue item
+// (nudge_id the queue id, its shadow open) keeps that item once the
+// controller's host executes message, and gets no lane notice for the same
+// attempt, so the attempt is delivered once.
+func TestWaitNudgeFlipKeepsTheQueuedAttempt(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	wait := readyWait(t, f, "flip")
+	dispatchWaits(t, f) // no lane host: the attempt is a queue item
+	queuedID := waitNow(t, f, wait).NudgeID
+	if _, open, err := nudgeShadows(beads.NudgesStore{Store: f.store}).Find(queuedID); err != nil || !open {
+		t.Fatalf("before the flip: queue item %s open %v, %v; want it open", queuedID, open, err)
+	}
+	f.cfg.Ops.Authoritative = []string{"message"}
+	newNoticeLaneHost(t, f, "message")
+	dispatchWaits(t, f)
+	if got := waitNow(t, f, wait).NudgeID; got != queuedID {
+		t.Fatalf("after the flip: nudge_id %q, want the queue item's %q", got, queuedID)
+	}
+	if open, err := st.ListOpen(f.id); err != nil || len(open) != 0 {
+		t.Fatalf("after the flip: open ops = %+v, %v; want none for the queued attempt", open, err)
+	}
+}
+
+// Rolling the switch back: a ready wait whose attempt is an open lane notice
+// gets no queue item for the same attempt once no host executes message
+// (the open notice still drains), and keeps the op as its nudge_id.
+func TestWaitNudgeRollbackKeepsTheOpenNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	f.cfg.Ops.Authoritative = []string{"message"}
+	newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	wait := readyWait(t, f, "rollback")
+	dispatchWaits(t, f)
+	op := waitNotice(t, f, st, wait)
+	f.cfg.Ops.Authoritative = nil
+	newNoticeLaneHost(t, f)
+	dispatchWaits(t, f)
+	if got := waitNow(t, f, wait).NudgeID; got != op.ID {
+		t.Fatalf("after the rollback: nudge_id %q, want the notice's %q", got, op.ID)
+	}
+	if _, open, err := nudgeShadows(beads.NudgesStore{Store: f.store}).Find(waitNudgeID(wait)); err != nil || open {
+		t.Fatalf("after the rollback: queue item for the attempt open %v, %v; want none", open, err)
+	}
+}
