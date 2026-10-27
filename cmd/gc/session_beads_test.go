@@ -10723,3 +10723,65 @@ func TestFailedCreateCloseClearsTheHolds(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncSessionBeads_ClaudeAgentsSharingWorkDirEachGetSessionKey pins
+// ga-k98e78 (gastownhall/gascity#5439): two supervisor-created claude sessions
+// sharing one work_dir each carry a distinct session_key, resolved through the
+// real builtin claude provider, each row's first start runs under its own key,
+// and the keyed transcript lookup resolves each row's own transcript, so `gc
+// session logs` never falls back to the ambiguous workdir match.
+func TestSyncSessionBeads_ClaudeAgentsSharingWorkDirEachGetSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	workDir := t.TempDir()
+	ws := &config.Workspace{}
+	base := config.BasePrefixBuiltin + "claude"
+	providers := map[string]config.ProviderSpec{"claude": {Base: &base}}
+	ds := map[string]TemplateParams{}
+	for _, name := range []string{"alpha", "beta"} {
+		resolved, err := config.ResolveProvider(&config.Agent{Name: name, Provider: "claude"}, ws, providers,
+			func(n string) (string, error) { return n, nil })
+		if err != nil {
+			t.Fatalf("resolving claude provider for %s: %v", name, err)
+		}
+		ds[name] = TemplateParams{TemplateName: name, Command: resolved.Command, WorkDir: workDir, ResolvedProvider: resolved}
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	got := allSessionBeads(t, store)
+	if len(got) != 2 {
+		t.Fatalf("session beads = %d, want 2; stderr=%s", len(got), stderr.String())
+	}
+	searchBase := t.TempDir()
+	keys := map[string]bool{}
+	transcripts := map[string]string{}
+	for _, b := range got {
+		key := b.Metadata["session_key"]
+		if key == "" {
+			t.Fatalf("session %s (%s) has no session_key on shared work_dir %q", b.ID, b.Metadata["template"], workDir)
+		}
+		if keys[key] {
+			t.Fatalf("session_key %q shared by two sessions", key)
+		}
+		keys[key] = true
+		tp := ds[b.Metadata["template"]]
+		if cmd := resolveSessionCommand(tp.Command, key, "", tp.ResolvedProvider, true, false); !strings.HasSuffix(cmd, "--session-id "+key) {
+			t.Fatalf("first start for %s = %q, want it to end with --session-id %s", b.Metadata["template"], cmd, key)
+		}
+		transcripts[b.Metadata["session_name"]] = writeNamedTestSession(t, searchBase, workDir, key+".jsonl",
+			`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+		)
+	}
+	// The transcript probe consults the ambient session env; keep it inert so
+	// the keyed path, not an ambient provider, answers.
+	for _, k := range []string{"GC_SESSION", "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT"} {
+		t.Setenv(k, "")
+	}
+	for alias, want := range transcripts {
+		path, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), alias, []string{searchBase})
+		if !ok || diagnostic != "" || provider != "claude" || path != want {
+			t.Fatalf("resolving %s = (%q, %q, %v, %q), want its own transcript %q with no diagnostic", alias, path, provider, ok, diagnostic, want)
+		}
+	}
+}
