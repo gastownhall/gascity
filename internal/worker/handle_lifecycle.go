@@ -132,6 +132,17 @@ func (h *SessionHandle) ResetFenced(ctx context.Context, instanceToken string) (
 	return err
 }
 
+// CheckResetFenced reports ResetFenced's decision on a fresh read of the
+// session row, writing nothing (session.Manager.CheckFreshRestartFenced).
+// instanceToken is never logged.
+func (h *SessionHandle) CheckResetFenced(_ context.Context, instanceToken string) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+	}
+	return h.manager.CheckFreshRestartFenced(id, instanceToken)
+}
+
 // Stop suspends the worker runtime while preserving conversation state.
 //
 // This carries OPERATOR intent: it has targeted, single-session callers (the

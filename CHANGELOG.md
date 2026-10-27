@@ -435,6 +435,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
 
+- **`gc runtime request-restart` and a self `gc handoff` record a restart
+  only for the caller's own incarnation, and their exit codes change.** The
+  request is written to the session row first, and only while the row or the
+  session's live runtime carries the caller's `GC_INSTANCE_TOKEN`, so a
+  process left over from an earlier incarnation can no longer restart its
+  successor; a self `gc handoff` refused this way sends no mail. Both
+  commands now exit 1 and record nothing when `GC_INSTANCE_TOKEN` is not
+  set. An agent CLI that scrubs `*TOKEN*` variables from the shells it spawns
+  (for example Claude Code with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) removes
+  it, so keep that variable in the agent's subprocess environment.
+  `gc runtime request-restart` also exits 1 when the session store does not
+  open, where it used to set only the runtime's restart flag. Once the
+  request is recorded, a failed controller poke exits 0 with the warning
+  `restart recorded; controller not notified, it will act on its next pass`,
+  where it used to exit 1: the controller acts on the recorded request at
+  its next pass, so a script need not retry. An operator on the controller
+  host can still restart any session with `gc session reset <session>`.
+
 ### Added
 
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -48,11 +47,13 @@ For controller-restartable sessions, equivalent to:
 The restart request is recorded on this session's row, bound to this
 session's incarnation: it is recorded only while the session row, or the
 live runtime under the session's name, still carries the GC_INSTANCE_TOKEN
-this process runs under. An agent CLI that scrubs *TOKEN* variables from the
-shells it spawns removes GC_INSTANCE_TOKEN, and the restart is refused before
-the mail is sent. Outside a worker site the
-runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
-gc handoff exits 0 once the request is recorded, even when the controller
+this process runs under. The restart is refused before the mail is sent when
+this process has no GC_INSTANCE_TOKEN (an agent CLI that scrubs *TOKEN*
+variables from the shells it spawns removes it) or when the session row and
+the live runtime name another incarnation, so a process left over from an
+earlier incarnation sends its successor no handoff mail. Outside a worker
+site the runtime's GC_RESTART_REQUESTED hint follows, then the controller
+poke. gc handoff exits 0 once the request is recorded, even when the controller
 could not be signaled: a warning says so, and the controller acts at its next
 pass. It exits 1 with no restart recorded and no runtime hint set when the
 request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
@@ -189,6 +190,7 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 		display:     current.display,
 		token:       os.Getenv(runtime.InstanceTokenEnv),
 		record:      sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName),
+		check:       sessionRestartChecker(current.cityPath, sessStore, sp, cfg, current.sessionName),
 		hint:        restartHintOps(current.cityPath, sp),
 		poke:        pokeControllerForRestart,
 		stderr:      stderr,
@@ -266,9 +268,13 @@ func doHandoff(msgStore, sessStore beads.Store, rec events.Recorder, dops drainO
 
 // doHandoffWithOutcome checks restartability, sends the handoff mail and, for
 // a restartable session, records the restart request row first (SG-3). A
-// restartable handoff whose caller names no incarnation is refused before the
-// mail, so a retry does not send it twice. dops clears a stale runtime restart
-// flag of a session the controller does not restart.
+// restartable handoff whose caller names no incarnation, or whose incarnation
+// a check of the row refuses (rowFirstRestart.refusedBeforeMail), is refused
+// before the mail: the mail is addressed to the session, so a left-over
+// incarnation's mail would reach its successor, and a retry would send it
+// again. The fenced write after the mail stays the authority, since the row
+// can move between the check and the write. dops clears a stale runtime
+// restart flag of a session the controller does not restart.
 func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, dops drainOps, r rowFirstRestart,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
@@ -277,9 +283,11 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
-	if restartable && strings.TrimSpace(r.token) == "" {
-		fmt.Fprintf(stderr, "gc handoff: %s\n", r.notRecorded(session.ErrRestartRequestUnfenced)) //nolint:errcheck // best-effort stderr
-		return handoffOutcome{code: 1}
+	if restartable {
+		if err := r.refusedBeforeMail(); err != nil {
+			fmt.Fprintf(stderr, "gc handoff: %s\n", r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+			return handoffOutcome{code: 1}
+		}
 	}
 
 	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)

@@ -3160,8 +3160,48 @@ func TestSessionHandleResetFencedRecordsForTheCurrentIncarnation(t *testing.T) {
 	}
 }
 
+// TestSessionHandleCheckResetFencedWritesNothing proves the handle's
+// read-only fence decision answers as ResetFenced would, refusing another
+// incarnation and passing the row's own, and writes nothing (SG-3).
+func TestSessionHandleCheckResetFencedWritesNothing(t *testing.T) {
+	handle, store, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"instance_token": "tok-live"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	before, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	var fenced FencedResetHandle = handle
+
+	if err := fenced.CheckResetFenced(context.Background(), "tok-dead"); !errors.Is(err, sessionpkg.ErrStaleRestartRequest) {
+		t.Fatalf("CheckResetFenced(stale) err = %v, want ErrStaleRestartRequest", err)
+	}
+	if err := fenced.CheckResetFenced(context.Background(), "tok-live"); err != nil {
+		t.Fatalf("CheckResetFenced: %v", err)
+	}
+	after, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if after.Revision != before.Revision || after.Metadata["restart_requested"] != "" || after.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row moved from revision %d to %d (%v); the check must write nothing", before.Revision, after.Revision, after.Metadata)
+	}
+}
+
 // TestSessionHandleResetFencedRequiresExistingSession proves a handle with
-// no session row records nothing.
+// no session row records nothing and decides nothing.
 func TestSessionHandleResetFencedRequiresExistingSession(t *testing.T) {
 	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -3173,6 +3213,9 @@ func TestSessionHandleResetFencedRequiresExistingSession(t *testing.T) {
 	})
 	if err := handle.ResetFenced(context.Background(), "tok"); !errors.Is(err, ErrOperationUnsupported) {
 		t.Fatalf("ResetFenced err = %v, want %v", err, ErrOperationUnsupported)
+	}
+	if err := handle.CheckResetFenced(context.Background(), "tok"); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("CheckResetFenced err = %v, want %v", err, ErrOperationUnsupported)
 	}
 }
 

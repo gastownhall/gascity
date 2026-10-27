@@ -66,7 +66,7 @@ func TestDecideRestartRequest(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			patch, err := decideRestartRequest(tc.info, restartFenceToken, func(string, string) bool { return false })
+			patch, err := decideRestartRequest(tc.info, restartFenceToken, func(Info, string) bool { return false })
 			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
@@ -282,24 +282,38 @@ func TestRequestFreshRestartFencedRefusesAClosedRow(t *testing.T) {
 // second proof of the caller's incarnation: a row whose token moved while
 // its runtime kept running (a legacy warm reuse mints in PreWake and keeps
 // the pane) still records the request when the live runtime under the row's
-// session name carries the caller's GC_INSTANCE_TOKEN. Any other runtime
-// token, none, or a failed read refuses, and the write is still the CAS at
-// the deciding read's revision.
+// session name carries the caller's GC_INSTANCE_TOKEN and names no other
+// row in its GC_SESSION_ID (an unset ID, as legacy adoption leaves it, is
+// judged by the token alone). Any other runtime token, none, another row's
+// session ID (compareIdentity's Foreign), or a failed read refuses, and the
+// write is still the CAS at the deciding read's revision.
 func TestRequestFreshRestartFencedAcceptsTheLiveRuntimesToken(t *testing.T) {
 	const sessName = "s-fence"
 	cases := []struct {
 		name    string
-		seed    func(sp *runtime.Fake)
+		seed    func(sp *runtime.Fake, rowID string)
 		wantErr error
 	}{
-		{"runtime carries the caller's token", func(sp *runtime.Fake) {
+		{"runtime carries the caller's token", func(sp *runtime.Fake, _ string) {
 			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, " "+restartFenceToken+"\n")
 		}, nil},
-		{"runtime carries another token", func(sp *runtime.Fake) {
+		{"runtime carries the caller's token and names this row", func(sp *runtime.Fake, rowID string) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
+			_ = sp.SetMeta(sessName, "GC_SESSION_ID", " "+rowID+"\n")
+		}, nil},
+		{"runtime carries the caller's token but names another row", func(sp *runtime.Fake, _ string) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
+			_ = sp.SetMeta(sessName, "GC_SESSION_ID", "gc-another-row")
+		}, ErrStaleRestartRequest},
+		{"runtime session ID read fails", func(sp *runtime.Fake, _ string) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
+			sp.GetMetaErrors = map[string]map[string]error{sessName: {"GC_SESSION_ID": errors.New("tmux: no server")}}
+		}, ErrStaleRestartRequest},
+		{"runtime carries another token", func(sp *runtime.Fake, _ string) {
 			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, "tok-third")
 		}, ErrStaleRestartRequest},
-		{"runtime carries no token", func(*runtime.Fake) {}, ErrStaleRestartRequest},
-		{"runtime read fails", func(sp *runtime.Fake) {
+		{"runtime carries no token", func(*runtime.Fake, string) {}, ErrStaleRestartRequest},
+		{"runtime read fails", func(sp *runtime.Fake, _ string) {
 			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
 			sp.GetMetaErrors = map[string]map[string]error{sessName: {runtime.InstanceTokenEnv: errors.New("tmux: no server")}}
 		}, ErrStaleRestartRequest},
@@ -313,7 +327,7 @@ func TestRequestFreshRestartFencedAcceptsTheLiveRuntimesToken(t *testing.T) {
 				"instance_token": restartFenceOtherToken,
 			})
 			sp := runtime.NewFake()
-			tc.seed(sp)
+			tc.seed(sp, created.ID)
 			rec := &rowWriteRecorder{Store: store}
 			m := newTestManager(t, rec, sp)
 
@@ -365,4 +379,65 @@ func TestRequestFreshRestartFencedRuntimeProofLosesToARestart(t *testing.T) {
 		t.Fatalf("err = %v, want ErrStaleRestartRequest", err)
 	}
 	assertRestartRequestKeys(t, store, created.ID, "")
+}
+
+// TestCheckFreshRestartFenced proves the read-only decision answers as
+// RequestFreshRestartFenced would, on a fresh read of the row, and writes
+// nothing: the current incarnation, a pending request and a live runtime that
+// carries the caller's token pass; another incarnation, a closed row and no
+// token refuse.
+func TestCheckFreshRestartFenced(t *testing.T) {
+	const sessName = "s-fence"
+	cases := []struct {
+		name         string
+		token        string
+		row          map[string]string
+		runtimeToken string // the live runtime's GC_INSTANCE_TOKEN
+		closed       bool
+		wantErr      error
+	}{
+		{name: "current incarnation", token: restartFenceToken},
+		{name: "request already pending", token: restartFenceToken, row: map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}},
+		{name: "live runtime carries the caller's token", token: restartFenceToken, row: map[string]string{"instance_token": restartFenceOtherToken}, runtimeToken: restartFenceToken},
+		{name: "another incarnation", token: "tok-dead", wantErr: ErrStaleRestartRequest},
+		{name: "closed row", token: restartFenceToken, closed: true, wantErr: ErrSessionClosed},
+		{name: "no token", token: " \t", wantErr: ErrRestartRequestUnfenced},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+			extra := map[string]string{"session_name": sessName}
+			for k, v := range tc.row {
+				extra[k] = v
+			}
+			created := seedRestartFenceSession(t, store, extra)
+			if tc.closed {
+				if err := store.Close(created.ID); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			}
+			before, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			sp := runtime.NewFake()
+			if tc.runtimeToken != "" {
+				_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, tc.runtimeToken)
+			}
+			m := newTestManager(t, store, sp)
+
+			err = m.CheckFreshRestartFenced(created.ID, tc.token)
+			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			after, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if after.Revision != before.Revision || after.Metadata["restart_requested"] != before.Metadata["restart_requested"] ||
+				after.Metadata["continuation_reset_pending"] != before.Metadata["continuation_reset_pending"] {
+				t.Fatalf("row moved from revision %d %v to %d %v; the check must write nothing", before.Revision, before.Metadata, after.Revision, after.Metadata)
+			}
+		})
+	}
 }

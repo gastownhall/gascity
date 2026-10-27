@@ -71,6 +71,9 @@ type FencedResetHandle interface {
 	// ResetFenced records the restart request when the row's instance token
 	// is instanceToken (session.Manager.RequestFreshRestartFenced).
 	ResetFenced(ctx context.Context, instanceToken string) error
+	// CheckResetFenced is ResetFenced's decision taken now, with nothing
+	// written (session.Manager.CheckFreshRestartFenced).
+	CheckResetFenced(ctx context.Context, instanceToken string) error
 }
 
 // MessagingHandle exposes live input delivery operations.

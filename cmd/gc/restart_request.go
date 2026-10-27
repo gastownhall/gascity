@@ -29,6 +29,8 @@ type rowFirstRestart struct {
 	token       string // the caller's GC_INSTANCE_TOKEN; a capability, never printed
 	// record writes the fenced row marker (worker.FencedResetHandle).
 	record func(token string) error
+	// check decides record's write without making it; nil decides nothing.
+	check func(token string) error
 	// hint sets the runtime's restart hint; nil on a worker site, whose
 	// guard holds no runtime metadata.
 	hint drainOps
@@ -75,6 +77,25 @@ func (r rowFirstRestart) recordRestart() error {
 	return nil
 }
 
+// refusedBeforeMail is the request's refusal decided before a self handoff
+// sends its mail, so a refused caller sends none: no token, or a check of the
+// row that refuses this incarnation, the row being closed or it and its live
+// runtime naming another incarnation. A check that cannot decide (no session
+// store or row, a failed read) refuses nothing here: the fenced write after
+// the mail stays the authority and reports why it recorded nothing.
+func (r rowFirstRestart) refusedBeforeMail() error {
+	if strings.TrimSpace(r.token) == "" {
+		return session.ErrRestartRequestUnfenced
+	}
+	if r.check == nil {
+		return nil
+	}
+	if err := r.check(r.token); errors.Is(err, session.ErrStaleRestartRequest) || errors.Is(err, session.ErrSessionClosed) {
+		return err
+	}
+	return nil
+}
+
 // notifyController pokes the controller once the request is recorded. It
 // never fails the command: a worker site prints errWorkerSiteNoController,
 // and a failed poke prints the pinned warning.
@@ -93,13 +114,15 @@ func (r rowFirstRestart) notifyController() restartNotice {
 }
 
 // notRecorded renders why recordRestart recorded nothing, without the verb.
-// It never contains the token.
+// It never contains the token. A refused incarnation is given no command that
+// restarts the session: gc session reset is unfenced, so a process left over
+// from an earlier incarnation that ran it would restart its successor.
 func (r rowFirstRestart) notRecorded(err error) string {
 	switch {
 	case errors.Is(err, session.ErrStaleRestartRequest):
-		return fmt.Sprintf("restart not recorded: this process does not run in session %s's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); from outside the session, gc session reset %s restarts it", r.display, r.display)
+		return fmt.Sprintf("restart not recorded: this process does not run in session %s's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); a process left over from an earlier incarnation must exit, and only an operator on the controller host can restart the session", r.display)
 	case errors.Is(err, session.ErrRestartRequestUnfenced):
-		return "restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of the session it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); from outside the session, gc session reset restarts it"
+		return fmt.Sprintf("restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of the session it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); keep GC_INSTANCE_TOKEN in the agent's environment, or ask an operator on the controller host to restart session %s (gc session reset %s)", r.display, r.display)
 	default:
 		return fmt.Sprintf("restart not recorded: %v", err)
 	}
@@ -118,6 +141,21 @@ func restartHintOps(cityPath string, sp runtime.Provider) drainOps {
 // session row through the worker boundary, fenced to the caller's instance
 // token. A nil sessStore records nothing (recordRestart reports it).
 func sessionRestartRecorder(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func(token string) error {
+	return sessionFencedReset(cityPath, sessStore, sp, cfg, target, worker.FencedResetHandle.ResetFenced)
+}
+
+// sessionRestartChecker decides, writing nothing, whether
+// sessionRestartRecorder's write would record the request. A nil sessStore
+// decides nothing.
+func sessionRestartChecker(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func(token string) error {
+	return sessionFencedReset(cityPath, sessStore, sp, cfg, target, worker.FencedResetHandle.CheckResetFenced)
+}
+
+// sessionFencedReset runs op with the caller's token on target's worker
+// handle, which must be bound to a session row. A nil sessStore returns nil.
+func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string,
+	op func(worker.FencedResetHandle, context.Context, string) error,
+) func(token string) error {
 	if sessStore == nil {
 		return nil
 	}
@@ -130,6 +168,6 @@ func sessionRestartRecorder(cityPath string, sessStore beads.Store, sp runtime.P
 		if !ok {
 			return fmt.Errorf("session %q has no session row to record the restart on", target)
 		}
-		return fenced.ResetFenced(context.Background(), token)
+		return op(fenced, context.Background(), token)
 	}
 }

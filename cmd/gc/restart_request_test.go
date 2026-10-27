@@ -52,12 +52,13 @@ func fencedRecorder(t *testing.T, store beads.Store, sp runtime.Provider, id str
 // against the explicit-restart fixture.
 var restartVerbs = []struct {
 	name, verb string
+	sendsMail  bool // a recorded request also sends the handoff mail
 	run        func(stdout, stderr *bytes.Buffer) int
 }{
-	{"request-restart", "gc runtime request-restart", func(stdout, stderr *bytes.Buffer) int {
+	{"request-restart", "gc runtime request-restart", false, func(stdout, stderr *bytes.Buffer) int {
 		return cmdRuntimeRequestRestart(stdout, stderr)
 	}},
-	{"self handoff", "gc handoff", func(stdout, stderr *bytes.Buffer) int {
+	{"self handoff", "gc handoff", true, func(stdout, stderr *bytes.Buffer) int {
 		return cmdHandoffWithForce([]string{"context cycle", "resume from the brief"}, "", false, "", false, stdout, stderr)
 	}},
 }
@@ -101,6 +102,13 @@ func TestRowFirstRestartDurableWriteFailedPokeExitsZero(t *testing.T) {
 			if restartHint(t, fixture) == "" {
 				t.Fatal("GC_RESTART_REQUESTED unset, want the local-mode hint after the row write")
 			}
+			wantMail := 0
+			if v.sendsMail {
+				wantMail = 1
+			}
+			if got := len(listOpenMessagesBothTiers(t, fixture.store)); got != wantMail {
+				t.Fatalf("open messages = %d, want %d", got, wantMail)
+			}
 			want := v.verb + ": warning: restart recorded; controller not notified, it will act on its next pass: "
 			if !strings.HasPrefix(stderr.String(), want) {
 				t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
@@ -114,19 +122,23 @@ func TestRowFirstRestartDurableWriteFailedPokeExitsZero(t *testing.T) {
 
 // TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta (ruling condition
 // 4): when the row write is refused, the command exits non-zero, writes
-// nothing to provider meta, records no event and dials no controller.
+// nothing to provider meta, records no event, dials no controller and sends
+// no handoff mail. The stale-incarnation diagnostic gives the refused caller
+// no command that restarts the session: gc session reset is unfenced, so a
+// left-over process that ran it would restart its successor.
 func TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta(t *testing.T) {
 	cases := []struct {
 		name       string
 		setup      func(t *testing.T, fixture explicitRestartFixture)
 		wantStderr string
+		notWant    string
 	}{
 		{"another incarnation", func(t *testing.T, _ explicitRestartFixture) {
 			t.Setenv("GC_INSTANCE_TOKEN", "tok-dead-incarnation")
-		}, "restart not recorded: this process does not run in session worker's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); from outside the session, gc session reset worker restarts it"},
+		}, "restart not recorded: this process does not run in session worker's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); a process left over from an earlier incarnation must exit, and only an operator on the controller host can restart the session\n", "gc session reset"},
 		{"no instance token", func(t *testing.T, _ explicitRestartFixture) {
 			t.Setenv("GC_INSTANCE_TOKEN", "")
-		}, "restart not recorded: GC_INSTANCE_TOKEN is not set"},
+		}, "restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of the session it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); keep GC_INSTANCE_TOKEN in the agent's environment, or ask an operator on the controller host to restart session worker (gc session reset worker)\n", ""},
 	}
 	for _, v := range restartVerbs {
 		for _, tc := range cases {
@@ -141,8 +153,14 @@ func TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta(t *testing.T) {
 				}
 				assertRestartNotRecorded(t, fixture)
 				assertNoControllerReached(t, dials, accepted)
-				if !strings.Contains(stderr.String(), v.verb+": ") || !strings.Contains(stderr.String(), tc.wantStderr) {
-					t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+				if msgs := listOpenMessagesBothTiers(t, fixture.store); len(msgs) != 0 {
+					t.Fatalf("open messages = %d, want no handoff mail when nothing is recorded", len(msgs))
+				}
+				if got, want := stderr.String(), v.verb+": "+tc.wantStderr; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				if tc.notWant != "" && strings.Contains(stderr.String(), tc.notWant) {
+					t.Fatalf("stderr = %q names %q to the refused caller", stderr.String(), tc.notWant)
 				}
 				if strings.Contains(stdout.String(), "requesting restart") || strings.Contains(stdout.String(), "Restart requested") {
 					t.Fatalf("stdout = %q, promised a restart it did not record", stdout.String())

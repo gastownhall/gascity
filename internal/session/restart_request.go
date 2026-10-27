@@ -39,13 +39,13 @@ const restartRequestAttempts = 5
 // compared: every start mints a new token, and a rekey moves only the token.
 //
 // A row that records another token still records the request when the live
-// runtime under the row's session name carries instanceToken: the caller
-// runs in that runtime, which is the row's current one (a legacy warm reuse
-// mints in PreWake and keeps the running pane). The runtime is read after
-// the row, inside the decision, so a restart after the deciding read loses
-// the swap and the re-decide reads its successor's token. A failed read is
-// no proof. On a worker site the guard refuses runtime metadata, so only the
-// row's token proves the incarnation there.
+// runtime under the row's session name carries instanceToken and names no
+// other row: the caller runs in that runtime, which is the row's current one
+// (a legacy warm reuse mints in PreWake and keeps the running pane). The
+// runtime is read after the row, inside the decision, so a restart after the
+// deciding read loses the swap and the re-decide reads its successor's
+// token. A failed read is no proof. On a worker site the guard refuses
+// runtime metadata, so only the row's token proves the incarnation there.
 //
 // instanceToken is a capability: it is never logged or printed.
 func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
@@ -73,16 +73,38 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
 	})
 }
 
+// CheckFreshRestartFenced is RequestFreshRestartFenced's decision on a fresh
+// read of the row, with nothing written: nil when the request would be
+// recorded or is already pending, else the refusal the request would return.
+// A caller that acts on the session before it records the request (a self
+// handoff's mail) decides with it first, so a refused incarnation acts on
+// nothing. The fenced write stays the authority: the row can move between
+// this read and that write.
+//
+// instanceToken is a capability: it is never logged or printed.
+func (m *Manager) CheckFreshRestartFenced(id, instanceToken string) error {
+	instanceToken = strings.TrimSpace(instanceToken)
+	if instanceToken == "" {
+		return ErrRestartRequestUnfenced
+	}
+	info, err := m.PersistedStore().Get(id)
+	if err != nil {
+		return err
+	}
+	_, err = decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
+	return err
+}
+
 // decideRestartRequest is the fence's decision on one fresh read of the row:
 // a closed row refuses with ErrSessionClosed; a row whose instance_token is
 // not instanceToken, and whose live runtime (runtimeCarries) does not carry
 // it either, refuses with ErrStaleRestartRequest; a row that already carries
 // both keys needs no patch; and any other row gets both keys.
-func decideRestartRequest(info Info, instanceToken string, runtimeCarries func(sessionName, instanceToken string) bool) (MetadataPatch, error) {
+func decideRestartRequest(info Info, instanceToken string, runtimeCarries func(row Info, instanceToken string) bool) (MetadataPatch, error) {
 	if info.Closed {
 		return nil, ErrSessionClosed
 	}
-	if strings.TrimSpace(info.InstanceToken) != instanceToken && !runtimeCarries(info.SessionName, instanceToken) {
+	if strings.TrimSpace(info.InstanceToken) != instanceToken && !runtimeCarries(info, instanceToken) {
 		return nil, ErrStaleRestartRequest
 	}
 	if info.RestartRequested == "true" && info.ContinuationResetPending == "true" {
@@ -94,13 +116,25 @@ func decideRestartRequest(info Info, instanceToken string, runtimeCarries func(s
 	}, nil
 }
 
-// runtimeCarriesToken reports whether the live runtime under sessionName
-// carries instanceToken as its GC_INSTANCE_TOKEN. Any read error, a missing
-// runtime, or a manager without a provider proves nothing.
-func (m *Manager) runtimeCarriesToken(sessionName, instanceToken string) bool {
-	if m.sp == nil || strings.TrimSpace(sessionName) == "" {
+// runtimeCarriesToken reports whether the live runtime under row's session
+// name carries instanceToken as its GC_INSTANCE_TOKEN and names no other row.
+// A runtime whose GC_SESSION_ID is another row's is Foreign to row (cmd/gc's
+// compareIdentity), so its token proves nothing here; one with no
+// GC_SESSION_ID (legacy adoption never stamped it) is judged by its token
+// alone. Any read error, a missing runtime, or a manager without a provider
+// proves nothing.
+func (m *Manager) runtimeCarriesToken(row Info, instanceToken string) bool {
+	if m.sp == nil || strings.TrimSpace(row.SessionName) == "" {
 		return false
 	}
-	tok, err := runtime.MetaValue(m.sp.GetMeta(sessionName, runtime.InstanceTokenEnv))
-	return err == nil && strings.TrimSpace(tok) == instanceToken
+	tok, err := runtime.MetaValue(m.sp.GetMeta(row.SessionName, runtime.InstanceTokenEnv))
+	if err != nil || strings.TrimSpace(tok) != instanceToken {
+		return false
+	}
+	runtimeID, err := runtime.MetaValue(m.sp.GetMeta(row.SessionName, "GC_SESSION_ID"))
+	if err != nil {
+		return false
+	}
+	runtimeID = strings.TrimSpace(runtimeID)
+	return runtimeID == "" || runtimeID == strings.TrimSpace(row.ID)
 }
