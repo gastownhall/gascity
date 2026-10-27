@@ -279,6 +279,22 @@ func TestCompiledRalphIterationDrainIteratesOnceSiblingCloses(t *testing.T) {
 	}
 }
 
+// TestCompiledRalphIterationDrainSiblingHardFailureEndsLoop pins AC-4: a hard
+// failure from the sibling the control waited on ends the loop instead of
+// being lost behind an already-minted next iteration.
+func TestCompiledRalphIterationDrainSiblingHardFailureEndsLoop(t *testing.T) {
+	t.Parallel()
+	for _, st := range []ralphDrainStore{memDrainStore(), sqliteDrainStore()} {
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			fx := drainedSiblingAfterFailure(t, st)
+			fx.finish(t, "loop.iteration.1.beta", workerFailure(beadmeta.FailureClassHard, "external_live_head_changed"))
+			fx.serve(t)
+			requireRalphHardFailed(t, fx.ledger(t), "loop", 1, "external_live_head_changed")
+		})
+	}
+}
+
 // TestCompiledRalphIterationDrainRuntimeSpawnedIteration pins AC-6: an
 // iteration the control spawned at runtime drains the same way as the
 // compile-time first one.
