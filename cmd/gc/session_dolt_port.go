@@ -20,6 +20,9 @@ var withheldSessionDoltPortKeys = [...]string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER
 // rewrites on every runtime publication, so a projected port would keep a
 // long-lived session dialing the old server after the managed Dolt comes back
 // on a new port. Leaving the port keys empty lets bd follow the mirror.
+// With no env port, bd's user-level shared-server mode could otherwise take
+// the scope to ~/.beads/shared-server, so a withheld session also pins that
+// mode off, as gc-owned proxied scopes do.
 //
 // The port is withheld only when the mirror can stand in for it: env carries
 // a TCP port with no host or socket override (bd's port-file path dials
@@ -49,6 +52,7 @@ func withholdMirroredManagedDoltPort(env map[string]string, cityPath, scopeRoot 
 	for _, key := range withheldSessionDoltPortKeys {
 		env[key] = ""
 	}
+	applyProxiedSharedServerOptOut(env)
 }
 
 // readScopeDoltPortMirror reads scopeRoot's .beads/dolt-server.port through

@@ -106,3 +106,24 @@ func TestSessionBackendEnvWithholdsMirroredInheritedRigDoltPort(t *testing.T) {
 		t.Errorf("GC_DOLT_HOST = %q, want empty for a managed target", got)
 	}
 }
+
+// With no env port, a user-level dolt.shared-server or an inherited
+// BEADS_DOLT_SHARED_SERVER=1 would send bd to ~/.beads/shared-server instead
+// of the scope's own mirror, so a withheld session pins the mode off.
+func TestSessionBackendEnvWithheldPortPinsSharedServerOff(t *testing.T) {
+	cityPath, rigRoot, rigs := mirroredManagedDoltCity(t)
+	setStaleSessionDoltPortEnv(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	for _, scope := range []struct{ name, rigRoot string }{{"city", ""}, {"rig", rigRoot}} {
+		t.Run(scope.name, func(t *testing.T) {
+			env := mustSessionBackendEnv(t, cityPath, scope.rigRoot, rigs)
+
+			assertSessionDoltPortWithheld(t, env)
+			assertSharedServerPinnedOff(t, scope.name+" session", env)
+			if got := env["BEADS_DOLT_SHARED_SERVER"]; got != "0" {
+				t.Errorf("BEADS_DOLT_SHARED_SERVER = %q, want 0", got)
+			}
+		})
+	}
+}
