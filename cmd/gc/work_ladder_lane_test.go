@@ -533,7 +533,7 @@ func TestWorkLadderPausesWhileTheProviderIsDegraded(t *testing.T) {
 // L7 (WL5). A held gate gets no nudge however long the seat is quiet: a
 // stop request at the row's generation, a kill in progress, an agent's
 // heartbeat hold, a wait hold, a start in flight, an operator's content
-// hold on the conversation (SESSION-RUNTIME-027).
+// hold on the conversation (SESSION-RUNTIME-027), an idle stop pending.
 func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 	for name, meta := range map[string]func(now time.Time) map[string]string{
 		"draining": func(now time.Time) map[string]string {
@@ -553,8 +553,9 @@ func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 		"quarantined": func(now time.Time) map[string]string {
 			return map[string]string{"quarantined_until": now.Add(6 * time.Hour).Format(time.RFC3339)}
 		},
-		"starting":  func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
-		"suspended": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"starting":          func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
+		"suspended":         func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"idle stop pending": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "idle-stop-pending"} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newLadderCity(t)

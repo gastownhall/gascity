@@ -529,8 +529,12 @@ func ladderSeed(meta map[string]string, t ladderTarget) (workladder.StartSource,
 
 // ladderGate is open, or held by what owns the seat for now: a stop request
 // (a drain, at the row's generation), a kill, a start in flight, a restart
-// request, an operator's content hold on the conversation, an operator's
-// suspend or an agent's wait, a quarantine, or an agent's heartbeat (WL5).
+// request, an operator's content hold on the conversation, an idle stop
+// pending, an operator's suspend or an agent's wait, a quarantine, or an
+// agent's heartbeat (WL5). The idle stop is the content gate's stop_pending:
+// a lane holds a notice to such a seat until it expires, so the ladder
+// proposes none there and reads none of that seat's holds as a refusal; the
+// direct path types into it no more either.
 // Every hold but the content hold is one the row clears when it ends, so
 // none can silence a seat for good. A content hold stands until a resume
 // clears it (SESSION-RUNTIME-027): meanwhile the ladder nudges, recycles and
@@ -553,6 +557,8 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 	}
 	d := session.DecodeDisposition(meta)
 	switch {
+	case d.IdleStop:
+		return held("stop_pending")
 	case d.HeartbeatHeld(now):
 		return held("heartbeat")
 	case d.Wait || d.WaitIntent:

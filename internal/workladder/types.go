@@ -92,8 +92,8 @@ type Quiet struct {
 }
 
 // Gate is open, or held by something that owns the seat for now (draining,
-// stop requested, kill pending, a user or wait hold, restart pending,
-// starting, a heartbeat hold).
+// stop requested, kill pending, an idle stop pending, a user or wait hold,
+// restart pending, starting, a heartbeat hold).
 type Gate struct {
 	Held   bool
 	Reason string

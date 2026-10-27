@@ -497,6 +497,44 @@ func ladderGateMeta() map[string]func(now time.Time) map[string]string {
 		"agent wait":      func(time.Time) map[string]string { return map[string]string{"wait_hold": "true"} },
 		"restart pending": func(time.Time) map[string]string { return map[string]string{"restart_requested": "true"} },
 		"operator hold":   func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"idle stop pending": func(time.Time) map[string]string {
+			return map[string]string{"sleep_intent": "idle-stop-pending"}
+		},
+	}
+}
+
+// A seat whose idle stop is pending is held: the lane would hold and expire
+// its notices (the content gate's stop_pending), so the ladder proposes
+// none, types none, and reads no refusal off the seat however long it stays.
+func TestWorkLadderProposesNoNoticeToAnIdleStopPendingSeat(t *testing.T) {
+	for name, claim := range map[string]func(lc *ladderLaneCity) string{
+		"started":   func(lc *ladderLaneCity) string { return lc.startedClaim() },
+		"unstarted": func(lc *ladderLaneCity) string { return lc.claim("unstarted") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			lc := newLadderLaneCity(t, "message")
+			id := claim(lc)
+			lc.setRow(map[string]string{"sleep_intent": "idle-stop-pending"})
+			lc.run(2*time.Hour, 30*time.Second, func() {
+				if ops := lc.ladderOps(); len(ops) != 0 {
+					t.Fatalf("open ladder notices %+v to an idle-stop-pending seat", ops)
+				}
+			})
+			if n := lc.nudges(); n != 0 {
+				t.Fatalf("typed %d nudges into an idle-stop-pending seat", n)
+			}
+			if got := escalations(lc.ladderCity); len(got) != 0 {
+				t.Fatalf("escalations %v, want none: a held seat refuses nothing", got)
+			}
+			if b, _ := lc.work.Get(id); b.Status != "in_progress" || len(lc.events(events.WorkReleased)) != 0 {
+				t.Fatalf("claim %q released under a held gate", b.Status)
+			}
+			for _, e := range lc.cell().Entries {
+				if e.Attempts != 0 || e.Refused != 0 || !e.Notice.IsZero() {
+					t.Fatalf("entry %+v, want nothing reserved under a held gate", e)
+				}
+			}
+		})
 	}
 }
 
