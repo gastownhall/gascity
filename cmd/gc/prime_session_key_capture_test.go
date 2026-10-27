@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // primeCaptureTestStore stands up a file-backed city store the same way
@@ -229,6 +233,48 @@ func TestPersistPrimeHookProviderSessionKey_RejectsIDEqualToGCSessionID(t *testi
 
 	if got := reloadSessionKey(t, cityDir, id); got != "" {
 		t.Fatalf("session_key = %q, want empty (provider id equal to GC_SESSION_ID must be rejected)", got)
+	}
+}
+
+// TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow pins ga-k98e78's
+// residual: a sync that runs while a claude row is live and keyless (the
+// stale-key relaunch clears the key under a running process) must not mint a
+// key of its own, or the hook's set-once guard drops the provider's real id.
+// The sync and the hook share one file store here, as they do in a city.
+func TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	clk := &clock.Fake{Time: time.Date(2026, 10, 27, 8, 0, 0, 0, time.UTC)}
+	ws := &config.Workspace{}
+	base := config.BasePrefixBuiltin + "claude"
+	providers := map[string]config.ProviderSpec{"claude": {Base: &base}}
+	resolved, err := config.ResolveProvider(&config.Agent{Name: "alpha", Provider: "claude"}, ws, providers,
+		func(n string) (string, error) { return n, nil })
+	if err != nil {
+		t.Fatalf("resolving claude provider: %v", err)
+	}
+	ds := map[string]TemplateParams{"alpha": {TemplateName: "alpha", Command: resolved.Command, ResolvedProvider: resolved}}
+	var syncErr bytes.Buffer
+	syncSessionBeads("", store, ds, runtime.NewFake(), allConfiguredDS(ds), nil, clk, &syncErr, false)
+	rows := allSessionBeads(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("session beads = %d, want 1; stderr=%s", len(rows), syncErr.String())
+	}
+	row := rows[0].ID
+	// The stale-key relaunch: the key is cleared under a live process, then a
+	// sync pass runs before the SessionStart hook reports the provider's id.
+	if err := store.SetMetadataBatch(row, map[string]string{"session_key": "", "state": "active"}); err != nil {
+		t.Fatal(err)
+	}
+	syncSessionBeads("", store, ds, runtime.NewFake(), allConfiguredDS(ds), nil, clk, &syncErr, false)
+
+	t.Setenv("GC_SESSION_ID", row)
+	isolateProviderSessionEnv(t)
+	const claudeID = "e5b1c0d2-1111-4222-8333-444455556666"
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey(claudeID, &stderr)
+
+	if got := reloadSessionKey(t, cityDir, row); got != claudeID {
+		t.Fatalf("session_key = %q, want the hook's %q (a sync must not mint over a live keyless row); stderr=%q", got, claudeID, stderr.String())
 	}
 }
 
