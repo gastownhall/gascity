@@ -103,8 +103,11 @@ provider = "sqlite-beads"
 			if code := doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, "gas-city-gateway", &stdout, &stderr, true); code == 0 {
 				t.Fatalf("gc init --from a split city named gas-city-gateway succeeded; stdout=%s", stdout.String())
 			}
-			if !strings.Contains(stderr.String(), "gcg") || !strings.Contains(stderr.String(), "workspace_prefix") {
-				t.Errorf("stderr = %q, want the reserved-prefix refusal naming workspace_prefix", stderr.String())
+			if !strings.Contains(stderr.String(), "gcg") || !strings.Contains(stderr.String(), "name the city differently") {
+				t.Errorf("stderr = %q, want the reserved-prefix refusal naming the rename", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "site.toml") {
+				t.Errorf("the refusal tells the user to edit a file of a city that does not exist yet: %q", stderr.String())
 			}
 			if _, err := os.Stat(cityPath); err == nil {
 				entries, _ := os.ReadDir(cityPath)

@@ -1180,6 +1180,10 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	// --file creates a new city from a template; default to target dir name.
 	cityName := resolveCityName(nameOverride, "", cityPath)
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if err := initReservedPrefixRefusal(fs, tomlSrc, cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	templatePack, err := decodeInitPackTemplate(data, cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1435,6 +1439,13 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return 1
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	// Today no wizard template declares [storage], so this cannot refuse; it
+	// is here for the day `gc init` writes a split (split-by-default), so the
+	// new city is never given a reserved prefix it would then be refused for.
+	if err := initReservedPrefixRefusal(fs, "", &cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Write prompt files only for the agents declared by the init template.
 	logInitProgress(stdout, 3, "Writing default prompts")
@@ -2000,12 +2011,25 @@ func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride s
 	if err != nil {
 		return nil
 	}
-	cityName := resolveCityName(nameOverride, "", cityPath)
-	next := *src
+	return initReservedPrefixRefusal(fs, srcToml, src, resolveCityName(nameOverride, "", cityPath), src.Workspace.Prefix)
+}
+
+// initReservedPrefixRefusal is the R10 check every city-creating init path
+// shares (gc init, gc init --file, gc init --from): cfg is the config the new
+// city gets, tomlPath the file its include fragments resolve against ("" when
+// it has none), cityName and cityPrefix the identity init gives it. The
+// remedy it names is renaming the city or changing the source config — never
+// a file of the city being created, which does not exist yet.
+func initReservedPrefixRefusal(fs fsys.FS, tomlPath string, cfg *config.City, cityName, cityPrefix string) error {
+	if cfg == nil {
+		return nil
+	}
+	next := *cfg
 	next.Workspace.Name = cityName
+	next.Workspace.Prefix = strings.TrimSpace(cityPrefix)
 	next.ResolvedWorkspaceName = cityName
-	next.ResolvedWorkspacePrefix = strings.TrimSpace(src.Workspace.Prefix)
-	return config.ReservedPrefixSplitRefusalForEdit(fs, srcToml, &next)
+	next.ResolvedWorkspacePrefix = strings.TrimSpace(cityPrefix)
+	return config.ReservedPrefixSplitRefusalForNewCity(fs, tomlPath, &next)
 }
 
 func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {

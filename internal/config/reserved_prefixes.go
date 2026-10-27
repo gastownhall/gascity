@@ -93,19 +93,43 @@ func ReservedPrefixCollision(prefix string) (string, bool) {
 // fix: an explicit prefix. A city that relocates nothing keeps
 // ReservedPrefixWarnings' advisory.
 func ReservedPrefixSplitRefusal(cfg *City) error {
+	return reservedPrefixSplitRefusal(cfg, reservedPrefixFixesForExistingCity)
+}
+
+// reservedPrefixFixes is the remedy each kind of collision names. A city that
+// exists is fixed in its own files; a city being created is fixed by naming it
+// differently or by changing the config it is created from.
+type reservedPrefixFixes struct {
+	hq, rig, patch string
+}
+
+var (
+	reservedPrefixFixesForExistingCity = reservedPrefixFixes{
+		hq:    `set an explicit prefix: workspace_prefix = "<prefix>" in .gc/site.toml`,
+		rig:   `set an explicit prefix: prefix = "<prefix>" on that [[rigs]] entry`,
+		patch: "choose another prefix",
+	}
+	reservedPrefixFixesForNewCity = reservedPrefixFixes{
+		hq:    `name the city differently, or set an explicit non-reserved prefix in the [workspace] of the config it is created from`,
+		rig:   `set an explicit non-reserved prefix on that rig in the config the city is created from`,
+		patch: "change that patch's prefix in the config the city is created from",
+	}
+)
+
+func reservedPrefixSplitRefusal(cfg *City, fixes reservedPrefixFixes) error {
 	if cfg == nil || !RelocatesAnyClass(cfg) {
 		return nil
 	}
 	var problems []string
 	if hq := strings.ToLower(strings.TrimSpace(EffectiveHQPrefix(cfg))); hq != "" {
 		if reserved, ok := ReservedPrefixCollision(hq); ok {
-			problems = append(problems, fmt.Sprintf("the city's bead prefix %q (derived from %q unless set) is in the reserved %q namespace; set an explicit prefix: workspace_prefix = \"<prefix>\" in .gc/site.toml", hq, cfg.EffectiveCityName(), reserved))
+			problems = append(problems, fmt.Sprintf("the city's bead prefix %q (derived from %q unless set) is in the reserved %q namespace; %s", hq, cfg.EffectiveCityName(), reserved, fixes.hq))
 		}
 	}
 	for _, r := range cfg.Rigs {
 		prefix := strings.ToLower(strings.TrimSpace(r.EffectivePrefix()))
 		if reserved, ok := ReservedPrefixCollision(prefix); ok {
-			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is in the reserved %q namespace; set an explicit prefix: prefix = \"<prefix>\" on that [[rigs]] entry", r.Name, prefix, reserved))
+			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is in the reserved %q namespace; %s", r.Name, prefix, reserved, fixes.rig))
 		}
 	}
 	// A raw (unpatched) config being edited still carries its [[patches.rigs]]
@@ -116,7 +140,7 @@ func ReservedPrefixSplitRefusal(cfg *City) error {
 		}
 		prefix := strings.ToLower(strings.TrimSpace(*p.Prefix))
 		if reserved, ok := ReservedPrefixCollision(prefix); ok {
-			problems = append(problems, fmt.Sprintf("the rig patch for %q sets bead prefix %q, in the reserved %q namespace; choose another prefix", p.Name, prefix, reserved))
+			problems = append(problems, fmt.Sprintf("the rig patch for %q sets bead prefix %q, in the reserved %q namespace; %s", p.Name, prefix, reserved, fixes.patch))
 		}
 	}
 	if len(problems) == 0 {
@@ -137,11 +161,24 @@ func ReservedPrefixSplitRefusal(cfg *City) error {
 // rig create and rig/config edits, gc init --from): refusing at boot alone
 // lets one command write a config every later CLI process refuses.
 func ReservedPrefixSplitRefusalForEdit(fs fsys.FS, tomlPath string, next *City) error {
+	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForExistingCity)
+}
+
+// ReservedPrefixSplitRefusalForNewCity is ReservedPrefixSplitRefusalForEdit
+// for a city that does not exist yet (gc init, gc init --from): next is the
+// config it will be created with, tomlPath the file its include fragments
+// resolve against, and the remedy names renaming the city or changing the
+// source config, never a file of the city being created.
+func ReservedPrefixSplitRefusalForNewCity(fs fsys.FS, tomlPath string, next *City) error {
+	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForNewCity)
+}
+
+func reservedPrefixSplitRefusalForConfig(fs fsys.FS, tomlPath string, next *City, fixes reservedPrefixFixes) error {
 	if next == nil {
 		return nil
 	}
 	if RelocatesAnyClass(next) {
-		return ReservedPrefixSplitRefusal(next)
+		return reservedPrefixSplitRefusal(next, fixes)
 	}
 	if len(next.Include) == 0 || fs == nil || tomlPath == "" {
 		return nil
@@ -152,5 +189,5 @@ func ReservedPrefixSplitRefusalForEdit(fs fsys.FS, tomlPath string, next *City) 
 	}
 	check := *next
 	check.Storage = composed.Storage
-	return ReservedPrefixSplitRefusal(&check)
+	return reservedPrefixSplitRefusal(&check, fixes)
 }

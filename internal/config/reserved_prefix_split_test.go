@@ -150,3 +150,20 @@ func TestReservedPrefixSplitRefusalSeesARigPatchPrefix(t *testing.T) {
 		t.Errorf("a rig patch setting gcs-alpha on a split city: refusal = %v", err)
 	}
 }
+
+// A city being created is told to rename itself or change its source config,
+// never to edit a file of the city that does not exist yet.
+func TestReservedPrefixSplitRefusalForNewCityNamesTheRename(t *testing.T) {
+	err := ReservedPrefixSplitRefusalForNewCity(fsys.OSFS{}, "", splitCityNamed("gas-city-gateway", Rig{Name: "gas-city-ops", Path: "/x"}))
+	if err == nil {
+		t.Fatal("no refusal")
+	}
+	for _, want := range []string{"name the city differently", "config the city is created from", "gcg", "gco"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "site.toml") || strings.Contains(err.Error(), "[[rigs]] entry") {
+		t.Errorf("refusal names a file of the city being created: %v", err)
+	}
+}
