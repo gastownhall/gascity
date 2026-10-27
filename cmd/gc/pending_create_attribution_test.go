@@ -801,6 +801,73 @@ func TestReconcileSessionBeads_LiveIncarnationHoldSettlesAndReleasesWork(t *test
 	}
 }
 
+// TestReconcileSessionBeads_AlivePendingCreateRollbackStillRollsBackForeignRuntime
+// is the #2081 control: the hold is specific to a live incarnation of THIS
+// session. A runtime positively carrying another session's GC_SESSION_ID is
+// another session's, and the rollback still applies — stopping it for a
+// bead-scoped pool row that owns the name, closing the row over it for a
+// configured named row — with no live_incarnation standing condition.
+func TestReconcileSessionBeads_AlivePendingCreateRollbackStillRollsBackForeignRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rowKind    string
+		wantStowed bool // the bead-scoped pool row's rollback stops the runtime
+	}{
+		{name: "bead-scoped pool row", rowKind: "pool", wantStowed: true},
+		{name: "configured named row", rowKind: "named", wantStowed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			session := env.createSessionBead("worker", "worker")
+			name := "worker-" + session.ID
+			rowMeta := map[string]string{
+				"session_name":              name,
+				"state":                     "creating",
+				"generation":                "2",
+				"instance_token":            "tok-row",
+				"pending_create_claim":      "true",
+				"pending_create_started_at": pendingCreateStartedAtNow(env.clk.Now().Add(-30 * time.Minute)),
+				"last_woke_at":              env.clk.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+			}
+			if tc.rowKind == "pool" {
+				rowMeta[poolManagedMetadataKey] = boolMetadata(true)
+			} else {
+				name = "worker"
+				rowMeta["session_name"] = name
+				rowMeta[namedSessionMetadataKey] = boolMetadata(true)
+				rowMeta["configured_named_identity"] = "worker"
+			}
+			env.setSessionMetadata(&session, rowMeta)
+			env.addDesired(name, "worker", true)
+			for key, value := range map[string]string{
+				"GC_SESSION_ID":     "gcg--another-session",
+				"GC_INSTANCE_TOKEN": "tok-incarnation",
+				"GC_RUNTIME_EPOCH":  "3",
+			} {
+				if err := env.sp.SetMeta(name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			reconcileTraced(env, []beads.Bead{session}, newPoolDesiredStateTestTrace("worker"))
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "closed" || got.Metadata["pending_create_claim"] == "true" {
+				t.Fatalf("status=%q claim=%q, want the foreign-runtime rollback", got.Status, got.Metadata["pending_create_claim"])
+			}
+			if tc.wantStowed && env.sp.IsRunning(name) {
+				t.Fatalf("runtime %q still running, want the row-owned teardown to stop it", name)
+			}
+			if strings.Contains(env.stderr.String(), "live_incarnation") {
+				t.Fatalf("stderr = %q, want no live-incarnation hold for another session's runtime", env.stderr.String())
+			}
+		})
+	}
+}
+
 // TestReconcileSessionBeads_GonePendingCreateRollsBackDespiteUnreadableIdentity
 // shows the deferral is bounded: once liveness reports the runtime gone, the
 // lease-expired rollback applies whatever the identity reads say.
