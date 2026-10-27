@@ -55,6 +55,7 @@ func journalRecoveryHarness(t *testing.T, maskJQ bool) string {
 		"backup_registry_slice",
 		"backup_registry_has_backup",
 		"backup_registry_backup_url",
+		"backup_registry_summary",
 		"backup_remote_url_for_recovery",
 		"backup_restore_source_usable",
 		"attempt_journal_corruption_recovery",
@@ -552,6 +553,11 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
 	}
+	// legacyDir holds a usable legacy backup (seeded when seed is set);
+	// env.backupDir stays empty and serves as the default backup's target.
+	legacyDirFor := func(env journalRecoveryEnv) string {
+		return filepath.Join(env.cityDir, "backups", "legacy")
+	}
 	tests := []struct {
 		name      string
 		repoState func(env journalRecoveryEnv) string
@@ -571,21 +577,61 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 				return `{"backups":{"prod-backup":{"url":"aws://bucket/prod"}}}`
 			},
 		},
+		{
+			name: "default backup is a non-file remote",
+			repoState: func(journalRecoveryEnv) string {
+				return `{"backups":{"default":{"name":"default","url":"aws://bucket/prod","fetch_specs":[],"params":{}}}}`
+			},
+		},
+		{
+			name:      "default backup dir empty",
+			repoState: func(env journalRecoveryEnv) string { return bdDefaultRepoState(env.backupDir) },
+		},
+		{
+			// The default entry is selected first and is unusable; recovery
+			// must refuse rather than fall through to the usable legacy
+			// entry — the legacy backup stopped syncing when it was renamed
+			// and would restore older data without anyone choosing it.
+			name: "default unusable even with usable legacy entry",
+			repoState: func(env journalRecoveryEnv) string {
+				return bothBackupsRepoState(env.backupDir, legacyDirFor(env))
+			},
+			seed: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			env := setupJournalRecoveryEnv(t)
+			restoreCalls := filepath.Join(env.cityDir, "restore-calls.log")
+			if tc.seed {
+				legacyDir := legacyDirFor(env)
+				if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+					t.Fatalf("mkdir legacy backup dir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(legacyDir, "manifest"), []byte("backup"), 0o644); err != nil {
+					t.Fatalf("seed legacy backup content: %v", err)
+				}
+			}
 			env.addDatabase(t, "prod", true, tc.repoState(env))
 
-			out, err := env.run(t, journalRecoveryHarness(t, false))
+			out, err := env.run(t, journalRecoveryHarness(t, false), "FAKE_RESTORE_CALLS="+restoreCalls)
 			if err == nil {
 				t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
 			}
 			if !strings.Contains(out, "NOT auto-recovering 'prod'") {
 				t.Fatalf("output missing loud refusal:\n%s", out)
 			}
+			if !strings.Contains(out, "default") || !strings.Contains(out, "prod-backup") {
+				t.Fatalf("refusal must name the candidate backups it checked (default, prod-backup):\n%s", out)
+			}
+			if !strings.Contains(out, "dolt backup restore") {
+				t.Fatalf("refusal must print the manual dolt backup restore command:\n%s", out)
+			}
 			if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "original-marker")); statErr != nil {
 				t.Fatalf("prod store must stay in place when not recoverable: %v", statErr)
+			}
+			if calls, readErr := os.ReadFile(restoreCalls); readErr == nil && strings.TrimSpace(string(calls)) != "" {
+				t.Fatalf("no restore may run when the selected backup is unusable, restore calls:\n%s", calls)
 			}
 		})
 	}

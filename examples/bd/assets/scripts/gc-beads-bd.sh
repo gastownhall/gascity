@@ -2966,6 +2966,26 @@ backup_registry_backup_url() {
     printf '%s\n' "$url"
 }
 
+# backup_registry_summary prints a compact name=url listing of the backups
+# registered in a database's repo_state.json, for refusal diagnostics: the
+# operator judging a manual restore needs to see every registered backup,
+# not just the one recovery selected. jq lists every entry; the sed fallback
+# lists the two names recovery can select, omitting unregistered names.
+backup_registry_summary() {
+    local summary_db="$1" summary_db_dir="$2" repo_state name summary=""
+    repo_state="$summary_db_dir/.dolt/repo_state.json"
+    [ -f "$repo_state" ] || { printf 'none (no repo_state.json)'; return 0; }
+    if command -v jq >/dev/null 2>&1; then
+        summary=$(jq -r '(.backups // {}) | to_entries | map(.key + "=" + (.value.url? // .value // "")) | join(", ")' "$repo_state" 2>/dev/null)
+    else
+        for name in default "${summary_db}-backup"; do
+            backup_registry_has_backup "$repo_state" "$name" || continue
+            summary="${summary:+$summary, }${name}=$(backup_registry_backup_url "$repo_state" "$name")"
+        done
+    fi
+    printf '%s' "${summary:-none registered}"
+}
+
 # backup_remote_url_for_recovery prints the backup a journal-corrupt database
 # should be restored from, as `name<TAB>url`. It selects the first of bd's
 # canonical `default` backup (the name mol-dog-backup has registered via
@@ -3032,8 +3052,9 @@ attempt_journal_corruption_recovery() {
             url=""
         fi
         if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
-            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (backup: ${backup_name:-none}, remote url: ${url:-none})" >&2
-            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
+            echo "gc-beads-bd: NOT auto-recovering '$db': selected backup '${backup_name:-none}' (url: ${url:-none}) is not a usable local backup source" >&2
+            echo "gc-beads-bd: candidate backups checked: default, ${db}-backup; registered backups: $(backup_registry_summary "$db" "$db_dir")" >&2
+            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run \"dolt backup restore '${url:-<url>}' $db\" from $DATA_DIR" >&2
             return 1
         fi
         mkdir -p "$aside_root" || return 1
