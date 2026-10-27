@@ -627,11 +627,11 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				session.PrimedAtMetadataKey, ago(time.Hour), session.PrimingAttemptedAtMetadataKey, ago(time.Hour), session.PromptHashMetadataKey, "p",
 				"resume_failures", "2", "resume_launch", "true",
 			},
-			patchSite(asleepHealPatch),
+			patchSite(func(info session.Info) session.MetadataPatch { return asleepHealPatch(info, now) }),
 		},
 		"internal/session/lifecycle_exits.go:ConversationResetPatch": {
 			[]string{"session_key", "k", "resume_failures", "2", "resume_launch", "true"},
-			patchSite(func(session.Info) session.MetadataPatch { return session.ConversationResetPatch(false) }),
+			patchSite(func(session.Info) session.MetadataPatch { return session.ConversationResetPatch(false, now) }),
 		},
 		"cmd/gc/session_lifecycle_parallel.go:clearStaleResumeKeyMetadata": {
 			[]string{"session_key", "k", "started_config_hash", "h", "resume_failures", "2", "resume_launch", "true"},

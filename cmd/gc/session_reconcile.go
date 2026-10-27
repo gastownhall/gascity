@@ -1271,6 +1271,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
+				batch[sessionpkg.ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2): this asleep continuation reset re-primes.
 				batch[sessionpkg.PrimedAtMetadataKey] = ""
