@@ -3113,6 +3113,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
+				if identity.otherEpochOfThisSession() {
+					// The live runtime is this session's own earlier or later
+					// incarnation. The rollback would stop a row-owned name or
+					// close the row under it, orphaning its work, so neither:
+					// the row is held and re-decided every tick, and once the
+					// runtime exits the lease-expired rollback below applies.
+					logStandingCondition(dt, stderr, id, "live_incarnation.pending_create_rollback", fmt.Sprintf(
+						"session reconciler: pending-create rollback of %s deferred: a live runtime of this session (%s) holds the name (live_incarnation)", name, liveIncarnationDetail(infoPostZombie, identity)), clk.Now())
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollback, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+							"session_bead_id": id,
+							"attribution":     "live_incarnation",
+						})
+					}
+					continue
+				}
 				live, leaseErr := ownStartNotLive, error(nil)
 				if identity.unstamped() {
 					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
