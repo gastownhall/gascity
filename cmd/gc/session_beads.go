@@ -4228,7 +4228,10 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// other store makes the same checks on one read, then keeps the single Tx
 	// with the metadata ordered first. There the metadata may land while the
 	// Close fails; the helper then reports failure and the reconciler re-runs
-	// the close next tick, so no bead is durably left half-closed.
+	// the close next tick — and when that failure leaves the row half-closed
+	// with its own close code as state, the re-run is the interrupted-close
+	// finisher (finishInterruptedClose, #2085), since the unknown-state skip
+	// would otherwise hold the row open forever.
 	if commitLegacyClose(sessionFrontDoor(store), expected, session.ClosePatch(now, reason), now, stderr, "session") != session.CommitLanded {
 		return false
 	}

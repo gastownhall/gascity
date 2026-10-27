@@ -2289,7 +2289,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// older reconciler ignores those beads rather than crashing. The skip is
 		// preserved; the previously per-tick stderr line is now a throttled,
 		// durable session.unknown_state signal (folded onto the tick snapshot).
+		// One unknown state is ours, not a newer version's: a close whose
+		// terminal patch landed but whose status flip was lost leaves the row
+		// open with its own close code as state (#2085). Finish that close
+		// before signaling; markers from earlier ticks stay as forensic record.
 		if !isKnownStateInfo(info) {
+			if gate := interruptedCloseGate(info); gate != 0 {
+				if finishInterruptedClose(cityPath, store, sw, sp, cfg, dt, info, gate, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, trace, clk, stderr) {
+					tick.markClosed(id)
+					continue
+				}
+			}
 			if fold := emitSessionUnknownStateDiagnostic(store, info, snapshot, rec, clk, stderr); fold != nil {
 				tick.apply(id, fold)
 			}
@@ -5767,7 +5777,11 @@ const unknownStateEscalationAge = 30 * time.Minute
 // state the reconciler does not recognize. The caller preserves the
 // forward-compatible skip (an older reconciler ignores a newer writer's state
 // rather than crashing); this turns the previously per-tick stderr line into a
-// throttled signal. It logs and records events.SessionUnknownState only on
+// throttled signal. A row whose state is this binary's own interrupted close
+// code never reaches it — the skip site finishes that close first
+// (finishInterruptedClose, #2085) — so a half-closed row signals only while
+// the finisher declines it (partial observation, liveness error, live
+// runtime, or a refused gate). It logs and records events.SessionUnknownState only on
 // first sight or when the raw state changes to a different unrecognized value,
 // then re-records once with escalated=true after the bead has sat unrecognized
 // past unknownStateEscalationAge. Throttle state is read off the projected typed

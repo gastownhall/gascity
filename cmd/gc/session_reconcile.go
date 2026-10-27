@@ -1554,7 +1554,9 @@ func topoOrderRows(rows []sessionpkg.ReconcileSession, deps map[string][]string)
 // knownSessionStates is the set of bead metadata "state" values that the
 // current reconciler understands. Beads with unrecognized states are skipped
 // during reconciliation to allow forward-compatible rollback from newer
-// versions that add states like "draining" or "archived".
+// versions that add states like "draining" or "archived" — except a state
+// that is this binary's own interrupted close code, which the skip site
+// finishes instead (interruptedCloseGate, gastownhall/gascity#2085).
 var knownSessionStates = map[string]bool{
 	"active":                             true,
 	"asleep":                             true,
