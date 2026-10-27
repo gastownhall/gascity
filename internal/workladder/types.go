@@ -230,6 +230,9 @@ type Entry struct {
 	// permission prompt, a runtime unavailable): while it is above zero the
 	// entry is nudged no more often than PausedCap.
 	Refused int
+	// Notice is the asynchronous delivery of the entry's last nudge, until
+	// the caller settles it (SettleNotice); zero when there is none.
+	Notice NoticeMark
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a
