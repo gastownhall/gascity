@@ -69,7 +69,8 @@ type OpsConfig struct {
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
 	// operator proposing a message) and, for sessions a lane host can type
 	// into (a keystroke-mode runtime, or one a box host serves), the
-	// controller's planner notices (drain reminders, the nudge backstop) and
+	// controller's planner notices (the work ladder's nudges, drain reminders,
+	// the nudge backstop) and
 	// gc session nudge. gc session nudge delivers inline what its delivery
 	// mode allows now, where it can type into the session: wait-idle only at
 	// an idle boundary; immediate there too, or into a running turn when the

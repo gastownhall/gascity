@@ -49,7 +49,12 @@ const ladderSeatName = "seat-a"
 // newLadderCity is a running, quiet pool seat at generation 7.
 func newLadderCity(t *testing.T) *ladderCity {
 	t.Helper()
-	sessions := beads.NewMemStore()
+	return newLadderCityOver(t, beads.NewMemStore())
+}
+
+// newLadderCityOver is newLadderCity with its session rows on sessions.
+func newLadderCityOver(t *testing.T, sessions *beads.MemStore) *ladderCity {
+	t.Helper()
 	stampedMemStore(t, sessions)
 	work := beads.NewMemStore()
 	m := map[string]string{

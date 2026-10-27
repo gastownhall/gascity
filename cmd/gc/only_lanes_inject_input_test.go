@@ -116,7 +116,7 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	"drain_reminder.go:nudgeDrainReminder":        {laneInjectFallback, "the drain reminder the gate holds, or for a session no lane serves; legacy reconciler only (excused at OJ-21)"},
 	"nudge_backstop.go:runNudgeBackstop":          {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
 	"warm_bind_nudge.go:nudgeWarmBindSlot":        {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
-	"work_ladder_lane.go:ladderDeliver":           {laneInjectFallback, "the work ladder's delivery seam (M4); W5 swaps it for a planner notice"},
+	"work_ladder_lane.go:ladderDeliver":           {laneInjectFallback, "the work ladder's nudge for a session no lane serves (protocol mode; excused at OJ-21), or with message not listed"},
 }
 
 // laneInjectFallbackPin is how many fallback entries laneInjectAllowlist
