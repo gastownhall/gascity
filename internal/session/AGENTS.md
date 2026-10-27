@@ -145,8 +145,12 @@ evidence from tests, source, an issue, or a commit.
   dropped. Do not change `HoldsMeta`, `CommitVerdict` or
   `StateConfirmsPendingStart` to cover for a missing hand-off.
 - A test that keeps a commit hung in the same city sees the lease retained and
-  every repair path defer; one that models a restarted controller needs a fresh
-  city directory (the flock is per process). See
+  the repair paths defer, except the dead-runtime stale-create rollback, which
+  still clears an expired claim (the zombie's late commit is then fenced
+  against the closed row; see
+  `TestRepairMatrixDeadHungCommitIsRolledBackAndTheLateCommitIsFenced`). A test
+  that models a departed controller runs the tick in a fresh city directory, so
+  it does not share the hung commit's lock file. See
   `abandonedCommitRepairScenario`.
 
 When a session has a persisted native conversation key and its provider family
