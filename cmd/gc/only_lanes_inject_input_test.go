@@ -110,7 +110,7 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	// Fallbacks: they run while their kind is listed.
 	"cmd_nudge.go:deliverSessionNudgeLegacy":      {laneInjectFallback, "gc session nudge to a target with no session row, or a protocol-mode session no lane serves (excused at OJ-21)"},
 	"cmd_nudge.go:deliverMailNotifyLegacy":        {laneInjectFallback, "mail --notify (M7): with message listed, only for a session with no row in the city's sessions store, or one no lane serves (protocol mode)"},
-	"cmd_nudge.go:tryDeliverQueuedNudgesByPoller": {laneInjectFallback, "the legacy queue's poller (M12): with message listed it delivers only what the fallback producers queue for a session no lane serves, and items queued before the flip"},
+	"cmd_nudge.go:tryDeliverQueuedNudgesByPoller": {laneInjectFallback, "the legacy queue's poller (M12): with message listed it delivers only what the fallback producers queue for a session no lane serves or a notice the op store refuses, and items queued before the flip"},
 	"cmd_session.go:cmdSessionSubmit":             {laneInjectFallback, "gc session submit's local fallback delivers through handle.Message (M6)"},
 	"cmd_sling.go:deliverSlingNudge":              {laneInjectFallback, "sling --nudge (M8): with message listed, only for a session with no row in the city's sessions store, or one no lane serves (protocol mode)"},
 	"drain_reminder.go:nudgeDrainReminder":        {laneInjectFallback, "the drain reminder the gate holds, or for a session no lane serves; legacy reconciler only (excused at OJ-21)"},

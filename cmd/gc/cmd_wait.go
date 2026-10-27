@@ -1346,6 +1346,10 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 	// message: a ready wait's nudge is then a lane notice for a session it
 	// serves (wait_lane_notice.go).
 	lane := plannerNoticeLaneFor(sessFront.Store().Store)
+	// A wait that fails to dispatch is reported with the others once the
+	// pass is done; it holds up none of the waits after it, which a refused
+	// or failing one would otherwise starve on every pass.
+	var errs []error
 	for _, wait := range waits {
 		if wait.State != waitStateReady {
 			continue
@@ -1381,7 +1385,8 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 				stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
 				continue
 			}
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if queued {
 			continue
@@ -1389,7 +1394,8 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if lane != nil {
 			handled, err := dispatchWaitNotice(lane, sessFront, sessionInfo, wait, nudgeID, message)
 			if err != nil {
-				return err
+				errs = append(errs, err)
+				continue
 			}
 			if handled {
 				continue
@@ -1397,7 +1403,8 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		}
 		noticed, err := waitNoticeRecorded(sessFront, wait, nudgeID)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if noticed {
 			continue
@@ -1409,10 +1416,12 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
 		})
 		if err := enqueueQueuedNudgeWithStore(cityPath, nudges, item); err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if err := sessFront.SetWaitNudgeID(wait.ID, nudgeID); err != nil {
-			return fmt.Errorf("setting wait nudge_id: %w", err)
+			errs = append(errs, fmt.Errorf("setting wait nudge_id: %w", err))
+			continue
 		}
 		// provider_kind is stamped from ResolvedProvider.Kind /
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
@@ -1420,11 +1429,11 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// fallback covers sessions created before provider_kind was stamped.
 		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
-				return fmt.Errorf("starting wait nudge poller: %w", err)
+				errs = append(errs, fmt.Errorf("starting wait nudge poller: %w", err))
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // waitNudgeAttemptQueuedOrResolved reports whether the wait nudge attempt
@@ -1634,9 +1643,13 @@ func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
 	if len(ops) == 0 {
 		return err
 	}
-	// A wait's lane notice lives in the sessions class's op journal.
+	// A wait's lane notice lives in the sessions class's op journal, which
+	// the city store this call opened reaches, never the nudges class.
+	if opened == nil {
+		return errors.Join(err, fmt.Errorf("withdrawing wait notices %s: the city store did not open", strings.Join(ops, ", ")))
+	}
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	return errors.Join(err, withdrawWaitNotices(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}, ops))
+	return errors.Join(err, withdrawWaitNotices(beads.SessionStore{Store: cliSessionStore(opened, cfg, cityPath)}, ops))
 }
 
 func waitLifecycleEnabled() error {

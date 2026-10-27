@@ -7,13 +7,14 @@ package main
 // attempt is its own op, caused by the wait, delivered at the boundary while
 // the session runs (live_only: the wait's readiness already drives the
 // wake), and scoped to the wait's registered continuation epoch when it
-// names one. The wait's nudge_id then holds the op id, which its finalize
-// and withdraw read (opjournal.IsOpID) in place of a queue shadow's. One
-// path serves both reconcilers: dispatchReadyWaitNudgesWithSnapshot and
-// finalizeReadyWaitFromNudge are their shared entry points. An attempt stays
-// with the path that recorded it first across a flip or rollback of message
-// in [ops] authoritative: a queued attempt gets no notice, and a noticed one
-// no queue item (waitNoticeRecorded).
+// names one. The wait's nudge_id then holds the op id, recorded before the
+// op is proposed, which its finalize and withdraw read (opjournal.IsOpID) in
+// place of a queue shadow's; the notice's outcome, whatever it is, ends the
+// wait. One path serves both reconcilers: dispatchReadyWaitNudgesWithSnapshot
+// and finalizeReadyWaitFromNudge are their shared entry points. An attempt
+// stays with the path that recorded it first across a flip or rollback of
+// message in [ops] authoritative: a queued attempt gets no notice, and a
+// noticed one no queue item (waitNoticeRecorded).
 
 import (
 	"errors"
@@ -55,22 +56,32 @@ func waitNoticeRequest(conv string, wait sessionpkg.WaitInfo, nudgeID, message s
 // dispatchWaitNotice dispatches wait's nudge attempt nudgeID to session info
 // on lane: an attempt whose op exists is queued (open) or resolved (closed)
 // and proposes nothing; otherwise, when the lane serves the session, it
-// proposes the notice, records its op id as the wait's nudge_id and rings
-// the lane. It reports handled false, having written nothing, when the lane
-// does not serve the session: the attempt takes the legacy queue.
+// records the notice's op id as the wait's nudge_id, then proposes the
+// notice and rings the lane. Recording first means no op exists that its
+// wait does not name: a crash between the two writes leaves a nudge_id that
+// names no op, which reads as not found everywhere, so the next pass
+// proposes the notice, or after a rollback queues it. It reports handled
+// false, having written nothing, when the lane does not serve the session
+// or the op store refuses the notice itself (a note past the inline payload
+// limit, or not UTF-8): the attempt takes the legacy queue. An error leaves
+// the attempt to the next pass.
 func dispatchWaitNotice(lane plannerNoticeLane, sessFront *sessionpkg.Store, info sessionpkg.Info, wait sessionpkg.WaitInfo, nudgeID, message string) (bool, error) {
 	st, err := lane.noticeStore()
 	if err != nil {
 		return false, fmt.Errorf("opening the lane store for wait %s: %w", wait.ID, err)
 	}
 	req := waitNoticeRequest(info.ID, wait, nudgeID, message)
-	id, err := opjournal.DeriveID(st.Prefix(), info.ID, waitNoticePrincipal, req.ClientKey)
-	if err != nil {
-		return false, fmt.Errorf("deriving wait %s's notice: %w", wait.ID, err)
+	preview, err := st.Preview(req)
+	switch {
+	case plannerNoticeRefused(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("previewing wait %s's notice: %w", wait.ID, err)
 	}
+	id := preview.ID
 	if _, err := st.Get(id); err == nil {
-		if wait.NudgeID != id {
-			return true, sessFront.SetWaitNudgeID(wait.ID, id)
+		if err := recordWaitNotice(sessFront, wait, id); err != nil {
+			return false, err
 		}
 		return true, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
@@ -83,17 +94,29 @@ func dispatchWaitNotice(lane plannerNoticeLane, sessFront *sessionpkg.Store, inf
 	if !serves {
 		return false, nil
 	}
-	op, created, err := st.Propose(req)
-	if err != nil {
-		return false, fmt.Errorf("proposing wait %s's notice: %w", wait.ID, err)
+	if err := recordWaitNotice(sessFront, wait, id); err != nil {
+		return false, err
 	}
-	if err := sessFront.SetWaitNudgeID(wait.ID, op.ID); err != nil {
-		return true, fmt.Errorf("setting wait nudge_id: %w", err)
+	_, created, err := st.Propose(req)
+	if err != nil {
+		return false, fmt.Errorf("proposing wait %s's notice %s: %w", wait.ID, id, err)
 	}
 	if created {
 		lane.Poke(info.ID)
 	}
 	return true, nil
+}
+
+// recordWaitNotice records notice op id as wait's nudge_id, unless it
+// already is.
+func recordWaitNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, id string) error {
+	if wait.NudgeID == id {
+		return nil
+	}
+	if err := sessFront.SetWaitNudgeID(wait.ID, id); err != nil {
+		return fmt.Errorf("recording wait %s's notice %s: %w", wait.ID, id, err)
+	}
+	return nil
 }
 
 // waitNoticeRecorded reports whether wait's nudge attempt nudgeID is a lane
@@ -126,10 +149,14 @@ func waitNoticeRecorded(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, n
 	}
 }
 
-// finalizeWaitFromNotice closes ready wait from its lane notice opID: a
-// notice that succeeded closes the wait, one that failed fails it with the
-// failure's reason; a skipped or canceled notice leaves it (the epoch check,
-// or the canceler, already ended the wait), and an open one keeps it ready.
+// finalizeWaitFromNotice ends ready wait from its lane notice opID once the
+// notice closes. A closed notice is its attempt's last word, since no pass
+// proposes its key again, so every outcome ends the wait: one that
+// succeeded closes it, one that failed fails it with the failure's reason,
+// and one a principal canceled, or the lane skipped (its conversation
+// closed, as an archived session reads, or its context epoch moved on),
+// cancels it, recording why. A notice still open, or not proposed yet, keeps
+// the wait ready.
 func finalizeWaitFromNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, opID string, now time.Time) (bool, error) {
 	st, err := opjournal.NewStore(sessFront.Store(), clock.Real{})
 	if err != nil {
@@ -150,8 +177,15 @@ func finalizeWaitFromNotice(sessFront *sessionpkg.Store, wait sessionpkg.WaitInf
 		return true, sessFront.CloseWaitFromNudge(wait.ID, now, opID, "")
 	case opjournal.ArmFailed:
 		return true, sessFront.FailWaitFromNudge(wait.ID, now, opID, reason, "")
+	case opjournal.ArmCanceled:
+		why := "notice canceled by " + op.Cancel.By
+		if op.Cancel.Reason != "" {
+			why += ": " + op.Cancel.Reason
+		}
+		return true, sessFront.CancelWait(wait.ID, now, why)
+	default: // opjournal.ArmSkipped: a decoded op's arm is one of the four.
+		return true, sessFront.CancelWait(wait.ID, now, "notice skipped: "+reason)
 	}
-	return false, nil
 }
 
 // splitWaitNudgeIDs splits a wait's nudge ids into lane notice op ids and

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -10,6 +11,8 @@ import (
 // sends any other id to the nudge queue.
 func TestWaitWithdrawCancelsItsNotice(t *testing.T) {
 	e, st := newLaneOpsEnv(t, "message")
+	queue := &recordingNudgeQueue{}
+	e.fs.nudgeQueue = queue
 	info := e.session(t, "Waiting")
 	op, _, err := st.ops.Propose(opjournal.Request{
 		Conversation: info.ID, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane, ClientKey: "wait:wait-gc-9-1-1",
@@ -26,5 +29,8 @@ func TestWaitWithdrawCancelsItsNotice(t *testing.T) {
 	got, err := st.ops.Get(op.ID)
 	if err != nil || got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.By != waitNoticePrincipal {
 		t.Fatalf("notice after withdraw = %+v, %v", got, err)
+	}
+	if len(queue.withdrawn) != 1 || !slices.Equal(queue.withdrawn[0], []string{"wait-gc-8-1-1"}) {
+		t.Fatalf("queue withdrawals = %v, want only the queue id", queue.withdrawn)
 	}
 }
