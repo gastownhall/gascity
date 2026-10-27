@@ -1607,6 +1607,46 @@ func (s *Server) emitLaneMessageResult(st *opjournal.Store, op opjournal.Op, ope
 	}
 }
 
+// deliverInitialMessage delivers the initial message a session create
+// carries to the session it created, id. When the city's lane host executes
+// message it proposes the message as an operator lane message op at the
+// boundary under a minted key (proposeInitialMessage), so the lane host
+// delivers it and the op journal records it; otherwise it submits it through
+// the session layer (submitMessageToSession). An error means the message was
+// neither proposed nor delivered.
+func (s *Server) deliverInitialMessage(ctx context.Context, store beads.Store, id, message string) error {
+	if s.laneExecutes(opjournal.KindMessage) {
+		return s.proposeInitialMessage(id, message)
+	}
+	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, false)
+	return err
+}
+
+// proposeInitialMessage proposes a create's initial message to session id as
+// an operator lane message op (LaneMessageOpPolicy of the default intent)
+// under a minted key.
+func (s *Server) proposeInitialMessage(id, message string) error {
+	st, err := s.conversationOpStore()
+	if err != nil {
+		return err
+	}
+	key, err := legacyop.MintKey()
+	if err != nil {
+		return err
+	}
+	_, _, err = s.proposeLaneOp(st, opjournal.Request{
+		Conversation: id,
+		Kind:         opjournal.KindMessage,
+		Executor:     opjournal.ExecutorLane,
+		ClientKey:    key,
+		MintedKey:    true,
+		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Payload:      message,
+		Policy:       LaneMessageOpPolicy(session.SubmitIntentDefault),
+	})
+	return err
+}
+
 // proposeExtmsgNotice is an extmsg member notice under lane authority: a lane
 // notice from gc:extmsg, delivered at the session's boundary, waking it if
 // needed, under a minted key (the notice path carries no message id).

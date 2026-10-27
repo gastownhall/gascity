@@ -106,7 +106,7 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	"internal/api/session_control_ops.go:Server.executeStop":                   {laneInjectUnlisted, "POST /stop runs its interrupt inline (I-d); with interrupt listed it proposes a lane op"},
 	"internal/api/session_control_ops.go:Server.respondSession":                {laneInjectUnlisted, "POST /respond answers through the session layer (R-a); with respond listed it proposes a lane op"},
 	"internal/api/session_resolution.go:Server.sendBackgroundMessageToSession": {laneInjectUnlisted, "extmsg member notices (M11); with message listed they are lane notices"},
-	"internal/api/session_resolution.go:Server.submitMessageToSessionFor":      {laneInjectUnlisted, "POST /submit and /messages deliver through handle.Message (M5, I-f); with message listed they propose lane ops"},
+	"internal/api/session_resolution.go:Server.submitMessageToSessionFor":      {laneInjectUnlisted, "POST /submit, /messages and a create's initial message (POST /sessions) deliver through handle.Message (M5, I-f); with message listed they propose lane ops"},
 	// Fallbacks: they run while their kind is listed.
 	"cmd_nudge.go:deliverSessionNudgeLegacy":      {laneInjectFallback, "gc session nudge to a target with no session row, or a protocol-mode session no lane serves (excused at OJ-21)"},
 	"cmd_nudge.go:deliverMailNotifyLegacy":        {laneInjectFallback, "mail --notify keeps its legacy delivery (M7)"},

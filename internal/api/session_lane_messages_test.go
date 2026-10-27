@@ -251,6 +251,32 @@ func TestExtmsgNotifyUnderLaneProposesANotice(t *testing.T) {
 	}
 }
 
+// POST /sessions for a provider session with an initial message, under lane
+// authority, proposes the message as an operator lane message op at the
+// boundary instead of delivering it through the session layer itself.
+func TestCreateWithMessageUnderLaneProposesAMessageOp(t *testing.T) {
+	e, st := laneMessageEnv(t, nil)
+	rec := e.post(t, "/sessions", "", `{"kind":"provider","name":"test-agent","message":"hello from create"}`)
+	wantStatus(t, "create", rec, http.StatusAccepted)
+	acc := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, e.fs.eventProv, acc.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if got := deliveredCalls(e.fs.sp, success.Session.SessionName); len(got) != 0 {
+		t.Fatalf("the API delivered the initial message itself: %+v", got)
+	}
+	open, err := st.ops.ListOpen(success.Session.ID)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("open ops = %+v, %v; want the initial message's lane op", open, err)
+	}
+	op := open[0]
+	if op.Executor != opjournal.ExecutorLane || op.Kind != opjournal.KindMessage || op.Payload != "hello from create" ||
+		op.Producer.Actor != opjournal.ActorOperator || op.Policy.Message.When != opjournal.WhenBoundary || op.Policy.Message.Role != opjournal.RolePrompt {
+		t.Fatalf("op = %+v", op)
+	}
+}
+
 func TestSubmitWithoutLaneMessageKeepsOJ2b(t *testing.T) {
 	e, st := newLaneOpsEnv(t, "interrupt")
 	e.fs.cfg.Ops.ContentMode = "auto"

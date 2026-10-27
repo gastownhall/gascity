@@ -452,7 +452,10 @@ adopts it.
   (`messageReplayErrorCode`) for one closed otherwise; the result, queued
   true, for one still open. A same-key retry of a closed op replays it
   (`storedReplayAnswer`); of an open lane op it is 202 replayed. extmsg
-  member notices are lane notices from `gc:extmsg`.
+  member notices are lane notices from `gc:extmsg`. A session create's
+  initial message (`POST /sessions` with `message`) is an operator lane
+  message op at the boundary under a minted key (`deliverInitialMessage`);
+  only a failed proposal fails the create and rolls it back.
 - Run cancel (interrupt listed): one op per holder session with a turn to
   stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
   `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that
