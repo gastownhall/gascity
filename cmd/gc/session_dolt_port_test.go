@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -219,6 +220,98 @@ func TestSessionBackendEnvKeepsDoltPortWhenMirrorCannotStandIn(t *testing.T) {
 			for _, key := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
 				if got, present := env[key]; present {
 					t.Errorf("%s = %q, want it left unprojected", key, got)
+				}
+			}
+		})
+	}
+}
+
+// Proxied, storage-bound and doltlite scopes keep their projection: a scope
+// mirror matching whatever port they carry changes nothing, and no withheld
+// key or extra shared-server opt-out appears.
+func TestSessionBackendEnvLeavesUnmirroredTopologiesUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// setup returns the city path, the session's rig root ("" for a
+		// city session) and the scope whose mirror bd would read.
+		setup func(t *testing.T) (cityPath, rigRoot, scopeRoot string)
+		// sharedServerPinned is the base projection's shared-server opt-out
+		// for the scope.
+		sharedServerPinned bool
+	}{
+		{
+			name: "gc-owned proxied city",
+			setup: func(t *testing.T) (string, string, string) {
+				cityPath, _ := proxiedEnvTestCity(t)
+				journalProxiedScope(t, cityPath, cityPath, true)
+				return cityPath, "", cityPath
+			},
+			sharedServerPinned: true,
+		},
+		{
+			name: "gc-owned proxied rig",
+			setup: func(t *testing.T) (string, string, string) {
+				cityPath, _ := proxiedEnvTestCity(t)
+				rig := filepath.Join(cityPath, "rigs", "r1")
+				writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"r1"}`)
+				journalProxiedScope(t, cityPath, rig, true)
+				return cityPath, rig, rig
+			},
+			sharedServerPinned: true,
+		},
+		{
+			name: "found proxied city",
+			setup: func(t *testing.T) (string, string, string) {
+				cityPath, _ := proxiedEnvTestCity(t)
+				return cityPath, "", cityPath
+			},
+		},
+		{
+			name: "storage-bound city",
+			setup: func(t *testing.T) (string, string, string) {
+				cityPath := writeLibraryBackendScope(t)
+				return cityPath, "", cityPath
+			},
+		},
+		{
+			name: "doltlite city",
+			setup: func(t *testing.T) (string, string, string) {
+				cityPath := t.TempDir()
+				writeScopeBeadsMetadata(t, cityPath, `{"database":"doltlite","backend":"doltlite","dolt_database":"hq"}`)
+				writeScopeConfigYAML(t, cityPath, "issue_prefix: hq\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n")
+				return cityPath, "", cityPath
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setStaleSessionDoltPortEnv(t)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+			cityPath, rigRoot, scopeRoot := tc.setup(t)
+
+			projected, projectedErr := sessionBackendEnvWithError(cityPath, rigRoot, nil)
+			if port := projected["GC_DOLT_PORT"]; port != "" {
+				if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "dolt-server.port"), []byte(port+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mirrored, mirroredErr := sessionBackendEnvWithError(cityPath, rigRoot, nil)
+
+			if (projectedErr == nil) != (mirroredErr == nil) {
+				t.Fatalf("error changed with the mirror: %v -> %v", projectedErr, mirroredErr)
+			}
+			if !maps.Equal(projected, mirrored) {
+				t.Errorf("session env changed with a matching mirror:\n before %v\n after  %v", projected, mirrored)
+			}
+			if got, present := mirrored["BEADS_DOLT_PORT"]; present {
+				t.Errorf("BEADS_DOLT_PORT = %q, want it left unprojected", got)
+			}
+			if tc.sharedServerPinned {
+				assertSharedServerPinnedOff(t, tc.name, mirrored)
+				return
+			}
+			for _, key := range []string{"BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+				if got, present := mirrored[key]; present {
+					t.Errorf("%s = %q, want no shared-server opt-out", key, got)
 				}
 			}
 		})
