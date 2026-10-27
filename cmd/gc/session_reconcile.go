@@ -786,7 +786,7 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // keyed transcript qualifies; everything else (no key, no work dir, provider we
 // cannot probe, transcript gone) returns false, and the wake failure resets
 // the conversation unless recordWakeFailure retains a committed manual one
-// (SESSION-LIFE-MANUAL-LOSS). searchPaths is sessionTranscriptSearchPaths.
+// (SESSION-LIFE-MANUAL-LOSS). searchPaths is launchTranscriptRoots.
 func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)

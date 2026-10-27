@@ -181,6 +181,14 @@ type Probe struct {
 	Running   bool
 	// Boundary is whether the runtime is idle at input.
 	Boundary Tri
+	// BoundaryAt is the instant a closed Boundary opens by itself: a
+	// keystroke runtime's quiescence deadline, when quiescence is the only
+	// thing keeping it closed. Zero is unknown, and the host's busy backoff
+	// (Busy) finds the boundary. Content that waits busy (WaitBusy) for a
+	// BoundaryAt still ahead puts it in PassResult.Next, so the pass that
+	// follows runs at the deadline, not on the next re-probe of the grid.
+	// Read only with Boundary no.
+	BoundaryAt time.Time
 	// Turn is the turn running at the probe, "" when unknown.
 	Turn     string
 	TurnLive Tri
@@ -495,7 +503,10 @@ type PassResult struct {
 	// More: something else is eligible now; pass again at once.
 	More bool
 	// Next is the earliest time a waiting op can change by itself, always
-	// after the instant the pass planned at; zero means none.
+	// after the instant the pass planned at; zero means none. It includes
+	// the deadline of a busy boundary that names one (Probe.BoundaryAt), so a
+	// Busy pass with a Next is passed again at the deadline, a wait the
+	// host's backoff only bounds from above.
 	Next time.Time
 }
 

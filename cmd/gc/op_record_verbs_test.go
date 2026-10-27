@@ -911,17 +911,21 @@ func TestSessionVerbOpConfigLoadFailure(t *testing.T) {
 	t.Run("warns that the gates were not read", func(t *testing.T) {
 		f := newCLIOpVerbFixture(t, cliOpWakeCase(t), nil)
 		appendCityTOML(t, f.c.dir, broken)
-		r := f.run("", false)
+		r := f.run("k-1", false)
 		if r.code != 0 {
 			t.Fatalf("wake = %d; stderr=%s", r.code, r.stderr)
 		}
 		if !strings.Contains(r.stderr, "[ops] gates were not read, so each takes its builtin default") {
 			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read and take their builtin defaults", r.stderr)
 		}
-		// The lifecycle gate's builtin default is auto, so a store that can
-		// record ops records the run.
-		if ops := cliOpRows(t, f.h.opStore); len(ops) != 1 || ops[0].Status != opjournal.StatusClosed {
-			t.Fatalf("op rows = %+v, want the run recorded and closed under the builtin auto default", ops)
+		// The lifecycle gate's builtin default is auto, which records only
+		// over a SQLite sessions store: over this city's it runs unrecorded,
+		// and the --key run says why.
+		if !strings.Contains(r.stderr, "op journal open failed ("+legacyop.DegradeNotRecordedByDefault+")") {
+			t.Fatalf("stderr = %q, want the builtin auto default's not-recorded warning for a --key run", r.stderr)
+		}
+		if ops := cliOpRows(t, f.h.opStore); len(ops) != 0 {
+			t.Fatalf("op rows = %+v, want none under the builtin auto default over a non-SQLite store", ops)
 		}
 	})
 	t.Run("an environment require still refuses", func(t *testing.T) {

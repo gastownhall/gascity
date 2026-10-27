@@ -1594,3 +1594,58 @@ func TestLaneExecAdmitsTheDrainNoticeIntoAStopRequestedRow(t *testing.T) {
 		})
 	}
 }
+
+// TestLaneExecProbeBoundaryAt proves a busy keystroke boundary names its
+// deadline, the last activity plus the quiescence window, only when the
+// quiescence window is the sole reason it is closed: an unknown activity, a
+// deadline at or past now, a protocol-mode or ACP runtime, and a boundary
+// that is open all leave it zero (the polling grid is the fallback).
+func TestLaneExecProbeBoundaryAt(t *testing.T) {
+	now := laneT0
+	for _, tc := range []struct {
+		name     string
+		opts     []laneFixtureOpt
+		protocol bool
+		activity time.Time // zero: the runtime reports none
+		want     time.Time
+		boundary opjournal.Tri
+	}{
+		{name: "busy", activity: now.Add(-time.Second), want: now.Add(defaultNudgePollQuiescence - time.Second), boundary: opjournal.TriNo},
+		{name: "just active", activity: now, want: now.Add(defaultNudgePollQuiescence), boundary: opjournal.TriNo},
+		{name: "deadline now", activity: now.Add(-defaultNudgePollQuiescence), boundary: opjournal.TriYes},
+		{name: "deadline passed", activity: now.Add(-time.Minute), boundary: opjournal.TriYes},
+		{name: "unknown activity", boundary: opjournal.TriNo},
+		{name: "acp", opts: []laneFixtureOpt{func(meta map[string]string) { meta["transport"] = "acp" }}, activity: now.Add(-time.Second), boundary: opjournal.TriNo},
+		{name: "protocol", protocol: true, activity: now.Add(-time.Second), boundary: opjournal.TriUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			if tc.protocol {
+				f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+			}
+			f.sp.SetActivity(f.name, tc.activity)
+			v, info := f.view(t)
+			e := newConversationLaneExec(f.deps(f.laneStore(t)), info)
+			e.now = f.clk.Now
+			// The quiescence rule as the production idle check applies it,
+			// on the fake clock.
+			e.idle = func(_ nudgeTarget, obs worker.LiveObservation) bool {
+				return obs.LastActivity != nil && f.clk.Now().Sub(*obs.LastActivity) >= defaultNudgePollQuiescence
+			}
+			p, err := e.Probe(context.Background(), v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.protocol {
+				if p.Caps.Live {
+					t.Fatalf("Probe = %+v, want a runtime that is not live", p)
+				}
+			} else if p.Boundary != tc.boundary {
+				t.Fatalf("boundary %v, want %v", p.Boundary, tc.boundary)
+			}
+			if !p.BoundaryAt.Equal(tc.want) {
+				t.Fatalf("BoundaryAt %s, want %s", p.BoundaryAt, tc.want)
+			}
+		})
+	}
+}

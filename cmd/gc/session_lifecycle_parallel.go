@@ -2844,11 +2844,13 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // dir's projects, the one root the launch reads: a conversation an agent
 // left under another observed root when it moved reads gone rather than
 // resumable. Otherwise sessionTranscriptSearchPaths(cfg):
-//   - a CLAUDE_CONFIG_DIR passed through from gc's own environment is
-//     ambient, not the launch's choice, and is not read;
+//   - an absolute CLAUDE_CONFIG_DIR the launch is otherwise handed (tp.Env:
+//     passed through from gc's own environment, or an upstream's env) adds
+//     its projects after those roots, never instead of them, because a
+//     wrapper may set its own;
 //   - a relative or ~ value is resolved by the provider against its own
-//     working dir and home, which the probe cannot reproduce, so it does
-//     not pin the probe.
+//     working dir and home, which the probe cannot reproduce, so it adds no
+//     root and does not pin the probe.
 //
 // A wrapper that sets its own CLAUDE_CONFIG_DIR wins at runtime: an
 // operator value beside such a wrapper pins the probe to a root the launch
@@ -2857,7 +2859,11 @@ func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
 	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
 		return []string{filepath.Join(dir, "projects")}
 	}
-	return sessionTranscriptSearchPaths(cfg)
+	roots := sessionTranscriptSearchPaths(cfg)
+	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	}
+	return roots
 }
 
 // staleKeyConversationResetEvent is session.conversation_reset for info, a

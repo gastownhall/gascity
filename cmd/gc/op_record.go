@@ -134,6 +134,19 @@ var cliOpenOpStore = func(sessStore beads.Store) (*opjournal.Store, error) {
 	return opjournal.NewStore(beads.SessionStore{Store: sessStore}, cliOpClock)
 }
 
+// cliOpenOpStoreUnder is cliOpenOpStore for a gate that is auto only by its
+// builtin default when builtinAuto is set: such a gate records only over a
+// SQLite sessions store, so over any other it answers
+// *opjournal.NotRecordedByDefaultError without opening or probing anything.
+func cliOpenOpStoreUnder(builtinAuto bool, sessStore beads.Store) (*opjournal.Store, error) {
+	if builtinAuto {
+		if err := opjournal.CheckRecordsByDefault(beads.SessionStore{Store: sessStore}); err != nil {
+			return nil, err
+		}
+	}
+	return cliOpenOpStore(sessStore)
+}
+
 // cliOpClock is the clock CLI ops are proposed and closed under. A var so
 // tests can move past an op's finish_by.
 var cliOpClock clock.Clock = clock.Real{}
@@ -267,7 +280,7 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
 			if op.opened == nil && op.openErr == nil {
-				op.opened, op.openErr = cliOpenOpStore(op.sessStore)
+				op.opened, op.openErr = cliOpenOpStoreUnder(builtinAuto, op.sessStore)
 			}
 			return op.opened, op.openErr
 		},
@@ -279,11 +292,12 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 
 		// Under a gate that is auto only by its builtin default, a store that
 		// cannot record ops at all (a bd without --if-revision, a store with
-		// no id prefix) runs the request unrecorded without a warning, as if
-		// the gate were off: every released bd lacks --if-revision, so a
-		// warning there would print on every recorded command of a default
-		// city. A run that asked for a --key still warns, as it does not get
-		// the dedup it asked for.
+		// no id prefix), or one the default does not record on (not
+		// SQLite-backed, cliOpenOpStoreUnder), runs the request unrecorded
+		// without a warning, as if the gate were off: a warning there would
+		// print on every recorded command of a default city. A run that
+		// asked for a --key still warns, as it does not get the dedup it
+		// asked for.
 		QuietCannotRecord: builtinAuto && req.key == "",
 		CrashPoints:       opsFailpointState.hook(legacyop.SurfaceCLI),
 	}

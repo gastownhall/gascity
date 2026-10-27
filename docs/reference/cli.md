@@ -3492,14 +3492,22 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute
 
 Without --strict, a prompt_template that cannot be read is reported on
-stderr and the default prompt is output.
+stderr and the default prompt is output; one that fails to parse or
+execute is reported on stderr and its raw unrendered text is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
 to empty output from valid conditional logic, or on suspended states
 (city or agent) — those are legitimate quiet states, not mistakes.
+
+Fragments appended to the prompt (global_fragments, inject_fragments,
+append_fragments) do not fail --strict: one that is missing or fails to
+render is reported on stderr and left out of the prompt. gc lint
+reports a pack's missing or failing inject_fragments and
+append_fragments.
 
 ```
 gc prime [agent-name] [flags]
@@ -3510,7 +3518,7 @@ gc prime [agent-name] [flags]
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
-| `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
+| `--strict` | bool |  | fail on missing city, missing or unknown agent, or a prompt_template that cannot be read or rendered instead of falling back |
 
 ## gc prompt
 

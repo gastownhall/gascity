@@ -940,6 +940,7 @@ func TestLaneWorkerNextDelay(t *testing.T) {
 		{"next", lanePassOutcome{res: opjournal.PassResult{Next: laneT0.Add(7 * time.Second)}}, 7 * time.Second, false},
 		{"busy", lanePassOutcome{res: opjournal.PassResult{Busy: true}}, laneBusyFirst, false},
 		{"busy beats a later next", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(time.Minute)}}, laneBusyFirst, false},
+		{"next beats the busy backoff", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(1500 * time.Millisecond)}}, 1500 * time.Millisecond, false},
 		{"quiescent", lanePassOutcome{skipped: true}, laneQuiescentRetry, false},
 		{"wake recorded", lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeRecorded}, laneWakeRecheck, false},
 		{"wake held", lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeHeld}, laneWakeHeldRecheck, false},
@@ -1624,6 +1625,66 @@ func TestLaneHostReprobesBusyRuntimeWithoutRows(t *testing.T) {
 	}
 	if s := hh.h.status(f.clk.Now()); s.Reprobes != 2 {
 		t.Fatalf("status = %+v, want two re-probes", s)
+	}
+}
+
+// TestLaneHostBusyBoundaryWakesAtItsDeadline proves a busy keystroke
+// boundary is passed again at its quiescence deadline, not on the next
+// re-probe of the backoff grid: the wait is the sooner of the backoff and
+// the time left to the deadline, and the pass that deadline ends is a full
+// pass that delivers. The worker already waits for the sooner of the backoff
+// and Next; the executor's hint is what makes Next the deadline.
+func TestLaneHostBusyBoundaryWakesAtItsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		left time.Duration // the time left to the deadline at the first pass
+		// waits are the timers before the pass that delivers, and reprobes
+		// the re-probes among them.
+		waits    []time.Duration
+		reprobes int
+	}{
+		{"inside the backoff", 1500 * time.Millisecond, []time.Duration{1500 * time.Millisecond}, 0},
+		{"past the first re-probe", 3 * time.Second, []time.Duration{laneBusyFirst, time.Second}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			f.sp.SetActivity(f.name, laneT0.Add(tc.left-defaultNudgePollQuiescence))
+			st := f.laneStore(t)
+			op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+			hh := newLaneHostHarness(t, f)
+			hh.h.newExec = func(deps laneExecDeps, row laneRow) opjournal.Executor {
+				e := newConversationLaneExec(deps, row)
+				e.now = f.clk.Now
+				e.idle = func(_ nudgeTarget, obs worker.LiveObservation) bool {
+					return obs.LastActivity != nil && f.clk.Now().Sub(*obs.LastActivity) >= defaultNudgePollQuiescence
+				}
+				return e
+			}
+			hh.start()
+			if p := hh.nextPass(t); !p.out.res.Busy {
+				t.Fatalf("first pass = %+v, want busy", p.out.res)
+			}
+			for i, want := range tc.waits {
+				tm := hh.nextTimer(t)
+				if tm.d != want {
+					t.Fatalf("wait %d = %s, want %s", i, tm.d, want)
+				}
+				f.clk.Advance(tm.d)
+				tm.c <- f.clk.Now()
+				if i < len(tc.waits)-1 && !hh.nextReprobe(t) {
+					t.Fatalf("re-probe %d reported a boundary before the deadline", i)
+				}
+			}
+			if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+				t.Fatalf("pass at the deadline = %+v, want the delivery", p.out.res)
+			}
+			if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("op = %+v", got.Outcome)
+			}
+			if s := hh.h.status(f.clk.Now()); s.Reprobes != int64(tc.reprobes) {
+				t.Fatalf("status = %+v, want %d re-probe(s): the deadline wakes a full pass", s, tc.reprobes)
+			}
+		})
 	}
 }
 

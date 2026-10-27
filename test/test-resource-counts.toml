@@ -1362,8 +1362,13 @@ calls = 1
 
 [[count]]
 path = "examples/bd/dolt/runtime_bounded_test.go"
+resource = "net_listen"
+calls = 6
+
+[[count]]
+path = "examples/bd/dolt/runtime_bounded_test.go"
 resource = "subprocess"
-calls = 1
+calls = 5
 
 [[count]]
 path = "examples/bd/dolt/sql_test.go"
@@ -2758,6 +2763,12 @@ calls = 11
 path = "scripts/push_ownership_guard_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "scripts/rbe_worker_env_drift_test.go"
+resource = "subprocess"
+calls = 2
+medium = 2
 
 [[count]]
 path = "scripts/rbe_worker_env_grace_test.go"

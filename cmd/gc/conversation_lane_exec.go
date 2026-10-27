@@ -283,6 +283,7 @@ func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.Convers
 		return opjournal.Probe{}, fmt.Errorf("probing session %s: %w", e.info.ID, err)
 	}
 	p.Running, p.ContentBlock, p.Pending, p.Boundary = look.running, look.block, look.pending, look.boundary
+	p.BoundaryAt = look.boundaryAt
 	if look.block != "" && look.drainNoticeBlock == "" {
 		p.ContentAdmit = []opjournal.ContentClass{laneDrainNoticeClass}
 	}
@@ -304,6 +305,7 @@ type laneLook struct {
 	drainNoticeBlock string
 	pending          string
 	boundary         opjournal.Tri
+	boundaryAt       time.Time
 	handle           worker.Handle
 	turn             laneTurnLook
 	// noResponses is PendingStatus's answer that the session takes no
@@ -381,8 +383,26 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
 		l.boundary = opjournal.TriYes
+	} else {
+		l.boundaryAt = e.quiescenceDeadline(obs)
 	}
 	return l, nil
+}
+
+// quiescenceDeadline is the instant a keystroke runtime that e.idle found
+// busy turns idle by itself: its last activity plus the quiescence window.
+// It is zero where that is not the only thing keeping the boundary closed or
+// is not known: an ACP session, no known activity, and a deadline at or
+// before now (the window has run out, so something else keeps it closed).
+func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) time.Time {
+	if e.target.sessionTransport() == "acp" || obs.LastActivity == nil || obs.LastActivity.IsZero() {
+		return time.Time{}
+	}
+	at := obs.LastActivity.Add(defaultNudgePollQuiescence)
+	if !at.After(e.now()) {
+		return time.Time{}
+	}
+	return at
 }
 
 // caps are the runtime's capabilities for conv. Content is live for a
