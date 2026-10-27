@@ -985,7 +985,7 @@ request is refused; keep that variable in the agent's subprocess environment.
 
 Exits 0 once the request is recorded, even when the controller could not be
 signaled: a warning says so, and the controller acts at its next pass. Exits 1
-with nothing recorded and no runtime hint set when the request cannot be
+with no restart requested and no runtime hint set when the request cannot be
 recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
 store, a session whose row and live runtime name another incarnation, or a
 session store that cannot compare-and-swap where the request needs it: a v2
@@ -994,8 +994,15 @@ city records the request only by compare-and-swap, and
 fence.
 
 While the op journal records lifecycle ops, the request is recorded as a
-restart{fresh} op; a rerun with the same --key reports the first run's
-outcome instead of requesting again.
+restart{fresh} op, which closes with the request's outcome, a refusal
+included; a rerun with the same --key reports the first run's outcome instead
+of requesting again. The key is request-restart's own: gc handoff or gc
+session reset under the same --key records another op. The restart stops this
+session, and so can stop the run before it closes its op: a rerun with the
+same --key is then refused as in progress until the op's deadline passes, and
+after that replays the first run's success while the session row still
+records the restart as pending, else reports the op's failure, also once the
+restart has run, since the op records no context to tell it by.
 
 This command is designed to be called from within a session context.
 It emits a session.draining event once the request is recorded.`,
@@ -1007,7 +1014,7 @@ It emits a session.draining event once the request is recorded.`,
 			return nil
 		},
 	}
-	addOpKeyFlag(cmd, &key, cliOpKeyRestartedNote)
+	addOpKeyFlag(cmd, &key, restartOpKeyNote)
 	return cmd
 }
 

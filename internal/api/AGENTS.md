@@ -229,7 +229,12 @@ in one process and after a restart. A close that also deleted its bead
 closes its op `succeeded{via: legacy.deleted}`, and a replay never deletes. A
 same-key close retry finds its op by the session ID only: by an alias or
 session_name after a restart, or after a completed delete, the target no
-longer resolves and the answer is 404. With the gates off nothing is read or
+longer resolves and the answer is 404. A `/reset` Idempotency-Key that
+starts with `handoff:` or `request-restart:` is invalid
+(`legacyop.ErrReservedKey`): `gc handoff` and `gc runtime request-restart`
+record the same `restart{fresh}` request with their keys in those
+namespaces, so `require` answers 422 `invalid_idempotency_key` and `auto`
+runs the reset unrecorded. With the gates off nothing is read or
 written beyond the legacy path, except that a `/stop` that names a turn is
 stopped turn-scoped through the worker in every mode. A request `auto` could
 not record runs exactly as in off (I8).

@@ -18,12 +18,32 @@ package main
 // the row write; R closes from the row write, before the runtime hint and the
 // poke. The row write is itself the request, so a controller pass that acts
 // on it first (a patrol tick, a ledger-feed wake) can stop this process
-// before R closes, leaving R to the op sweeper.
+// before R closes, leaving R to the op sweeper (X12's K3). A same-key rerun
+// then finds R open and is refused as in progress, as every CLI op's rerun
+// is, until R's finish_by, when R closes failed{deadline_in_flight}. A rerun
+// of that R replays the first run's success when the session row shows the
+// restart: still pending (restart_requested and continuation_reset_pending),
+// or, for a handoff whose N closed succeeded (so its mail landed before the
+// row write), past the context N names (continuation_epoch >= E+1). R records
+// no context, so a request-restart whose restart already ran reports R's
+// failure: a rerun cannot tell that restart from one that never ran.
+//
 // R's key is --key, else minted; there is no (generation, purpose) key, since
 // a relaunch in place runs a second agent process under one generation and
-// token. `gc handoff --auto` (a hook path), `--target` and a self handoff of a
-// session the controller does not restart record nothing; the last warns that
-// its --key is not recorded.
+// token. --key is stored in the verb's own key namespace
+// (legacyop.KeyNamespaceRequestRestart, legacyop.KeyNamespaceHandoff): a
+// session reset, gc session reset's or the API's, records the same request,
+// restart{fresh} on the conversation with no payload, under its key as given,
+// so one verb's rerun would otherwise replay another's op, and a handoff
+// would replay a request-restart and send no mail. The namespaces are
+// reserved: a reset's key that starts with one is invalid (auto runs the
+// reset unrecorded, require refuses it), so it never names a restart
+// request's op either. The output names --key as given. The key covers R's
+// request only, not the handoff's subject or message: a same-key rerun sends
+// no mail whatever they say, and its --json result leaves the subject out.
+// `gc handoff --auto` (a hook path), `--target` and a self handoff of a
+// session the controller does not restart record nothing; the last warns,
+// while R's gate records, that its --key is not recorded.
 //
 // Because N rides R, ops.content=require does not require N on its own: with
 // ops.lifecycle off, or R run unrecorded, N is neither checked nor proposed,
@@ -65,6 +85,15 @@ const (
 // op's id, as deliver-now derives <message>:interrupt.
 const handoffNoticeKeySuffix = ":notice"
 
+// The restart verbs' notes on what their --key replays (addOpKeyFlag). The
+// restart stops the run, so the flag promises a replay from the restarted
+// session only where the first run closed its op; the command's help says
+// what a rerun answers otherwise.
+const (
+	restartOpKeyNote = ", also from the restarted session if the first run closed its op before the restart stopped it"
+	handoffOpKeyNote = restartOpKeyNote + "; the key covers neither the subject nor the message, so a rerun under it sends no mail whatever they say"
+)
+
 // restartOpPolicy is the restart op's policy: a fresh restart, as `gc
 // session reset` records.
 var restartOpPolicy = opjournal.Policy{Restart: opjournal.RestartPolicy{Mode: opjournal.RestartFresh}}
@@ -86,8 +115,11 @@ type restartOps struct {
 	conversation    string
 	unrecordable    string
 	unrecordableErr error
-	// epoch is the row's continuation_epoch (1 when unset or not positive).
-	epoch int64
+	// epoch is the row's continuation_epoch (1 when unset or not positive),
+	// and restartPending whether the row records a fresh restart not yet run
+	// (restart_requested and continuation_reset_pending).
+	epoch          int64
+	restartPending bool
 	// sender is the session's address, which the notice names.
 	sender  string
 	asJSON  bool
@@ -130,6 +162,7 @@ func newRestartOps(cfg *config.City, cfgErr error, sessStore beads.Store, key, s
 	if e, err := strconv.ParseInt(strings.TrimSpace(b.Metadata["continuation_epoch"]), 10, 64); err == nil && e > 0 {
 		o.epoch = e
 	}
+	o.restartPending = b.Metadata["restart_requested"] == "true" && b.Metadata["continuation_reset_pending"] == "true"
 	return o
 }
 
@@ -142,10 +175,12 @@ func (o *restartOps) request(verb string, kind opjournal.Kind) cliOpRequest {
 	}
 }
 
-// restartRequest is R's request.
-func (o *restartOps) restartRequest(verb string) cliOpRequest {
+// restartRequest is R's request: --key in the verb's own key namespace, and
+// ran deciding a replay of an R that did not succeed.
+func (o *restartOps) restartRequest(verb, keyNamespace string, ran func(opjournal.Op) (string, bool)) cliOpRequest {
 	req := o.request(verb, opjournal.KindRestart)
-	req.key, req.policy = o.key, restartOpPolicy
+	req.key, req.keyNamespace, req.policy = o.key, keyNamespace, restartOpPolicy
+	req.replaysAsSuccess = ran
 	return req
 }
 
@@ -170,14 +205,19 @@ func (o *restartOps) noticeKey() string {
 	return o.restart.adm.Op.ID + handoffNoticeKeySuffix
 }
 
-// startRestart starts R. It reports every refusal itself.
+// startRestart starts request-restart's R. It reports every refusal itself.
 func (o *restartOps) startRestart(verb string) cliOpStart {
 	if o == nil {
 		return cliOpExecute
 	}
-	var start cliOpStart
-	o.restart, start = startCLIOp(o.cfg, o.sessStore, o.restartRequest(verb))
-	return start
+	return o.startR(o.restartRequest(verb, legacyop.KeyNamespaceRequestRestart, o.restartStillPending))
+}
+
+// startR starts R from req. R is set before it starts, so a replay's
+// decision (cliOpRequest.replaysAsSuccess) reads through R's op store.
+func (o *restartOps) startR(req cliOpRequest) cliOpStart {
+	o.restart = newCLIOp(o.cfg, o.sessStore, req)
+	return o.restart.start()
 }
 
 // startHandoff starts R and then, only when R is recorded and executing,
@@ -187,8 +227,8 @@ func (o *restartOps) startHandoff(verb string) cliOpStart {
 	if o == nil {
 		return cliOpExecute
 	}
-	start := o.startRestart(verb)
-	if start == cliOpReplayed && o.asJSON {
+	start := o.startR(o.restartRequest(verb, legacyop.KeyNamespaceHandoff, o.handoffRestartRan))
+	if start == cliOpReplayed && o.asJSON && o.replayedNotice == "" {
 		o.replayedNotice = o.recordedNoticeID(verb)
 	}
 	if start != cliOpExecute || !o.restart.recordedExecution() {
@@ -223,33 +263,102 @@ func (o *restartOps) refuseNotice() {
 }
 
 // recordedNoticeID is the id of the notice op a replayed R's first run
-// recorded under <R.ID>:notice, read through R's op store; "" when that run
-// recorded none. A read that fails is warned of, and the --json result then
-// leaves the notice out.
+// recorded under <R.ID>:notice; "" when that run recorded none. A read that
+// fails is warned of, and the --json result then leaves the notice out.
 func (o *restartOps) recordedNoticeID(verb string) string {
-	st, err := o.restart.rec.Open()
+	n, found, err := o.firstRunNotice(o.restart.adm.Op.ID)
 	if err != nil {
-		o.warnNoticeUnread(verb, err)
+		o.warnNoticeUnread(verb, err, "the JSON result leaves out notice_op_id")
+	}
+	if !found {
 		return ""
 	}
-	principal, _ := o.restart.principal()
-	id, err := opjournal.DeriveID(st.Prefix(), o.conversation, principal, o.noticeKey())
-	if err == nil {
-		_, err = st.Get(id)
-	}
-	switch {
-	case err == nil:
-		return id
-	case !errors.Is(err, beads.ErrNotFound):
-		o.warnNoticeUnread(verb, err)
-	}
-	return ""
+	return n.ID
 }
 
-// warnNoticeUnread warns that a replay's --json result leaves out the notice
-// op its first run recorded, as reading it failed with err.
-func (o *restartOps) warnNoticeUnread(verb string, err error) {
-	fmt.Fprintf(o.stderr, "%s: warning: reading the first run's notice op: %v; the JSON result leaves out notice_op_id\n", verb, err) //nolint:errcheck // best-effort stderr
+// firstRunNotice reads the notice op a handoff's first run recorded beside
+// its restart op rID, under <rID>:notice, through R's op store. found is
+// false when that run recorded none.
+func (o *restartOps) firstRunNotice(rID string) (n opjournal.Op, found bool, err error) {
+	st, err := o.restart.rec.Open()
+	if err != nil {
+		return opjournal.Op{}, false, err
+	}
+	principal, _ := o.restart.principal()
+	id, err := opjournal.DeriveID(st.Prefix(), o.conversation, principal, rID+handoffNoticeKeySuffix)
+	if err == nil {
+		n, err = st.Get(id)
+	}
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return opjournal.Op{}, false, nil
+	case err != nil:
+		return opjournal.Op{}, false, err
+	}
+	return n, true, nil
+}
+
+// warnNoticeUnread warns that reading the notice op a replay's first run
+// recorded failed with err, and what the replay does without it.
+func (o *restartOps) warnNoticeUnread(verb string, err error, consequence string) {
+	fmt.Fprintf(o.stderr, "%s: warning: reading the first run's notice op: %v; %s\n", verb, err, consequence) //nolint:errcheck // best-effort stderr
+}
+
+// restartStillPending decides a replay of request-restart's R that did not
+// succeed: an R its run left to the op sweeper (restartOpSwept) replays as
+// the first run's success while the row still records the fresh restart, so
+// the request stands, as a fresh run would find it. R records no context, so
+// once the restart has run a rerun cannot tell it from one that never ran,
+// and reports R's failure.
+func (o *restartOps) restartStillPending(r opjournal.Op) (string, bool) {
+	if !restartOpSwept(r) || !o.restartPending {
+		return "", false
+	}
+	return restartOpSweptNote(r, "still pending"), true
+}
+
+// handoffRestartRan decides a replay of a handoff's R that did not succeed:
+// an R its run left to the op sweeper (restartOpSwept) replays as the first
+// run's success when its notice op closed succeeded, so the mail landed
+// before the row write, and the row still records the fresh restart or has
+// opened the context the notice names. It keeps the notice's id for the
+// --json result. A notice that does not read is warned of, and the replay
+// then reports R's failure.
+func (o *restartOps) handoffRestartRan(r opjournal.Op) (string, bool) {
+	if !restartOpSwept(r) {
+		return "", false
+	}
+	n, found, err := o.firstRunNotice(r.ID)
+	if err != nil {
+		o.warnNoticeUnread(o.restart.req.verb, err, "the replay cannot tell whether the restart ran")
+		return "", false
+	}
+	if arm, _ := n.Outcome.Effective(); !found || n.Status != opjournal.StatusClosed || arm != opjournal.ArmSucceeded {
+		return "", false
+	}
+	how := "still pending"
+	if !o.restartPending {
+		if n.Scope.Kind != opjournal.ScopeContext || o.epoch < n.Scope.Epoch {
+			return "", false
+		}
+		how = "ran"
+	}
+	o.replayedNotice = n.ID
+	return restartOpSweptNote(r, how), true
+}
+
+// restartOpSwept reports whether r closed failed{deadline_in_flight}: its run
+// stopped before it closed it, as a restart stops the session that asked for
+// it, and the op sweeper, or a rerun past r's finish_by, closed it.
+func restartOpSwept(r opjournal.Op) bool {
+	arm, reason := r.Outcome.Effective()
+	return arm == opjournal.ArmFailed && reason == opjournal.ReasonDeadlineInFlight
+}
+
+// restartOpSweptNote is the replay line's note on a swept R whose restart the
+// session row shows (how: still pending, or ran).
+func restartOpSweptNote(r opjournal.Op, how string) string {
+	return fmt.Sprintf(": it closed %s, its run having stopped before closing it, and the session row shows the restart it requested %s", cliOpOutcomeText(r.Outcome), how)
 }
 
 // mailSent closes N from the handoff mail's result, and R too when the mail
@@ -285,9 +394,16 @@ func (o *restartOps) end() {
 }
 
 // unrecordedKey warns that --key is not recorded on a self handoff of a
-// session the controller does not restart, which records no ops.
+// session the controller does not restart, which records no ops, when R's
+// gate records: with it off the flag says --key is ignored. The gate is
+// resolved quietly, since no op is proposed.
 func (o *restartOps) unrecordedKey(verb string) {
 	if o == nil || o.key == "" {
+		return
+	}
+	req := o.restartRequest(verb, legacyop.KeyNamespaceHandoff, nil)
+	req.cfgErr, req.stderr = nil, io.Discard
+	if !newCLIOp(o.cfg, o.sessStore, req).recording() {
 		return
 	}
 	fmt.Fprintf(o.stderr, "%s: warning: --key not recorded (the controller does not restart this session, so the handoff records no ops); a rerun sends the mail again\n", verb) //nolint:errcheck // best-effort stderr
@@ -334,5 +450,5 @@ func restartOpOutcome(err error) legacyop.Result {
 
 // handoffReplayNote notes on stderr that a replayed handoff sends no mail.
 func handoffReplayNote(verb string, stderr io.Writer) {
-	fmt.Fprintf(stderr, "%s: the first run's mail is not sent again\n", verb) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: a replay sends no mail\n", verb) //nolint:errcheck // best-effort stderr
 }

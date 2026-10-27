@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -376,11 +380,400 @@ func TestHandoffReplaySendsNoMail(t *testing.T) {
 	}
 	r := runHandoffForTest(c, "k-replay")
 	restart, _ := opsByKind(t, h)
-	if r.code != 0 || r.stdout != "Handoff: restart requested.\n" || !strings.Contains(r.stderr, "replayed op "+restart[0].ID) || !strings.Contains(r.stderr, "the first run's mail is not sent again") {
+	if r.code != 0 || r.stdout != "Handoff: restart requested.\n" || !strings.Contains(r.stderr, "replayed op "+restart[0].ID) || !strings.Contains(r.stderr, "gc handoff: a replay sends no mail") {
 		t.Fatalf("replay = %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
 	}
 	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
 		t.Fatalf("mail beads = %d, want the first run's only", len(mails))
+	}
+}
+
+// TestRestartVerbsDoNotReplayEachOthersKey: gc session reset, gc runtime
+// request-restart and gc handoff record the same request (restart{fresh} on
+// the conversation, no payload), so the in-session verbs store --key in their
+// own namespace: a run under a key another verb already used records its own
+// op and acts, rather than replaying the other's. A handoff after a
+// request-restart under one key sends its mail.
+func TestRestartVerbsDoNotReplayEachOthersKey(t *testing.T) {
+	requestRestart := func(_ *cliOpCity, key string) cliOpVerbRun {
+		var stdout, stderr bytes.Buffer
+		code := cmdRuntimeRequestRestart(key, &stdout, &stderr)
+		return cliOpVerbRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}
+	reset := func(c *cliOpCity, key string) cliOpVerbRun {
+		var stdout, stderr bytes.Buffer
+		code := cmdSessionReset([]string{c.bead.ID}, key, &stdout, &stderr, false)
+		return cliOpVerbRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}
+	for _, tc := range []struct {
+		name        string
+		first, then func(*cliOpCity, string) cliOpVerbRun
+		wantMails   int
+	}{
+		{"request-restart then handoff", requestRestart, runHandoffForTest, 1},
+		{"handoff then request-restart", runHandoffForTest, requestRestart, 1},
+		{"session reset then handoff", reset, runHandoffForTest, 1},
+		{"session reset then request-restart", reset, requestRestart, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := restartOpsCity(t, restartOpsEnv(), nil)
+			startCLIOpController(t, c.dir)
+			if r := tc.first(c, "k-shared"); r.code != 0 {
+				t.Fatalf("first run = %d; stderr=%s", r.code, r.stderr)
+			}
+			r := tc.then(c, "k-shared")
+			if r.code != 0 || strings.Contains(r.stderr, "replayed op") {
+				t.Fatalf("second run = %d, stdout %q, stderr %q; want it to act under its own op, not replay", r.code, r.stdout, r.stderr)
+			}
+			restart, _ := opsByKind(t, h)
+			if len(restart) != 2 || restart[0].ID == restart[1].ID {
+				t.Fatalf("restart ops = %+v, want one per verb", restart)
+			}
+			for _, op := range restart {
+				if op.Status != opjournal.StatusClosed || op.Outcome.Arm != opjournal.ArmSucceeded {
+					t.Fatalf("restart op %s = %s %+v, want closed succeeded", op.ID, op.Status, op.Outcome)
+				}
+			}
+			if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != tc.wantMails {
+				t.Fatalf("mail beads = %d, want %d", len(mails), tc.wantMails)
+			}
+		})
+	}
+}
+
+// TestSessionResetKeyCannotNameARestartRequestsOp: gc session reset keeps
+// --key as given, so a reset key that spells an in-session restart request's
+// stored key (handoff:<key>, request-restart:<key>) would name that request's
+// op, and whichever ran second would replay the other's success and do
+// nothing. The namespaces are reserved: in auto such a reset warns that its
+// --key is invalid and resets unrecorded, in either order, while the restart
+// request records and acts under its own op; in require the reset is refused
+// invalid_key with no effect.
+func TestSessionResetKeyCannotNameARestartRequestsOp(t *testing.T) {
+	requestRestart := func(_ *cliOpCity, key string) cliOpVerbRun {
+		var stdout, stderr bytes.Buffer
+		code := cmdRuntimeRequestRestart(key, &stdout, &stderr)
+		return cliOpVerbRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}
+	for _, verb := range []struct {
+		name, namespace string
+		run             func(*cliOpCity, string) cliOpVerbRun
+		mails           int
+	}{
+		{"handoff", legacyop.KeyNamespaceHandoff, runHandoffForTest, 1},
+		{"request-restart", legacyop.KeyNamespaceRequestRestart, requestRestart, 0},
+	} {
+		resetKey := verb.namespace + "abc"
+		for _, resetFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/reset first %t", verb.name, resetFirst), func(t *testing.T) {
+				h, c := restartOpsCity(t, restartOpsEnv(), nil)
+				ctl := startCLIOpController(t, c.dir)
+				reset := func() {
+					t.Helper()
+					var stdout, stderr bytes.Buffer
+					code := cmdSessionReset([]string{c.bead.ID}, resetKey, &stdout, &stderr, false)
+					if code != 0 || !strings.Contains(stderr.String(), "warning: invalid --key") || strings.Contains(stderr.String(), "replayed op") {
+						t.Fatalf("reset --key %s = %d, stderr %q; want 0, an invalid-key warning and no replay", resetKey, code, stderr.String())
+					}
+				}
+				if resetFirst {
+					reset()
+				}
+				if r := verb.run(c, "abc"); r.code != 0 || strings.Contains(r.stderr, "replayed op") {
+					t.Fatalf("%s --key abc = %d, stdout %q, stderr %q; want it to act under its own op", verb.name, r.code, r.stdout, r.stderr)
+				}
+				if !resetFirst {
+					reset()
+				}
+				if got := ctl.breakerResets.Load(); got != 1 {
+					t.Fatalf("circuit-breaker resets = %d, want the reset's one", got)
+				}
+				restart, _ := opsByKind(t, h)
+				if len(restart) != 1 || restart[0].ClientKey != resetKey || restart[0].Status != opjournal.StatusClosed || restart[0].Outcome.Arm != opjournal.ArmSucceeded {
+					t.Fatalf("restart ops = %+v, want only the %s's, closed succeeded", restart, verb.name)
+				}
+				if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != verb.mails {
+					t.Fatalf("mail beads = %d, want %d", len(mails), verb.mails)
+				}
+			})
+		}
+		t.Run(verb.name+"/require refuses the reset", func(t *testing.T) {
+			h, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": "require", "GC_OPS_CONTENT": "require", "GC_OPS_CONTROL": "off"}, nil)
+			ctl := startCLIOpController(t, c.dir)
+			before := c.snap(t)
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionReset([]string{c.bead.ID}, resetKey, &stdout, &stderr, true); code != 1 || cliOpFailureCode(t, stdout.Bytes()) != cliOpCodeInvalidKey {
+				t.Fatalf("reset --key %s = %d, stdout %q, stderr %q; want 1, invalid_key", resetKey, code, stdout.String(), stderr.String())
+			}
+			if d := c.snap(t).diff(before); d != "" || ctl.breakerResets.Load() != 0 {
+				t.Fatalf("the refused reset acted: row %s, circuit-breaker resets %d", d, ctl.breakerResets.Load())
+			}
+			if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
+				t.Fatalf("op rows = %+v, want none", ops)
+			}
+		})
+	}
+}
+
+// TestRestartVerbsKeepAnInvalidKeyInvalid: the key namespace never turns a
+// --key the journal refuses (one with leading space) into a valid stored
+// key, and a --key valid elsewhere that the namespace makes too long is
+// invalid for the verb, named by its own length and the verb's limit, while
+// the longest key the namespace leaves room for records. Under require an
+// invalid key is refused invalid_key with no effect; under auto it warns and
+// runs unrecorded.
+func TestRestartVerbsKeepAnInvalidKeyInvalid(t *testing.T) {
+	for _, tc := range cliOpVerbCases() {
+		if tc.keyNamespace == "" {
+			continue
+		}
+		limit := opjournal.MaxClientKeyLen - len(tc.keyNamespace)
+		for _, k := range []struct{ name, key, says string }{
+			{"padded", " padded", "leading or trailing space"},
+			{"too long in its namespace", strings.Repeat("k", limit+1), fmt.Sprintf("client key is %d bytes, max %d in the %q key namespace", limit+1, limit, tc.keyNamespace)},
+		} {
+			t.Run(tc.name+"/"+k.name+"/require refuses", func(t *testing.T) {
+				f := newCLIOpVerbFixture(t, tc, map[string]string{"GC_OPS_LIFECYCLE": "require", "GC_OPS_CONTENT": "require"})
+				before := f.c.snap(t)
+				r := f.run(k.key, true)
+				if r.code != 1 || !strings.Contains(r.stderr, k.says) {
+					t.Fatalf("%s = %d, stderr %q; want 1 for an invalid key in require, naming %q", tc.name, r.code, r.stderr, k.says)
+				}
+				if got := tc.failureCode(t, r); got != cliOpCodeInvalidKey {
+					t.Fatalf("failure code = %q, want %s", got, cliOpCodeInvalidKey)
+				}
+				if d := f.c.snap(t).diff(before); d != "" {
+					t.Fatalf("require acted on an invalid key: %s", d)
+				}
+				if ops := cliOpRows(t, f.h.opStore); len(ops) != 0 {
+					t.Fatalf("op rows = %+v, want none", ops)
+				}
+			})
+			t.Run(tc.name+"/"+k.name+"/auto warns and runs unrecorded", func(t *testing.T) {
+				f := newCLIOpVerbFixture(t, tc, map[string]string{"GC_OPS_LIFECYCLE": "auto", "GC_OPS_CONTENT": "auto"})
+				r := f.run(k.key, false)
+				if r.code != 0 || !strings.Contains(r.stderr, "warning: invalid --key (") || !strings.Contains(r.stderr, k.says) {
+					t.Fatalf("%s = %d, stderr %q; want 0 and an invalid-key warning naming %q", tc.name, r.code, r.stderr, k.says)
+				}
+				if ops := cliOpRows(t, f.h.opStore); len(ops) != 0 {
+					t.Fatalf("op rows = %+v, want none for an invalid key", ops)
+				}
+			})
+		}
+		t.Run(tc.name+"/the longest key its namespace allows records", func(t *testing.T) {
+			f := newCLIOpVerbFixture(t, tc, map[string]string{"GC_OPS_LIFECYCLE": "auto", "GC_OPS_CONTENT": "auto"})
+			key := strings.Repeat("k", limit)
+			if r := f.run(key, false); r.code != 0 || strings.Contains(r.stderr, "--key") {
+				t.Fatalf("%s = %d, stderr %q; want 0 and no --key warning", tc.name, r.code, r.stderr)
+			}
+			restart, _ := opsByKind(t, f.h)
+			if len(restart) != 1 || restart[0].ClientKey != tc.keyNamespace+key {
+				t.Fatalf("restart ops = %+v, want one under the %d-byte key in %q", restart, limit, tc.keyNamespace)
+			}
+		})
+	}
+}
+
+// TestHandoffSameKeyRerunWithAnotherSubjectReplays: the key covers neither
+// the subject nor the message, so a same-key rerun with another subject
+// replays the first run and sends no mail, and its --json result leaves the
+// subject out rather than naming one no mail carried.
+func TestHandoffSameKeyRerunWithAnotherSubjectReplays(t *testing.T) {
+	_, c := restartOpsCity(t, restartOpsEnv(), nil)
+	run := func(subject string) (map[string]any, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := cmdHandoff(handoffRun{args: []string{subject, "notes for the successor"}, key: "k-subject", asJSON: true, stdout: io.Discard, jsonOut: &stdout, stderr: &stderr}); code != 0 {
+			t.Fatalf("handoff %q = %d; stderr=%s", subject, code, stderr.String())
+		}
+		validateJSONAgainstResultSchema(t, []string{"handoff"}, stdout.Bytes())
+		return cliOpJSON(t, stdout.Bytes()), stderr.String()
+	}
+	if first, _ := run("subject A"); first["subject"] != "subject A" || first["replayed"] == true {
+		t.Fatalf("first JSON %v, want subject A, not replayed", first)
+	}
+	replay, stderr := run("subject B")
+	if _, ok := replay["subject"]; ok || replay["replayed"] != true || replay["key"] != "k-subject" {
+		t.Fatalf("replay JSON %v, want replayed under k-subject with no subject", replay)
+	}
+	if !strings.Contains(stderr, "gc handoff: a replay sends no mail") {
+		t.Fatalf("replay stderr %q, want the no-mail note", stderr)
+	}
+	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 || mails[0].Title != "subject A" {
+		t.Fatalf("mail beads = %+v, want the first run's subject A only", mails)
+	}
+}
+
+// sweepRestartOpAfterRowWrite makes r's row write leave its restart op to the
+// op sweeper: once the row lands, the sweeper closes the op
+// failed{deadline_in_flight}, as when the restart the row requests stops the
+// run before the run closes its op.
+func sweepRestartOpAfterRowWrite(t *testing.T, h *cliOpHarness, r *rowFirstRestart) {
+	t.Helper()
+	write := r.record
+	r.record = func(token string) error {
+		if err := write(token); err != nil {
+			return err
+		}
+		restart, _ := opsByKind(t, h)
+		if len(restart) != 1 {
+			t.Fatalf("restart ops at the row write = %+v, want one", restart)
+		}
+		past := restart[0].FinishBy.Add(time.Second)
+		st, err := opjournal.NewStore(beads.SessionStore{Store: h.opStore}, &clock.Fake{Time: past}, opjournal.WithIDPrefix("gc"))
+		if err != nil {
+			t.Fatalf("opening op store: %v", err)
+		}
+		if _, closed, err := st.CloseExpired(restart[0], past, "sweeper"); err != nil || !closed {
+			t.Fatalf("sweeping the restart op: closed %t, err %v", closed, err)
+		}
+		return nil
+	}
+}
+
+// restartFresh moves c's row past the fresh restart its request asked for,
+// as the controller's next start leaves it: the request consumed, the
+// continuation epoch at epoch, and a new incarnation, whose token the next
+// run runs under.
+func restartFresh(t *testing.T, c *cliOpCity, epoch int) {
+	t.Helper()
+	const token = "tok-cli-op-successor"
+	if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{
+		"restart_requested": "", "continuation_reset_pending": "", "continuation_epoch": strconv.Itoa(epoch),
+		"generation": "5", "instance_token": token,
+	}); err != nil {
+		t.Fatalf("restarting the session row: %v", err)
+	}
+	t.Setenv("GC_INSTANCE_TOKEN", token)
+}
+
+// TestHandoffSweptRestartOpReplaysWhenTheRowShowsTheRestart: the restart a
+// handoff requests stops the session, and so can stop the run between the
+// row write and the restart op's close, leaving the op to the sweeper, which
+// closes it failed{deadline_in_flight}. A same-key rerun replays it as the
+// first run's success, sending no second mail, when the notice op succeeded
+// and the row shows the restart still pending or past the context the notice
+// names. It reports the op's failure when the row shows no restart, when the
+// first run recorded no notice, or when the notice does not read.
+func TestHandoffSweptRestartOpReplaysWhenTheRowShowsTheRestart(t *testing.T) {
+	ran := func(t *testing.T, _ *cliOpHarness, c *cliOpCity) { restartFresh(t, c, 4) }
+	for _, tc := range []struct {
+		name    string
+		content string // the gate the first run records its notice under
+		after   func(t *testing.T, h *cliOpHarness, c *cliOpCity)
+		// shows is how the replay line says the row shows the restart; ""
+		// wants the op's failure.
+		shows    string
+		warnings string
+	}{
+		{name: "restart ran", content: "auto", after: ran, shows: "ran"},
+		{name: "restart pending", content: "auto", shows: "still pending"},
+		{name: "restart never ran", content: "auto", after: func(t *testing.T, _ *cliOpHarness, c *cliOpCity) {
+			if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"restart_requested": "", "continuation_reset_pending": ""}); err != nil {
+				t.Fatalf("withdrawing the restart request: %v", err)
+			}
+		}},
+		{name: "no notice recorded", content: "off", after: ran},
+		{name: "notice does not read", content: "auto", after: func(t *testing.T, h *cliOpHarness, c *cliOpCity) {
+			ran(t, h, c)
+			_, notice := opsByKind(t, h)
+			h.opStore = noticeGetFailingStore{Store: h.opStore, id: notice[0].ID}
+		}, warnings: "gc handoff: warning: reading the first run's notice op: reading op "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := restartOpsEnv()
+			env["GC_OPS_CONTENT"] = tc.content
+			h, c := restartOpsCity(t, env, nil)
+			rows := h.opStore
+			var stderr bytes.Buffer
+			r := unitRestart(t, c, "gc handoff", &stderr, nil)
+			r.ops = newRestartOps(nil, nil, c.store, "k-swept", c.name, killPokeSessionIdentity, false, io.Discard, &stderr)
+			sweepRestartOpAfterRowWrite(t, h, &r)
+			outcome := doHandoffWithOutcome(c.store, c.store, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, io.Discard, &stderr)
+			if outcome.code != 0 || !outcome.restartRequested {
+				t.Fatalf("first run = %+v; stderr=%s", outcome, stderr.String())
+			}
+			restart, notice := opsByKind(t, h)
+			R := restart[0]
+			cliOpWantOutcome(t, R, opjournal.ArmFailed, opjournal.ReasonDeadlineInFlight, "")
+			if tc.after != nil {
+				tc.after(t, h, c)
+			}
+
+			rerun := runHandoffForTest(c, "k-swept")
+			if tc.shows == "" {
+				want := "op " + R.ID + " closed failed{deadline_in_flight}; rerun without --key to act again (key k-swept)"
+				if rerun.code != 1 || !strings.Contains(rerun.stderr, want) {
+					t.Fatalf("rerun = %d, stderr %q; want 1 and %q", rerun.code, rerun.stderr, want)
+				}
+			} else {
+				want := "gc handoff: replayed op " + R.ID + ": it closed failed{deadline_in_flight}, its run having stopped before closing it, and the session row shows the restart it requested " + tc.shows
+				if rerun.code != 0 || rerun.stdout != "Handoff: restart requested.\n" || !strings.Contains(rerun.stderr, want) {
+					t.Fatalf("rerun = %d, stdout %q, stderr %q; want 0 and %q", rerun.code, rerun.stdout, rerun.stderr, want)
+				}
+			}
+			if tc.warnings != "" && !strings.Contains(rerun.stderr, tc.warnings) {
+				t.Fatalf("rerun stderr %q, want %q", rerun.stderr, tc.warnings)
+			}
+			if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
+				t.Fatalf("mail beads = %d, want the first run's only", len(mails))
+			}
+			if ops := cliOpRows(t, rows); len(ops) != len(restart)+len(notice) {
+				t.Fatalf("ops = %+v, want the first run's only", ops)
+			}
+			for _, op := range cliOpRows(t, rows) {
+				if op.ID == R.ID {
+					cliOpWantOutcome(t, op, opjournal.ArmFailed, opjournal.ReasonDeadlineInFlight, "")
+				}
+			}
+		})
+	}
+}
+
+// TestRequestRestartSweptRestartOpReplaysOnlyWhilePending: request-restart's
+// restart op records no context, so a same-key rerun of an op the sweeper
+// closed failed{deadline_in_flight} replays as the first run's success only
+// while the row still records the restart as pending; once the restart has
+// run, the rerun cannot tell it from one that never ran and reports the op's
+// failure.
+func TestRequestRestartSweptRestartOpReplaysOnlyWhilePending(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ran     bool
+		replays bool
+	}{
+		{"restart pending", false, true},
+		{"restart ran", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := restartOpsCity(t, restartOpsEnv(), nil)
+			var stderr bytes.Buffer
+			r := unitRestart(t, c, "gc runtime request-restart", &stderr, nil)
+			r.ops = newRestartOps(nil, nil, c.store, "k-swept", c.name, killPokeSessionIdentity, false, io.Discard, &stderr)
+			sweepRestartOpAfterRowWrite(t, h, &r)
+			if code := doRuntimeRequestRestart(r, events.Discard, io.Discard); code != 0 {
+				t.Fatalf("first run = %d; stderr=%s", code, stderr.String())
+			}
+			R := cliOpOnly(t, h.opStore)
+			cliOpWantOutcome(t, R, opjournal.ArmFailed, opjournal.ReasonDeadlineInFlight, "")
+			if tc.ran {
+				restartFresh(t, c, 4)
+			}
+
+			var stdout, rerunErr bytes.Buffer
+			code := cmdRuntimeRequestRestart("k-swept", &stdout, &rerunErr)
+			if tc.replays {
+				want := "gc runtime request-restart: replayed op " + R.ID + ": it closed failed{deadline_in_flight}, its run having stopped before closing it, and the session row shows the restart it requested still pending"
+				if code != 0 || stdout.String() != "Restart requested.\n" || !strings.Contains(rerunErr.String(), want) {
+					t.Fatalf("rerun = %d, stdout %q, stderr %q; want 0 and %q", code, stdout.String(), rerunErr.String(), want)
+				}
+			} else if want := "op " + R.ID + " closed failed{deadline_in_flight}; rerun without --key to act again (key k-swept)"; code != 1 || !strings.Contains(rerunErr.String(), want) {
+				t.Fatalf("rerun = %d, stderr %q; want 1 and %q", code, rerunErr.String(), want)
+			}
+			if op := cliOpOnly(t, h.opStore); op.ID != R.ID {
+				t.Fatalf("op = %+v, want the first run's %s only", op, R.ID)
+			}
+		})
 	}
 }
 
@@ -525,25 +918,35 @@ func TestHandoffJSONMailFailureWritesOneRecord(t *testing.T) {
 
 // TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns: a self handoff
 // of a session the controller does not restart records no ops, so its --key
-// is not recorded; the run says so, and a rerun sends the mail again.
+// is not recorded; the run says so, and a rerun sends the mail again. With
+// every ops gate off the key is ignored, as the flag says, and nothing warns.
 func TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns(t *testing.T) {
-	h, c := restartOpsCity(t, restartOpsEnv(), map[string]string{namedSessionModeMetadata: "on_demand"})
-	const want = "gc handoff: warning: --key not recorded (the controller does not restart this session, so the handoff records no ops); a rerun sends the mail again"
-	for i := range 2 {
-		r := runHandoffForTest(c, "k-unrestartable")
-		if r.code != 0 || !strings.Contains(r.stderr, want) {
-			t.Fatalf("run %d: exit %d, stderr %q; want 0 and %q", i+1, r.code, r.stderr, want)
+	unrestartable := map[string]string{namedSessionModeMetadata: "on_demand"}
+	t.Run("gate records", func(t *testing.T) {
+		h, c := restartOpsCity(t, restartOpsEnv(), unrestartable)
+		const want = "gc handoff: warning: --key not recorded (the controller does not restart this session, so the handoff records no ops); a rerun sends the mail again"
+		for i := range 2 {
+			r := runHandoffForTest(c, "k-unrestartable")
+			if r.code != 0 || !strings.Contains(r.stderr, want) {
+				t.Fatalf("run %d: exit %d, stderr %q; want 0 and %q", i+1, r.code, r.stderr, want)
+			}
 		}
-	}
-	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 2 {
-		t.Fatalf("mails = %d, want 2 (nothing dedups an unrecorded key)", len(mails))
-	}
-	if rows := cliOpRows(t, h.opStore); len(rows) != 0 {
-		t.Fatalf("ops = %d, want none", len(rows))
-	}
-	if r := runHandoffForTest(c, ""); strings.Contains(r.stderr, "--key") {
-		t.Fatalf("stderr = %q, want no --key warning without --key", r.stderr)
-	}
+		if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 2 {
+			t.Fatalf("mails = %d, want 2 (nothing dedups an unrecorded key)", len(mails))
+		}
+		if rows := cliOpRows(t, h.opStore); len(rows) != 0 {
+			t.Fatalf("ops = %d, want none", len(rows))
+		}
+		if r := runHandoffForTest(c, ""); strings.Contains(r.stderr, "--key") {
+			t.Fatalf("stderr = %q, want no --key warning without --key", r.stderr)
+		}
+	})
+	t.Run("gates off", func(t *testing.T) {
+		_, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": "off", "GC_OPS_CONTENT": "off", "GC_OPS_CONTROL": "off"}, unrestartable)
+		if r := runHandoffForTest(c, "k-unrestartable"); r.code != 0 || strings.Contains(r.stderr, "--key") {
+			t.Fatalf("exit %d, stderr %q; want 0 and no --key warning with the gates off", r.code, r.stderr)
+		}
+	})
 }
 
 // TestHandoffContentRequireRidesAnUnrecordedRestart pins the documented "N
@@ -612,8 +1015,8 @@ func TestHandoffNoticeRefusalReportsTheRestartOp(t *testing.T) {
 	}
 	R := cliOpOnly(t, rows)
 	cliOpWantOutcome(t, R, opjournal.ArmFailed, opjournal.RefusedReasonPrefix+cliOpRefusedNoticeRefused, "")
-	if R.Kind != opjournal.KindRestart || R.ClientKey != "k-notice" {
-		t.Fatalf("op = %+v, want the restart op under k-notice", R)
+	if R.Kind != opjournal.KindRestart || R.ClientKey != legacyop.KeyNamespaceHandoff+"k-notice" {
+		t.Fatalf("op = %+v, want the restart op under handoff:k-notice", R)
 	}
 	want := "gc handoff: op " + R.ID + " (key k-notice): failed{refused:notice_refused}: the journal refused the handoff's notice op, so nothing ran; rerun without --key to act again"
 	if !strings.Contains(stderr.String(), want) {

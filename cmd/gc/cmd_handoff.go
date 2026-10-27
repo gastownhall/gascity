@@ -58,7 +58,7 @@ still refuse it there, with the mail already sent. Outside a worker site the
 runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
 gc handoff exits 0 once the request is recorded, even when the controller
 could not be signaled: a warning says so, and the controller acts at its next
-pass. It exits 1 with no restart recorded and no runtime hint set when the
+pass. It exits 1 with no restart requested and no runtime hint set when the
 request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
 store, a session whose row and live runtime name another incarnation, or a
 session store that cannot compare-and-swap where the request needs it: a v2
@@ -82,12 +82,20 @@ For controller-restartable targets, equivalent to:
 
 While the op journal records ops, a restartable self-handoff is recorded as a
 restart{fresh} op and a notice op to self; a rerun with the same --key reports
-the first run's outcome without sending the mail again. The notice op rides
-the restart op: when the restart op is not recorded (ops.lifecycle off), no
-notice op is recorded either, even under ops.content = "require". --auto and
---target record no ops and refuse --key. A self handoff of a session the
-controller does not restart records no ops and warns that --key is not
-recorded.
+the first run's outcome without sending the mail again. The key covers neither
+the subject nor the message: a rerun under it sends no mail whatever they say,
+and its --json result leaves the subject out. The key is the handoff's own: gc
+runtime request-restart or gc session reset under the same --key records
+another op. The restart stops this session, and so can stop the run before it
+closes its restart op: a rerun with the same --key is then refused as in
+progress until the op's deadline passes, and after that replays the first
+run's success when its notice op succeeded and the session row shows that the
+restart is still pending or has run, else reports the op's failure. The
+notice op rides the restart op: when the restart op is not recorded
+(ops.lifecycle off), no notice op is recorded either, even under ops.content =
+"require". --auto and --target record no ops and refuse --key. A self handoff
+of a session the controller does not restart records no ops and warns that
+--key is not recorded.
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
@@ -117,7 +125,7 @@ or ID. Subject is required unless --auto is set.`,
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&force, "force", false, "destroy a target even when it has live background subagents")
-	addOpKeyFlag(cmd, &key, cliOpKeyRestartedNote)
+	addOpKeyFlag(cmd, &key, handoffOpKeyNote)
 	return cmd
 }
 
@@ -127,7 +135,9 @@ type handoffJSONResult struct {
 	Mode          string `json:"mode"`
 	Target        string `json:"target,omitempty"`
 	Auto          bool   `json:"auto"`
-	Subject       string `json:"subject,omitempty"`
+	// Subject is the sent mail's subject; a replay sends none and leaves it
+	// out.
+	Subject string `json:"subject,omitempty"`
 	// OpID, NoticeOpID, Key and Replayed name the restart op and notice op
 	// that back a recorded self-handoff (OJ-6).
 	OpID       string `json:"op_id,omitempty"`
@@ -163,13 +173,19 @@ func cmdHandoff(run handoffRun) int {
 	if code != 0 || !run.asJSON {
 		return code
 	}
+	subject := handoffJSONSubject(run.args, run.auto)
+	if ops.replayed {
+		// A replay sends no mail, and its op does not hold the subject the
+		// first run sent.
+		subject = ""
+	}
 	return writeCLIJSONLineOrExit(run.jsonOut, run.stderr, "gc handoff", handoffJSONResult{
 		SchemaVersion: "1",
 		OK:            true,
 		Mode:          handoffJSONMode(run.target, run.auto),
 		Target:        run.target,
 		Auto:          run.auto,
-		Subject:       handoffJSONSubject(run.args, run.auto),
+		Subject:       subject,
 		OpID:          ops.opID,
 		NoticeOpID:    ops.noticeOpID,
 		Key:           ops.key,

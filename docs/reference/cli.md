@@ -2065,7 +2065,7 @@ still refuse it there, with the mail already sent. Outside a worker site the
 runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
 gc handoff exits 0 once the request is recorded, even when the controller
 could not be signaled: a warning says so, and the controller acts at its next
-pass. It exits 1 with no restart recorded and no runtime hint set when the
+pass. It exits 1 with no restart requested and no runtime hint set when the
 request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
 store, a session whose row and live runtime name another incarnation, or a
 session store that cannot compare-and-swap where the request needs it: a v2
@@ -2089,12 +2089,20 @@ For controller-restartable targets, equivalent to:
 
 While the op journal records ops, a restartable self-handoff is recorded as a
 restart&#123;fresh&#125; op and a notice op to self; a rerun with the same --key reports
-the first run's outcome without sending the mail again. The notice op rides
-the restart op: when the restart op is not recorded (ops.lifecycle off), no
-notice op is recorded either, even under ops.content = "require". --auto and
---target record no ops and refuse --key. A self handoff of a session the
-controller does not restart records no ops and warns that --key is not
-recorded.
+the first run's outcome without sending the mail again. The key covers neither
+the subject nor the message: a rerun under it sends no mail whatever they say,
+and its --json result leaves the subject out. The key is the handoff's own: gc
+runtime request-restart or gc session reset under the same --key records
+another op. The restart stops this session, and so can stop the run before it
+closes its restart op: a rerun with the same --key is then refused as in
+progress until the op's deadline passes, and after that replays the first
+run's success when its notice op succeeded and the session row shows that the
+restart is still pending or has run, else reports the op's failure. The
+notice op rides the restart op: when the restart op is not recorded
+(ops.lifecycle off), no notice op is recorded either, even under ops.content =
+"require". --auto and --target record no ops and refuse --key. A self handoff
+of a session the controller does not restart records no ops and warns that
+--key is not recorded.
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
@@ -2110,7 +2118,7 @@ gc handoff [subject] [message] [flags]
 | `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
-| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, even after the session restarted under the same ID; ignored when the gate is off (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, also from the restarted session if the first run closed its op before the restart stopped it; the key covers neither the subject nor the message, so a rerun under it sends no mail whatever they say; ignored when the gate is off (default: a new key each run) |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -4244,7 +4252,7 @@ request is refused; keep that variable in the agent's subprocess environment.
 
 Exits 0 once the request is recorded, even when the controller could not be
 signaled: a warning says so, and the controller acts at its next pass. Exits 1
-with nothing recorded and no runtime hint set when the request cannot be
+with no restart requested and no runtime hint set when the request cannot be
 recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
 store, a session whose row and live runtime name another incarnation, or a
 session store that cannot compare-and-swap where the request needs it: a v2
@@ -4253,8 +4261,15 @@ city records the request only by compare-and-swap, and
 fence.
 
 While the op journal records lifecycle ops, the request is recorded as a
-restart&#123;fresh&#125; op; a rerun with the same --key reports the first run's
-outcome instead of requesting again.
+restart&#123;fresh&#125; op, which closes with the request's outcome, a refusal
+included; a rerun with the same --key reports the first run's outcome instead
+of requesting again. The key is request-restart's own: gc handoff or gc
+session reset under the same --key records another op. The restart stops this
+session, and so can stop the run before it closes its op: a rerun with the
+same --key is then refused as in progress until the op's deadline passes, and
+after that replays the first run's success while the session row still
+records the restart as pending, else reports the op's failure, also once the
+restart has run, since the op records no context to tell it by.
 
 This command is designed to be called from within a session context.
 It emits a session.draining event once the request is recorded.
@@ -4265,7 +4280,7 @@ gc runtime request-restart [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, even after the session restarted under the same ID; ignored when the gate is off (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, also from the restarted session if the first run closed its op before the restart stopped it; ignored when the gate is off (default: a new key each run) |
 
 ## gc runtime undrain
 
@@ -4713,6 +4728,11 @@ with the same --key of a reset that rolled back replays it only when it names
 the session by its ID: the rollback released the alias, and once the
 replacement the controller creates holds it, a rerun by the alias resets that
 session.
+
+A --key may not start with handoff: or request-restart:, where gc handoff and
+gc runtime request-restart keep the keys of the restart ops they record. Such
+a key is invalid: under ops.lifecycle = "require" the reset is refused, and
+under "auto" it runs unrecorded with a warning.
 
 ```
 gc session reset <session-id-or-alias> [flags]

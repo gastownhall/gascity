@@ -147,6 +147,9 @@ type cliOpVerbCase struct {
 	replayStdout string
 	// schema is the verb's result schema path; empty is session <name>.
 	schema []string
+	// keyNamespace is the verb's --key namespace (cliOpRequest.keyNamespace):
+	// its op is stored under keyNamespace + --key.
+	keyNamespace string
 }
 
 // resultSchema is the verb's result schema path.
@@ -228,6 +231,7 @@ func cliOpVerbCases() []cliOpVerbCase {
 			name: "request-restart", kind: opjournal.KindRestart, policy: restartOpPolicy,
 			meta:  map[string]string{"instance_token": cliOpRestartToken},
 			setup: inSessionRestart, noJSON: true, replayStdout: "Restart requested.\n",
+			keyNamespace: legacyop.KeyNamespaceRequestRestart,
 			run: func(_ *cliOpCity, key string, _ bool, stdout, stderr io.Writer) int {
 				return cmdRuntimeRequestRestart(key, stdout, stderr)
 			},
@@ -236,7 +240,8 @@ func cliOpVerbCases() []cliOpVerbCase {
 			name: "handoff", kind: opjournal.KindRestart, policy: restartOpPolicy,
 			meta:  map[string]string{"instance_token": cliOpRestartToken, namedSessionModeMetadata: "always"},
 			setup: inSessionRestart, replayStdout: "Handoff: restart requested.\n", schema: []string{"handoff"},
-			run: runHandoffVerb,
+			keyNamespace: legacyop.KeyNamespaceHandoff,
+			run:          runHandoffVerb,
 		},
 	}
 }
@@ -268,6 +273,8 @@ func (tc cliOpVerbCase) failureCode(t *testing.T, r cliOpVerbRun) string {
 		return cliOpCodeAlreadyFailed
 	case strings.Contains(r.stderr, "op journal cannot record this request"):
 		return cliOpCodeUnavailable
+	case strings.Contains(r.stderr, "invalid --key"):
+		return cliOpCodeInvalidKey
 	}
 	t.Fatalf("stderr %q names no op refusal", r.stderr)
 	return ""
@@ -304,11 +311,11 @@ func (f *cliOpVerbFixture) run(key string, asJSON bool) cliOpVerbRun {
 	return cliOpVerbRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
-// proposeOpen writes an open op for the verb under key, as another CLI
+// proposeOpen writes an open op for the verb under --key key, as another CLI
 // process mid-run would leave it.
 func (f *cliOpVerbFixture) proposeOpen(t *testing.T, key string, at time.Time) opjournal.Op {
 	t.Helper()
-	return cliOpProposeOpen(t, f.h.opStore, f.tc.kind, f.c.bead.ID, key, f.tc.scope, at, f.tc.policy)
+	return cliOpProposeOpen(t, f.h.opStore, f.tc.kind, f.c.bead.ID, legacyop.NamespacedKey(f.tc.keyNamespace, key), f.tc.scope, at, f.tc.policy)
 }
 
 // TestSessionVerbOpOrderAtPropose: every verb proposes its op before its
