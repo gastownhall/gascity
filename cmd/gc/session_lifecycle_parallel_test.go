@@ -3267,10 +3267,7 @@ func TestAsyncStartTrackerWaitZeroDoesNotBlock(t *testing.T) {
 	}
 }
 
-// A runtime under the row's name stamped with the row's own GC_SESSION_ID,
-// another token and an older epoch is an earlier incarnation of the same
-// session: the pending create holds while it runs (#2081).
-func TestReconcileSessionBeads_HoldsPendingCreateWhenRuntimeTokenMismatches(t *testing.T) {
+func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 45, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3340,12 +3337,8 @@ func TestReconcileSessionBeads_HoldsPendingCreateWhenRuntimeTokenMismatches(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status == "closed" || updated.Metadata["pending_create_claim"] != "true" || updated.Metadata["state"] == string(sessionpkg.StateFailedCreate) {
-		t.Fatalf("status=%q state=%q claim=%q, want the pending create held open while its earlier incarnation runs",
-			updated.Status, updated.Metadata["state"], updated.Metadata["pending_create_claim"])
-	}
-	if !sp.IsRunning("worker") || countCalls(sp, "Stop") != 0 {
-		t.Fatalf("running=%v stops=%d, want the earlier incarnation left running", sp.IsRunning("worker"), countCalls(sp, "Stop"))
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so stale runtime is not recovered", updated.Status)
 	}
 }
 

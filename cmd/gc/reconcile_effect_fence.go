@@ -17,11 +17,11 @@ import (
 
 // txWork is L5 read live: the row's assigned work over every store its agent
 // can reach, in the form the effect asks for (readWork: open or in-progress;
-// an idle stop's late claim; a signal's awake work and live-claim veto).
-// Only a clean read proves Free; a failed or expired read, and the zero
-// value, count as work.
+// an idle stop's late claim; a rollback's in-progress work; a signal's awake
+// work and live-claim veto). Only a clean read proves Free; a failed or
+// expired read, and the zero value, count as work.
 type txWork struct {
-	Free bool // proven: no open or in-progress assigned work
+	Free bool // proven: no assigned work in the form read
 	Err  error
 }
 
@@ -116,7 +116,8 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	// the sessions store standing in for the work store). A close ends a
 	// dead seat, which the narrow ReleaseScope gates, as legacy's close gate
 	// does; every other effect that reads L5 ends a live runtime (a drain
-	// begin), which the seat's RefuseScope gates (O4).
+	// begin, a Workless rollback's stop), which the seat's RefuseScope gates
+	// (O4).
 	var scope workScope = releaseScope(row, p.World.Env.Cfg)
 	if it.Reason == decideIdleTimeout { // legacy's late claim: in-progress work under the narrow scope (SESS-574)
 		late, err := lateSeatWork(p.reads.legs, scope, []string{"in_progress"}, nil)
@@ -125,7 +126,11 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	if it.Kind != intentClose {
 		scope = refuseScope(row, p.World.Env.Cfg)
 	}
-	has, err := sessionHasOpenAssignedWorkInStores(seatWorkFor(p.reads.legs, scope), scope)
+	statuses := seatWorkStatuses
+	if it.Kind == intentRollback { // a live incarnation's in-flight work (#2081): open work no stale incarnation can claim
+		statuses = []string{"in_progress"}
+	}
+	has, err := sessionHasAssignedWorkInStoresForStatuses(seatWorkFor(p.reads.legs, scope), scope, statuses)
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 

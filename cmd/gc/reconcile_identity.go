@@ -86,7 +86,8 @@ func ownRuntime(v identityVerdict, row session.Info, rt runtimeIdentity) bool {
 // liveIncarnation reports rt, read under row's name, as another incarnation
 // of row's own session (#2081): the row's session ID under another token, at
 // an epoch below the row's generation (StaleSelf) or above it (NewerSelf). A
-// pending create holds over it: its rollback would stop in-flight work.
+// pending create holds over it while the session has work in flight, which
+// its rollback would stop.
 func liveIncarnation(row session.Info, rt runtimeIdentity) bool {
 	v := compareIdentity(row, rt)
 	epoch, generation, ok := identityEpochs(row, rt)

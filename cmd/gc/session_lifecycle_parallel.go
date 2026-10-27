@@ -4004,8 +4004,10 @@ func (r pendingCreateIdentity) unstamped() bool {
 // otherEpochOfThisSession reports a runtime stamped with this row's own
 // session ID under another token and another epoch: an earlier or a later
 // incarnation of the same session, never another session's runtime.
-// attribution reads it as foreign; a pending-create rollback holds the row
-// while it lives instead of stopping it or freeing its name.
+// attribution reads it as foreign; a start that finds it defers its
+// rollback, and the tick's rollback holds the row while the session has work
+// in flight (holdsOverLiveIncarnation) instead of stopping it or freeing its
+// name.
 func (r pendingCreateIdentity) otherEpochOfThisSession() bool {
 	return r.id == runtimeTokenMatch && r.token == runtimeTokenMismatch && r.generation == runtimeTokenMismatch
 }

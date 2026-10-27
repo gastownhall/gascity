@@ -23,11 +23,10 @@ import (
 // (#2081): a live runtime under the row's name that carries the row's own
 // GC_SESSION_ID, another GC_INSTANCE_TOKEN and a GC_RUNTIME_EPOCH other than
 // the row's generation is an earlier or later incarnation of the same
-// session. The rollback holds the row while it runs: nothing is stopped, the
-// row keeps its pending_create_claim, and its work stays assigned.
-
-// liveIncarnationKind is the standing condition the hold reports.
-const liveIncarnationKind = "live_incarnation.pending_create_rollback"
+// session. The rollback holds the row while that session has in-progress
+// work: nothing is stopped, the row keeps its pending_create_claim, and its
+// work stays assigned. Once no in-progress work is left the rollback takes
+// the row as it takes any other incarnation's runtime.
 
 // stampLiveIncarnation seeds the restarted pending create of class at
 // generation 2 and stamps the box under its name as another incarnation of
@@ -44,6 +43,13 @@ func stampLiveIncarnation(t *testing.T, class teardownRowClass, epoch string) (*
 // assigned to the session name.
 func assignLiveIncarnationWork(t *testing.T, store beads.Store, assignee string) beads.Bead {
 	t.Helper()
+	return assignRoutedWork(t, store, assignee, "in_progress")
+}
+
+// assignRoutedWork creates a work bead routed to the worker pool, assigned to
+// assignee, in status.
+func assignRoutedWork(t *testing.T, store beads.Store, assignee, status string) beads.Bead {
+	t.Helper()
 	work, err := store.Create(beads.Bead{
 		Title:    "routed work",
 		Assignee: assignee,
@@ -52,8 +58,7 @@ func assignLiveIncarnationWork(t *testing.T, store beads.Store, assignee string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inProgress := "in_progress"
-	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
 		t.Fatal(err)
 	}
 	work, err = store.Get(work.ID)
@@ -82,12 +87,12 @@ func releaseOrphanedWork(t *testing.T, env *reconcilerTestEnv, sessionID string,
 	return got
 }
 
-// liveIncarnationDeferrals counts the tick's Deferred pending-create rollback
-// records attributed to a live incarnation.
+// liveIncarnationDeferrals counts the tick's Deferred pending-create records
+// attributed to a live incarnation.
 func liveIncarnationDeferrals(trace *sessionReconcilerTraceCycle) int {
 	n := 0
 	for _, r := range trace.records {
-		if r.SiteCode == TraceSiteReconcilerPendingCreate && r.ReasonCode == TraceReasonPendingCreateRollback &&
+		if r.SiteCode == TraceSiteReconcilerPendingCreate && r.ReasonCode == TraceReasonPendingCreateLiveIncarnation &&
 			r.OutcomeCode == TraceOutcomeDeferred && r.Fields["attribution"] == "live_incarnation" {
 			n++
 		}
@@ -114,9 +119,13 @@ func reconcileLiveIncarnationTick(t *testing.T, env *reconcilerTestEnv, sp runti
 
 // assertLiveIncarnationHeld ticks the legacy reconciler twice over the row and
 // checks the hold on each: the box runs unstopped, the row stays open with its
-// claim, one Deferred trace per tick, and the standing condition said once.
+// claim, one Deferred trace per tick under a reason that arms no auto-trace,
+// and the standing condition said once.
 func assertLiveIncarnationHeld(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, session beads.Bead, name string) {
 	t.Helper()
+	if shouldAutoArmForTrace(TraceReasonPendingCreateLiveIncarnation, TraceOutcomeDeferred) {
+		t.Fatalf("the hold's trace reason %q arms an auto-trace, renewed every tick the hold lasts", TraceReasonPendingCreateLiveIncarnation)
+	}
 	for tick := 1; tick <= 2; tick++ {
 		trace := newPoolDesiredStateTestTrace("worker")
 		reconcileLiveIncarnationTick(t, env, sp, session.ID, trace)
@@ -135,8 +144,8 @@ func assertLiveIncarnationHeld(t *testing.T, env *reconcilerTestEnv, sp runtime.
 			t.Fatalf("tick %d: live_incarnation deferral records = %d, want 1; records=%+v", tick, n, trace.records)
 		}
 	}
-	if _, ok := env.dt.drainSkips[drainSkipKey{beadID: session.ID, kind: liveIncarnationKind}]; !ok {
-		t.Fatalf("standing condition %q not recorded for %s", liveIncarnationKind, session.ID)
+	if _, ok := env.dt.drainSkips[drainSkipKey{beadID: session.ID, kind: liveIncarnationHoldKind}]; !ok {
+		t.Fatalf("standing condition %q not recorded for %s", liveIncarnationHoldKind, session.ID)
 	}
 	if n := strings.Count(env.stderr.String(), "(live_incarnation)"); n != 1 {
 		t.Fatalf("live_incarnation lines = %d, want 1 (transition only); stderr=%s", n, env.stderr.String())
@@ -166,17 +175,163 @@ func TestPendingCreateRollback_HoldsPoolRowsLiveIncarnation(t *testing.T) {
 // TestPendingCreateRollback_HoldsNamedAndManualRowsLiveIncarnation is AC-2: a
 // configured named or a manual row's expired pending create, whose name holds
 // a live incarnation of the same session on a runtime that stamps identity,
-// is not closed failed-create while that runtime keeps running.
+// is not closed failed-create while that incarnation's work is in progress.
 func TestPendingCreateRollback_HoldsNamedAndManualRowsLiveIncarnation(t *testing.T) {
 	for _, class := range []teardownRowClass{rowNamed, rowManual} {
 		for _, epoch := range []string{"1", "3"} {
 			t.Run(string(class)+"/epoch "+epoch, func(t *testing.T) {
 				env, session, name := stampLiveIncarnation(t, class, epoch)
 				sp := runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: env.sp})
+				assignLiveIncarnationWork(t, env.store, name)
 
 				assertLiveIncarnationHeld(t, env, sp, session, name)
 			})
 		}
+	}
+}
+
+// TestPendingCreateRollback_HoldsOverWorkUnderAPriorAlias is the hold read
+// as a kill gate (O4, #2081): in-progress work the live incarnation holds
+// under a prior alias of its session (alias_history), which the release
+// identities omit, holds a pool, named or manual row as work under its name
+// does, and stays with its assignee.
+func TestPendingCreateRollback_HoldsOverWorkUnderAPriorAlias(t *testing.T) {
+	for _, class := range []teardownRowClass{rowPool, rowNamed, rowManual} {
+		for _, epoch := range []string{"1", "3"} {
+			t.Run(string(class)+"/epoch "+epoch, func(t *testing.T) {
+				env, session, name := stampLiveIncarnation(t, class, epoch)
+				env.setSessionMetadata(&session, map[string]string{"alias_history": "worker/nux"})
+				sp := runtime.Provider(env.sp)
+				if class != rowPool {
+					sp = runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: env.sp})
+				}
+				work := assignLiveIncarnationWork(t, env.store, "worker/nux")
+
+				assertLiveIncarnationHeld(t, env, sp, session, name)
+
+				got, err := env.store.Get(work.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status != "in_progress" || got.Assignee != "worker/nux" {
+					t.Fatalf("work status=%q assignee=%q, want in_progress assigned to worker/nux", got.Status, got.Assignee)
+				}
+			})
+		}
+	}
+}
+
+// TestPendingCreateRollback_ConvergesOnceLiveIncarnationWorkEnds is the hold's
+// exit (#2081): a row held over its live incarnation while that incarnation's
+// work is in progress is rolled back by the first tick after the work ends,
+// the incarnation still running and no operator acting. Open work assigned to
+// the session, a continuation the incarnation cannot claim under its old
+// token, does not hold it. A pool row's bead-scoped incarnation is stopped
+// and that open work released to the session's next incarnation; a named or
+// manual row closes without a stop, as for any other incarnation's runtime.
+func TestPendingCreateRollback_ConvergesOnceLiveIncarnationWorkEnds(t *testing.T) {
+	for _, class := range []teardownRowClass{rowPool, rowNamed, rowManual} {
+		for _, epoch := range []string{"1", "3"} {
+			t.Run(string(class)+"/epoch "+epoch, func(t *testing.T) {
+				env, session, name := stampLiveIncarnation(t, class, epoch)
+				sp := runtime.Provider(env.sp)
+				if class != rowPool {
+					sp = runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: env.sp})
+				}
+				work := assignLiveIncarnationWork(t, env.store, name)
+				next := assignRoutedWork(t, env.store, session.ID, "open")
+				assertLiveIncarnationHeld(t, env, sp, session, name)
+
+				if err := env.store.Close(work.ID); err != nil {
+					t.Fatal(err)
+				}
+				trace := newPoolDesiredStateTestTrace("worker")
+				reconcileLiveIncarnationTick(t, env, sp, session.ID, trace)
+				got, err := env.store.Get(session.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status != "closed" || got.Metadata["state"] != string(sessionpkg.StateFailedCreate) {
+					t.Fatalf("status=%q state=%q, want the pending create rolled back once its live incarnation's work ended; stderr=%s",
+						got.Status, got.Metadata["state"], env.stderr.String())
+				}
+				if n := liveIncarnationDeferrals(trace); n != 0 {
+					t.Fatalf("live_incarnation deferral records = %d after the work ended, want 0", n)
+				}
+				if !strings.Contains(env.stderr.String(), "rolling back pending create "+name+": a live incarnation of this session holds no in-progress work") {
+					t.Fatalf("stderr = %q, want the rollback to name the workless live incarnation", env.stderr.String())
+				}
+				pool := class == rowPool
+				if stops := countCalls(env.sp, "Stop"); (stops > 0) != pool || env.sp.IsRunning(name) == pool {
+					t.Fatalf("stops=%d running=%v, want the incarnation stopped only under the pool row's bead-scoped name", stops, env.sp.IsRunning(name))
+				}
+				if !pool {
+					return
+				}
+				if released := releaseOrphanedWork(t, env, session.ID, next); released.Status != "open" || released.Assignee != "" {
+					t.Fatalf("open work status=%q assignee=%q, want it released to the next incarnation", released.Status, released.Assignee)
+				}
+			})
+		}
+	}
+}
+
+// TestHoldsOverLiveIncarnation_FailsClosed pins the hold's work read: no
+// in-progress work assigned to the session releases the hold, open work and
+// another session's work included; in-progress work under any identity the
+// session may have claimed it under (its RefuseScope: the session name, a
+// prior alias, its transient pool alias), or a read that cannot answer,
+// holds and says why once.
+func TestHoldsOverLiveIncarnation_FailsClosed(t *testing.T) {
+	base := sessionpkg.Info{ID: "gc-1", SessionNameMetadata: "worker", Generation: "2"}
+	priorAlias := base
+	priorAlias.AliasHistory = []string{"worker/nux"}
+	slotted := base
+	slotted.Template, slotted.PoolManaged, slotted.PoolSlot, slotted.Alias = "worker", true, "1", "worker-1"
+	identity := pendingCreateIdentity{id: runtimeTokenMatch, token: runtimeTokenMismatch, generation: runtimeTokenMismatch, epoch: "1"}
+	for _, c := range []struct {
+		name     string
+		info     sessionpkg.Info
+		status   string // the work assigned to the session, "" for none
+		assignee string // whom the work is assigned to
+		noRead   bool   // no work legs at all: every answer unknown
+		hold     bool
+		why      string
+	}{
+		{name: "no work", info: base, hold: false},
+		{name: "open work only", info: base, status: "open", assignee: "worker", hold: false},
+		{name: "in-progress work", info: base, status: "in_progress", assignee: "worker", hold: true, why: "its work is in progress"},
+		{name: "in-progress work under a prior alias", info: priorAlias, status: "in_progress", assignee: "worker/nux", hold: true, why: "its work is in progress"},
+		{name: "in-progress work under its transient pool alias", info: slotted, status: "in_progress", assignee: "worker-1", hold: true, why: "its work is in progress"},
+		{name: "another session's in-progress work", info: priorAlias, status: "in_progress", assignee: "worker/other", hold: false},
+		{name: "work unreadable", info: base, noRead: true, hold: true, why: "its work cannot be read"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			if c.status != "" {
+				assignRoutedWork(t, store, c.assignee, c.status)
+			}
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			sw := testSeatWork(t.TempDir(), cfg, store, nil)
+			if c.noRead {
+				sw = nil
+			}
+			var stderr strings.Builder
+			dt := newDrainTracker()
+			trace := newPoolDesiredStateTestTrace("worker")
+			if got := holdsOverLiveIncarnation(sw, c.info, identity, "worker", "worker", dt, &stderr, trace, time.Now()); got != c.hold {
+				t.Fatalf("holdsOverLiveIncarnation = %v, want %v; stderr=%s", got, c.hold, stderr.String())
+			}
+			if n := liveIncarnationDeferrals(trace); (n == 1) != c.hold || n > 1 {
+				t.Fatalf("live_incarnation deferral records = %d, want %d", n, map[bool]int{true: 1}[c.hold])
+			}
+			if c.hold && !strings.Contains(stderr.String(), c.why) {
+				t.Fatalf("stderr = %q, want the hold to say %q", stderr.String(), c.why)
+			}
+			if !c.hold && stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want nothing said when the hold is released", stderr.String())
+			}
+		})
 	}
 }
 

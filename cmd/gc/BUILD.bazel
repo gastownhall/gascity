@@ -453,6 +453,7 @@ go_library(
         "order_store.go",
         "orders_lane.go",
         "path_util.go",
+        "pending_create_live_incarnation.go",
         "pending_create_skew.go",
         "pending_interaction_lane.go",
         "planner_notice.go",
