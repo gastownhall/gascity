@@ -10782,3 +10782,34 @@ func builtinClaudeTemplate(t *testing.T, name, workDir string) TemplateParams {
 	}
 	return TemplateParams{TemplateName: name, Command: resolved.Command, WorkDir: workDir, ResolvedProvider: resolved}
 }
+
+// TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow kills the legacy
+// backfill minting a key under a running provider process
+// (gastownhall/gascity#5439): a keyless builtin-claude row whose sync state
+// may hold a live process keeps no key, so its SessionStart hook's id lands.
+func TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow(t *testing.T) {
+	for _, tc := range []struct {
+		state string
+		mint  bool
+	}{
+		{"active", false},
+		{"creating", false},
+		{"draining", false},
+	} {
+		store, ds, _ := syncSharedWorkDirClaudeSessions(t)
+		row := allSessionBeads(t, store)[0]
+		if err := store.SetMetadataBatch(row.ID, map[string]string{"session_key": "", "state": tc.state}); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		clk := &clock.Fake{Time: time.Date(2026, 10, 26, 0, 1, 0, 0, time.UTC)}
+		syncSessionBeads("", store, ds, runtime.NewFake(), allConfiguredDS(ds), nil, clk, &stderr, false)
+		got, err := store.Get(row.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key := got.Metadata["session_key"]; (key != "") != tc.mint {
+			t.Errorf("a keyless row in state %q: session_key %q after sync, want minted %v; stderr=%s", tc.state, key, tc.mint, stderr.String())
+		}
+	}
+}

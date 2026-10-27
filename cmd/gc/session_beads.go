@@ -2332,9 +2332,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
+		// Backfill session_key for beads created before this fix, but not
+		// under a process that may be running and own its id.
 		if b.Metadata["session_key"] == "" &&
-			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
+			!sessionStateMayBeRunning(state) {
 			if key, err := session.GenerateSessionKey(); err == nil {
 				queueMeta("session_key", key)
 			}
