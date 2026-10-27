@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1439,4 +1440,194 @@ func laneRespondRefusal(op opjournal.Op) error {
 		return apierr.OpAlreadyFailed.Msg(fmt.Sprintf("%s: %s: the answer may have reached its prompt, so it is never sent again; read the session's pending interaction before answering again", opAlreadyFailedCode, closed))
 	}
 	return apierr.OpAlreadyFailed.Msg(fmt.Sprintf("%s: %s with nothing sent; resend with a new Idempotency-Key to act again", opAlreadyFailedCode, closed))
+}
+
+// --- /submit, /messages and extmsg notices ---
+
+// laneSubmitSettle is how long a /submit or /messages under lane authority
+// waits for its op before it emits the request's terminal event: closed
+// succeeded is the result, queued false; closed otherwise request.failed;
+// still open the result, queued true, as a legacy message that was queued
+// succeeded. Its later fate is op.changed's. A var so tests can shorten it.
+var laneSubmitSettle = 5 * time.Second
+
+// extmsgNoticePrincipal is the principal of the notices extmsg proposes for a
+// conversation's members; their label is extmsg.
+const extmsgNoticePrincipal = "gc:extmsg"
+
+// LaneMessageOpPolicy is the lane policy of a submit intent: default and
+// follow_up deliver at the session's boundary and interrupt_now as a
+// deliver-now unit (D-DN: a failed interrupt makes the message wait, and
+// nothing restarts the session); /messages is the default. Every one wakes
+// the session if needed and is a prompt. gc session submit's local fallback
+// proposes its lane op under the same policy, so the request the API would
+// write and the CLI's derive one op digest.
+func LaneMessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
+	when := opjournal.WhenBoundary
+	if intent == session.SubmitIntentInterruptNow {
+		when = opjournal.WhenNow
+	}
+	return opjournal.Policy{Message: opjournal.MessagePolicy{When: when, Wake: opjournal.WakeIfNeeded, Role: opjournal.RolePrompt}}
+}
+
+// acceptMessageLane is /submit and /messages under lane authority (message
+// listed): it proposes req as a lane message op, which the lane host
+// delivers, and answers 202 once the op is committed, its request_id the op
+// id. A configured named session's row is materialized before the Propose;
+// resume: true first runs the operator wake that consumes the session's
+// hold, else a held session keeps the op waiting. A same-key retry of a
+// closed op replays it (OJ-2b's path), of an open lane op answers 202
+// replayed (the lane runs it), and of an open legacy op 409 in_flight. The
+// request's terminal event follows laneSubmitSettle after the commit.
+func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *messageOpRequest, ep events.Recorder, cursor string) (asyncAcceptedBody, error) {
+	st, err := s.conversationOpStore()
+	if err != nil {
+		return asyncAcceptedBody{}, err
+	}
+	key, minted := req.key, false
+	if key == "" {
+		if key, err = legacyop.MintKey(); err != nil {
+			return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
+		}
+		minted = true
+	} else if err := opjournal.ValidateClientKey(key); err != nil {
+		return asyncAcceptedBody{}, apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + err.Error())
+	}
+	oreq := opjournal.Request{
+		Conversation: previewConversation,
+		Kind:         opjournal.KindMessage,
+		Executor:     opjournal.ExecutorLane,
+		ClientKey:    key,
+		MintedKey:    minted,
+		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Payload:      req.text,
+		Policy:       LaneMessageOpPolicy(req.intent),
+	}
+	if _, err := st.Preview(oreq); err != nil {
+		return asyncAcceptedBody{}, laneMessageProposeError(err)
+	}
+	conv := req.conv
+	if conv == "" {
+		if conv, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store, req.target); err != nil {
+			return asyncAcceptedBody{}, humaResolveError(err)
+		}
+	}
+	oreq.Conversation = conv
+	// A retry runs nothing: its resume wakes nothing. A lane op under the
+	// key answers only the same request (Propose refuses another as key
+	// reuse); a legacy op under it, recorded before the flip, replays.
+	if prior, found, err := keyedLaneOp(st, opjournal.KindMessage, conv, key); err != nil {
+		return asyncAcceptedBody{}, err
+	} else if found && prior.Executor != opjournal.ExecutorLane {
+		return s.replayLaneMessage(prior, key, req.operation, cursor)
+	} else if found {
+		op, _, err := st.Propose(oreq)
+		if err != nil {
+			return asyncAcceptedBody{}, laneMessageProposeError(err)
+		}
+		return s.replayLaneMessage(op, key, req.operation, cursor)
+	}
+	if req.resume {
+		if err := s.wakeSession(beads.SessionStore{Store: store}, conv); err != nil {
+			if _, conflict := session.WakeConflictState(err); !conflict {
+				return asyncAcceptedBody{}, wakeHTTPError(conv, err)
+			}
+		}
+	}
+	op, created, err := st.Propose(oreq)
+	if err != nil {
+		return asyncAcceptedBody{}, laneMessageProposeError(err)
+	}
+	if !created {
+		return s.replayLaneMessage(op, key, req.operation, cursor)
+	}
+	finish, err := s.recordAsyncAcceptance(ep, op.ID, req.operation)
+	if err != nil {
+		// Nothing is delivered for a request whose acceptance the event log
+		// refused: its op is canceled before the lane host is rung.
+		if _, _, cerr := st.Cancel(op.ID, legacyop.PrincipalOperator, "the request's acceptance could not be recorded"); cerr != nil {
+			s.ops.logf("api: canceling op %s, whose acceptance could not be recorded: %v", op.ID, cerr)
+		}
+		return asyncAcceptedBody{}, err
+	}
+	s.pokeConversationLane(conv)
+	go func() {
+		defer finish()
+		s.emitLaneMessageResult(st, op, req.operation, string(req.intent))
+	}()
+	return asyncAcceptedBody{Status: "accepted", RequestID: op.ID, EventCursor: cursor, IdempotencyKey: key, Op: conversationOpWire(op)}, nil
+}
+
+// laneMessageProposeError maps a refused lane message proposal onto the
+// wire as the legacy admission maps it: a key that names another request is
+// 422 idempotency_mismatch.
+func laneMessageProposeError(err error) error {
+	if errors.Is(err, opjournal.ErrKeyReuse) {
+		return apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with a different request")
+	}
+	return proposeError(err)
+}
+
+// replayLaneMessage answers a same-key retry of message op op: a closed op
+// replays its outcome with its terminal event re-emitted (storedReplayAnswer),
+// an open lane op answers 202 replayed, and an open legacy op 409 in_flight.
+func (s *Server) replayLaneMessage(op opjournal.Op, key, operation, cursor string) (asyncAcceptedBody, error) {
+	switch {
+	case op.Status == opjournal.StatusClosed:
+		body, err := s.storedReplayAnswer(op, key, operation, cursor)
+		if err != nil {
+			return asyncAcceptedBody{}, err
+		}
+		return *body, nil
+	case op.Executor != opjournal.ExecutorLane:
+		return asyncAcceptedBody{}, requestInFlight()
+	}
+	return asyncAcceptedBody{Status: "accepted", RequestID: op.ID, EventCursor: cursor, IdempotencyKey: key, Replayed: true, Op: conversationOpWire(op)}, nil
+}
+
+// emitLaneMessageResult waits laneSubmitSettle for lane message op op and
+// emits its request's terminal event for operation: the result, queued
+// false, once it closed succeeded; request.failed once it closed otherwise;
+// the result, queued true, while it is still open.
+func (s *Server) emitLaneMessageResult(st *opjournal.Store, op opjournal.Op, operation, intent string) {
+	cur, err := s.awaitLaneOp(context.Background(), op.Conversation, op.ID, laneSubmitSettle)
+	if err != nil {
+		s.ops.logf("api: op %s: reading its outcome for the request's result: %v", op.ID, err)
+		cur = op
+	}
+	wire := conversationOpWire(cur)
+	arm, reason := cur.Outcome.Effective()
+	switch {
+	case cur.Status == opjournal.StatusClosed && arm != opjournal.ArmSucceeded:
+		s.emitRequestFailedOp(op.ID, operation, messageReplayErrorCode(operation, reason), fmt.Sprintf("op %s closed %s", op.ID, laneOutcomeText(cur)), wire)
+	case operation == RequestOperationSessionSubmit:
+		s.emitSessionSubmitSucceeded(op.ID, op.Conversation, messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: cur.Status != opjournal.StatusClosed}}, intent, wire)
+	default:
+		s.emitSessionMessageSucceeded(op.ID, op.Conversation, messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: cur.Status != opjournal.StatusClosed}}, wire)
+	}
+}
+
+// proposeExtmsgNotice is an extmsg member notice under lane authority: a lane
+// notice from gc:extmsg, delivered at the session's boundary, waking it if
+// needed, under a minted key (the notice path carries no message id).
+func (s *Server) proposeExtmsgNotice(id, message string) error {
+	st, err := s.conversationOpStore()
+	if err != nil {
+		return err
+	}
+	key, err := legacyop.MintKey()
+	if err != nil {
+		return err
+	}
+	_, _, err = s.proposeLaneOp(st, opjournal.Request{
+		Conversation: id,
+		Kind:         opjournal.KindMessage,
+		Executor:     opjournal.ExecutorLane,
+		ClientKey:    key,
+		MintedKey:    true,
+		Producer:     opjournal.Producer{Principal: extmsgNoticePrincipal, Actor: opjournal.ActorBackground},
+		Payload:      message,
+		Policy:       opjournal.Policy{Message: opjournal.MessagePolicy{Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeIfNeeded}},
+	})
+	return err
 }

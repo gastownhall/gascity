@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -830,8 +831,12 @@ func deferralFor(outcome session.WakeRequestOutcome, err error) deferral {
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it. It never starts a session in the controller's process:
 // one that is not running gets the nudge queued and the start left to the
-// controller (CONTRACT v5.9 D8 7(e)).
+// controller (CONTRACT v5.9 D8 7(e)). When the city's lane host executes
+// message, it proposes a lane notice instead (proposeExtmsgNotice).
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
+	if s.laneExecutes(opjournal.KindMessage) {
+		return s.proposeExtmsgNotice(id, message)
+	}
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err

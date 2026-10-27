@@ -62,6 +62,7 @@ go_test(
     name = "conversationlane_test",
     size = "large",
     srcs = [
+        "api_lane_test.go",
         "bddolt_gating_test.go",
         "harness_bddolt_test.go",
         "harness_test.go",

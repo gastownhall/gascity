@@ -36,7 +36,9 @@ type OpsConfig struct {
 	// store served through bd can record once that bd supports --if-revision,
 	// which no released bd does yet. "off" records nothing. "require" (opt-in) refuses a request it
 	// cannot record before any effect. A change takes effect at the next
-	// process start.
+	// process start. With message listed in authoritative, a surface that
+	// proposes lane message ops (the API's submit and messages, gc session
+	// nudge, planner notices) is not governed by this gate.
 	ContentMode string `toml:"content,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records interrupt (stop) and respond requests as ops. "auto" is the
 	// default. Left unset, it records only over a SQLite sessions store and
@@ -72,8 +74,13 @@ type OpsConfig struct {
 	// an idle boundary; immediate there too, or into a running turn when the
 	// runtime can steer it, else at the next boundary. It leaves the rest to
 	// the controller's lane host, and the content gate no longer governs it.
-	// The API's submit and messages, gc session submit, mail --notify, sling
-	// --nudge and wait nudges keep their legacy delivery in this build.
+	// The API's POST .../session/{id}/submit and .../messages propose lane
+	// message ops too (interrupt_now as a deliver-now unit, which never
+	// restarts the session), answer 202 once the op is committed, and emit
+	// the request's result after a 5 s settle window (queued while the op
+	// still waits); extmsg member notices are lane notices. gc session
+	// submit's local fallback, mail --notify, sling --nudge and wait nudges
+	// keep their legacy delivery in this build.
 	// Listing interrupt switches the API's POST
 	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
 	// each proposes interrupt ops the controller's lane host runs, and

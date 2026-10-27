@@ -581,6 +581,8 @@ type messageOpRequest struct {
 	key    string
 	text   string
 	intent session.SubmitIntent
+	// resume is the request's resume: true.
+	resume bool
 	// operation is the endpoint's request operation, the one its terminal
 	// events name.
 	operation string
@@ -664,19 +666,26 @@ func (s *Server) replayAnswer(adm *legacyop.Admission, operation, cursor string)
 		}
 		return &answer.body, nil
 	}
+	return s.storedReplayAnswer(adm.Op, adm.Key, operation, cursor)
+}
+
+// storedReplayAnswer is the body a same-key retry of finished message op op,
+// recorded under key, is answered with: replayed, its request_id the op id,
+// with its terminal event re-emitted for operation's endpoint.
+func (s *Server) storedReplayAnswer(op opjournal.Op, key, operation, cursor string) (*asyncAcceptedBody, error) {
 	body := asyncAcceptedBody{
 		Status:         "accepted",
-		RequestID:      adm.Op.ID,
+		RequestID:      op.ID,
 		EventCursor:    cursor,
-		IdempotencyKey: adm.Key,
+		IdempotencyKey: key,
 		Replayed:       true,
-		Op:             conversationOpWire(adm.Op),
+		Op:             conversationOpWire(op),
 	}
 	// The replay's re-emitted event is a terminal event too: busy while one
 	// of the op's is kept, without keeping another, so the 202 has its event
 	// after its cursor, and only one: a kept one of its type for this
 	// endpoint, recorded now, is that event (cityOps.emitReplay).
-	if s.emitMessageOpProjection(operation, adm.Op) {
+	if s.emitMessageOpProjection(operation, op) {
 		return nil, requestInFlight()
 	}
 	return &body, nil

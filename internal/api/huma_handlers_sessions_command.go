@@ -784,7 +784,7 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 	}
 	req := &messageOpRequest{
 		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
-		intent: intent, operation: RequestOperationSessionSubmit,
+		intent: intent, resume: input.Body.Resume, operation: RequestOperationSessionSubmit,
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
@@ -856,7 +856,9 @@ type messageDelivery struct {
 
 // acceptMessageOp is the acceptance /submit and /messages share: it
 // validates req's target, admits req as a message op under the ops.content
-// gate (session_ops.go), records the request's acceptance so its request_id
+// gate (session_ops.go), or, when the city's lane host executes message,
+// proposes it as a lane op instead (acceptMessageLane), records the
+// request's acceptance so its request_id
 // resolves through GET /request/{requestId} (request_outcome.go), starts
 // deliver on its own goroutine and returns the 202 body. A replay is answered
 // with its body and starts nothing: its request_id is the one first accepted.
@@ -881,6 +883,9 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	eventCursor, err := s.currentCityEventCursor()
 	if err != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
+	}
+	if s.laneExecutes(opjournal.KindMessage) {
+		return s.acceptMessageLane(ctx, store.Store, req, ep, eventCursor)
 	}
 	adm, replay, err := s.admitMessageOp(ctx, store.Store, req, eventCursor)
 	if err != nil {
@@ -992,7 +997,7 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
 	req := &messageOpRequest{
 		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
-		intent: session.SubmitIntentDefault, operation: RequestOperationSessionMessage,
+		intent: session.SubmitIntentDefault, resume: input.Body.Resume, operation: RequestOperationSessionMessage,
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {

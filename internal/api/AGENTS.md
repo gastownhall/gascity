@@ -439,6 +439,20 @@ adopts it.
   before it proposed the op had the lane send nothing, and answers from
   itself: `in_flight` until the op sweeper closes it at its `finish_by`,
   then that close.
+- `/submit` and `/messages` (message listed): a lane message op under the
+  operator, keyed by the Idempotency-Key or a minted one, with
+  `LaneMessageOpPolicy` (default and follow_up at the boundary,
+  interrupt_now as a deliver-now unit, which never hard-restarts), proposed
+  after a configured named session's row is materialized; `resume: true`
+  first runs the operator wake that consumes the hold. The 202 follows the
+  commit, `request_id` the op id, and the acceptance is recorded before the
+  lane is rung (a refused acceptance cancels the op). The terminal event
+  follows `laneSubmitSettle` (5 s) later through `cityOps.emit`: the
+  result, queued false, for an op closed succeeded; `request.failed`
+  (`messageReplayErrorCode`) for one closed otherwise; the result, queued
+  true, for one still open. A same-key retry of a closed op replays it
+  (`storedReplayAnswer`); of an open lane op it is 202 replayed. extmsg
+  member notices are lane notices from `gc:extmsg`.
 - Run cancel (interrupt listed): one op per holder session with a turn to
   stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
   `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that

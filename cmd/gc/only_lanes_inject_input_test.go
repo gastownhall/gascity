@@ -102,27 +102,27 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	"internal/api/handler_session_interaction.go:Server.handleSessionRespond": {laneInjectTestSurface, "legacy handler served only through Server.ServeHTTP in tests"},
 	"internal/api/handler_session_interaction.go:Server.handleSessionStop":    {laneInjectTestSurface, "legacy handler served only through Server.ServeHTTP in tests"},
 	// Unlisted: they run only while their kind is not listed.
-	"internal/api/huma_handlers_runs.go:Server.interruptRunHolders": {laneInjectUnlisted, "run cancel interrupts its holders through the session layer (I-e); with interrupt listed it proposes lane ops"},
-	"internal/api/session_control_ops.go:Server.executeStop":        {laneInjectUnlisted, "POST /stop runs its interrupt inline (I-d); with interrupt listed it proposes a lane op"},
-	"internal/api/session_control_ops.go:Server.respondSession":     {laneInjectUnlisted, "POST /respond answers through the session layer (R-a); with respond listed it proposes a lane op"},
+	"internal/api/huma_handlers_runs.go:Server.interruptRunHolders":            {laneInjectUnlisted, "run cancel interrupts its holders through the session layer (I-e); with interrupt listed it proposes lane ops"},
+	"internal/api/session_control_ops.go:Server.executeStop":                   {laneInjectUnlisted, "POST /stop runs its interrupt inline (I-d); with interrupt listed it proposes a lane op"},
+	"internal/api/session_control_ops.go:Server.respondSession":                {laneInjectUnlisted, "POST /respond answers through the session layer (R-a); with respond listed it proposes a lane op"},
+	"internal/api/session_resolution.go:Server.sendBackgroundMessageToSession": {laneInjectUnlisted, "extmsg member notices (M11); with message listed they are lane notices"},
+	"internal/api/session_resolution.go:Server.submitMessageToSessionFor":      {laneInjectUnlisted, "POST /submit and /messages deliver through handle.Message (M5, I-f); with message listed they propose lane ops"},
 	// Fallbacks: they run while their kind is listed.
-	"cmd_nudge.go:deliverSessionNudgeLegacy":                                   {laneInjectFallback, "gc session nudge to a target with no session row, or a protocol-mode session no lane serves (excused at OJ-21)"},
-	"cmd_nudge.go:deliverMailNotifyLegacy":                                     {laneInjectFallback, "mail --notify keeps its legacy delivery (M7)"},
-	"cmd_nudge.go:tryDeliverQueuedNudgesByPoller":                              {laneInjectFallback, "the legacy queue's poller delivers what producers still queue (M9, M10, M12)"},
-	"cmd_session.go:cmdSessionSubmit":                                          {laneInjectFallback, "gc session submit's local fallback delivers through handle.Message (M6)"},
-	"cmd_sling.go:deliverSlingNudge":                                           {laneInjectFallback, "sling --nudge keeps its legacy delivery (M8)"},
-	"drain_reminder.go:nudgeDrainReminder":                                     {laneInjectFallback, "the drain reminder the gate holds, or for a session no lane serves; legacy reconciler only (excused at OJ-21)"},
-	"nudge_backstop.go:runNudgeBackstop":                                       {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
-	"warm_bind_nudge.go:nudgeWarmBindSlot":                                     {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
-	"work_ladder_lane.go:ladderDeliver":                                        {laneInjectFallback, "the work ladder's delivery seam (M4); W5 swaps it for a planner notice"},
-	"internal/api/session_resolution.go:Server.sendBackgroundMessageToSession": {laneInjectFallback, "extmsg member notices (M11)"},
-	"internal/api/session_resolution.go:Server.submitMessageToSessionFor":      {laneInjectFallback, "POST /submit and /messages deliver through handle.Message, interrupt_now included (M5, I-f)"},
+	"cmd_nudge.go:deliverSessionNudgeLegacy":      {laneInjectFallback, "gc session nudge to a target with no session row, or a protocol-mode session no lane serves (excused at OJ-21)"},
+	"cmd_nudge.go:deliverMailNotifyLegacy":        {laneInjectFallback, "mail --notify keeps its legacy delivery (M7)"},
+	"cmd_nudge.go:tryDeliverQueuedNudgesByPoller": {laneInjectFallback, "the legacy queue's poller delivers what producers still queue (M9, M10, M12)"},
+	"cmd_session.go:cmdSessionSubmit":             {laneInjectFallback, "gc session submit's local fallback delivers through handle.Message (M6)"},
+	"cmd_sling.go:deliverSlingNudge":              {laneInjectFallback, "sling --nudge keeps its legacy delivery (M8)"},
+	"drain_reminder.go:nudgeDrainReminder":        {laneInjectFallback, "the drain reminder the gate holds, or for a session no lane serves; legacy reconciler only (excused at OJ-21)"},
+	"nudge_backstop.go:runNudgeBackstop":          {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
+	"warm_bind_nudge.go:nudgeWarmBindSlot":        {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
+	"work_ladder_lane.go:ladderDeliver":           {laneInjectFallback, "the work ladder's delivery seam (M4); W5 swaps it for a planner notice"},
 }
 
 // laneInjectFallbackPin is how many fallback entries laneInjectAllowlist
 // holds. Each producer slice that moves a surface onto the lane moves its
 // entries to unlisted and lowers the pin; it never rises.
-const laneInjectFallbackPin = 11
+const laneInjectFallbackPin = 9
 
 // laneInjectSite is one place a scanned file types input: its site name and
 // position, and what it does.
