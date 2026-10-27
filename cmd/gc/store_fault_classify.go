@@ -67,7 +67,9 @@ func storeGotNoAnswer(err error, lowerText string) bool {
 }
 
 // storeStandingMarkers are answers that hold until an operator acts, even when
-// a no-answer marker also appears in the text: a host name that does not
+// a no-answer marker also appears in the text (they take precedence in the
+// gate; gc hook does not read them, so a hook's work query that hits one still
+// gets the store-unavailable token, as it did before this table existed): a host name that does not
 // resolve (a typo in config, which "dial tcp" would otherwise match), refused
 // credentials, a full or failing disk, a corrupt database.
 var storeStandingMarkers = []string{
@@ -78,6 +80,12 @@ var storeStandingMarkers = []string{
 	"disk i/o error",
 	"database disk image is malformed",
 	"no space left on device",
+	// A TLS or URL misconfiguration (an expired or untrusted certificate, a
+	// mistyped scheme) reaches gc as "cannot reach bd serve", a no-answer
+	// marker, but holds until an operator fixes it.
+	"x509:",
+	"tls:",
+	"unsupported protocol scheme",
 }
 
 // isTransientStoreFault reports whether a read the storage gate made failed

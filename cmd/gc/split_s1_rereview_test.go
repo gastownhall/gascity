@@ -64,6 +64,20 @@ func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 		{"hosted no such host", errors.New(`cannot reach bd serve at https://bd.exmaple: Get "x": dial tcp: lookup bd.exmaple: no such host`), false},
 		{"malformed annotation", errors.New(`reading the infra copy manifest: malformed "#gc:written x" line`), false},
 		{"misconfigured store", errors.New("unknown beads provider \"nope\""), false},
+		// Each marker alone (mutants C4, C7, C9, C19).
+		{"db_unavailable alone", errors.New("bd serve cannot reach its database: db_unavailable"), true},
+		{"too many open files text alone", errors.New("open /x: too many open files"), true},
+		{"EMFILE typed alone", opaqueErr{"accept failed", syscall.EMFILE}, true},
+		{"ENOSPC typed alone", opaqueErr{"write failed", syscall.ENOSPC}, false},
+		// A standing marker wins over a no-answer marker in the same text
+		// (precedence pinned; mutants C23-C25).
+		{"x509 behind cannot reach", errors.New(`cannot reach bd serve at https://bd.example: Get "x": tls: failed to verify certificate: x509: certificate has expired or is not yet valid`), false},
+		{"untrusted CA behind cannot reach", errors.New(`cannot reach bd serve at https://bd.example: Get "x": x509: certificate signed by unknown authority`), false},
+		{"tls alert behind cannot reach", errors.New(`cannot reach bd serve at https://bd.example: Get "x": remote error: tls: handshake failure`), false},
+		{"bad scheme behind cannot reach", errors.New(`cannot reach bd serve at htps://bd.example: Get "htps://bd.example/v1": unsupported protocol scheme "htps"`), false},
+		{"disk i/o error with a lock wait", errors.New("database is locked; disk I/O error (10) (SQLITE_IOERR)"), false},
+		{"401 behind cannot reach", errors.New("cannot reach bd serve at https://bd.example: answered 401"), false},
+		{"unauthenticated behind 503", errors.New("bd serve at https://bd.example answered 503: unauthenticated"), false},
 		{"nil", nil, false},
 	} {
 		if got := isTransientStoreFault(tc.err); got != tc.want {
@@ -87,6 +101,35 @@ func TestHookAndGateShareTheNoAnswerVocabulary(t *testing.T) {
 		}
 		if !isTransientStoreFault(err) {
 			t.Errorf("the storage gate does not read %q as transient", msg)
+		}
+	}
+}
+
+// opaqueErr carries a typed cause behind a message that names none of the
+// text markers, so a row tests the type alone.
+type opaqueErr struct {
+	msg   string
+	cause error
+}
+
+func (e opaqueErr) Error() string { return e.msg }
+func (e opaqueErr) Unwrap() error { return e.cause }
+
+// gc hook reads the shared no-answer vocabulary but NOT the gate's standing
+// exclusions (mutant C21): a work query that fails on an unresolvable host or
+// a certificate still reports the store-unavailable token, as it did before
+// the shared classifier existed.
+func TestHookIgnoresTheGatesStandingExclusions(t *testing.T) {
+	for _, msg := range []string{
+		`cannot reach bd serve at https://bd.exmaple: Get "x": dial tcp: lookup bd.exmaple: no such host`,
+		`cannot reach bd serve at https://bd.example: Get "x": x509: certificate signed by unknown authority`,
+	} {
+		err := errors.New(msg)
+		if !workQueryStoreUnavailable(err) {
+			t.Errorf("gc hook lost the token for %q", msg)
+		}
+		if isTransientStoreFault(err) {
+			t.Errorf("the gate reads %q as transient", msg)
 		}
 	}
 }
@@ -505,5 +548,42 @@ func TestStorageMigrateFailsLoudlyWhenTheServedNoteCannotBeWritten(t *testing.T)
 	code = doStorageMigrate(context.Background(), request, &stdout, &stderr)
 	if _, present, _ := readBornSplitServedNote(request.CityPath); code != 0 || !present {
 		t.Errorf("the re-run = %d (note present=%v): %s %s", code, present, stdout.String(), stderr.String())
+	}
+}
+
+// Mutant I1: plain `gc init` runs the reserved-prefix check before the
+// scaffold is created, so a refusal leaves nothing behind. No template
+// declares [storage] today, so the test shapes one through the hook.
+func TestPlainInitRefusesAReservedPrefixBeforeTheScaffold(t *testing.T) {
+	prev := initCityConfigHook
+	initCityConfigHook = func(cfg *config.City) {
+		split := infraSplitConfig(".gc/store")
+		cfg.Storage = split.Storage
+	}
+	t.Cleanup(func() { initCityConfigHook = prev })
+	cityPath := filepath.Join(t.TempDir(), "gas-city-gateway")
+	var stdout, stderr bytes.Buffer
+	if code := doInit(fsysOSFSForTest(), cityPath, wizardConfig{}, "", &stdout, &stderr, false); code == 0 {
+		t.Fatalf("plain gc init of a split city named gas-city-gateway succeeded: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gcg") || !strings.Contains(stderr.String(), "name the city differently") {
+		t.Errorf("stderr = %q, want the new-city refusal", stderr.String())
+	}
+	if entries, err := os.ReadDir(cityPath); err == nil && len(entries) > 0 {
+		t.Errorf("the refused init left %d entr(ies) behind", len(entries))
+	}
+}
+
+// Mutants I3/I4: the prefix init gives the new city decides, not whatever the
+// template's [workspace] says.
+func TestInitReservedPrefixRefusalUsesThePrefixInitAssigns(t *testing.T) {
+	cfg := infraSplitConfig(".gc/store")
+	cfg.Workspace.Prefix = "gw"
+	if err := initReservedPrefixRefusal(fsysOSFSForTest(), "", cfg, "plain-city", "gcg"); err == nil {
+		t.Error("the assigned prefix gcg was not refused")
+	}
+	cfg.Workspace.Prefix = "gcg"
+	if err := initReservedPrefixRefusal(fsysOSFSForTest(), "", cfg, "plain-city", "gw"); err != nil {
+		t.Errorf("the assigned prefix gw was refused because of the template's: %v", err)
 	}
 }
