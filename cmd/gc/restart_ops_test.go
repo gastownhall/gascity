@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -419,5 +420,76 @@ func TestRestartOpKeysDoNotCollideUnderReexecution(t *testing.T) {
 				t.Fatalf("notice ops = %+v, want two distinct", notice)
 			}
 		})
+	}
+}
+
+// TestHandoffJSONMailFailureWritesOneRecord: a --json handoff whose mail
+// fails with both ops recorded closes both failed, but writes exactly one
+// JSON record (the bounded-command rule), naming the restart op.
+func TestHandoffJSONMailFailureWritesOneRecord(t *testing.T) {
+	h, c := restartOpsCity(t, restartOpsEnv(), nil)
+	var stdout, stderr, jsonOut bytes.Buffer
+	r := unitRestart(t, c, "gc handoff", &stderr, nil)
+	r.ops = newRestartOps(nil, nil, c.store, "", c.name, killPokeSessionIdentity, true, &jsonOut, &stderr)
+	outcome := doHandoffWithOutcome(handoffMailFailingStore{c.store}, c.store, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
+	if outcome.code != 1 {
+		t.Fatalf("outcome = %+v, want 1", outcome)
+	}
+	restart, notice := opsByKind(t, h)
+	if len(restart) != 1 || len(notice) != 1 || restart[0].Outcome.Arm != opjournal.ArmFailed || notice[0].Outcome.Arm != opjournal.ArmFailed {
+		t.Fatalf("ops = %+v / %+v, want both closed failed", restart, notice)
+	}
+	lines := strings.Split(strings.TrimSpace(jsonOut.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("JSON records = %d, want exactly one:\n%s", len(lines), jsonOut.String())
+	}
+	var record struct {
+		OpID string `json:"op_id"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("decoding %q: %v", lines[0], err)
+	}
+	if record.OpID != restart[0].ID {
+		t.Fatalf("record op_id = %q, want the restart op %q", record.OpID, restart[0].ID)
+	}
+}
+
+// TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns: a self handoff
+// of a session the controller does not restart records no ops, so its --key
+// is not recorded; the run says so, and a rerun sends the mail again.
+func TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns(t *testing.T) {
+	h, c := restartOpsCity(t, restartOpsEnv(), map[string]string{namedSessionModeMetadata: "on_demand"})
+	const want = "gc handoff: warning: --key not recorded (the controller does not restart this session, so the handoff records no ops); a rerun sends the mail again"
+	for i := range 2 {
+		r := runHandoffForTest(c, "k-unrestartable")
+		if r.code != 0 || !strings.Contains(r.stderr, want) {
+			t.Fatalf("run %d: exit %d, stderr %q; want 0 and %q", i+1, r.code, r.stderr, want)
+		}
+	}
+	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 2 {
+		t.Fatalf("mails = %d, want 2 (nothing dedups an unrecorded key)", len(mails))
+	}
+	if rows := cliOpRows(t, h.opStore); len(rows) != 0 {
+		t.Fatalf("ops = %d, want none", len(rows))
+	}
+	if r := runHandoffForTest(c, ""); strings.Contains(r.stderr, "--key") {
+		t.Fatalf("stderr = %q, want no --key warning without --key", r.stderr)
+	}
+}
+
+// TestHandoffContentRequireWithLifecycleOffRecordsNoNotice pins the
+// documented "N rides R" consequence: with ops.content=require and
+// ops.lifecycle off, no restart op is recorded, so no notice op is proposed
+// and the handoff runs unrecorded and exits 0.
+func TestHandoffContentRequireWithLifecycleOffRecordsNoNotice(t *testing.T) {
+	h, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": "off", "GC_OPS_CONTENT": "require", "GC_OPS_CONTROL": "off"}, nil)
+	if r := runHandoffForTest(c, ""); r.code != 0 {
+		t.Fatalf("handoff = %d; stderr=%s", r.code, r.stderr)
+	}
+	if rows := cliOpRows(t, h.opStore); len(rows) != 0 {
+		t.Fatalf("ops = %d, want none", len(rows))
+	}
+	if m := c.row(t).Metadata; m["restart_requested"] != "true" {
+		t.Fatalf("row %v, want the restart recorded", m)
 	}
 }

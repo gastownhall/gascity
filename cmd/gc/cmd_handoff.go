@@ -82,8 +82,12 @@ For controller-restartable targets, equivalent to:
 
 While the op journal records ops, a restartable self-handoff is recorded as a
 restart{fresh} op and a notice op to self; a rerun with the same --key reports
-the first run's outcome without sending the mail again. --auto and --target
-record no ops and refuse --key.
+the first run's outcome without sending the mail again. The notice op rides
+the restart op: when the restart op is not recorded (ops.lifecycle off), no
+notice op is recorded either, even under ops.content = "require". --auto and
+--target record no ops and refuse --key. A self handoff of a session the
+controller does not restart records no ops and warns that --key is not
+recorded.
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
@@ -364,6 +368,9 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		defer r.ops.end()
 	}
 
+	if !restartable {
+		r.ops.unrecordedKey(r.verb)
+	}
 	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if restartable {
 		var mailErr error

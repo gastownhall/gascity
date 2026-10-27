@@ -20,7 +20,14 @@ package main
 // R's key is --key, else minted; there is no (generation, purpose) key, since
 // a relaunch in place runs a second agent process under one generation and
 // token. `gc handoff --auto` (a hook path), `--target` and a self handoff of a
-// session the controller does not restart record nothing.
+// session the controller does not restart record nothing; the last warns that
+// its --key is not recorded.
+//
+// Because N rides R, ops.content=require does not require N on its own: with
+// ops.lifecycle off, or R run unrecorded, no N is proposed and the handoff
+// runs and exits 0 with no notice op. N stays a legacy:cli shadow message
+// op even where [ops].authoritative lists message: it is an exception to
+// that setting until the notice gets a lane producer.
 
 import (
 	"errors"
@@ -209,13 +216,36 @@ func (o *restartOps) finishRestart(err error) {
 }
 
 // end closes whatever the command left open as failed{other}; defer it after
-// starting the ops.
+// starting the ops. A run writes one --json record: when R reports a failure
+// it names the run's op, so N's failure goes to stderr only.
 func (o *restartOps) end() {
 	if o == nil {
 		return
 	}
+	if o.notice != nil && cliOpReportsFailureAtEnd(o.restart) {
+		o.notice.req.asJSON = false
+	}
 	o.notice.end()
 	o.restart.end()
+}
+
+// cliOpReportsFailureAtEnd reports whether op.end() will report a failure: a
+// recorded, executing op that is still open (end closes it failed{other}) or
+// closed with an outcome that does not replay as success.
+func cliOpReportsFailureAtEnd(op *cliOp) bool {
+	if op == nil || op.adm == nil || !op.adm.Recorded || op.adm.Decision != legacyop.Execute {
+		return false
+	}
+	return op.closedWith == nil || !cliOpReplaysAsSuccess(op.req.kind, *op.closedWith)
+}
+
+// unrecordedKey warns that --key is not recorded on a self handoff of a
+// session the controller does not restart, which records no ops.
+func (o *restartOps) unrecordedKey(verb string) {
+	if o == nil || o.key == "" {
+		return
+	}
+	fmt.Fprintf(o.stderr, "%s: warning: --key not recorded (the controller does not restart this session, so the handoff records no ops); a rerun sends the mail again\n", verb) //nolint:errcheck // best-effort stderr
 }
 
 // handoffOpFields are the op fields of a handoff's JSON result.
