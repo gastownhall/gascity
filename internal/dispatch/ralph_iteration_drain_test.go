@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -274,6 +275,68 @@ func drainBeadByID(t *testing.T, store beads.Store, id string) beads.Bead {
 		t.Fatalf("loading %s: %v", id, err)
 	}
 	return b
+}
+
+// drainAttemptLog decodes the control's gc.attempt_log.
+func drainAttemptLog(t *testing.T, control beads.Bead) []map[string]string {
+	t.Helper()
+	var log []map[string]string
+	if raw := control.Metadata[beadmeta.AttemptLogMetadataKey]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &log); err != nil {
+			t.Fatalf("decoding gc.attempt_log %q: %v", raw, err)
+		}
+	}
+	return log
+}
+
+// TestCompiledRalphIterationDrainContinuesAfterMemberCloses pins AC-3: from
+// the AC-1 hold, the claimed member closing passed releases exactly one
+// verdict — one attempt-log entry, for iteration 1, carrying the aborted
+// iteration's synthetic failure — and exactly one iteration-2 set, nothing
+// beyond it.
+func TestCompiledRalphIterationDrainContinuesAfterMemberCloses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range drainUnforcedAbortStores() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
+			all := drainStoreAll(t, fx.store)
+			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
+			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+			drainServeHeld(t, fx.crashFixture)
+			body := drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), "loop.iteration.1")
+
+			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, drainStoreAll(t, fx.store),
+				"loop.iteration.1.b").ID, workerPass); err != nil {
+				t.Fatalf("closing worker B: %v", err)
+			}
+			if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+				t.Fatalf("serving after the member closed did not converge: %v", errs)
+			}
+
+			all = drainStoreAll(t, fx.store)
+			for _, ref := range []string{"loop.iteration.2", "loop.iteration.2.a", "loop.iteration.2.b"} {
+				if got := len(drainBeadsByRefSuffix(all, ref)); got != 1 {
+					t.Errorf("iteration-2 beads with step_ref suffix %q = %d, want exactly one", ref, got)
+				}
+			}
+			drainRequireNoIteration(t, all, 3)
+			control := drainBeadByRefSuffix(t, all, ".loop")
+			log := drainAttemptLog(t, control)
+			if len(log) != 1 {
+				t.Fatalf("ralph gc.attempt_log has %d entries, want exactly one for iteration 1", len(log))
+			}
+			if want := "attempt subject " + body.ID + " already failed"; log[0]["reason"] != want {
+				t.Errorf("attempt-log reason = %q, want %q", log[0]["reason"], want)
+			}
+			if log[0]["attempt"] != "1" {
+				t.Errorf("attempt-log attempt = %q, want the single iteration-1 entry", log[0]["attempt"])
+			}
+		})
+	}
 }
 
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
