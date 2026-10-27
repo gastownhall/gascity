@@ -76,6 +76,10 @@ const (
 // stall, and any in-flight observation window is left untouched rather
 // than cleared, so a transient conflict cannot reset the clock.
 //
+// Covers persistent agent-home worktrees only: an agent's work_dir, or its
+// default worktree under .gc/worktrees when none is set. Per-session and
+// per-bead worktrees are out of scope.
+//
 // Returns the number of newly-fired stall events.
 func patrolCommitClassWorktreeDrift(
 	cityPath string,
@@ -107,7 +111,11 @@ func patrolCommitClassWorktreeDrift(
 			continue
 		}
 
-		worktreePath := filepath.Join(cityPath, ".gc", "worktrees", agent.Dir, agent.BindingQualifiedName())
+		worktreePath, err := driftWorktreePath(cityPath, cfg, agent)
+		if err != nil {
+			fmt.Fprintf(stderr, "patrolCommitClassWorktreeDrift: resolving worktree for %s: %v\n", identity, err) //nolint:errcheck
+			continue
+		}
 		if _, err := os.Stat(worktreePath); err != nil {
 			// No worktree materialized yet — nothing to observe.
 			continue
@@ -189,6 +197,16 @@ func patrolCommitClassWorktreeDrift(
 	return fired
 }
 
+// driftWorktreePath returns the directory the agent's session actually runs
+// in: the resolved work_dir when the agent sets one, otherwise the default
+// persistent agent-home worktree under .gc/worktrees.
+func driftWorktreePath(cityPath string, cfg *config.City, agent *config.Agent) (string, error) {
+	if agent.WorkDir == "" {
+		return filepath.Join(cityPath, ".gc", "worktrees", agent.Dir, agent.BindingQualifiedName()), nil
+	}
+	return resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, agent.QualifiedName())
+}
+
 // getOrCreateWorktreeDriftBead returns the single reusable worktree_drift
 // tracking bead for identity, creating it if this is the first time drift
 // has ever been observed for that agent.
@@ -232,12 +250,16 @@ func clearWorktreeDriftObservation(store beads.Store, identity string, stderr io
 	if b.Metadata[worktreeDriftMetaFirstObservedAt] == "" && b.Metadata[worktreeDriftMetaStallEventFired] == "" {
 		return // already clear
 	}
-	if err := store.SetMetadata(b.ID, worktreeDriftMetaFirstObservedAt, ""); err != nil {
-		fmt.Fprintf(stderr, "patrolCommitClassWorktreeDrift: clearing observation for %s: %v\n", identity, err) //nolint:errcheck
-		return
-	}
+	// Clear the stall flag before the observation window: a failure between
+	// the two writes must leave the flag set with its window intact (the
+	// retry clears both) rather than a stale flag that suppresses the next
+	// episode's event.
 	if err := store.SetMetadata(b.ID, worktreeDriftMetaStallEventFired, ""); err != nil {
 		fmt.Fprintf(stderr, "patrolCommitClassWorktreeDrift: clearing stall flag for %s: %v\n", identity, err) //nolint:errcheck
+		return
+	}
+	if err := store.SetMetadata(b.ID, worktreeDriftMetaFirstObservedAt, ""); err != nil {
+		fmt.Fprintf(stderr, "patrolCommitClassWorktreeDrift: clearing observation for %s: %v\n", identity, err) //nolint:errcheck
 	}
 }
 
