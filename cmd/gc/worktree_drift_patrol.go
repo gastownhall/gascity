@@ -250,10 +250,10 @@ func clearWorktreeDriftObservation(store beads.Store, identity string, stderr io
 	if b.Metadata[worktreeDriftMetaFirstObservedAt] == "" && b.Metadata[worktreeDriftMetaStallEventFired] == "" {
 		return // already clear
 	}
-	// Clear the stall flag before the observation window: a failure between
-	// the two writes must leave the flag set with its window intact (the
-	// retry clears both) rather than a stale flag that suppresses the next
-	// episode's event.
+	// Clear the stall flag before the observation window. If the second
+	// write fails, the leftover is an old window with no flag, which at worst
+	// re-fires the event; the reverse order could leave a stale flag with no
+	// window, silently suppressing the next episode's event.
 	if err := store.SetMetadata(b.ID, worktreeDriftMetaStallEventFired, ""); err != nil {
 		fmt.Fprintf(stderr, "patrolCommitClassWorktreeDrift: clearing stall flag for %s: %v\n", identity, err) //nolint:errcheck
 		return
