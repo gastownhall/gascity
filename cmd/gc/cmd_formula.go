@@ -730,6 +730,13 @@ store, copy them into the binding with
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
+			// Parsed, keys included, before any arm writes a bead, so a pair
+			// the store would refuse leaves nothing behind: no root, no input
+			// convoy, no attach dep.
+			rootMeta, err := parseMetadataArgs(metadata)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
 
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
@@ -860,7 +867,7 @@ store, copy them into the binding with
 						}
 						if existing != nil {
 							result = existing
-							return ensureFormulaCookAttachDep(store, attach, result.RootID)
+							return finishFormulaCookGraphV2Attach(store, attach, result.RootID, rootMeta)
 						}
 						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
 							return err
@@ -895,13 +902,19 @@ store, copy them into the binding with
 							return err
 						}
 						emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
-						return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						return finishFormulaCookGraphV2Attach(store, attach, result.RootID, rootMeta)
 					})
 					if err != nil {
-						// A post-prepare failure discards the invocation; close the
-						// synthetic input convoy it minted (the success path threads the
-						// convoy into the started workflow, so err == nil never reaches here).
-						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
+						// A failure before a root was committed discards the
+						// invocation, so close the synthetic input convoy it minted.
+						// Once a root exists, fresh or adopted, the convoy is that
+						// live workflow's input: a failed attach dep or --meta stamp
+						// fails the command and leaves it open. The success path
+						// threads the convoy into the workflow, so err == nil never
+						// reaches here.
+						if result == nil {
+							graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
+						}
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
@@ -969,6 +982,11 @@ store, copy them into the binding with
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
+				// The sub-DAG root lives where molecule.Attach materialized it:
+				// attachStore, which on a split city is the class binding.
+				if err := setFormulaCookRootMetadata(attachStore, result.RootID, rootMeta); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -1010,7 +1028,7 @@ store, copy them into the binding with
 			// rootStore is the store the cooked root ended up in, so the --meta
 			// stamp below lands on the bead it just created rather than on a
 			// store that has never held it.
-			rootStore := store
+			var rootStore beads.Store
 			if isGraphFormula {
 				// This arm writes molecule.Cook's sequence out rather than
 				// calling molecule.CookChoosingStore, and it needs all three
@@ -1076,15 +1094,8 @@ store, copy them into the binding with
 				}
 			}
 
-			rootMeta, err := parseMetadataArgs(metadata)
-			if err != nil {
+			if err := setFormulaCookRootMetadata(rootStore, result.RootID, rootMeta); err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-			}
-			if len(rootMeta) > 0 {
-				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
-					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
 			}
 
 			if jsonOutput {
@@ -1180,6 +1191,30 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	// MetadataOnly mirrors the no-session default binding).
 	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+}
+
+// setFormulaCookRootMetadata applies the --meta pairs to the cooked root
+// through the store that holds it. No pairs is a no-op.
+func setFormulaCookRootMetadata(store beads.Store, rootID string, meta map[string]string) error {
+	if len(meta) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(rootID, meta); err != nil {
+		return fmt.Errorf("setting root metadata on %s: %w", rootID, err)
+	}
+	return nil
+}
+
+// finishFormulaCookGraphV2Attach completes a graph.v2 --attach cook on its
+// root, freshly instantiated or adopted: the attach bead's blocking dep, then
+// the --meta stamp. The caller runs it under the per-source workflow lock, so
+// overlapping cooks of one source apply their --meta in lock order, exactly as
+// sequential cooks would.
+func finishFormulaCookGraphV2Attach(store beads.Store, attachBeadID, rootID string, meta map[string]string) error {
+	if err := ensureFormulaCookAttachDep(store, attachBeadID, rootID); err != nil {
+		return err
+	}
+	return setFormulaCookRootMetadata(store, rootID, meta)
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
@@ -1308,6 +1343,10 @@ func parseFormulaVars(varFlags []string) map[string]string {
 	return vars
 }
 
+// parseMetadataArgs parses --meta key=value pairs. It refuses a pair with no
+// "=" or an empty key, and a key the bead store would refuse
+// (beadmeta.ValidateKey): bd and native Dolt reject such a key on the stamp's
+// SetMetadataBatch, which runs only after the cook has written its beads.
 func parseMetadataArgs(items []string) (map[string]string, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -1317,6 +1356,9 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 		key, value, ok := strings.Cut(item, "=")
 		if !ok || key == "" {
 			return nil, fmt.Errorf("invalid metadata %q (want key=value)", item)
+		}
+		if err := beadmeta.ValidateKey(key); err != nil {
+			return nil, fmt.Errorf("invalid metadata %q: %w", item, err)
 		}
 		out[key] = value
 	}

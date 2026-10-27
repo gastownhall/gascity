@@ -36,6 +36,7 @@ var rawSessionWriteVerbs = map[string]rawWriteVerb{
 	"setMetaBatch": {2, true}, "writeSessionMetadata": {2, true},
 	"setMeta": {2, true}, "setMetadataValue": {1, true},
 	"SetMetadataBatch": {1, false}, "SetMetadata": {1, false}, "setWaitTerminalState": {1, false},
+	"setFormulaCookRootMetadata": {2, false}, "finishFormulaCookGraphV2Attach": {3, false},
 }
 
 // rawWriteKeyVerbs take one key, not a patch.
