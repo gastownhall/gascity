@@ -2134,6 +2134,15 @@ func runPreparedStartCandidate(
 		unattributedErr = unattributedStartError(err, identity)
 		err = nil
 		rollbackPending = false
+	case attribution == pendingCreateRuntimeForeign && identity.otherEpochOfThisSession():
+		// The name holds another incarnation of this session (#2081): the
+		// rollback would stop it by name, killing in-flight work. Defer, as
+		// for an unknown attribution; the reconciler holds the row while it
+		// runs and rolls back once it is gone.
+		outcome = TraceOutcomeDeferred
+		unattributedErr = liveIncarnationStartError(err, item.candidate.info, identity)
+		err = nil
+		rollbackPending = false
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -2400,6 +2409,14 @@ func commitAsyncStartResultWithContext(
 			// or a capacity refusal keeps its own commit arm, as there.
 			if !refreshed.rateLimitScreen && !refreshed.capacityRefused {
 				refreshed.unattributedErr = unattributedStartError(refreshed.err, identity)
+				refreshed.err = nil
+				refreshed.outcome = TraceOutcomeDeferred
+				refreshed.rollbackPending = false
+			}
+		case pendingCreateRuntimeForeign:
+			// Same live-incarnation deferral as runPreparedStartCandidate's.
+			if identity.otherEpochOfThisSession() && !refreshed.rateLimitScreen && !refreshed.capacityRefused {
+				refreshed.unattributedErr = liveIncarnationStartError(refreshed.err, refreshed.prepared.candidate.info, identity)
 				refreshed.err = nil
 				refreshed.outcome = TraceOutcomeDeferred
 				refreshed.rollbackPending = false
@@ -4011,6 +4028,12 @@ func attributePendingCreateRuntime(info sessionpkg.Info, sessionName string, sp 
 // sets aside, annotated with the identity reads that failed.
 func unattributedStartError(err error, identity pendingCreateIdentity) error {
 	return fmt.Errorf("%w (attribution_unknown: %s)", err, strings.Join(identity.failed, "; "))
+}
+
+// liveIncarnationStartError is the start error a deferral over a live
+// incarnation of the row's own session carries for the lifecycle log.
+func liveIncarnationStartError(err error, info sessionpkg.Info, identity pendingCreateIdentity) error {
+	return fmt.Errorf("%w (live_incarnation: %s)", err, liveIncarnationDetail(info, identity))
 }
 
 // rollbackPendingCreateClears is the pending-create rollback: the failed-create
