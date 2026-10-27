@@ -491,6 +491,59 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 	}
 }
 
+// TestCompiledRalphIterationDrainHoldsRuntimeSpawnedIteration pins the gate
+// on iterations the loop minted itself: iteration 1 drains every member and
+// fails its real check, iteration 2 is spawned, and when that runtime-spawned
+// iteration then fails one member while the other is claimed, no iteration 3
+// exists until the claim settles — exactly one after.
+func TestCompiledRalphIterationDrainHoldsRuntimeSpawnedIteration(t *testing.T) {
+	t.Parallel()
+	fx := buildRalphDrainFixture(t, drainUnforcedAbortStores()[0], compiledRalphDrainFormula)
+	// The pool serves iteration 1 fully but passes by the runtime-spawned
+	// iterations, whose members stay for the test to steer.
+	fx.work = compiledRalphWorker(fx.store, fx.rootID, func(_ string, iteration int) map[string]string {
+		if iteration == 1 {
+			return workerPass
+		}
+		return nil
+	})
+	if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+		t.Fatalf("iteration 1 did not drain into a spawned iteration 2: %v", errs)
+	}
+	all := drainStoreAll(t, fx.store)
+	for _, ref := range []string{"loop.iteration.2", "loop.iteration.2.a", "loop.iteration.2.b"} {
+		drainBeadByRefSuffix(t, all, ref)
+	}
+
+	drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.b"))
+	if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.a").ID,
+		workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+		t.Fatalf("closing iteration-2 worker A: %v", err)
+	}
+	drainServeHeld(t, fx.crashFixture)
+
+	all = drainStoreAll(t, fx.store)
+	drainRequireNoIteration(t, all, 3)
+	if b := drainBeadByID(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.b").ID); b.Status != "in_progress" || b.Assignee != "pool-worker" {
+		t.Errorf("iteration-2 worker B = %s/%s, want still claimed in_progress by pool-worker", b.Status, b.Assignee)
+	}
+
+	if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.b").ID, workerPass); err != nil {
+		t.Fatalf("closing iteration-2 worker B: %v", err)
+	}
+	if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+		t.Fatalf("serving after the member closed did not converge: %v", errs)
+	}
+
+	all = drainStoreAll(t, fx.store)
+	for _, ref := range []string{"loop.iteration.3", "loop.iteration.3.a", "loop.iteration.3.b"} {
+		if got := len(drainBeadsByRefSuffix(all, ref)); got != 1 {
+			t.Errorf("iteration-3 beads with step_ref suffix %q = %d, want exactly one", ref, got)
+		}
+	}
+	drainRequireNoIteration(t, all, 4)
+}
+
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
 // of iteration 1 fails — with a transient failure class, or a bare close the
 // abort_scope contract counts as failed — while worker B is claimed and
