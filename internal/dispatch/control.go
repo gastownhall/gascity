@@ -378,13 +378,21 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	return eval, nil
 }
 
-// ralphIterationLiveMembers returns the members of a ralph iteration that are
-// still running: the same selection a scope abort skips, keyed by "not
-// closed" instead of "open" so a claimed sibling counts. A childless ralph's
-// iteration is the work bead itself and has no members. The candidate pool is
-// the root view the control loop already loaded, so the gate adds no store
-// read, and rootID mirrors ralphIterationHardFailure for controls minted
-// before gc.root_bead_id was stamped.
+// ralphIterationLiveMembers returns the work members of a ralph iteration
+// that are still running: the same selection a scope abort skips, keyed by
+// "not closed" instead of "open" so a claimed sibling counts, minus
+// controller machinery. Only the dispatcher closes a control, one per root at
+// a time, so an open control inside a closed iteration is mid-settlement and
+// completes on a later sweep; blocking the verdict on it would leave a
+// blocks edge no clean run mints (the abort settles within its cycle, but a
+// crash-restarted serve can evaluate the control in between) and end in a
+// different ledger than an uninterrupted one. Claimed work is the other side
+// of that line: only its worker closes it, and that is the #2519 boundary
+// this gate holds. A childless ralph's iteration is the work bead itself and
+// has no members. The candidate pool is the root view the control loop
+// already loaded, so the gate adds no store read; rootID mirrors
+// ralphIterationHardFailure for controls minted before gc.root_bead_id was
+// stamped.
 func ralphIterationLiveMembers(store beads.Store, control, iteration beads.Bead, opts ProcessOptions) ([]beads.Bead, error) {
 	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
 		return nil, nil
@@ -405,7 +413,9 @@ func ralphIterationLiveMembers(store beads.Store, control, iteration beads.Bead,
 		func(b beads.Bead) bool { return b.Status != "closed" })
 	live := make([]beads.Bead, 0, len(pending))
 	for _, member := range pending {
-		live = append(live, member)
+		if !beadmeta.IsControlKind(member.Metadata[beadmeta.KindMetadataKey]) {
+			live = append(live, member)
+		}
 	}
 	slices.SortFunc(live, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
 	return live, nil
