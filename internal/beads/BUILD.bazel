@@ -264,6 +264,7 @@ go_test(
         "sqlite_sequence_test.go",
         "sqlite_store_atomic_close_test.go",
         "sqlite_store_closed_test.go",
+        "sqlite_store_concurrent_metadata_test.go",
         "sqlite_store_conditional_capability_test.go",
         "sqlite_store_conformance_test.go",
         "sqlite_store_dsn_test.go",
