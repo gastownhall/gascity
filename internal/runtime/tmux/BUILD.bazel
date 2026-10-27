@@ -91,6 +91,7 @@ go_test(
         "fresh_only_test.go",
         "hidden_attach_hook_test.go",
         "holder_token_test.go",
+        "idle_wait_unobserved_test.go",
         "interaction_codex_test.go",
         "interaction_test.go",
         "kimi_process_test.go",
