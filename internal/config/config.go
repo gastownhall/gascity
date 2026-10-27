@@ -1438,6 +1438,15 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// BDListReadyStatus states that every bd this city runs honors --status
+	// together with --ready on bd list (bd 1.3.1+, beads #5924). The
+	// crash-recovery work-query tier then reads only the agent's in_progress
+	// beads that can be worked (no open blocker, no dispatch hold), so a
+	// blocked or held first row no longer hides the others. Leave it unset on
+	// an older bd: there --ready forces status open, and the crash-recovery
+	// tier would never see an in_progress bead. gc start refuses it on a bd
+	// older than 1.3.1. Default: false.
+	BDListReadyStatus bool `toml:"bd_list_ready_status,omitempty" jsonschema:"default=false"`
 	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
 	// byte-identical), "auto" (compare-and-swap where the store is capable,
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
@@ -1626,6 +1635,13 @@ func (b BeadsConfig) UsesBD105CLISemantics() bool {
 // flags whose complete filter semantics require bd 1.0.5 or newer.
 func (b BeadsConfig) UsesBD105ReadySemantics() bool {
 	return b.UsesBD105CLISemantics()
+}
+
+// UsesBDListReadyStatus reports whether generated bd list reads may combine
+// --status with --ready (and --exclude-label) and rely on bd intersecting them.
+// It implies no bd_compatibility level.
+func (b BeadsConfig) UsesBDListReadyStatus() bool {
+	return b.BDListReadyStatus
 }
 
 // BeadPolicyConfig holds storage and retention defaults for a named bead use.

@@ -14,6 +14,7 @@ type WorkReadyInput struct {
 	Sort          string   `query:"sort" required:"false" enum:"oldest,newest" doc:"Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id)."`
 	Limit         int      `query:"limit" required:"false" minimum:"0" doc:"At most this many rows, cut after the merge and the order; 0 is unlimited."`
 	Status        string   `query:"status" required:"false" enum:"open,in_progress,blocked,closed" doc:"List beads in this status instead of ready work."`
+	Ready         bool     `query:"ready" required:"false" doc:"With status in_progress, drop rows that have a non-closed blocking dependency before the limit is applied."`
 }
 
 // readyWorkQuery is the input as the reader's query.
@@ -27,6 +28,7 @@ func (in *WorkReadyInput) readyWorkQuery() readywork.Query {
 		Sort:           in.Sort,
 		Limit:          in.Limit,
 		Status:         in.Status,
+		Ready:          in.Ready,
 	}
 }
 

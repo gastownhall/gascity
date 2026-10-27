@@ -671,6 +671,11 @@ const (
 	// contract, introduced with the 1.3 release candidate. It equals the init
 	// floor today; it stays a separate anchor so it can move independently.
 	bdFreshProviderMinVersion = "1.3.0"
+	// [beads] bd_list_ready_status has the crash-recovery work query combine
+	// bd list --status with --ready, which bd intersects only from 1.3.1
+	// (beads #5924). An older bd forces status open under --ready, so the
+	// tier would silently never see an in_progress bead.
+	bdListReadyStatusMinVersion = "1.3.1"
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -694,6 +699,11 @@ func checkHardDependencies(cityPath string) []missingDep {
 		// legacy compatibility. Normal ownership admission will surface the
 		// journal error before lifecycle work begins.
 		bdRequiredVersion = bdFreshProviderMinVersion
+	}
+	// Last, because it is the highest floor: it must not be lowered by the
+	// fresh-provider raise above.
+	if cfg, ok := initConfigForBdTooling(cityPath); ok && cfg.Beads.UsesBDListReadyStatus() {
+		bdRequiredVersion = bdListReadyStatusMinVersion
 	}
 
 	deps := []dep{

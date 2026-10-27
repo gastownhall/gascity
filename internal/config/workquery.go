@@ -646,8 +646,39 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) + `)` +
+	return `r=$(` + reader + inProgressWorkableFilterArgs(topo) + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; `
+}
+
+// inProgressWorkableFilterArgs returns the flags that make the crash-recovery
+// read return only in_progress beads that can be worked: no open blocker
+// (--ready) and no dispatch hold (--exclude-label per
+// beadmeta.DispatchHoldLabels). The reader applies them BEFORE --limit, so the
+// limit-1 read returns the first workable row instead of the first row, and a
+// blocked or held first row no longer hides the agent's other in_progress
+// work. inProgressBlockedByEnrichmentScript still runs on the row afterwards;
+// it is now the fail-open backstop, not the only gate.
+//
+// On bd, --ready alongside --status in_progress needs bd 1.3.1 (beads #5924):
+// older bd forces status open under --ready, and this tier would serve open
+// rows and never an in_progress one. bd's --ready also drops deferred and
+// pinned beads and children of a blocked or deferred parent, the same set
+// `bd ready` excludes, so those in_progress beads leave this tier too. The
+// federated reader (gc ready --ready, readywork.Query.Ready, applied the same
+// way in-process and when the controller answers) filters direct blockers
+// only: it drops a row with a non-closed blocker and keeps deferred, pinned
+// and parent-blocked rows. Both sit behind [beads]
+// bd_list_ready_status so that, unset, every generated query is
+// byte-identical to the one already deployed.
+func inProgressWorkableFilterArgs(topo QueryTopology) string {
+	if !topo.Beads.UsesBDListReadyStatus() {
+		return ""
+	}
+	args := ` --ready`
+	for _, label := range beadmeta.DispatchHoldLabels {
+		args += ` --exclude-label=` + label
+	}
+	return args
 }
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.

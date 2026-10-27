@@ -128,6 +128,7 @@ func readyWorkQueries(f readyWorkSplitFixture) []readywork.Query {
 		{Limit: 3},
 		{Assignee: f.assignee, Limit: 1},
 		{Status: readywork.StatusInProgress, Assignee: f.assignee, Limit: 1},
+		{Status: readywork.StatusInProgress, Assignee: f.assignee, Limit: 1, Ready: true},
 		{Status: readywork.StatusInProgress},
 		{MetadataFields: []string{"gc.routed_to=" + f.routedTo}, Unassigned: true, ExcludeTypes: []string{"epic"}, ExcludeLabels: []string{"hold:mayor"}, Limit: 20},
 		{MetadataFields: []string{"gc.routed_to=" + f.routedTo}, Unassigned: true, Sort: readywork.SortOldest, Limit: 20},

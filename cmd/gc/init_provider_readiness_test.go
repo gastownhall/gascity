@@ -2467,3 +2467,55 @@ func TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork(t *testing.T) {
 		t.Fatalf("roles pack not materialized from embedded content: %v", err)
 	}
 }
+
+// [beads] bd_list_ready_status raises the bd floor to 1.3.1: below it, bd list
+// forces status open under --ready and the crash-recovery tier would silently
+// never see an in_progress bead. Unset, the compatibility floor stands.
+func TestCheckHardDependenciesRequiresBd131ForBDListReadyStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		set       bool
+		bdVersion string
+		wantFloor bool
+	}{
+		{name: "set refuses 1.3.0", set: true, bdVersion: "1.3.0", wantFloor: true},
+		{name: "set accepts 1.3.1", set: true, bdVersion: "1.3.1"},
+		{name: "unset accepts 1.3.0", bdVersion: "1.3.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			toml := "[workspace]\nname = \"deps\"\n\n[beads]\nprovider = \"bd\"\n"
+			if tc.set {
+				toml += "bd_list_ready_status = true\n"
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			oldLookPath := initLookPath
+			initLookPath = func(string) (string, error) { return "/usr/bin/tool", nil }
+			t.Cleanup(func() { initLookPath = oldLookPath })
+			oldVersion := initRunVersion
+			initRunVersion = func(binary string) (string, error) {
+				if binary == "bd" {
+					return "bd version " + tc.bdVersion, nil
+				}
+				if binary == "dolt" {
+					return "dolt version " + doltMinVersion, nil
+				}
+				return binary + " version", nil
+			}
+			t.Cleanup(func() { initRunVersion = oldVersion })
+			missing := checkHardDependencies(city)
+			gotFloor := false
+			for _, dep := range missing {
+				gotFloor = gotFloor || strings.Contains(dep.name, bdListReadyStatusMinVersion)
+			}
+			if gotFloor != tc.wantFloor || (!tc.wantFloor && len(missing) != 0) {
+				t.Fatalf("dependencies = %#v, want bd %s floor refusal=%t", missing, bdListReadyStatusMinVersion, tc.wantFloor)
+			}
+		})
+	}
+}

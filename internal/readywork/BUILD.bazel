@@ -25,6 +25,7 @@ go_test(
         "federate_test.go",
         "pushdown_test.go",
         "query_test.go",
+        "ready_flag_test.go",
         "testenv_import_test.go",
     ],
     embed = [":readywork"],

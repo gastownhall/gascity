@@ -73,6 +73,14 @@ type Query struct {
 	// Status is "" for ready work, or one of the statuses in knownStatuses to
 	// list beads in that status instead.
 	Status string
+	// Ready, on the in_progress arm, drops every row with a non-closed blocking
+	// dependency BEFORE Limit, so a blocked first row cannot fill a bounded
+	// crash-recovery read and hide the workable rows behind it. It is the
+	// direct-blocker part of `bd list --status in_progress --ready` (bd 1.3.1+):
+	// deferred, pinned and parent-blocked rows, which bd's --ready also drops,
+	// are kept. The ready arm is ready already, and the other statuses list
+	// beads that are not being worked, so it changes nothing there.
+	Ready bool
 }
 
 // compiled is a validated Query: every flag parsed once, before any store is

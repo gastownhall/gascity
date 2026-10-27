@@ -105,6 +105,7 @@ func registerReadyFlags(cmd *cobra.Command, opts *readywork.Query, includeEpheme
 	// quietly narrows (ga-8lyxc).
 	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
+	cmd.Flags().BoolVar(&opts.Ready, "ready", false, "with --status in_progress, drop rows that have an open blocker before --limit applies")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.

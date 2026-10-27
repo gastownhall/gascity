@@ -3,6 +3,7 @@ package readywork
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
@@ -83,14 +84,28 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 	}
 	items = c.filter(items)
 	c.order(items)
+	// Ready has to see every row before the bound, or a blocked first row fills
+	// a --limit=1 read and hides the workable rows behind it. So it pays a
+	// dependency read per candidate row, and the bound comes after the drop.
+	var blockers map[string][]ReadyBeadBlocker
+	dropBlocked := c.query.Ready && c.status == StatusInProgress
+	if dropBlocked {
+		blockers, err = blockedByForRows(ctx, items, legs, owners)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = dropBlockedRows(items, blockers)
+	}
 	if c.query.Limit > 0 && len(items) > c.query.Limit {
 		items = items[:c.query.Limit]
 	}
-	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
-	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
-	// this one dependency read on the one row that matters.
-	var blockers map[string][]ReadyBeadBlocker
-	if c.status == StatusInProgress {
+	// Otherwise enrich AFTER the bound, so the dependency reads are paid only
+	// for the rows actually emitted. The crash-recovery tier asks for --limit=1,
+	// which makes this one dependency read on the one row that matters.
+	if c.status == StatusInProgress && !dropBlocked {
 		blockers, err = blockedByForRows(ctx, items, legs, owners)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -100,6 +115,25 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 		}
 	}
 	return toReadyBeads(items, blockers), nil
+}
+
+// dropBlockedRows keeps the rows with no non-closed blocker, the test the work
+// query's crash-recovery serve gate applies to blocked_by.
+func dropBlockedRows(items []beads.Bead, blockers map[string][]ReadyBeadBlocker) []beads.Bead {
+	out := items[:0]
+	for _, item := range items {
+		blocked := false
+		for _, b := range blockers[item.ID] {
+			if !strings.EqualFold(b.Status, "closed") {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // readCandidates reads the merged candidate set from the legs, and which leg

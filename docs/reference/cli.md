@@ -3681,6 +3681,7 @@ gc ready [flags]
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
+| `--ready` | bool |  | with --status in_progress, drop rows that have an open blocker before --limit applies |
 | `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
 | `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
 | `--unassigned` | bool |  | only unassigned work |

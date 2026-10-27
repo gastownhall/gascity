@@ -55840,6 +55840,16 @@
               ],
               "type": "string"
             }
+          },
+          {
+            "description": "With status in_progress, drop rows that have a non-closed blocking dependency before the limit is applied.",
+            "explode": false,
+            "in": "query",
+            "name": "ready",
+            "schema": {
+              "description": "With status in_progress, drop rows that have a non-closed blocking dependency before the limit is applied.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

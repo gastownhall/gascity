@@ -21598,6 +21598,10 @@ export type GetV0CityByCityNameWorkReadyData = {
          * List beads in this status instead of ready work.
          */
         status?: 'open' | 'in_progress' | 'blocked' | 'closed';
+        /**
+         * With status in_progress, drop rows that have a non-closed blocking dependency before the limit is applied.
+         */
+        ready?: boolean;
     };
     url: '/v0/city/{cityName}/work/ready';
 };
