@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ type interruptedCloseEnv struct {
 	cityDir  string
 	cfg      *config.City
 	store    beads.Store
-	sp       runtime.Provider
+	sp       *runtime.Fake
 	clk      *clock.Fake
 	dt       *drainTracker
 	stderr   *bytes.Buffer
@@ -111,6 +112,170 @@ func (e *interruptedCloseEnv) openSeatRunning(t *testing.T) bool {
 		}
 	}
 	return false
+}
+
+// halfClosedSeat stamps the interrupted close onto a freshly minted pool
+// seat and returns the re-read bead.
+func (e *interruptedCloseEnv) halfClosedSeat(t *testing.T, state string, extra map[string]string) beads.Bead {
+	t.Helper()
+	seat := createCanonicalPoolSession(t, e.store, &e.cfg.Agents[0], e.clk.Now(), 1)
+	e.halfClose(t, seat.ID, state, extra)
+	stored, err := e.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("reload half-closed seat: %v", err)
+	}
+	return stored
+}
+
+// tracedTick runs one traced reconcile pass over sessions against store and
+// provider sp (either may wrap the env's own, to inject a liveness failure),
+// with the template armed for detail so decisions land on the cycle.
+func (e *interruptedCloseEnv) tracedTick(t *testing.T, sessions []beads.Bead, store beads.Store, sp runtime.Provider) (*SessionReconcilerTraceCycle, *events.Fake) {
+	t.Helper()
+	tracer := newSessionReconcilerTracer(e.cityDir, e.cityName, io.Discard)
+	armNow := e.clk.Now()
+	if _, err := tracer.armStore.upsertArm(TraceArm{
+		ScopeType:      TraceArmScopeTemplate,
+		ScopeValue:     interruptedCloseTemplate,
+		Source:         TraceArmSourceManual,
+		Level:          TraceModeDetail,
+		ArmedAt:        armNow,
+		ExpiresAt:      armNow.Add(15 * time.Minute),
+		LastExtendedAt: armNow,
+		UpdatedAt:      armNow,
+	}); err != nil {
+		t.Fatalf("upsert arm: %v", err)
+	}
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", armNow, e.cfg)
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.syncArms(armNow, e.cfg)
+	rec := events.NewFake()
+	reconcileSessionBeadsTraced(
+		context.Background(), e.cityDir, sessions, nil, map[string]bool{interruptedCloseTemplate: true},
+		e.cfg, sp, store, nil, nil, nil, nil, e.dt, nil, false, nil, e.cityName,
+		nil, e.clk, rec, 0, 0, io.Discard, e.stderr, cycle,
+	)
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("tracer close: %v", err)
+	}
+	return cycle, rec
+}
+
+// finishInterruptedCloseDecisions returns the finisher's decision records
+// from the cycle.
+func finishInterruptedCloseDecisions(cycle *SessionReconcilerTraceCycle) []SessionReconcilerTraceRecord {
+	var out []SessionReconcilerTraceRecord
+	for _, rec := range cycle.records {
+		if rec.RecordType == TraceRecordDecision && rec.SiteCode == TraceSiteReconcilerFinishInterruptedClose {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// unknownStateSkipRecorded reports whether the tick recorded the skip site's
+// unknown_state_skipped decision — S20's trace half, exactly as at base.
+func unknownStateSkipRecorded(cycle *SessionReconcilerTraceCycle) bool {
+	for _, rec := range cycle.records {
+		if rec.SiteCode == TraceSiteReconcilerUnknownState && rec.ReasonCode == TraceReasonUnknownStateSkipped {
+			return true
+		}
+	}
+	return false
+}
+
+// unknownStateEvents returns the session.unknown_state events the tick
+// emitted.
+func unknownStateEvents(t *testing.T, rec *events.Fake) []events.Event {
+	t.Helper()
+	evs, err := rec.List(events.Filter{Type: events.SessionUnknownState})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	return evs
+}
+
+// TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime
+// is the AC-3 guard: the finisher never finishes a close it cannot observe.
+// A half-closed stale-session row whose runtime is alive (or whose liveness
+// probe errors) must stay open with its state unchanged, record kept_open or
+// skipped_liveness_error at reconciler.session.finish_interrupted_close, and
+// leave S20 exactly as at base — while no runtime is stopped, including a
+// live twin's: the release path sits behind the liveness verdict.
+func TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime(t *testing.T) {
+	t.Run("alive runtime keeps the row open", func(t *testing.T) {
+		env := newInterruptedCloseEnv(t)
+		zombie := env.halfClosedSeat(t, "stale-session", nil)
+		name := zombie.Metadata["session_name"]
+		// The name is live — whether the row's own runtime or a twin's: the
+		// probe reads the name.
+		if err := env.sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("start runtime under %q: %v", name, err)
+		}
+
+		cycle, rec := env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp)
+
+		got, err := env.store.Get(zombie.ID)
+		if err != nil {
+			t.Fatalf("reload zombie: %v", err)
+		}
+		if got.Status != "open" || got.Metadata["state"] != "stale-session" {
+			t.Fatalf("live half-closed row changed: status=%q state=%q, want open/stale-session", got.Status, got.Metadata["state"])
+		}
+		decisions := finishInterruptedCloseDecisions(cycle)
+		if len(decisions) != 1 || decisions[0].OutcomeCode != TraceOutcomeKeptOpen {
+			t.Fatalf("finisher decisions = %+v, want one kept_open", decisions)
+		}
+		if !unknownStateSkipRecorded(cycle) {
+			t.Fatal("S20's unknown_state_skipped decision missing — the skip site must still signal a row the finisher declines")
+		}
+		if len(unknownStateEvents(t, rec)) != 1 {
+			t.Fatal("session.unknown_state not emitted exactly as at base (first sight)")
+		}
+		if got.Metadata["unknown_state_first_seen"] == "" {
+			t.Fatal("S20 first-seen marker not stamped")
+		}
+		if !env.sp.IsRunning(name) || env.sp.CountCalls("Stop", name) != 0 {
+			t.Fatalf("runtime under %q was stopped or died: running=%v stop_calls=%d", name, env.sp.IsRunning(name), env.sp.CountCalls("Stop", name))
+		}
+	})
+
+	t.Run("liveness error skips the close", func(t *testing.T) {
+		env := newInterruptedCloseEnv(t)
+		zombie := env.halfClosedSeat(t, "stale-session", nil)
+		name := zombie.Metadata["session_name"]
+		// The provider cannot observe liveness — the same class a transient
+		// tmux blip produces at runtime.
+		sp := &startUnavailableLivenessProvider{Fake: env.sp}
+
+		cycle, rec := env.tracedTick(t, []beads.Bead{zombie}, env.store, sp)
+
+		got, err := env.store.Get(zombie.ID)
+		if err != nil {
+			t.Fatalf("reload zombie: %v", err)
+		}
+		if got.Status != "open" || got.Metadata["state"] != "stale-session" {
+			t.Fatalf("unobservable half-closed row changed: status=%q state=%q, want open/stale-session", got.Status, got.Metadata["state"])
+		}
+		decisions := finishInterruptedCloseDecisions(cycle)
+		if len(decisions) != 1 || decisions[0].OutcomeCode != TraceOutcomeSkippedLivenessError {
+			t.Fatalf("finisher decisions = %+v, want one skipped_liveness_error", decisions)
+		}
+		if !strings.Contains(env.stderr.String(), "skipping interrupted close of '"+name+"': liveness observation failed") {
+			t.Fatalf("fail-closed stderr line missing; stderr=%q", env.stderr.String())
+		}
+		if !unknownStateSkipRecorded(cycle) {
+			t.Fatal("S20's unknown_state_skipped decision missing — the skip site must still signal a row the finisher declines")
+		}
+		if len(unknownStateEvents(t, rec)) != 1 {
+			t.Fatal("session.unknown_state not emitted exactly as at base (first sight)")
+		}
+		if env.sp.CountCalls("Stop", name) != 0 {
+			t.Fatalf("runtime under %q stopped despite liveness error: stop_calls=%d", name, env.sp.CountCalls("Stop", name))
+		}
+	})
 }
 
 // TestReconcileSessionBeads_InterruptedCloseFreesAlwaysNamedSession is the
