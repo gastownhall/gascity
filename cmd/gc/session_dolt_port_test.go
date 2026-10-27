@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // sessionDoltPortKeys are the env keys a raw bd in an agent session reads
@@ -315,5 +316,42 @@ func TestSessionBackendEnvLeavesUnmirroredTopologiesUnchanged(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Withholding changes only keys the fingerprint allow-list ignores, so a
+// session spawned with the port projected is not drained once the port is
+// withheld, nor when the managed Dolt later moves.
+func TestSessionBackendEnvWithholdingKeepsConfigFingerprint(t *testing.T) {
+	cityPath, _, rigs := mirroredManagedDoltCity(t)
+	setStaleSessionDoltPortEnv(t)
+	mirrorPath := filepath.Join(cityPath, ".beads", "dolt-server.port")
+	mirror, err := os.ReadFile(mirrorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(mirrorPath); err != nil {
+		t.Fatal(err)
+	}
+	projected := mustSessionBackendEnv(t, cityPath, "", rigs)
+	if err := os.WriteFile(mirrorPath, mirror, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withheld := mustSessionBackendEnv(t, cityPath, "", rigs)
+	if projected["GC_DOLT_PORT"] == "" || withheld["GC_DOLT_PORT"] != "" {
+		t.Fatalf("fixture: GC_DOLT_PORT projected %q, withheld %q; want a port then empty", projected["GC_DOLT_PORT"], withheld["GC_DOLT_PORT"])
+	}
+
+	session := func(env map[string]string) runtime.Config {
+		env = maps.Clone(env)
+		env["GC_CITY"] = cityPath
+		env["GC_TEMPLATE"] = "worker"
+		return runtime.Config{Command: "agent --serve", Env: env}
+	}
+	if got, want := runtime.CoreFingerprint(session(withheld)), runtime.CoreFingerprint(session(projected)); got != want {
+		t.Errorf("CoreFingerprint withheld = %s, projected = %s; withholding would drain the session", got, want)
+	}
+	if got, want := runtime.ConfigFingerprint(session(withheld)), runtime.ConfigFingerprint(session(projected)); got != want {
+		t.Errorf("ConfigFingerprint withheld = %s, projected = %s; withholding would drain the session", got, want)
 	}
 }
