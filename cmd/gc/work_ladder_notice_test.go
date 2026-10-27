@@ -1169,6 +1169,84 @@ func TestWorkLadderSettlesItsNoticeAfterMessageIsUnlisted(t *testing.T) {
 	}
 }
 
+// [daemon] work_ladder = "off" withdraws the ladder's open notices on the
+// pass that hands the seats back to the backstops, in the CAS that drops a
+// pending release and on a cell that holds none, so the lane types no ladder
+// reminder beside the backstops' nudges. A notice in flight keeps the cancel
+// as a request, and its mark until the lane decides it.
+func TestWorkLadderOffWithdrawsItsNotices(t *testing.T) {
+	marked := func(t *testing.T) (*ladderLaneCity, string, opjournal.Op) {
+		t.Helper()
+		lc := newLadderLaneCity(t, "message")
+		id := lc.startedClaim()
+		lc.at(0)
+		lc.at(halfPast(1))
+		return lc, id, lc.onlyOp()
+	}
+	off := func(lc *ladderLaneCity, d time.Duration) {
+		lc.env.Cfg.Daemon.WorkLadder = "off"
+		lc.at(d)
+	}
+	withdrawn := func(t *testing.T, lc *ladderLaneCity, id, op string) {
+		t.Helper()
+		if got := lc.op(op); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.By != ladderNoticePrincipal {
+			t.Fatalf("op %s %+v cancel %+v, want canceled by the ladder", got.Status, got.Outcome, got.Cancel)
+		}
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want the mark withdrawn: re-counted paused, no refusal", e)
+		}
+	}
+	t.Run("pending", func(t *testing.T) {
+		lc, id, op := marked(t)
+		off(lc, 2*time.Minute)
+		withdrawn(t, lc, id, op.ID)
+		if ops := lc.ladderOps(); len(ops) != 0 {
+			t.Fatalf("open ladder notices %+v with the ladder off", ops)
+		}
+	})
+	t.Run("with a pending release", func(t *testing.T) {
+		lc, id, op := marked(t)
+		key := workladder.ClaimKey{Store: lc.entry(id).Key.Store, Bead: lc.claim("being released")}
+		cell := lc.cell()
+		cell.Release = &workladder.ReleaseMark{Key: key, Gen: 7, At: lc.now}
+		lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(cell)})
+		off(lc, 2*time.Minute)
+		withdrawn(t, lc, id, op.ID)
+		if session.WorkLadderReleases(lc.row().Metadata[session.WorkLadderKey], key.Store, key.Bead) {
+			t.Fatal("the pending release outlived the ladder")
+		}
+	})
+	t.Run("never proposed", func(t *testing.T) {
+		lc := newLadderLaneCity(t, "message")
+		id := lc.startedClaim()
+		lc.at(0)
+		e := lc.entry(id)
+		e.Attempts, e.Last = 1, lc.now
+		e.Notice = workladder.NoticeMark{Op: "gc-op-neverproposed", At: lc.now}
+		lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{e}})})
+		off(lc, time.Minute)
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want the lost notice withdrawn, not refused", e)
+		}
+	})
+	t.Run("in flight", func(t *testing.T) {
+		lc, id, op := marked(t)
+		lc.startOp(op.ID)
+		off(lc, 2*time.Minute)
+		if got := lc.op(op.ID); got.Status != opjournal.StatusExecuting || got.Cancel.By != ladderNoticePrincipal {
+			t.Fatalf("op %s cancel %+v, want the cancel requested", got.Status, got.Cancel)
+		}
+		if e := lc.entry(id); e.Notice.Op != op.ID {
+			t.Fatalf("entry %+v, want the mark kept while the lane decides", e)
+		}
+		lc.closeOp(op.ID, opjournal.Outcome{Arm: opjournal.ArmCanceled})
+		lc.at(2*time.Minute + 30*time.Second)
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 {
+			t.Fatalf("entry %+v, want withdrawn on the lane's close", e)
+		}
+	})
+}
+
 // snapshotWaitStore makes the step's snapshot (List) read the seat's row as
 // holding an agent wait while the commit's fresh read (Get) does not: the
 // seat's snapshot decision nudges nothing, so no route is resolved, and the
@@ -1227,6 +1305,59 @@ func TestWorkLadderCommitReprovesAReleaseDecidedAfterANudgeHold(t *testing.T) {
 			lc.at(time.Minute)
 			if b, _ := lc.work.Get(stamped); b.Status != "in_progress" {
 				t.Fatalf("claim %s %q: released though current_claim_bead_id names it started; log:\n%s", stamped, b.Status, log.String())
+			}
+		})
+	}
+}
+
+// seatReadFailingStore is a snapshotWaitStore whose Get of the seat's row
+// fails while fail is set: a live read of the row that does not answer.
+type seatReadFailingStore struct {
+	*snapshotWaitStore
+	seat string
+	fail bool
+}
+
+func (s *seatReadFailingStore) Get(id string) (beads.Bead, error) {
+	if s.fail && id == s.seat {
+		return beads.Bead{}, errors.New("reading the row failed")
+	}
+	return s.snapshotWaitStore.Get(id)
+}
+
+// The held-gate withdraw cannot be undone, so the gate the pass's snapshot
+// holds is proved again on a live read of the row first: a hold the row no
+// longer carries (here an agent's wait that ended since the snapshot)
+// withdraws nothing and leaves the notice to the lane, and a read that does
+// not answer leaves the seat for the next pass.
+func TestWorkLadderReprovesItsGateBeforeWithdrawing(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		unreadable bool
+	}{{name: "hold ended"}, {name: "row unreadable", unreadable: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fs *seatReadFailingStore
+			lc := newLadderLaneCityOver(t, func(s laneTestStore) beads.Store {
+				fs = &seatReadFailingStore{snapshotWaitStore: &snapshotWaitStore{laneTestStore: s}}
+				return fs
+			}, "message")
+			fs.seat = lc.seat
+			id := lc.startedClaim()
+			lc.at(0)
+			lc.at(halfPast(1))
+			op := lc.onlyOp()
+			fs.on, fs.fail = true, tc.unreadable
+			var log strings.Builder
+			lc.lane.stderr = &log
+			lc.at(2 * time.Minute)
+			if got := lc.op(op.ID); got.Status != opjournal.StatusSubmitted || got.Cancel.Recorded() {
+				t.Fatalf("op %s cancel %+v, want it left to the lane; log:\n%s", got.Status, got.Cancel, log.String())
+			}
+			if e := lc.entry(id); e.Notice.Op != op.ID || e.Attempts != 1 || e.Paused != 0 {
+				t.Fatalf("entry %+v, want the mark pending", e)
+			}
+			if tc.unreadable && !strings.Contains(log.String(), "reading the row failed") {
+				t.Fatalf("the failed read went unreported; log:\n%s", log.String())
 			}
 		})
 	}

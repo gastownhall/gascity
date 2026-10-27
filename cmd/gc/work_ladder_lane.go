@@ -132,28 +132,50 @@ func ladderGoverns(row beads.Bead) bool {
 		strings.TrimSpace(row.Metadata["pool_managed"]) == "true" && strings.TrimSpace(row.Metadata["session_name"]) != ""
 }
 
-// clearLadderReleases drops the pending release from every governed row's
-// cell, by CAS, when the ladder is turned off: nothing will finish it, and
-// the hook refuses to hand out a claim a release names.
-func (l *externalReadsLane) clearLadderReleases(store beads.Store, raw []beads.Bead) {
-	front := sessionFrontDoor(store)
+// standDownLadder hands every governed seat back to the backstops when the
+// ladder is turned off. By one CAS on each cell it drops the pending release
+// (nothing will finish it, and the hook refuses to hand out a claim a
+// release names) and folds in its notices' fates (W5). Each notice still
+// pending is withdrawn first, as under a held gate, so the lane types no
+// ladder reminder beside the backstops' nudges; one in flight keeps the
+// cancel as a request, and its mark until a later pass reads its fate. The
+// cell's pacing is otherwise left as it was.
+func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Bead) {
+	p := &ladderPass{l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore)}
+	off := workladder.Gate{Held: true, Reason: "work_ladder_off"}
 	for _, row := range raw {
 		if !ladderGoverns(row) {
 			continue
 		}
-		if r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey]); err != nil || r.Release == nil {
+		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
+		if err != nil {
 			continue
 		}
-		_, err := front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
+		outs := p.noticeOutcomes(row, r, off)
+		if r.Release == nil && len(outs) == 0 {
+			continue
+		}
+		var settled []ladderSettled
+		wrote, err := p.front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
 			r, err := workladder.DecodeLadder(resp.Metadata[session.WorkLadderKey])
-			if err != nil || r.Release == nil {
+			if err != nil {
+				return session.RowPatch{}, false
+			}
+			r, settled = foldLadderNotices(r, outs)
+			if r.Release == nil && len(settled) == 0 {
 				return session.RowPatch{}, false
 			}
 			r.Release = nil
 			return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(r)}}, true
 		})
 		if err != nil {
-			fmt.Fprintf(l.stderr, "work-ladder: clearing %s's pending release: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(l.stderr, "work-ladder: standing down %s's cell: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if wrote {
+			for _, s := range settled {
+				p.noticeSettled(row, s)
+			}
 		}
 	}
 }
@@ -311,8 +333,14 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 		targets = p.carryLadderWork(row, targets, prev)
 	}
 	info, live := sessionInfoFromBead(row), p.observeRuntime(row)
+	gate, err := p.withdrawGate(row, prev, ladderGate(info, row.Metadata, p.now))
+	if err != nil {
+		// Its snapshot holds it, so no nudge or recycle was due this pass.
+		fmt.Fprintf(p.l.stderr, "work-ladder: %s: re-reading its gate before withdrawing its notice: %v; the seat waits for the next pass\n", row.ID, err) //nolint:errcheck // best-effort stderr
+		return
+	}
 	// W5: the marks' fates, read live, folded in before deciding.
-	outs := p.noticeOutcomes(row, prev, ladderGate(info, row.Metadata, p.now))
+	outs := p.noticeOutcomes(row, prev, gate)
 	folded, _ := foldLadderNotices(prev, outs)
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision

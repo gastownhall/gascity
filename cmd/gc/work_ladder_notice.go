@@ -34,11 +34,15 @@ package main
 // events follow the fold: work.nudged means the notice reached the seat.
 //
 // A held ladder gate (ladderGate: a stop request, a drain, a kill, a start,
-// a restart, a content or operator hold, a wait, a heartbeat, a quarantine)
+// a restart, a content or operator hold, a wait, a heartbeat, a quarantine),
+// proved again on a live read of the row since a cancel cannot be undone,
 // withdraws the seat's pending notice, and a decision that drops a marked
 // entry (its work ended, or its episode did) withdraws its op: a notice
 // proposed before such a hold never lands after it (WL5), beyond one already
 // in flight, which keeps the cancel as a request for the lane to decide.
+// Turning the ladder off ([daemon] work_ladder = "off") withdraws every
+// seat's pending notice the same way (standDownLadder), so none lands beside
+// the backstops' nudges.
 
 import (
 	"errors"
@@ -289,6 +293,22 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 		return settled(workladder.NoticeRefused, "notice past its start_by undelivered")
 	}
 	return unsettled("waiting for a boundary")
+}
+
+// withdrawGate is the gate the held-gate withdraw (noticeOutcomes) acts on:
+// gate, the snapshot's, proved again on a live read of row when it holds a
+// seat whose cell prev carries a mark, since a withdraw cannot be undone. A
+// hold the row no longer carries withdraws nothing. The error is a read that
+// did not answer.
+func (p *ladderPass) withdrawGate(row beads.Bead, prev workladder.Record, gate workladder.Gate) (workladder.Gate, error) {
+	if !gate.Held || !slices.ContainsFunc(prev.Entries, func(e workladder.Entry) bool { return !e.Notice.IsZero() }) {
+		return gate, nil
+	}
+	fresh, err := beads.HandlesFor(p.env.CityStore).Live.Get(row.ID)
+	if err != nil {
+		return workladder.Gate{}, err
+	}
+	return ladderGate(sessionInfoFromBead(fresh), fresh.Metadata, p.now), nil
 }
 
 // noticeOutcomes reads the fate of every mark prev carries, live. While gate
