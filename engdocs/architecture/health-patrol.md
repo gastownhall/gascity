@@ -444,6 +444,16 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
   tracking. In that case, idle detection silently does nothing (no
   false positives, but also no idle kills).
 
+- **A heartbeat outranks a quiet pane**: `gc runtime heartbeat` sets
+  `held_until` on the session bead, and while it is in the future neither
+  the idle timeout nor the execution-stalled backstop (the claim
+  nudge-then-drain escalation for a pool slot that holds a claim) acts on
+  the session. An adapter with a long silent turn should call the
+  heartbeat rather than fabricate pane output to keep `GetLastActivity()`
+  fresh. A hold that lapses with the session still quiet resumes the
+  escalation from its persisted attempt count; it does not restart the
+  grace window.
+
 - **Order dispatch goroutines are drained on controller exit**:
   Each due order launches a goroutine whose completion is tracked
   by an in-flight counter and channel signal. Controller shutdown

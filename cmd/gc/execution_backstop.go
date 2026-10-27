@@ -161,12 +161,12 @@ const (
 	// (v5.10x, ga-ba7k1f): the claimed bead's step started this incarnation,
 	// so once its nudges are spent, or it has none to send, the seat is held
 	// rather than drained.
-	executionHoldExecuting = "executing"
+	executionHoldExecuting     = "executing"
+	executionHoldSnapshotError = "snapshot_error"
 	// executionHoldHeartbeat names a seat that called `gc runtime heartbeat`:
 	// its held_until is still in the future, so a silent pane is a declared
 	// long operation rather than a stalled claim.
-	executionHoldHeartbeat     = "heartbeat"
-	executionHoldSnapshotError = "snapshot_error"
+	executionHoldHeartbeat = "heartbeat"
 )
 
 // executionClaimNudgeLabel names the execution backstop in its log lines and
@@ -341,9 +341,10 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 
 // resolve reports an outstanding stall only when all of it holds: the session
 // holds exactly ONE in-progress claim under a current identity, and the runtime
-// says the session has been quiet for at least the grace window (quietHold). A
-// seat with execution evidence is held as executing instead whenever the
-// engine's next action would escalate it (escalatesNext); its nudges go out.
+// says the session has been quiet for at least the grace window (quietHold)
+// with no heartbeat hold in force (held_until). A seat with execution evidence
+// is held as executing instead whenever the engine's next action would
+// escalate it (escalatesNext); its nudges go out.
 //
 // Exactly one, because the pacing state names a single bead: a session juggling
 // several claims is demonstrably doing something, and picking one of them to
@@ -375,6 +376,15 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	if !started && (workStartedAtGen(s, claim) ||
 		executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID)) {
 		started = p.markStarted(&s, claim.BeadID)
+	}
+	// A seat that called `gc runtime heartbeat` declared a long silent
+	// operation, the same declaration that defers the reconciler's idle and
+	// max-age timers. Like every hold here it skips the tick and leaves the
+	// pacing state alone, so a hold that lapses with the seat still quiet
+	// resumes the escalation instead of restarting the grace window.
+	if sessionpkg.DecodeDisposition(s.Metadata).HeartbeatHeld(p.now) {
+		p.observeHold(p.store, &s, executionHoldHeartbeat, p.stdout)
+		return backstopTarget{}, backstopResolutionHold
 	}
 	if hold := p.quietHold(s, sessName); hold != "" {
 		p.observeHold(p.store, &s, hold, p.stdout)
