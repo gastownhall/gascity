@@ -2989,11 +2989,13 @@ backup_restore_source_usable() {
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load, preserves each corrupt store under
 # $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
-# from its registered local backup (#3176): bd's "default" backup, else the
-# legacy <db>-backup (see backup_candidates_for_recovery). Fail-closed: when any corrupt
-# database has no usable backup or the restore fails, its store is moved back
-# so the server cannot come up silently missing a database, and the function
-# returns 1. Returns 0 only when at least one database was restored and none
+# from its registered local backup (#3176): bd's "default" backup when it is
+# registered, otherwise the legacy <db>-backup (see
+# backup_remote_url_for_recovery). Fail-closed: when any corrupt database's
+# selected backup is unusable or the restore fails, its store is moved back
+# so the server cannot come up silently missing a database, the refusal lists
+# every registered candidate backup and the manual restore command, and the
+# function returns 1. Returns 0 only when at least one database was restored and none
 # were left unrecoverable. Everything is logged loudly — restored copies are
 # missing all writes since the last backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
@@ -3010,8 +3012,10 @@ attempt_journal_corruption_recovery() {
         backup_name="${selected%%	*}"
         url="${selected#*	}"
         if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
-            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (remote url: ${url:-none})" >&2
-            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
+            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (checked backups in order: default, ${db}-backup; selected: ${backup_name:-none}, url: ${url:-none})" >&2
+            backup_candidates_for_recovery "$db" "$db_dir" \
+                | sed "s/^\([^	]*\)	\(.*\)\$/gc-beads-bd:   registered backup '\1' url '\2'/" >&2
+            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then from $DATA_DIR run: dolt backup restore '${url:-<url>}' $db" >&2
             return 1
         fi
         mkdir -p "$aside_root" || return 1

@@ -532,21 +532,58 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 				return `{"backups":{"prod-backup":{"url":"aws://bucket/prod"}}}`
 			},
 		},
+		{
+			name: "non-file bd default backup",
+			repoState: func(journalRecoveryEnv) string {
+				return `{"backups":{"default":{"name":"default","url":"aws://bucket/prod","fetch_specs":[],"params":{}}}}`
+			},
+		},
+		{
+			name:      "bd default backup dir empty",
+			repoState: func(env journalRecoveryEnv) string { return bdDefaultRepoState(env.backupDir) },
+		},
+		{
+			// Precedence is final: the legacy entry stopped syncing when the
+			// backup dog moved to `bd backup init`, so it is never a silent
+			// fallback for an unusable default backup.
+			name: "bd default backup dir empty with usable legacy backup",
+			repoState: func(env journalRecoveryEnv) string {
+				legacyDir := filepath.Join(env.cityDir, "backups", "prod-legacy")
+				if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+					t.Fatalf("mkdir legacy backup: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(legacyDir, "manifest"), []byte("backup"), 0o644); err != nil {
+					t.Fatalf("seed legacy backup: %v", err)
+				}
+				return `{"backups":{` +
+					`"prod-backup":{"name":"prod-backup","url":"file://` + legacyDir + `","fetch_specs":[],"params":{}},` +
+					`"default":{"name":"default","url":"file://` + env.backupDir + `","fetch_specs":[],"params":{}}}}`
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			env := setupJournalRecoveryEnv(t)
 			env.addDatabase(t, "prod", true, tc.repoState(env))
+			callsFile := filepath.Join(env.cityDir, "restore-calls")
 
-			out, err := env.run(t, journalRecoveryHarness(t))
+			out, err := env.run(t, journalRecoveryHarness(t), "FAKE_RESTORE_CALLS="+callsFile)
 			if err == nil {
 				t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
 			}
 			if !strings.Contains(out, "NOT auto-recovering 'prod'") {
 				t.Fatalf("output missing loud refusal:\n%s", out)
 			}
+			for _, want := range []string{"default", "prod-backup", "dolt backup restore"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("refusal must name the checked backups and the manual restore command; missing %q:\n%s", want, out)
+				}
+			}
 			if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "original-marker")); statErr != nil {
 				t.Fatalf("prod store must stay in place when not recoverable: %v", statErr)
+			}
+			if calls, readErr := os.ReadFile(callsFile); readErr == nil {
+				t.Fatalf("no restore may run without a usable selected backup, got:\n%s", calls)
 			}
 		})
 	}
