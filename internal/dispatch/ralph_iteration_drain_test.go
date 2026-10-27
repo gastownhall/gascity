@@ -228,6 +228,35 @@ func requireOneIteration(t *testing.T, ledger []ledgerBead, n int) {
 	}
 }
 
+// TestCompiledRalphIterationDrainRuntimeSpawnedIteration pins AC-6: an
+// iteration the control spawned at runtime drains the same way as the
+// compile-time first one.
+func TestCompiledRalphIterationDrainRuntimeSpawnedIteration(t *testing.T) {
+	t.Parallel()
+	for _, st := range []ralphDrainStore{memDrainStore(), sqliteDrainStore()} {
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, st.open(t), compiledRalphDrainFormula)
+			fx.finish(t, "loop.iteration.1.alpha", workerPass)
+			fx.finish(t, "loop.iteration.1.beta", workerPass)
+			fx.serve(t)
+			requireOneIteration(t, fx.ledger(t), 2)
+
+			beta := fx.claim(t, "loop.iteration.2.beta")
+			fx.finish(t, "loop.iteration.2.alpha", workerFailure(beadmeta.FailureClassTransient, "rate_limited"))
+			fx.serve(t)
+			requireNoIteration(t, fx.ledger(t), 3)
+			if control := ledgerBeadByRefSuffix(t, fx.ledger(t), ".loop"); !slices.Contains(control.Blocks, "blocks:"+beta.ID) {
+				t.Errorf("ralph control deps = %v, want a blocks edge to %s", control.Blocks, beta.ID)
+			}
+
+			fx.finish(t, "loop.iteration.2.beta", workerPass)
+			fx.serve(t)
+			requireOneIteration(t, fx.ledger(t), 3)
+		})
+	}
+}
+
 // compiledRalphDrainFanoutFormula gives alpha an on_complete fanout. A failed
 // source closes its fanout failed, and that exempt control settles the
 // iteration with a forced body close, which no store's close policy refuses.
