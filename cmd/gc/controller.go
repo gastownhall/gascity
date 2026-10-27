@@ -517,6 +517,7 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 		return
 	}
 	req.replyCh = make(chan convergenceReply, 1)
+	req.cancelled = &atomic.Bool{}
 	// Send to event loop with a timeout to prevent hanging if the loop is stuck.
 	select {
 	case ch <- req:
@@ -529,6 +530,11 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	case reply := <-req.replyCh:
 		writeJSONLine(conn, reply)
 	case <-time.After(60 * time.Second):
+		// Mark the request abandoned so the event loop skips it instead of
+		// running it behind this caller's back once its tick ends — the
+		// enqueued copy shares this pointer, so the Store is visible to
+		// whichever goroutine dequeues it (gastownhall/gascity#8387).
+		req.cancelled.Store(true)
 		writeJSONLine(conn, convergenceReply{Error: "controller did not respond in time"})
 	}
 }
