@@ -530,9 +530,11 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackDefersOnUnknownAttribut
 // with a conflicting generation), but the runtime is the row's own earlier
 // or later incarnation, never another session's, so the rollback may
 // neither stop it (a bead-scoped pool row's teardown stops the runtime by
-// name) nor close the row over it. While it lives the row is held — open,
-// claimed, runtime untouched — said once as a standing condition and
-// re-decided every tick, like the unknown-attribution hold above.
+// name) nor close the row over it (configured named and manual rows, whose
+// rollback closes the row and leaves the incarnation orphaned under the
+// name). While it lives the row is held — open, claimed, runtime untouched
+// — said once as a standing condition and re-decided every tick, like the
+// unknown-attribution hold above.
 func TestReconcileSessionBeads_AlivePendingCreateRollbackDefersOnLiveIncarnation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -541,6 +543,8 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackDefersOnLiveIncarnation
 	}{
 		{name: "bead-scoped pool row, earlier epoch", rowKind: "pool", epoch: "1"},
 		{name: "bead-scoped pool row, later epoch", rowKind: "pool", epoch: "3"},
+		{name: "configured named row, earlier epoch", rowKind: "named", epoch: "1"},
+		{name: "manual row, later epoch", rowKind: "manual", epoch: "3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newReconcilerTestEnv(t)
