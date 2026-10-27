@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -274,4 +277,147 @@ func TestInterruptedCloseKeepsTheInterruptedCloseGate(t *testing.T) {
 			t.Fatalf("work = status %q assignee %q, want open and unassigned", gotWork.Status, gotWork.Assignee)
 		}
 	})
+}
+
+// interruptedCloseTick runs one traced reconcile pass over the env's open
+// session beads with sp as the provider.
+func (e *reconcilerTestEnv) interruptedCloseTick(t *testing.T, sp runtime.Provider, storeQueryPartial bool, opts ...startExecutionOption) *sessionReconcilerTraceCycle {
+	t.Helper()
+	sessions, err := loadSessionBeads(e.store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	trace := newPoolDesiredStateTestTrace("worker")
+	reconcileSessionBeadsTraced(
+		context.Background(), e.city, sessions, e.desiredState, configuredSessionNames(e.cfg, "", e.store), e.cfg, sp,
+		e.store, nil, nil, nil, nil, e.dt, map[string]int{}, storeQueryPartial, nil, "",
+		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, trace,
+		append(append([]startExecutionOption{}, e.startOptions...), opts...)...,
+	)
+	return trace
+}
+
+// unknownStateEventsFor returns rec's session.unknown_state events for id.
+func unknownStateEventsFor(t *testing.T, rec *capturingRecorder, id string) []api.SessionUnknownStatePayload {
+	t.Helper()
+	var out []api.SessionUnknownStatePayload
+	for _, e := range rec.unknownStateEvents() {
+		if e.Subject != id {
+			continue
+		}
+		var payload api.SessionUnknownStatePayload
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatalf("decoding session.unknown_state payload: %v", err)
+		}
+		out = append(out, payload)
+	}
+	return out
+}
+
+// providerStops counts the Stop calls the fake provider received.
+func providerStops(sp *runtime.Fake) int {
+	n := 0
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Stop" {
+			n++
+		}
+	}
+	return n
+}
+
+// Every unrecognized state other than this binary's interrupted close codes
+// keeps the notify-only skip: the row is never closed or otherwise written
+// beyond the unknown-state markers, and the diagnostic still fires on first
+// sight and escalates once past the threshold.
+func TestInterruptedCloseLeavesUnrecognizedStatesToTheSkip(t *testing.T) {
+	cases := []struct {
+		name  string
+		state string
+		close bool
+		extra map[string]string
+	}{
+		{name: "archived", state: "archived"},
+		{name: "draining", state: "draining"},
+		{name: "newer_binary_state", state: "hibernating"},
+		{name: "padded_close_code", state: " duplicate", close: true},
+		{name: "retire_state_reason", state: "duplicate-repair", close: true},
+		{name: "passthrough_on_named_pool_row", state: "idle-timeout", close: true, extra: map[string]string{
+			"sleep_reason":          "idle-timeout",
+			"pool_managed":          "true",
+			namedSessionMetadataKey: "true",
+		}},
+		{name: "passthrough_on_non_pool_row", state: "idle-timeout", close: true, extra: map[string]string{
+			"sleep_reason": "idle-timeout",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			rec := &capturingRecorder{}
+			env.rec = rec
+			b := env.createSessionBead("worker-held", "worker")
+			patch := map[string]string{"state": tc.state}
+			if tc.close {
+				patch = map[string]string(sessionpkg.ClosePatch(env.clk.Now().Add(-time.Hour), tc.state))
+			}
+			for k, v := range tc.extra {
+				patch[k] = v
+			}
+			if err := env.store.SetMetadataBatch(b.ID, patch); err != nil {
+				t.Fatalf("seed %q: %v", tc.state, err)
+			}
+			before, err := env.store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("reload seed: %v", err)
+			}
+
+			for tick := 0; tick < 3; tick++ {
+				trace := env.interruptedCloseTick(t, env.sp, false)
+				skipped := false
+				for _, r := range trace.records {
+					if r.SessionName == "worker-held" && r.ReasonCode == TraceReasonUnknownStateSkipped {
+						skipped = true
+					}
+				}
+				if !skipped {
+					t.Fatalf("tick %d: no %s decision for %q; records: %+v", tick, TraceReasonUnknownStateSkipped, tc.state, trace.records)
+				}
+				if tick == 0 {
+					env.clk.Advance(unknownStateEscalationAge + time.Minute)
+				}
+			}
+
+			got, err := env.store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if got.Status == "closed" {
+				t.Fatalf("unrecognized state %q was closed; only this binary's interrupted close codes are finished", tc.state)
+			}
+			markers := map[string]bool{unknownStateFirstSeenKey: true, unknownStateValueKey: true, unknownStateEscalatedKey: true}
+			for k, v := range got.Metadata {
+				if markers[k] {
+					continue
+				}
+				if before.Metadata[k] != v {
+					t.Errorf("metadata %q = %q, want %q unchanged: the skip writes only its markers", k, v, before.Metadata[k])
+				}
+			}
+			for k := range before.Metadata {
+				if _, ok := got.Metadata[k]; !ok {
+					t.Errorf("metadata %q removed, want unchanged", k)
+				}
+			}
+			if got.Metadata[unknownStateEscalatedKey] == "" {
+				t.Errorf("unknown-state escalation marker missing after %s unrecognized", unknownStateEscalationAge+time.Minute)
+			}
+			events := unknownStateEventsFor(t, rec, b.ID)
+			if len(events) != 2 || events[0].Escalated || !events[1].Escalated {
+				t.Fatalf("session.unknown_state events = %+v, want first sight then one escalation", events)
+			}
+			if n := providerStops(env.sp); n != 0 {
+				t.Fatalf("provider Stop calls = %d, want 0", n)
+			}
+		})
+	}
 }
