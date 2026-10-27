@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -739,6 +740,64 @@ func stampLiveIncarnation(t *testing.T, sp *runtime.Fake, name, sessionID, epoch
 		if err := sp.SetMeta(name, key, value); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestReconcileSessionBeads_LiveIncarnationHoldSettlesAndReleasesWork pins
+// the far side of the #2081 hold: while the row is held its work claim is
+// live (the orphan sweep keeps it), and once the incarnation exits the
+// ordinary lease-expired rollback closes the row and the sweep releases its
+// assigned work — the hold defers the rollback, it never wedges the work.
+func TestReconcileSessionBeads_LiveIncarnationHoldSettlesAndReleasesWork(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	name := "worker-" + session.ID
+	leasedAt := env.clk.Now().Add(-30 * time.Minute)
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name":              name,
+		"state":                     "creating",
+		"generation":                "2",
+		"instance_token":            "tok-row",
+		poolManagedMetadataKey:      boolMetadata(true),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAtNow(leasedAt),
+		"last_woke_at":              leasedAt.UTC().Format(time.RFC3339),
+	})
+	env.addDesired(name, "worker", true)
+	stampLiveIncarnation(t, env.sp, name, session.ID, "1")
+	work := createWork(t, env.store, "in_progress", session.ID, map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	assigned := []beads.Bead{work}
+	sweep := func() beads.Bead {
+		releaseOrphanedPoolAssignments(env.store, beads.SessionStore{Store: env.store}, env.cfg, env.city, nil, assigned, nil, nil, nil, nil, nil, nil)
+		got, err := env.store.Get(work.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	// Held: the row stays open with its claim, and its work claim stays live.
+	reconcileTraced(env, []beads.Bead{session}, newPoolDesiredStateTestTrace("worker"))
+	if got, _ := env.store.Get(session.ID); got.Status == "closed" {
+		t.Fatal("fixture: held pending create rolled back")
+	}
+	if got := sweep(); got.Status != "in_progress" || got.Assignee != session.ID {
+		t.Fatalf("held row's work status=%q assignee=%q, want kept by the open row", got.Status, got.Assignee)
+	}
+
+	// The incarnation exits: the lease-expired rollback settles the row...
+	if err := env.sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	session, _ = env.store.Get(session.ID)
+	reconcileTraced(env, []beads.Bead{session}, newPoolDesiredStateTestTrace("worker"))
+	if got, _ := env.store.Get(session.ID); got.Status != "closed" {
+		t.Fatalf("settled row status=%q, want the lease-expired rollback to close it", got.Status)
+	}
+	// ...and the orphan sweep releases its work for the next seat.
+	if got := sweep(); got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("closed row's work status=%q assignee=%q, want released", got.Status, got.Assignee)
 	}
 }
 
