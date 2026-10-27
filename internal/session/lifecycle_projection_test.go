@@ -395,6 +395,20 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReconciledState: StateAsleep,
 		},
 		{
+			name: "dead active runtime with killed reason preserves resume identity",
+			input: LifecycleInput{
+				Status:            "open",
+				StoredState:       "active",
+				SessionKey:        "provider-conversation",
+				StartedConfigHash: "config",
+				SleepReason:       string(SleepReasonKilled),
+				Runtime:           RuntimeFacts{Observed: true, Alive: false},
+				Now:               now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status:             "open",
@@ -516,6 +530,47 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 				t.Fatalf("ResetContinuation = %v, want %v", view.ResetContinuation, tt.wantReset)
 			}
 		})
+	}
+}
+
+// TestHealState_KilledRuntimeExitPreservesResumeIdentity reproduces #7308: an
+// operator `gc session kill` writes sleep_reason=killed before the runtime
+// stops, so when the heal pass then observes the runtime dead it must treat
+// the death as deliberate and keep session_key/started_config_hash for the
+// next wake's resume — not reset the continuation as an unexpected death.
+func TestHealState_KilledRuntimeExitPreservesResumeIdentity(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	input := LifecycleInput{
+		Status:            "open",
+		StoredState:       string(StateAsleep),
+		SessionKey:        "resume-key",
+		StartedConfigHash: "config-hash",
+		SleepReason:       string(SleepReasonKilled),
+		Now:               now,
+	}
+
+	// Heal alive: the runtime answers and the row reconciles awake.
+	alive := input
+	alive.Runtime = RuntimeFacts{Observed: true, Alive: true}
+	aliveView := ProjectLifecycle(alive)
+	if aliveView.ReconciledState != StateAwake {
+		t.Fatalf("alive heal: ReconciledState = %q, want %q", aliveView.ReconciledState, StateAwake)
+	}
+	if aliveView.ResetContinuation {
+		t.Fatal("alive heal: ResetContinuation = true, want false")
+	}
+
+	// Heal dead: the runtime is gone. The killed reason must keep the resume
+	// identity, exactly like drained or city-stop.
+	dead := input
+	dead.StoredState = string(aliveView.ReconciledState)
+	dead.Runtime = RuntimeFacts{Observed: true, Alive: false}
+	deadView := ProjectLifecycle(dead)
+	if deadView.ReconciledState != StateAsleep {
+		t.Fatalf("dead heal: ReconciledState = %q, want %q", deadView.ReconciledState, StateAsleep)
+	}
+	if deadView.ResetContinuation {
+		t.Fatal("dead heal: ResetContinuation = true, want false — a killed session must keep session_key/started_config_hash")
 	}
 }
 

@@ -22,6 +22,7 @@ func TestSleepReasonConstantValues(t *testing.T) {
 		SleepReasonQuarantine:            "quarantine",
 		SleepReasonContextChurn:          "context-churn",
 		SleepReasonMaxSessionAge:         "max-session-age",
+		SleepReasonKilled:                "killed",
 	}
 	for reason, str := range want {
 		if string(reason) != str {
@@ -57,6 +58,19 @@ func TestSleepReasonListDivergence(t *testing.T) {
 	}
 	if !resetSuppressed(t, SleepReasonRuntimeMissing) {
 		t.Error("runtime-missing must suppress continuation reset")
+	}
+}
+
+// TestSleepReasonKilledIsDeliberateAndKeepsContinuation pins #7308: an
+// operator `gc session kill` is a deliberate stop like drained or city-stop,
+// so killed sits in BOTH lists — the death accrues no churn and the heal
+// keeps session_key/started_config_hash for the resume.
+func TestSleepReasonKilledIsDeliberateAndKeepsContinuation(t *testing.T) {
+	if !IsDeliberateSleepReason(string(SleepReasonKilled)) {
+		t.Error("killed must be a deliberate sleep reason")
+	}
+	if !resetSuppressed(t, SleepReasonKilled) {
+		t.Error("killed must suppress continuation reset")
 	}
 }
 
