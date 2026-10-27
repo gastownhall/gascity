@@ -2008,6 +2008,7 @@ go_test(
         "session_reconciler_fresh_cycle_selfclaim_test.go",
         "session_reconciler_idle_probe_named_test.go",
         "session_reconciler_inc003_test.go",
+        "session_reconciler_interrupted_close_census_test.go",
         "session_reconciler_interrupted_close_test.go",
         "session_reconciler_killed_seat_test.go",
         "session_reconciler_killed_stale_heal_test.go",
