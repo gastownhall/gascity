@@ -130,7 +130,7 @@ func (e *interruptedCloseEnv) halfClosedSeat(t *testing.T, state string, extra m
 // tracedTick runs one traced reconcile pass over sessions against store and
 // provider sp (either may wrap the env's own, to inject a liveness failure),
 // with the template armed for detail so decisions land on the cycle.
-func (e *interruptedCloseEnv) tracedTick(t *testing.T, sessions []beads.Bead, store beads.Store, sp runtime.Provider) (*SessionReconcilerTraceCycle, *events.Fake) {
+func (e *interruptedCloseEnv) tracedTick(t *testing.T, sessions []beads.Bead, store beads.Store, sp runtime.Provider, storeQueryPartial bool, startOpts ...startExecutionOption) (*SessionReconcilerTraceCycle, *events.Fake) {
 	t.Helper()
 	tracer := newSessionReconcilerTracer(e.cityDir, e.cityName, io.Discard)
 	armNow := e.clk.Now()
@@ -154,8 +154,9 @@ func (e *interruptedCloseEnv) tracedTick(t *testing.T, sessions []beads.Bead, st
 	rec := events.NewFake()
 	reconcileSessionBeadsTraced(
 		context.Background(), e.cityDir, sessions, nil, map[string]bool{interruptedCloseTemplate: true},
-		e.cfg, sp, store, nil, nil, nil, nil, e.dt, nil, false, nil, e.cityName,
+		e.cfg, sp, store, nil, nil, nil, nil, e.dt, nil, storeQueryPartial, nil, e.cityName,
 		nil, e.clk, rec, 0, 0, io.Discard, e.stderr, cycle,
+		startOpts...,
 	)
 	if err := tracer.Close(); err != nil {
 		t.Fatalf("tracer close: %v", err)
@@ -215,7 +216,7 @@ func TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime(
 			t.Fatalf("start runtime under %q: %v", name, err)
 		}
 
-		cycle, rec := env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp)
+		cycle, rec := env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp, false)
 
 		got, err := env.store.Get(zombie.ID)
 		if err != nil {
@@ -250,7 +251,7 @@ func TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime(
 		// tmux blip produces at runtime.
 		sp := &startUnavailableLivenessProvider{Fake: env.sp}
 
-		cycle, rec := env.tracedTick(t, []beads.Bead{zombie}, env.store, sp)
+		cycle, rec := env.tracedTick(t, []beads.Bead{zombie}, env.store, sp, false)
 
 		got, err := env.store.Get(zombie.ID)
 		if err != nil {
@@ -276,6 +277,63 @@ func TestReconcileSessionBeads_InterruptedCloseRefusesLiveOrUnobservableRuntime(
 			t.Fatalf("runtime under %q stopped despite liveness error: stop_calls=%d", name, env.sp.CountCalls("Stop", name))
 		}
 	})
+}
+
+// TestReconcileSessionBeads_InterruptedCloseDefersOnPartialObservation is the
+// AC-4 guard: a tick whose observation is partial (storeQueryPartial) or whose
+// closes are deferred on the boot reconcile does not finish an interrupted
+// close — it stays open, records skipped with both flags, and the next
+// complete non-boot tick closes it.
+func TestReconcileSessionBeads_InterruptedCloseDefersOnPartialObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		partial     bool
+		startOpt    startExecutionOption
+		wantPartial bool
+		wantDefer   bool
+	}{
+		{name: "store query partial", partial: true, wantPartial: true, wantDefer: false},
+		{name: "defer session closes on boot", startOpt: withDeferSessionClosesOnBoot(), wantPartial: false, wantDefer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newInterruptedCloseEnv(t)
+			zombie := env.halfClosedSeat(t, "stale-session", nil)
+
+			var cycle *SessionReconcilerTraceCycle
+			if tc.startOpt != nil {
+				cycle, _ = env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp, tc.partial, tc.startOpt)
+			} else {
+				cycle, _ = env.tracedTick(t, []beads.Bead{zombie}, env.store, env.sp, tc.partial)
+			}
+
+			got, err := env.store.Get(zombie.ID)
+			if err != nil {
+				t.Fatalf("reload zombie: %v", err)
+			}
+			if got.Status != "open" {
+				t.Fatalf("half-closed seat closed on a partial/deferred tick: status=%q, want open", got.Status)
+			}
+			decisions := finishInterruptedCloseDecisions(cycle)
+			if len(decisions) != 1 || decisions[0].OutcomeCode != TraceOutcomeSkipped {
+				t.Fatalf("finisher decisions = %+v, want one skipped", decisions)
+			}
+			fields := decisions[0].Fields
+			if fields["store_query_partial"] != tc.wantPartial || fields["defer_session_closes_on_boot"] != tc.wantDefer {
+				t.Fatalf("skipped decision fields = %#v, want store_query_partial=%v defer_session_closes_on_boot=%v",
+					fields, tc.wantPartial, tc.wantDefer)
+			}
+
+			// The next complete non-boot tick finishes the close.
+			env.tick(t)
+			closed, err := env.store.Get(zombie.ID)
+			if err != nil {
+				t.Fatalf("reload zombie after complete tick: %v", err)
+			}
+			if closed.Status != "closed" || closed.Metadata["state"] != "stale-session" {
+				t.Fatalf("complete tick did not finish the close: status=%q state=%q", closed.Status, closed.Metadata["state"])
+			}
+		})
+	}
 }
 
 // TestReconcileSessionBeads_InterruptedCloseFreesAlwaysNamedSession is the
