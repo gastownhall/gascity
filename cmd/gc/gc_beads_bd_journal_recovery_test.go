@@ -459,6 +459,59 @@ func TestJournalRecoveryRestoresFromBdDefaultBackup(t *testing.T) {
 	}
 }
 
+// TestJournalRecoveryRestoresFromLegacyStringBackup pins the other legacy
+// shape: pre-#6751 writers registered <db>-backup as a plain string URL, and
+// a corrupt database whose only registered backup is that entry must still
+// restore from it, with the notice naming the entry and its URL. The object
+// form of the same entry is pinned by
+// TestJournalRecoveryRestoresCorruptDBFromLocalBackup.
+func TestJournalRecoveryRestoresFromLegacyStringBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	for _, tc := range []struct {
+		name   string
+		maskJQ bool
+	}{
+		{name: "sed fallback", maskJQ: true},
+		{name: "jq", maskJQ: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.maskJQ {
+				if _, err := exec.LookPath("jq"); err != nil {
+					t.Skip("jq not available; skipping jq-path test")
+				}
+			}
+			env := setupJournalRecoveryEnv(t)
+			if err := os.WriteFile(filepath.Join(env.backupDir, "manifest"), []byte("backup"), 0o644); err != nil {
+				t.Fatalf("seed backup content: %v", err)
+			}
+			restoreCalls := filepath.Join(env.cityDir, "restore-calls.log")
+			repoState := `{"head":"refs/heads/main","backups":{"prod-backup":"file://` + env.backupDir + `"}}`
+			env.addDatabase(t, "prod", true, repoState)
+
+			out, err := env.run(t, journalRecoveryHarness(t, tc.maskJQ), "FAKE_RESTORE_CALLS="+restoreCalls)
+			if err != nil {
+				t.Fatalf("recovery failed: %v\n%s", err, out)
+			}
+			wantURL := "file://" + env.backupDir
+			if !strings.Contains(out, "RESTORED 'prod' from backup 'prod-backup' at "+wantURL) {
+				t.Fatalf("restore notice must name the legacy backup and its URL:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(env.dataDir, "prod", "restored-marker")); err != nil {
+				t.Fatalf("prod was not restored from the legacy backup: %v\n%s", err, out)
+			}
+			calls, err := os.ReadFile(restoreCalls)
+			if err != nil {
+				t.Fatalf("read restore calls: %v", err)
+			}
+			if lines := strings.Fields(strings.TrimSpace(string(calls))); len(lines) != 1 || lines[0] != wantURL {
+				t.Fatalf("restore calls = %v, want exactly one restore from %s", lines, wantURL)
+			}
+		})
+	}
+}
+
 func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
