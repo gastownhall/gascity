@@ -868,7 +868,9 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
+			return env, nil
 		}
+		withholdMirroredManagedDoltPort(env, cityPath, cityPath)
 		return env, nil
 	}
 
