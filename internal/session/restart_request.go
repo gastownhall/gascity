@@ -3,6 +3,8 @@ package session
 import (
 	"errors"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ErrStaleRestartRequest reports that the session row records another
@@ -36,6 +38,15 @@ const restartRequestAttempts = 5
 // carries both keys is not written again. The caller's generation is not
 // compared: every start mints a new token, and a rekey moves only the token.
 //
+// A row that records another token still records the request when the live
+// runtime under the row's session name carries instanceToken: the caller
+// runs in that runtime, which is the row's current one (a legacy warm reuse
+// mints in PreWake and keeps the running pane). The runtime is read after
+// the row, inside the decision, so a restart after the deciding read loses
+// the swap and the re-decide reads its successor's token. A failed read is
+// no proof. On a worker site the guard refuses runtime metadata, so only the
+// row's token proves the incarnation there.
+//
 // instanceToken is a capability: it is never logged or printed.
 func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
 	instanceToken = strings.TrimSpace(instanceToken)
@@ -46,7 +57,7 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
 		var refusal error
 		due := false
 		written, err := m.PersistedStore().UpdateMetadataFenced(id, restartRequestAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
-			patch, decideErr := decideRestartRequest(info, instanceToken)
+			patch, decideErr := decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
 			refusal, due = decideErr, len(patch) > 0
 			return patch
 		})
@@ -63,14 +74,15 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string) error {
 }
 
 // decideRestartRequest is the fence's decision on one fresh read of the row:
-// a closed row refuses with ErrSessionClosed, a row whose instance_token is
-// not instanceToken refuses with ErrStaleRestartRequest, a row that already
-// carries both keys needs no patch, and any other row gets both keys.
-func decideRestartRequest(info Info, instanceToken string) (MetadataPatch, error) {
+// a closed row refuses with ErrSessionClosed; a row whose instance_token is
+// not instanceToken, and whose live runtime (runtimeCarries) does not carry
+// it either, refuses with ErrStaleRestartRequest; a row that already carries
+// both keys needs no patch; and any other row gets both keys.
+func decideRestartRequest(info Info, instanceToken string, runtimeCarries func(sessionName, instanceToken string) bool) (MetadataPatch, error) {
 	if info.Closed {
 		return nil, ErrSessionClosed
 	}
-	if strings.TrimSpace(info.InstanceToken) != instanceToken {
+	if strings.TrimSpace(info.InstanceToken) != instanceToken && !runtimeCarries(info.SessionName, instanceToken) {
 		return nil, ErrStaleRestartRequest
 	}
 	if info.RestartRequested == "true" && info.ContinuationResetPending == "true" {
@@ -80,4 +92,15 @@ func decideRestartRequest(info Info, instanceToken string) (MetadataPatch, error
 		"restart_requested":          "true",
 		"continuation_reset_pending": "true",
 	}, nil
+}
+
+// runtimeCarriesToken reports whether the live runtime under sessionName
+// carries instanceToken as its GC_INSTANCE_TOKEN. Any read error, a missing
+// runtime, or a manager without a provider proves nothing.
+func (m *Manager) runtimeCarriesToken(sessionName, instanceToken string) bool {
+	if m.sp == nil || strings.TrimSpace(sessionName) == "" {
+		return false
+	}
+	tok, err := runtime.MetaValue(m.sp.GetMeta(sessionName, runtime.InstanceTokenEnv))
+	return err == nil && strings.TrimSpace(tok) == instanceToken
 }

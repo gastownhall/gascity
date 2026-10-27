@@ -41,10 +41,10 @@ func testRowFirstRestart(verb, sessionName string, hint drainOps, stderr io.Writ
 }
 
 // fencedRecorder records through session.Manager.RequestFreshRestartFenced
-// on store, the write the worker boundary makes.
-func fencedRecorder(t *testing.T, store beads.Store, id string) func(string) error {
+// on store over sp, the write the worker boundary makes.
+func fencedRecorder(t *testing.T, store beads.Store, sp runtime.Provider, id string) func(string) error {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	return func(token string) error { return mgr.RequestFreshRestartFenced(id, token) }
 }
 
@@ -123,7 +123,7 @@ func TestRowFirstRestartFailedWriteExitsNonZeroWritesNoMeta(t *testing.T) {
 	}{
 		{"another incarnation", func(t *testing.T, _ explicitRestartFixture) {
 			t.Setenv("GC_INSTANCE_TOKEN", "tok-dead-incarnation")
-		}, "restart not recorded: session worker has restarted since this process started (its row records another incarnation); from outside the session, gc session reset worker restarts it"},
+		}, "restart not recorded: this process does not run in session worker's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); from outside the session, gc session reset worker restarts it"},
 		{"no instance token", func(t *testing.T, _ explicitRestartFixture) {
 			t.Setenv("GC_INSTANCE_TOKEN", "")
 		}, "restart not recorded: GC_INSTANCE_TOKEN is not set"},
@@ -244,7 +244,7 @@ func TestRowFirstRestartWritesTheRowBeforeTheHint(t *testing.T) {
 	}
 	hint := rowCheckingHint{fakeDrainOps: newFakeDrainOps(), t: t, store: store, id: b.ID}
 	restart := testRowFirstRestart("gc runtime request-restart", "worker", hint, nil)
-	restart.record = fencedRecorder(t, store, b.ID)
+	restart.record = fencedRecorder(t, store, runtime.NewFake(), b.ID)
 	if code := doRuntimeRequestRestart(restart, events.Discard, io.Discard); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
@@ -265,7 +265,8 @@ func (p *countingMetaProvider) SetMeta(name, key, value string) error {
 }
 
 // TestRowFirstRestartWorkerSiteSkipsMeta pins that a worker site writes no
-// runtime hint: the guard is never asked.
+// runtime hint: the request recorded on a worker site never calls the
+// provider's SetMeta, and both verbs record the row there end to end.
 func TestRowFirstRestartWorkerSiteSkipsMeta(t *testing.T) {
 	for _, v := range restartVerbs {
 		t.Run(v.name, func(t *testing.T) {
@@ -273,18 +274,24 @@ func TestRowFirstRestartWorkerSiteSkipsMeta(t *testing.T) {
 			t.Setenv("GC_ALIAS", "worker")
 			t.Setenv("GC_SESSION_NAME", "worker-1")
 			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
-			counting := &countingMetaProvider{Provider: guard.New()}
-			if hint := restartHintOps(cityDir, counting); hint != nil {
-				t.Fatalf("restartHintOps = %T on a worker site, want nil", hint)
+
+			// The composed request on a worker site: restartHintOps over a
+			// counting provider, then recordRestart.
+			counting := &countingMetaProvider{Provider: runtime.NewFake()}
+			restart := testRowFirstRestart(v.verb, "worker-1", restartHintOps(cityDir, counting), nil)
+			restart.cityPath = cityDir
+			if err := restart.recordRestart(); err != nil {
+				t.Fatalf("recordRestart: %v", err)
 			}
+			if counting.setMeta != 0 {
+				t.Fatalf("SetMeta calls = %d, want none on a worker site", counting.setMeta)
+			}
+
 			var stdout, stderr bytes.Buffer
 			if code := v.run(&stdout, &stderr); code != 0 {
 				t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 			}
 			assertRestartMarkerRecorded(t, localSessionBeads(t, cityDir))
-			if counting.setMeta != 0 {
-				t.Fatalf("SetMeta calls = %d, want none on a worker site", counting.setMeta)
-			}
 		})
 	}
 }
@@ -311,7 +318,7 @@ func TestRowFirstRestartRefusesWithoutToken(t *testing.T) {
 // reaches the controller's cache through the ledger event.
 func simRowFirstRestart(t *testing.T, s *sim, token string, hint drainOps) rowFirstRestart {
 	t.Helper()
-	write := fencedRecorder(t, s.legs[0].backing, "gc-1")
+	write := fencedRecorder(t, s.legs[0].backing, runtime.NewFake(), "gc-1")
 	restart := testRowFirstRestart("gc runtime request-restart", "s-gc-1", hint, nil)
 	restart.token = token
 	restart.record = func(token string) error {
@@ -390,12 +397,15 @@ func TestRowFirstRestartV2Matrix(t *testing.T) {
 }
 
 // TestRowFirstRestartLegacyMatrix drives the CLI's row-first request through
-// the legacy reconciler: locally (row and hint), with the hint failed, and on
-// a worker site, where the provider refuses the runtime flag as the exec
+// the legacy reconciler, whose drain ops read the runtime hint as the
+// controller's do: locally (row and hint), with the hint failed, after a warm
+// reuse (the row minted a new token in PreWake while the pane kept the
+// caller's, so the live runtime proves the caller's incarnation), and on a
+// worker site, where the provider refuses the runtime flag as the exec
 // runtime does. Legacy restarts from the row marker alone (condition 3,
 // option (a)); a late request from the dead incarnation is refused.
 func TestRowFirstRestartLegacyMatrix(t *testing.T) {
-	for _, site := range []string{"local", "local, hint failed", "worker site"} {
+	for _, site := range []string{"local", "local, hint failed", "local, warm reuse", "worker site"} {
 		t.Run(site, func(t *testing.T) {
 			env := newRestartRequestTestEnv(t)
 			env.cfg = &config.City{
@@ -424,6 +434,10 @@ func TestRowFirstRestartLegacyMatrix(t *testing.T) {
 			if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", row.ID); err != nil {
 				t.Fatalf("SetMeta: %v", err)
 			}
+			token := row.Metadata["instance_token"]
+			if err := env.sp.SetMeta(sessionName, runtime.InstanceTokenEnv, token); err != nil {
+				t.Fatalf("SetMeta: %v", err)
+			}
 			var hint drainOps
 			switch site {
 			case "local":
@@ -432,22 +446,32 @@ func TestRowFirstRestartLegacyMatrix(t *testing.T) {
 				failing := newFakeDrainOps()
 				failing.err = errors.New("pane gone")
 				hint = failing
+			case "local, warm reuse":
+				hint = newDrainOps(env.sp)
+				env.setSessionMetadata(&row, map[string]string{"generation": "2", "instance_token": "tok-warm-reuse-mint"})
 			case "worker site":
 				env.sp.GetMetaErrors[sessionName] = map[string]error{"GC_RESTART_REQUESTED": guard.ErrControllerOwnedRuntime}
 			}
-			token := row.Metadata["instance_token"]
 			restart := testRowFirstRestart("gc runtime request-restart", sessionName, hint, nil)
 			restart.token = token
-			restart.record = fencedRecorder(t, env.store, row.ID)
+			restart.record = fencedRecorder(t, env.store, env.sp, row.ID)
 			if code := doRuntimeRequestRestart(restart, events.Discard, io.Discard); code != 0 {
 				t.Fatalf("request-restart exit = %d, want 0", code)
 			}
+			if site == "local" && restartHintOf(t, env.sp, sessionName) == "" {
+				t.Fatal("GC_RESTART_REQUESTED unset; the local cell must also leave the hint")
+			}
+			if site == "local, hint failed" && restartHintOf(t, env.sp, sessionName) != "" {
+				t.Fatal("GC_RESTART_REQUESTED set; the hint-failed cell restarts from the row alone")
+			}
+			// The controller's drain ops read the runtime hint.
+			controllerOps := newDrainOps(env.sp)
 
 			got, err := env.store.Get(row.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			env.reconcile([]beads.Bead{got})
+			env.reconcileWithDrainOps([]beads.Bead{got}, controllerOps)
 			if env.sp.IsRunning(sessionName) {
 				t.Fatalf("session %q still running; legacy must restart on the row marker", sessionName)
 			}
@@ -458,7 +482,7 @@ func TestRowFirstRestartLegacyMatrix(t *testing.T) {
 			if got.Metadata["state"] != "asleep" || got.Metadata["session_key"] == "original-key" {
 				t.Fatalf("row %v, want the restart handoff applied", got.Metadata)
 			}
-			env.reconcile([]beads.Bead{got})
+			env.reconcileWithDrainOps([]beads.Bead{got}, controllerOps)
 			if !env.sp.IsRunning(sessionName) {
 				t.Fatalf("session %q not started again on the next tick", sessionName)
 			}
@@ -468,6 +492,11 @@ func TestRowFirstRestartLegacyMatrix(t *testing.T) {
 			}
 			if successor.Metadata["instance_token"] == token {
 				t.Fatalf("successor kept the old token %q; want a new incarnation", token)
+			}
+			// The successor's runtime carries the token it started under, as
+			// a tmux session's environment does.
+			if err := env.sp.SetMeta(sessionName, runtime.InstanceTokenEnv, lastStartEnv(t, env.sp, sessionName)[runtime.InstanceTokenEnv]); err != nil {
+				t.Fatalf("SetMeta: %v", err)
 			}
 
 			// The dead incarnation's late request is refused.
@@ -481,10 +510,33 @@ func TestRowFirstRestartLegacyMatrix(t *testing.T) {
 			if after.Metadata["restart_requested"] != "" {
 				t.Fatalf("late request recorded restart_requested on the successor: %v", after.Metadata)
 			}
-			env.reconcile([]beads.Bead{after})
+			env.reconcileWithDrainOps([]beads.Bead{after}, controllerOps)
 			if !env.sp.IsRunning(sessionName) {
 				t.Fatal("the successor was stopped by the dead incarnation's request")
 			}
 		})
 	}
+}
+
+// restartHintOf reads name's runtime restart hint.
+func restartHintOf(t *testing.T, sp runtime.Provider, name string) string {
+	t.Helper()
+	v, err := sp.GetMeta(name, "GC_RESTART_REQUESTED")
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	return v
+}
+
+// lastStartEnv is the environment of the fake's last Start of name.
+func lastStartEnv(t *testing.T, sp *runtime.Fake, name string) map[string]string {
+	t.Helper()
+	calls := sp.SnapshotCalls()
+	for i := len(calls) - 1; i >= 0; i-- {
+		if c := calls[i]; c.Method == "Start" && c.Name == name {
+			return c.Config.Env
+		}
+	}
+	t.Fatalf("no Start of %q", name)
+	return nil
 }

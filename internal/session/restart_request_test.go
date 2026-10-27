@@ -66,7 +66,7 @@ func TestDecideRestartRequest(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			patch, err := decideRestartRequest(tc.info, restartFenceToken)
+			patch, err := decideRestartRequest(tc.info, restartFenceToken, func(string, string) bool { return false })
 			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
@@ -274,6 +274,95 @@ func TestRequestFreshRestartFencedRefusesAClosedRow(t *testing.T) {
 
 	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("err = %v, want ErrSessionClosed", err)
+	}
+	assertRestartRequestKeys(t, store, created.ID, "")
+}
+
+// TestRequestFreshRestartFencedAcceptsTheLiveRuntimesToken proves the
+// second proof of the caller's incarnation: a row whose token moved while
+// its runtime kept running (a legacy warm reuse mints in PreWake and keeps
+// the pane) still records the request when the live runtime under the row's
+// session name carries the caller's GC_INSTANCE_TOKEN. Any other runtime
+// token, none, or a failed read refuses, and the write is still the CAS at
+// the deciding read's revision.
+func TestRequestFreshRestartFencedAcceptsTheLiveRuntimesToken(t *testing.T) {
+	const sessName = "s-fence"
+	cases := []struct {
+		name    string
+		seed    func(sp *runtime.Fake)
+		wantErr error
+	}{
+		{"runtime carries the caller's token", func(sp *runtime.Fake) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, " "+restartFenceToken+"\n")
+		}, nil},
+		{"runtime carries another token", func(sp *runtime.Fake) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, "tok-third")
+		}, ErrStaleRestartRequest},
+		{"runtime carries no token", func(*runtime.Fake) {}, ErrStaleRestartRequest},
+		{"runtime read fails", func(sp *runtime.Fake) {
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
+			sp.GetMetaErrors = map[string]map[string]error{sessName: {runtime.InstanceTokenEnv: errors.New("tmux: no server")}}
+		}, ErrStaleRestartRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+			created := seedRestartFenceSession(t, store, map[string]string{
+				"session_name":   sessName,
+				"generation":     "4",
+				"instance_token": restartFenceOtherToken,
+			})
+			sp := runtime.NewFake()
+			tc.seed(sp)
+			rec := &rowWriteRecorder{Store: store}
+			m := newTestManager(t, rec, sp)
+
+			err := m.RequestFreshRestartFenced(created.ID, restartFenceToken)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("RequestFreshRestartFenced: %v", err)
+				}
+				assertRestartRequestKeys(t, store, created.ID, "true")
+				if len(rec.writes) != 1 || rec.writes[0] != "UpdateIfMatch" {
+					t.Fatalf("writes = %v, want one UpdateIfMatch", rec.writes)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			assertRestartRequestKeys(t, store, created.ID, "")
+		})
+	}
+}
+
+// TestRequestFreshRestartFencedRuntimeProofLosesToARestart proves the
+// runtime proof binds to the deciding read: a restart that mints and
+// relaunches between the deciding read and the CAS makes the swap lose, and
+// the re-decide reads the successor's runtime token and refuses.
+func TestRequestFreshRestartFencedRuntimeProofLosesToARestart(t *testing.T) {
+	const sessName = "s-fence"
+	store := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	created := seedRestartFenceSession(t, store, map[string]string{
+		"session_name":   sessName,
+		"generation":     "4",
+		"instance_token": restartFenceOtherToken,
+	})
+	sp := runtime.NewFake()
+	_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, restartFenceToken)
+	w := &casHookWriter{Store: store}
+	w.before = func(id string) {
+		if w.calls == 1 {
+			if err := store.SetMetadataBatch(id, map[string]string{"generation": "5", "instance_token": "tok-relaunched"}); err != nil {
+				t.Fatalf("mint: %v", err)
+			}
+			_ = sp.SetMeta(sessName, runtime.InstanceTokenEnv, "tok-relaunched")
+		}
+	}
+	m := newTestManager(t, w, sp)
+
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken); !errors.Is(err, ErrStaleRestartRequest) {
+		t.Fatalf("err = %v, want ErrStaleRestartRequest", err)
 	}
 	assertRestartRequestKeys(t, store, created.ID, "")
 }

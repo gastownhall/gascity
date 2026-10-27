@@ -91,6 +91,18 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, nil)
 }
 
+// reconcileWithDrainOps is reconcile with the controller's drain ops dops,
+// through which the reconciler reads the runtime restart hint.
+func (e *restartRequestTestEnv) reconcileWithDrainOps(sessions []beads.Bead, dops drainOps) {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, dops)
+}
+
 func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	_ = reconcileSessionBeadsAtPath(

@@ -97,7 +97,7 @@ func (r rowFirstRestart) notifyController() restartNotice {
 func (r rowFirstRestart) notRecorded(err error) string {
 	switch {
 	case errors.Is(err, session.ErrStaleRestartRequest):
-		return fmt.Sprintf("restart not recorded: session %s has restarted since this process started (its row records another incarnation); from outside the session, gc session reset %s restarts it", r.display, r.display)
+		return fmt.Sprintf("restart not recorded: this process does not run in session %s's current incarnation (neither its row nor its live runtime carries this process's GC_INSTANCE_TOKEN); from outside the session, gc session reset %s restarts it", r.display, r.display)
 	case errors.Is(err, session.ErrRestartRequestUnfenced):
 		return "restart not recorded: GC_INSTANCE_TOKEN is not set, so this process cannot prove which incarnation of the session it runs in (an agent CLI that filters *TOKEN* variables from its shell removes it); from outside the session, gc session reset restarts it"
 	default:

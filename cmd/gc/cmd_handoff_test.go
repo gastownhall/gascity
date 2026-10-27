@@ -762,6 +762,40 @@ func TestDoHandoff_RowWriteFailureRecordsNothing(t *testing.T) {
 	}
 }
 
+// TestDoHandoff_NoInstanceTokenRefusesBeforeTheMail pins the SG-3 deviation
+// "no token: refuse before the mail": a restartable handoff that names no
+// incarnation exits 1 before it sends the mail, so a retry with the token
+// does not deliver the handoff twice. Nothing is written anywhere.
+func TestDoHandoff_NoInstanceTokenRefusesBeforeTheMail(t *testing.T) {
+	for _, token := range []string{"", " \t"} {
+		t.Run(fmt.Sprintf("token %q", token), func(t *testing.T) {
+			store := beads.NewMemStore()
+			rec := events.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+			restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+			restart.token = token
+			recorded := false
+			restart.record = func(string) error { recorded = true; return nil }
+
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
+				[]string{"HANDOFF: context full"}, &stdout, &stderr)
+			if outcome.code != 1 || outcome.restartRequested {
+				t.Fatalf("outcome = %+v, want exit 1 with no restart; stderr: %s", outcome, stderr.String())
+			}
+			if msgs := listOpenMessagesBothTiers(t, store); len(msgs) != 0 {
+				t.Fatalf("messages = %d, want no mail sent before the token check", len(msgs))
+			}
+			if recorded || dops.restartRequested["mayor"] || len(rec.Events) != 0 {
+				t.Fatalf("recorded %t, hint %t, events %v; want nothing", recorded, dops.restartRequested["mayor"], rec.Events)
+			}
+			if !strings.Contains(stderr.String(), "gc handoff: restart not recorded: GC_INSTANCE_TOKEN is not set") {
+				t.Fatalf("stderr = %q, want the no-token diagnostic", stderr.String())
+			}
+		})
+	}
+}
+
 func TestHandoffWithMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()
