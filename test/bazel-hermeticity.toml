@@ -22,6 +22,18 @@
 # engdocs/contributors/bazel-test-hermeticity-audit.md
 
 [[target]]
+package = "internal/gchome"
+tags = ["external", "no-remote-exec"]
+reason = "Ownership checks read real ancestor UIDs outside the fixture. User-namespace sandbox remapping changes those UIDs, so run on the host and do not reuse environment-dependent results."
+evidence = ["internal/gchome/gchome_test.go"]
+
+[[target]]
+package = "internal/productmetrics"
+tags = ["external", "no-remote-exec"]
+reason = "Storage trust checks use gchome to read real ancestor UIDs. These host ownership checks cannot run under remote user-namespace remapping or reuse another host's cached result."
+evidence = ["internal/productmetrics/storage_test.go"]
+
+[[target]]
 package = "internal/testpolicy/waiverexpiry"
 tags = ["external"]
 reason = "TestDatedWaiversAgainstToday is the one place a dated waiver (provider ledger, resource census, beads conformance skips) is compared with time.Now(); it must re-run every day, so it is never cached. The ledgers' own structural tests stay cached and date-free."
