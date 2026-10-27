@@ -270,6 +270,7 @@ go_test(
         "sqlite_store_graph_cook_contention_test.go",
         "sqlite_store_hardening_test.go",
         "sqlite_store_list_assignees_test.go",
+        "sqlite_store_metadata_compose_test.go",
         "sqlite_store_noop_write_test.go",
         "sqlite_store_readonly_uri_test.go",
         "sqlite_store_ready_test.go",
