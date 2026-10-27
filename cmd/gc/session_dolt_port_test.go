@@ -127,3 +127,100 @@ func TestSessionBackendEnvWithheldPortPinsSharedServerOff(t *testing.T) {
 		})
 	}
 }
+
+// Wherever the scope mirror cannot stand in for the env port, the session
+// keeps the projection it has always had: the guard rows each break exactly
+// one withholding condition.
+func TestSessionBackendEnvKeepsDoltPortWhenMirrorCannotStandIn(t *testing.T) {
+	writeRigConfig := func(t *testing.T, rigRoot, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMirror := func(t *testing.T, scopeRoot, port string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "dolt-server.port"), []byte(port+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// setup adjusts the mirrored fixture and returns the session's rig
+		// root ("" for a city session), its rigs, and the projected port
+		// and host the session must keep.
+		setup func(t *testing.T, cityPath, rigRoot string, rigs []config.Rig) (string, []config.Rig, string, string)
+	}{
+		{
+			name: "city mirror absent",
+			setup: func(t *testing.T, cityPath, _ string, rigs []config.Rig) (string, []config.Rig, string, string) {
+				port := mustReadScopeDoltPortMirror(t, cityPath)
+				if err := os.Remove(filepath.Join(cityPath, ".beads", "dolt-server.port")); err != nil {
+					t.Fatal(err)
+				}
+				return "", rigs, port, ""
+			},
+		},
+		{
+			name: "rig mirror reads a different port",
+			setup: func(t *testing.T, cityPath, rigRoot string, rigs []config.Rig) (string, []config.Rig, string, string) {
+				port := mustReadScopeDoltPortMirror(t, cityPath)
+				writeMirror(t, rigRoot, "31364")
+				return rigRoot, rigs, port, ""
+			},
+		},
+		{
+			name: "legacy port-only rig",
+			setup: func(t *testing.T, _, rigRoot string, _ []config.Rig) (string, []config.Rig, string, string) {
+				writeRigConfig(t, rigRoot, "issue_prefix: repo\ndolt.auto-start: false\n")
+				writeMirror(t, rigRoot, "4408")
+				return rigRoot, []config.Rig{{Name: "repo", Path: rigRoot, DoltPort: "4408"}}, "4408", "127.0.0.1"
+			},
+		},
+		{
+			name: "explicit loopback rig target",
+			setup: func(t *testing.T, _, rigRoot string, rigs []config.Rig) (string, []config.Rig, string, string) {
+				writeRigConfig(t, rigRoot, "issue_prefix: repo\ngc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.auto-start: false\ndolt.host: 127.0.0.1\ndolt.port: 4409\n")
+				writeMirror(t, rigRoot, "4409")
+				return rigRoot, rigs, "4409", "127.0.0.1"
+			},
+		},
+		{
+			name: "socket rig target",
+			setup: func(t *testing.T, _, rigRoot string, rigs []config.Rig) (string, []config.Rig, string, string) {
+				writeRigConfig(t, rigRoot, "issue_prefix: repo\ngc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.auto-start: false\ndolt.socket: /var/run/dolt/repo.sock\n")
+				return rigRoot, rigs, "", ""
+			},
+		},
+		{
+			name: "non-loopback rig host",
+			setup: func(t *testing.T, _, rigRoot string, rigs []config.Rig) (string, []config.Rig, string, string) {
+				writeRigConfig(t, rigRoot, "issue_prefix: repo\ngc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.auto-start: false\ndolt.host: rig-db.example.com\ndolt.port: 4410\n")
+				writeMirror(t, rigRoot, "4410")
+				return rigRoot, rigs, "4410", "rig-db.example.com"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, rigRoot, rigs := mirroredManagedDoltCity(t)
+			setStaleSessionDoltPortEnv(t)
+			scopeRig, scopeRigs, wantPort, wantHost := tc.setup(t, cityPath, rigRoot, rigs)
+
+			env := mustSessionBackendEnv(t, cityPath, scopeRig, scopeRigs)
+
+			for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
+				if got := env[key]; got != wantPort {
+					t.Errorf("%s = %q, want projected %q", key, got, wantPort)
+				}
+			}
+			if got := env["GC_DOLT_HOST"]; got != wantHost {
+				t.Errorf("GC_DOLT_HOST = %q, want %q", got, wantHost)
+			}
+			for _, key := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+				if got, present := env[key]; present {
+					t.Errorf("%s = %q, want it left unprojected", key, got)
+				}
+			}
+		})
+	}
+}
