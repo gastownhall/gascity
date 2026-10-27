@@ -319,6 +319,38 @@ func TestRowMetadataProposesAMissingKeyAlone(t *testing.T) {
 	}
 }
 
+// Kills a mint racing the provider's own id (ga-k98e78): a keyless row whose
+// state may hold a running process — a live process reports its real session
+// id only through its SessionStart hook, and a minted key would name a
+// transcript that does not exist — is left keyless by desiredRowIdentity; a
+// stopped row still mints, so the guard cannot pass by being over-broad.
+func TestDesiredRowIdentitySkipsKeyMintOnLiveRow(t *testing.T) {
+	cfg := identityCity()
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType}
+	for _, tc := range []struct {
+		state   string
+		wantKey bool
+	}{
+		{"", false},
+		{"active", false},
+		{"awake", false},
+		{"creating", false},
+		{"draining", false},
+		{"asleep", true},
+		{"start-pending", true},
+		{"suspended", true},
+		{"drained", true},
+		{"quarantined", true},
+	} {
+		seat.MetadataState = tc.state
+		id := desiredRowIdentity(cfg, tp, seat, rowRefreshKeys{"continuation_epoch": "1"})
+		if id.NeedsKey != tc.wantKey {
+			t.Fatalf("state %q: NeedsKey = %v, want %v", tc.state, id.NeedsKey, tc.wantKey)
+		}
+	}
+}
+
 // Kills the census retry trigger reading other legs (the C7d-1 review's
 // G05): the live check reads the sessions store alone, so a row on a rig
 // leg carrying the alias does not hold it; one on the row's own leg does.

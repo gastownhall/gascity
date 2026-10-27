@@ -241,18 +241,32 @@ func TestSimRowMetadataRefusesALockTheFreshRowDoesNotTake(t *testing.T) {
 }
 
 // Kills a session key minted over one another writer set (v5 M1, R1's
-// set-once; SESS-714): the verb mints a key for a row whose provider takes
-// one and that has none; a key landing between the pass and its CAS moves
-// the premise (session_key is a premise fact), so the verb refuses and the
-// key stands.
+// set-once; SESS-714), and a mint racing the provider's own id (ga-k98e78):
+// the verb mints a key for a stopped row whose provider takes one and that
+// has none; a live row mints none (its process reports the real id through
+// its SessionStart hook, and a minted key would name a transcript that does
+// not exist); a key landing between the pass and its CAS moves the premise
+// (session_key is a premise fact), so the verb refuses and the key stands.
 func TestRowMetadataMintsTheSessionKeyOnce(t *testing.T) {
-	for _, raced := range []bool{false, true} {
-		c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
+	for _, tc := range []struct {
+		name  string
+		live  bool // the row may hold a running process
+		raced bool // a key lands between the pass and the CAS
+	}{
+		{"a live row mints no key", true, false},
+		{"a stopped row mints the key", false, false},
+		{"a landed key stands", false, true},
+	} {
+		liveness, desired, state := livenessAlive, desireKeep, "active"
+		if !tc.live {
+			liveness, desired, state = livenessGone, desireSleep, "asleep"
+		}
+		c, _ := baselineCase(t, liveness, desired, nil, "state", state)
 		c.w.Env = &reconcileEnv{Cfg: workerCity(3)}
 		tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
 		c.w.Templates.entries = map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: tp}}
 		c.a.Snapshot.Entries[c.k].InDesired = true
-		if raced {
+		if tc.raced {
 			c.before = func() {
 				if err := c.store.SetMetadataBatch(c.k.ID, map[string]string{"session_key": "operator-key"}); err != nil {
 					t.Fatal(err)
@@ -263,11 +277,15 @@ func TestRowMetadataMintsTheSessionKeyOnce(t *testing.T) {
 		key := c.meta(t)["session_key"]
 		switch {
 		case it.Kind != intentRowMetadata:
-			t.Fatalf("decideRow = %q, want the verb", it.Kind)
-		case raced && (s.Outcome != settledRefused || key != "operator-key"):
-			t.Fatalf("raced: settled %+v, session_key %q; want the landed key kept and the verb refused (a premise fact)", s, key)
-		case !raced && (s.Outcome != settledLanded || key == ""):
-			t.Fatalf("settled %+v, session_key %q; want a key minted", s, key)
+			t.Fatalf("%s: decideRow = %q, want the verb", tc.name, it.Kind)
+		case tc.live && key != "":
+			t.Fatalf("%s: settled %+v, session_key %q; want no key on a row that may be running", tc.name, s, key)
+		case tc.live && s.Outcome != settledLanded:
+			t.Fatalf("%s: settled %+v, want the verb's plain keys to land keyless", tc.name, s)
+		case tc.raced && (s.Outcome != settledRefused || key != "operator-key"):
+			t.Fatalf("%s: settled %+v, session_key %q; want the landed key kept and the verb refused (a premise fact)", tc.name, s, key)
+		case !tc.live && !tc.raced && (s.Outcome != settledLanded || key == ""):
+			t.Fatalf("%s: settled %+v, session_key %q; want a key minted", tc.name, s, key)
 		}
 	}
 }

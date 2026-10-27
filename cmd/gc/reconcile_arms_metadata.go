@@ -190,7 +190,11 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, 
 		}
 	}
 	refreshLaunchKeys(id.Meta, tp, raw)
-	id.NeedsKey = raw["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != ""
+	// A row that may be running keeps no minted key: its process reports the
+	// real id through its SessionStart hook, and a minted key would name a
+	// transcript that does not exist (ga-k98e78).
+	id.NeedsKey = raw["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
+		!sessionStateMayBeRunning(info.MetadataState)
 	id.Type = info.Type == "" && session.IsSessionBeadOrRepairableInfo(info)
 	// SESS-719: a pool row's slot follows the allocation's (realize).
 	if cfgAgent != nil && cfgAgent.SupportsInstanceExpansion() && !cfgAgent.UsesCanonicalSingletonPoolIdentity() && !named && !tp.ManualSession &&
