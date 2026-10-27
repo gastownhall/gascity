@@ -263,3 +263,31 @@ func TestPropertyNoNudgeWhileMarked(t *testing.T) {
 		return s.run()
 	})
 }
+
+// A release that finds its claim started begins a new episode at the instant
+// the nudge it shared a decision with was reserved: the mark is dropped with
+// the old episode, as a rung rise drops it, so the old claimed-rung notice
+// is never re-counted on the started episode, and its refusals end with it.
+func TestReleaseFoundStartedDropsTheMark(t *testing.T) {
+	at := t0.Add(time.Hour)
+	e := Entry{Key: key("x"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 4, Refused: 2, Unreleased: true, Last: at}
+	e = marked(e, "op-1", at, false)
+	r := rec(1, e)
+	r.Release = &ReleaseMark{Key: key("x"), Gen: 1, At: at}
+	r, ok := ReleaseFoundStarted(r, key("x"), 1, SrcClaimSession, at)
+	if !ok {
+		t.Fatal("no release")
+	}
+	got := r.Entries[0]
+	if !got.Notice.IsZero() || got.Rung != RungStarted || got.Attempts != 0 || got.Paused != 0 || got.Refused != 0 {
+		t.Fatalf("entry %+v, want a fresh started episode with no mark", got)
+	}
+	for _, fate := range []NoticeFate{NoticeRefused, NoticeWithdrawn, NoticeFailed, NoticeDelivered} {
+		if out, _, ok := SettleNotice(r, "op-1", fate); ok || !reflect.DeepEqual(out, r) {
+			t.Fatalf("fate %d: settled %+v on the started episode", fate, out.Entries[0])
+		}
+	}
+	if due := p.dueAt(got, false); !due.Equal(at.Add(p.Grace)) {
+		t.Fatalf("first reminder due %v, want the grace %v", due, at.Add(p.Grace))
+	}
+}

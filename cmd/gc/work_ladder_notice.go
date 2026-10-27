@@ -78,12 +78,14 @@ type ladderRoute struct {
 func (r *ladderRoute) viaLane() bool { return r != nil && r.lane != nil }
 
 // ladderNoticeResult is what a pass read of a marked notice: still pending,
-// or its fate, with the reason its event or log carries.
+// or its fate, with the reason its event or log carries, and the generation
+// the op was scoped to (zero when it could not be read).
 type ladderNoticeResult struct {
 	op      string
 	pending bool
 	fate    workladder.NoticeFate
 	reason  string
+	gen     int64
 }
 
 // ladderSettled is a fate a commit folded into the cell: the entry as it
@@ -162,6 +164,13 @@ func ladderRouteTallyKey(conv string) string {
 	return strings.Join([]string{conv, ladderNoticePurpose, "route"}, "\x00")
 }
 
+// ladderProposeTallyKey is the key of conv's proposal-failure tally: one per
+// seat, since each attempt's notice has its own key and a per-notice tally
+// would grow by one entry per refused attempt through an outage.
+func ladderProposeTallyKey(conv string) string {
+	return strings.Join([]string{conv, ladderNoticePurpose, "propose"}, "\x00")
+}
+
 // ladderNotice is the notice of e's nudge about key, carrying text, for
 // session row row: its key's episode is e's Since, its ordinal e's nudges
 // this episode (Attempts+Paused, counted or not), so each reservation has its
@@ -192,6 +201,9 @@ func ladderNoticeOpID(st *opjournal.Store, row beads.Bead, key workladder.ClaimK
 // ladderNoticeFate reads mark m's op (op, or the read's err) at now.
 func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now time.Time) ladderNoticeResult {
 	r := ladderNoticeResult{op: m.Op}
+	if err == nil {
+		r.gen = op.Scope.Generation
+	}
 	settled := func(f workladder.NoticeFate, reason string) ladderNoticeResult {
 		r.fate, r.reason = f, reason
 		return r
@@ -327,8 +339,12 @@ func droppedMarks(prev, next workladder.Record) []string {
 // noticeSettled reports a fate the commit folded in: work.nudged for a
 // notice that reached the seat, work.nudge_failed (and the refusal alert at
 // the third in a row) for one that failed or was refused, a log line for one
-// withdrawn.
+// withdrawn. The events carry the generation the notice was scoped to, not
+// the one the fold landed at.
 func (p *ladderPass) noticeSettled(row beads.Bead, gen int64, s ladderSettled) {
+	if s.res.gen > 0 {
+		gen = s.res.gen
+	}
 	e := s.entry
 	fields := workLadderEventFields{Kind: e.Kind.String(), Rung: e.Rung.String(), Attempt: e.Attempts, Paused: s.mark.Paused}
 	switch s.res.fate {
@@ -373,7 +389,7 @@ func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e worklad
 	notice := ladderNotice(n.Key, e, p.nudgeText(row, n))
 	out, op, err := proposePlannerNotice(route.lane, row, notice)
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused}
-	tally := plannerNoticeFailureKey(row.ID, notice)
+	tally := ladderProposeTallyKey(row.ID)
 	switch {
 	case err != nil && plannerNoticeRefused(err):
 		fields.Reason = "notice refused: " + err.Error()

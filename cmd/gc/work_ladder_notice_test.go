@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -521,6 +522,22 @@ func TestWorkLadderWithdrawsItsNoticeWhenItsGateHolds(t *testing.T) {
 			}
 		})
 	}
+	t.Run("never proposed", func(t *testing.T) {
+		lc := newLadderLaneCity(t, "message")
+		id := lc.startedClaim()
+		lc.at(0)
+		e := lc.entry(id)
+		e.Attempts, e.Last = 1, lc.now
+		e.Notice = workladder.NoticeMark{Op: "gc-op-neverproposed", At: lc.now}
+		lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{e}}), "wait_hold": "true"})
+		lc.at(time.Minute)
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want withdrawn while the gate holds, not refused", e)
+		}
+		if n := len(lc.events(events.WorkNudgeFailed)); n != 0 {
+			t.Fatalf("work.nudge_failed = %d for a withdrawn notice", n)
+		}
+	})
 	t.Run("in flight", func(t *testing.T) {
 		lc := newLadderLaneCity(t, "message")
 		id := lc.startedClaim()
@@ -631,6 +648,25 @@ func TestWorkLadderNoticeProposalFailures(t *testing.T) {
 		}
 		if n := len(lc.events(events.WorkNudgeFailed)); n != 1 {
 			t.Fatalf("work.nudge_failed = %d", n)
+		}
+	})
+	t.Run("a long outage keeps one failure tally per seat", func(t *testing.T) {
+		var fs *failingOpListStore
+		lc := newLadderLaneCityOver(t, func(s laneTestStore) beads.Store {
+			fs = &failingOpListStore{laneTestStore: s}
+			return fs
+		}, "message")
+		lc.startedClaim()
+		fs.fail.Store(true)
+		lc.run(2*time.Hour, 30*time.Second, nil)
+		if n := len(lc.events(events.WorkNudgeFailed)); n < 3 {
+			t.Fatalf("work.nudge_failed = %d, want a failure per attempt", n)
+		}
+		lc.host.mu.Lock()
+		tallies := len(lc.host.noticeFailures)
+		lc.host.mu.Unlock()
+		if tallies != 1 {
+			t.Fatalf("%d failure tallies after an outage, want one for the seat", tallies)
 		}
 	})
 	t.Run("the configured nudge is too large", func(t *testing.T) {
@@ -833,5 +869,149 @@ func TestWorkLadderSettlesItsNoticeAfterMessageIsUnlisted(t *testing.T) {
 	}
 	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 2 {
 		t.Fatalf("entry %+v", e)
+	}
+}
+
+// snapshotWaitStore makes the step's snapshot (List) read the seat's row as
+// holding an agent wait while the commit's fresh read (Get) does not: the
+// seat's snapshot decision nudges nothing, so no route is resolved, and the
+// commit's fresh decision nudges.
+type snapshotWaitStore struct {
+	laneTestStore
+	on bool
+}
+
+func (s *snapshotWaitStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	bs, err := s.laneTestStore.List(q)
+	if err != nil || !s.on {
+		return bs, err
+	}
+	for i := range bs {
+		if strings.TrimSpace(bs[i].Metadata["session_name"]) == ladderSeatName {
+			m := maps.Clone(bs[i].Metadata)
+			m["wait_hold"] = "true"
+			bs[i].Metadata = m
+		}
+	}
+	return bs, nil
+}
+
+// The commit holds a nudge whose route this pass never resolved and decides
+// again; a release first decided there is re-proved against the seeds on
+// the fresh row like any other: a claim the hook's current-claim stamp names
+// started is not released, though holding the nudge freed the release slot.
+func TestWorkLadderCommitReprovesAReleaseDecidedAfterANudgeHold(t *testing.T) {
+	for _, race := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot_wait=%v", race), func(t *testing.T) {
+			var fs *snapshotWaitStore
+			lc := newLadderLaneCityOver(t, func(s laneTestStore) beads.Store {
+				fs = &snapshotWaitStore{laneTestStore: s}
+				return fs
+			}, "message")
+			unfinished := lc.claim("release unfinished")
+			stamped := lc.claim("started per the hook's stamp")
+			lc.at(0)
+			cell := lc.cell()
+			for i := range cell.Entries {
+				e := &cell.Entries[i]
+				switch e.Key.Bead {
+				case unfinished:
+					e.Attempts, e.Unreleased, e.Last = 3, true, lc.now.Add(-3*time.Hour)
+				case stamped:
+					e.Attempts, e.Last = 3, lc.now.Add(-2*time.Hour)
+				}
+			}
+			lc.sp.SetActivity(ladderSeatName, lc.now.Add(-4*time.Hour))
+			lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(cell), beadmeta.CurrentClaimBeadIDMetadataKey: stamped})
+			lc.claim("new work") // a new entry: the snapshot's decision changes the cell, so it commits
+			fs.on = race
+			var log strings.Builder
+			lc.lane.stderr = &log
+			lc.at(time.Minute)
+			if b, _ := lc.work.Get(stamped); b.Status != "in_progress" {
+				t.Fatalf("claim %s %q: released though current_claim_bead_id names it started; log:\n%s", stamped, b.Status, log.String())
+			}
+		})
+	}
+}
+
+// A release that finds its claim handed to the seat (the live read of
+// gc.session_id, stamped after the snapshot) starts a new episode: the
+// unfinished-release nudge it shared a decision with is never proposed, and
+// the started episode's first reminder comes after the grace, uncounted.
+func TestWorkLadderReleaseFoundStartedProposesNoNotice(t *testing.T) {
+	lc := newLadderLaneCity(t, "message")
+	id := lc.claim("handed over after the snapshot")
+	lc.lane.summary = func() *allocSummary {
+		s := lc.summary()
+		for i := range s.AssignedWork {
+			s.AssignedWork[i].Metadata = maps.Clone(s.AssignedWork[i].Metadata)
+			delete(s.AssignedWork[i].Metadata, beadmeta.SessionIDMetadataKey)
+		}
+		return s
+	}
+	lc.at(0)
+	e := lc.entry(id)
+	e.Attempts, e.Unreleased, e.Last = 3, true, lc.now.Add(-2*time.Hour)
+	lc.sp.SetActivity(ladderSeatName, lc.now.Add(-3*time.Hour))
+	lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{e}})})
+	if err := lc.work.SetMetadataBatch(id, map[string]string{beadmeta.SessionIDMetadataKey: lc.seat}); err != nil {
+		t.Fatal(err)
+	}
+	var log strings.Builder
+	lc.lane.stderr = &log
+	lc.at(time.Minute)
+	if b, _ := lc.work.Get(id); b.Status != "in_progress" {
+		t.Fatalf("claim %q: released though handed to the seat; log:\n%s", b.Status, log.String())
+	}
+	if ops := lc.ladderOps(); len(ops) != 0 || lc.nudges() != 0 {
+		t.Fatalf("ops %+v, nudges %d: the old episode's reminder was sent", ops, lc.nudges())
+	}
+	got := lc.entry(id)
+	if got.Rung != workladder.RungStarted || !got.Notice.IsZero() || got.Attempts != 0 || got.Paused != 0 || got.Refused != 0 {
+		t.Fatalf("entry %+v, want a fresh started episode", got)
+	}
+	lc.at(2 * time.Minute)
+	if got := lc.entry(id); got.Paused != 0 || got.Refused != 0 || len(lc.events(events.WorkNudgeFailed)) != 0 {
+		t.Fatalf("entry %+v, nudge_failed %d: the old notice was re-counted on the new episode", got, len(lc.events(events.WorkNudgeFailed)))
+	}
+}
+
+// A notice proposed and delivered at generation 7 whose fold lands on the
+// pass that first sees generation 8 reports work.nudged at the notice's
+// generation.
+func TestWorkLadderNudgedEventCarriesTheNoticesGeneration(t *testing.T) {
+	lc := newLadderLaneCity(t, "message")
+	lc.startedClaim()
+	lc.at(0)
+	lc.at(halfPast(1))
+	op := lc.onlyOp()
+	lc.closeOp(op.ID, succeeded)
+	lc.setRow(map[string]string{"generation": "8", "instance_token": "tok-8"})
+	lc.at(2 * time.Minute)
+	evs := lc.events(events.WorkNudged)
+	if len(evs) != 1 {
+		t.Fatalf("work.nudged = %d, want 1", len(evs))
+	}
+	var pl events.WorkLadderPayload
+	if err := json.Unmarshal(evs[0].Payload, &pl); err != nil {
+		t.Fatal(err)
+	}
+	if pl.Generation != 7 {
+		t.Fatalf("work.nudged generation = %d, want the notice's 7", pl.Generation)
+	}
+}
+
+// An open notice past its start_by is refused when no attempt may have
+// reached the seat, and counts as failed when one may have.
+func TestLadderNoticeFatePastStartBy(t *testing.T) {
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	m := workladder.NoticeMark{Op: "gc-op-1", At: now.Add(-3 * time.Minute)}
+	for maybe, want := range map[int]workladder.NoticeFate{0: workladder.NoticeRefused, 1: workladder.NoticeFailed} {
+		op := opjournal.Op{ID: m.Op, Status: opjournal.StatusSubmitted, StartBy: now.Add(-time.Second), MaybeDelivered: maybe}
+		got := ladderNoticeFate(op, nil, m, now)
+		if got.pending || got.fate != want {
+			t.Fatalf("maybe_delivered=%d: %+v, want fate %d", maybe, got, want)
+		}
 	}
 }

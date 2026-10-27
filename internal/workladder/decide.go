@@ -344,7 +344,9 @@ func ReleaseUnfinished(r Record, key ClaimKey, gen int64, now time.Time) (Record
 
 // ReleaseFoundStarted is r after the release of key at gen found, on its
 // live read, that the claim was handed to a turn of the seat (by src): the
-// release cleared, and the entry started, with a fresh count.
+// release cleared, and the entry started, with a fresh count. As a rung rise
+// does, the new episode drops the old one's notice mark and refusals: the
+// caller proposes no notice for that mark and withdraws one it proposed.
 func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now time.Time) (Record, bool) {
 	r, ok := ClearRelease(r, key, gen)
 	if !ok {
@@ -353,7 +355,7 @@ func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now
 	r.Entries = slices.Clone(r.Entries)
 	if i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key }); i >= 0 && r.Entries[i].Rung < RungStarted {
 		e := &r.Entries[i]
-		e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Seed = RungStarted, 0, 0, now, false, false, src
+		e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused, e.Notice, e.Seed = RungStarted, 0, 0, now, false, false, 0, NoticeMark{}, src
 	}
 	return r, true
 }
