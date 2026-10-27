@@ -153,6 +153,41 @@ func TestGcBdUpdateRunsPassthroughOnce(t *testing.T) {
 	}
 }
 
+// TestGcBdUpdateSetMetadataPassesThroughVerbatim pins that `gc bd update
+// --set-metadata` reaches bd as the key-level patch the caller wrote. bd
+// resolves the patch against the row inside its write transaction, so
+// concurrent writes to different keys compose (gascity#1596); a gascity-side
+// pre-merge into a whole `--metadata` document would lose them again.
+func TestGcBdUpdateSetMetadataPassesThroughVerbatim(t *testing.T) {
+	log := newSingleExecTestCity(t)
+	args := []string{"update", "demo-abc", "--set-metadata", "k1=v1"}
+	var stdout, stderr bytes.Buffer
+	if got := doBd(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(update) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	calls := singleExecBdCalls(t, log)
+	var updates, reads int
+	for _, call := range calls {
+		if strings.Contains(" "+call+" ", " --metadata ") {
+			t.Fatalf("bd invocation %q carries a whole --metadata document (calls %q)", call, calls)
+		}
+		switch {
+		case strings.HasPrefix(call, "update "):
+			updates++
+			if want := strings.Join(args, " "); call != want {
+				t.Fatalf("bd update invocation = %q, want the passthrough %q verbatim", call, want)
+			}
+		case strings.HasPrefix(call, "show "):
+			reads++
+		default:
+			t.Fatalf("unexpected bd invocation %q", call)
+		}
+	}
+	if updates != 1 || reads != 1 {
+		t.Fatalf("bd update invocations = %d, guard reads = %d; want 1 and 1 (calls %q)", updates, reads, calls)
+	}
+}
+
 // TestResolveBdScopeTargetSkipsProbesThatCannotChangeTheAnswer pins the probe
 // rule directly. An existence probe opens a store and reads the bead, a whole
 // bd round trip, so it runs only when its answer could pick a different store
