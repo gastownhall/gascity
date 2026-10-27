@@ -161,7 +161,11 @@ const (
 	// (v5.10x, ga-ba7k1f): the claimed bead's step started this incarnation,
 	// so once its nudges are spent, or it has none to send, the seat is held
 	// rather than drained.
-	executionHoldExecuting     = "executing"
+	executionHoldExecuting = "executing"
+	// executionHoldHeartbeat names a seat that called `gc runtime heartbeat`:
+	// its held_until is still in the future, so a silent pane is a declared
+	// long operation rather than a stalled claim.
+	executionHoldHeartbeat     = "heartbeat"
 	executionHoldSnapshotError = "snapshot_error"
 )
 
