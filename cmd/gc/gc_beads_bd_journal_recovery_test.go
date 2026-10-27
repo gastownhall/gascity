@@ -57,7 +57,8 @@ func journalRecoveryHarness(t *testing.T) string {
 
 // writeJournalFakeDolt stubs `dolt status` (corrupt when the database dir
 // contains a .corrupt marker) and `dolt backup restore` (recreates the
-// database with a restored-marker, honoring FAKE_RESTORE_EXIT).
+// database with a restored-marker, honoring FAKE_RESTORE_EXIT, and appends the
+// restored URL to FAKE_RESTORE_CALLS when set).
 func writeJournalFakeDolt(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -75,6 +76,9 @@ case "${1:-}" in
       if [ "${FAKE_RESTORE_EXIT:-0}" != "0" ]; then
         echo "restore failed" >&2
         exit "$FAKE_RESTORE_EXIT"
+      fi
+      if [ -n "${FAKE_RESTORE_CALLS:-}" ]; then
+        printf '%s\n' "$3" >> "$FAKE_RESTORE_CALLS"
       fi
       db="$4"
       mkdir -p "$PWD/$db/.dolt"
@@ -408,6 +412,72 @@ func TestJournalRecoveryRestoresFromBdDefaultBackup(t *testing.T) {
 	}
 }
 
+// The legacy entry stopped syncing when mol-dog-backup moved to
+// `bd backup init`, so when both are registered the restore must come from
+// bd's "default" backup. The legacy entry is written first so a greedy match
+// on the JSON text would pick the wrong one.
+func TestJournalRecoveryPrefersBdDefaultOverLegacyBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	for _, tc := range []struct {
+		name   string
+		maskJQ bool
+	}{
+		{name: "without jq", maskJQ: true},
+		{name: "with jq"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.maskJQ {
+				if _, err := exec.LookPath("jq"); err != nil {
+					t.Skip("jq not available; skipping jq-path test")
+				}
+			}
+			env := setupJournalRecoveryEnv(t)
+			legacyDir := filepath.Join(env.cityDir, "backups", "prod-legacy")
+			if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+				t.Fatalf("mkdir legacy backup: %v", err)
+			}
+			for _, dir := range []string{env.backupDir, legacyDir} {
+				if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("backup"), 0o644); err != nil {
+					t.Fatalf("seed backup content: %v", err)
+				}
+			}
+			defaultURL := "file://" + env.backupDir
+			repoState := `{"head":"refs/heads/main","backups":{` +
+				`"prod-backup":{"name":"prod-backup","url":"file://` + legacyDir + `","fetch_specs":[],"params":{}},` +
+				`"default":{"name":"default","url":"` + defaultURL + `","fetch_specs":[],"params":{}}}}`
+			env.addDatabase(t, "prod", true, repoState)
+			callsFile := filepath.Join(env.cityDir, "restore-calls")
+
+			harness := journalRecoveryHarness(t)
+			if tc.maskJQ {
+				harness = strings.Replace(harness, "set -u\n", "set -u\n"+maskJQPrelude, 1)
+			}
+			out, err := env.run(t, harness, "FAKE_RESTORE_CALLS="+callsFile)
+			if err != nil {
+				t.Fatalf("recovery failed: %v\n%s", err, out)
+			}
+			calls, err := os.ReadFile(callsFile)
+			if err != nil {
+				t.Fatalf("read restore calls: %v\n%s", err, out)
+			}
+			if got, want := strings.TrimSpace(string(calls)), defaultURL; got != want {
+				t.Fatalf("restore calls = %q, want exactly one restore from the default backup %q\n%s", got, want, out)
+			}
+			var restoredLine string
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, "RESTORED 'prod'") {
+					restoredLine = line
+				}
+			}
+			if !strings.Contains(restoredLine, "'default'") || !strings.Contains(restoredLine, defaultURL) {
+				t.Fatalf("restore notice must name backup 'default' and its URL %q, got %q\n%s", defaultURL, restoredLine, out)
+			}
+		})
+	}
+}
+
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
@@ -493,7 +563,8 @@ func TestJournalRecoveryReportsWhenNoCorruptionConfirmed(t *testing.T) {
 }
 
 // runBackupRemoteURLShapeTests exercises backup_remote_url_for_recovery
-// against both repo_state.json backup shapes. maskJQ forces the sed fallback
+// against both repo_state.json backup shapes, bd's "default" name, and the
+// default-over-legacy precedence. It prints "name<TAB>url". maskJQ forces the sed fallback
 // by hiding jq from `command -v`; otherwise the host jq path is exercised.
 func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 	t.Helper()
@@ -517,12 +588,35 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 		{
 			name:      "object form",
 			repoState: `{"backups":{"prod-backup":{"name":"prod-backup","url":"file:///backups/prod","fetch_specs":[]}}}`,
-			want:      "file:///backups/prod",
+			want:      "prod-backup\tfile:///backups/prod",
 		},
 		{
 			name:      "legacy string form",
 			repoState: `{"backups":{"prod-backup":"file:///backups/prod"}}`,
-			want:      "file:///backups/prod",
+			want:      "prod-backup\tfile:///backups/prod",
+		},
+		{
+			name:      "bd default object form",
+			repoState: `{"head":"refs/heads/main","backups":{"default":{"name":"default","url":"file:///backups/default/prod","fetch_specs":[],"params":{}}}}`,
+			want:      "default\tfile:///backups/default/prod",
+		},
+		{
+			name:      "default wins when listed after legacy",
+			repoState: `{"backups":{"prod-backup":{"name":"prod-backup","url":"file:///backups/legacy","fetch_specs":[],"params":{}},"default":{"name":"default","url":"file:///backups/default","fetch_specs":[],"params":{}}}}`,
+			want:      "default\tfile:///backups/default",
+		},
+		{
+			name:      "default wins when listed before legacy",
+			repoState: `{"backups":{"default":{"name":"default","url":"file:///backups/default","fetch_specs":[],"params":{}},"prod-backup":{"name":"prod-backup","url":"file:///backups/legacy","fetch_specs":[],"params":{}}}}`,
+			want:      "default\tfile:///backups/default",
+		},
+		{
+			name: "remote named default is not a backup",
+			repoState: `{"head":"refs/heads/main",` +
+				`"remotes":{"default":{"name":"default","url":"file:///remotes/default","fetch_specs":[],"params":{}}},` +
+				`"backups":{"prod-backup":{"name":"prod-backup","url":"file:///backups/legacy","fetch_specs":[],"params":{}}},` +
+				`"branches":{}}`,
+			want: "prod-backup\tfile:///backups/legacy",
 		},
 	}
 	for _, tc := range tests {
@@ -544,7 +638,7 @@ func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 				t.Fatalf("backup_remote_url_for_recovery failed: %v\n%s", err, out)
 			}
 			if got := strings.TrimSpace(string(out)); got != tc.want {
-				t.Fatalf("url = %q, want %q", got, tc.want)
+				t.Fatalf("selected backup = %q, want %q", got, tc.want)
 			}
 		})
 	}

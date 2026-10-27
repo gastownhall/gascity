@@ -2960,7 +2960,7 @@ backup_candidates_for_recovery() {
     printf '%s\n' "$cand_out"
 }
 
-# backup_remote_url_for_recovery prints the URL of the backup journal
+# backup_remote_url_for_recovery prints "name<TAB>url" for the backup journal
 # recovery restores a database from: the highest-precedence entry listed by
 # backup_candidates_for_recovery. Precedence is final: the selected entry is
 # used even when its URL is empty or unusable, so recovery fails closed
@@ -2969,7 +2969,7 @@ backup_remote_url_for_recovery() {
     local sel_line
     sel_line=$(backup_candidates_for_recovery "$1" "$2" | head -n 1)
     [ -n "$sel_line" ] || return 1
-    printf '%s\n' "${sel_line#*	}"
+    printf '%s\n' "$sel_line"
 }
 
 # backup_restore_source_usable reports whether url points at a local backup
@@ -2998,7 +2998,7 @@ backup_restore_source_usable() {
 # missing all writes since the last backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
     local aside_root="$PACK_STATE_DIR/corrupt-aside"
-    local ts db_dir db aside url recovered=0
+    local ts db_dir db aside selected backup_name url recovered=0
     ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
     echo "gc-beads-bd: journal corruption reported at startup; probing databases in $DATA_DIR" >&2
     for db_dir in "$DATA_DIR"/*/; do
@@ -3006,7 +3006,9 @@ attempt_journal_corruption_recovery() {
         db=$(basename "$db_dir")
         database_journal_corrupt "$db_dir" || continue
         echo "gc-beads-bd: journal corruption confirmed in database '$db'" >&2
-        url=$(backup_remote_url_for_recovery "$db" "$db_dir") || url=""
+        selected=$(backup_remote_url_for_recovery "$db" "$db_dir") || selected=""
+        backup_name="${selected%%	*}"
+        url="${selected#*	}"
         if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
             echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (remote url: ${url:-none})" >&2
             echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
@@ -3021,7 +3023,7 @@ attempt_journal_corruption_recovery() {
         echo "gc-beads-bd: preserved corrupt store at $aside" >&2
         if (cd "$DATA_DIR" && run_with_timeout 600 dolt backup restore "$url" "$db") >> "$LOG_FILE" 2>&1; then
             recovered=$((recovered + 1))
-            echo "gc-beads-bd: RESTORED '$db' from backup $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
+            echo "gc-beads-bd: RESTORED '$db' from backup '$backup_name' ($url) — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
         else
             # Fail closed: put the corrupt store back so the server cannot
             # start without this database and silently drop it from the
