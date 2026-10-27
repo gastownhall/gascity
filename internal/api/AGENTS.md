@@ -273,6 +273,35 @@ session's turns refuse only an adopted op, which runs, so a closed stop
 replays after its session closed or its runtime stopped answering too. One
 naming another turn is 422 `idempotency_mismatch`.
 
+## Session commands under lane authority
+
+When the running lane host executes a kind (`ConversationLaneKinds`, the
+kinds `[ops] authoritative` listed at the controller's start), the session
+command that produces it writes a lane op instead of running its legacy path
+inline (`session_lane_ops.go`), and the `ops.*` gate does not govern it. A
+request whose op cannot be written is 503 `op_journal_unavailable`, nothing
+done. The API sends nothing to the runtime itself: the lane host runs the
+op, and the API awaits it (`awaitLaneOp`, through the host's
+`AwaitConversationOp`, which wakes at the end of each pass over the
+conversation) for at most `laneControlAnswerBound` (45 s, under the Go
+client's 60 s), then answers from the outcome as OJ-4 answers the same
+outcome, or 409 `in_flight` naming the op and its key, under which a retry
+adopts it.
+
+- `/stop` (interrupt listed): a key that names a stop is its retry (an open
+  lane op awaited, a closed op replayed, a coalesced row followed). A named
+  turn keeps OJ-4's front-door checks, is keyed `stop:<gen>:<turn>` and
+  scoped to the turn, and leaves an API-executed row under the request's
+  own key closed `skipped{coalesced_into}` (`recordLaneStopUnderKey`); a
+  target-key op that closed without success is retried under the request's
+  key. Without a named turn the op is `session(gen)` under the request's key
+  or a minted one, and the executor reads the turn. `skipped{stale}` is 200
+  for an unnamed stop and 409 `turn_not_current` for a named one.
+- Run cancel (interrupt listed): one op per live holder session, keyed
+  `run-cancel:<run id>` with the run as causation, awaited together;
+  `succeeded` is interrupted, a failure or an op still open is a failure,
+  and `skipped` neither.
+
 ## The producer API and journal-row events
 
 `POST`/`GET .../session/{id}/ops`, `GET .../ops/{op}` and

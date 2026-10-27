@@ -45,7 +45,8 @@ type OpsConfig struct {
 	// cannot; a store served through bd can record once that bd supports
 	// --if-revision, which no released bd does yet. "off" records nothing. "require" (opt-in)
 	// refuses a request it cannot record before any effect. A change takes
-	// effect at the next process start.
+	// effect at the next process start. A kind [ops] authoritative lists is
+	// a lane op instead, which this gate does not govern.
 	ControlMode string `toml:"control,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records wake, suspend, reset (restart), kill and close requests as ops.
 	// "auto" is the default. Left unset, it records only over a SQLite
@@ -73,9 +74,13 @@ type OpsConfig struct {
 	// the controller's lane host, and the content gate no longer governs it.
 	// The API's submit and messages, gc session submit, mail --notify, sling
 	// --nudge and wait nudges keep their legacy delivery in this build.
-	// Listing interrupt lets the ops route propose interrupt ops, which the
-	// controller's lane host runs; no other request surface writes them yet
-	// (the API's stop and run cancel keep their legacy path in this build).
+	// Listing interrupt switches the API's POST
+	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
+	// each proposes an interrupt op the controller's lane host runs, and
+	// answers from its outcome (409 in_flight, naming the op, when it is
+	// still running after 45 s); the ops route proposes interrupt ops too,
+	// and the control gate no longer governs them. gc stop's graceful
+	// interrupt wave is lifecycle and keeps its path.
 	// gc session nudge's inline pass never runs an interrupt, a respond or a
 	// deliver-now unit: it leaves them, and content queued behind them, to
 	// the controller's lane host. No request surface writes respond ops yet,

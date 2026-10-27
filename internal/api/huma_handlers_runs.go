@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runproj"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -613,6 +614,10 @@ func inProgressAssignees(members []beads.Bead, exclude func(beads.Bead) bool) []
 // that is suspended or whose runtime is not running, has no turn to interrupt
 // and is skipped.
 //
+// When the city's lane host executes interrupt, each live session's
+// interrupt is a lane op the host runs (interruptRunHoldersLane), keyed
+// run-cancel:<run id>.
+//
 // Best-effort: the run is already durably marked canceling, so a failure is
 // logged and returned for the response rather than failing the cancel. Distinct sessions
 // are interrupted concurrently, since a provider's interrupt can wait for the
@@ -661,6 +666,20 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 	}
 
 	sp := s.state.SessionProvider()
+	if s.laneExecutes(opjournal.KindInterrupt) {
+		live := make([]string, 0, len(ids))
+		for _, id := range ids {
+			info, err := s.sessionManager(store).Get(id)
+			switch {
+			case err != nil:
+				fail(id, err)
+			case info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName):
+			default:
+				live = append(live, id)
+			}
+		}
+		return s.interruptRunHoldersLane(ctx, store, runID, live, fail), failures
+	}
 	results := make([]error, len(ids))
 	skipped := make([]bool, len(ids))
 	var wg sync.WaitGroup
