@@ -6,6 +6,7 @@ go_test(
         "agent_instructions_test.go",
         "connected_clients_test.go",
         "docsync_test.go",
+        "dolt_recovery_docs_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
