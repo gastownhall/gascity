@@ -9,12 +9,25 @@ journals approach the compaction threshold (default 4 GB warn / 6 GB error). If 
 starts successfully, prefer `gc dolt compact` before a corruption event rather than this
 recovery path.
 
+## The automatic path comes first
+
+On a gc-managed server, `gc start` runs journal-corruption recovery by itself: when dolt
+reports a journal corruption error at startup, each affected database is probed offline, the
+corrupt store is preserved under `<city>/.gc/runtime/packs/dolt/corrupt-aside/<db>.<timestamp>`
+(never deleted), and the database is restored from its registered local backup — bd's
+canonical `default` backup, or the legacy `<db>-backup` remote. The recovery log (and the
+`RESTORED` line) names the backup and URL each database came from. When no usable local
+backup is registered, recovery fails closed: the corrupt store is left in place, the server
+does not start, and the refusal names the backups it checked. That is the moment this
+runbook's manual steps apply.
+
 ---
 
 ## When to Use
 
 Use this runbook when:
-- `gc start` fails and `dolt` or `gc dolt start` reports a journal or noms error on startup
+- `gc start` fails with a journal-corruption refusal (no usable local backup registered)
+- `gc dolt status 2>&1` or the startup log reports a journal or noms error
 - `gc doctor` reports `dolt-journal-size` at error level AND the server will not start
 - You need to recover a managed Dolt database that fails to open
 
@@ -36,17 +49,17 @@ ls -lh "$(gc config get dolt.data_dir 2>/dev/null || echo .dolt-data)"
 ls -lh /path/to/city/.beads/dolt/<dbname>/.dolt/noms/*.journal
 
 # 3. Stop everything
-gc stop --all 2>/dev/null || true
-gc dolt stop 2>/dev/null || true
+gc stop
 
-# 4a. Restore from backup (preferred)
-# WARNING: all changes after the backup snapshot are lost
-gc dolt backup restore <dbname>-backup <dbname>
+# 4a. Manual restore from the registered backup (preferred)
+#     (gc start already tried this automatically and refused — see below)
+url=$(jq -r '.backups.default.url // .backups["<dbname>-backup"].url // empty' \
+  /path/to/city/.beads/dolt/<dbname>/.dolt/repo_state.json)
+mv /path/to/city/.beads/dolt/<dbname> /somewhere-safe-not-under-the-data-dir
+(cd /path/to/city/.beads/dolt && dolt backup restore "$url" <dbname>)
 
-# 4b. Reconstruct from the JSONL archive (fallback)
-# WARNING: reconstructs from the passive 15-minute export; open/in-progress
-#          bead state may be partially stale compared to the last committed Dolt state
-gc bd import /path/to/city/.gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
+# 4b. Reconstruct from the core JSONL archive (lossy last resort — see warning)
+gc bd import .gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
 
 # 5. Verify
 dolt --host 127.0.0.1 --port "$GC_DOLT_PORT" --user root sql -q "SELECT active_branch()"
@@ -62,15 +75,17 @@ Identify that the Dolt server is down due to journal corruption, not a port conf
 config error:
 
 ```bash
-# Attempt to start Dolt and capture the error
-gc dolt start 2>&1 | tee /tmp/dolt-start-error.txt
+# Attempt to start the city and capture the error (gc start runs recovery itself)
+gc start 2>&1 | tee /tmp/gc-start-error.txt
 
-# Look for noms/journal errors
-grep -i "journal\|noms\|corrupt\|manifest" /tmp/dolt-start-error.txt
+# Look for the recovery refusal or noms/journal errors
+grep -i "journal\|noms\|corrupt\|NOT auto-recovering" /tmp/gc-start-error.txt
 ```
 
 If the error is unrelated to journals (e.g. port in use, missing config), stop here and
-diagnose normally. This runbook applies only to journal/noms startup failures.
+diagnose normally. This runbook applies only to journal/noms startup failures. If recovery
+ran automatically, its log lines name each corrupt database, the backup it restored from,
+and the `corrupt-aside/` path holding the preserved original.
 
 ---
 
@@ -87,12 +102,6 @@ find "$(gc config get dolt.data_dir 2>/dev/null || echo .beads/dolt)" \
 # Note the <dbname> (directory immediately under data_dir)
 ```
 
-Also capture the current `.beads/issues.jsonl` as a fallback snapshot before any mutation:
-
-```bash
-cp .beads/issues.jsonl /tmp/issues-snapshot-$(date +%Y%m%d-%H%M%S).jsonl
-```
-
 ---
 
 ## Step 3: Stop All Running Processes
@@ -100,8 +109,7 @@ cp .beads/issues.jsonl /tmp/issues-snapshot-$(date +%Y%m%d-%H%M%S).jsonl
 Ensure no processes hold the Dolt data directory before recovery:
 
 ```bash
-gc stop --all 2>/dev/null || true
-gc dolt stop 2>/dev/null || true
+gc stop
 
 # Wait for the port to clear
 sleep 2
@@ -110,24 +118,36 @@ lsof -i :"${GC_DOLT_PORT:-28231}" 2>/dev/null || true
 
 ---
 
-## Step 4: Restore From Backup
+## Step 4: Manual Restore From the Registered Backup
 
 > **[WARNING]** Restoring from backup permanently replaces the current database with the
 > backup snapshot. All writes after the backup timestamp are lost. This is a destructive
-> operation. Confirm the backup timestamp with `gc dolt backup status <dbname>-backup`
-> before proceeding.
+> operation. Confirm the backup's freshness first:
 
 ```bash
-# Identify available backup remotes
-gc dolt backup list <dbname>
-
-# Restore the database from the <dbname>-backup remote
-gc dolt backup restore <dbname>-backup <dbname>
-
-# If the restore command is unavailable, drop and re-clone manually:
-# rm -rf /path/to/city/.beads/dolt/<dbname>
-# dolt clone <backup-url> /path/to/city/.beads/dolt/<dbname>
+# Freshness of the registered backup (.dolt.backup_url, .dolt.last_sync)
+gc bd backup status --json
 ```
+
+The backup URL is registered in the database's own `repo_state.json`, which stays readable
+even when the noms store does not. bd's `bd backup init` registers it under the name
+`default`; older cities may still carry the legacy `<dbname>-backup` entry instead:
+
+```bash
+# Read the registered backup URL (default first, legacy name as fallback)
+url=$(jq -r '.backups.default.url // .backups["<dbname>-backup"].url // empty' \
+  /path/to/city/.beads/dolt/<dbname>/.dolt/repo_state.json)
+
+# Move the corrupt store somewhere safe, outside the data dir
+mv /path/to/city/.beads/dolt/<dbname> /somewhere-safe-not-under-the-data-dir
+
+# Restore the database from the backup URL
+(cd /path/to/city/.beads/dolt && dolt backup restore "$url" <dbname>)
+```
+
+`gc start` runs exactly this restore automatically when it can; doing it by hand is for
+when the automatic path refused (backup not local, empty, or unreachable) and you have
+fixed the cause — for example re-synced the backup directory.
 
 **bd-owned proxied scopes** (the default for new cities; `dolt_mode` is
 `proxied-server` in the scope's `.beads/metadata.json`) are backed up by the
@@ -145,23 +165,19 @@ gc start
 
 No maintenance order ever runs a restore.
 
-If no backup is configured or the backup itself is corrupt, proceed to Step 4b.
+If no usable backup exists, proceed to the JSONL fallback — as a last resort only.
 
 ---
 
-## Step 4 (fallback): Reconstruct From JSONL Export
+## Step 4 (fallback): Reconstruct From the Core JSONL Archive
 
-> **[WARNING]** The JSONL archive snapshot is **passive**: the core `jsonl-export` order
-> writes it every 15 minutes. Any bead changes after the last export are not reflected, and
-> wisps are not archived. In-progress beads may require manual status correction after import.
+> **[WARNING] Lossy last resort.** JSONL recovery loses all non-issue history (events,
+> wisps, comment and audit history). The core `jsonl-export` order writes the archive
+> every 15 minutes, so recent issue changes may also be missing, and in-progress beads
+> may require manual status correction after import. Prefer the backup restore above
+> whenever a usable backup exists.
 
 ```bash
-# Drop the corrupt database directory
-rm -rf /path/to/city/.beads/dolt/<dbname>
-
-# Re-initialize an empty store
-gc bd init --db <dbname>
-
 # Import the latest JSONL archive snapshot of this database (written by the
 # core jsonl-export order in bd export format)
 gc bd import .gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
@@ -169,6 +185,11 @@ gc bd import .gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
 # Inspect open/in-progress beads and correct state if needed
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
+
+If neither a usable backup nor a JSONL archive exists, **stop and escalate** — do not
+initialize an empty store over the incident: an empty beads database silently loses the
+audit trail of what the city was doing. Preserve the corrupt store directory and involve
+a maintainer.
 
 ---
 
@@ -205,7 +226,7 @@ gc dolt compact
 - [ ] Dolt server starts and responds to SQL queries
 - [ ] `gc doctor` passes with no errors (warnings on non-critical checks are acceptable)
 - [ ] `gc start` brings all configured sessions online
-- [ ] Backup remote is configured and `gc dolt backup status` shows a recent artifact
-- [ ] Open in-progress beads reviewed and state corrected if import was used
+- [ ] Backup is registered and `gc bd backup status --json` shows a recent sync (`.dolt.last_sync`)
+- [ ] Open in-progress beads reviewed and state corrected if the JSONL import was used
 - [ ] Root cause of journal growth identified (missing compaction schedule? high write volume?)
 - [ ] `gc dolt compact` scheduled or an order configured to prevent recurrence

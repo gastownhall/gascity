@@ -115,6 +115,7 @@ go_test(
         "dog_prompt_test.go",
         "health_order_test.go",
         "health_test.go",
+        "journal_recovery_runbook_test.go",
         "logs_test.go",
         "main_test.go",
         "port_resolve_test.go",
