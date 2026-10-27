@@ -822,7 +822,8 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
 	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
 	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
-	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target) + ambientDoltConnectionQueryPrefix()
+	ambientPrefix, ambientFill := ambientDoltConnectionPassthrough()
+	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target) + ambientPrefix
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -837,7 +838,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	if bare := controlDispatcherBareRoute(target); bare != "" {
 		queryPrefix += ` GC_CONTROL_BARE_TARGET=` + shellquote.Quote(bare)
 	}
-	query := queryPrefix + ` sh -c '` +
+	query := queryPrefix + ` sh -c '` + ambientFill +
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
@@ -862,40 +863,43 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	return query
 }
 
-// ambientDoltConnectionQueryPrefix returns a shell-prefix env fragment
+// ambientDoltConnectionPassthrough returns the shell-prefix env fragment
 // (leading space + "KEY=value" pairs, or "") carrying the CURRENT process's
-// Dolt connection coordinates under both the GC_DOLT_* and BEADS_DOLT_SERVER_*
-// names bd recognizes.
+// Dolt connection coordinates under private GC_AMBIENT_DOLT_* names, and the
+// fill statement (or "") that opens the inner `sh -c` script and exports them
+// under both the GC_DOLT_* and BEADS_DOLT_SERVER_* names bd recognizes when
+// the subprocess env resolved no Dolt target of its own.
 //
-// Without this, the ready-query subprocess env is built by stripping the
-// parent's inherited Dolt vars and re-projecting them from a freshly resolved
-// scope lookup (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution
-// runs its own managed-runtime-availability probe and can transiently come
-// back without a port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT
-// from the subprocess env and causing `bd --sandbox` to resolve port 0
-// ("Dolt server unreachable at 127.0.0.1:0") — the recurring fleet-wide
-// graph.v2 wedge (gascity gc-74rxa). The running control-dispatcher process's
-// own environment already carries the connection coordinates it was spawned
-// with, so pass them through explicitly as a shell-prefix assignment (which
-// takes effect for the inner `sh -c` and its `bd` children regardless of what
-// the outer subprocess's cmd.Env resolved to) rather than depending on that
-// re-resolution succeeding on every poll.
-func ambientDoltConnectionQueryPrefix() string {
+// The ready-query subprocess env is built by stripping the parent's inherited
+// Dolt vars and re-projecting them from a freshly resolved scope lookup
+// (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution runs its own
+// managed-runtime-availability probe and can transiently come back without a
+// port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT from the
+// subprocess env and causing `bd --sandbox` to resolve port 0 ("Dolt server
+// unreachable at 127.0.0.1:0") — the recurring fleet-wide graph.v2 wedge
+// (gascity gc-74rxa). The running control-dispatcher process's own
+// environment carries the coordinates it was spawned with, so they fill that
+// gap. They only fill it: when the per-poll resolution does carry a port or
+// socket, that live target wins whole, because the spawn-time port goes stale
+// once the managed Dolt restarts on a new port.
+func ambientDoltConnectionPassthrough() (prefix, fill string) {
 	host, port := ambientDoltHostPort()
-	var pairs []string
+	var pairs, exports []string
 	if host != "" {
-		quotedHost := shellquote.Quote(host)
-		pairs = append(pairs, `GC_DOLT_HOST=`+quotedHost, `BEADS_DOLT_SERVER_HOST=`+quotedHost)
+		pairs = append(pairs, `GC_AMBIENT_DOLT_HOST=`+shellquote.Quote(host))
+		exports = append(exports, `GC_DOLT_HOST="$GC_AMBIENT_DOLT_HOST"`, `BEADS_DOLT_SERVER_HOST="$GC_AMBIENT_DOLT_HOST"`)
 	}
 	if port != "" {
-		quotedPort := shellquote.Quote(port)
-		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
+		pairs = append(pairs, `GC_AMBIENT_DOLT_PORT=`+shellquote.Quote(port))
+		exports = append(exports, `GC_DOLT_PORT="$GC_AMBIENT_DOLT_PORT"`, `BEADS_DOLT_SERVER_PORT="$GC_AMBIENT_DOLT_PORT"`)
 	}
 	if len(pairs) == 0 {
 		workflowTracef("ambient dolt env unset; ready-query passthrough disabled")
-		return ""
+		return "", ""
 	}
-	return " " + strings.Join(pairs, " ")
+	fill = `if [ -z "${GC_DOLT_PORT:-}${BEADS_DOLT_SERVER_PORT:-}${BEADS_DOLT_SERVER_SOCKET:-}" ]; then export ` +
+		strings.Join(exports, " ") + `; fi; `
+	return " " + strings.Join(pairs, " "), fill
 }
 
 // ambientDoltHostPort resolves the ambient Dolt host and port as a matched
