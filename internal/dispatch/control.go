@@ -308,7 +308,7 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	}
 	if len(live) > 0 {
 		for _, member := range live {
-			if err := ensureBlockingDependency(store, bead.ID, member.ID); err != nil {
+			if err := ensureBlockingDependencyWithRetry(store, bead.ID, member.ID); err != nil {
 				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 					return attemptEvaluation{}, ErrControlPending
 				}
@@ -479,6 +479,23 @@ func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) er
 		}
 	}
 	return store.DepAdd(issueID, dependsOnID, "blocks")
+}
+
+// ensureBlockingDependencyWithRetry is ensureBlockingDependency with one
+// immediate re-issue of the write after a transient store failure. The ralph
+// drain gate's edge is how the verdict is parked, and the member it blocks on
+// can close during the failure window (a dispatched worker finishing while
+// the store blips): the next sweep would then find nothing to wait on and
+// end the hold without the edge a clean run always minted, so a
+// crash-restarted serve and an uninterrupted one would end in different
+// ledgers. One retry closes the window with no loop; a failure that persists
+// returns to the caller's spawn-boundary classification unchanged.
+func ensureBlockingDependencyWithRetry(store beads.Store, issueID, dependsOnID string) error {
+	err := ensureBlockingDependency(store, issueID, dependsOnID)
+	if err == nil || !IsTransientControllerError(err) {
+		return err
+	}
+	return ensureBlockingDependency(store, issueID, dependsOnID)
 }
 
 func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
