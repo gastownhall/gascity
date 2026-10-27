@@ -434,6 +434,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it for every agent on the harness in `city.toml` (`[providers.codex]` with
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
+- **Restart claude sessions started under gc 1.4.x once.** gc 1.5.0 gives
+  every new claude session a `session_key` (#5396) and accepts the id
+  claude's SessionStart hook reports (#3954, #5421), so `gc session logs`
+  resolves sessions that share a `work_dir`. A claude session still running
+  from 1.4.x has no key, and gc no longer mints one for a session whose
+  process may be running, since that key would name no transcript: restart
+  each such session once (`gc session reset <id>` or `gc restart`) and its
+  next start gets a key (#5439).
 
 ### Added
 
