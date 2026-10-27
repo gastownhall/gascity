@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Restart claude sessions once after upgrading past v1.5.0.** The
+  supervisor-created-session fix landed in v1.5.0 (#5396 restores claude's
+  `--session-id`; #3954/#5421 accept claude's SessionStart id), but a session
+  key minted before that could still name a transcript that does not exist and
+  block the hook's capture of the provider's real id. After upgrading, restart
+  each claude session that was started under ≤1.4.x once (`gc session reset
+  <id>` or `gc restart`): its next start gets a real key.
 - **The op journal now records session requests by default on a SQLite
   sessions store.** The three `[ops]` rollout gates, `content` (submit,
   messages, nudge, mail notify), `control` (interrupt, respond) and
