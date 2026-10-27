@@ -914,6 +914,12 @@ func TestBeadsProxiedDefaultInit(t *testing.T) {
 
 	t.Run("init-default", func(t *testing.T) {
 		p.initDefault(t)
+		// The fresh-install front door: `gc status` must answer immediately
+		// after `gc init`, with no manual `bd dolt start` / `bd bootstrap`
+		// between the two.
+		if out, err := p.city.GC("status"); err != nil {
+			t.Fatalf("gc status right after gc init: %v\n%s", err, out)
+		}
 	})
 
 	t.Run("doctor-green", func(t *testing.T) {

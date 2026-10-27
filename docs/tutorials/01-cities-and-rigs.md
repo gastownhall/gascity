@@ -106,6 +106,15 @@ $ ls
 agents  assets  city.toml  commands  doctor  formulas  orders  overlays  pack.toml  template-fragments
 ```
 
+<Note>
+`gc init` already created the city's bead store under `.beads/` — the `hq`
+database your beads live in. `bd` starts and stops its own Dolt server on
+demand to serve it, so there is no database setup to do by hand. Never run
+`bd dolt start`, `bd init`, or `bd bootstrap` inside a city; `bd bootstrap`
+in particular can create a second, empty database beside the live one. If
+the store ever looks wrong, `gc doctor` is the diagnostic.
+</Note>
+
 At the top level of the city directory:
 
 - `pack.toml` — the portable pack definition layer
@@ -220,9 +229,9 @@ A named session shows `reserved-unmaterialized` until the orchestrator
 materializes it; once the mayor session is up, its state reads `awake` (or
 `active` — the two are equivalent).
 
-The `dolt.dog` pool is a background utility agent from the bundled `dolt` pack
+The `bd.dog` pool is a background utility agent from the bundled `dolt` pack
 (pulled in transitively through the explicit `bd` import you saw in
-`pack.toml` — the `dolt.` prefix is the import binding it arrived through).
+`pack.toml` — the `bd.` prefix is the import binding it arrived through).
 It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is platform
 infrastructure: the orchestrator uses it to advance formula workflows. You don't
 need to interact with either — ignore them for now.
