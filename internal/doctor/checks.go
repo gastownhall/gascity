@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
@@ -1061,9 +1062,43 @@ func activeBDStoreFromMetadata(path string) (string, string) {
 		return "metadata.json dolt_mode=" + mode, "dolt"
 	case "embedded", "local":
 		return "metadata.json dolt_mode=" + mode, "embeddeddolt"
+	case "proxied-server":
+		if proxiedRootIsScopeDoltDir(filepath.Dir(path)) {
+			return "metadata.json dolt_mode=" + mode, "dolt"
+		}
+		return "metadata.json dolt_mode=" + mode, ""
 	default:
 		return mode, ""
 	}
+}
+
+// proxiedRootIsScopeDoltDir reports whether a proxied-server scope's bd
+// provider root is the scope's own .beads/dolt directory.
+//
+// proxied-server is the one mode whose root can move without metadata
+// changing — bd relocates it through BEADS_PROXIED_SERVER_ROOT_PATH, the
+// sidecar's root_path, shared-server mode, BEADS_DOLT_DATA_DIR and
+// metadata.json's dolt_data_dir — so unlike server and embedded the mode
+// alone does not name a directory. Resolving the root the way bd does
+// (proxyendpoint.ProviderRoot) and comparing it against .beads/dolt says
+// "active" only for the default-root scope gc creates; every relocated root,
+// and any resolution error, fails closed to unknown so neither local
+// directory is named live.
+//
+// Two of bd's resolution arms are deliberately not mirrored by
+// ProviderRoot's DoltDataDir and both resolve to .beads/dolt here:
+// shared-server mode declared in .beads/config.yaml as dolt.shared-server,
+// and the legacy absolute `database` key. Such scopes are named
+// active-.beads/dolt rather than unknown, which is right for gc-owned scopes
+// (gc projects BEADS_DOLT_SHARED_SERVER=0 into every bd fork it spawns) and
+// can misattribute a user-managed bd scope that relocates its root through
+// config alone.
+func proxiedRootIsScopeDoltDir(beadsDir string) bool {
+	root, err := proxyendpoint.ProviderRoot(filepath.Dir(beadsDir))
+	if err != nil {
+		return false
+	}
+	return pathutil.NormalizePathForCompare(root) == pathutil.NormalizePathForCompare(filepath.Join(beadsDir, "dolt"))
 }
 
 func sameDoctorScope(a, b string) bool {

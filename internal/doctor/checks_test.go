@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1455,6 +1456,54 @@ func TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists(t *testing.T) {
 	}
 	if !strings.Contains(r.FixHint, "keep both directories until reconciled") {
 		t.Fatalf("fix hint = %q, want the recovery the storage-mode announcement mirrors", r.FixHint)
+	}
+}
+
+// clearProxiedRootEnv removes the environment that can relocate a proxied
+// scope's bd provider root, so the resolver's default arm — the scope's own
+// .beads/dolt — is what answers.
+func clearProxiedRootEnv(t *testing.T) {
+	t.Helper()
+	for _, env := range []string{
+		proxyendpoint.RootPathEnv,
+		proxyendpoint.DoltDataDirEnv,
+		proxyendpoint.SharedServerModeEnv,
+		proxyendpoint.SharedServerDirEnv,
+	} {
+		t.Setenv(env, "")
+	}
+}
+
+// TestBDSplitStoreCheck_ProxiedServerActiveWarnsWhenEmbeddedStoreHasRepos
+// covers the reporter's post-bootstrap layout (#2587): a proxied-server scope
+// rooted at its default .beads/dolt, with a second Dolt repo left under
+// .beads/embeddeddolt by the bd bootstrap hint. dolt_mode=proxied-server alone
+// does not name a directory — the proxied root can live elsewhere — so the
+// check must resolve bd's provider root before it may call .beads/dolt active.
+func TestBDSplitStoreCheck_ProxiedServerActiveWarnsWhenEmbeddedStoreHasRepos(t *testing.T) {
+	clearProxiedRootEnv(t)
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "hq"))
+
+	r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	want := "active .beads/dolt (metadata.json dolt_mode=proxied-server), inactive .beads/embeddeddolt contains 1 Dolt repo(s)"
+	if !strings.Contains(r.Message, want) {
+		t.Fatalf("message = %q, want %q", r.Message, want)
+	}
+	if !strings.Contains(r.FixHint, "export from the inactive store") {
+		t.Fatalf("fix hint = %q, want identified-store guidance", r.FixHint)
+	}
+	if strings.Contains(r.FixHint, "current or intended active store") {
+		t.Fatalf("fix hint = %q, should not use neutral guidance when the active store is identified", r.FixHint)
 	}
 }
 

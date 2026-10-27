@@ -35,7 +35,11 @@ import (
 // decide which of the two directories is the ACTIVE store; doctor keeps its own
 // copy because it also classifies non-Dolt backends, and
 // TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists is where the two are
-// exercised against the same on-disk shape. An unrecognized or absent mode maps
+// exercised against the same on-disk shape. Doctor additionally maps
+// proxied-server, and only after resolving bd's provider root — this mapping
+// deliberately leaves that mode unmapped, because a proxied root can live
+// elsewhere than either directory, so the mode alone does not name one. An
+// unrecognized or absent mode maps
 // to nothing: a scope whose mode gc cannot classify is one this says nothing
 // about.
 func beadsSubdirForDoltMode(mode string) string {
