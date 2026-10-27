@@ -36,8 +36,16 @@ var interruptedCloseGates = map[string]closeGate{
 // interruptedClosePassthroughCodes are the pool-freeable sleep reasons the
 // not-running pool close writes verbatim as its close code
 // (ClosePatch(now, TrimSpace(sleep_reason))) that are not known states.
+// TestInterruptedCloseCensusCoversEveryCloseCode keeps it complete.
 var interruptedClosePassthroughCodes = map[string]bool{
-	"idle-timeout": true,
+	string(sessionpkg.SleepReasonIdle):                  true,
+	string(sessionpkg.SleepReasonIdleTimeout):           true,
+	string(sessionpkg.SleepReasonCityStop):              true,
+	string(sessionpkg.SleepReasonRuntimeMissing):        true,
+	string(sessionpkg.SleepReasonProviderTerminalError): true,
+	string(sessionpkg.SleepReasonMaxSessionAge):         true,
+	string(sessionpkg.SleepReasonConfigDrift):           true,
+	string(sessionpkg.SleepReasonKilled):                true,
 }
 
 // interruptedCloseGate reports whether info is an interrupted close of this
