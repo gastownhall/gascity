@@ -156,3 +156,139 @@ func TestSessionBackendEnvWithheldPortPinsSharedServerOff(t *testing.T) {
 		t.Fatalf("BD_DOLT_SHARED_SERVER = %q, want false pinned off beside a withheld port", got)
 	}
 }
+
+// TestSessionBackendEnvKeepsDoltPortWhenMirrorCannotStandIn guards AC-5 of
+// gastownhall/gascity#1656: the port withhold fires only when the scope's own
+// mirror can stand in for the projected port. Every row here is a scope where
+// it cannot — the mirror is absent or stale, or the target is one bd's
+// port-file path cannot serve — and each must keep today's projection,
+// byte for byte, with and without the withhold in place.
+func TestSessionBackendEnvKeepsDoltPortWhenMirrorCannotStandIn(t *testing.T) {
+	writeRigConfig := func(rigRoot, configYAML string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(rigRoot, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "config.yaml"), []byte(configYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cityPath := t.TempDir()
+	livePort := writeManagedDirectCityFixture(t, cityPath)
+
+	t.Run("city mirror absent", func(t *testing.T) {
+		if err := os.Remove(filepath.Join(cityPath, ".beads", "dolt-server.port")); err != nil {
+			t.Fatal(err)
+		}
+		env, err := sessionBackendEnvWithError(cityPath, "", nil)
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		if got := env["GC_DOLT_PORT"]; got != livePort {
+			t.Fatalf("GC_DOLT_PORT = %q, want projected %q when no mirror exists", got, livePort)
+		}
+		if got := env["BEADS_DOLT_SERVER_PORT"]; got != livePort {
+			t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want projected %q when no mirror exists", got, livePort)
+		}
+	})
+
+	t.Run("rig mirror stale", func(t *testing.T) {
+		rigRoot := filepath.Join(t.TempDir(), "repo")
+		writeRigConfig(rigRoot, `issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`)
+		if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "dolt-server.port"), []byte("31364"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env, err := sessionBackendEnvWithError(cityPath, rigRoot, []config.Rig{{Name: "repo", Path: rigRoot}})
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		if got := env["GC_DOLT_PORT"]; got != livePort {
+			t.Fatalf("GC_DOLT_PORT = %q, want projected %q when the mirror reads a stale port", got, livePort)
+		}
+		if got := env["BEADS_DOLT_SERVER_PORT"]; got != livePort {
+			t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want projected %q when the mirror reads a stale port", got, livePort)
+		}
+	})
+
+	t.Run("legacy port-only rig", func(t *testing.T) {
+		rigRoot := filepath.Join(t.TempDir(), "legacy")
+		if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		env, err := sessionBackendEnvWithError(cityPath, rigRoot, []config.Rig{{Name: "legacy", Path: rigRoot, DoltPort: "3307"}})
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		if got := env["GC_DOLT_PORT"]; got != "3307" {
+			t.Fatalf("GC_DOLT_PORT = %q, want the legacy rig's pinned 3307", got)
+		}
+		if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
+			t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want the legacy rig's pinned 3307", got)
+		}
+	})
+
+	t.Run("explicit external rig", func(t *testing.T) {
+		rigRoot := filepath.Join(t.TempDir(), "external")
+		writeRigConfig(rigRoot, `issue_prefix: external
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.test
+dolt.port: 3307
+dolt.auto-start: false
+`)
+		env, err := sessionBackendEnvWithError(cityPath, rigRoot, []config.Rig{{Name: "external", Path: rigRoot}})
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		if got := env["GC_DOLT_HOST"]; got != "rig-db.example.test" {
+			t.Fatalf("GC_DOLT_HOST = %q, want the explicit external host", got)
+		}
+		if got := env["GC_DOLT_PORT"]; got != "3307" {
+			t.Fatalf("GC_DOLT_PORT = %q, want the explicit external 3307", got)
+		}
+	})
+
+	t.Run("explicit loopback rig", func(t *testing.T) {
+		rigRoot := filepath.Join(t.TempDir(), "loopback")
+		writeRigConfig(rigRoot, `issue_prefix: loopback
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: 3307
+dolt.auto-start: false
+`)
+		env, err := sessionBackendEnvWithError(cityPath, rigRoot, []config.Rig{{Name: "loopback", Path: rigRoot}})
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		// An explicit endpoint resolves External even on 127.0.0.1, so it is
+		// not gc's mirror path; the projection keeps host and port.
+		if got := env["GC_DOLT_HOST"]; got != "127.0.0.1" {
+			t.Fatalf("GC_DOLT_HOST = %q, want the explicit 127.0.0.1 host", got)
+		}
+		if got := env["GC_DOLT_PORT"]; got != "3307" {
+			t.Fatalf("GC_DOLT_PORT = %q, want the explicit 3307", got)
+		}
+	})
+
+	t.Run("socket target", func(t *testing.T) {
+		socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+		rigRoot := filepath.Join(t.TempDir(), "socket")
+		writeRigConfig(rigRoot, "issue_prefix: socket\ngc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.mode: server\ndolt.socket: "+socketPath+"\ndolt.auto-start: false\n")
+		env, err := sessionBackendEnvWithError(cityPath, rigRoot, []config.Rig{{Name: "socket", Path: rigRoot}})
+		if err != nil {
+			t.Fatalf("sessionBackendEnvWithError: %v", err)
+		}
+		if got := env["BEADS_DOLT_SERVER_SOCKET"]; got != socketPath {
+			t.Fatalf("BEADS_DOLT_SERVER_SOCKET = %q, want %q", got, socketPath)
+		}
+		if got := env["GC_DOLT_PORT"]; got != "" {
+			t.Fatalf("GC_DOLT_PORT = %q, want empty for a socket target", got)
+		}
+	})
+}
