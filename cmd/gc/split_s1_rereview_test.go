@@ -69,6 +69,7 @@ func TestIsTransientStoreFaultIsStoreIOOnly(t *testing.T) {
 		{"too many open files text alone", errors.New("open /x: too many open files"), true},
 		{"EMFILE typed alone", opaqueErr{"accept failed", syscall.EMFILE}, true},
 		{"ENOSPC typed alone", opaqueErr{"write failed", syscall.ENOSPC}, false},
+		{"ENOSPC typed behind a no-answer marker", opaqueErr{"dolt server unreachable while writing", syscall.ENOSPC}, false},
 		// A standing marker wins over a no-answer marker in the same text
 		// (precedence pinned; mutants C23-C25).
 		{"x509 behind cannot reach", errors.New(`cannot reach bd serve at https://bd.example: Get "x": tls: failed to verify certificate: x509: certificate has expired or is not yet valid`), false},
