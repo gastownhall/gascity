@@ -384,6 +384,75 @@ func TestHandoffReplaySendsNoMail(t *testing.T) {
 	}
 }
 
+// noticeGetFailingStore fails reading one op row by id, as a store that
+// stops answering would.
+type noticeGetFailingStore struct {
+	beads.Store
+	id string
+}
+
+// ConditionalWritesResolveTarget keeps the wrapped store's conditional
+// writes, so the op store still opens over it.
+func (s noticeGetFailingStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+func (s noticeGetFailingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		return beads.Bead{}, errors.New("store down")
+	}
+	return s.Store.Get(id)
+}
+
+// TestHandoffJSONReplayNamesTheFirstRunsNotice: a same-key --json rerun
+// reports the first run's restart op and the notice op recorded beside it,
+// replayed; a first run that recorded no notice replays with none, and a
+// notice that does not read is left out with a warning.
+func TestHandoffJSONReplayNamesTheFirstRunsNotice(t *testing.T) {
+	run := func(t *testing.T, c *cliOpCity, key string) (map[string]any, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := runHandoffVerb(c, key, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("handoff --key %s = %d; stderr=%s", key, code, stderr.String())
+		}
+		validateJSONAgainstResultSchema(t, []string{"handoff"}, stdout.Bytes())
+		return cliOpJSON(t, stdout.Bytes()), stderr.String()
+	}
+	t.Run("notice recorded", func(t *testing.T) {
+		h, c := restartOpsCity(t, restartOpsEnv(), nil)
+		first, _ := run(t, c, "k-json-replay")
+		restart, notice := opsByKind(t, h)
+		if len(restart) != 1 || len(notice) != 1 || first["notice_op_id"] != notice[0].ID {
+			t.Fatalf("first JSON %v over ops %+v / %+v, want one of each, naming the notice", first, restart, notice)
+		}
+		replay, _ := run(t, c, "k-json-replay")
+		if replay["replayed"] != true || replay["op_id"] != restart[0].ID || replay["notice_op_id"] != notice[0].ID || replay["key"] != "k-json-replay" {
+			t.Fatalf("replay JSON %v, want restart op %s and notice op %s, replayed", replay, restart[0].ID, notice[0].ID)
+		}
+	})
+	t.Run("no notice recorded", func(t *testing.T) {
+		h, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": "auto", "GC_OPS_CONTENT": "off", "GC_OPS_CONTROL": "off"}, nil)
+		run(t, c, "k-json-replay")
+		h.env["GC_OPS_CONTENT"] = "auto"
+		replay, stderr := run(t, c, "k-json-replay")
+		if _, ok := replay["notice_op_id"]; ok || replay["replayed"] != true || strings.Contains(stderr, "notice op") {
+			t.Fatalf("replay JSON %v, stderr %q; want replayed with no notice_op_id and no notice warning", replay, stderr)
+		}
+	})
+	t.Run("notice does not read", func(t *testing.T) {
+		h, c := restartOpsCity(t, restartOpsEnv(), nil)
+		run(t, c, "k-json-replay")
+		_, notice := opsByKind(t, h)
+		if len(notice) != 1 {
+			t.Fatalf("notice ops = %+v, want one", notice)
+		}
+		h.opStore = noticeGetFailingStore{Store: h.opStore, id: notice[0].ID}
+		replay, stderr := run(t, c, "k-json-replay")
+		const want = "gc handoff: warning: reading the first run's notice op: reading op "
+		if _, ok := replay["notice_op_id"]; ok || replay["replayed"] != true || !strings.Contains(stderr, want) || !strings.Contains(stderr, "store down; the JSON result leaves out notice_op_id") {
+			t.Fatalf("replay JSON %v, stderr %q; want replayed with no notice_op_id and %q", replay, stderr, want)
+		}
+	})
+}
+
 // TestRestartOpKeysDoNotCollideUnderReexecution (§3.3; the row's acceptance
 // test): two agent processes under one GC_SESSION_ID, GC_INSTANCE_TOKEN and
 // GC_RUNTIME_EPOCH, as a relaunch in place or a stale-key retry runs them,
@@ -477,19 +546,107 @@ func TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns(t *testing.T) {
 	}
 }
 
-// TestHandoffContentRequireWithLifecycleOffRecordsNoNotice pins the
-// documented "N rides R" consequence: with ops.content=require and
-// ops.lifecycle off, no restart op is recorded, so no notice op is proposed
-// and the handoff runs unrecorded and exits 0.
-func TestHandoffContentRequireWithLifecycleOffRecordsNoNotice(t *testing.T) {
-	h, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": "off", "GC_OPS_CONTENT": "require", "GC_OPS_CONTROL": "off"}, nil)
-	if r := runHandoffForTest(c, ""); r.code != 0 {
-		t.Fatalf("handoff = %d; stderr=%s", r.code, r.stderr)
+// TestHandoffContentRequireRidesAnUnrecordedRestart pins the documented "N
+// rides R" consequence: with ops.content=require and no restart op recorded
+// (ops.lifecycle off, or auto over a store that cannot record), the notice op
+// is neither checked nor proposed, so the handoff sends its mail, records the
+// restart and exits 0.
+func TestHandoffContentRequireRidesAnUnrecordedRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name, lifecycle string
+		incapable       bool
+	}{
+		{"lifecycle off", "off", false},
+		{"lifecycle off, store cannot record", "off", true},
+		{"lifecycle auto, store cannot record", "auto", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": tc.lifecycle, "GC_OPS_CONTENT": "require", "GC_OPS_CONTROL": "off"}, nil)
+			rows := h.opStore
+			if tc.incapable {
+				h.opStore = cliOpIncapableStore{rows}
+			}
+			if r := runHandoffForTest(c, ""); r.code != 0 {
+				t.Fatalf("handoff = %d; stderr=%s", r.code, r.stderr)
+			}
+			if ops := cliOpRows(t, rows); len(ops) != 0 {
+				t.Fatalf("ops = %d, want none", len(ops))
+			}
+			if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
+				t.Fatalf("mail beads = %d, want 1", len(mails))
+			}
+			if m := c.row(t).Metadata; m["restart_requested"] != "true" {
+				t.Fatalf("row %v, want the restart recorded", m)
+			}
+		})
 	}
-	if rows := cliOpRows(t, h.opStore); len(rows) != 0 {
-		t.Fatalf("ops = %d, want none", len(rows))
+}
+
+// noticeCreateFailingStore fails the create of every message op row, as a
+// journal write failing between the restart op and its notice would.
+type noticeCreateFailingStore struct{ beads.Store }
+
+// ConditionalWritesResolveTarget keeps the wrapped store's conditional
+// writes, so the op store still opens over it.
+func (s noticeCreateFailingStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+func (s noticeCreateFailingStore) Create(b beads.Bead) (beads.Bead, error) {
+	if op, err := opjournal.DecodeOp(b); err == nil && op.Kind == opjournal.KindMessage {
+		return beads.Bead{}, errors.New("database is locked")
 	}
-	if m := c.row(t).Metadata; m["restart_requested"] != "true" {
-		t.Fatalf("row %v, want the restart recorded", m)
+	return s.Store.Create(b)
+}
+
+// TestHandoffNoticeRefusalReportsTheRestartOp: under ops.content=require, a
+// notice op the journal refuses once the restart op is recorded closes the
+// restart op failed{refused:notice_refused} with nothing run. The run names
+// the restart op and the caller's key, on stderr and in its one --json
+// record, and a same-key rerun is refused as that op's failure.
+func TestHandoffNoticeRefusalReportsTheRestartOp(t *testing.T) {
+	h, c := restartOpsCity(t, map[string]string{"GC_OPS_LIFECYCLE": "auto", "GC_OPS_CONTENT": "require", "GC_OPS_CONTROL": "off"}, nil)
+	rows := h.opStore
+	h.opStore = noticeCreateFailingStore{rows}
+	var stdout, stderr bytes.Buffer
+	if code := runHandoffVerb(c, "k-notice", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("handoff = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	R := cliOpOnly(t, rows)
+	cliOpWantOutcome(t, R, opjournal.ArmFailed, opjournal.RefusedReasonPrefix+cliOpRefusedNoticeRefused, "")
+	if R.Kind != opjournal.KindRestart || R.ClientKey != "k-notice" {
+		t.Fatalf("op = %+v, want the restart op under k-notice", R)
+	}
+	want := "gc handoff: op " + R.ID + " (key k-notice): failed{refused:notice_refused}: the journal refused the handoff's notice op, so nothing ran; rerun without --key to act again"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("JSON records = %d, want exactly one:\n%s", len(lines), stdout.String())
+	}
+	if code := cliOpFailureCode(t, []byte(lines[0])); code != cliOpCodeFailed {
+		t.Fatalf("failure code = %q, want %s", code, cliOpCodeFailed)
+	}
+	if m := cliOpJSON(t, []byte(lines[0])); m["op_id"] != R.ID || m["key"] != "k-notice" {
+		t.Fatalf("failure envelope %v, want op_id %s and key k-notice", m, R.ID)
+	}
+	wantNothingRan := func(run string) {
+		t.Helper()
+		if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 0 {
+			t.Fatalf("%s: mail beads = %d, want none", run, len(mails))
+		}
+		if m := c.row(t).Metadata; m["restart_requested"] != "" {
+			t.Fatalf("%s: row %v records a restart", run, m)
+		}
+	}
+	wantNothingRan("first run")
+
+	h.opStore = rows
+	r := runHandoffForTest(c, "k-notice")
+	if r.code != 1 || !strings.Contains(r.stderr, "op "+R.ID+" closed failed{refused:notice_refused}; rerun without --key to act again (key k-notice)") {
+		t.Fatalf("rerun = %d, stderr %q; want 1 and %s's failed replay", r.code, r.stderr, R.ID)
+	}
+	wantNothingRan("rerun")
+	if ops := cliOpRows(t, rows); len(ops) != 1 {
+		t.Fatalf("ops = %+v, want the first run's restart op only", ops)
 	}
 }

@@ -14,9 +14,11 @@ package main
 // row's continuation_epoch, and it declares no after while R is shadow: an
 // after on an op the CLI closes at acceptance says nothing (DES-O1 §13).
 //
-// R closes from the row write, before the runtime hint and the poke; N closes
-// succeeded{via: legacy.queued} once the handoff mail lands, before the row
-// write. Both close before the restart they request can stop this process.
+// N closes succeeded{via: legacy.queued} once the handoff mail lands, before
+// the row write; R closes from the row write, before the runtime hint and the
+// poke. The row write is itself the request, so a controller pass that acts
+// on it first (a patrol tick, a ledger-feed wake) can stop this process
+// before R closes, leaving R to the op sweeper.
 // R's key is --key, else minted; there is no (generation, purpose) key, since
 // a relaunch in place runs a second agent process under one generation and
 // token. `gc handoff --auto` (a hook path), `--target` and a self handoff of a
@@ -24,10 +26,11 @@ package main
 // its --key is not recorded.
 //
 // Because N rides R, ops.content=require does not require N on its own: with
-// ops.lifecycle off, or R run unrecorded, no N is proposed and the handoff
-// runs and exits 0 with no notice op. N stays a legacy:cli shadow message
-// op even where [ops].authoritative lists message: it is an exception to
-// that setting until the notice gets a lane producer.
+// ops.lifecycle off, or R run unrecorded, N is neither checked nor proposed,
+// and the handoff runs as it does unrecorded. Once R is recorded, a refusal
+// of N closes R failed{refused:notice_refused}, and nothing runs. N stays a
+// legacy:cli shadow message op even where [ops].authoritative lists message:
+// it is an exception to that setting until the notice gets a lane producer.
 
 import (
 	"errors"
@@ -92,6 +95,9 @@ type restartOps struct {
 	stderr  io.Writer
 
 	restart, notice *cliOp
+	// replayedNotice is the id of the notice op a replayed R's first run
+	// recorded, read only for a --json result (recordedNoticeID).
+	replayedNotice string
 }
 
 // newRestartOps resolves sessionName's row on sessStore for a restart
@@ -143,17 +149,25 @@ func (o *restartOps) restartRequest(verb string) cliOpRequest {
 	return req
 }
 
-// noticeRequest is N's request before R is known: a notice to self, scoped
-// to the context the fresh restart opens, with no after.
+// noticeRequest is N's request once R is recorded: a notice to self under
+// <R.ID>:notice with causation R.ID, scoped to the context the fresh restart
+// opens, with no after.
 //
 // R's request already warned of a city config that did not load, so N's
-// does not warn again.
+// does not warn again, and R names the run in its one --json record, so N
+// reports on stderr only.
 func (o *restartOps) noticeRequest(verb string) cliOpRequest {
 	req := o.request(verb, opjournal.KindMessage)
-	req.cfgErr = nil
+	req.cfgErr, req.asJSON = nil, false
 	req.payload, req.policy = mailNotifyText(o.sender), mailNotifyOpPolicy
 	req.scope = opjournal.Scope{Kind: opjournal.ScopeContext, Epoch: o.epoch + 1}
+	req.presetKey, req.causation = o.noticeKey(), o.restart.adm.Op.ID
 	return req
+}
+
+// noticeKey is N's key, derived from R's op id.
+func (o *restartOps) noticeKey() string {
+	return o.restart.adm.Op.ID + handoffNoticeKeySuffix
 }
 
 // startRestart starts R. It reports every refusal itself.
@@ -166,33 +180,76 @@ func (o *restartOps) startRestart(verb string) cliOpStart {
 	return start
 }
 
-// startHandoff checks N, starts R, and then, when R is recorded and
-// executing, starts N under <R.ID>:notice. A refusal of N after R started
-// closes R failed{refused:notice_refused}: nothing ran.
+// startHandoff starts R and then, only when R is recorded and executing,
+// starts N: nothing about N is checked before, so N's gate never refuses a
+// handoff whose R is not recorded. A refusal of N closes R (refuseNotice).
 func (o *restartOps) startHandoff(verb string) cliOpStart {
 	if o == nil {
 		return cliOpExecute
 	}
-	notice := newCLIOp(o.cfg, o.sessStore, o.noticeRequest(verb))
-	if !notice.preflight() {
-		return cliOpRefused
+	start := o.startRestart(verb)
+	if start == cliOpReplayed && o.asJSON {
+		o.replayedNotice = o.recordedNoticeID(verb)
 	}
-	if start := o.startRestart(verb); start != cliOpExecute {
+	if start != cliOpExecute || !o.restart.recordedExecution() {
 		return start
 	}
-	if !o.restart.recordedExecution() {
-		return cliOpExecute
-	}
-	notice.req.presetKey = o.restart.adm.Op.ID + handoffNoticeKeySuffix
-	notice.req.causation = o.restart.adm.Op.ID
+	notice := newCLIOp(o.cfg, o.sessStore, o.noticeRequest(verb))
 	switch notice.start() {
 	case cliOpRefused:
-		o.restart.finishOutcome(cliOpRefusedOutcome(cliOpRefusedNoticeRefused))
+		o.refuseNotice()
 		return cliOpRefused
 	case cliOpExecute:
 		o.notice = notice
 	}
 	return cliOpExecute
+}
+
+// refuseNotice closes R failed{refused:notice_refused} once the journal has
+// refused N, which reported why: nothing ran. It names R and R's key, on
+// stderr and in the run's one --json record, as end names a recorded R that
+// failed.
+func (o *restartOps) refuseNotice() {
+	r := o.restart
+	r.finishOutcome(cliOpRefusedOutcome(cliOpRefusedNoticeRefused))
+	rerun := "rerun to act again"
+	if o.key != "" {
+		rerun = "rerun without --key to act again"
+	}
+	message := fmt.Sprintf("op %s (key %s): %s: the journal refused the handoff's notice op, so nothing ran; %s",
+		r.adm.Op.ID, r.adm.Key, cliOpOutcomeText(*r.closedWith), rerun)
+	fmt.Fprintf(o.stderr, "%s: %s\n", r.req.verb, message) //nolint:errcheck // best-effort stderr
+	r.writeFailure(cliOpCodeFailed, message, r.adm.Op.ID, r.adm.Key)
+}
+
+// recordedNoticeID is the id of the notice op a replayed R's first run
+// recorded under <R.ID>:notice, read through R's op store; "" when that run
+// recorded none. A read that fails is warned of, and the --json result then
+// leaves the notice out.
+func (o *restartOps) recordedNoticeID(verb string) string {
+	st, err := o.restart.rec.Open()
+	if err != nil {
+		o.warnNoticeUnread(verb, err)
+		return ""
+	}
+	principal, _ := o.restart.principal()
+	id, err := opjournal.DeriveID(st.Prefix(), o.conversation, principal, o.noticeKey())
+	if err == nil {
+		_, err = st.Get(id)
+	}
+	switch {
+	case err == nil:
+		return id
+	case !errors.Is(err, beads.ErrNotFound):
+		o.warnNoticeUnread(verb, err)
+	}
+	return ""
+}
+
+// warnNoticeUnread warns that a replay's --json result leaves out the notice
+// op its first run recorded, as reading it failed with err.
+func (o *restartOps) warnNoticeUnread(verb string, err error) {
+	fmt.Fprintf(o.stderr, "%s: warning: reading the first run's notice op: %v; the JSON result leaves out notice_op_id\n", verb, err) //nolint:errcheck // best-effort stderr
 }
 
 // mailSent closes N from the handoff mail's result, and R too when the mail
@@ -216,27 +273,15 @@ func (o *restartOps) finishRestart(err error) {
 }
 
 // end closes whatever the command left open as failed{other}; defer it after
-// starting the ops. A run writes one --json record: when R reports a failure
-// it names the run's op, so N's failure goes to stderr only.
+// starting the ops. A run writes one --json record: N fails only beside R,
+// whose record names the run's op, so N's failure goes to stderr only
+// (noticeRequest).
 func (o *restartOps) end() {
 	if o == nil {
 		return
 	}
-	if o.notice != nil && cliOpReportsFailureAtEnd(o.restart) {
-		o.notice.req.asJSON = false
-	}
 	o.notice.end()
 	o.restart.end()
-}
-
-// cliOpReportsFailureAtEnd reports whether op.end() will report a failure: a
-// recorded, executing op that is still open (end closes it failed{other}) or
-// closed with an outcome that does not replay as success.
-func cliOpReportsFailureAtEnd(op *cliOp) bool {
-	if op == nil || op.adm == nil || !op.adm.Recorded || op.adm.Decision != legacyop.Execute {
-		return false
-	}
-	return op.closedWith == nil || !cliOpReplaysAsSuccess(op.req.kind, *op.closedWith)
 }
 
 // unrecordedKey warns that --key is not recorded on a self handoff of a
@@ -262,6 +307,9 @@ func (o *restartOps) jsonFields() handoffOpFields {
 	var f handoffOpFields
 	f.opID, f.key, f.replayed = o.restart.jsonFields()
 	f.noticeOpID, _, _ = o.notice.jsonFields()
+	if f.replayed {
+		f.noticeOpID = o.replayedNotice
+	}
 	return f
 }
 
