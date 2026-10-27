@@ -220,18 +220,20 @@ fi
 
 # Backup freshness: check each database's newest restorable backup, read from
 # the backup remote's manifest. See backup_commit_mtime_for_db.
-# Every user database is in scope. DBs without a configured <db>-backup
-# remote are reported as a coverage gap rather than silently excluded —
-# the exclusion is how unconfigured production DBs went unbacked-up until
-# journal corruption made them unrecoverable (#3176). mol-dog-backup.sh
-# auto-configures the remote on its next run, so this warning self-heals
-# unless the backup dog itself is failing.
+# Every user database is in scope. DBs without a configured backup remote —
+# bd's canonical `default` (what `bd backup init` registers and mol-dog-backup
+# has synced since #6751) or the legacy <db>-backup name — are reported as a
+# coverage gap rather than silently excluded — the exclusion is how
+# unconfigured production DBs went unbacked-up until journal corruption made
+# them unrecoverable (#3176). mol-dog-backup.sh auto-configures the
+# destination on its next run, so this warning self-heals unless the backup
+# dog itself is failing.
 BACKUP_ELIGIBLE_DBS=""
 BACKUP_STALE_ITEMS=""
 for db in $USER_DBS; do
     db_dir="$DOLT_DATA_DIR/$db"
     if [ -d "$db_dir/.dolt" ]; then
-        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx -e default -e "${db}-backup"); then
             BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
         else
             append_backup_stale "$db backup remote missing"

@@ -6000,6 +6000,64 @@ exit 0
 	}
 }
 
+// TestDoctorTreatsBdDefaultBackupAsConfigured asserts mol-dog-doctor counts
+// bd's canonical `default` backup as configured coverage. Since #6751,
+// mol-dog-backup registers the destination via `bd backup init`, which names
+// it `default` — a database whose only backup is that entry must reach the
+// manifest-freshness check ("prod backup missing" when no artifact exists),
+// not be reported as a coverage gap ("prod backup remote missing").
+func TestDoctorTreatsBdDefaultBackupAsConfigured(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    if [ "$(basename "$PWD")" = "prod" ]; then
+      printf 'default\n'
+    fi
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "prod backup remote missing") {
+		t.Fatalf("doctor must treat bd's default backup as configured coverage (#1980):\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("prod must reach the manifest-freshness check and be reported missing (no artifact):\n%s", gcLog)
+	}
+}
+
 func TestDoctorScriptDetectsDoctestOrphansWithBSDGrep(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
