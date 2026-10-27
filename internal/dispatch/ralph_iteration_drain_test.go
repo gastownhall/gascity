@@ -55,10 +55,72 @@ id = "b"
 title = "Worker B"
 `
 
+// compiledRalphDrainFanoutFormula gives worker A an on_complete fanout. A
+// failing close routes the scope through the fanout's forced settle — the one
+// body close every store takes, including the bd close policy that refuses
+// the unforced abort — so this shape lands the closed-body-while-sibling-runs
+// state on every store.
+const compiledRalphDrainFanoutFormula = `formula = "ralph-iteration-drain"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "loop"
+title = "Iteration loop"
+
+[steps.ralph]
+max_attempts = 3
+
+[steps.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children]]
+id = "a"
+title = "Worker A"
+
+[steps.children.on_complete]
+for_each = "output.items"
+bond = "drain-fanout-item"
+
+[[steps.children]]
+id = "b"
+title = "Worker B"
+`
+
 // drainStoreCase opens the base store a drain fixture cooks on.
 type drainStoreCase struct {
 	name string
 	open func(t *testing.T) (beads.Store, *beads.MemStore)
+}
+
+// drainSQLiteStore opens a real SQLite store on a throwaway directory.
+func drainSQLiteStore(t *testing.T) (beads.Store, *beads.MemStore) {
+	t.Helper()
+	store, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.(interface{ CloseStore() error }).CloseStore() })
+	return store, nil
+}
+
+// drainForcedSettleStores are the stores the forced-settle fixture cooks on:
+// the bd close-policy double, which refuses the abort's unforced body close,
+// and a real SQLite store. The fanout settle forces the body close either
+// way.
+func drainForcedSettleStores() []drainStoreCase {
+	return []drainStoreCase{
+		{
+			name: "bd-close-policy",
+			open: func(*testing.T) (beads.Store, *beads.MemStore) {
+				store := newBdClosePolicyStore()
+				return store, store.MemStore
+			},
+		},
+		{name: "sqlite", open: drainSQLiteStore},
+	}
 }
 
 // drainUnforcedAbortStores are the stores where the aborted iteration's
@@ -76,14 +138,7 @@ func drainUnforcedAbortStores() []drainStoreCase {
 		},
 		{
 			name: "sqlite",
-			open: func(t *testing.T) (beads.Store, *beads.MemStore) {
-				store, err := beads.OpenSQLiteStore(t.TempDir())
-				if err != nil {
-					t.Fatalf("OpenSQLiteStore: %v", err)
-				}
-				t.Cleanup(func() { _ = store.(interface{ CloseStore() error }).CloseStore() })
-				return store, nil
-			},
+			open: drainSQLiteStore,
 		},
 	}
 }
@@ -98,12 +153,12 @@ type ralphDrainFixture struct {
 	rootID    string
 }
 
-// buildRalphDrainFixture cooks compiledRalphDrainFormula on the store tc
-// opens. The check never passes (checkPassFrom 0), so a drained failed
-// iteration always iterates.
-func buildRalphDrainFixture(t *testing.T, tc drainStoreCase) ralphDrainFixture {
+// buildRalphDrainFixture cooks the drain formula on the store tc opens. The
+// check never passes (checkPassFrom 0), so a drained failed iteration always
+// iterates.
+func buildRalphDrainFixture(t *testing.T, tc drainStoreCase, formulaText string) ralphDrainFixture {
 	t.Helper()
-	city := newCompiledRalphCity(t, "ralph-iteration-drain", compiledRalphDrainFormula, 0)
+	city := newCompiledRalphCity(t, "ralph-iteration-drain", formulaText, 0)
 	base, mem := tc.open(t)
 	cooked, err := molecule.Cook(context.Background(), base, city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
@@ -223,7 +278,7 @@ func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 	for _, tc := range drainUnforcedAbortStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
 			all := drainStoreAll(t, fx.store)
 			b := drainBeadByRefSuffix(t, all, "loop.iteration.1.b")
 			drainClaimed(t, fx.store, b)
@@ -299,7 +354,7 @@ func TestCompiledRalphIterationDrainContinuesAfterMemberCloses(t *testing.T) {
 	for _, tc := range drainUnforcedAbortStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
@@ -350,7 +405,7 @@ func TestCompiledRalphIterationDrainHardFailAfterMemberCloses(t *testing.T) {
 	for _, tc := range drainUnforcedAbortStores() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := buildRalphDrainFixture(t, tc)
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
@@ -387,6 +442,55 @@ func TestCompiledRalphIterationDrainHardFailAfterMemberCloses(t *testing.T) {
 	}
 }
 
+// TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration pins the
+// forced-settle route to the same defect: an on_complete fanout on the failed
+// worker settles the iteration scope through the forced close every store
+// takes — the bd close policy included — so the body closes failed while the
+// claimed sibling runs. The drain gate still holds the verdict, and exactly
+// one iteration 2 exists once the sibling closes.
+func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T) {
+	t.Parallel()
+	for _, tc := range drainForcedSettleStores() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFanoutFormula)
+			all := drainStoreAll(t, fx.store)
+			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
+			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+			drainServeHeld(t, fx.crashFixture)
+
+			all = drainStoreAll(t, fx.store)
+			fanout := drainBeadByRefSuffix(t, all, "loop.iteration.1.a-fanout")
+			if fanout.Status != "closed" || fanout.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("worker A's fanout = %s/%s, want closed/fail: the settle this control drove is the route that closed the body", fanout.Status, fanout.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			body := drainBeadByRefSuffix(t, all, "loop.iteration.1")
+			if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("iteration body = %s/%s, want settled closed/fail while worker B still runs", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			drainRequireNoIteration(t, all, 2)
+
+			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b").ID, workerPass); err != nil {
+				t.Fatalf("closing worker B: %v", err)
+			}
+			if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+				t.Fatalf("serving after the member closed did not converge: %v", errs)
+			}
+
+			all = drainStoreAll(t, fx.store)
+			for _, ref := range []string{"loop.iteration.2", "loop.iteration.2.a", "loop.iteration.2.b"} {
+				if got := len(drainBeadsByRefSuffix(all, ref)); got != 1 {
+					t.Errorf("iteration-2 beads with step_ref suffix %q = %d, want exactly one", ref, got)
+				}
+			}
+			drainRequireNoIteration(t, all, 3)
+		})
+	}
+}
+
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
 // of iteration 1 fails — with a transient failure class, or a bare close the
 // abort_scope contract counts as failed — while worker B is claimed and
@@ -404,7 +508,7 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 		} {
 			t.Run(tc.name+"/"+failure.name, func(t *testing.T) {
 				t.Parallel()
-				fx := buildRalphDrainFixture(t, tc)
+				fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula)
 				all := drainStoreAll(t, fx.store)
 				drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 				a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
