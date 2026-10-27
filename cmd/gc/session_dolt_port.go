@@ -46,7 +46,12 @@ func scopeDoltPortMirror(scopeRoot string) (string, error) {
 // The withheld keys stay present but empty, following setProjectedDoltEnvEmpty,
 // so tmux/subprocess providers unset any stale inherited value. BEADS_DOLT_PORT
 // is cleared alongside BEADS_DOLT_SERVER_PORT because bd still honors the
-// legacy alias when the primary key is empty.
+// legacy alias when the primary key is empty. Withholding also removes the one
+// fact that kept bd off a shared server, so the pin applyProxiedSharedServerOptOut
+// adds — a user-level dolt.shared-server would otherwise send the session's
+// bd to ~/.beads/shared-server or 3308 instead of the managed server the
+// mirror tracks — is part of the withhold, the same split-brain rule
+// applySessionSharedServerOptOut applies to proxied gc-owned scopes.
 func withholdMirroredManagedDoltPort(env map[string]string, cityPath, scopeRoot string) {
 	if env == nil {
 		return
@@ -72,4 +77,5 @@ func withholdMirroredManagedDoltPort(env map[string]string, cityPath, scopeRoot 
 	env["GC_DOLT_PORT"] = ""
 	env["BEADS_DOLT_SERVER_PORT"] = ""
 	env["BEADS_DOLT_PORT"] = ""
+	applyProxiedSharedServerOptOut(env)
 }

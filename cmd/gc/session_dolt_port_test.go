@@ -127,3 +127,32 @@ dolt.auto-start: false
 		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want 0", got)
 	}
 }
+
+// TestSessionBackendEnvWithheldPortPinsSharedServerOff pins AC-4 of
+// gastownhall/gascity#1656: withholding the env port removes the one fact
+// that kept bd off a shared server, so a user-level `dolt.shared-server`
+// (or an inherited BEADS_DOLT_SHARED_SERVER=1) would now send the
+// session's raw bd to ~/.beads/shared-server or port 3308 instead of the
+// managed server the mirror tracks. The withhold must pin the mode off
+// explicitly, the same split-brain rule applySessionSharedServerOptOut
+// applies to proxied gc-owned scopes.
+func TestSessionBackendEnvWithheldPortPinsSharedServerOff(t *testing.T) {
+	cityPath := t.TempDir()
+	livePort := writeManagedDirectCityFixture(t, cityPath)
+	// An inherited shared-server preference, as a session spawned from a
+	// process carrying it would pass down.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	env, err := sessionBackendEnvWithError(cityPath, "", nil)
+	if err != nil {
+		t.Fatalf("sessionBackendEnvWithError: %v", err)
+	}
+
+	assertWithheldDoltPort(t, env, livePort)
+	if got := env["BEADS_DOLT_SHARED_SERVER"]; got != "0" {
+		t.Fatalf("BEADS_DOLT_SHARED_SERVER = %q, want 0 pinned off beside a withheld port", got)
+	}
+	if got := env["BD_DOLT_SHARED_SERVER"]; got != "false" {
+		t.Fatalf("BD_DOLT_SHARED_SERVER = %q, want false pinned off beside a withheld port", got)
+	}
+}
