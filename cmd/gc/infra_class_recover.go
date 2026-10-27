@@ -206,11 +206,14 @@ which clears them exactly as it clears the cutover's own copies.
 
 A manifest written by an older build may list a work-store row by id alone,
 with no time that says whether it is the bead the copy carried. When the
-binding no longer holds such a row, a CLOSED one is moved. An OPEN one is
-refused and named: it is a snapshot frozen at cutover, and the binding most
-likely closed and collected the live bead, so copying it back would bring it
-back open. Decide per id with --move <id> (copy it in) or --record-carried
-<id> (record it as carried, so the clear deletes it).`,
+binding no longer holds such a row, a closed one is moved. One that is not
+closed is refused and shown (status, type, timestamps, title): nothing here
+can tell whether the binding collected the bead the copy carried or never
+received it. Decide per id with --move <id> (copy it in as it is) or
+--record-carried <id> (record it as carried; the clear then deletes its
+work-store row, and the clear's backup keeps it). Both also accept closed
+rows. --dry-run and --dump show these rows without writing, and naming an
+already-resolved id again is a no-op.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
@@ -238,9 +241,9 @@ back open. Decide per id with --move <id> (copy it in) or --record-carried
 	cmd.Flags().StringVar(&dumpPath, "dump", "",
 		"write every stranded bead and its source dep edges to this JSON file before any write")
 	cmd.Flags().StringSliceVar(&moveIDs, strandedMoveFlag, nil,
-		"for an OPEN work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding (repeatable, comma-separated)")
+		"for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated)")
 	cmd.Flags().StringSliceVar(&carriedIDs, strandedRecordCarriedFlag, nil,
-		"for an OPEN work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes it (repeatable, comma-separated)")
+		"for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated)")
 	return cmd
 }
 
@@ -899,28 +902,54 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 	// A choice may only name a row it is the answer for: anything else is a
 	// typo or a misunderstanding, and acting on it would move or record a bead
-	// nobody asked about.
-	var misnamed []string
+	// nobody asked about. A choice for a row an earlier run already resolved
+	// (now recorded, or held by the binding after a copy that failed before
+	// the manifest was extended) is a no-op with a note, so re-running with
+	// the same flags is safe and a copy failure's re-run stays a resume.
+	resolved := map[string]bool{}
+	for _, b := range rows {
+		if resolvable[b.ID] || manifest.Match(b) == infraManifestCarried {
+			resolved[b.ID] = true
+		}
+	}
+	var misnamed, already []string
 	for _, ids := range []map[string]bool{opts.Move, opts.RecordCarried} {
 		for id := range ids {
-			if !chosen[id] {
+			switch {
+			case chosen[id]:
+			case resolved[id]:
+				already = append(already, id)
+			default:
 				misnamed = append(misnamed, id)
 			}
 		}
 	}
 	if len(misnamed) > 0 {
 		sort.Strings(misnamed)
-		fmt.Fprintf(stderr, "%s: --%s/--%s name only OPEN work-store rows that the manifest lists by id alone and the binding no longer holds; these are not: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strings.Join(misnamed, ", ")) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --%s/--%s name only work-store rows that the manifest lists by id alone and the binding no longer holds; these are not: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strings.Join(misnamed, ", ")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if len(unboundedOpen) > 0 {
-		ids := make([]string, 0, len(unboundedOpen))
+	if len(already) > 0 {
+		sort.Strings(already)
+		fmt.Fprintf(stdout, "note: already resolved by an earlier run, nothing to do: %s\n", strings.Join(already, ", ")) //nolint:errcheck // best-effort stdout
+	}
+	// The evidence an operator decides each open row on. The refusal states
+	// the two answers and what each does; it does not lean toward either.
+	reportUnboundedOpen := func(w io.Writer) {
 		for _, b := range unboundedOpen {
-			ids = append(ids, b.ID)
+			fmt.Fprintf(w, "  %s  status=%s  type=%s  created=%s  updated=%s  title=%q\n", //nolint:errcheck // best-effort output
+				b.ID, b.Status, b.Type, b.CreatedAt.UTC().Format(time.RFC3339), b.UpdatedAt.UTC().Format(time.RFC3339), b.Title)
 		}
-		sort.Strings(ids)
-		fmt.Fprintf(stderr, "%s: %d OPEN work-store row(s) are listed by the copy manifest by id alone, with no time that says whether they are the beads the copy carried, and the binding no longer holds them: %s. Each is a snapshot frozen at cutover; the binding most likely closed and collected the live bead, so copying it back would resurrect it OPEN. Nothing was written. Decide per id and run this again with --%s <id> (copy it into the binding) or --%s <id> (record it as carried, so the clear deletes it)\n", //nolint:errcheck // best-effort stderr
-			logPrefix, len(ids), strings.Join(ids, ", "), strandedMoveFlag, strandedRecordCarriedFlag)
+	}
+	unboundedOpenRefusal := func() {
+		fmt.Fprintf(stderr, "%s: %d work-store row(s) that are not closed are listed by the copy manifest by id alone, with no time that says whether each is the bead the copy carried, and the binding no longer holds them. Nothing here can tell whether the binding collected the bead the copy carried (then the work row is a snapshot frozen at cutover) or never received it (then the work row is the only copy). Nothing was written. Decide per id and run this again with --%s <id> (copy the row into the binding as it is) or --%s <id> (record it as the bead the copy carried; the clear then deletes its work-store row, and the clear's backup keeps it). --%s and --%s show the rows without writing:\n", //nolint:errcheck // best-effort stderr
+			logPrefix, len(unboundedOpen), strandedMoveFlag, strandedRecordCarriedFlag, "dry-run", "dump")
+		reportUnboundedOpen(stderr)
+	}
+	// Refused now unless the operator asked to look: a dry run or a dump
+	// carries on to show them, and refuses before any write.
+	if len(unboundedOpen) > 0 && !opts.DryRun && opts.DumpPath == "" {
+		unboundedOpenRefusal()
 		return 1
 	}
 
@@ -977,11 +1006,14 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 
 	if opts.DumpPath != "" {
-		if err := writeStrandedDump(opts.DumpPath, target, depReader, stranded); err != nil {
+		// The rows awaiting a per-id choice are dumped too: the dump is how an
+		// operator inspects them before choosing.
+		dumped := append(append([]beads.Bead(nil), stranded...), unboundedOpen...)
+		if err := writeStrandedDump(opts.DumpPath, target, depReader, dumped); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		fmt.Fprintf(stdout, "dump: %s (%d bead(s) with their source dep edges)\n", opts.DumpPath, len(stranded)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "dump: %s (%d bead(s) with their source dep edges)\n", opts.DumpPath, len(dumped)) //nolint:errcheck // best-effort stdout
 	}
 
 	// The topology, planned over every source bead the binding WILL hold rather
@@ -1010,12 +1042,30 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 
 	if opts.DryRun {
 		fmt.Fprintf(stdout, "dry-run: nothing was written. %d bead(s) would be copied into %s, and %d dep edge(s) restored\n", len(movable), target.Database, len(plan.missing)) //nolint:errcheck // best-effort stdout
+		for _, b := range movable {
+			if opts.Move[b.ID] {
+				fmt.Fprintf(stdout, "would move: %s\n", b.ID) //nolint:errcheck // best-effort stdout
+			}
+		}
+		for _, b := range recordCarried {
+			fmt.Fprintf(stdout, "would record as carried: %s (the clear then deletes its work-store row; the backup keeps it)\n", b.ID) //nolint:errcheck // best-effort stdout
+		}
+		if len(unboundedOpen) > 0 {
+			fmt.Fprintf(stdout, "awaiting a choice (--%s or --%s): %d row(s)\n", strandedMoveFlag, strandedRecordCarriedFlag, len(unboundedOpen)) //nolint:errcheck // best-effort stdout
+			reportUnboundedOpen(stdout)
+		}
 		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
-		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 {
+		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unboundedOpen) > 0 {
 			return 1
 		}
 		return 0
+	}
+	// A dump was asked for; the rows awaiting a choice are in it, and nothing
+	// is written until each has one.
+	if len(unboundedOpen) > 0 {
+		unboundedOpenRefusal()
+		return 1
 	}
 
 	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 && len(recordCarried) == 0 {

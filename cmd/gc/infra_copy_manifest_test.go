@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -668,7 +669,7 @@ func TestRecoverRefusesAnOpenUnboundedEntryTheBindingCollected(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("recover moved or accepted an open frozen row; stdout: %s", stdout)
 	}
-	for _, want := range []string{id, "--" + strandedMoveFlag, "--" + strandedRecordCarriedFlag, "OPEN"} {
+	for _, want := range []string{id, "--" + strandedMoveFlag, "--" + strandedRecordCarriedFlag, "status=open", "type=session", "created=", "updated=", "title="} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the refusal does not name %q: %s", want, stderr)
 		}
@@ -825,4 +826,150 @@ func TestRecoverNextLineCountsHeldAndCollectedApart(t *testing.T) {
 	if !strings.Contains(stdout, want) {
 		t.Errorf("stdout does not say %q:\n%s", want, stdout)
 	}
+}
+
+// Mutant R1: a frozen row that is in_progress or blocked is not closed, and is
+// refused like an open one.
+func TestRecoverRefusesInProgressAndBlockedUnboundedEntries(t *testing.T) {
+	for _, status := range []string{"in_progress", "blocked"} {
+		t.Run(status, func(t *testing.T) {
+			cityPath, cfg, source, target, id := unboundedCollectedCity(t, false)
+			st := status
+			if err := source.Update(id, beads.UpdateOpts{Status: &st}); err != nil {
+				t.Fatalf("setting %s to %s: %v", id, status, err)
+			}
+			code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+			if code == 0 {
+				t.Fatalf("recover moved a %s frozen row; stdout: %s", status, stdout)
+			}
+			if !strings.Contains(stderr, "status="+status) {
+				t.Errorf("the refusal does not show status=%s: %s", status, stderr)
+			}
+			if _, err := openMigratedDestination(t, target).Get(id); err == nil {
+				t.Errorf("the refused recover copied the %s row %s", status, id)
+			}
+		})
+	}
+}
+
+// Mutants R6/R7: a run whose ONLY action is --record-carried (the binding
+// holds no infrastructure row, every legacy row is open) records them and
+// counts them removed since cutover; the clear then proceeds.
+func TestRecoverWhoseOnlyActionIsRecordCarried(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := openMigratedDestination(t, target)
+	choice := map[string]bool{}
+	for _, b := range rows {
+		if b.Status == "closed" {
+			t.Fatalf("fixture row %s is closed; every legacy row must be open", b.ID)
+		}
+		if err := dest.Delete(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		choice[b.ID] = true
+	}
+	_ = closeBeadStoreHandle(dest)
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{RecordCarried: choice})
+	if code != 0 {
+		t.Fatalf("recover --record-carried exited %d: %s %s", code, stdout, stderr)
+	}
+	if want := fmt.Sprintf("removed since cutover: %d\n", len(rows)); !strings.Contains(stdout, want) {
+		t.Errorf("stdout does not count the recorded rows (%q):\n%s", want, stdout)
+	}
+	manifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range choice {
+		if _, ok := manifest.Created[id]; !ok {
+			t.Errorf("%s was not recorded", id)
+		}
+	}
+	assertClearProceeds(t, cityPath, target)
+}
+
+// --dry-run and --dump show the rows awaiting a choice without writing, and a
+// dry run names what each choice would do.
+func TestRecoverDryRunAndDumpShowUnboundedRows(t *testing.T) {
+	cityPath, cfg, _, target, id := unboundedCollectedCity(t, false)
+	before, _ := os.ReadFile(target.ManifestPath())
+	code, stdout, _ := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{DryRun: true})
+	if code == 0 || !strings.Contains(stdout, "awaiting a choice") || !strings.Contains(stdout, id) {
+		t.Errorf("dry run without a choice = %d:\n%s", code, stdout)
+	}
+	_, stdout, _ = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{DryRun: true, RecordCarried: map[string]bool{id: true}})
+	if !strings.Contains(stdout, "would record as carried: "+id+" (the clear then deletes its work-store row; the backup keeps it)") {
+		t.Errorf("dry run --record-carried does not say what it would do:\n%s", stdout)
+	}
+	_, stdout, _ = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{DryRun: true, Move: map[string]bool{id: true}})
+	if !strings.Contains(stdout, "would move: "+id) {
+		t.Errorf("dry run --move does not say what it would do:\n%s", stdout)
+	}
+	dump := filepath.Join(t.TempDir(), "dump.json")
+	code, _, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{DumpPath: dump})
+	if code == 0 {
+		t.Error("a dump with rows awaiting a choice went on to write")
+	}
+	if data, err := os.ReadFile(dump); err != nil || !strings.Contains(string(data), id) {
+		t.Errorf("the dump does not hold %s (err %v); stderr: %s", id, err, stderr)
+	}
+	if after, _ := os.ReadFile(target.ManifestPath()); !bytes.Equal(before, after) {
+		t.Error("a dry run or dump rewrote the manifest")
+	}
+	if _, err := openMigratedDestination(t, target).Get(id); err == nil {
+		t.Error("a dry run or dump copied the row")
+	}
+}
+
+// Re-running with the same choice after it took effect is a no-op with a
+// note, for both choices, and after a copy that failed before the manifest was
+// extended (the re-run is a resume).
+func TestRecoverRerunWithTheSameChoiceIsANoOp(t *testing.T) {
+	for name, opts := range map[string]func(string) strandedRecoveryOptions{
+		"record-carried": func(id string) strandedRecoveryOptions {
+			return strandedRecoveryOptions{RecordCarried: map[string]bool{id: true}}
+		},
+		"move": func(id string) strandedRecoveryOptions {
+			return strandedRecoveryOptions{Move: map[string]bool{id: true}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityPath, cfg, _, _, id := unboundedCollectedCity(t, false)
+			if code, so, se := runStrandedRecoveryWith(t, cityPath, cfg, opts(id)); code != 0 {
+				t.Fatalf("first run = %d: %s %s", code, so, se)
+			}
+			code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, opts(id))
+			if code != 0 || !strings.Contains(stdout, "already resolved") || !strings.Contains(stdout, id) {
+				t.Errorf("re-run with the same flags = %d: %s %s", code, stdout, stderr)
+			}
+		})
+	}
+	t.Run("move after a failed copy", func(t *testing.T) {
+		cityPath, cfg, source, target, id := unboundedCollectedCity(t, false)
+		b, err := source.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dest := openMigratedDestination(t, target)
+		if _, err := dest.(beads.ForeignIDCreator).CreateWithForeignID(infraMigrationRow(b)); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeBeadStoreHandle(dest)
+		code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{Move: map[string]bool{id: true}})
+		if code != 0 || !strings.Contains(stdout, "already resolved") {
+			t.Errorf("re-run with --move after a failed copy = %d: %s %s", code, stdout, stderr)
+		}
+		if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+			t.Errorf("still stranded after the resume: %v", got)
+		}
+		assertClearProceeds(t, cityPath, target)
+	})
 }

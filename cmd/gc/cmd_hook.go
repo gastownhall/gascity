@@ -48,7 +48,12 @@ failed work query is an error (nothing on stdout), never a drain result.
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
 fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
-unknown, not empty. This applies with and without --claim. Any other
+unknown, not empty. This applies with and without --claim. The answers that
+count as "no answer" are shared with the storage gate's transient faults and
+include a hosted bd serve answering 502, 503 or 504, "cannot reach bd serve",
+a killed bd ("signal: killed"), "too many open files", network timeouts and
+unreachable hosts (EHOSTUNREACH), and EMFILE/EAGAIN; each of these exits 2
+with the token (stdout keeps any partial output). Any other
 work-query failure exits 2 without --claim and 1 with --claim. Neither writes a
 drain result. When another store the hook searches serves work, a store that
 failed is named on stderr and the work is served; when no store has work, a
