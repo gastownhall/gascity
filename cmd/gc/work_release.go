@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -91,7 +92,8 @@ var (
 //     stay assigned (D5). A routeless claim takes the seat's route, as on the
 //     paths below, since kept it would leave the acked seat asleep holding
 //     it (mc-sca8r). A claim the seat's work_started cell or
-//     execution_claim_started stamp names is kept (PHASE1-2 §6.5), unless
+//     execution_claim_started stamp names is kept while in_progress
+//     (PHASE1-2 §6.5), unless
 //     it is on a dispatch hold: the ack is no proof it never ran, and giving
 //     it back lost started work (mc-ilr3b);
 //   - the cascade, the stranded repair, both orphan releases and the
@@ -112,6 +114,7 @@ var releasePolicies = map[releaseWhy]releasePolicy{
 
 // Why a claim was kept or failed.
 const (
+	keptPreassigned   = "preassigned"
 	keptStarted       = "started"
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
@@ -271,13 +274,21 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	if opts.RefuseStarted {
 		out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
 		for _, c := range claims {
-			if seat.keepsStarted(c.bead) {
+			if c.bead.Status == "in_progress" && seat.keepsStarted(c.bead) {
 				out.Kept, out.Why[c.bead.ID], out.Refused = append(out.Kept, c), keptStarted, true
 			}
 		}
 		if out.Refused {
 			return out, err
 		}
+	}
+	// Status-filtered live lists exclude bd's raw blocked rows, even through
+	// the controller cache. Discover parked assignments only for release, using
+	// the existing assignee query without a status filter. Other seat-work gates
+	// retain their raw-open semantics. Census failures remain release errors.
+	if why != releaseLadder {
+		parked, parkedErr := blockedReleaseClaims(sw.Legs(), scope)
+		claims, err = appendUniqueSeatWork(parked, claims), errors.Join(err, parkedErr)
 	}
 	if sw.Legs().cfg == nil && len(claims) > 0 {
 		return ReleaseOutcome{}, errors.Join(err, errReleaseNoConfig)
@@ -286,6 +297,36 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 		return ReleaseOutcome{}, err
 	}
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
+}
+
+// blockedReleaseClaims reads raw-blocked assignments through the same work
+// legs and persisted identities as the release. SourceStatus is only a read
+// projection: the eventual writer must still guard the raw status and holder.
+func blockedReleaseClaims(legs WorkLegs, scope ReleaseScope) ([]seatWorkHit, error) {
+	if err := legs.unusable(); err != nil {
+		return nil, err
+	}
+	var hits []seatWorkHit
+	var errs error
+	ids := map[string]bool{}
+	for _, id := range scope.scopeIDs() {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = true
+		}
+	}
+	legs.each(func(store beads.Store) {
+		for id := range ids {
+			rows, err := store.List(beads.ListQuery{Assignee: id, Live: true, TierMode: beads.TierBoth})
+			errs = errors.Join(errs, err)
+			for _, b := range rows {
+				if (b.SourceStatus != "blocked" && b.Status != "blocked") || !ids[strings.TrimSpace(b.Assignee)] || sessionpkg.IsSessionBeadOrRepairable(b) || beadmail.IsMessageBead(b) {
+					continue
+				}
+				hits = append(hits, seatWorkHit{store: store, bead: b})
+			}
+		}
+	})
+	return hits, errs
 }
 
 // releaseListed is ReleaseClaims' body for claims a caller already listed
@@ -328,7 +369,13 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 		fallback = seat.fallback
 	}
 	for _, c := range mine {
-		if p.startedNamedKeeps && seat.keepsStarted(c.bead) {
+		if why == releaseDrainAck && c.bead.Status != "in_progress" && c.bead.Status != "blocked" && c.bead.SourceStatus != "blocked" {
+			// D5 keeps continuation preassignments. They need neither a release
+			// route, a raw-row probe nor a write-budget failure.
+			keep(c, keptPreassigned)
+			continue
+		}
+		if p.startedNamedKeeps && c.bead.Status == "in_progress" && seat.keepsStarted(c.bead) {
 			keep(c, keptStarted)
 			continue
 		}

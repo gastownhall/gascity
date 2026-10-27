@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"github.com/gastownhall/gascity/internal/session"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,8 +265,8 @@ func TestReleaseListedKilledBlockedClaim(t *testing.T) {
 	}
 }
 
-// An open-row read consumes the remaining budget without sleeping. Started
-// claims must already be released, in their original relative order.
+// Drain releases started claims in order and never probes ordinary open
+// preassignments or reports them as budget failures.
 func TestReleaseListedDrainPrioritizesStartedClaimsWithinBudget(t *testing.T) {
 	now := time.Unix(100, 0)
 	deadline := now.Add(time.Second)
@@ -289,10 +293,10 @@ func TestReleaseListedDrainPrioritizesStartedClaimsWithinBudget(t *testing.T) {
 		claims = append(claims, seatWorkHit{store: store, bead: ledger.row()})
 	}
 	out := releaseListedWithClock(claims, releaseDrainAck, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{Deadline: deadline}, func() time.Time { return now })
-	if got, want := visits, []string{"bd-started1", "bd-started2", "bd-open1"}; !reflect.DeepEqual(got, want) {
+	if got, want := visits, []string{"bd-started1", "bd-started2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("store reads = %v, want %v", got, want)
 	}
-	if len(out.Released) != 2 || out.Released[0].bead.ID != "bd-started1" || out.Released[1].bead.ID != "bd-started2" || len(out.Kept) != 1 || len(out.Failed) != 1 || out.Why["bd-open2"] != failedBudget {
+	if len(out.Released) != 2 || out.Released[0].bead.ID != "bd-started1" || out.Released[1].bead.ID != "bd-started2" || len(out.Kept) != 2 || len(out.Failed) != 0 || out.Why["bd-open1"] != keptPreassigned || out.Why["bd-open2"] != keptPreassigned {
 		t.Fatalf("release = %+v", out)
 	}
 	for i, ledger := range ledgers {
@@ -594,4 +598,171 @@ func (s *releaseWithoutBlockedProbe) List(q beads.ListQuery) ([]beads.Bead, erro
 		return nil, nil
 	}
 	return s.Store.List(q)
+}
+
+// The normalized census models a provider/cache that exposes parked rows as
+// open; the raw census models BdStore's actual --status filter. Both use the
+// real SeatWork snapshot and BdStore guarded raw reader/writer.
+func drainBlockedEntrypointFixture(t *testing.T, status string, normalizedCensus bool) (*bdGuardLedger, beads.Store, beads.Bead, *SeatWork) {
+	t.Helper()
+	seat := beads.Bead{ID: "seat-1", Metadata: map[string]string{"template": "repo/worker"}}
+	ledger := newBdGuardLedger(status, seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker", "hold_reason": "awaiting input", "defer_until": "2030-01-01"})
+	ledger.bead.Labels = []string{"awaiting-input"}
+	ledger.bead.Dependencies = []beads.Dep{{DependsOnID: "bd-6", Type: "blocks"}}
+	deferred := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	ledger.bead.DeferUntil = &deferred
+	run := func(dir, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "query" {
+			return []byte("[]"), nil
+		}
+		if len(args) > 0 && args[0] == "list" {
+			ledger.mu.Lock()
+			defer ledger.mu.Unlock()
+			listed := ledger.bead.Status
+			if normalizedCensus && listed == "blocked" {
+				listed = "open"
+			}
+			flag := func(key string) string {
+				for _, arg := range args {
+					if v, ok := strings.CutPrefix(arg, key+"="); ok {
+						return v
+					}
+				}
+				return testFlagValue(args, key)
+			}
+			if requested := flag("--status"); requested != "" && requested != listed {
+				return []byte("[]"), nil
+			}
+			if owner := flag("--assignee"); owner != "" && owner != ledger.bead.Assignee {
+				return []byte("[]"), nil
+			}
+			return ledger.render()
+		}
+		return ledger.run(dir, name, args...)
+	}
+	store := wrapWithCachingStore(context.Background(), beads.NewBdStoreWithPrefix(t.TempDir(), run, "bd"), nil, false)
+	sw := testSeatWork(t.TempDir(), &config.City{Agents: []config.Agent{persistentWorker()}}, store, nil)
+	return ledger, store, seat, sw
+}
+
+func TestReleaseClaimsDrainBlockedEntrypoint(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, started  string
+		refuse, expired        bool
+		wantReleased, wantKept int
+		wantRefused            bool
+	}{
+		{name: "blocked execution stamp self ack", status: "blocked", started: "stamp", refuse: true, wantReleased: 1},
+		{name: "blocked work started self ack", status: "blocked", started: "cell", refuse: true, wantReleased: 1},
+		{name: "blocked operator ack", status: "blocked", started: "stamp", wantReleased: 1},
+		{name: "unreadable started open preassignment", status: "open", started: "unreadable", refuse: true, wantKept: 1},
+		{name: "expired open preassignment", status: "open", expired: true, wantKept: 1},
+		{name: "live in progress refuses whole ack", status: "in_progress", started: "stamp", refuse: true, wantKept: 1, wantRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _, seat, sw := drainBlockedEntrypointFixture(t, tc.status, true)
+			switch tc.started {
+			case "stamp":
+				seat.Metadata[executionClaimStartedKey] = "instance|" + ledger.bead.ID
+			case "cell":
+				seat.Metadata[session.WorkStartedKey] = session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Bead: ledger.bead.ID}}})
+			case "unreadable":
+				seat.Metadata[session.WorkStartedKey] = "invalid-json"
+			}
+			if tc.status == "open" {
+				ledger.bead.Metadata[beadmeta.RoutedToMetadataKey] = "missing/lane"
+			}
+			before := ledger.row()
+			opts := ReleaseOpts{RefuseStarted: tc.refuse}
+			if tc.expired {
+				opts.Deadline = time.Now().Add(-time.Hour)
+			}
+			out, err := ReleaseClaims(sw, releaseScopeOwn(seat), releaseSeatOfBead(seat), releaseDrainAck, opts)
+			if err != nil || out.Refused != tc.wantRefused || len(out.Released) != tc.wantReleased || len(out.Kept) != tc.wantKept || len(out.Failed) != 0 {
+				t.Fatalf("entrypoint result=%+v err=%v", out, err)
+			}
+			want := before
+			if tc.wantReleased > 0 {
+				want.Assignee = ""
+				want.Metadata = map[string]string{}
+				for k, v := range before.Metadata {
+					want.Metadata[k] = v
+				}
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					want.Metadata[key] = ""
+				}
+				if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "blocked" || hasBdFlag(ledger.updates[0], "--status") {
+					t.Fatalf("unguarded blocked write: %v", ledger.updates)
+				}
+			} else if len(ledger.updates) != 0 {
+				t.Fatalf("kept row mutated: %v", ledger.updates)
+			}
+			if !reflect.DeepEqual(ledger.row(), want) {
+				t.Fatalf("raw state=%+v want=%+v", ledger.row(), want)
+			}
+			if tc.status == "open" && out.Why[ledger.bead.ID] != "preassigned" {
+				t.Fatalf("ordinary preassignment misclassified: %+v", out)
+			}
+		})
+	}
+}
+
+func TestReleaseDrainAckBlockedEntrypointAndBdReachability(t *testing.T) {
+	for _, normalized := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct bd raw filter", true: "normalized census"}[normalized], func(t *testing.T) {
+			ledger, store, seat, sw := drainBlockedEntrypointFixture(t, "blocked", normalized)
+			if !storeBackedBy[*beads.BdStore](store) {
+				t.Fatal("fixture is not BdStore-backed")
+			}
+			if _, ok := storeLayer[*beads.CachingStore](store); !ok {
+				t.Fatal("production cache wrapper missing")
+			}
+			if !normalized {
+				hits, err := sw.snapshot(seatWorkQuery{scope: releaseScopeOwn(seat), statuses: openOrStarted}, false)
+				if err != nil || len(hits) != 0 {
+					t.Fatalf("raw status-filter baseline=%v %v", hits, err)
+				}
+			}
+			seat.Metadata[executionClaimStartedKey] = "instance|" + ledger.bead.ID
+			var stderr bytes.Buffer
+			held := releaseDrainAckClaims(sw.Legs(), seat, true, time.Minute, &stderr)
+			if len(held) != 0 || strings.Contains(stderr.String(), "ran out") {
+				t.Fatalf("ack held=%v log=%s", held, stderr.String())
+			}
+			wantOwner := ""
+			if got := ledger.row(); got.Assignee != wantOwner || got.Status != "blocked" {
+				t.Fatalf("provider reachability row=%+v", got)
+			}
+			wantWrites := 1
+			if len(ledger.updates) != wantWrites {
+				t.Fatalf("writes=%v", ledger.updates)
+			}
+		})
+	}
+}
+
+func TestReleaseClaimsBdCachedDeadHolderEntrypoint(t *testing.T) {
+	for _, why := range []releaseWhy{releaseCloseCascade, releaseStrandedRepair, releaseRetired} {
+		t.Run(string(rune('a'+why)), func(t *testing.T) {
+			ledger, _, seat, sw := drainBlockedEntrypointFixture(t, "blocked", false)
+			ledger.bead.Labels = []string{"hold:external"}
+			before := ledger.row()
+			out, err := ReleaseClaims(sw, releaseScopeOwn(seat), releaseSeatOfBead(seat), why, ReleaseOpts{Late: why == releaseCloseCascade})
+			if err != nil || len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 {
+				t.Fatalf("dead holder=%+v error=%v", out, err)
+			}
+			want := before
+			want.Assignee = ""
+			want.Metadata = map[string]string{}
+			for k, v := range before.Metadata {
+				want.Metadata[k] = v
+			}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				want.Metadata[key] = ""
+			}
+			if !reflect.DeepEqual(ledger.row(), want) {
+				t.Fatalf("blocked/hold/defer/dependency state changed: got=%+v want=%+v", ledger.row(), want)
+			}
+		})
+	}
 }

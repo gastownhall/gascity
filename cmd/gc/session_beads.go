@@ -1250,7 +1250,7 @@ func unclaimWorkAssignedToRetiredSessionBeadVia(
 
 // releaseDrainAckClaims gives back in_progress WORK claims first, then raw
 // blocked holds without reopening them. Both clear obsolete session affinity.
-// Claims named by the seat's started records remain held under releaseDrainAck's
+// In-progress claims named by the seat's started records remain held under releaseDrainAck's
 // policy (PHASE1-2 §6.5).
 //
 // Drain-ack means "I am done and I hold nothing." A session that reaches it
