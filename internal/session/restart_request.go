@@ -44,7 +44,9 @@ const restartRequestAttempts = 5
 // compare-and-swap (a v2 city), and is asked only when a patch is due and the
 // store resolves no conditional writer, so a v2 city never takes the checked
 // write (ErrRestartRequestNeedsConditionalWrite); a nil casOnly allows it (a
-// legacy city). A store that must fence and cannot refuses. A row that already
+// legacy city). casOnly can be slow, so it is asked with nothing written and
+// outside the read-to-write window, and the patch is decided again on a fresh
+// read after it: an incarnation minted while it is asked refuses the request. A store that must fence and cannot refuses. A row that already
 // carries both keys is not written again. The caller's generation is not
 // compared: every start mints a new token, and a rekey moves only the token.
 //
@@ -64,29 +66,41 @@ func (m *Manager) RequestFreshRestartFenced(id, instanceToken string, casOnly fu
 		return ErrRestartRequestUnfenced
 	}
 	return withSessionMutationLock(id, func() error {
-		var refusal error
-		due := false
-		writeRefusal := m.restartWriteRefusal(casOnly)
-		written, err := m.PersistedStore().UpdateMetadataFenced(id, restartRequestAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
-			patch, decideErr := decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
-			if decideErr == nil && len(patch) > 0 {
-				decideErr = writeRefusal()
+		gate := &restartWriteRefusal{m: m, casOnly: casOnly}
+		for {
+			var refusal error
+			due, unasked := false, false
+			written, err := m.PersistedStore().UpdateMetadataFenced(id, restartRequestAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
+				patch, decideErr := decideRestartRequest(info, instanceToken, m.runtimeCarriesToken)
+				unasked = false
+				if decideErr == nil && len(patch) > 0 {
+					var answered bool
+					answered, decideErr = gate.peek()
+					unasked = !answered
+				}
+				if decideErr != nil || unasked {
+					patch = nil
+				}
+				refusal, due = decideErr, len(patch) > 0
+				return patch
+			})
+			if err == nil && unasked {
+				// casOnly can take seconds (the CLI asks the controller), so it
+				// is never asked between the deciding read and the write: ask
+				// it here, with nothing written, then re-read and re-decide.
+				_ = gate.ask() // the re-decide returns the refusal, after the row's own
+				continue
 			}
-			if decideErr != nil {
-				patch = nil
+			switch {
+			case err != nil:
+				return err
+			case refusal != nil:
+				return refusal
+			case due && !written:
+				return ErrRestartRequestContended
 			}
-			refusal, due = decideErr, len(patch) > 0
-			return patch
-		})
-		switch {
-		case err != nil:
-			return err
-		case refusal != nil:
-			return refusal
-		case due && !written:
-			return ErrRestartRequestContended
+			return nil
 		}
-		return nil
 	})
 }
 
@@ -113,34 +127,50 @@ func (m *Manager) CheckFreshRestartFenced(id, instanceToken string, casOnly func
 	if err != nil || len(patch) == 0 {
 		return err
 	}
-	return m.restartWriteRefusal(casOnly)()
+	return (&restartWriteRefusal{m: m, casOnly: casOnly}).ask()
 }
 
-// restartWriteRefusal returns the refusal of a due restart-request write that
-// the decision on the row allowed: the require refusal of a store that must
-// fence and cannot, or ErrRestartRequestNeedsConditionalWrite when the store
+// restartWriteRefusal is the refusal of a due restart-request write that the
+// decision on the row allowed: the require refusal of a store that must fence
+// and cannot, or ErrRestartRequestNeedsConditionalWrite when the store
 // resolves no conditional writer and casOnly reports that the city records
-// only by compare-and-swap. It resolves the writer and asks casOnly at most
-// once, on its first call, so a re-decide after a lost swap asks nothing new.
-func (m *Manager) restartWriteRefusal(casOnly func() bool) func() error {
-	var (
-		asked   bool
-		refusal error
-	)
-	return func() error {
-		if asked {
-			return refusal
-		}
-		asked = true
-		writer, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: m.store})
-		switch {
-		case err != nil:
-			refusal = err
-		case writer == nil && casOnly != nil && casOnly():
-			refusal = ErrRestartRequestNeedsConditionalWrite
-		}
+// only by compare-and-swap. It asks casOnly at most once, so a re-decide
+// after a lost swap asks nothing new.
+type restartWriteRefusal struct {
+	m        *Manager
+	casOnly  func() bool
+	answered bool
+	refusal  error
+}
+
+// peek returns the refusal when it is known without asking casOnly; answered
+// is false when casOnly must still be asked (the store resolves no
+// conditional writer and casOnly is set).
+func (r *restartWriteRefusal) peek() (answered bool, refusal error) {
+	if r.answered {
+		return true, r.refusal
+	}
+	writer, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: r.m.store})
+	switch {
+	case err != nil:
+		r.answered, r.refusal = true, err
+	case writer != nil || r.casOnly == nil:
+		r.answered = true
+	}
+	return r.answered, r.refusal
+}
+
+// ask returns the refusal, asking casOnly when peek cannot answer. A caller
+// that writes asks it outside its read-to-write window.
+func (r *restartWriteRefusal) ask() error {
+	if answered, refusal := r.peek(); answered {
 		return refusal
 	}
+	r.answered = true
+	if r.casOnly() {
+		r.refusal = ErrRestartRequestNeedsConditionalWrite
+	}
+	return r.refusal
 }
 
 // decideRestartRequest is the fence's decision on one fresh read of the row:

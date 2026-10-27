@@ -337,7 +337,13 @@ func TestRequestFreshRestartFencedAcceptsTheLiveRuntimesToken(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RequestFreshRestartFenced: %v", err)
 				}
-				assertRestartRequestKeys(t, store, created.ID, "true")
+				got := assertRestartRequestKeys(t, store, created.ID, "true")
+				// The proof only records the request: the row keeps its own
+				// incarnation, and the restart that follows mints the next.
+				if got.Metadata["instance_token"] != restartFenceOtherToken || got.Metadata["generation"] != "4" {
+					t.Fatalf("row incarnation = instance_token %q, generation %q; want the row's own, unchanged",
+						got.Metadata["instance_token"], got.Metadata["generation"])
+				}
 				if len(rec.writes) != 1 || rec.writes[0] != "UpdateIfMatch" {
 					t.Fatalf("writes = %v, want one UpdateIfMatch", rec.writes)
 				}
@@ -566,6 +572,36 @@ func TestRequestFreshRestartFencedCASOnlyRefusesTheCheckedWrite(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestRequestFreshRestartFencedAsksCASOnlyOutsideTheWriteWindow proves the
+// casOnly ask (the CLI's controller identify dial, which can take seconds)
+// never runs between the deciding read and the checked write: a successor
+// minted while it is asked is read by a fresh decision, which refuses the
+// stale request, so it never lands on the successor's row.
+func TestRequestFreshRestartFencedAsksCASOnlyOutsideTheWriteWindow(t *testing.T) {
+	store := beads.NewMemStore()
+	created := seedRestartFenceSession(t, store, nil)
+	asks := 0
+	casOnly := func() bool {
+		asks++
+		if err := store.SetMetadataBatch(created.ID, map[string]string{"generation": "4", "instance_token": restartFenceOtherToken}); err != nil {
+			t.Fatalf("mint the successor: %v", err)
+		}
+		return false
+	}
+	m := newTestManager(t, store, runtime.NewFake())
+
+	if err := m.RequestFreshRestartFenced(created.ID, restartFenceToken, casOnly); !errors.Is(err, ErrStaleRestartRequest) {
+		t.Fatalf("err = %v, want ErrStaleRestartRequest", err)
+	}
+	got := assertRestartRequestKeys(t, store, created.ID, "")
+	if got.Metadata["instance_token"] != restartFenceOtherToken {
+		t.Fatalf("row token = %q, want the successor's", got.Metadata["instance_token"])
+	}
+	if asks != 1 {
+		t.Fatalf("casOnly asked %d times, want 1", asks)
 	}
 }
 
