@@ -18,19 +18,20 @@ import (
 
 // Start decide reasons. A held start names its gate.
 const (
-	decideAdopt             = "adopt"
-	decideRollback          = "rollback"
-	decideStaleCreate       = "stale-create-exit"             // v5 S7: a pending create's StaleSelf runtime
-	decideRollbackHeld      = "rollback-held:occupant-corpse" // v5.10i: a foreign corpse inside the lease
-	decideStart             = "start"
-	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
-	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
-	decideStartFailedCreate = "start-held:failed-create"           // SESS-605
-	decideStartParked       = "start-held:provider-terminal-error" // §12.2 #19: parked until a wake request releases it
-	decideStartQuarantine   = "start-held:quarantine"              // SESS-606
-	decideStartEpisode      = "start-held:startup-health"          // SESS-607, #46
-	decideStartProviderRed  = "start-held:provider-red"            // SESS-610, GUAR-034
-	decideStartHeld         = "start-held:hold"                    // v5.9u: a hold S1's PreWake refuses
+	decideAdopt                       = "adopt"
+	decideRollback                    = "rollback"
+	decideStaleCreate                 = "stale-create-exit"              // v5 S7: a pending create's StaleSelf runtime
+	decideRollbackHeld                = "rollback-held:occupant-corpse"  // v5.10i: a foreign corpse inside the lease
+	decideRollbackHeldLiveIncarnation = "rollback-held:live-incarnation" // #2081: this session's live runtime at another epoch
+	decideStart                       = "start"
+	decideHeartbeatRespawn            = "heartbeat-respawn"                  // A17, SESS-602
+	decideStartAccrued                = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
+	decideStartFailedCreate           = "start-held:failed-create"           // SESS-605
+	decideStartParked                 = "start-held:provider-terminal-error" // §12.2 #19: parked until a wake request releases it
+	decideStartQuarantine             = "start-held:quarantine"              // SESS-606
+	decideStartEpisode                = "start-held:startup-health"          // SESS-607, #46
+	decideStartProviderRed            = "start-held:provider-red"            // SESS-610, GUAR-034
+	decideStartHeld                   = "start-held:hold"                    // v5.9u: a hold S1's PreWake refuses
 )
 
 // armAdopt is A10's adopt: an uncommitted intent (a creating row) whose own
@@ -58,12 +59,19 @@ func armAdopt(r *rowFacts) (intent, bool) {
 // whose live runtime reads StaleSelf. At the row's generation it is the
 // row's own runtime: the effect stops it, then a configured named row the
 // allocation wants awake is kept for A18 to relaunch on the same bead
-// (Relaunch) and any other is rolled back. An older epoch is another
-// incarnation's, Foreign: rolled back without a stop.
+// (Relaunch) and any other is rolled back. A live runtime of the session
+// at another epoch — an older incarnation's, or a newer one's — holds the
+// rollback instead (#2081): neither it nor the row is touched, and the
+// next pass re-decides once the incarnation exits.
 func armRollback(r *rowFacts) (intent, bool) {
 	e, info := r.entry, r.row.Info
 	if !info.PendingCreateClaim || e == nil {
 		return intent{}, false
+	}
+	if e.Liveness == livenessAlive {
+		if v := compareIdentity(info, r.w.Observed[r.k].Identity); v == identityNewerSelf || v == identityStaleSelf && !ownRuntime(v, info, r.w.Observed[r.k].Identity) {
+			return intent{Reason: decideRollbackHeldLiveIncarnation}, true
+		}
 	}
 	reason, relaunch, occupant := decideRollback, false, false
 	switch {

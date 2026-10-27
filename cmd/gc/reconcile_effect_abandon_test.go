@@ -848,14 +848,14 @@ func TestArmRollbackMarksItsOccupant(t *testing.T) {
 		{"past its deadline, occupied", desireNone, reasonRollbackCandidate, livenessOccupied, false, false},
 		{"undesired and gone", desireDrain, "undesired", livenessGone, false, false},
 		{"another row's runtime", desireNone, reasonNameOccupied, livenessOccupied, false, true},
-		{"its StaleSelf runtime (S7)", desireWake, "", livenessAlive, true, true},
+		{"its own StaleSelf runtime (S7)", desireWake, "", livenessAlive, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			row := poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok", "generation", "3", "pending_create_claim", "true")
 			k := rowKeyOf(row.ID)
 			w := &World{Observed: map[rowKey]rowObservation{}}
 			if c.stale {
-				w.Observed[k] = rowObservation{Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "old"}}
+				w.Observed[k] = rowObservation{Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "old"}}
 			}
 			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
 			it, ok := armRollback(r)
@@ -907,7 +907,9 @@ func TestArmRollback(t *testing.T) {
 // Kills the S7 exit missed or mis-shaped (v5 S7): a pending create whose
 // live runtime reads StaleSelf is rolled back, and kept for A18's relaunch
 // only when it is the row's own runtime (its epoch the row's generation),
-// configured named and wanted awake. A Current one is A10's adopt.
+// configured named and wanted awake. A live runtime of the session at
+// another epoch is one of its incarnations: the rollback holds, whatever
+// the allocation wants (#2081). A Current one is A10's adopt.
 func TestArmRollbackStaleCreate(t *testing.T) {
 	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "session_name", "chat", "pool_managed", ""}
 	for _, c := range []struct {
@@ -918,12 +920,16 @@ func TestArmRollbackStaleCreate(t *testing.T) {
 		desired  desire
 		propose  bool
 		relaunch bool
+		held     bool
 	}{
-		{"own, configured named, wanted: relaunched", "3", "old", true, desireWake, true, true},
-		{"own, configured named, unwanted: rolled back", "3", "old", true, desireNone, true, false},
-		{"own, pool: rolled back", "3", "old", false, desireWake, true, false},
-		{"older epoch, configured named: rolled back", "2", "old", true, desireWake, true, false},
-		{"Current: the adopt's", "3", "tok", true, desireWake, false, false},
+		{"own, configured named, wanted: relaunched", "3", "old", true, desireWake, true, true, false},
+		{"own, configured named, unwanted: rolled back", "3", "old", true, desireNone, true, false, false},
+		{"own, pool: rolled back", "3", "old", false, desireWake, true, false, false},
+		{"older epoch, configured named: held", "2", "old", true, desireWake, false, false, true},
+		{"older epoch, unwanted: held", "2", "old", true, desireNone, false, false, true},
+		{"older epoch, pool: held", "2", "old", false, desireWake, false, false, true},
+		{"newer epoch: held", "4", "old", true, desireWake, false, false, true},
+		{"Current: the adopt's", "3", "tok", true, desireWake, false, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			meta := []string{"generation", "3", "instance_token", "tok", "pending_create_claim", "true"}
@@ -938,6 +944,12 @@ func TestArmRollbackStaleCreate(t *testing.T) {
 			w := &World{Env: &reconcileEnv{Cfg: cfg}, Observed: map[rowKey]rowObservation{k: {Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: c.epoch, Token: c.token}}}}
 			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Liveness: livenessAlive}}
 			it, ok := armRollback(r)
+			if c.held {
+				if !ok || it.Kind != "" || it.Reason != decideRollbackHeldLiveIncarnation {
+					t.Fatalf("armRollback = (%+v, %v), want held on a live incarnation", it, ok)
+				}
+				return
+			}
 			if ok != c.propose || ok && (it.Kind != intentRollback || it.Reason != decideStaleCreate || it.Relaunch != c.relaunch) {
 				t.Fatalf("armRollback = (%+v, %v), want proposed %v relaunch %v", it, ok, c.propose, c.relaunch)
 			}
