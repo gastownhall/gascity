@@ -1053,3 +1053,108 @@ func TestLadderNoticeFatePastStartBy(t *testing.T) {
 		}
 	}
 }
+
+// atBoth moves the ladder's and the lane fixture's clocks to d after the
+// start and passes the ladder once, for a running lane host that reads the
+// fixture's clock.
+func (lc *ladderLaneCity) atBoth(d time.Duration) {
+	lc.now = lc.start.Add(d)
+	lc.f.clk.mu.Lock()
+	lc.f.clk.now = lc.now
+	lc.f.clk.mu.Unlock()
+	lc.pass()
+}
+
+// fenceRuntime restarts the seat's fake runtime as incarnation 7 of tok-7,
+// as a production start stamps it, so the lane's input fence matches, with
+// its activity an hour back.
+func (lc *ladderLaneCity) fenceRuntime() {
+	lc.t.Helper()
+	if err := lc.sp.Stop(ladderSeatName); err != nil {
+		lc.t.Fatal(err)
+	}
+	env := map[string]string{runtime.RuntimeEpochEnv: "7", runtime.ContinuationEpochEnv: "1", runtime.InstanceTokenEnv: "tok-7"}
+	if err := lc.sp.Start(context.Background(), ladderSeatName, runtime.Config{Env: env}); err != nil {
+		lc.t.Fatal(err)
+	}
+	lc.sp.SetActivity(ladderSeatName, lc.start.Add(-time.Hour))
+}
+
+// The ladder's notice end to end in process: a running lane host's pass
+// types it into the seat as one reminder block, closes it succeeded, and the
+// next ladder pass settles the mark delivered (work.nudged, attempt 1).
+func TestWorkLadderNoticeTypedByARunningLaneHost(t *testing.T) {
+	lc := newLadderLaneCity(t)
+	lc.fenceRuntime()
+	hh := newLaneHostHarness(t, lc.f, "message")
+	hh.start()
+	hh.waitTicker(t)
+	id := lc.startedClaim()
+	lc.atBoth(0)
+	lc.atBoth(halfPast(1))
+	m := lc.entry(id).Notice
+	if m.IsZero() {
+		t.Fatalf("no notice mark: %+v (typed %d)", lc.entry(id), lc.nudges())
+	}
+	deadline := time.After(laneWaitBudget)
+	for got := lc.op(m.Op); got.Status != opjournal.StatusClosed; got = lc.op(m.Op) {
+		select {
+		case <-deadline:
+			t.Fatalf("the host never delivered %s: status %s, waiting %+v, logs %q", m.Op, got.Status, conversationLaneStatusFor(lc.f.dir, time.Now()).Waiting, hh.logLines())
+		case <-hh.passes:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if arm, reason := lc.op(m.Op).Outcome.Effective(); arm != opjournal.ArmSucceeded {
+		t.Fatalf("outcome %s{%s}, want succeeded", arm, reason)
+	}
+	text := fmt.Sprintf(ladderStartedNudge, id)
+	if ns := lc.f.nudges(); len(ns) != 1 || ns[0].Message != reminderGolden("planner", text) {
+		t.Fatalf("typed %+v, want one reminder block carrying %q", ns, text)
+	}
+	lc.atBoth(2 * time.Minute)
+	if n := len(lc.events(events.WorkNudged)); n != 1 {
+		t.Fatalf("work.nudged = %d, want 1", n)
+	}
+	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 1 || e.Refused != 0 {
+		t.Fatalf("entry %+v, want the delivered attempt settled", e)
+	}
+}
+
+// V2-18: a stop request landing after the proposal. A running lane host
+// holds the notice (content_block stop_requested), the next ladder pass
+// withdraws it, and nothing is typed into the stopping seat.
+func TestWorkLadderNoticeHeldOnAStopRequestedRow(t *testing.T) {
+	lc := newLadderLaneCity(t, "message") // registered, running no pass
+	id := lc.startedClaim()
+	lc.atBoth(0)
+	lc.atBoth(halfPast(1))
+	op := lc.onlyOp()
+	lc.setRow(map[string]string{session.DrainIntentReasonKey: drainOrphaned, session.DrainIntentAtKey: lc.now.Format(time.RFC3339), session.DrainIntentIncarnationKey: "7"})
+	hh := newLaneHostHarness(t, lc.f, "message") // replaces the registration with a running host
+	hh.start()
+	hh.waitTicker(t)
+	hh.h.Poke(lc.seat)
+	deadline := time.After(laneWaitBudget)
+	for !laneStatusWaitsFor(conversationLaneStatusFor(lc.f.dir, time.Now()), op.ID, opjournal.WaitContentBlock, session.ContentGateStopRequested) {
+		select {
+		case <-deadline:
+			t.Fatalf("the host never held the notice on stop_requested: %+v", conversationLaneStatusFor(lc.f.dir, time.Now()).Waiting)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if n := len(lc.f.nudges()); n != 0 {
+		t.Fatalf("typed %d into a stop-requested seat", n)
+	}
+	lc.atBoth(2 * time.Minute)
+	got := lc.op(op.ID)
+	if got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.By != ladderNoticePrincipal {
+		t.Fatalf("op %s %+v cancel %+v, want withdrawn by the ladder", got.Status, got.Outcome, got.Cancel)
+	}
+	if n := len(lc.f.nudges()); n != 0 {
+		t.Fatalf("typed %d into a stop-requested seat", n)
+	}
+	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 0 {
+		t.Fatalf("entry %+v, want withdrawn: paused, no refusal", e)
+	}
+}
