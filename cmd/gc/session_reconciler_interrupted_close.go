@@ -65,8 +65,9 @@ func interruptedCloseGate(info sessionpkg.Info) (closeGate, bool) {
 // runtime is confirmed not running, release of the row's own runtime lease,
 // then closeSeat with the interrupted close's own code and gate, which rewrites
 // the same ClosePatch and runs the same guards and cascade. Any refusal leaves
-// the row to the unknown-state skip. Each refusal is recorded on trace at
-// TraceSiteReconcilerFinishInterruptedClose.
+// the row to the unknown-state skip. Each decision is recorded on trace at
+// TraceSiteReconcilerFinishInterruptedClose, and a finished close also writes
+// a WARN line to stderr.
 func finishInterruptedClose(
 	cityPath string,
 	store beads.Store,
@@ -105,12 +106,33 @@ func finishInterruptedClose(
 		return false
 	}
 	if !closeSeat(store, sw, info, closeWhy{reason: info.MetadataState, gate: gate}, clk.Now().UTC(), stderr) {
+		recordInterruptedClose(trace, info, TraceOutcomeNoChange, nil)
 		return false
 	}
 	if info.MetadataState == strandedRepairCloseReason || interruptedClosePassthroughCodes[info.MetadataState] {
 		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
 	}
+	fmt.Fprintf(stderr, "WARN: reconciler: finished interrupted %q close of session bead %s — runtime not running\n", info.MetadataState, info.ID) //nolint:errcheck
+	recordInterruptedClose(trace, info, TraceOutcomeClosed, traceRecordPayload{
+		"state": info.MetadataState,
+		"gate":  closeGateName(gate),
+	})
 	return true
+}
+
+// closeGateName names gate in trace payloads.
+func closeGateName(gate closeGate) string {
+	switch gate {
+	case closeGated:
+		return "gated"
+	case closeFreeSlot:
+		return "free_slot"
+	case closeReleasing:
+		return "releasing"
+	case closeRollback:
+		return "rollback"
+	}
+	return fmt.Sprintf("gate_%d", gate)
 }
 
 // recordInterruptedClose records the finisher's decision for info on trace.

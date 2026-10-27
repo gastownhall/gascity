@@ -541,3 +541,47 @@ func TestInterruptedCloseWaitsForACompleteSteadyStateTick(t *testing.T) {
 		})
 	}
 }
+
+// A finished interrupted close says so: one WARN line naming the bead and its
+// state, a closed trace record carrying the state and gate, and no
+// unknown-state signal for the row it closed.
+func TestInterruptedCloseReportsTheFinishedClose(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rec := &capturingRecorder{}
+	env.rec = rec
+	b := env.createSessionBead("worker-gone", "worker")
+	halfCloseSessionBead(t, env.store, b.ID, "stale-session", env.clk.Now().Add(-time.Hour), nil)
+
+	trace := env.interruptedCloseTick(t, env.sp, false)
+
+	got, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed", got.Status)
+	}
+	warn := `WARN: reconciler: finished interrupted "stale-session" close of session bead ` + b.ID + ` — runtime not running`
+	if n := strings.Count(env.stderr.String(), warn); n != 1 {
+		t.Fatalf("stderr has %d %q lines, want 1; stderr:\n%s", n, warn, env.stderr.String())
+	}
+	var closed []map[string]any
+	for _, r := range trace.records {
+		if r.SessionName != "worker-gone" {
+			continue
+		}
+		if r.ReasonCode == TraceReasonUnknownStateSkipped {
+			t.Fatalf("unknown_state_skipped recorded for the finished close: %+v", r)
+		}
+		if r.SiteCode == TraceSiteCode("reconciler.session.finish_interrupted_close") &&
+			r.ReasonCode == TraceReasonCode("interrupted_close") && r.OutcomeCode == TraceOutcomeClosed {
+			closed = append(closed, r.Fields)
+		}
+	}
+	if len(closed) != 1 || closed[0]["state"] != "stale-session" || closed[0]["gate"] != "releasing" {
+		t.Fatalf("finisher closed records = %+v, want one with state=stale-session gate=releasing", closed)
+	}
+	if events := unknownStateEventsFor(t, rec, b.ID); len(events) != 0 {
+		t.Fatalf("session.unknown_state events = %+v, want none for the finished close", events)
+	}
+}
