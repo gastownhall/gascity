@@ -295,7 +295,6 @@ func IsVersionMismatchedHash(stored string) bool {
 //	  GC_CITY / GC_CITY_PATH — city identity and location
 //	  GC_RIG*         — which rig the agent operates on
 //	  GC_TEMPLATE     — agent template identity
-//	  GC_DOLT_PORT    — how to reach dolt (ephemeral port)
 //	  GC_SKILLS_DIR   — skill discovery path
 //	  GC_BLESSED_BIN_DIR — trusted binary path
 //	  GC_PUBLICATION_* — service publication config
@@ -324,10 +323,13 @@ var envFingerprintAllow = map[string]bool{
 	// Agent identity
 	"GC_TEMPLATE": true,
 
-	// Service connectivity — GC_DOLT_PORT intentionally excluded.
-	// The dolt port is ephemeral (changes on every supervisor restart)
-	// and including it causes spurious config-drift drains on every
-	// restart. The agent reconnects to the new port automatically.
+	// Service connectivity — GC_DOLT_PORT intentionally excluded. The
+	// managed port is ephemeral (changes on every supervisor restart) and
+	// including it causes spurious config-drift drains on every restart.
+	// A session's raw bd follows the scope's .beads/dolt-server.port
+	// mirror because gc withholds the env port for gc-managed mirrored
+	// scopes; scopes that still project a port are external or
+	// operator-pinned endpoints whose ports do not churn.
 
 	// Tool/binary discovery
 	"GC_SKILLS_DIR":      true,
