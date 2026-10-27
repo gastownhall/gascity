@@ -18,8 +18,8 @@ var sessionDoltPortKeys = []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BE
 // mirroredManagedDoltCity builds a managed-direct city whose live runtime
 // state publishes a reachable port, plus an inherited_city rig, and lets gc's
 // own publication sync write both .beads/dolt-server.port mirrors. It returns
-// the city path, the rig root, the rig list and the published port.
-func mirroredManagedDoltCity(t *testing.T) (string, string, []config.Rig, string) {
+// the city path, the rig root and the rig list.
+func mirroredManagedDoltCity(t *testing.T) (string, string, []config.Rig) {
 	t.Helper()
 	cityPath := t.TempDir()
 	writeScopeMetadata(t, cityPath, map[string]string{
@@ -52,7 +52,7 @@ func mirroredManagedDoltCity(t *testing.T) (string, string, []config.Rig, string
 			t.Fatalf("fixture scope %s is not gc-managed", scope)
 		}
 	}
-	return cityPath, rigRoot, rigs, port
+	return cityPath, rigRoot, rigs
 }
 
 func mustReadScopeDoltPortMirror(t *testing.T, scopeRoot string) string {
@@ -84,7 +84,7 @@ func assertSessionDoltPortWithheld(t *testing.T, env map[string]string) {
 }
 
 func TestSessionBackendEnvWithholdsMirroredCityManagedDoltPort(t *testing.T) {
-	cityPath, _, rigs, _ := mirroredManagedDoltCity(t)
+	cityPath, _, rigs := mirroredManagedDoltCity(t)
 	setStaleSessionDoltPortEnv(t)
 
 	env := mustSessionBackendEnv(t, cityPath, "", rigs)
@@ -92,5 +92,17 @@ func TestSessionBackendEnvWithholdsMirroredCityManagedDoltPort(t *testing.T) {
 	assertSessionDoltPortWithheld(t, env)
 	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
 		t.Errorf("BEADS_DOLT_AUTO_START = %q, want 0", got)
+	}
+}
+
+func TestSessionBackendEnvWithholdsMirroredInheritedRigDoltPort(t *testing.T) {
+	cityPath, rigRoot, rigs := mirroredManagedDoltCity(t)
+	setStaleSessionDoltPortEnv(t)
+
+	env := mustSessionBackendEnv(t, cityPath, rigRoot, rigs)
+
+	assertSessionDoltPortWithheld(t, env)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Errorf("GC_DOLT_HOST = %q, want empty for a managed target", got)
 	}
 }
