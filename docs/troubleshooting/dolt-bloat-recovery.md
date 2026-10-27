@@ -260,6 +260,14 @@ Markers left by runs from before this guard existed:
   `mayor`). Reminders follow the same cadence as quarantine alerts. Reconcile
   it the same way as a pending-GC marker.
 
+A `compact-pending-push` marker whose remote has since been removed can never
+be retried. Compact stops treating it as a stale-marker alert and reports it
+once, as a `dolt.compact.quarantine` event of type
+`compact-pending-push-unsatisfiable` plus one mail. The event repeats every
+run; the mail does not. The marker is left untouched and the database stays
+blocked. Restore the remote, or clear the marker after you reconcile the
+database by hand.
+
 > **Warning:** re-cloning from the remote discards every commit made to the
 > local database since the flatten. Those writes exist only locally. Before
 > you re-clone, take a copy of `.dolt`. Then export the local changes with
