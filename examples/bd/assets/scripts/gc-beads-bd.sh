@@ -3045,7 +3045,7 @@ attempt_journal_corruption_recovery() {
         echo "gc-beads-bd: preserved corrupt store at $aside" >&2
         if (cd "$DATA_DIR" && run_with_timeout 600 dolt backup restore "$url" "$db") >> "$LOG_FILE" 2>&1; then
             recovered=$((recovered + 1))
-            echo "gc-beads-bd: RESTORED '$db' from backup $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
+            echo "gc-beads-bd: RESTORED '$db' from backup '$backup_name' at $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
         else
             # Fail closed: put the corrupt store back so the server cannot
             # start without this database and silently drop it from the

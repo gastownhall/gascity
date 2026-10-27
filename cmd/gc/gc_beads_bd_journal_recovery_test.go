@@ -68,7 +68,8 @@ func journalRecoveryHarness(t *testing.T, maskJQ bool) string {
 
 // writeJournalFakeDolt stubs `dolt status` (corrupt when the database dir
 // contains a .corrupt marker) and `dolt backup restore` (recreates the
-// database with a restored-marker, honoring FAKE_RESTORE_EXIT).
+// database with a restored-marker, honoring FAKE_RESTORE_EXIT and recording
+// each restore's URL argument in FAKE_RESTORE_CALLS).
 func writeJournalFakeDolt(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -83,6 +84,7 @@ case "${1:-}" in
     ;;
   backup)
     if [ "${2:-}" = "restore" ]; then
+      printf '%s\n' "${3:-}" >> "${FAKE_RESTORE_CALLS:-/dev/null}"
       if [ "${FAKE_RESTORE_EXIT:-0}" != "0" ]; then
         echo "restore failed" >&2
         exit "$FAKE_RESTORE_EXIT"
@@ -337,6 +339,69 @@ func prodRepoState(backupDir string) string {
 // has left behind since #6751 rewrote ensure_backup_destination.
 func bdDefaultRepoState(backupDir string) string {
 	return `{"head":"refs/heads/main","backups":{"default":{"name":"default","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
+}
+
+// bothBackupsRepoState registers both backup names, the legacy entry first
+// in the JSON text so a reader that scans for the last occurrence of a name
+// cannot pick the default entry by accident of position.
+func bothBackupsRepoState(defaultDir, legacyDir string) string {
+	return `{"head":"refs/heads/main","backups":{"prod-backup":{"name":"prod-backup","url":"file://` + legacyDir + `","fetch_specs":[],"params":{}},"default":{"name":"default","url":"file://` + defaultDir + `","fetch_specs":[],"params":{}}}}`
+}
+
+// TestJournalRecoveryPrefersBdDefaultOverLegacyBackup pins the precedence
+// when both backup names are registered: recovery restores exactly once,
+// from the `default` entry (the one mol-dog-backup still syncs), and its log
+// line names that backup and its URL so operators can see which source a
+// restored database came from.
+func TestJournalRecoveryPrefersBdDefaultOverLegacyBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	for _, tc := range []struct {
+		name   string
+		maskJQ bool
+	}{
+		{name: "sed fallback", maskJQ: true},
+		{name: "jq", maskJQ: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.maskJQ {
+				if _, err := exec.LookPath("jq"); err != nil {
+					t.Skip("jq not available; skipping jq-path test")
+				}
+			}
+			env := setupJournalRecoveryEnv(t)
+			defaultDir := env.backupDir
+			legacyDir := filepath.Join(env.cityDir, "backups", "legacy")
+			if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+				t.Fatalf("mkdir legacy backup dir: %v", err)
+			}
+			for _, dir := range []string{defaultDir, legacyDir} {
+				if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("backup"), 0o644); err != nil {
+					t.Fatalf("seed backup content in %s: %v", dir, err)
+				}
+			}
+			restoreCalls := filepath.Join(env.cityDir, "restore-calls.log")
+			env.addDatabase(t, "prod", true, bothBackupsRepoState(defaultDir, legacyDir))
+
+			out, err := env.run(t, journalRecoveryHarness(t, tc.maskJQ), "FAKE_RESTORE_CALLS="+restoreCalls)
+			if err != nil {
+				t.Fatalf("recovery failed: %v\n%s", err, out)
+			}
+			wantURL := "file://" + defaultDir
+			if !strings.Contains(out, "RESTORED 'prod' from backup 'default' at "+wantURL) {
+				t.Fatalf("restore notice must name the selected backup and its URL:\n%s", out)
+			}
+			calls, err := os.ReadFile(restoreCalls)
+			if err != nil {
+				t.Fatalf("read restore calls: %v", err)
+			}
+			lines := strings.Fields(strings.TrimSpace(string(calls)))
+			if len(lines) != 1 || lines[0] != wantURL {
+				t.Fatalf("restore calls = %v, want exactly one restore from %s", lines, wantURL)
+			}
+		})
+	}
 }
 
 // TestJournalRecoveryRestoresFromBdDefaultBackup pins that auto-recovery
