@@ -435,6 +435,17 @@ func censusDemandEnv(c *sessionCensus, store beads.Store, rigs map[string]beads.
 	return demandGatherEnv{CityStore: store, RigStores: rigs, OpenSessions: open, Sessions: newSessionBeadSnapshotFromInfos(sessionsLeg)}
 }
 
+// templateRowConfigured reports whether info's template resolves under cfg:
+// its agent is configured, or it is a configured named row whose stored
+// identity still names a configured named session, such as one a rig
+// binding has since qualified (gascity#5957), whose template A7 rewrites.
+func templateRowConfigured(cfg *config.City, info session.Info) bool {
+	if findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg)) != nil {
+		return true
+	}
+	return isNamedSessionInfo(info) && config.FindNamedSession(cfg, namedSessionIdentityInfo(info)) != nil
+}
+
 // templateMemoKey is what one row's template resolution reads off the row:
 // the row's ID (the session bead ID and pool-name ownership), the template
 // and identity fields its kind's path reads (rowTemplateResolver), the
@@ -508,6 +519,13 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 		if isNamedSessionInfo(info) {
 			identity := namedSessionIdentityInfo(info)
 			spec, ok := findNamedSessionSpec(cfg, bp.cityName, identity)
+			if ok && spec.Named != nil && spec.Named.QualifiedName() != identity {
+				// A row stored under a named session's bare identity, which
+				// a binding has since qualified (gascity#5957), resolves as
+				// the qualified session, so A7 renames it.
+				identity = spec.Named.QualifiedName()
+				spec, ok = findNamedSessionSpec(cfg, bp.cityName, identity)
+			}
 			if !ok || spec.Agent == nil {
 				return templateResolution{Err: fmt.Errorf("configured named session %q not found", identity)}
 			}
@@ -619,7 +637,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 	next := make(map[templateMemoKey]templateResolution, len(rows))
 	missed := false
 	for _, row := range rows {
-		if mislabelled[row.Key] || findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
+		if mislabelled[row.Key] || !templateRowConfigured(env.Cfg, row.Info) {
 			continue
 		}
 		k := templateMemoKeyOf(row.Info)

@@ -71,6 +71,14 @@ func requalifiedFixture(t *testing.T, mode string, ambiguous bool) parityFixture
 	}
 }
 
+// requalifiedV2World is f's v2 world with the contentbuild rig, which
+// newV2World's simulator rigs replace, configured beside them.
+func requalifiedV2World(t *testing.T, f parityFixture) *v2World {
+	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)
+	w.s.cfg.Rigs = append(w.s.cfg.Rigs, f.city().Rigs...)
+	return w
+}
+
 // rowByID is the bead with id in all.
 func rowByID(t *testing.T, all []beads.Bead, id string) beads.Bead {
 	t.Helper()
@@ -128,5 +136,60 @@ func TestLegacyRequalifiedNamedSessionMigratesBareRowInOneTick(t *testing.T) {
 	want := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, sessionInfoFromBead(row)))
 	if got := row.Metadata["started_config_hash"]; got != want {
 		t.Errorf("started_config_hash = %q, want the requalified template's %q (stale %q)", got, want, requalifiedStaleHash)
+	}
+}
+
+// AC-2: one v2 pass selects the pre-adopt row as the qualified named
+// session's canonical row, and A7 renames it and rebaselines its drift hash
+// in one patch.
+func TestV2RequalifiedNamedSessionSelectsAndRenamesBareRowInOnePass(t *testing.T) {
+	cfg := requalifiedCity(t, "always", false)()
+	d := newAllocFixture(t, cfg).sessions(preAdoptRow("always")).alive(requalifiedBare, InventoryAttrs{}).decide()
+	if e := entryOf(t, d, "gc-1"); !e.InDesired || e.DrainReason == drainOrphaned {
+		t.Errorf("gc-1 entry: InDesired %v, drain %q; want the named session's canonical row", e.InDesired, e.DrainReason)
+	}
+	for _, p := range d.Plans {
+		if p.Kind == createNamed {
+			t.Errorf("planNamed planned a named create %+v beside the pre-adopt row", p.Named)
+		}
+	}
+
+	f := requalifiedFixture(t, "always", false)
+	w := requalifiedV2World(t, f)
+	w.once(t)
+	admitted := w.s.p.out.record.Load().Admitted
+	if keys := intentKeys(admitted); !slices.Contains(keys, intentRowMetadata+":gc-1") {
+		t.Errorf("v2 admitted %v, want A7's %s on gc-1", keys, intentRowMetadata)
+	}
+	for _, it := range admitted {
+		if it.Kind == intentCreate {
+			t.Errorf("v2 admitted a create %v beside the pre-adopt row", it.Key)
+		}
+	}
+	snap := w.s.snapshot()
+	row, ok := snap["city/gc-1"]
+	if !ok || row.Status != "open" {
+		t.Fatalf("row gc-1 = %+v, want it open", row)
+	}
+	for key, want := range map[string]string{
+		"session_name":              requalifiedBare,
+		"template":                  requalifiedQualified,
+		"configured_named_identity": requalifiedQualified,
+		"alias":                     requalifiedQualified,
+	} {
+		if got := row.Metadata[key]; got != want {
+			t.Errorf("row %s = %q, want %q", key, got, want)
+		}
+	}
+	if history := session.AliasHistory(row.Metadata); !slices.Contains(history, requalifiedBare) {
+		t.Errorf("alias_history = %v, want it to contain %q", history, requalifiedBare)
+	}
+	if row.Metadata["started_config_hash"] == requalifiedStaleHash || row.Metadata["core_hash_breakdown"] == "" {
+		t.Errorf("A7 left the drift baseline: started_config_hash %q, core_hash_breakdown %q", row.Metadata["started_config_hash"], row.Metadata["core_hash_breakdown"])
+	}
+	for k, b := range snap {
+		if b.Metadata["session_name"] == requalifiedRuntime {
+			t.Errorf("row %s (%s) was minted for the requalified session", k, b.Status)
+		}
 	}
 }
