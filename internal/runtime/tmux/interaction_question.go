@@ -198,9 +198,10 @@ func (q *parsedQuestion) promptText() string {
 	return text
 }
 
-// requestID is the stable ID of the dialog: the same on every look while it
-// stays open, whichever option is focused.
+// requestID is the stable ID of the dialog page: the same on every look while
+// the page stays open, whichever option is focused, and new on the next page.
+// The header is left out: its chips change as questions are answered.
 func (q *parsedQuestion) requestID() string {
-	h := sha256.Sum256([]byte(q.Header + "\x00" + q.Question + "\x00" + strings.Join(q.Choices, "\x00")))
+	h := sha256.Sum256([]byte(q.Question + "\x00" + strings.Join(q.Choices, "\x00")))
 	return fmt.Sprintf("tmux-question-%x", h[:8])
 }

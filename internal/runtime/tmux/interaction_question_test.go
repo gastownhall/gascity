@@ -655,3 +655,59 @@ func TestNudgePathsSendNoKeyIntoAnyAskUserQuestionPage(t *testing.T) {
 		})
 	}
 }
+
+// Pending reports a question page as Kind "question" with no options and the
+// question in its prompt. The request ID names the page: the same on every
+// poll of it, whichever option has focus and whichever tab chips are checked
+// when the user steps back to it, and new once the dialog moves to its next
+// page. Back at the composer, nothing is pending.
+func TestPendingQuestionRequestIDFollowsThePage(t *testing.T) {
+	poll := func(pane string) *runtime.PendingInteraction {
+		t.Helper()
+		tm, _ := questionTmux(pane)
+		pending, err := (&Provider{tm: tm}).Pending("auq")
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		return pending
+	}
+	first := readQuestionFixture(t, "multi-question-page-ga-ngrme8.txt")
+	refocused := strings.Replace(strings.Replace(first, "❯ 1. Alpha", "1. Alpha", 1), "\n2. Beta", "\n❯ 2. Beta", 1)
+	steppedBack := strings.Replace(first, "☐ Q1  ☐ Q2", "☒ Q1  ☒ Q2", 1)
+	next := readQuestionFixture(t, "multi-question-after-answer-ga-ngrme8.txt")
+
+	page := poll(first)
+	if page == nil {
+		t.Fatal("Pending = nil for an open question page")
+	}
+	if page.Kind != "question" || len(page.Options) != 0 || !strings.HasPrefix(page.RequestID, "tmux-question-") {
+		t.Fatalf("Pending = %+v, want Kind question, no options, a tmux-question- request ID", page)
+	}
+	if !strings.Contains(page.Prompt, "Which approach would you prefer for this feature?") {
+		t.Errorf("Prompt = %q, want the question", page.Prompt)
+	}
+	for name, pane := range map[string]string{
+		"the same page again":                      first,
+		"the same page, focus moved":               refocused,
+		"the same page, stepped back to, answered": steppedBack,
+	} {
+		if again := poll(pane); again == nil || again.RequestID != page.RequestID {
+			t.Errorf("%s: Pending = %+v, want request ID %q", name, again, page.RequestID)
+		}
+	}
+
+	nextPage := poll(next)
+	if nextPage == nil || nextPage.Kind != "question" {
+		t.Fatalf("Pending = %+v for the page after one answer, want Kind question", nextPage)
+	}
+	if nextPage.RequestID == page.RequestID {
+		t.Errorf("the next page kept request ID %q; a new page is a new request", page.RequestID)
+	}
+	if len(nextPage.Options) != 0 || !strings.Contains(nextPage.Prompt, "How should we handle configuration?") {
+		t.Errorf("Pending = %+v, want no options and the next question", nextPage)
+	}
+
+	if done := poll(next + "\n" + answeredAskUserQuestionTail); done != nil {
+		t.Errorf("Pending = %+v once the pane is back at its composer, want nil", done)
+	}
+}
