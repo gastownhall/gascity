@@ -30,6 +30,17 @@ jobs:
       force_blacksmith: true
     secrets: inherit
 
+  # The advisory live probes (contract radar, MCP mail conformance) left
+  # ci.yml for their own workflow, so RC calls it beside CI parity. They read
+  # no secret. RC summary fails on a red radar, as it did inside CI parity.
+  probes_parity:
+    name: Advisory probes parity
+    permissions:
+      contents: read
+    uses: ./.github/workflows/advisory-probes.yml
+    with:
+      force_blacksmith: true
+
   # Every Bazel lane on the dispatched ref, executing on rbe-west: unit
   # (the untagged suite with cmd/gc's fast tests, docsync, the generated
   # artifact and policy checks, nogo), acceptance (Tier A), integration-
@@ -406,6 +417,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     needs:
       - ci_parity
+      - probes_parity
       - bazel_parity
       - ubuntu_embedded_pins
       - ubuntu_acceptance_a
@@ -430,9 +442,9 @@ jobs:
           lines = [
               "## RC Gate",
               "",
-              "This workflow is the manual pre-RC gate. It calls the reusable CI workflow plus RC-only release jobs for the dispatched ref.",
+              "This workflow is the manual pre-RC gate. It calls the reusable CI, advisory probes and Bazel workflows plus RC-only release jobs for the dispatched ref.",
               "",
-              "The `ci_parity` and `bazel_parity` entries are the aggregate results of the shared CI and Bazel workflows. Inspect their nested jobs in this run for per-check detail.",
+              "The `ci_parity`, `probes_parity` and `bazel_parity` entries are the aggregate results of the shared CI, advisory probes and Bazel workflows. Inspect their nested jobs in this run for per-check detail.",
               "",
               "Jobs that show `skipped` were intentionally gated off by the same conditional logic used in CI.",
               "",

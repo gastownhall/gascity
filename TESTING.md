@@ -343,6 +343,13 @@ this:
   group's concurrency group on its own `gh-readonly-queue/*` ref, which is
   unique per entry and base, with `cancel-in-progress` false. A PR's runs,
   keyed on its number, never share a queue entry's group.
+- **Advisory probes run beside, never inside, the required workflows.**
+  `advisory-probes.yml` (the contract radar against beads main HEAD, MCP
+  mail conformance) runs on `ci.yml`'s events, `merge_group` included, but
+  none of its checks is required, so the queue never waits on it. It is not
+  part of `ci.yml`, so a red probe never shares a run with `Check` and
+  `CI / required`: every `ci.yml` job feeds `CI / required`
+  (`scripts/ci_required_coverage_test.go`).
 - **CodeQL reports without analyzing.** Each `Analyze (...)` leg of a merge
   group runs one step, on a 2 vCPU runner, that says why: each queued pull
   request's own run analyzed it, and the ruleset's `code_scanning` rule
