@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -428,6 +429,80 @@ func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 
 	// The loop is terminated with terminal_reason=stopped.
 	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateTerminated)
+	}
+	if meta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("terminal_reason = %q, want %q", meta[FieldTerminalReason], TerminalStopped)
+	}
+}
+
+// TestStopHandler_ForceCloseDescendantErrorLeavesLoopActive asserts that
+// a store failure while closing a wisp descendant fails the stop before
+// any terminal state is written — the wisp root stays open and the loop
+// active — and that re-running stop once the error clears converges
+// (ga-i4s7ce, issue #8386).
+func TestStopHandler_ForceCloseDescendantErrorLeavesLoopActive(t *testing.T) {
+	handler, store, emitter := setupActiveHandler(t, "in_progress", nil)
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-b", "in_progress", "wisp-iter-2", "", nil)
+
+	store.CloseDescendantErrFunc = func(id string) error {
+		if id == "step-b" {
+			return fmt.Errorf("injected descendant close failure")
+		}
+		return nil
+	}
+
+	_, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err == nil {
+		t.Fatal("expected error when a descendant close fails")
+	}
+	if !strings.Contains(err.Error(), "wisp-iter-2") {
+		t.Errorf("error %q does not name the wisp", err)
+	}
+
+	// The failed step and the wisp root stay open; the loop keeps its
+	// running state and terminal fields, and no terminated event fires.
+	for _, id := range []string{"step-b", "wisp-iter-2", "root-1"} {
+		info, infoErr := store.GetBead(id)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Status == "closed" {
+			t.Errorf("%s closed, want open", id)
+		}
+	}
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateActive {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateActive)
+	}
+	if meta[FieldTerminalReason] != "" {
+		t.Errorf("terminal_reason = %q, want empty", meta[FieldTerminalReason])
+	}
+	if _, ok := emitter.findEvent(EventTerminated); ok {
+		t.Error("no ConvergenceTerminated event may fire while the stop failed")
+	}
+
+	// Clear the failure and re-run: the stop converges.
+	store.CloseDescendantErrFunc = nil
+	result, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err != nil {
+		t.Fatalf("retry stop: %v", err)
+	}
+	if result.Action != ActionStopped {
+		t.Errorf("Action = %q, want %q", result.Action, ActionStopped)
+	}
+	for _, id := range []string{"step-a", "step-b", "wisp-iter-2"} {
+		info, infoErr := store.GetBead(id)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, info.Status)
+		}
+	}
+	meta, _ = store.GetMetadata("root-1")
 	if meta[FieldState] != StateTerminated {
 		t.Errorf("state = %q, want %q", meta[FieldState], StateTerminated)
 	}

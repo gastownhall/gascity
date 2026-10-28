@@ -47,6 +47,11 @@ type fakeStore struct {
 	// parent closes only after all of its descendants.
 	CloseLog []string
 
+	// CloseDescendantErrFunc, when non-nil, is consulted before each
+	// descendant close in CloseOpenDescendants; a non-nil return fails
+	// that close and the whole call.
+	CloseDescendantErrFunc func(id string) error
+
 	ActivatedWispIDs []string
 }
 
@@ -180,6 +185,11 @@ func (s *fakeStore) closeDescendantTree(id, reason string) error {
 	}
 	if closed {
 		return nil
+	}
+	if s.CloseDescendantErrFunc != nil {
+		if err := s.CloseDescendantErrFunc(id); err != nil {
+			return err
+		}
 	}
 	return s.CloseBead(id, reason)
 }
