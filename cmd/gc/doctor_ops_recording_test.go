@@ -46,6 +46,7 @@ func newTestOpsRecordingCheck(store beads.Store, now time.Time, opts ...rollout.
 		return s
 	}
 	c.clk = &clock.Fake{Time: now}
+	c.reaperScopes = nil
 	return c, &opens
 }
 

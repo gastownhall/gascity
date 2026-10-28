@@ -320,7 +320,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// SQLite, or unable to record ops), the check reads at most one op
 		// row, and scans for expired legacy ops only once that read finds
 		// one; during a store outage it reports the outage too, beside the
-		// preflight's line.
+		// preflight's line. It also counts op rows (one bd read per bd scope)
+		// and, on a scope holding any, reads the purge and prune help and the
+		// types.retained setting, as the core reaper does before it purges.
 		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr))
 		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))

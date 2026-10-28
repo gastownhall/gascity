@@ -1403,6 +1403,7 @@ func TestOpsBuiltinDefaultRecordsOnARealSplitCity(t *testing.T) {
 	c.open = func() (beads.Store, error) { return work, nil }
 	c.sessions = func(beads.Store) beads.Store { return cliSess }
 	c.clk = &clock.Fake{Time: opSweepT0}
+	c.reaperScopes = nil // no bd here; the reaper's op-row scopes are pinned in reaper_op_rows_test.go
 	r := c.Run(&doctor.CheckContext{})
 	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "can record ops") {
 		t.Fatalf("doctor = %v %q, want OK recording", r.Status, r.Message)

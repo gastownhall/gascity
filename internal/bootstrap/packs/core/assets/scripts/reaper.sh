@@ -155,6 +155,14 @@ STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-
 # wisp that an open, hooked or in-progress wisp still depends on through
 # parent-child, tracks or blocks.
 PURGE_PLANE_FLAG="${GC_REAPER_PURGE_PLANE_FLAG:---wisps-plane}"
+# Op-journal rows (issue_type op) are no-history rows whose ids are
+# idempotency keys. The purge's wisps plane and the session prune both select
+# closed no-history rows, and bd deletes them with no tombstone unless it
+# honors types.retained and the scope's database names op there. So on a
+# scope that holds op rows both are held back until then (op_rows_guard). The
+# doctor's ops-recording check applies the same rule (cmd/gc/reaper_op_rows.go).
+OP_ROW_TYPE="op"
+RETAINED_TYPES_KEY="types.retained"
 # Closed wisps deleted per bd purge call, and the wall-clock budget (seconds,
 # shared by every scope) the purge step may spend per run. Both keep a large
 # backlog from outrunning the order timeout.
@@ -323,6 +331,62 @@ get_sql_rows() {
     rm -f "$stderr_file"
 
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r' | sed '/^[[:space:]]*$/d')
+}
+
+# retained_types_name_op VALUE reports whether a stored types.retained value
+# (a comma list or a JSON array of type names) names the op row type.
+retained_types_name_op() {
+    local list="${1//[][\"[:space:]]/}"
+    case ",$list," in
+        *",$OP_ROW_TYPE,"*) return 0 ;;
+    esac
+    return 1
+}
+
+# op_rows_guard VERB reports whether VERB (purge or prune) may delete closed
+# rows on the current scope. It may when the scope holds no op row, or when
+# the scope's bd honors types.retained (VERB's help names the setting) and the
+# database's types.retained names op, so bd itself keeps the op rows. Anything
+# else holds VERB back, a census that cannot be read included, and
+# OP_ROWS_GUARD_REASON says why.
+OP_ROWS_GUARD_REASON=""
+op_rows_guard() {
+    local verb="$1"
+    local help
+    local setting
+    local retained
+
+    OP_ROWS_GUARD_REASON=""
+    if ! get_sql_count "op row" "
+        SELECT COUNT(*) FROM (
+            SELECT id FROM (SELECT id FROM \`$SCOPE_DB\`.wisps WHERE issue_type = '$OP_ROW_TYPE' LIMIT 1) AS op_wisp
+            UNION ALL
+            SELECT id FROM (SELECT id FROM \`$SCOPE_DB\`.issues WHERE issue_type = '$OP_ROW_TYPE' LIMIT 1) AS op_issue
+        ) AS op_row_census
+    "; then
+        OP_ROWS_GUARD_REASON="op rows could not be counted"
+        return 1
+    fi
+    [ "$SQL_COUNT_RESULT" -gt 0 ] || return 0
+    if ! help=$(scope_bd "$verb" --help 2>/dev/null) || [[ "$help" != *"$RETAINED_TYPES_KEY"* ]]; then
+        OP_ROWS_GUARD_REASON="holds op rows and its bd does not honor $RETAINED_TYPES_KEY"
+        return 1
+    fi
+    if ! setting=$(scope_bd config get --json "$RETAINED_TYPES_KEY" 2>/dev/null) ||
+        ! retained=$(printf '%s' "$setting" | jq -r '.value // ""' 2>/dev/null) ||
+        ! retained_types_name_op "$retained"; then
+        OP_ROWS_GUARD_REASON="holds op rows and $RETAINED_TYPES_KEY does not name $OP_ROW_TYPE"
+        return 1
+    fi
+    return 0
+}
+
+# op_rows_hold_back STEP records that STEP did not run on the current scope
+# because op_rows_guard held it back.
+op_rows_hold_back() {
+    local reason="$1 skipped: $OP_ROWS_GUARD_REASON"
+    echo "reaper: $SCOPE_LABEL: $reason"
+    order_outcome_scope_skipped "$SCOPE_LABEL" "$reason"
 }
 
 count_lines() {
@@ -1119,6 +1183,10 @@ reap_scope_purge() {
     local batches=0
     local purge_args=(purge "$PURGE_PLANE_FLAG" --older-than "$PURGE_AGE" --json)
 
+    if ! op_rows_guard purge; then
+        op_rows_hold_back purge
+        return 0
+    fi
     if [ -n "$DRY_RUN" ]; then
         purge_args+=(--dry-run)
     else
@@ -1306,6 +1374,13 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
             ) AS session_prune_candidates
         " && [ "$SQL_COUNT_RESULT" -eq 0 ]; then
             echo "reaper: session prune: nothing to prune (no closed bead matching $SESSION_BEAD_PATTERN is older than $SESSION_PURGE_AGE)"
+            _PRUNE_SKIP=1
+        fi
+
+        # Op-row gate: the prune selects closed no-history rows too, which is
+        # where op rows live (see op_rows_guard).
+        if [ "$_PRUNE_SKIP" -eq 0 ] && ! op_rows_guard prune; then
+            op_rows_hold_back "session prune"
             _PRUNE_SKIP=1
         fi
 
