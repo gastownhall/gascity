@@ -20,7 +20,7 @@ import (
 // or CI / required without naming the need that failed, so a tool that
 // reads such a red from the failed jobs of its run (the adopt-pr gate's
 // infrastructure rerun does) would count a red probe in the same run as part
-// of it. Their triggers, path filters and runners are ci.yml's.
+// of it. Their triggers, runners and shared path filter are ci.yml's.
 
 const advisoryProbesWorkflowFile = "advisory-probes.yml"
 

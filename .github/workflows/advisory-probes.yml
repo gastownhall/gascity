@@ -12,7 +12,7 @@ name: Advisory probes
 # feeds CI / required (scripts/ci_required_coverage_test.go); an advisory job
 # belongs here.
 #
-# The triggers, path filters and runners are ci.yml's
+# The triggers, runners and shared path filter are ci.yml's
 # (scripts/advisory_probes_workflow_test.go), and RC Gate calls this
 # workflow beside ci.yml.
 on:
