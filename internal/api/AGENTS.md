@@ -347,10 +347,10 @@ adopts it.
   carry-on, however late, and an op the lane ran is answered as it closed,
   so a retry never stops a turn that began after the stop answered.
 - `/respond` (respond listed): a key that names a respond is its retry when
-  it asks the same answer of the same request id, followed through the row
-  the first request left under it (an open op awaited, a closed one
-  replayed), so a retry never answers an identical prompt raised later. A
-  different answer or `request_id` under the key is 422
+  it asks the same answer of the same request id, answered through the
+  occurrence the first request pinned the key to (an open op awaited, a
+  closed one replayed), so a retry never answers an identical prompt raised
+  later. A different answer or `request_id` under the key is 422
   `idempotency_mismatch`, nothing written, compared as OJ-4 compares it
   (`sameRespondRequest`: a legacy-shaped row's request digest under its own
   scope, a lane op's canonical answer). The front door reads the pending
@@ -358,17 +358,67 @@ adopts it.
   (`Store.RecordRaising`: the latest unresolved raising of the pending
   request id, or the next), keyed `opjournal.RespondKey`, `at_most_once`; a
   different answer to the same occurrence is 409 `key_reuse`. A request
-  with a key also leaves an API-executed row of the legacy op's frozen shape
-  (request-id scope, `respondOpPayload`, `at_least_once`) closed
-  `skipped{coalesced_into}` the lane op; the legacy op is never re-keyed.
+  with a key pins the key to the occurrence before it proposes the op and
+  pokes the lane (`pinLaneRespondKey`): a row of the legacy op's frozen
+  shape (request-id scope, `respondOpPayload`, `at_least_once`) with the
+  occurrence as its causation, which the request digest does not cover,
+  closed `skipped{coalesced_into}` the lane op once the op exists, or
+  `failed{refused:key_reuse}` when the occurrence's op records another
+  answer; the legacy op is never re-keyed. The row's executor is `legacy`,
+  which nothing adopts: OJ-4 adopting it would run the respond again, by
+  request id, which can answer a later, identical prompt. A key that is the
+  occurrence's own (`respond:<raised fact id>`, as a producer that saw the
+  raising keys its answer) pins nothing: the lane op is the row under it,
+  and a pin would take the op's id and refuse every answer to the prompt
+  `key_reuse`. A row that cannot be written is 503, no op proposed. A
+  retry under the key never runs the front door or `RecordRaising` again:
+  it proposes the pinned occurrence's op create-if-absent and answers from
+  it, whether the row is closed, still open (its request died, or its close
+  failed, which answers from the op all the same) or closed
+  `failed{deadline_in_flight}` by the op sweeper.
   The answer carries the request's own key, or the op's for a request with
   none. The await is 20 s, cut short when the request ends; an op still open
-  answers 202 with it, a provisional answer the `Idempotency-Key` LRU does
-  not keep (`withIdempotencyKeeping`), so a retry reads the op again. A
-  failure offers a resend under a new key only when nothing was sent: an
-  answer that may have reached its prompt (`maybe_delivered`,
-  `ambiguous_delivery`) is 409 `op_already_failed` with no resend offered,
-  since a resend would answer the next occurrence.
+  answers 202 with it, never `replayed`, a provisional answer the
+  `Idempotency-Key` LRU does not keep (`withIdempotencyKeeping`), so a retry
+  reads the op again. A failure offers a resend under a new key only when
+  nothing was sent: an answer that may have reached its prompt
+  (`maybe_delivered`, `ambiguous_delivery`) is 409 `op_already_failed` with
+  no resend offered, since a resend would answer the next occurrence.
+  A retry under the key of OJ-4's own respond op (`legacy:api`) that is
+  still open, its API having died before respond was listed, is finished
+  through the lane (`adoptLegacyRespond`): OJ-4's admission takes the op as
+  it would (`Recorder.Admit`, through `serverOps.laneAdopt`, whatever
+  `ops.control` says), so an op in flight in this process is 409
+  `in_flight`, one past its `finish_by` closes `failed{deadline_in_flight}`
+  and replays, and one inside it is adopted. The lane then answers only the
+  request id the op names, in the op's generation, through the lane op of
+  its occurrence, into which the adopted op closes `skipped{coalesced_into}`;
+  the API never answers the runtime itself while respond is listed. A
+  front-door refusal closes the op as OJ-4 closes it (no prompt pending,
+  another one, or another generation is `skipped{stale}`), and an occurrence
+  whose op records another answer closes it `failed{refused:key_reuse}`,
+  which replays 409 `key_reuse`. A closed OJ-4 op replays as OJ-4 replays
+  it.
+  While OJ-4 answers `/respond` again (respond unlisted: a rollback, or no
+  lane host runs), a key the lane path wrote or answered a respond under (a
+  lane op, a pin, or OJ-4's op the lane finished) answers from that lane op
+  (`replayLaneRespond`), never by running the respond, whatever
+  `ops.control` says: the key's row is read from the lane path's own store,
+  which no gate governs, since `off`, and `auto` by its builtin default over
+  a store that is not SQLite-backed (a native Dolt one, which a lane host
+  runs over), read nothing through OJ-4. The read happens only over a
+  sessions store that can apply guarded batches, which every lane host
+  needs, and that names an id namespace, without which no op row exists.
+  An op store that otherwise does not open, and a read that fails, is 503
+  `op_journal_unavailable`, nothing done: `opjournal.NewStore` reports
+  storage it cannot reach as it reports a store that cannot fence writes,
+  so its error does not say the lane never wrote there. A closed op
+  replays under the request's key, one still open is 409 `in_flight`, and
+  a pinned occurrence whose op records another answer, like OJ-4's op the
+  lane closed `failed{refused:key_reuse}`, is 409 `key_reuse`. Nothing
+  proposes a lane op then. A pin whose request ended before it proposed the
+  op sent nothing, and answers from itself: `in_flight` until the op sweeper
+  closes it at its `finish_by`, then that close.
 - Run cancel (interrupt listed): one op per holder session with a turn to
   stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
   `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that

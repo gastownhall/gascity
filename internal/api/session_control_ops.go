@@ -388,6 +388,10 @@ func replayedSyncError(op opjournal.Op, mapErr func(error) error) error {
 			return replayed(sentinel)
 		}
 		switch {
+		case op.Kind == opjournal.KindRespond && why == refusedKeyReuse:
+			// The lane closed it: another answer to the occurrence it
+			// answers was recorded first, and the first answer wins.
+			return proposeError(&opjournal.KeyReuseError{Existing: op})
 		case op.Kind == opjournal.KindKill && why == refusedTargetMoved:
 			return apierr.SessionConflict.Msg(fmt.Sprintf("%s: replayed op %s: session %s had moved past generation %d, which the kill was recorded for, so nothing was killed; resend with a new Idempotency-Key to kill the new run", refusedTargetMoved, op.ID, op.Conversation, op.Scope.Generation))
 		case op.Kind == opjournal.KindWake && why == refusedWillNotStart:
@@ -896,7 +900,10 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 // a respond op under ops.control, and returns the answer. key is the
 // Idempotency-Key header. When the city's lane host executes respond, the
 // answer is a lane op instead (respondSessionLane), awaited at most until
-// ctx ends, and ops.control does not govern it.
+// ctx ends, and ops.control does not govern it. Otherwise a key the lane
+// path wrote or answered a respond under answers from that lane op in every
+// ops.control mode (replayLaneRespond), so a rollback never runs a respond
+// again for it.
 func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -909,6 +916,9 @@ func (s *Server) respondSession(ctx context.Context, target, key string, resp ru
 	mgr := s.sessionManager(store.Store)
 	if s.laneExecutes(opjournal.KindRespond) {
 		return s.respondSessionLane(ctx, mgr, store.Store, id, key, resp)
+	}
+	if answer, answered, err := s.replayLaneRespond(ctx, store, id, key, resp); answered {
+		return answer, err
 	}
 	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {

@@ -374,6 +374,11 @@ type serverOps struct {
 	content   *legacyop.Recorder
 	control   *legacyop.Recorder
 	lifecycle *legacyop.Recorder
+	// laneAdopt admits, for the lane, an open op of OJ-4's own that a
+	// same-key request finds while its kind is listed (adoptLegacyRespond):
+	// OJ-4's admission over the city's in-flight registry, whatever the
+	// kind's gate says, since no ops.* gate governs a listed kind.
+	laneAdopt *legacyop.Recorder
 	clk       clock.Clock
 	// openStore opens the op store over a sessions-class store; tests
 	// substitute it.
@@ -419,6 +424,15 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 	o.content = o.newRecorder(s, rollout.KeyOpsContent, s.bootFlags.OpsContent())
 	o.control = o.newRecorder(s, rollout.KeyOpsControl, s.bootFlags.OpsControl())
 	o.lifecycle = o.newRecorder(s, rollout.KeyOpsLifecycle, s.bootFlags.OpsLifecycle())
+	o.laneAdopt = &legacyop.Recorder{
+		Mode:        gate.Require,
+		Executor:    legacyop.ExecutorAPI,
+		Open:        s.openOpStore,
+		Inflight:    city.inflight,
+		Clock:       o.clk,
+		Done:        city.done,
+		CrashPoints: o.crashPoints,
+	}
 	return o
 }
 
