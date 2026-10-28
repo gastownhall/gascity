@@ -2414,3 +2414,61 @@ func TestDoRuntimeDrainAckFailsWhenNoServerAnswersTheReadBack(t *testing.T) {
 		t.Errorf("controller poked %d times, want 0", *pokes)
 	}
 }
+
+// scriptedAckDrainOps scripts the ack write and its read-back.
+type scriptedAckDrainOps struct {
+	*fakeDrainOps
+	t        *testing.T
+	writeErr error
+	readErr  error
+	noRead   bool
+}
+
+func (o scriptedAckDrainOps) setDrainAck(string) error { return o.writeErr }
+
+func (o scriptedAckDrainOps) isDrainAcked(sessionName string) (bool, error) {
+	if o.noRead {
+		o.t.Errorf("isDrainAcked(%q) called; the ack must not be read back", sessionName)
+	}
+	return false, o.readErr
+}
+
+// A session reaped between the ack and its read-back is the benign reap race:
+// the ack still succeeds and pokes the controller.
+func TestDoRuntimeDrainAckReadBackGoneStaysAcknowledged(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	gone := fmt.Errorf("reading GC_DRAIN_ACK: %w", fmt.Errorf("reading GC_DRAIN_ACK from session %q: %w: %w", "worker", runtime.ErrSessionNotFound, errors.New("session not found")))
+	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, readErr: gone}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
+	}
+}
+
+// An ack whose only failure is the runtime mirror is in force; it is reported
+// as a warning without a read-back, as before.
+func TestDoRuntimeDrainAckMirrorOnlyErrorSkipsReadBack(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, writeErr: t3OutageMirrorFailure("worker", "GC_DRAIN_ACK"), noRead: true}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.HasPrefix(got, "gc runtime drain-ack: warning: ") {
+		t.Errorf("stderr = %q, want the mirror warning", got)
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
+	}
+}
