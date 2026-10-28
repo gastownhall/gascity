@@ -14692,6 +14692,10 @@ func TestGcBeadsBdScriptNeverPassesPasswordInArgv(t *testing.T) {
 // a caller's already-set DOLT_CLI_PASSWORD win.
 // With the password empty or unset the variable must still be set (empty)
 // so dolt does not fall back to a TTY prompt.
+// The prefix is per-invocation only: the calls must leave the script's own
+// DOLT_CLI_PASSWORD untouched, because this script also starts
+// dolt sql-server, which reads it and exits with "When a password is
+// provided, a user must also be provided".
 func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
@@ -14704,7 +14708,7 @@ func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 		t.Fatal("gc-beads-bd script missing main marker")
 	}
 
-	// rows exercises the three GC_DOLT_PASSWORD shapes a caller can present.
+	// rows exercise the three GC_DOLT_PASSWORD shapes a caller can present.
 	rows := []struct {
 		name    string
 		secret  string // non-empty only when a password is configured
@@ -14756,6 +14760,7 @@ connections=$(get_connection_count)
 check_read_only
 set -e
 printf 'connections=%s\n' "$connections"
+printf 'shell=%s:%s\n' "${DOLT_CLI_PASSWORD+set}" "${DOLT_CLI_PASSWORD-}"
 `
 			if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
 				t.Fatal(err)
@@ -14766,7 +14771,7 @@ printf 'connections=%s\n' "$connections"
 				"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"GC_BIN=",
 				// The caller's own DOLT_CLI_PASSWORD must never win inside a
-				// client call.
+				// client call, and the calls must not clobber it either.
 				"DOLT_CLI_PASSWORD=other-pw",
 			}, row.env...)...)
 			out := runShHarness(t, harness, "dolt client argv", env)
@@ -14803,6 +14808,9 @@ printf 'connections=%s\n' "$connections"
 			}
 			if !strings.Contains(string(out), "connections=1") {
 				t.Errorf("%s: get_connection_count output missing or wrong through the env prefix: %s", row.name, out)
+			}
+			if !strings.Contains(string(out), "shell=set:other-pw") {
+				t.Errorf("%s: client calls changed the script's own DOLT_CLI_PASSWORD: %s", row.name, out)
 			}
 		})
 	}
