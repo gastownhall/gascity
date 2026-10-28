@@ -120,6 +120,15 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 		fmt.Fprintf(stderr, "gc session reset: loading session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A row whose state the controller skips is refused before any write: the
+	// controller will not apply the queued restart, and a fresh restart is
+	// destructive (it discards the conversation), so recording one now would
+	// surprise the operator later, when a gc version that manages the state
+	// picks the row up (issue #1497).
+	if why := unknownStateRefusal(sessionInfoFromBead(bead)); why != "" {
+		fmt.Fprintf(stderr, "gc session reset: session %s cannot be reset: %s\n", sessionID, why) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	identity := namedSessionIdentity(bead)
 
 	// The op is proposed once the target is loaded, before the circuit-breaker

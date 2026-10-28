@@ -974,3 +974,78 @@ func startSessionResetTestController(t *testing.T, cityDir string) {
 		os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
 	})
 }
+
+// TestCmdSessionReset_RefusesRowInSkippedStateWithoutWriting is issue #1497's
+// reset half: a reset of a row whose state the controller skips is refused
+// before any write — no op is proposed, no flag or key is written, nothing
+// is sent to the controller — naming the raw state and the close that
+// releases the row, instead of queueing a restart the controller will never
+// apply.
+func TestCmdSessionReset_RefusesRowInSkippedStateWithoutWriting(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-unknown-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "skipped-state session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "s-gc-reset-unknown-test",
+			"state":        "future-state",
+			"session_key":  "original-key",
+			"generation":   "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	startSessionResetTestController(t, cityDir)
+	if code := cmdSessionReset([]string{bead.ID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if want := "gc session reset: session " + bead.ID + " cannot be reset:"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"future-state"`) {
+		t.Errorf("stderr does not name the raw state:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc session close "+bead.ID) {
+		t.Errorf("stderr does not name the close that releases the row:\n%s", stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want nothing on a refused reset", stdout.String())
+	}
+
+	reloaded, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(reload): %v", err)
+	}
+	got, err := reloaded.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "open" {
+		t.Errorf("status = %q, want the row untouched", got.Status)
+	}
+	for key, want := range map[string]string{
+		"state":                      "future-state",
+		"session_key":                "original-key",
+		"restart_requested":          "",
+		"continuation_reset_pending": "",
+	} {
+		if got.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q (the row must not be written)", key, got.Metadata[key], want)
+		}
+	}
+}
