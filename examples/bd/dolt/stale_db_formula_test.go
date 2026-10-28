@@ -14,7 +14,6 @@ import (
 func staleDBFilteredEnv(keys ...string) []string {
 	keys = append(keys,
 		"GC_BEAD_ID",
-		"GC_TRIGGER_BEAD_ID",
 		"GC_ESCALATE_SCRIPT",
 		"GC_ESCALATE_SEARCH_PACKS",
 		"GC_ESCALATION_RECIPIENT",
@@ -41,7 +40,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	desc := f.Steps[0].Description
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"`,
 		`TMP_DIR=$(mktemp -d`,
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
@@ -73,6 +72,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`gc session nudge deacon`,
 		`GC_BEAD_ID:-<work-bead>`,
 		`GC_BEAD_ID:?`,
+		`:-${GC_TRIGGER_BEAD_ID`,
 		`Dolt orphan(s) detected`,
 	} {
 		if strings.Contains(desc, bad) {
@@ -89,7 +89,7 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	script := renderStaleDBFormulaShell(t)
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"`,
 		`if [ "$PROTECTED_NON_BASELINE" -ge "10" ]; then`,
 		`protected_non_baseline: ((.summary.protected_total // 0) - (.summary.protected_by_kind["active-rig"] // 0))`,
 	} {
@@ -575,12 +575,12 @@ esac
 }
 
 // TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain proves the formula
-// runs in a real pool shell, where neither GC_BEAD_ID nor GC_TRIGGER_BEAD_ID
-// is guaranteed: the bead-id chain must fall through to
-// `gc hook current --id-only`, the back-channel stamped by `gc hook --claim`.
-// Before this chain the formula required GC_BEAD_ID — an env var no session
-// shell has ever received — so even a correctly claiming dog aborted at the
-// WORK_BEAD guard (ga-2q2r0).
+// runs in a real pool shell, where GC_BEAD_ID is never exported and no
+// trigger id reaches a session shell at all (gascity#5738): the bead-id
+// chain must fall through to `gc hook current --id-only`, the back-channel
+// stamped by `gc hook --claim`. Before this chain the formula required
+// GC_BEAD_ID — an env var no session shell has ever received — so even a
+// correctly claiming dog aborted at the WORK_BEAD guard (ga-2q2r0).
 func TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
@@ -1420,5 +1420,101 @@ func TestStaleDBOrderUsesParsedFieldsOnly(t *testing.T) {
 	}
 	if order.Schedule != "0 */4 * * *" {
 		t.Fatalf("Schedule = %q, want 0 */4 * * *", order.Schedule)
+	}
+}
+
+// TestStaleDBFormulaIgnoresForeignTriggerBeadID reproduces the shipped half of
+// gascity#5738: a demand-spawned pool seat's shell no longer carries
+// GC_TRIGGER_BEAD_ID, but an old shell can still hold one frozen at exec —
+// and this formula's close chain used to prefer it over the session's own
+// claim, closing a foreign run's bead. The rendered script must name its bead
+// only through the claim back-channel (gc hook current --id-only) and never
+// touch an id-shaped trigger hint, even one explicitly present in the env.
+func TestStaleDBFormulaIgnoresForeignTriggerBeadID(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "commands.log")
+	scanPath := filepath.Join(dir, "scan.json")
+	applyPath := filepath.Join(dir, "apply.json")
+	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":100},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":100,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, applyPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":100},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":100,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "hook current")
+    echo "gc $*" >> "$GC_TEST_LOG"
+    echo "bead-hook-1"
+    ;;
+  "dolt-cleanup "*)
+    echo "gc $*" >> "$GC_TEST_LOG"
+    case " $* " in
+      *" --force "*) cat "$GC_TEST_APPLY_JSON" ;;
+      *) cat "$GC_TEST_SCAN_JSON" ;;
+    esac
+    ;;
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+    echo "gc $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected gc command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+	writeTestFile(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  update|close)
+    echo "bd $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = append(staleDBFilteredEnv("PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+		"GC_TEST_SCAN_JSON="+scanPath,
+		"GC_TEST_APPLY_JSON="+applyPath,
+		// A foreign trigger id, as a pre-refresh shell would still carry.
+		"GC_TRIGGER_BEAD_ID=bead-foreign",
+	)
+	out, err := cmd.CombinedOutput()
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, readErr, out)
+	}
+	log := string(logData)
+	if err != nil {
+		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+	}
+	for _, want := range []string{
+		"gc hook current --id-only",
+		staleDBCloseWrite("bead-hook-1"),
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	if strings.Contains(log, "bead-foreign") || strings.Contains(string(out), "bead-foreign") {
+		t.Fatalf("the script consulted the foreign trigger id\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
