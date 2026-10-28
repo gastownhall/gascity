@@ -810,3 +810,45 @@ func TestAskUserQuestionReviewPageHoldsEveryLook(t *testing.T) {
 		})
 	}
 }
+
+// numberedDraftComposerPane is an idle composer holding a draft of numbered
+// lines, with no dialog footer anywhere.
+const numberedDraftComposerPane = `⏺ Done. The tests pass.
+────────────────────────────────────────────────────────────────────────────
+❯ 1. Submit answers
+  2. Cancel
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+// A question or review page quoted in scrollback above a live composer, or a
+// composer draft of numbered lines, is no dialog: the pane reads idle, nothing
+// is pending, and the nudge is delivered.
+func TestQuotedAskUserQuestionAboveAComposerIsNotADialog(t *testing.T) {
+	composer := "\n" + answeredAskUserQuestionTail
+	for name, pane := range map[string]string{
+		"quoted dialog above the composer (ga-ngrme8)": readQuestionFixture(t, "quoted-dialog-above-composer-ga-ngrme8.txt"),
+		"question page above the composer":             readQuestionFixture(t, "multi-question-after-answer-ga-ngrme8.txt") + composer,
+		"review page above the composer":               readQuestionFixture(t, "review-page-ga-ngrme8.txt") + composer,
+		"numbered draft in the composer":               numberedDraftComposerPane,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lines := strings.Split(pane, "\n")
+			if q := parseAskUserQuestion(lines); q != nil {
+				t.Fatalf("parseAskUserQuestion = %+v, want nil", q)
+			}
+			if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); !idle || err != nil {
+				t.Errorf("ClassifyIdlePane = (%v, %v), want (true, nil)", idle, err)
+			}
+			tm, ex := questionTmux(pane)
+			if pending, err := (&Provider{tm: tm}).Pending("auq"); err != nil || pending != nil {
+				t.Fatalf("Pending = %+v, %v; want nothing", pending, err)
+			}
+			if err := tm.NudgeSession("auq", "hello"); errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("NudgeSession = %v; nothing on screen waits for an answer", err)
+			}
+			if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") < 0 {
+				t.Fatalf("the message was never pasted; calls=%v", ex.calls)
+			}
+		})
+	}
+}
