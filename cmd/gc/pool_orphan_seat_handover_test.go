@@ -186,3 +186,61 @@ func TestReleaseOrphanedPoolAssignments_SeatHandOverWritesOnlyAssignee(t *testin
 		t.Fatalf("hand-over changed more than the assignee:\n got  %+v\n want %+v", got, work)
 	}
 }
+
+// TestReleaseOrphanedPoolAssignments_ReleasesClaimOfSeatlessClosedRow (AC-3):
+// a closed row with no seat identity has no successor, even when a sibling of
+// its template is processing the bead: siblings never inherit its claims
+// (ga-r22k2y), so the sweep releases it as at base.
+func TestReleaseOrphanedPoolAssignments_ReleasesClaimOfSeatlessClosedRow(t *testing.T) {
+	poolRow := map[string]string{
+		namedSessionMetadataKey:      "",
+		namedSessionIdentityMetadata: "",
+		poolManagedMetadataKey:       "true",
+	}
+	for _, tc := range []struct {
+		name      string
+		pred      map[string]string
+		successor map[string]string
+	}{{
+		name:      "unaliased pool row",
+		pred:      mergeSeatMeta(poolRow, map[string]string{"session_name": "worker-gc-pred"}),
+		successor: mergeSeatMeta(poolRow, map[string]string{"session_name": "worker-gc-sibling"}),
+	}, {
+		name:      "transient pool-slot alias",
+		pred:      mergeSeatMeta(poolRow, map[string]string{"session_name": "worker-1", "alias": "worker-1", "pool_slot": "1"}),
+		successor: mergeSeatMeta(poolRow, map[string]string{"session_name": "worker-1", "alias": "worker-1", "pool_slot": "1"}),
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cfg := seatHandoverCity()
+			pred := createClosedSeatPredecessor(t, store, tc.pred)
+			work := createInProgressWorkClaimedBy(t, store, pred)
+			sibling := createSeatSessionRow(t, store, "sibling", seatRowMeta("awake", mergeSeatMeta(tc.successor, map[string]string{"currently_processing_bead_id": work.ID})))
+
+			released := sweepSeatWork(store, cfg, []beads.Bead{sibling}, []beads.Bead{work})
+			assertSeatWorkReleased(t, store, work, released)
+		})
+	}
+}
+
+func assertSeatWorkReleased(t *testing.T, store beads.Store, work beads.Bead, released []releasedPoolAssignment) {
+	t.Helper()
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %+v, want exactly %s", released, work.ID)
+	}
+	got := getSeatBead(t, store, work.ID)
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("work = status %q assignee %q, want open/unassigned", got.Status, got.Assignee)
+	}
+}
+
+func mergeSeatMeta(base, overrides map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(overrides))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range overrides {
+		out[k] = v
+	}
+	return out
+}
