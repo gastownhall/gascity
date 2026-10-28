@@ -452,7 +452,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeAliveSkipsRelease(t *testin
 	store := beads.NewMemStore()
 	work := createDetachedOrphanedPoolWork(t, store)
 	listenDetachedProbeServer(t, "gascity")
-	installFakeTmux(t, "exit 0")
+	installFakeTmux(t, "echo soak-loop")
 	var logs bytes.Buffer
 	restore := captureLogOutput(&logs)
 	defer restore()
@@ -493,7 +493,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadReleasesAndClears(t *te
 	store := beads.NewMemStore()
 	work := createDetachedOrphanedPoolWork(t, store)
 	listenDetachedProbeServer(t, "gascity")
-	installFakeTmux(t, "exit 1")
+	installFakeTmux(t, "exit 0") // the server lists no session
 
 	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,
@@ -529,7 +529,7 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadPreservesGuardWhenRelea
 	work := createDetachedOrphanedPoolWork(t, base)
 	store := failReleaseUpdateStore{Store: base, failID: work.ID}
 	listenDetachedProbeServer(t, "gascity")
-	installFakeTmux(t, "exit 1")
+	installFakeTmux(t, "exit 0") // the server lists no session
 
 	released := releaseOrphanedPoolAssignmentsFromBeads(
 		store,

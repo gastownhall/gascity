@@ -62,6 +62,11 @@ func parseDetachedProbeSpec(spec string) (detachedProbeSpec, error) {
 	if socket == "" || session == "" {
 		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: socket and session are required", spec)
 	}
+	// tmux never names a session with ':' or '.', so such a session could
+	// only ever read as dead.
+	if strings.ContainsAny(session, ":.") {
+		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: session %q contains ':' or '.', which tmux session names cannot", spec, session)
+	}
 	return detachedProbeSpec{
 		Kind:    kind,
 		Socket:  socket,

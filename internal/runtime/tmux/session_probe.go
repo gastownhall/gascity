@@ -3,11 +3,9 @@ package tmux
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -22,8 +20,8 @@ const (
 	PresenceUnobservable SessionPresence = iota
 	// PresenceAlive means a server answered and hosts the session.
 	PresenceAlive
-	// PresenceDead means the session is attested gone: a server answered
-	// without it, or the socket's server is gone.
+	// PresenceDead means the session is attested gone: a server listed its
+	// sessions without this exact name, or the socket's server is gone.
 	PresenceDead
 )
 
@@ -74,18 +72,22 @@ func probeSessionWith(ctx context.Context, socketRef, session string, deps sessi
 		return PresenceUnobservable, fmt.Errorf("probing tmux session %q: %w", session, observation)
 	}
 
-	_, err := deps.run(ctx, []string{"-L", socketRef, "has-session", "-t", session})
-	if err == nil {
-		return PresenceAlive, nil
+	// list-sessions, not has-session: a -t target also matches by prefix and
+	// pattern, and its exit 1 does not tell a missing session from a server
+	// that never answered.
+	listing, err := deps.run(ctx, []string{"-L", socketRef, "list-sessions", "-F", "#{session_name}"})
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return PresenceUnobservable, fmt.Errorf("probing tmux session %q at %s: %w", session, path, ctxErr)
+		}
+		return PresenceUnobservable, fmt.Errorf("probing tmux session %q at %s: %w", session, path, err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return PresenceUnobservable, fmt.Errorf("probing tmux session %q at %s: %w", session, path, ctxErr)
+	for _, name := range strings.Split(listing, "\n") {
+		if name == session {
+			return PresenceAlive, nil
+		}
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return PresenceDead, nil
-	}
-	return PresenceUnobservable, fmt.Errorf("probing tmux session %q at %s: %w", session, path, err)
+	return PresenceDead, nil
 }
 
 func dialUnixSocket(ctx context.Context, path string) (net.Conn, error) {
@@ -93,7 +95,7 @@ func dialUnixSocket(ctx context.Context, path string) (net.Conn, error) {
 }
 
 // runTmuxProbe runs one tmux client in this process's environment and returns
-// its stdout. A failure keeps the *exec.ExitError and adds tmux's stderr.
+// its stdout. A failure adds tmux's stderr.
 func runTmuxProbe(ctx context.Context, args []string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	if err := newTmuxCommand(ctx, args, &stdout, &stderr).Run(); err != nil {

@@ -141,15 +141,13 @@ func probeSocketPath(t *testing.T, name string) string {
 
 // listenProbeSocket binds a listener where name resolves, standing in for a
 // live tmux server.
-func listenProbeSocket(t *testing.T, name string) string {
+func listenProbeSocket(t *testing.T, name string) {
 	t.Helper()
-	path := probeSocketPath(t, name)
-	ln, err := net.Listen("unix", path)
+	ln, err := net.Listen("unix", probeSocketPath(t, name))
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	return path
 }
 
 func plainFileInfo(t *testing.T) os.FileInfo {
@@ -172,5 +170,42 @@ func sequenceLstat(infos ...os.FileInfo) func(string) (os.FileInfo, error) {
 		info := infos[min(calls, len(infos)-1)]
 		calls++
 		return info, nil
+	}
+}
+
+// AC-2: a server that answers is read by exact session name, so a session
+// sharing only a prefix or matching as a pattern does not keep it alive.
+func TestProbeSessionReadsTheServerListingExactly(t *testing.T) {
+	listenProbeSocket(t, "gc-probe")
+	tests := []struct {
+		name    string
+		listing string
+		want    SessionPresence
+	}{
+		{name: "listed", listing: "other\nsoak-loop\n", want: PresenceAlive},
+		{name: "listed without a trailing newline", listing: "soak-loop", want: PresenceAlive},
+		{name: "only a longer name listed", listing: "soak-loop-2\n", want: PresenceDead},
+		{name: "only a shorter name listed", listing: "soak\n", want: PresenceDead},
+		{name: "no session listed", want: PresenceDead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotArgs []string
+			got, err := probeSessionWith(context.Background(), "gc-probe", "soak-loop", sessionProbeDeps{
+				lstat: os.Lstat,
+				dial:  dialUnixSocket,
+				run: func(_ context.Context, args []string) (string, error) {
+					gotArgs = args
+					return tt.listing, nil
+				},
+			})
+			if got != tt.want || err != nil {
+				t.Fatalf("ProbeSession = %v, %v; want %v", got, err, tt.want)
+			}
+			wantArgs := []string{"-L", "gc-probe", "list-sessions", "-F", "#{session_name}"}
+			if fmt.Sprint(gotArgs) != fmt.Sprint(wantArgs) {
+				t.Fatalf("tmux args = %q, want %q", gotArgs, wantArgs)
+			}
+		})
 	}
 }

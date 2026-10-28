@@ -30,13 +30,14 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "session keeps extra colons",
-			spec: "tmux:gascity:scope:soak-loop",
-			want: detachedProbeSpec{
-				Kind:    "tmux",
-				Socket:  "gascity",
-				Session: "scope:soak-loop",
-			},
+			name:    "session with a colon tmux cannot name",
+			spec:    "tmux:gascity:scope:soak-loop",
+			wantErr: true,
+		},
+		{
+			name:    "session with a dot tmux cannot name",
+			spec:    "tmux:gascity:scope.soak-loop",
+			wantErr: true,
 		},
 		{
 			name:    "unsupported kind",
@@ -79,14 +80,19 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 	}
 }
 
+// AC-2: a server that answers is read by exact session name; only an answer
+// that lacks the session is dead, and a failed tmux client is an error.
 func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 	tests := []struct {
 		name       string
+		sessions   string
 		exitCode   string
 		wantStatus detachedProbeStatus
 	}{
-		{name: "alive on exit zero", exitCode: "0", wantStatus: detachedProbeAlive},
-		{name: "dead on exit one", exitCode: "1", wantStatus: detachedProbeDead},
+		{name: "alive when the server lists the session", sessions: `soak-loop-2\nsoak-loop\n`, exitCode: "0", wantStatus: detachedProbeAlive},
+		{name: "dead when the server lists only a longer name", sessions: `soak-loop-2\n`, exitCode: "0", wantStatus: detachedProbeDead},
+		{name: "dead when the server lists no session", exitCode: "0", wantStatus: detachedProbeDead},
+		{name: "error on exit one", exitCode: "1", wantStatus: detachedProbeError},
 		{name: "error on other exit", exitCode: "2", wantStatus: detachedProbeError},
 	}
 
@@ -94,7 +100,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := filepath.Join(t.TempDir(), "args")
 			listenDetachedProbeServer(t, "gascity")
-			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
+			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; printf '`+tt.sessions+`'; exit `+tt.exitCode)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
 			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
@@ -105,7 +111,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read fake tmux args: %v", err)
 			}
-			wantArgs := "-L\ngascity\nhas-session\n-t\nsoak-loop\n"
+			wantArgs := "-L\ngascity\nlist-sessions\n-F\n#{session_name}\n"
 			if string(args) != wantArgs {
 				t.Fatalf("tmux args = %q, want %q", string(args), wantArgs)
 			}

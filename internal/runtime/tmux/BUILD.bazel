@@ -124,6 +124,7 @@ go_test(
         "session_env_file_integration_test.go",
         "session_env_file_test.go",
         "session_object_integration_test.go",
+        "session_probe_integration_test.go",
         "session_probe_test.go",
         "session_roster_test.go",
         "socket_path_integration_test.go",
