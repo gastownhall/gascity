@@ -20,9 +20,9 @@ import (
 )
 
 // cityAnchoredSessionEnv returns the provider process baseline merged with the
-// configured workspace env, resolved provider/agent env, the three
-// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR), and the
-// canonical path to the running gc binary. Later layers win, matching the
+// configured workspace env, resolved provider/agent env, the city-anchored
+// env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR, GC_CITY_NAME), and
+// the canonical path to the running gc binary. Later layers win, matching the
 // create-time precedence in cmd/gc/template_resolve.go: workspace env is the
 // lowest config layer, provider/agent env can override it, and runtime-owned
 // city anchors plus GC_BIN are authoritative. TOML-sourced workspace and
@@ -63,11 +63,11 @@ import (
 // drops the inherited entry. GC_CITY_ROOT is pinned too even though
 // citylayout.CityIdentityEnvMap never seeds it, because the guard trips on it
 // and nothing else clears an inherited value.
-func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
+func cityAnchoredSessionEnv(cityPath, cityName string, workspaceEnv, providerEnv map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
 	gcBin, _ := os.Executable()
 
-	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+4)
+	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+5)
 	for k, v := range baseline {
 		out[k] = v
 	}
@@ -86,7 +86,17 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 			"GC_CITY_PATH":        "",
 			"GC_CITY_ROOT":        "",
 			"GC_CITY_RUNTIME_DIR": "",
+			// The local city's name is withheld with the other local
+			// anchors: the session targets a remote city, and a nested gc
+			// must not act as the local one (upstream #8151).
+			"GC_CITY_NAME": "",
 		}
+	} else if anchors != nil {
+		// The city's effective runtime identity, always written next to the
+		// path anchors — even when empty — so an ambient supervisor value
+		// naming a different city cannot leak into the session (upstream
+		// #8151).
+		anchors["GC_CITY_NAME"] = cityName
 	}
 	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
 		return nil
@@ -435,7 +445,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
 	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), s.state.CityName(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm), nil
 }
 
@@ -554,7 +564,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		}
 	}
 	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), s.state.CityName(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
 	// This resolver builds the launch hints for every API resume, so the startup
 	// prompt must be delivered through them: without a payload and the delivered
 	// marker, the SessionStart hook is the only carrier and the provider

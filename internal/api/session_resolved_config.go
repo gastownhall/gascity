@@ -11,6 +11,7 @@ import (
 
 func resolvedSessionConfigForProvider(
 	cityPath string,
+	cityName string,
 	workspaceEnv map[string]string,
 	programStatus runtime.ProgramStatusMode,
 	alias, explicitName, template, title, transport string,
@@ -40,7 +41,7 @@ func resolvedSessionConfigForProvider(
 		resolvedCommand = resolved.ACPCommandString()
 	}
 	programStatusArm, providerEnv := sessionProgramStatus(programStatus, resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(cityPath, workspaceEnv, providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(cityPath, cityName, workspaceEnv, providerEnv)
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,

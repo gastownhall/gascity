@@ -75,7 +75,7 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				cfg, err := resolvedSessionConfigForProvider(
-					"/tmp/test-city", nil, tc.mode,
+					"/tmp/test-city", "own-city", nil, tc.mode,
 					"worker", "", "worker", "worker", tc.transport, nil,
 					resolved, "", "/tmp/work", nil,
 				)
