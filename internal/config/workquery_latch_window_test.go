@@ -201,3 +201,36 @@ func TestEffectiveWorkQueryLatchWindowRereadsOnlyAFullAllLatchWindow(t *testing.
 		})
 	}
 }
+
+// TestEffectiveWorkQueryLatchWindowRereadFailureFailsTheQuery pins the
+// re-read's failure discipline: a failed unbounded read behind a full
+// all-latch window is a read failure, not an idle queue, so the query exits
+// non-zero with the reader-failure message instead of printing [].
+func TestEffectiveWorkQueryLatchWindowRereadFailureFailsTheQuery(t *testing.T) {
+	script, env, logPath := latchWindowFakeBd(t, fullLatchWindow(), nil, true)
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	for k, v := range env {
+		commandEnv = append(commandEnv, k+"="+v)
+	}
+
+	stdout, stderr, exit := runShellCommandCapture(t, (&Agent{Name: "worker", Dir: "hello-world"}).EffectiveWorkQuery(), commandEnv)
+	reads := routedReadReads(t, logPath)
+	if len(reads) != 2 || !strings.Contains(reads[1], "--limit 0") {
+		t.Fatalf("routed ready reads = %q, want the bounded read then the failing unbounded re-read", reads)
+	}
+	if exit == 0 {
+		t.Fatalf("work query exited 0 over a failing re-read and printed %q; that is the answer an idle queue gives", stdout)
+	}
+	if strings.Contains(stdout, "[]") {
+		t.Errorf("work query printed %q over a failing re-read", stdout)
+	}
+	for _, want := range []string{"gc work query: bd ready failed (exit 1)", "bd: store unreadable"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("work query stderr = %q, want %q", stderr, want)
+		}
+	}
+}
