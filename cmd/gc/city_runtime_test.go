@@ -4838,6 +4838,66 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 }
 
+// An applied config reload rebuilds the wisp GC tracker. It must keep the
+// cadence: before the fix the rebuilt tracker had a zero lastRun, so the tick
+// after every applied reload ran the full GC regardless of wisp_gc_interval.
+func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeWispGCReloadConfig := func(shutdownTimeout string) {
+		t.Helper()
+		data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n" +
+			"[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\nshutdown_timeout = \"" + shutdownTimeout + "\"\n")
+		if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeWispGCReloadConfig("5s")
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if cr.wg == nil {
+		t.Fatal("wisp GC tracker = nil, want one for wisp_gc_interval = 1h")
+	}
+	ran := time.Now()
+	cr.wg.(*memoryWispGC).lastRun = ran
+	oldWG := cr.wg
+
+	writeWispGCReloadConfig("6s")
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	if cr.configRev == configRev {
+		t.Fatal("reload was not applied; the test needs a changed revision")
+	}
+	if cr.wg == oldWG {
+		t.Fatal("reload kept the old tracker; the test needs a rebuilt one")
+	}
+	if cr.wg.shouldRun(ran.Add(10 * time.Minute)) {
+		t.Fatal("wisp GC due 10m after its last run, right after a config reload; want the 1h cadence kept")
+	}
+	if !cr.wg.shouldRun(ran.Add(61 * time.Minute)) {
+		t.Fatal("wisp GC not due once wisp_gc_interval elapsed after a reload")
+	}
+}
+
 func TestCityRuntimeReloadProviderSwapFailsOnPartialSessionListing(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

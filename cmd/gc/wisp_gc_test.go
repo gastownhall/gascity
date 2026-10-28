@@ -57,6 +57,40 @@ func TestWispGC_ShouldRunRespectsInterval(t *testing.T) {
 	}
 }
 
+// A config reload rebuilds the tracker; it must keep the cadence, or every
+// applied reload runs the full GC on the next tick regardless of
+// wisp_gc_interval.
+func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
+	prev := newWispGC(time.Hour, 24*time.Hour, 0)
+	ran := time.Now()
+	prev.(*memoryWispGC).lastRun = ran
+	cursor := &beads.SeekBoundary{}
+	prev.(*memoryWispGC).sessionPurgeCursor = cursor
+
+	next := carryWispGCState(prev, newWispGC(time.Hour, 24*time.Hour, 0))
+
+	if next.shouldRun(ran.Add(10 * time.Minute)) {
+		t.Error("a reload 10m after a run must not make the GC due")
+	}
+	if !next.shouldRun(ran.Add(61 * time.Minute)) {
+		t.Error("the GC must still run once the interval has elapsed")
+	}
+	if next.(*memoryWispGC).sessionPurgeCursor != cursor {
+		t.Error("the session purge cursor must survive a reload")
+	}
+	// A shorter interval applies from the carried run time.
+	if !carryWispGCState(prev, newWispGC(5*time.Minute, 24*time.Hour, 0)).shouldRun(ran.Add(6 * time.Minute)) {
+		t.Error("a changed interval must apply from the carried lastRun")
+	}
+	// Disabling or first enabling the GC carries nothing.
+	if carryWispGCState(prev, nil) != nil {
+		t.Error("disabling the GC must stay disabled")
+	}
+	if !carryWispGCState(nil, newWispGC(time.Hour, 24*time.Hour, 0)).shouldRun(ran) {
+		t.Error("a newly enabled GC runs on its first tick")
+	}
+}
+
 func TestWispGCForConfigUsesMailRetentionTTL(t *testing.T) {
 	cfg := &config.City{}
 	cfg.Daemon.WispGCInterval = "5m"
