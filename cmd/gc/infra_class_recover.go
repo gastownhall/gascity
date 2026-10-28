@@ -951,6 +951,14 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			case opts.Move[b.ID] && opts.RecordCarried[b.ID]:
 				fmt.Fprintf(stderr, "%s: %s is named by both --%s and --%s; choose one\n", logPrefix, b.ID, strandedMoveFlag, strandedRecordCarriedFlag) //nolint:errcheck // best-effort stderr
 				return 1
+			case opts.RecordCarried[b.ID] && choicesBefore[strandedReplaceBindingRowFlag][b.ID]:
+				// An earlier --replace-binding-row removed the binding's row
+				// under the id, so this work-store row is the id's only live
+				// copy. Recording it as carried would let the clear delete it,
+				// leaving the id in neither live store: refused, not guessed.
+				fmt.Fprintf(stderr, "%s: --%s %s is refused: an earlier run removed the binding's row under %s by --%s (it is backed up in %s), so this work-store row is the only live copy and the clear would delete it. Finish that choice with --%s %s. Nothing was written\n", //nolint:errcheck // best-effort stderr
+					logPrefix, strandedRecordCarriedFlag, b.ID, b.ID, strandedReplaceBindingRowFlag, target.RecoverChoicesBackupPath(), strandedReplaceBindingRowFlag, b.ID)
+				return 1
 			case opts.RecordCarried[b.ID]:
 				chosen[b.ID] = strandedRecordCarriedFlag
 				recordCarried = append(recordCarried, b)
@@ -1087,19 +1095,47 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// except for a row an earlier --replace-binding-row already answered:
 	// with the binding's row removed, the work-store row is the only live
 	// copy of the id, and --record-carried would let the clear delete it.
+	// A row an earlier --replace-binding-row answered is listed apart, with
+	// only the answer that finishes it: --record-carried is never offered for
+	// it, because the work-store row is the id's only live copy.
+	replacedBefore := func(b beads.Bead) bool { return choicesBefore[strandedReplaceBindingRowFlag][b.ID] }
+	describeIDOnlyOpen := func(w io.Writer, b beads.Bead) {
+		fmt.Fprintf(w, "  %s  status=%s  type=%s  created=%s  updated=%s  title=%q\n", //nolint:errcheck // best-effort output
+			b.ID, b.Status, b.Type, b.CreatedAt.UTC().Format(time.RFC3339), b.UpdatedAt.UTC().Format(time.RFC3339), b.Title)
+	}
 	reportIDOnlyOpen := func(w io.Writer) {
+		var replaced []beads.Bead
 		for _, b := range idOnlyOpen {
-			fmt.Fprintf(w, "  %s  status=%s  type=%s  created=%s  updated=%s  title=%q\n", //nolint:errcheck // best-effort output
-				b.ID, b.Status, b.Type, b.CreatedAt.UTC().Format(time.RFC3339), b.UpdatedAt.UTC().Format(time.RFC3339), b.Title)
-			if choicesBefore[strandedReplaceBindingRowFlag][b.ID] {
-				fmt.Fprintf(w, "    an earlier run removed the binding's row under %s by --%s (it is backed up in %s), so this row is the only live copy: finish that choice with --%s %s, not --%s, which would let the clear delete it\n", //nolint:errcheck // best-effort output
-					b.ID, strandedReplaceBindingRowFlag, target.RecoverChoicesBackupPath(), strandedReplaceBindingRowFlag, b.ID, strandedRecordCarriedFlag)
+			if replacedBefore(b) {
+				replaced = append(replaced, b)
+				continue
 			}
+			describeIDOnlyOpen(w, b)
+		}
+		if len(replaced) == 0 {
+			return
+		}
+		fmt.Fprintf(w, "  an earlier run removed the binding's row under each of these by --%s (backed up in %s), so each row below is the id's only live copy: finish that choice with --%s <id>; --%s would let the clear delete it\n", //nolint:errcheck // best-effort output
+			strandedReplaceBindingRowFlag, target.RecoverChoicesBackupPath(), strandedReplaceBindingRowFlag, strandedRecordCarriedFlag)
+		for _, b := range replaced {
+			describeIDOnlyOpen(w, b)
+			fmt.Fprintf(w, "    an earlier run removed the binding's row under %s: finish that choice with --%s %s\n", b.ID, strandedReplaceBindingRowFlag, b.ID) //nolint:errcheck // best-effort output
 		}
 	}
 	idOnlyOpenRefusal := func() {
-		fmt.Fprintf(stderr, "%s: %d work-store row(s) that are not closed are listed by the copy manifest by id alone, and the binding no longer holds them. Nothing records whether each is the bead the copy carried: no time bounds its entry, the row carries no created_at, or the row is younger than the legacy manifest, which an older build's recover-stranded extended with the id of every row it carried. Nothing here can tell whether the binding collected that bead (then the work row is a frozen snapshot) or never received it (then the work row is the only copy). Nothing was written. Decide per id and run this again with --%s <id> (copy the row into the binding as it is) or --%s <id> (record it as the bead the copy carried; the clear then deletes its work-store row, and the clear's backup keeps it). --%s and --%s show the rows without writing:\n", //nolint:errcheck // best-effort stderr
-			logPrefix, len(idOnlyOpen), strandedMoveFlag, strandedRecordCarriedFlag, "dry-run", "dump")
+		undecided := 0
+		for _, b := range idOnlyOpen {
+			if !replacedBefore(b) {
+				undecided++
+			}
+		}
+		if undecided > 0 {
+			fmt.Fprintf(stderr, "%s: %d work-store row(s) that are not closed are listed by the copy manifest by id alone, and the binding no longer holds them. Nothing records whether each is the bead the copy carried: no time bounds its entry, the row carries no created_at, or the row is younger than the legacy manifest, which an older build's recover-stranded extended with the id of every row it carried. Nothing here can tell whether the binding collected that bead (then the work row is a frozen snapshot) or never received it (then the work row is the only copy). Nothing was written. Decide per id and run this again with --%s <id> (copy the row into the binding as it is) or --%s <id> (record it as the bead the copy carried; the clear then deletes its work-store row, and the clear's backup keeps it). --%s and --%s show the rows without writing:\n", //nolint:errcheck // best-effort stderr
+				logPrefix, undecided, strandedMoveFlag, strandedRecordCarriedFlag, "dry-run", "dump")
+		} else {
+			fmt.Fprintf(stderr, "%s: %d work-store row(s) are the only live copy of their id after an earlier --%s; nothing was written:\n", //nolint:errcheck // best-effort stderr
+				logPrefix, len(idOnlyOpen), strandedReplaceBindingRowFlag)
+		}
 		reportIDOnlyOpen(stderr)
 	}
 	// Refused now unless the operator asked to look: a dry run or a dump

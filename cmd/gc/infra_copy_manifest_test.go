@@ -2445,3 +2445,54 @@ func TestManifestRefusesAMalformedCreatedAtRecord(t *testing.T) {
 		}
 	}
 }
+
+// After an interrupted --replace-binding-row, the work-store row is the id's
+// only live copy: --record-carried is never offered for it, and naming it
+// explicitly is refused with nothing written (the clear would otherwise delete
+// the id from both live stores).
+func TestRecoverNeverRecordsAsCarriedARowAnEarlierReplaceLeftAsTheOnlyCopy(t *testing.T) {
+	prevSlack := infraManifestClockSlack
+	infraManifestClockSlack = 0
+	t.Cleanup(func() { infraManifestClockSlack = prevSlack })
+
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	id := carriedMessageID(t, source)
+	backdateHeldOriginal(t, target, id)
+	writeLegacyManifest(t, target)
+	waitPastMarkerBound(t, target)
+	reused := reuseCarriedID(t, source, id)
+	dest, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := dest.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyInfraHeldChoices(target, source, dest, []beads.Bead{reused}, nil, map[string]beads.Bead{id: original}); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeBeadStoreHandle(dest); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(target.ManifestPath())
+
+	code, _, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code == 0 {
+		t.Fatal("recover exited 0 over the only live copy with no flag")
+	}
+	if strings.Contains(stderr, "--"+strandedRecordCarriedFlag+" <id> (record it") {
+		t.Errorf("the refusal offers --%s for a row an earlier replace left as the only copy: %s", strandedRecordCarriedFlag, stderr)
+	}
+
+	code, _, stderr = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{RecordCarried: map[string]bool{id: true}})
+	if code == 0 || !strings.Contains(stderr, "only live copy") || !strings.Contains(stderr, "--"+strandedReplaceBindingRowFlag+" "+id) {
+		t.Errorf("explicit --%s %s = %d: %s", strandedRecordCarriedFlag, id, code, stderr)
+	}
+	if after, _ := os.ReadFile(target.ManifestPath()); !bytes.Equal(before, after) {
+		t.Error("the refused --record-carried rewrote the manifest")
+	}
+	if got, err := source.Get(id); err != nil || got.Title != reused.Title {
+		t.Errorf("work-store %s = %q (err %v), want the only live copy kept", id, got.Title, err)
+	}
+}
