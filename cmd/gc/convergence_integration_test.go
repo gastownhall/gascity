@@ -1124,6 +1124,7 @@ func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
 		iterations int // wisps closed by the "agent" before the stop
 	}{
 		{"manual-gate/iteration-1", map[string]string{}, 0},
+		{"condition-gate/iteration-2", map[string]string{"gate_mode": "condition"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cr, store := setupConvergenceRuntime(t)
