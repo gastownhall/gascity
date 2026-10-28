@@ -1682,6 +1682,7 @@ go_test(
         "pending_create_exec_pack_teardown_test.go",
         "pending_create_inflight_rollback_test.go",
         "pending_create_live_incarnation_test.go",
+        "pending_create_reap_pool_test.go",
         "pending_create_teardown_sites_test.go",
         "pending_create_unattributed_teardown_test.go",
         "pending_interaction_lane_test.go",
