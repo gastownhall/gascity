@@ -154,6 +154,28 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 	})
 }
 
+// TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp pins AC-2:
+// the assigned-ready tier truncates to one row, so with an older mail wisp in
+// front of a real assigned task, withholding the message is what lets the task
+// be served rather than shadowed.
+func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	a := singleSessionConfigAgent()
+	env := map[string]string{"GC_SESSION_ID": "gcg-session-5815"}
+	// Older created_at, so the tier's sort_by puts the mail first: at the
+	// truncation it is the row served.
+	mail := `{"id":"gcg-mail-1","status":"open","issue_type":"message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	task := `{"id":"gcg-assigned-task","status":"open","issue_type":"task","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:02:00Z","metadata":{}}`
+
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+		fakeBdOpenEphemeralStore(`[`+mail+`,`+task+`]`))
+	if strings.Contains(out, "gcg-mail-1") || !strings.Contains(out, "gcg-assigned-task") {
+		t.Fatalf("assigned-ready tier did not serve the task behind an older mail wisp: %q", out)
+	}
+}
+
 // TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType pins the fix's
 // scope: the message withholding lives in the jq probes over the ephemeral
 // snapshots, never as --exclude-type flags on the generated ready reads. bd's
