@@ -309,7 +309,7 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 		// CreatedAt, not close time), or on a later tick otherwise. Best-effort:
 		// never fails the GC tick.
 		pass := &wispGCPassLog{}
-		holders := wispGCHolders{graph: store, legs: legs, pass: pass, cityName: m.cityName}
+		holders := wispGCHolders{graph: store, legs: legs, pass: pass, cityName: m.cityName, memo: &m.notes, now: now}
 		if abandonedErr := closeAbandonedRoots(store, holders, now, &m.notes); abandonedErr != nil {
 			deleteErr = errors.Join(deleteErr, abandonedErr)
 		}
@@ -433,7 +433,22 @@ type wispGCHolders struct {
 	// cityName, on a single-store city (no legs), is the only city a source
 	// ref may name ("": any).
 	cityName string
+	// memo remembers, per root, the answer the guard's reads gave, until the
+	// root changes or wispGCRefusalRecheck passes (nil: every pass reads).
+	// The graph arm runs on the controller tick, and on a ledger served by bd
+	// the holder query is a few bd calls per leg, which a root the guard holds
+	// open, or a dry run's would-close root, would otherwise pay every pass.
+	memo *wispGCNotes
+	// now is the pass's clock, for memo.
+	now time.Time
 }
+
+// The graph arm's memo of holder answers (wispGCHolders.memo).
+const (
+	graphArmHolderMemo = "graph-holders"
+	holderAnswerHeld   = "held"
+	holderAnswerFree   = "not held"
+)
 
 // wispGCPassLog collects, for one pass, the stepless roots the holder guard
 // left open because a suspended rig might hold their source, so the pass logs
@@ -1025,6 +1040,9 @@ func closeAbandonedRoots(store beads.Store, holders wispGCHolders, now time.Time
 		// Best-effort: a list failure must not fail the GC tick.
 		return fmt.Errorf("listing open workflow roots for abandoned-root sweep: %w", err)
 	}
+	// Forget the holder answers of roots no longer open (closed, or deleted
+	// elsewhere).
+	holders.memo.pruneRefusals(graphArmHolderMemo, rootIDSet(candidates))
 	return closeAbandonedRootCandidatesMode(store, candidates, holders, now, abandonedCloseMode{
 		enforce:    closeAbandonedEnforced(),
 		dryRunHint: fmt.Sprintf("set %s=1 to enforce", closeAbandonedEnv),
@@ -1120,6 +1138,7 @@ func closeAbandonedRootCandidatesMode(store beads.Store, candidates []beads.Bead
 
 		if err := closeMoleculeWithReason(store, root.ID, abandonedRootCloseReason); err != nil {
 			keep(root, "close failed: "+err.Error())
+			holders.forget(root.ID)
 			closeErr = errors.Join(closeErr, fmt.Errorf("closing abandoned root %s: %w", root.ID, err))
 			continue
 		}
@@ -1219,6 +1238,14 @@ func steplessRootIsAbandoned(b beads.Bead) bool {
 // retired proxy), yet it can hold a live source. While any rig is suspended
 // the guard therefore cannot prove a stepless root unattached, and it leaves
 // the root open until the rig resumes.
+//
+// With a memo (the graph arm), the answer the reads gave is reused until the
+// root changes or wispGCRefusalRecheck passes. A remembered "held" only keeps
+// the root open longer; a remembered "not held" closes it on the pass that
+// first found it, except in a dry run, which closes nothing. A close that
+// fails can leave the root unchanged, so it forgets the answer (forget), and
+// the retry reads the holders again. The suspension and unreadable-legs
+// decisions read nothing, so they are made every pass.
 func (h wispGCHolders) liveAttachmentSource(root beads.Bead) bool {
 	rootID := root.ID
 	if h.own != nil {
@@ -1238,6 +1265,7 @@ func (h wispGCHolders) liveAttachmentSource(root beads.Bead) bool {
 	// or foreign city ref, a class ref, an undeclared or renamed rig) proves
 	// nothing, and the root takes the no-pointer path below.
 	src := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	var srcStore beads.Store
 	pointerUsable := false
 	if src != "" {
 		store, suspended, ok := h.sourceStore(root)
@@ -1247,9 +1275,7 @@ func (h wispGCHolders) liveAttachmentSource(root beads.Bead) bool {
 				h.pass.noteSuspended([]string{strings.TrimPrefix(strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey]), "rig:")})
 				return true
 			}
-			if sourceIsLiveIn(store, root, src) {
-				return true
-			}
+			srcStore = store
 		}
 	}
 	if !pointerUsable {
@@ -1262,7 +1288,26 @@ func (h wispGCHolders) liveAttachmentSource(root beads.Bead) bool {
 			return true
 		}
 	}
-	if h.graph != nil && storeHoldsLiveAttachmentSource(h.graph, rootID) {
+	if answer, ok := h.memo.remembered(graphArmHolderMemo, root, h.now); ok {
+		return answer == holderAnswerHeld
+	}
+	held := h.readHolders(root, pointerUsable, srcStore, src)
+	answer := holderAnswerFree
+	if held {
+		answer = holderAnswerHeld
+	}
+	h.memo.noteRefusal(graphArmHolderMemo, root, h.now, answer)
+	return held
+}
+
+// readHolders is liveAttachmentSource's reads: the recorded source, when the
+// root's pointer is usable, then the beads pointing at the root in the
+// graph-class store and in every leg.
+func (h wispGCHolders) readHolders(root beads.Bead, pointerUsable bool, srcStore beads.Store, src string) bool {
+	if pointerUsable && sourceIsLiveIn(srcStore, root, src) {
+		return true
+	}
+	if h.graph != nil && storeHoldsLiveAttachmentSource(h.graph, root.ID) {
 		return true
 	}
 	live := false
@@ -1271,10 +1316,16 @@ func (h wispGCHolders) liveAttachmentSource(root beads.Bead) bool {
 			if live || store == nil || sameBeadStore(store, h.graph) {
 				return
 			}
-			live = storeHoldsLiveAttachmentSource(store, rootID)
+			live = storeHoldsLiveAttachmentSource(store, root.ID)
 		})
 	}
 	return live
+}
+
+// forget drops the holder answer remembered for rootID, so the next pass that
+// reaches the root reads its holders again.
+func (h wispGCHolders) forget(rootID string) {
+	h.memo.forgetRefusal(graphArmHolderMemo, rootID)
 }
 
 func (h wispGCHolders) suspendedRigs() []string {
@@ -1544,11 +1595,11 @@ func deleteExpiredBeadClosureFrom(store beads.Store, rootID string, prefetched *
 	if len(open) > 0 {
 		return workflowDeleteRefusal(rootID, open)
 	}
-	// Every member's own status was just checked. The set-level strand guard
-	// reads LIVE where the walk may have read a lagging cache, and adds an
-	// open bead recorded against a nested root, so it is asked about the root
-	// and every member that can be a root (a workflow, wisp or molecule); a
-	// plain step costs no extra read.
+	// Every member's own status was just checked, as the backing holds it.
+	// The set-level strand guard adds an open bead recorded against a nested
+	// root (gc.root_bead_id), which the walk does not follow, so it is asked
+	// about the root and every member that can be a root (a workflow, wisp or
+	// molecule); a plain step costs no extra read.
 	if err := assertWorkflowDeleteSetLeavesNothingStrandedFor(store, ids, nestedRootCandidates(ids, rows, rootID)); err != nil {
 		return err
 	}
@@ -1581,10 +1632,15 @@ func nestedRootCandidates(ids []string, rows map[string]beads.Bead, rootID strin
 // carve-out the strand guard makes (workflowDeleteSkip): a lingering message
 // must not block retention forever.
 //
+// The walk reads store's live backing (liveBackingStore), never its cache. A
+// list through the cache drops a backing row the cache holds closed, or
+// answers with the cached closed row, so a member reopened behind the cache
+// would be deleted with the closure, or stranded under a deleted root.
+//
 // root is the root's own row, already read live by the caller, so it is not
 // read again.
 func collectExpiredBeadClosureWithOpen(store beads.Store, root beads.Bead) ([]string, []string, map[string]beads.Bead, error) {
-	ids, rows, err := collectExpiredBeadClosureStatus(store, root.ID)
+	ids, rows, err := collectExpiredBeadClosureStatus(liveBackingStore(store), root.ID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1705,12 +1761,19 @@ func collectExpiredBeadClosureStatus(store beads.Store, rootID string) ([]string
 // children the per-node walk asks for separately. Other stores (in-memory,
 // file, SQLite) keep the two apart, and keep the per-node walk.
 func childrenFollowParentChildDeps(store beads.Store) bool {
+	_, ok := liveBackingStore(store).(*beads.BdStore)
+	return ok
+}
+
+// liveBackingStore is the store under store's bead-policy and cache layers,
+// whose reads no cached row stands in for. A store with neither layer is its
+// own backing.
+func liveBackingStore(store beads.Store) beads.Store {
 	inner, _, _ := unwrapBeadPolicyStore(store)
 	if cache, ok := inner.(*beads.CachingStore); ok {
 		inner, _, _ = unwrapBeadPolicyStore(cache.Backing())
 	}
-	_, ok := inner.(*beads.BdStore)
-	return ok
+	return inner
 }
 
 // collectClosureByLevel is the ownership-closure walk one level at a time,
@@ -1852,11 +1915,7 @@ func prefetchLiveRoots(store beads.Store, entries []beads.Bead, opts closurePurg
 		}
 		ids = append(ids, entry.ID)
 	}
-	backing, _, _ := unwrapBeadPolicyStore(store)
-	if cache, ok := backing.(*beads.CachingStore); ok {
-		backing = cache.Backing()
-	}
-	rows, err := beads.PrefetchExact(backing, ids)
+	rows, err := beads.PrefetchExact(liveBackingStore(store), ids)
 	if err != nil {
 		return map[string]beads.Bead{}
 	}

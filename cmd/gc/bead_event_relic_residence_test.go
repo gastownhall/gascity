@@ -213,6 +213,72 @@ func TestRelicIDCollisionKeepsTheWorkRoute(t *testing.T) {
 	}
 }
 
+// Review 8: an inferred close of a relic is confirmed in the store whose row
+// reads closed, on the event path and on the sweep, as a committed close is. A
+// work bead reusing the relic's id holds the first row a read finds; while that
+// row is open it must not refute the relic's close, or the relic molecule
+// never autocloses. The autoclose runs in the binding, in the ID-only store-ref
+// mode relic closes take.
+func TestRelicIDCollisionInferredCloseAutoclosesTheRelic(t *testing.T) {
+	syncAutoclose(t)
+	for _, path := range []string{"event", "sweep"} {
+		t.Run(path, func(t *testing.T) {
+			f := newRelicEventFixture(t, false)
+			work := f.cs.cityBeadStore
+			creator, ok := work.(beads.ForeignIDCreator)
+			if !ok {
+				t.Fatalf("work leaf %T cannot pin an id", work)
+			}
+			if _, err := creator.CreateWithForeignID(beads.Bead{ID: f.stepID, Title: "work bead reusing the relic id", Type: "task"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.binding.Close(f.stepID); err != nil {
+				t.Fatal(err)
+			}
+			stores := f.cs.beadEventStores(f.stepID)
+			if len(stores) != 2 || stores[0] != work || stores[1] != f.binding {
+				t.Fatalf("event stores for colliding id %s = %d store(s), want the work store, then the binding", f.stepID, len(stores))
+			}
+			owner, live, err := liveCloseOwner(stores, f.stepID, f.binding)
+			if err != nil || owner != f.binding || live.Status != "closed" {
+				t.Fatalf("close owner for %s = (%T, %q, %v), want the binding's closed row", f.stepID, owner, live.Status, err)
+			}
+			f.cs.mu.RLock()
+			prefixRef := f.cs.autocloseStoreRefLocked(f.stepID)
+			f.cs.mu.RUnlock()
+			if prefixRef == "" {
+				t.Fatalf("precondition: the prefix route of %s has no store ref, so the ID-only mode is indistinguishable", f.stepID)
+			}
+			if ref := relicStoreRef(owner, f.binding, prefixRef); ref != "" {
+				t.Fatalf("store ref for the relic's close = %q, want the ID-only mode", ref)
+			}
+			switch path {
+			case "event":
+				payload, err := json.Marshal(beads.Bead{ID: f.stepID, Title: "Step 1", Type: "step", Status: "closed"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "agent", Subject: f.stepID, Payload: payload})
+			case "sweep":
+				f.cs.autocloseSweepOf().deferID(f.stepID, sweepTestClock(0))
+				if got := f.cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 1 || got.Refuted != 0 {
+					t.Fatalf("sweep pass = %+v, want the relic's close confirmed and its autoclose run", got)
+				}
+			}
+			root, err := f.binding.Get(f.rootID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root.Status != "closed" {
+				t.Errorf("relic molecule root %s status=%q after its only step closed beside an open work bead of the same id, want closed", f.rootID, root.Status)
+			}
+			if got, err := work.Get(f.stepID); err != nil || got.Status != "open" {
+				t.Errorf("colliding work bead %s = (%q, %v) after the relic's close, want it open and untouched", f.stepID, got.Status, err)
+			}
+		})
+	}
+}
+
 func storesInclude(stores []beads.Store, want beads.Store) bool {
 	for _, s := range stores {
 		if s == want {

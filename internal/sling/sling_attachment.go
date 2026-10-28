@@ -60,8 +60,10 @@ type AttachedBead struct {
 // from the parent's work store; a work-class molecule (a v1 poured recipe, or a
 // pre-split one) stays on the work ledger. stores lists the candidates in
 // lookup order, graph store first; the first store that resolves an id owns
-// it. An id that no store holds is reported as the probe error (the
-// ErrNotFound of the last store asked), exactly as a single store reports it.
+// it. An id that no store holds is reported as the probe error (ErrNotFound),
+// exactly as a single store reports it. A read that failed is reported in its
+// place: a not-found is a dangling stamp a guard may pass, a failed read is
+// not, so it is never hidden behind one.
 //
 // DB-child attachments (beads whose parent is this bead) are listed through
 // childQuerier and are attributed to the LAST store in stores — the parent's
@@ -78,9 +80,19 @@ type AttachedBead struct {
 func CollectAttachments(parent beads.Bead, childQuerier BeadChildQuerier, stores ...beads.Store) ([]AttachedBead, error) {
 	stores = nonNilStores(stores)
 	var (
-		attachments []AttachedBead
-		firstErr    error
+		attachments          []AttachedBead
+		hardErr, notFoundErr error
 	)
+	noteErr := func(err error) {
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			if notFoundErr == nil {
+				notFoundErr = err
+			}
+		case hardErr == nil:
+			hardErr = err
+		}
+	}
 	seen := make(map[string]struct{})
 
 	addByID := func(id string) {
@@ -93,9 +105,7 @@ func CollectAttachments(parent beads.Bead, childQuerier BeadChildQuerier, stores
 		}
 		attached, owner, err := getFromStores(id, stores)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+			noteErr(err)
 			return
 		}
 		seen[id] = struct{}{}
@@ -117,9 +127,7 @@ func CollectAttachments(parent beads.Bead, childQuerier BeadChildQuerier, stores
 			Sort:     beads.SortCreatedAsc,
 		})
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+			noteErr(err)
 		} else {
 			var childStore beads.Store
 			if len(stores) > 0 {
@@ -138,7 +146,10 @@ func CollectAttachments(parent beads.Bead, childQuerier BeadChildQuerier, stores
 		}
 	}
 
-	return attachments, firstErr
+	if hardErr != nil {
+		return attachments, hardErr
+	}
+	return attachments, notFoundErr
 }
 
 // getFromStores reads id from the first store that holds it. A store that
@@ -478,16 +489,7 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope
 		childQuerier = cq
 	}
 	attachments, err := CollectAttachments(parent, childQuerier, scope.stores()...)
-	if err != nil && len(attachments) == 0 {
-		// A reference no store holds is a dangling stamp (the molecule was
-		// purged): there is nothing attached to refuse or burn. Any other
-		// probe failure means the guard cannot tell whether a live molecule
-		// is attached, so it fails closed rather than pour a second one.
-		if errors.Is(err, beads.ErrNotFound) {
-			return nil
-		}
-		return &AttachmentProbeError{BeadID: beadID, Err: err}
-	}
+	probeErr := attachmentProbeFailure(beadID, err)
 
 	for _, located := range attachments {
 		attached := located.Bead
@@ -502,6 +504,12 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope
 				SourceBeadID: beadID,
 				WorkflowIDs:  []string{attached.ID},
 			}
+		}
+		if parentUnassigned && probeErr != nil {
+			// The reference the probe could not read may be a live molecule,
+			// so burning this one would not make room: refused below, with
+			// nothing burned.
+			continue
 		}
 		var held []string
 		var unreadable error
@@ -518,13 +526,29 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope
 		}
 		return &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID, ActiveSteps: held, Unreadable: unreadable}
 	}
-	return nil
+	return probeErr
+}
+
+// attachmentProbeFailure is the refusal the attach guards return for err,
+// CollectAttachments' error, when no live attachment refuses first. A
+// reference no store holds is a dangling stamp (the molecule was purged):
+// there is nothing attached there to refuse or burn, so a pure not-found is no
+// refusal. Any other failure means the guard cannot tell whether a live
+// molecule is attached, even beside the attachments it did read, so it fails
+// closed rather than pour a second one.
+func attachmentProbeFailure(beadID string, err error) error {
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		return nil
+	}
+	return &AttachmentProbeError{BeadID: beadID, Err: err}
 }
 
 // AttachmentProbeError reports that the attach guard could not read a source
 // bead's attachment (a store error, not a not-found), so it cannot tell
 // whether a live molecule is attached and refuses rather than risk pouring a
-// second one. It is a store fault, not a conflict: the API answers it 5xx.
+// second one, or could not read the subtree of a stale attachment it would
+// replace (subtreeProbeError), so it cannot tell whether a worker holds a step.
+// It is a store fault, not a conflict: the API answers it 5xx.
 type AttachmentProbeError struct {
 	BeadID string
 	Err    error
@@ -535,6 +559,13 @@ func (e *AttachmentProbeError) Error() string {
 }
 
 func (e *AttachmentProbeError) Unwrap() error { return e.Err }
+
+// subtreeProbeError is the AttachmentProbeError for an attachment whose
+// subtree could not be read (attachmentActiveWork's unreadable): the guard
+// read the attachment but could not tell whether a worker holds a step.
+func subtreeProbeError(beadID, label, attachmentID string, unreadable error) *AttachmentProbeError {
+	return &AttachmentProbeError{BeadID: beadID, Err: fmt.Errorf("reading the subtree of attached %s %s: %w", label, attachmentID, unreadable)}
+}
 
 // attachmentActiveWork reports why an unassigned source's stale attachment may
 // not be burned to make room for a new one: the beads of its subtree a worker
@@ -588,6 +619,17 @@ func (e *MoleculeAttachedError) Error() string {
 	return msg
 }
 
+// Unwrap reports an unreadable subtree as the AttachmentProbeError it also
+// is: a store fault kept the guard from deciding, which a retry can clear, so
+// a caller (the API) answers it as one rather than as a conflict. A refusal
+// for any other reason wraps nothing.
+func (e *MoleculeAttachedError) Unwrap() error {
+	if e.Unreadable == nil {
+		return nil
+	}
+	return subtreeProbeError(e.BeadID, e.Label, e.AttachmentID, e.Unreadable)
+}
+
 // CheckNoMoleculeChildren returns an error if the bead already has an attached
 // molecule or wisp child that is still open. Auto-burn messages go to result.AutoBurned.
 func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
@@ -631,13 +673,10 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope a
 	var probeErrs []error
 	for _, child := range open {
 		attachments, err := CollectAttachments(child, q, scope.stores()...)
-		if err != nil && len(attachments) == 0 {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			probeErrs = append(probeErrs, &AttachmentProbeError{BeadID: child.ID, Err: err})
+		probeErr := attachmentProbeFailure(child.ID, err)
+		if probeErr != nil {
+			probeErrs = append(probeErrs, probeErr)
 			problems = append(problems, fmt.Sprintf("%s (could not verify molecule attachment: %v)", child.ID, err))
-			continue
 		}
 		childUnassigned := strings.TrimSpace(child.Assignee) == ""
 		for _, located := range attachments {
@@ -651,6 +690,11 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope a
 				}
 				problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, AttachmentLabel(attached), attached.ID))
 				workflowConflicts = append(workflowConflicts, workflowConflict{childID: child.ID, workflowID: attached.ID})
+				continue
+			}
+			if childUnassigned && probeErr != nil {
+				// Its failed probe is already reported: nothing is burned past
+				// it, as in checkNoMoleculeChildren.
 				continue
 			}
 			var held []string
@@ -667,6 +711,7 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope a
 				}
 			}
 			if unreadable != nil {
+				probeErrs = append(probeErrs, subtreeProbeError(child.ID, AttachmentLabel(attached), attached.ID, unreadable))
 				problems = append(problems, fmt.Sprintf("%s (has %s %s, whose subtree could not be read: %v)", child.ID, AttachmentLabel(attached), attached.ID, unreadable))
 				continue
 			}

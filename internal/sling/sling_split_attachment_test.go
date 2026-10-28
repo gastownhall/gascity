@@ -370,36 +370,109 @@ func (s oneIDUnreadableStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// childListFailingStore fails the list of a bead's DB children: a store that
+// could not say which beads name the source as their parent.
+type childListFailingStore struct {
+	beads.Store
+}
+
+func (s childListFailingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.ParentID != "" {
+		return nil, errors.New("store unavailable")
+	}
+	return s.Store.List(query)
+}
+
 // Should-fix 4: the attach guard fails closed when it cannot read an
 // attachment (it may be live), and stays open for a dangling reference that
-// every store answers as absent (the molecule was purged).
+// every store answers as absent (the molecule was purged). A read that failed
+// is never hidden by another reference the probe did resolve: not by a
+// dangling one, nor by a closed attachment the guard skips, and nothing is
+// burned past it.
 func TestAttachGuardFailsClosedOnAnUnreadableAttachment(t *testing.T) {
-	work := beads.NewMemStore()
-	src, err := work.Create(beads.Bead{Title: "source", Type: "task", Metadata: map[string]string{
-		beadmeta.MoleculeIDMetadataKey: "gcg-77",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph := oneIDUnreadableStore{Store: beads.NewMemStore(), failID: "gcg-77"}
-	scope := attachmentScope{work: work, graph: graph}
+	const unreadableID, absentID = "gcg-77", "gcg-404"
+	for _, tc := range []struct {
+		name string
+		// molecule is what the source's molecule_id names: an id the graph
+		// store cannot read, an id no store holds, or a molecule in the graph
+		// store with this status.
+		molecule string
+		// workflowUnreadable stamps a workflow_id the graph store cannot read.
+		workflowUnreadable bool
+		// childListFails fails the list of the source's DB children.
+		childListFails bool
+		wantRefusal    bool
+	}{
+		{name: "unreadable molecule_id", molecule: unreadableID, wantRefusal: true},
+		{name: "dangling molecule_id", molecule: absentID},
+		{name: "dangling molecule_id beside an unreadable workflow_id", molecule: absentID, workflowUnreadable: true, wantRefusal: true},
+		{name: "dangling molecule_id beside an unreadable child list", molecule: absentID, childListFails: true, wantRefusal: true},
+		{name: "closed molecule beside an unreadable workflow_id", molecule: "closed", workflowUnreadable: true, wantRefusal: true},
+		{name: "live molecule beside an unreadable workflow_id", molecule: "open", workflowUnreadable: true, wantRefusal: true},
+	} {
+		for _, batch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/batch=%v", tc.name, batch), func(t *testing.T) {
+				work, graphLeaf := beads.NewMemStore(), beads.NewMemStore()
+				meta := map[string]string{beadmeta.MoleculeIDMetadataKey: tc.molecule}
+				attachedID := ""
+				if tc.molecule == "open" || tc.molecule == "closed" {
+					attached, err := graphLeaf.Create(beads.Bead{Title: "attached molecule", Type: "molecule"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if tc.molecule == "closed" {
+						if err := graphLeaf.Close(attached.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+					attachedID = attached.ID
+					meta[beadmeta.MoleculeIDMetadataKey] = attachedID
+				}
+				if tc.workflowUnreadable {
+					meta["workflow_id"] = unreadableID
+				}
+				// An unassigned source: a live attachment is burned to make
+				// room unless the guard refuses.
+				src, err := work.Create(beads.Bead{Title: "source", Type: "task", Metadata: meta})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var q BeadChildQuerier = work
+				if tc.childListFails {
+					q = childListFailingStore{Store: work}
+				}
+				scope := attachmentScope{work: work, graph: oneIDUnreadableStore{Store: graphLeaf, failID: unreadableID}}
 
-	var result SlingResult
-	err = checkNoMoleculeChildren(work, src.ID, scope, &result, false)
-	if err == nil || !strings.Contains(err.Error(), "could not verify molecule attachment") {
-		t.Fatalf("single check with an unreadable attachment: err=%v, want a could-not-verify refusal", err)
-	}
-	err = checkBatchNoMoleculeChildren(work, []beads.Bead{src}, scope, &result, false)
-	if err == nil || !strings.Contains(err.Error(), "could not verify molecule attachment") {
-		t.Fatalf("batch check with an unreadable attachment: err=%v, want a could-not-verify refusal", err)
-	}
-
-	dangling := attachmentScope{work: work, graph: beads.NewMemStore()}
-	if err := checkNoMoleculeChildren(work, src.ID, dangling, &result, false); err != nil {
-		t.Fatalf("single check with a dangling molecule_id: %v, want no refusal", err)
-	}
-	if err := checkBatchNoMoleculeChildren(work, []beads.Bead{src}, dangling, &result, false); err != nil {
-		t.Fatalf("batch check with a dangling molecule_id: %v, want no refusal", err)
+				var result SlingResult
+				if batch {
+					err = checkBatchNoMoleculeChildren(q, []beads.Bead{src}, scope, &result, false)
+				} else {
+					err = checkNoMoleculeChildren(q, src.ID, scope, &result, false)
+				}
+				if !tc.wantRefusal {
+					if err != nil {
+						t.Fatalf("guard refused: %v, want no refusal", err)
+					}
+					return
+				}
+				var probeErr *AttachmentProbeError
+				if !errors.As(err, &probeErr) || !strings.Contains(err.Error(), "could not verify molecule attachment") {
+					t.Fatalf("guard: err=%v, want a could-not-verify refusal (*AttachmentProbeError)", err)
+				}
+				if len(result.AutoBurned) != 0 {
+					t.Errorf("guard burned %v past a failed probe", result.AutoBurned)
+				}
+				if attachedID != "" {
+					got, err := graphLeaf.Get(attachedID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if want := map[string]string{"open": "open", "closed": "closed"}[tc.molecule]; got.Status != want {
+						t.Errorf("attached molecule status = %q, want %q (the guard must not touch it)", got.Status, want)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -499,6 +572,56 @@ func TestSplitSlingDoesNotBurnAnAttachmentWithWorkInProgress(t *testing.T) {
 	})
 }
 
+// The resolver accepts a formula spelled with its file extension (GitHub
+// #3704), so re-slinging the attached formula under that spelling is the same
+// request, not a different formula: no conflict, so no burn and no refusal.
+func TestConflictingOnFormulaRuleIgnoresTheFileExtension(t *testing.T) {
+	molecule := beads.Bead{ID: "gcg-2", Type: "molecule", Metadata: map[string]string{beadmeta.FormulaNameMetadataKey: "first"}}
+	for _, spelling := range []string{"first", "first.toml", "first.formula.toml", "first.formula.json"} {
+		opts := SlingOpts{BeadOrFormula: "gc-1", OnFormula: spelling}
+		if got := conflictingOnFormulaAttachment(opts, molecule); got != nil {
+			t.Errorf("--on %s against a molecule poured from first: conflict %v, want none", spelling, got)
+		}
+	}
+	opts := SlingOpts{BeadOrFormula: "gc-1", OnFormula: "second.toml"}
+	if got := conflictingOnFormulaAttachment(opts, molecule); got == nil {
+		t.Error("--on second.toml against a molecule poured from first: no conflict, want one")
+	}
+}
+
+// End to end, on both topologies: re-slinging the attached formula spelled
+// with its extension is the idempotent retry, whoever holds the source.
+func TestSplitSlingSameOnFormulaSpelledWithItsExtensionIsIdempotent(t *testing.T) {
+	forEachSlingTopology(t, func(t *testing.T, env splitAttachEnv) {
+		for _, assignee := range []string{"", "mayor"} {
+			t.Run(fmt.Sprintf("assignee=%q", assignee), func(t *testing.T) {
+				src := env.source(t, assignee)
+				first, err := env.sling(t, src.ID, splitAttachVaporA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := env.work.SetMetadata(src.ID, beadmeta.RoutedToMetadataKey, "mayor"); err != nil {
+					t.Fatal(err)
+				}
+				again, err := env.sling(t, src.ID, splitAttachVaporA+".toml")
+				if err != nil {
+					t.Fatalf("--on %s.toml after --on %s: %v, want the idempotent retry", splitAttachVaporA, splitAttachVaporA, err)
+				}
+				if len(again.AutoBurned) != 0 {
+					t.Fatalf("--on %s.toml burned %v, want the live molecule kept", splitAttachVaporA, again.AutoBurned)
+				}
+				live, err := env.graph.Get(first.WispRootID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if live.Status == "closed" {
+					t.Fatalf("the attached molecule %s was closed", first.WispRootID)
+				}
+			})
+		}
+	})
+}
+
 // Re-review M18: the different-formula --on rule covers legacy molecule
 // attachments only; a live graph.v2 workflow keeps its own guard.
 func TestConflictingOnFormulaRuleSkipsWorkflowAttachments(t *testing.T) {
@@ -567,6 +690,10 @@ func TestBurnGuardEdges(t *testing.T) {
 		if !strings.Contains(err.Error(), "subtree could not be read") || strings.Contains(err.Error(), "worker holds "+root.ID) {
 			t.Fatalf("refusal does not say the guard could not read the subtree (it must fail closed on that, not on a failed burn): %v", err)
 		}
+		var probeErr *AttachmentProbeError
+		if !errors.As(err, &probeErr) || probeErr.BeadID != src.ID {
+			t.Fatalf("refusal over an unreadable subtree = %v, want it to carry an AttachmentProbeError for %s: a store fault, not a conflict", err, src.ID)
+		}
 	})
 	t.Run("hooked-step", func(t *testing.T) {
 		work, src, root := mkAttached(t, "hooked")
@@ -578,6 +705,10 @@ func TestBurnGuardEdges(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "--status open") || !strings.Contains(err.Error(), "gc bd close") {
 			t.Errorf("refusal does not say how to clear a stale step: %v", err)
+		}
+		var probeErr *AttachmentProbeError
+		if errors.As(err, &probeErr) {
+			t.Errorf("a held step is reported as a store fault: %v", err)
 		}
 		if got, _ := work.Get(root.ID); got.Status == "closed" {
 			t.Fatal("the attachment was burned")
@@ -594,6 +725,10 @@ func TestBurnGuardEdges(t *testing.T) {
 		if !strings.Contains(err.Error(), "subtree could not be read") || strings.Contains(err.Error(), "held by") {
 			t.Fatalf("batch refusal misstates an unreadable subtree as held: %v", err)
 		}
+		var probeErr *AttachmentProbeError
+		if !errors.As(err, &probeErr) || probeErr.BeadID != src.ID {
+			t.Fatalf("batch refusal over an unreadable subtree = %v, want it to carry an AttachmentProbeError for %s: a store fault, not a conflict", err, src.ID)
+		}
 	})
 	t.Run("batch", func(t *testing.T) {
 		work, src, root := mkAttached(t, "in_progress")
@@ -604,6 +739,10 @@ func TestBurnGuardEdges(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "held by") {
 			t.Fatalf("batch refusal does not name the held step: %v", err)
+		}
+		var probeErr *AttachmentProbeError
+		if errors.As(err, &probeErr) {
+			t.Errorf("a batch refusal over a held step is reported as a store fault: %v", err)
 		}
 		if got, _ := work.Get(root.ID); got.Status == "closed" {
 			t.Fatal("the batch check burned an attachment a worker holds")

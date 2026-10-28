@@ -7,9 +7,10 @@ import (
 )
 
 // wispGCRefusalRecheck is how long a refused closure (one holding a bead that
-// is not closed) is left alone before the purge walks it again, as long as its
-// root has not changed. A root whose updated_at moves is re-walked at once.
-// Package var so tests can shrink it.
+// is not closed) is left alone before the purge walks it again, and how long
+// the abandoned-root sweep trusts a holder answer, as long as the root has not
+// changed. A root whose updated_at moves is re-read at once. Package var so
+// tests can shrink it.
 var wispGCRefusalRecheck = time.Hour
 
 // wispGCNotes is what one wisp GC tracker remembers across passes so a pass
@@ -19,6 +20,9 @@ var wispGCRefusalRecheck = time.Hour
 //     root changes or wispGCRefusalRecheck passes. On a ledger served by bd
 //     every walk is a burst of subprocesses, and a refusal re-walked every
 //     pass would cost that burst forever while removing nothing;
+//   - holder answers: whether a bead still holds a stepless root, as the
+//     abandoned-root sweep's reads found it (wispGCHolders), reused until the
+//     root changes or wispGCRefusalRecheck passes, for the same reason;
 //   - per-root detail: a pass logs one summary line per arm; the line naming
 //     a single root is printed only when that root's state is new since the
 //     previous pass (or with GC_DEBUG on), so a stable backlog does not repeat
@@ -97,11 +101,21 @@ func (n *wispGCNotes) detail(key string) bool {
 // refusedNow reports whether root's closure was refused recently enough, and
 // root is unchanged since, that the purge should not walk it this pass.
 func (n *wispGCNotes) refusedNow(arm string, root beads.Bead, now time.Time) bool {
+	_, ok := n.remembered(arm, root, now)
+	return ok
+}
+
+// remembered returns the reason last recorded for root under arm while it
+// still stands: root unchanged since, and wispGCRefusalRecheck not passed.
+func (n *wispGCNotes) remembered(arm string, root beads.Bead, now time.Time) (string, bool) {
 	if n == nil {
-		return false
+		return "", false
 	}
 	r, ok := n.refused[arm+"\x00"+root.ID]
-	return ok && r.updatedAt.Equal(root.UpdatedAt) && now.Before(r.until)
+	if !ok || !r.updatedAt.Equal(root.UpdatedAt) || !now.Before(r.until) {
+		return "", false
+	}
+	return r.reason, true
 }
 
 // noteRefusal records that root was refused at now for reason, and reports

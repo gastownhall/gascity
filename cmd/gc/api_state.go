@@ -1179,12 +1179,13 @@ func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Sto
 // is a claim anyone who can append to the event log could make. The
 // fact derives from the live read, never from the payload. A row that is open
 // or gone gets nothing. An unreadable row gets nothing yet: the autoclose
-// sweep re-reads it, and the completions sweep backstops its fact.
+// sweep re-reads it, and the completions sweep backstops its fact. For a
+// relic's id the read is the row that reads closed (liveCloseOwner).
 func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string, relic beads.Store) {
 	if cs.deferIfQuiescent(evt.Subject) {
 		return
 	}
-	store, live, err := liveReadOwner(stores, evt.Subject)
+	store, live, err := liveCloseOwner(stores, evt.Subject, relic)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
 		cs.emitCompletedFact(live, evt.Actor)
@@ -1219,6 +1220,37 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 		}
 	}
 	return stores[0], beads.Bead{}, err
+}
+
+// liveCloseOwner is liveReadOwner for the read that confirms a close of id.
+// relic is the binding the residence probe added beside the prefix route
+// (withRelicStore), nil when it added none. With a relic, two stores may hold
+// a row under id (a work bead that reuses the relic's id), so the first row
+// found need not be the one that closed: the owner is the first store whose
+// row reads closed, as committedCloseOwner picks it for a committed close. A
+// read that fails before one does is returned (the close is unconfirmed);
+// when every store answers and no row reads closed, the first row found, or
+// ErrNotFound, refutes it. stores must be non-empty.
+func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.Store, beads.Bead, error) {
+	if relic == nil {
+		return liveReadOwner(stores, id)
+	}
+	var openStore beads.Store
+	var open beads.Bead
+	for _, store := range stores {
+		b, err := beads.HandlesFor(store).Live.Get(id)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+		case err != nil || b.Status == "closed":
+			return store, b, err
+		case openStore == nil:
+			openStore, open = store, b
+		}
+	}
+	if openStore == nil {
+		return stores[0], beads.Bead{}, beads.ErrNotFound
+	}
+	return openStore, open, nil
 }
 
 // emitCompletedFact records step's execution.step_completed once per fact,

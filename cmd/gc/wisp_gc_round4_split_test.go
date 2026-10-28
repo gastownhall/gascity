@@ -524,6 +524,60 @@ func TestPurgeRefusesANestedRootWithAnOpenMember(t *testing.T) {
 	}
 }
 
+// Review: a closure member another process reopened while this cache still
+// holds it closed is live work. The purge must see it as the backing does: a
+// list through the cache drops a backing row the cache holds closed, or
+// answers with the cached closed row, so the purge would delete the step with
+// its closure or strand it under a deleted root. Both walks: the per-node walk
+// and the bd level walk.
+func TestPurgeRefusesAMemberReopenedBehindTheCache(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backing func() beads.Store
+	}{
+		{name: "per-node walk", backing: func() beads.Store { return beads.NewMemStore() }},
+		{name: "bd level walk", backing: func() beads.Store { return beads.NewBdStore("/fake-bd", beadstest.NewFakeBd().Run) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := tc.backing()
+			cache := beads.NewCachingStore(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			root, err := cache.Create(beads.Bead{Title: "v1 poured", Type: "molecule"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := cache.Create(beads.Bead{Title: "step", Type: "step", ParentID: root.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{root.ID, step.ID} {
+				if err := cache.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Another process puts the step back to work; this cache has not
+			// seen it.
+			if err := backing.Reopen(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			if cached, err := cache.Get(step.ID); err != nil || cached.Status != "closed" {
+				t.Fatalf("precondition: the cache holds step %s as %q (%v), want closed", step.ID, cached.Status, err)
+			}
+			err = deleteExpiredBeadClosureFrom(cache, root.ID, nil)
+			if !errors.Is(err, errWorkflowDeleteLiveDescendants) {
+				t.Fatalf("purge of %s = %v, want a refusal: its step %s is open in the backing", root.ID, err, step.ID)
+			}
+			for _, id := range []string{root.ID, step.ID} {
+				if _, err := backing.Get(id); err != nil {
+					t.Errorf("%s was deleted: %v", id, err)
+				}
+			}
+		})
+	}
+}
+
 // Must-fix 1, the two halves of the arm sharing. With two walks, a close that
 // goes first leaves one for the purge: the expired closure is purged on the
 // first visit even behind abandoned roots. With one walk, the arms alternate:

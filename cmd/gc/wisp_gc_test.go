@@ -2509,6 +2509,70 @@ func TestWispGC_LeavesSteplessRootWithLiveGraphV2AttachmentSourcePastTTL(t *test
 	}
 }
 
+// setMetadataFailsOnceStore fails the first SetMetadata of one id, the way a
+// write the backing refuses leaves the row untouched.
+type setMetadataFailsOnceStore struct {
+	*gcTestStore
+	failID string
+	failed bool
+}
+
+func (s *setMetadataFailsOnceStore) SetMetadata(id, key, value string) error {
+	if id == s.failID && !s.failed {
+		s.failed = true
+		return fmt.Errorf("backing refused the write")
+	}
+	return s.gcTestStore.SetMetadata(id, key, value)
+}
+
+// Review 8: the holder answer that cleared a stepless root is read for that
+// pass's close. A close that fails leaves the root unchanged, so a remembered
+// "not held" would stand for the whole recheck window: a source that attaches
+// before the retry, without touching the root, must still keep it open.
+func TestWispGC_FailedCloseRereadsTheHoldersBeforeTheRetry(t *testing.T) {
+	now := time.Now()
+	store := &setMetadataFailsOnceStore{gcTestStore: newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+	}), failID: "wisp-attached"}
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	pass := func(at time.Time) (err error) {
+		withCloseAbandonedEnforced(t, func() {
+			withCloseAbandonedTTL(t, 5*time.Minute, func() {
+				_, err = wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, at)
+			})
+		})
+		return err
+	}
+	if err := pass(now); err == nil || !strings.Contains(err.Error(), "closing abandoned root wisp-attached") {
+		t.Fatalf("first pass: err = %v, want the failed close of wisp-attached", err)
+	}
+	if !store.failed {
+		t.Fatal("the first pass never tried to close the unheld root")
+	}
+	if _, err := store.Create(beads.Bead{Title: "late source", Type: "task", Metadata: map[string]string{
+		beadmeta.MoleculeIDMetadataKey: "wisp-attached",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pass(now.Add(10 * time.Minute)); err != nil {
+		t.Fatalf("retry pass: %v", err)
+	}
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless root status = %q after a source attached between a failed close and its retry, want open", root.Status)
+	}
+}
+
 // TestWispGC_LeavesSteplessRootWhenAttachmentQueryFails pins the fail-CLOSED
 // posture wispGCHolders.liveAttachmentSource promises: an unreadable store
 // must never widen what the sweep destroys. With the attachment-holder query

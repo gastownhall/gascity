@@ -310,13 +310,15 @@ type attachmentDecision struct {
 // conflictingOnFormulaAttachment reports a live attachment that an explicit
 // --on formula would collide with: one whose recorded formula differs from the
 // requested one. An attachment that records no formula, or a sling that only
-// implies its formula through default_sling_formula, never conflicts here.
+// implies its formula through default_sling_formula, never conflicts here. The
+// requested name is compared as the resolver reads it, without a file
+// extension, so the same formula spelled "<name>.toml" is the same request.
 //
 // Only a legacy molecule/wisp attachment conflicts here. A live graph.v2
 // workflow attachment keeps its own guard on the graph path (the
 // source-workflow lock and its ConflictError), unchanged.
 func conflictingOnFormulaAttachment(opts SlingOpts, live beads.Bead) *MoleculeAttachedError {
-	requested := strings.TrimSpace(opts.OnFormula)
+	requested := formula.TrimFormulaExt(strings.TrimSpace(opts.OnFormula))
 	if requested == "" || IsWorkflowAttachment(live) {
 		return nil
 	}

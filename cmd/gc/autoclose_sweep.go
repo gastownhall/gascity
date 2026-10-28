@@ -23,7 +23,10 @@ package main
 //
 // The confirming read goes to the store whose configured prefix owns the id,
 // or on the unconfigured fallback to the first store that holds the row
-// (liveReadOwner).
+// (liveReadOwner). A migrated relic's id may also have a row in the binding
+// that holds the relic; then the read takes the first store whose row reads
+// closed (liveCloseOwner), so an open work bead reusing the id does not refute
+// the relic's close.
 //
 // Known limits: the first census of a cache only seeds it, so a close made
 // while the controller was down, or a row opened and closed between two
@@ -315,7 +318,7 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
-		store, live, err := liveReadOwner(stores, id)
+		store, live, err := liveCloseOwner(stores, id, relic)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)

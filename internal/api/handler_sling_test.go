@@ -1505,3 +1505,67 @@ func TestSlingAttachmentProbeFailureIsAServerError(t *testing.T) {
 		t.Fatalf("sling with an unreadable attachment: status %d body %s, want 500", rec.Code, rec.Body.String())
 	}
 }
+
+// subtreeFailingStore fails the subtree read of one root (the root_bead_id
+// query molecule.ListSubtree makes) with a store error.
+type subtreeFailingStore struct {
+	beads.Store
+	rootID string
+}
+
+func (s subtreeFailingStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters[beadmeta.RootBeadIDMetadataKey] == s.rootID {
+		return nil, errors.New("store unavailable")
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+// Review 8: an unassigned source's attachment is burned to make room for a
+// different formula only once its subtree reads clear of held steps. A subtree
+// the guard could not read is a store fault a retry can clear, answered 500
+// like a failed attachment read, not a 409 conflict the client would not retry.
+func TestSlingUnreadableAttachmentSubtreeIsAServerError(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	for _, name := range []string{"first-work", "second-work"} {
+		body := "formula = \"" + name + "\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n"
+		if err := os.WriteFile(filepath.Join(formulaDir, name+".toml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inner := state.stores["myrig"]
+	source, err := inner.Create(beads.Bead{ID: "BL-99", Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(formula string) *httptest.ResponseRecorder {
+		body := `{"target":"myrig/worker","formula":"` + formula + `","attached_bead_id":"` + source.ID + `"}`
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+		return rec
+	}
+	if rec := post("first-work"); rec.Code >= 300 {
+		t.Fatalf("first --on: status %d body %s", rec.Code, rec.Body.String())
+	}
+	attached, err := inner.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := attached.Metadata[beadmeta.MoleculeIDMetadataKey]
+	if rootID == "" || attached.Assignee != "" {
+		t.Fatalf("precondition: the first --on left molecule_id %q and assignee %q, want a molecule on an unassigned source", rootID, attached.Assignee)
+	}
+	state.stores["myrig"] = subtreeFailingStore{Store: inner, rootID: rootID}
+	rec := post("second-work")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("second --on over an attachment whose subtree is unreadable: status %d body %s, want 500", rec.Code, rec.Body.String())
+	}
+	root, err := inner.Get(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Status == "closed" {
+		t.Fatalf("attachment %s was burned although its subtree could not be read", rootID)
+	}
+}
