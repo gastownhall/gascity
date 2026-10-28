@@ -152,6 +152,42 @@ func namedSocketPath(socketName string) string {
 	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 }
 
+// pinnedServerSocket returns the socket path of the tmux server hosting the
+// caller's pane when $TMUX names this city's named socket, or "" otherwise.
+// The path must be absolute and clean, end in SocketName, and sit in the
+// current user's tmux-<uid> directory, so the pin can only select a socket
+// that "tmux -L <SocketName>" itself would resolve under some TMUX_TMPDIR: it
+// corrects the environment-dependent directory, never the socket name.
+func (t *Tmux) pinnedServerSocket() string {
+	if t.cfg.SocketName == "" {
+		return ""
+	}
+	path, _, _ := strings.Cut(os.Getenv("TMUX"), ",")
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return ""
+	}
+	if filepath.Base(path) != t.cfg.SocketName {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(path)) != fmt.Sprintf("tmux-%d", os.Getuid()) {
+		return ""
+	}
+	return path
+}
+
+// socketArgs returns the tmux flags that address t's server: -S with the
+// pinned server socket inside a pane of that server, -L <SocketName>
+// otherwise, and nothing for the default server.
+func (t *Tmux) socketArgs() []string {
+	if t.cfg.SocketName == "" {
+		return nil
+	}
+	if pinned := t.pinnedServerSocket(); pinned != "" {
+		return []string{"-S", pinned}
+	}
+	return []string{"-L", t.cfg.SocketName}
+}
+
 // serverSocketPath returns the socket path of the server t talks to: its
 // named -L socket, or tmux's "default" socket when SocketName is empty.
 func (t *Tmux) serverSocketPath() string {

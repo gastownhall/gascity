@@ -167,7 +167,10 @@ type Config struct {
 	DisplayMs        int
 	// SocketName specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. Empty means use the default tmux server.
+	// a dedicated server; inside a pane of that server ($TMUX names a
+	// socket called SocketName), they use "tmux -S <path-from-$TMUX>" so
+	// the caller's TMUX_TMPDIR cannot redirect them to another server.
+	// Empty means use the default tmux server.
 	SocketName string
 	// RuntimeDir is the city runtime root under which per-session
 	// diagnostics are persisted. Production sets it to
@@ -557,17 +560,15 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 func (t *Tmux) runCtxRaw(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
 	defer cancel()
-	allArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
-	}
+	allArgs := append([]string{"-u"}, t.socketArgs()...)
 	allArgs = append(allArgs, args...)
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
 // run executes a tmux command and returns stdout. All commands include -u
-// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
-// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
+// for UTF-8 regardless of locale; when SocketName is set, the server's socket
+// flags (see socketArgs) are injected after -u (see
+// https://github.com/steveyegge/gastown/issues/1219).
 // Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)

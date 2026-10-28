@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -1320,5 +1322,32 @@ func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
 				t.Errorf("err = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// pinnedTestSocket is the socket path a pane of the "bright-lights" server
+// carries in $TMUX when the server runs under a TMUX_TMPDIR of /run/user/<uid>.
+func pinnedTestSocket() string {
+	uid := os.Getuid()
+	return fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights", uid, uid)
+}
+
+// A gc command run inside a pane of the city's named server must reach that
+// same server. With -L, tmux builds the socket path from the caller's
+// TMUX_TMPDIR, which can differ from the controller's, so the server named
+// by $TMUX is addressed explicitly with -S (issue #8116).
+func TestRunPinsCallerServerFromTMUX(t *testing.T) {
+	sock := pinnedTestSocket()
+	t.Setenv("TMUX", sock+",4242,0")
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	fe := &fakeExecutor{}
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}, exec: fe}
+	_, _ = tm.run("list-sessions")
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(fe.calls))
+	}
+	if got, want := fe.calls[0], []string{"-u", "-S", sock, "list-sessions"}; !slices.Equal(got, want) {
+		t.Fatalf("args = %v, want %v", got, want)
 	}
 }
