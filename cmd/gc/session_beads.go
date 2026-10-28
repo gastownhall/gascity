@@ -2215,8 +2215,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 
 		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn, tp.TemplateName) {
-			fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
-			continue
+			// A row still stamped with the identity's prior (bare) form is
+			// this same named session awaiting its in-place rename, not a
+			// foreign claimant; the refresh below renames it
+			// (gastownhall/gascity#5957).
+			if spec, ok := findNamedSessionSpec(cfg, cityName, tp.ConfiguredNamedIdentity); !ok || !session.NamedSessionIdentityIsPriorForm(spec, namedSessionIdentity(b)) {
+				fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
+				continue
+			}
 		}
 
 		// Record existing open bead in index.
@@ -2739,17 +2745,19 @@ func syncQualifiedTemplate(tp TemplateParams) string {
 	return tp.TemplateName
 }
 
-// queueAliasChangeDriftRebaseline moves a started pool session's config-drift
-// baseline onto its post-rename config. A pool alias change re-renders the
-// alias-derived pre_start, which would otherwise trip the reconciler's
-// CoreFingerprint drift check and drain the session. Unstarted sessions (no
+// queueAliasChangeDriftRebaseline moves a started session's config-drift
+// baseline onto its post-rename config — pool and named sessions alike. An
+// alias change re-renders the alias-derived pre_start, which would otherwise
+// trip the reconciler's CoreFingerprint drift check and drain the session;
+// a named session requalified in place (gastownhall/gascity#5957) renames
+// its alias the same way. Unstarted sessions (no
 // started_config_hash) are skipped — the start path baselines them.
 // See gastownhall/gascity#2234.
 func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
 	if strings.TrimSpace(b.Metadata["started_config_hash"]) == "" {
 		return
 	}
-	// Rare alias-CHANGE lane (only when a started pool session's alias is renamed):
+	// Rare alias-CHANGE lane (only when a started session's alias is renamed):
 	// re-read the session through the front door for its typed Info. The Get contract
 	// (ErrSessionNotFound / "loading session %q" wrap / non-IsSessionBeadOrRepairable
 	// rejection) is bridged as a best-effort skip — a vanished or damaged bead simply

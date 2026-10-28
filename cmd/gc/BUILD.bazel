@@ -1616,6 +1616,7 @@ go_test(
         "molecule_autoclose_split_test.go",
         "molecule_autoclose_test.go",
         "mysql_driver_log_test.go",
+        "named_requalify_test.go",
         "named_session_demand_class_binding_test.go",
         "named_session_materialization_test.go",
         "native_dolt_env_cfg_reuse_test.go",

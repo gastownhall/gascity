@@ -23,24 +23,58 @@ func FindNamedSession(cfg *City, identity string) *NamedSession {
 		}
 	}
 	// V2 bare-name fallback: only when identity has no binding prefix.
-	if strings.Contains(identity, ".") {
+	if candidates := NamedSessionBareCandidates(cfg, identity); len(candidates) == 1 {
+		return candidates[0]
+	}
+	return nil
+}
+
+// NamedSessionBareCandidates returns the bound named sessions a dot-free
+// identity denotes, in config order: the entries with a binding whose
+// IdentityName is "<binding>.<identity>". It is the forward direction of
+// the bare-name relation FindNamedSession resolves with — a unique
+// candidate is the named session the bare identity denotes, and two or
+// more mean the caller must spell the qualified form. A dotted identity
+// has no candidates, and neither does a bindingless entry: its qualified
+// name already is the bare form.
+func NamedSessionBareCandidates(cfg *City, identity string) []*NamedSession {
+	if cfg == nil || identity == "" || strings.Contains(identity, ".") {
 		return nil
 	}
-	var match *NamedSession
+	var candidates []*NamedSession
 	for i := range cfg.NamedSessions {
 		ns := &cfg.NamedSessions[i]
 		if ns.BindingName == "" {
 			continue
 		}
 		if ns.IdentityName() == ns.BindingName+"."+identity {
-			if match != nil {
-				// Ambiguous — user must spell out the qualified name.
-				return nil
-			}
-			match = ns
+			candidates = append(candidates, ns)
 		}
 	}
-	return match
+	return candidates
+}
+
+// NamedSessionBareIdentity returns the bare, pre-requalification form of ns
+// — the identity a row stamped before ns was bound to its rig still
+// carries — or "" when ns has none. A bound entry (BindingName != "")
+// whose bare leaf resolves back to itself by FindNamedSession's
+// unique-candidate rule has that leaf as its bare form; a top-level entry,
+// an entry with no binding, and a leaf that a top-level entry shadows or
+// that two bindings share all return "". Config-level uniqueness is the
+// guard, so the reverse direction (resolving a bare row to ns) stays
+// unambiguous.
+func NamedSessionBareIdentity(cfg *City, ns *NamedSession) string {
+	if cfg == nil || ns == nil || ns.BindingName == "" {
+		return ""
+	}
+	leaf := strings.TrimPrefix(ns.IdentityName(), ns.BindingName+".")
+	if leaf == "" || leaf == ns.IdentityName() {
+		return ""
+	}
+	if FindNamedSession(cfg, leaf) != ns {
+		return ""
+	}
+	return leaf
 }
 
 // FindAgent returns the configured agent template for the provided qualified

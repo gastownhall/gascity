@@ -20,11 +20,21 @@ const (
 
 // NamedSessionSpec is the resolved runtime view of a configured named session.
 type NamedSessionSpec struct {
-	Named       *config.NamedSession
-	Agent       *config.Agent
-	Identity    string
-	SessionName string
-	Mode        string
+	Named *config.NamedSession
+	Agent *config.Agent
+	// Identity is the identity the spec resolves under: the qualified name
+	// for a spec built from QualifiedName(), the bare leaf for one built
+	// from a pre-requalification bare identity.
+	Identity string
+	// BareIdentity is the spec's bare, pre-requalification form: the leaf a
+	// row stamped before a `gc rig add --adopt` bound the named session to
+	// its rig still carries under configured_named_identity. It is set only
+	// when it differs from Identity (config.NamedSessionBareIdentity's
+	// unique-candidate rule), and the spec-to-row resolvers use it as a
+	// strictly-last pass to find that row and rename it in place.
+	BareIdentity string
+	SessionName  string
+	Mode         string
 }
 
 // NormalizeNamedSessionTarget trims whitespace and trailing separators from a named session target.
@@ -57,13 +67,17 @@ func FindNamedSessionSpec(cfg *config.City, cityName, identity string) (NamedSes
 	if agentCfg == nil {
 		return NamedSessionSpec{}, false
 	}
-	return NamedSessionSpec{
+	spec := NamedSessionSpec{
 		Named:       named,
 		Agent:       agentCfg,
 		Identity:    identity,
 		SessionName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
 		Mode:        named.ModeOrDefault(),
-	}, true
+	}
+	if bare := config.NamedSessionBareIdentity(cfg, named); bare != "" && bare != identity {
+		spec.BareIdentity = bare
+	}
+	return spec, true
 }
 
 // NamedSessionBackingTemplate returns the resolved backing agent template for a named session spec.
@@ -957,6 +971,56 @@ func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (In
 		if aliasMatchCount == 1 {
 			return aliasCanonical, true
 		}
+	}
+	return bareIdentityCanonicalInfo(candidates, spec)
+}
+
+// NamedSessionIdentityIsPriorForm reports whether stored, a row's
+// configured_named_identity, is a prior form of the identity spec resolves
+// under — the in-place rename a `gc rig add --adopt` requalification
+// performs. The bare pre-requalification form counts (spec.BareIdentity, the
+// same config-level unique-candidate rule that resolved the spec); a row
+// still stamped with it is the spec's own row awaiting its rename, not a
+// foreign claimant.
+func NamedSessionIdentityIsPriorForm(spec NamedSessionSpec, stored string) bool {
+	stored = strings.TrimSpace(stored)
+	return spec.Named != nil && stored != "" && stored != spec.Identity && stored == spec.BareIdentity
+}
+
+// bareIdentityCanonicalInfo is the strictly-last unique-bare pass the
+// spec-to-row resolvers share: when spec carries a BareIdentity (a bound
+// named session whose pre-requalification form was the bare leaf), the one
+// open, continuity-eligible, configured-named candidate whose
+// configured_named_identity equals that bare form is the row the spec
+// requalified from — a `gc rig add --adopt` renamed the config, not the
+// row, and the row's stored identity has not caught up yet. There is no
+// template gate: the backing template is exactly what requalification
+// changes, and config-level uniqueness (the same rule FindNamedSession
+// resolves the forward direction with) is the guard — two eligible bare
+// rows, or a config whose leaf maps to two bindings (which leaves
+// BareIdentity empty), both return nothing. Exact identity still beats
+// bare: this pass runs only after every exact pass has found nothing.
+func bareIdentityCanonicalInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
+	bare := strings.TrimSpace(spec.BareIdentity)
+	if bare == "" || bare == NormalizeNamedSessionTarget(spec.Identity) {
+		return Info{}, false
+	}
+	var canonical Info
+	matches := 0
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+			continue
+		}
+		if !IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != bare {
+			continue
+		}
+		matches++
+		if matches == 1 {
+			canonical = i
+		}
+	}
+	if matches == 1 {
+		return canonical, true
 	}
 	return Info{}, false
 }

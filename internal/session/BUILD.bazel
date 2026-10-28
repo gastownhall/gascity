@@ -170,6 +170,7 @@ go_test(
         "mcp_metadata_test.go",
         "metadata_candidates_test.go",
         "name_claim_sweep_test.go",
+        "named_config_bare_identity_test.go",
         "named_config_info_equiv_test.go",
         "named_config_test.go",
         "named_session_ineligible_conflict_test.go",
