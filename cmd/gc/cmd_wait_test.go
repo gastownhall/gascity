@@ -4849,6 +4849,34 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 			},
 		},
 		{
+			name: "control/registered-before-reset-is-stale",
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.wakePass()
+				fx.requireNotCanceled("inside the reset window")
+				fx.start(3)
+				fx.wakePass()
+				fx.requireCanceled("after the start", "continuation-stale")
+			},
+		},
+		{
+			name: "flagged-wait-is-stale-after-second-reset",
+			run: func(fx *resetWindowFixture) {
+				fx.requestReset()
+				fx.register()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireNotCanceled("after the first start")
+				fx.requestReset()
+				fx.wakePass()
+				fx.requireNotCanceled("inside the second reset window")
+				fx.start(4)
+				fx.wakePass()
+				fx.requireCanceled("after the second start", "continuation-stale")
+			},
+		},
+		{
 			name: "flagged-wait-on-closed-session-is-session-closed",
 			run: func(fx *resetWindowFixture) {
 				fx.requestReset()
