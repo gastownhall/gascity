@@ -113,6 +113,10 @@ type WaitInfo struct {
 	DepMode string
 	// RegisteredEpoch is the session continuation epoch at registration (metadata registered_epoch).
 	RegisteredEpoch string
+	// RegisteredResetPending reports that the wait was registered while the
+	// session had a fresh restart pending, so it belongs to the conversation
+	// that restart starts at RegisteredEpoch+1 (metadata registered_reset_pending).
+	RegisteredResetPending bool
 	// DeliveryAttempt is the current delivery attempt counter (metadata delivery_attempt).
 	DeliveryAttempt string
 	// NudgeID is the shadow wait-nudge ID once dispatched (metadata nudge_id).
@@ -136,22 +140,46 @@ type WaitInfo struct {
 // and decision paths previously performed inline.
 func WaitInfoFromBead(b beads.Bead) WaitInfo {
 	return WaitInfo{
-		ID:              b.ID,
-		SessionID:       b.Metadata["session_id"],
-		SessionName:     b.Metadata["session_name"],
-		Kind:            b.Metadata["kind"],
-		State:           b.Metadata["state"],
-		DepIDs:          splitWaitDepIDs(b.Metadata["dep_ids"]),
-		DepMode:         b.Metadata["dep_mode"],
-		RegisteredEpoch: b.Metadata["registered_epoch"],
-		DeliveryAttempt: b.Metadata["delivery_attempt"],
-		NudgeID:         b.Metadata["nudge_id"],
-		ExpiresAt:       b.Metadata["expires_at"],
-		Note:            b.Description,
-		Status:          b.Status,
-		CreatedAt:       b.CreatedAt,
-		Labels:          b.Labels,
+		ID:                     b.ID,
+		SessionID:              b.Metadata["session_id"],
+		SessionName:            b.Metadata["session_name"],
+		Kind:                   b.Metadata["kind"],
+		State:                  b.Metadata["state"],
+		DepIDs:                 splitWaitDepIDs(b.Metadata["dep_ids"]),
+		DepMode:                b.Metadata["dep_mode"],
+		RegisteredEpoch:        b.Metadata["registered_epoch"],
+		RegisteredResetPending: strings.TrimSpace(b.Metadata[waitRegisteredResetPendingKey]) != "",
+		DeliveryAttempt:        b.Metadata["delivery_attempt"],
+		NudgeID:                b.Metadata["nudge_id"],
+		ExpiresAt:              b.Metadata["expires_at"],
+		Note:                   b.Description,
+		Status:                 b.Status,
+		CreatedAt:              b.CreatedAt,
+		Labels:                 b.Labels,
 	}
+}
+
+// ContinuationStale reports whether the wait belongs to a conversation the
+// session has since retired. A wait is stale when both epochs are set and
+// differ, except that a wait registered while a fresh restart was pending is
+// current both at its registered epoch N (the reset not yet consumed, restored
+// by a refused start, or withdrawn) and at N+1 (the conversation the reset
+// opened). Epochs that do not parse as integers fall back to the plain
+// inequality.
+func (w WaitInfo) ContinuationStale(s Info) bool {
+	registered, current := w.RegisteredEpoch, s.ContinuationEpoch
+	if registered == "" || current == "" || registered == current {
+		return false
+	}
+	if !w.RegisteredResetPending {
+		return true
+	}
+	n, errN := strconv.Atoi(registered)
+	c, errC := strconv.Atoi(current)
+	if errN != nil || errC != nil {
+		return true
+	}
+	return c != n+1
 }
 
 // splitWaitDepIDs splits a comma-separated dep_ids value into trimmed, non-empty
