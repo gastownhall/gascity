@@ -4877,6 +4877,32 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 			},
 		},
 		{
+			name: "refused-start-restores-then-retries",
+			run: func(fx *resetWindowFixture) {
+				fx.requestReset()
+				fx.register()
+				fx.closeDep()
+				fx.startCreating(3)
+				fx.wakePass()
+				fx.requireNotCanceled("start creating at epoch 3")
+				// restorePreWakeState puts preWakeRestoredKeys back.
+				fx.patch(sessionpkg.MetadataPatch{
+					"state":                      string(sessionpkg.StateActive),
+					"sleep_reason":               "",
+					"detached_at":                "",
+					"continuation_reset_pending": "true",
+					"continuation_epoch":         "2",
+					"wake_request":               "",
+					"wake_requested_at":          "",
+				})
+				fx.wakePass()
+				fx.requireNotCanceled("start refused and restored to epoch 2")
+				fx.start(3)
+				fx.wakePass()
+				fx.requireReady("after the retried start")
+			},
+		},
+		{
 			name: "flagged-wait-on-closed-session-is-session-closed",
 			run: func(fx *resetWindowFixture) {
 				fx.requestReset()
