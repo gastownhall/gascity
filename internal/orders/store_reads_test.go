@@ -3,6 +3,7 @@ package orders
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -403,6 +404,61 @@ func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].Scoped != "a" {
 		t.Fatalf("OrphanedOpenRuns() = %+v, want only a (trigger-env-failed excluded)", runs)
+	}
+}
+
+// primedCacheWithBackingOnlyTracking returns a fully primed CachingStore over
+// mem plus an open tracking bead written straight to mem AFTER the prime — the
+// dispatcher's uncached-handle shape the cache snapshot never absorbs. It
+// fails the test if the cache's own ListByLabel already lists that bead, so a
+// test built on it cannot pass vacuously.
+func primedCacheWithBackingOnlyTracking(t *testing.T, mem *beads.MemStore) (*beads.CachingStore, beads.Bead) {
+	t.Helper()
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	behind, err := mem.Create(beads.Bead{Title: "order:behind", Labels: []string{"order-run:behind", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := cache.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("cache ListByLabel(): %v", err)
+	}
+	for _, b := range snapshot {
+		if b.ID == behind.ID {
+			t.Fatalf("cache ListByLabel already lists backing-only bead %s; the fixture no longer reproduces a snapshot miss", behind.ID)
+		}
+	}
+	return cache, behind
+}
+
+func runIDs(runs []OrderRun) []string {
+	ids := make([]string, 0, len(runs))
+	for _, r := range runs {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// TestStaleOpenRunsBypassCache proves the stale sweep's read sees a tracking
+// bead written to the backing after the cache was primed, like OpenRuns does:
+// a snapshot read leaves that bead gating its order indefinitely (ga-v5vnyp).
+func TestStaleOpenRunsBypassCache(t *testing.T) {
+	mem := beads.NewMemStore()
+	primed, err := mem.Create(beads.Bead{Title: "order:primed", Labels: []string{"order-run:primed", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, behind := primedCacheWithBackingOnlyTracking(t, mem)
+
+	runs, err := NewStore(beads.OrdersStore{Store: cache}).StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got := runIDs(runs); !slices.Contains(got, primed.ID) || !slices.Contains(got, behind.ID) {
+		t.Fatalf("StaleOpenRuns() = %v, want both %s and the backing-only %s", got, primed.ID, behind.ID)
 	}
 }
 

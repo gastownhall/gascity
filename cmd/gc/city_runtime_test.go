@@ -2251,6 +2251,73 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	}
 }
 
+// newPrimedPolicyCacheStore builds the production controller store stack — a
+// beadPolicyStore over a fully primed CachingStore — over backing. Order-tracking
+// beads are created and closed through the dispatcher's uncached handle, so
+// beads written to backing after this call are absent from the cache snapshot.
+func newPrimedPolicyCacheStore(t *testing.T, backing *beads.MemStore, cfg *config.City) beads.Store {
+	t.Helper()
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	return wrapStoreWithBeadPolicies(cached, cfg)
+}
+
+// requireSnapshotMisses fails the test when store's (snapshot-served)
+// ListByLabel already lists id, so a behind-the-cache test cannot pass
+// vacuously.
+func requireSnapshotMisses(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	listed, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("ListByLabel(): %v", err)
+	}
+	for _, b := range listed {
+		if b.ID == id {
+			t.Fatalf("ListByLabel already lists backing-only bead %s; the fixture no longer reproduces a snapshot miss", id)
+		}
+	}
+}
+
+// TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache runs the
+// watchdog over the production store stack rather than a bare MemStore: the
+// other watchdog tests read authoritatively and stayed green while the
+// production watchdog read a cache snapshot that never held the
+// dispatcher-written tracking beads (ga-v5vnyp).
+func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	store := newPrimedPolicyCacheStore(t, backing, cfg)
+
+	stale, err := backing.Create(beads.Bead{
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-run:nudge-on-route", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(stale): %v", err)
+	}
+	requireSnapshotMisses(t, store, stale.ID)
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 cfg,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+
+	got, err := backing.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("stale tracking status = %s, want closed (the watchdog read a cache snapshot that never held this bead)", got.Status)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	store := beads.NewMemStore()
 	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)
