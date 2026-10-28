@@ -1528,12 +1528,14 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 		depClosesInWindow bool
 		closeSession      bool
 		secondRotation    bool
+		refusedStart      bool
 		wantState         string
 		wantLastError     string
 	}{
 		{name: "dep-closes-after-start", registerInWindow: true, wantState: waitStateReady},
 		{name: "dep-closes-before-start", registerInWindow: true, depClosesInWindow: true, wantState: waitStateReady},
 		{name: "second-rotation-cancels", registerInWindow: true, secondRotation: true, wantState: waitStateCanceled, wantLastError: "continuation-stale"},
+		{name: "refused-start-restore-keeps-wait", registerInWindow: true, refusedStart: true, wantState: waitStateReady},
 		{name: "control-registered-before-reset", wantState: waitStateCanceled, wantLastError: "continuation-stale"},
 		{name: "closed-session-targeted-lookup", registerInWindow: true, closeSession: true, wantState: waitStateCanceled, wantLastError: "session-closed"},
 	} {
@@ -1601,11 +1603,64 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 				t.Fatalf("prepareWaitWakeState (window): %v", err)
 			}
 
-			if tc.closeSession {
+			switch {
+			case tc.closeSession:
 				if err := store.Close(sess.ID); err != nil {
 					t.Fatalf("close session: %v", err)
 				}
-			} else {
+			case tc.refusedStart:
+				// The start is refused after PreWake: the row sits at epoch 3
+				// (creating), is restored to epoch 2 with the marker re-armed
+				// (preWakeRestoredKeys), and the retried start publishes 3
+				// again. The wait must survive every leg.
+				start := now.Add(7 * time.Minute)
+				patch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+					Generation:        3,
+					InstanceToken:     "tok-3",
+					ContinuationEpoch: 3,
+					Now:               start,
+				})
+				patch["restart_requested"] = ""
+				patch["continuation_reset_pending"] = ""
+				if err := sf.ApplyPatch(sess.ID, patch); err != nil {
+					t.Fatalf("ApplyPatch(refused pre-wake): %v", err)
+				}
+				if _, err := prepareWaitWakeState(store, now.Add(8*time.Minute)); err != nil {
+					t.Fatalf("prepareWaitWakeState (creating): %v", err)
+				}
+				if err := sf.ApplyPatch(sess.ID, sessionpkg.MetadataPatch{
+					"state":                      string(sessionpkg.StateActive),
+					"sleep_reason":               "",
+					"detached_at":                "",
+					"continuation_reset_pending": "true",
+					"continuation_epoch":         "2",
+					"wake_request":               "",
+					"wake_requested_at":          "",
+				}); err != nil {
+					t.Fatalf("ApplyPatch(restore): %v", err)
+				}
+				if _, err := prepareWaitWakeState(store, now.Add(9*time.Minute)); err != nil {
+					t.Fatalf("prepareWaitWakeState (restored): %v", err)
+				}
+				retry := now.Add(9*time.Minute + 30*time.Second)
+				retryPatch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+					Generation:        4,
+					InstanceToken:     "tok-4",
+					ContinuationEpoch: 3,
+					Now:               retry,
+				})
+				retryPatch["restart_requested"] = ""
+				retryPatch["continuation_reset_pending"] = ""
+				if err := sf.ApplyPatch(sess.ID, retryPatch); err != nil {
+					t.Fatalf("ApplyPatch(retried pre-wake): %v", err)
+				}
+				if err := sf.ApplyPatch(sess.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)}); err != nil {
+					t.Fatalf("ApplyPatch(active): %v", err)
+				}
+				if err := store.Close(dep.ID); err != nil {
+					t.Fatalf("close dep after retried start: %v", err)
+				}
+			default:
 				// The start consumes the reset: epoch 2 -> 3, marker cleared.
 				start := now.Add(7 * time.Minute)
 				patch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
