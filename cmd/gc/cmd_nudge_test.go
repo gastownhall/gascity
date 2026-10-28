@@ -723,6 +723,55 @@ func TestSendMailNotifyWithoutControllerReportsSkippedWake(t *testing.T) {
 	}
 }
 
+// TestSendMailNotifyRecordedWakeIsQuiet guards the quiet arm of the #7629
+// fix: when the managed wake IS recorded for an asleep, unheld session, the
+// city-site notify path stays silent — the wake and the poke are the contract
+// --notify already promised, and the new report lines are only for outcomes
+// where no wake was recorded.
+func TestSendMailNotifyRecordedWakeIsQuiet(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sleepUnheld(t, store, info.ID)
+	prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
+	pokes := 0
+	nudgeCityUsesManagedReconciler = func(string) bool { return true }
+	nudgePokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
+	var warnings bytes.Buffer
+	prevWarn := nudgeWarningWriter
+	nudgeWarningWriter = &warnings
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController = prevManaged, prevPoke
+		nudgeWarningWriter = prevWarn
+	})
+	target := nudgeTarget{cityPath: dir, cfg: &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}}, sessionID: info.ID, sessionName: info.SessionName, identity: "worker", agent: config.Agent{Name: "worker", Provider: "claude"}}
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pokes != 1 {
+		t.Fatalf("pokes = %d, want 1", pokes)
+	}
+	if got.Metadata["wake_request"] != string(session.WakeCauseExplicit) || got.Metadata["wake_requested_at"] == "" {
+		t.Fatalf("wake_request = %q, wake_requested_at = %q; want an explicit wake recorded", got.Metadata["wake_request"], got.Metadata["wake_requested_at"])
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("warnings = %q, want silence for a recorded wake", warnings.String())
+	}
+}
+
 // sleepUnheld turns a suspended row into one nothing holds: asleep, with no
 // suspension, so a background nudge may still wake it (CONTRACT v5.9 D8).
 func sleepUnheld(t *testing.T, store beads.Store, id string) {
