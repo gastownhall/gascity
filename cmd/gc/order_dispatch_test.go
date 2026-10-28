@@ -11126,3 +11126,74 @@ func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
 		t.Fatalf("index summary %+v, want no run of digest", summary)
 	}
 }
+
+// TestOrderExecEnvCarriesItsOwnCityName runs the order env through the
+// production runner, which overlays it on the supervisor's environment. An
+// order env that does not name GC_CITY_NAME lets the supervisor's value, often
+// another city's, reach the order's process.
+func TestOrderExecEnvCarriesItsOwnCityName(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "declared-city"},
+		Rigs:      []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}},
+	}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	applyRuntimeCityIdentity(cfg, "own-city")
+
+	for _, tc := range []struct {
+		name   string
+		target execStoreTarget
+		order  orders.Order
+	}{
+		{
+			name:   "city scoped",
+			target: execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"},
+			order:  orders.Order{Name: "city-order", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+		},
+		{
+			name:   "rig scoped",
+			target: execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "pg", RigName: "pg"},
+			order:  orders.Order{Name: "rig-order", Rig: "pg", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, err := orderExecEnvWithError(cityDir, cfg, tc.target, tc.order, nil)
+			if err != nil {
+				t.Fatalf("orderExecEnvWithError() error = %v", err)
+			}
+			assertOrderProcessSeesCityName(t, env, "own-city")
+		})
+	}
+
+	t.Run("condition check", func(t *testing.T) {
+		target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+		a := orders.Order{Name: "cond-order", Trigger: "condition", Check: "true", Exec: "true"}
+		opts, err := orderTriggerOptionsForTarget(cityDir, cfg, target, a)
+		if err != nil {
+			t.Fatalf("orderTriggerOptionsForTarget() error = %v", err)
+		}
+		assertOrderProcessSeesCityName(t, opts.ConditionEnv, "own-city")
+	})
+}
+
+// assertOrderProcessSeesCityName spawns a shell through shellExecRunner with
+// env and asserts the child sees exactly one GC_CITY_NAME entry, equal to want.
+func assertOrderProcessSeesCityName(t *testing.T, env []string, want string) {
+	t.Helper()
+	out, err := shellExecRunner(context.Background(), "env | grep '^GC_CITY_NAME=' || true", t.TempDir(), env)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v; output=%s", err, out)
+	}
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) != 1 || lines[0] != "GC_CITY_NAME="+want {
+		t.Fatalf("order sees %v, want exactly GC_CITY_NAME=%s", lines, want)
+	}
+}

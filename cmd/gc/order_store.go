@@ -203,6 +203,9 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 		env["GC_RIG"] = ""
 		env["GC_RIG_ROOT"] = ""
 	}
+	// mergeOrderExecEnv keeps every ambient key the order env does not name,
+	// and the supervisor's GC_CITY_NAME may belong to another city.
+	env["GC_CITY_NAME"] = loadedCityName(cfg, cityPath)
 	if a.Source != "" {
 		env["ORDER_DIR"] = filepath.Dir(a.Source)
 	}
