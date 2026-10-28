@@ -858,7 +858,9 @@ carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
 to the incarnation the command read. A missing or stale token, or a store
 that is unreachable or keeps changing, exits 1 with nothing acknowledged.
-Under the legacy reconciler the ack behaves as it always has.`,
+Under the legacy reconciler the ack is read back after the write; an ack
+that did not persist, or cannot be read back from a live session, exits 1
+with nothing acknowledged.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrainAck(args, jsonOutput, operator, stdout, stderr) != 0 {
@@ -1344,7 +1346,7 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
 		return drainAckRefused
 	}
-	return finishRuntimeDrainAck(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(persistedAckDrainOps{drainOps: dops}, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
 }
 
 // finishRuntimeDrainAck is the ack after the release: the env flag, the poke
@@ -1404,6 +1406,32 @@ func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
 		return nil
 	}
 	return err
+}
+
+// persistedAckDrainOps is the legacy path's drainOps: the runtime flag is the
+// ack there, so a write that reported success is read back. Its write join
+// drops session-gone errors, and a write that reached the wrong tmux server, or
+// none, can look gone (#8116); the read-back turns that into a failed ack.
+// A read-back that finds the session gone is the benign reap race and passes.
+type persistedAckDrainOps struct {
+	drainOps
+}
+
+func (o persistedAckDrainOps) setDrainAck(sessionName string) error {
+	if err := o.drainOps.setDrainAck(sessionName); err != nil {
+		return err
+	}
+	acked, err := o.isDrainAcked(sessionName)
+	if err != nil {
+		if runtime.IsSessionGone(err) {
+			return nil
+		}
+		return fmt.Errorf("drain ack on session %q could not be verified; held claims released, nothing acknowledged (safe to re-run): %w", sessionName, err)
+	}
+	if !acked {
+		return fmt.Errorf("drain ack did not persist on session %q: GC_DRAIN_ACK is unset after the write; held claims released, nothing acknowledged (safe to re-run)", sessionName)
+	}
+	return nil
 }
 
 // drainAckRefused is runtimeDrainAck's status for a seat's own ack refused

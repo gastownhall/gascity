@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2330,5 +2331,86 @@ func TestDrainRuntimeRowWriteFailure(t *testing.T) {
 	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 || dops.draining["worker"] || len(rec.Events) != 0 || !strings.Contains(stderr.String(), "store down") {
 		t.Fatalf("drain = %d (draining %v, events %v, stderr %q), want 1 with nothing set", code, dops.draining["worker"], rec.Events, stderr.String())
+	}
+}
+
+// stubDrainAckSideEffects stubs the held-claim release and the controller
+// poke for a drain-ack test, returning a pointer to the poke count.
+func stubDrainAckSideEffects(t *testing.T) *int {
+	t.Helper()
+	pokes := 0
+	oldPoke := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
+	oldRelease := drainAckReleaseHeldClaims
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) string { return "" }
+	t.Cleanup(func() {
+		drainAckPokeController = oldPoke
+		drainAckReleaseHeldClaims = oldRelease
+	})
+	return &pokes
+}
+
+// unpersistedAckDrainOps reports every ack write as successful while the
+// flag never lands, as a write to the wrong tmux server can (#8116).
+type unpersistedAckDrainOps struct {
+	*fakeDrainOps
+}
+
+func (unpersistedAckDrainOps) setDrainAck(string) error { return nil }
+
+func TestDoRuntimeDrainAckFailsWhenAckDidNotPersist(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(unpersistedAckDrainOps{newFakeDrainOps()}, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, want no acknowledgement", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "did not persist") || !strings.Contains(got, `"worker-sess"`) {
+		t.Errorf("stderr = %q, want a did-not-persist error naming the session", got)
+	}
+	if *pokes != 0 {
+		t.Errorf("controller poked %d times, want 0", *pokes)
+	}
+}
+
+// noServerDrainAckProvider answers like a tmux runtime with nothing listening
+// at the addressed socket: the writes fail with tmux's bare no-server text,
+// which the ack's write join drops as gone, and the read fails the way
+// Provider.GetMeta reports an unavailable server.
+type noServerDrainAckProvider struct {
+	*runtime.Fake
+}
+
+func (noServerDrainAckProvider) SetMeta(_, _, _ string) error {
+	return errors.New("no tmux server running")
+}
+
+func (noServerDrainAckProvider) RemoveMeta(_, _ string) error {
+	return errors.New("no tmux server running")
+}
+
+func (noServerDrainAckProvider) GetMeta(name, key string) (string, error) {
+	return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, errors.New("no tmux server running"))
+}
+
+func TestDoRuntimeDrainAckFailsWhenNoServerAnswersTheReadBack(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	var stdout, stderr bytes.Buffer
+	dops := &providerDrainOps{sp: noServerDrainAckProvider{Fake: runtime.NewFake()}}
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, want no acknowledgement", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "could not be verified") || !strings.Contains(got, `"worker-sess"`) {
+		t.Errorf("stderr = %q, want a could-not-be-verified error naming the session", got)
+	}
+	if *pokes != 0 {
+		t.Errorf("controller poked %d times, want 0", *pokes)
 	}
 }
