@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -243,4 +245,117 @@ func mergeSeatMeta(base, overrides map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesClaimWithoutUniqueSeatSuccessor
+// (AC-4): the hand-over needs exactly one open, non-archived row of the
+// predecessor's template on its seat that reaches the work's store. Anything
+// else releases the bead as at base; there is no tie-break.
+func TestReleaseOrphanedPoolAssignments_ReleasesClaimWithoutUniqueSeatSuccessor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []map[string]string
+	}{
+		{name: "no row on the seat"},
+		{name: "two rows on the seat", rows: []map[string]string{seatRowMeta("awake", nil), seatRowMeta("asleep", nil)}},
+		{name: "only an archived row", rows: []map[string]string{seatRowMeta("archived", nil)}},
+		{name: "only a row of another template", rows: []map[string]string{seatRowMeta("awake", map[string]string{"template": "other"})}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cfg := seatHandoverCity()
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: "other", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)})
+			pred := createClosedSeatPredecessor(t, store, nil)
+			work := createInProgressWorkClaimedBy(t, store, pred)
+			var open []beads.Bead
+			for i, meta := range tc.rows {
+				open = append(open, createSeatSessionRow(t, store, fmt.Sprintf("row-%d", i), meta))
+			}
+
+			released := sweepSeatWork(store, cfg, open, []beads.Bead{work})
+			assertSeatWorkReleased(t, store, work, released)
+		})
+	}
+
+	// The successor row is rig-scoped to repo-a. Work held in repo-b's store
+	// is out of its reach, so it is released; the control case in repo-a's
+	// store is handed over.
+	for _, tc := range []struct {
+		name     string
+		workRig  string
+		released bool
+	}{
+		{name: "only a row whose stores exclude the work's", workRig: "repo-b", released: true},
+		{name: "control: the row reaches the work's store", workRig: "repo-a", released: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cityStore := beads.NewMemStore()
+			rigStores := map[string]beads.Store{"repo-a": seatRigMemStore("ra"), "repo-b": seatRigMemStore("rb")}
+			workStore := rigStores[tc.workRig]
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "worker", Dir: "repo-a", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+				NamedSessions: []config.NamedSession{{
+					Name:     "reviewer",
+					Template: "worker",
+					Dir:      "repo-a",
+					Mode:     "on_demand",
+				}},
+				Rigs: []config.Rig{
+					{Name: "repo-a", Path: filepath.Join(cityPath, "repo-a")},
+					{Name: "repo-b", Path: filepath.Join(cityPath, "repo-b")},
+				},
+				ResolvedWorkspaceName: "test-city",
+			}
+			rigRow := map[string]string{
+				"template":                   "repo-a/worker",
+				"session_name":               "repo-a--reviewer",
+				namedSessionIdentityMetadata: "repo-a/reviewer",
+			}
+			pred := createClosedSeatPredecessor(t, cityStore, rigRow)
+			work := createInProgressWorkClaimedBy(t, workStore, pred)
+			if err := workStore.SetMetadata(work.ID, beadmeta.RoutedToMetadataKey, "repo-a/worker"); err != nil {
+				t.Fatalf("route work: %v", err)
+			}
+			work = getSeatBead(t, workStore, work.ID)
+			successor := createSeatSessionRow(t, cityStore, "successor", seatRowMeta("awake", rigRow))
+
+			released := releaseOrphanedPoolAssignments(
+				cityStore,
+				beads.SessionStore{Store: cityStore},
+				cfg,
+				cityPath,
+				sessionInfosFromBeads([]beads.Bead{successor}),
+				[]beads.Bead{work},
+				[]beads.Store{workStore},
+				[]string{tc.workRig},
+				rigStores,
+				nil, nil, nil,
+			)
+			if tc.released {
+				assertSeatWorkReleased(t, workStore, work, released)
+				return
+			}
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none", released)
+			}
+			assertSeatWorkKept(t, workStore, work.ID, successor.ID)
+		})
+	}
+}
+
+// seatRigMemStore is a MemStore minting ids under prefix, so a rig store's
+// beads never share an id with the city store's.
+func seatRigMemStore(prefix string) *beads.MemStore {
+	m := beads.NewMemStore()
+	m.IDPrefix = prefix
+	return m
+}
+
+func assertSeatWorkKept(t *testing.T, store beads.Store, id, assignee string) {
+	t.Helper()
+	got := getSeatBead(t, store, id)
+	if got.Status != "in_progress" || got.Assignee != assignee {
+		t.Fatalf("work = status %q assignee %q, want in_progress/%q", got.Status, got.Assignee, assignee)
+	}
 }
