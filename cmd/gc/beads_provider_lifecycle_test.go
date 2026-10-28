@@ -14667,3 +14667,20 @@ func TestStartBeadsLifecycleKeepsNoJournalCityOnLegacyDirectPath(t *testing.T) {
 		t.Fatalf("provider operations = %v, want legacy direct start before init", operations)
 	}
 }
+
+// TestGcBeadsBdScriptNeverPassesPasswordInArgv is the re-introduction guard
+// for issue #8376: the shipped gc-beads-bd.sh hands the Dolt password to
+// client calls through DOLT_CLI_PASSWORD on each dolt invocation, never as a
+// --password flag, which would put the secret in /proc/<pid>/cmdline where
+// any local user can read it via ps.
+func TestGcBeadsBdScriptNeverPassesPasswordInArgv(t *testing.T) {
+	embedded, err := bdpack.PackFS.ReadFile("assets/scripts/gc-beads-bd.sh")
+	if err != nil {
+		t.Fatalf("read embedded gc-beads-bd.sh: %v", err)
+	}
+	for i, line := range strings.Split(string(embedded), "\n") {
+		if strings.Contains(line, "--password") {
+			t.Errorf("gc-beads-bd.sh:%d passes the Dolt password in argv: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
