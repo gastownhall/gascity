@@ -588,6 +588,13 @@ func (s *StrictStore) DepListBatch(ids []string) (map[string][]beads.Dep, error)
 	return result, nil
 }
 
+// StrandsAbsentTargets answers for the leaf (beads.AbsentBlockedReader): a
+// bd-semantics leaf strands nothing, and a reader must re-judge its rows.
+func (s *StrictStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
 // ReadyBlockedByAbsent forwards the leaf's absent-blocker listing
 // (beads.AbsentBlockedReader). A federated ready reader finds the beads a
 // SQLite or in-memory leaf strands behind a blocker held in another store

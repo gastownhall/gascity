@@ -2,7 +2,10 @@ package beads
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/fanout"
 )
 
 // Cross-store references: the one place gc decides what a blocking edge's
@@ -56,14 +59,30 @@ func BdIDPrefix(id string) string {
 // getManyChunk bounds one batched read's id list.
 const getManyChunk = 200
 
-// GetMany reads the beads ids name from store in batched, cache-bypassing reads
-// — one round trip per getManyChunk ids — open and closed alike, and returns
-// the ones the store holds. An id the store does not hold is simply absent
-// from the result; a failed read is an error.
+// getManyFanOut bounds the concurrent Gets that read a store with no exact
+// batch read.
+const getManyFanOut = 8
+
+// GetMany reads the beads ids name from store, open and closed alike, and
+// returns the ones the store holds. An id the store does not hold is simply
+// absent from the result; a failed read is an error.
 //
-// It uses the store's exact batch read where it has one and its LIVE handle's
-// List by id everywhere else (both tiers), so a caching store answers from its
-// backing store, never from its read cache.
+// Every read is keyed by id and goes through the store's LIVE handle, so a
+// caching store answers from its backing store, never from its read cache:
+//
+//   - Where the live handle reaches an exact batch read (ExactBatchGetter: bd,
+//     the native Dolt store and the proxied store, through each wrapper that
+//     forwards it), one batched read per getManyChunk ids. An id the batch
+//     leaves unresolved reads as absent. bd's batch is `bd show`, which reads
+//     only the issues table, so a wisp a bd ledger holds reads as absent here.
+//   - Everywhere else, one Get per id, at most getManyFanOut at once. A miss
+//     (a substring collision included), a Get that answers a different bead,
+//     and a store stating it holds no row under a relocated class's reserved
+//     prefix (ErrBdSQLClassRelocated) read as absent.
+//
+// It never lists. Neither bd (`bd list` has no --id) nor the native store can
+// narrow a listing to ids, so a listing by id walks the whole ledger, both
+// tiers, closed rows included (#8360 review, iteration 2).
 func GetMany(store Store, ids []string) (map[string]Bead, error) {
 	out := make(map[string]Bead, len(ids))
 	if store == nil || len(ids) == 0 {
@@ -78,29 +97,50 @@ func GetMany(store Store, ids []string) (map[string]Bead, error) {
 		seen[id] = true
 		unique = append(unique, id)
 	}
+	live := HandlesFor(store).Live
+	getter, batched := live.(ExactBatchGetter)
 	for start := 0; start < len(unique); start += getManyChunk {
 		chunk := unique[start:min(start+getManyChunk, len(unique))]
-		if getter, ok := store.(ExactBatchGetter); ok {
+		if batched {
 			found, _, err := getter.GetExactBatch(chunk)
 			if err == nil {
-				for id, b := range found {
-					out[id] = b
+				for _, id := range chunk {
+					if b, ok := found[id]; ok {
+						out[id] = b
+					}
 				}
 				continue
 			}
 			if !errors.Is(err, ErrExactBatchGetUnsupported) {
 				return nil, err
 			}
+			batched = false
 		}
-		rows, err := HandlesFor(store).Live.List(ListQuery{IDs: chunk, IncludeClosed: true})
-		if err != nil {
+		if err := getEach(live, chunk, out); err != nil {
 			return nil, err
-		}
-		for _, b := range rows {
-			if seen[b.ID] {
-				out[b.ID] = b
-			}
 		}
 	}
 	return out, nil
+}
+
+// getEach reads ids with one Get each through live, at most getManyFanOut at
+// once, and adds every bead the store holds under its exact id to out.
+func getEach(live LiveReader, ids []string, out map[string]Bead) error {
+	got := make([]Bead, len(ids))
+	errs := make([]error, len(ids))
+	fanout.Bounded(len(ids), getManyFanOut, func(i int) {
+		got[i], errs[i] = live.Get(ids[i])
+	})
+	for i, id := range ids {
+		switch err := errs[i]; {
+		case err == nil:
+			if got[i].ID == id {
+				out[id] = got[i]
+			}
+		case errors.Is(err, ErrNotFound), errors.Is(err, ErrBdSQLClassRelocated):
+		default:
+			return fmt.Errorf("getting bead %q: %w", id, err)
+		}
+	}
+	return nil
 }

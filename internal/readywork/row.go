@@ -86,11 +86,12 @@ type ReadyBeadDep struct {
 type ReadyBeadBlocker struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
-	// Reason is set only when the row's own store could not answer for the
-	// blocker: where the federation found it ("closed in the graph store",
-	// "held open in the work store"), or that no store holds it, in which case
-	// Status is BlockerUnresolved. Appended, so bd's two-field shape still
-	// decodes it.
+	// Reason is set only on a split city, which judges every blocker from
+	// every store that holds it: where the federation found it ("closed in the
+	// graph store", "held unreleased in the work store"), that every
+	// unreleased copy is closed blocked (Status BlockerClosedBlocked), or that
+	// no store holds it (Status BlockerUnresolved). Appended, so bd's
+	// two-field shape still decodes it.
 	Reason string `json:"reason,omitempty"`
 }
 

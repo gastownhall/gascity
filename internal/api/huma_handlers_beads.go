@@ -619,23 +619,25 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
 	// On a split city every leg's rows pass through the same cross-store rule
-	// `gc ready` and pool demand apply (readywork.GateLegReady): a row a
-	// blocker held in another store still holds is not served, and a row a
-	// store strands behind a blocker that has closed elsewhere is. A city with
-	// no binding keeps every store's own answer.
+	// `gc ready` and pool demand apply (readywork.LegGate): a row a blocker
+	// held in another store still holds is not served, and a row a store
+	// strands behind a blocker that has closed elsewhere is. One gate judges
+	// every leg, so a blocker several legs' rows wait on is read once. A city
+	// with no binding keeps every store's own answer.
 	federated := make([]readywork.Leg, len(legs))
 	for i, l := range legs {
 		federated[i] = l.leg
 	}
 	if readywork.IsSplit(federated) {
+		gate := readywork.NewLegGate(federated, readyFederationQuery())
 		for i := range legs {
-			gated, err := readywork.GateLegReady(ctx, federated, i, legs[i].rows, readyFederationQuery())
+			gated, err := gate.Gate(ctx, i, legs[i].rows)
 			if err != nil {
 				// A leg whose blockers could not be judged serves nothing: an
 				// ungated row may be one a blocker still holds. The response

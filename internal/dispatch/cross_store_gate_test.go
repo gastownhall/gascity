@@ -324,9 +324,9 @@ func TestReleaseCrossStoreGatesReadsEachBlockerOnceAndStripsExternal(t *testing.
 		}
 	}
 	var calls [][]string
-	report, err := ReleaseCrossStoreGates(graph, func(ids []string) (map[string][]beads.Bead, map[string]bool, error) {
+	report, err := ReleaseCrossStoreGates(graph, func(ids []string) (CrossStoreBlockerResolution, error) {
 		calls = append(calls, slices.Clone(ids))
-		return nil, nil, nil
+		return CrossStoreBlockerResolution{}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -345,21 +345,44 @@ func TestReleaseCrossStoreGatesReadsEachBlockerOnceAndStripsExternal(t *testing.
 
 // TestReleaseCrossStoreGatesKeepsAGateAnUnreadableStoreMayDecide: a blocker a
 // store the resolver could not read may hold is undecided — its gate is neither
-// released nor marked unresolved.
+// released nor marked unresolved. The hold is reported, not silent: the pass
+// carries the stores the resolver could not read, and the gates it holds only
+// on them, into its report. A gate an open copy it did read holds is held by
+// that copy, not by the store it could not read.
 func TestReleaseCrossStoreGatesKeepsAGateAnUnreadableStoreMayDecide(t *testing.T) {
 	graph := beads.NewMemStoreFrom(1000, nil, nil)
-	gateID, err := ensureCrossStoreGate(graph, newGateControl(t, graph), "mr-1", true)
-	if err != nil {
-		t.Fatal(err)
+	var gateIDs []string
+	for _, blocker := range []string{"mr-1", "gc-2", "gc-3"} {
+		gateID, err := ensureCrossStoreGate(graph, newGateControl(t, graph), blocker, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gateIDs = append(gateIDs, gateID)
 	}
-	report, err := ReleaseCrossStoreGates(graph, func([]string) (map[string][]beads.Bead, map[string]bool, error) {
-		return nil, map[string]bool{"mr-1": true}, nil
+	unreadable := errors.New("rig mr: reading 3 blocker(s): store unavailable")
+	report, err := ReleaseCrossStoreGates(graph, func([]string) (CrossStoreBlockerResolution, error) {
+		return CrossStoreBlockerResolution{
+			// gc-2 is open in a store the resolver read; gc-3 is closed there.
+			Copies:     map[string][]beads.Bead{"gc-2": {{ID: "gc-2", Status: "open"}}, "gc-3": {{ID: "gc-3", Status: "closed"}}},
+			Undecided:  map[string]bool{"mr-1": true, "gc-2": true, "gc-3": true},
+			Unreadable: []error{unreadable},
+		}, nil
 	})
 	if err != nil || len(report.Released)+len(report.Unresolved) != 0 {
-		t.Fatalf("release = %+v, %v; want the gate left as it is", report, err)
+		t.Fatalf("release = %+v, %v; want every gate left as it is", report, err)
 	}
-	if got := mustGetBead(t, graph, gateID); got.Status == "closed" || got.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
-		t.Fatalf("gate = %+v; want it open and unmarked", got)
+	for _, gateID := range gateIDs {
+		if got := mustGetBead(t, graph, gateID); got.Status == "closed" || got.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
+			t.Fatalf("gate = %+v; want it open and unmarked", got)
+		}
+	}
+	want := []string{gateIDs[0], gateIDs[2]}
+	slices.Sort(want)
+	if !slices.Equal(report.Undecided, want) {
+		t.Fatalf("undecided = %v, want %v: the gates on mr-1 (no copy read) and gc-3 (every copy read releases it), not the one gc-2's open copy holds", report.Undecided, want)
+	}
+	if len(report.Unreadable) != 1 || !errors.Is(report.Unreadable[0], unreadable) {
+		t.Fatalf("unreadable = %v, want the resolver's %v", report.Unreadable, unreadable)
 	}
 }
 
@@ -494,10 +517,13 @@ func TestReleaseCrossStoreGatesDoesNotReopenOnAPurgedOrUnreadableBlocker(t *test
 			t.Fatal(err)
 		}
 		open, _ := work.Get("gc-7")
-		report, err := ReleaseCrossStoreGates(graph, func([]string) (map[string][]beads.Bead, map[string]bool, error) {
+		report, err := ReleaseCrossStoreGates(graph, func([]string) (CrossStoreBlockerResolution, error) {
 			// The open copy is visible, but another store that may hold a
 			// copy could not be read: undecided.
-			return map[string][]beads.Bead{"gc-7": {open}}, map[string]bool{"gc-7": true}, nil
+			return CrossStoreBlockerResolution{
+				Copies:    map[string][]beads.Bead{"gc-7": {open}},
+				Undecided: map[string]bool{"gc-7": true},
+			}, nil
 		})
 		if err != nil || len(report.Reopened) != 0 || mustGetBead(t, graph, gateID).Status != "closed" {
 			t.Fatalf("with gc-7 undecided = %+v, %v; want the gate left released", report, err)
@@ -578,9 +604,9 @@ func TestReleaseCrossStoreGatesRetiresFinishedDrainsAndThenReadsOnlyItsListings(
 	}
 	counting := &listCounting{Store: inner}
 	resolved := 0
-	report, err = ReleaseCrossStoreGates(counting, func([]string) (map[string][]beads.Bead, map[string]bool, error) {
+	report, err = ReleaseCrossStoreGates(counting, func([]string) (CrossStoreBlockerResolution, error) {
 		resolved++
-		return nil, nil, nil
+		return CrossStoreBlockerResolution{}, nil
 	})
 	if err != nil || report.Open != 0 || len(report.Retired) != 0 {
 		t.Fatalf("idle pass = %+v, %v", report, err)
@@ -680,6 +706,56 @@ func TestReleaseCrossStoreGatesStampsWhenAGateWasFirstFoundUnresolved(t *testing
 	}
 	if got := mustGetBead(t, graph, gateID).Metadata[beadmeta.CrossStoreGateUnresolvedAtMetadataKey]; got != first.Format(time.RFC3339) {
 		t.Fatalf("unresolved_at = %q, want the first pass's %q", got, first.Format(time.RFC3339))
+	}
+}
+
+// TestReleaseCrossStoreGatesClearsAnUnresolvedMarkOnceItsBlockerIsBack: a gate
+// marked unresolved whose blocker is restored is an ordinary open gate again,
+// held by its blocker — so gc doctor stops recommending an override close — in
+// one write. A blocker that then disappears again is a new unresolved
+// episode, reported afresh with its own anchor.
+func TestReleaseCrossStoreGatesClearsAnUnresolvedMarkOnceItsBlockerIsBack(t *testing.T) {
+	const (
+		stateKey = beadmeta.CrossStoreGateStateMetadataKey
+		atKey    = beadmeta.CrossStoreGateUnresolvedAtMetadataKey
+	)
+	inner := beads.NewMemStoreFrom(1000, nil, nil)
+	rig := honoringMem()
+	gateID, err := ensureCrossStoreGate(inner, newGateControl(t, inner), "rg-9", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := crossStoreGateNow
+	t.Cleanup(func() { crossStoreGateNow = prev })
+	first := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	crossStoreGateNow = func() time.Time { return first }
+	if report, err := ReleaseCrossStoreGates(inner, storesResolver(rig)); err != nil || len(report.NewlyUnresolved) != 1 {
+		t.Fatalf("pass with rg-9 nowhere = %+v, %v; want the gate newly unresolved", report, err)
+	}
+
+	if _, err := rig.Create(beads.Bead{ID: "rg-9", Title: "restored blocker", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	counting := &writeCounting{Store: inner, id: gateID}
+	report, err := ReleaseCrossStoreGates(counting, storesResolver(rig))
+	if err != nil || len(report.Unresolved) != 0 || len(report.Released) != 0 {
+		t.Fatalf("pass with rg-9 restored open = %+v, %v; want the gate held by its blocker, no longer unresolved", report, err)
+	}
+	if g := mustGetBead(t, inner, gateID); g.Status == "closed" || g.Metadata[stateKey] != "" || g.Metadata[atKey] != "" {
+		t.Fatalf("gate = %s %v; want it open with its unresolved mark and anchor cleared", g.Status, g.Metadata)
+	}
+	if counting.writes != 1 {
+		t.Fatalf("clearing the mark took %d writes to the gate, want exactly 1", counting.writes)
+	}
+
+	if err := rig.Delete("rg-9"); err != nil {
+		t.Fatal(err)
+	}
+	later := first.Add(24 * time.Hour)
+	crossStoreGateNow = func() time.Time { return later }
+	report, err = ReleaseCrossStoreGates(inner, storesResolver(rig))
+	if err != nil || len(report.NewlyUnresolved) != 1 || report.NewlyUnresolved[0].Metadata[atKey] != later.Format(time.RFC3339) {
+		t.Fatalf("pass after rg-9 vanished again = %+v, %v; want the gate newly unresolved, anchored at %s", report, err, later.Format(time.RFC3339))
 	}
 }
 
@@ -945,12 +1021,12 @@ func TestReleaseCASRefusesAWriteOverAnOperatorClose(t *testing.T) {
 
 // undecidedResolver answers every blocker undecided: a store that may hold it
 // could not be read (or is suspended).
-func undecidedResolver(ids []string) (map[string][]beads.Bead, map[string]bool, error) {
+func undecidedResolver(ids []string) (CrossStoreBlockerResolution, error) {
 	undecided := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		undecided[id] = true
 	}
-	return nil, undecided, nil
+	return CrossStoreBlockerResolution{Undecided: undecided}, nil
 }
 
 // TestAReopenedDrainHoldsAGateTheReleasePassNeverReleased: a gate the pass
@@ -1003,7 +1079,7 @@ func TestAReopenedDrainHoldsAGateTheReleasePassNeverReleased(t *testing.T) {
 						if len(report.Released) != 0 || len(report.Retired) != 0 {
 							t.Fatalf("tick %d: pass = %+v; want the gate left holding", tick, report)
 						}
-						if got := slices.Contains(report.Unresolved, gateID); got != tc.wantUnresolved {
+						if got := slices.ContainsFunc(report.Unresolved, func(g beads.Bead) bool { return g.ID == gateID }); got != tc.wantUnresolved {
 							t.Fatalf("tick %d: unresolved = %v; want %v", tick, report.Unresolved, tc.wantUnresolved)
 						}
 					}
@@ -1437,6 +1513,147 @@ func TestReleaseRetriesALostCASWhosePremiseStillHolds(t *testing.T) {
 	}
 	if g := mustGetBead(t, mem, gateID); g.Status != "closed" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != CrossStoreGateStateReleased {
 		t.Fatalf("gate = %s %v", g.Status, g.Metadata)
+	}
+}
+
+// alwaysLosesCAS refuses every revision-checked write to one bead, as if
+// another writer moved its revision each time, so a gate write through it
+// loses both of its attempts.
+type alwaysLosesCAS struct {
+	*beads.MemStore
+	id string
+}
+
+func (s *alwaysLosesCAS) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if id == s.id {
+		return &beads.PreconditionFailedError{ID: id, Expected: expectedRevision}
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// requireConditionalWrites stamps mem as a binding with beads.conditional_writes
+// = require, so every gate write is a revision CAS.
+func requireConditionalWrites(t *testing.T, mem *beads.MemStore) {
+	t.Helper()
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatalf("stamping conditional writes: %v", err)
+	}
+}
+
+// TestReleaseCrossStoreGatesJudgesTheLiveRowWhenItsClearingWriteLoses: before
+// it judges an open gate the pass clears a leftover closed-gate marker (an
+// operator reopened a gate that was overridden, released or retired). When
+// that conditional write does not land, the pass judges the gate's LIVE row,
+// never its own copy with the marker deleted. A gate an operator closed
+// between the listing and the write is no longer open: it is neither counted
+// nor judged — never marked unresolved over the operator's close — and its
+// override stands. A gate whose revision checks were both lost is judged as it
+// is, still carrying the marker a later pass clears.
+func TestReleaseCrossStoreGatesJudgesTheLiveRowWhenItsClearingWriteLoses(t *testing.T) {
+	const (
+		stateKey = beadmeta.CrossStoreGateStateMetadataKey
+		fromKey  = beadmeta.CrossStoreGateRetiredFromMetadataKey
+	)
+	t.Run("an operator closed it between the listing and the write", func(t *testing.T) {
+		for name, conditional := range map[string]bool{"live re-check": false, "conditional, CAS": true} {
+			t.Run(name, func(t *testing.T) {
+				mem, _, reopened := gateInState(t, false, map[string]string{stateKey: CrossStoreGateStateOverridden})
+				if conditional {
+					requireConditionalWrites(t, mem)
+				}
+				race := &operatorClosesOnList{Store: mem, gateID: reopened.ID}
+				report, err := ReleaseCrossStoreGates(race, storesResolver())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !race.done {
+					t.Fatal("fixture: the operator's close never happened")
+				}
+				if report.Open != 0 || len(report.Unresolved) != 0 || len(report.NewlyUnresolved) != 0 {
+					t.Fatalf("report = %+v; want the gate the operator closed neither counted nor judged", report)
+				}
+				if g := mustGetBead(t, mem, reopened.ID); g.Status != "closed" || g.Metadata[stateKey] != CrossStoreGateStateOverridden {
+					t.Fatalf("gate = %s %v; want the operator's close standing, still recorded as overridden", g.Status, g.Metadata)
+				}
+			})
+		}
+	})
+	t.Run("both revision checks were lost", func(t *testing.T) {
+		mem, _, reopened := gateInState(t, false, map[string]string{stateKey: CrossStoreGateStateRetired, fromKey: CrossStoreGateStateReleased})
+		requireConditionalWrites(t, mem)
+		report, err := ReleaseCrossStoreGates(&alwaysLosesCAS{MemStore: mem, id: reopened.ID}, storesResolver())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(report.NewlyUnresolved) != 1 || report.Open != 1 {
+			t.Fatalf("report = %+v; want the open gate judged (its blocker no store holds)", report)
+		}
+		live := mustGetBead(t, mem, reopened.ID)
+		if live.Status == "closed" || live.Metadata[fromKey] != CrossStoreGateStateReleased {
+			t.Fatalf("gate = %s %v; want it open, still carrying the leftover marker the lost write never cleared", live.Status, live.Metadata)
+		}
+		if judged := report.NewlyUnresolved[0]; judged.Metadata[fromKey] != live.Metadata[fromKey] {
+			t.Fatalf("the pass judged a gate with metadata %v while the store holds %v; it must judge the live row, not its own copy with the marker deleted", judged.Metadata, live.Metadata)
+		}
+		// Once a write can land, a later pass clears the marker.
+		if _, err := ReleaseCrossStoreGates(mem, storesResolver()); err != nil {
+			t.Fatal(err)
+		}
+		if g := mustGetBead(t, mem, reopened.ID); g.Status == "closed" || g.Metadata[fromKey] != "" {
+			t.Fatalf("gate after a pass whose write lands = %s %v; want the leftover marker cleared", g.Status, g.Metadata)
+		}
+	})
+}
+
+// TestAnOpenGateThatClosesUnderItsClearingWriteIsSettledAsClosed: the drain
+// clears a leftover marker from an open gate before letting it hold the item.
+// When the gate closes between the drain's read and that write, the drain
+// settles the gate's live, closed row, never answering "held" from its stale
+// open copy: an operator's close is the override it is and holds nothing, and
+// a release the pass made meanwhile is reopened on a blocker the drain found
+// holding.
+func TestAnOpenGateThatClosesUnderItsClearingWriteIsSettledAsClosed(t *testing.T) {
+	const stateKey = beadmeta.CrossStoreGateStateMetadataKey
+	for _, tc := range []struct {
+		name      string
+		closing   map[string]string
+		foundOpen bool
+		wantID    bool
+		want      func(g beads.Bead) bool
+	}{
+		{
+			name:    "an operator closed it",
+			closing: map[string]string{"close_reason": "operator: not needed"},
+			want: func(g beads.Bead) bool {
+				return g.Status == "closed" && g.Metadata[stateKey] == CrossStoreGateStateOverridden
+			},
+		},
+		{
+			name:      "the release pass released it, and the drain found its blocker holding",
+			closing:   map[string]string{stateKey: CrossStoreGateStateReleased, "close_reason": "blocker rg-9 closed"},
+			foundOpen: true,
+			wantID:    true,
+			want:      func(g beads.Bead) bool { return g.Status == "open" && g.Metadata[stateKey] == "" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem, _, reopened := gateInState(t, false, map[string]string{stateKey: CrossStoreGateStateOverridden})
+			store := &raceOnGet{MemStore: mem, id: reopened.ID, on: 1, race: func() {
+				if _, err := mem.CloseAll([]string{reopened.ID}, tc.closing); err != nil {
+					t.Error(err)
+				}
+			}}
+			got, err := gateAnswer(store, reopened, tc.foundOpen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got != "") != tc.wantID {
+				t.Fatalf("answer = %q; want holding=%v from the gate's live row", got, tc.wantID)
+			}
+			if g := mustGetBead(t, mem, reopened.ID); !tc.want(g) {
+				t.Fatalf("gate = %s %v; the drain settled its stale open copy, not the closed live row", g.Status, g.Metadata)
+			}
+		})
 	}
 }
 

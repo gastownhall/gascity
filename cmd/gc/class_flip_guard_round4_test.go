@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
 // TestGcBdSplitRound4Refusals covers the #8333 allowlist round-2 review:
@@ -160,39 +161,6 @@ func TestGcBdSplitDeleteRefusesABindingDependency(t *testing.T) {
 		if !strings.Contains(g.refusal, want) {
 			t.Errorf("gc bd %s: refusal = %q, want %q", argv, g.refusal, want)
 		}
-	}
-}
-
-// TestBdOpenCrossStoreGatesNaming: an open S3b drain gate whose
-// gc.cross_store_blocker names a work bead holds that bead; a closed one, or
-// one naming another bead, does not.
-func TestBdOpenCrossStoreGatesNaming(t *testing.T) {
-	store := beads.NewMemStore()
-	mk := func(blocker string, closed bool) string {
-		b, err := store.Create(beads.Bead{Title: "gate", Type: "gate", Labels: []string{bdCrossStoreGateLabel}, Metadata: map[string]string{beadmeta.CrossStoreBlockerMetadataKey: blocker}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if closed {
-			if err := store.Close(b.ID); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return b.ID
-	}
-	open := mk("demo-1", false)
-	// An unlabeled bead carrying the key is not a gate (#8360's query).
-	if _, err := store.Create(beads.Bead{Title: "not a gate", Metadata: map[string]string{beadmeta.CrossStoreBlockerMetadataKey: "demo-1"}}); err != nil {
-		t.Fatal(err)
-	}
-	mk("demo-1", true)
-	mk("demo-2", false)
-	got, err := bdOpenCrossStoreGatesNaming(store, "demo-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0] != open {
-		t.Fatalf("open gates naming demo-1 = %v, want [%s]", got, open)
 	}
 }
 
@@ -436,14 +404,17 @@ func TestBdByIDUpdateParentStaysInTheBinding(t *testing.T) {
 // TestBdBindingDependentsListsOpenDrainGates is the delete guard's open-gate
 // half end to end: on a city whose classes live in a binding, an open
 // cross-store drain gate in the binding naming a work bead makes that bead a
-// binding dependent, so gc bd delete refuses it; a released gate does not.
+// binding dependent, so gc bd delete refuses it; a released gate does not. The
+// gate is labeled as internal/dispatch mints it, so a change to that label or
+// to dispatch.OpenCrossStoreGatesNaming fails here rather than silently
+// disabling the guard.
 func TestBdBindingDependentsListsOpenDrainGates(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	work, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "blocker", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate := mustCreateClassBead(t, classStore, beads.Bead{Title: "waits", Type: "gate", Labels: []string{bdCrossStoreGateLabel}, Metadata: map[string]string{beadmeta.CrossStoreBlockerMetadataKey: work.ID}})
+	gate := mustCreateClassBead(t, classStore, beads.Bead{Title: "waits", Type: "gate", Labels: []string{dispatch.CrossStoreGateLabel}, Metadata: map[string]string{beadmeta.CrossStoreBlockerMetadataKey: work.ID}})
 	deps, err := bdBindingDependents(cityPath, []string{work.ID})
 	if err != nil {
 		t.Fatal(err)

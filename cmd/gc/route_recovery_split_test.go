@@ -142,3 +142,25 @@ func TestRouteRecoveryRepairsALostRouteOnAWorkBeadOffTheTick(t *testing.T) {
 		t.Fatalf("the ledger queue still holds %v after the pass", again)
 	}
 }
+
+// TestRouteRecoveryLedgerPassWaitsOutQuiescence: the off-tick R11 pass reads
+// the work ledger, so while the city is quiescent (suspended, nothing running)
+// it reads nothing, as every sibling off-tick reader — and keeps its queue, so
+// the candidates the tick deferred are repaired once the city resumes.
+func TestRouteRecoveryLedgerPassWaitsOutQuiescence(t *testing.T) {
+	cr, store := routeRecoveryRuntime(t, unroutedWorkBead("CW-1"))
+	lane := cr.routeRecoveryLaneOf()
+	if queued := lane.deferToLedger([]string{"CW-1"}); queued != 1 {
+		t.Fatalf("fixture: queued %d candidate(s), want 1", queued)
+	}
+	cr.beadsQuiescent.Store(true)
+	if report := cr.runRouteRecoveryLedgerDeferred(); report.candidates != 0 || report.err != nil {
+		t.Fatalf("quiescent pass = %+v; want no candidate taken and no error", report)
+	}
+	if store.reads() != 0 {
+		t.Fatalf("the quiescent pass issued %d ledger read(s), want 0", store.reads())
+	}
+	if pending := lane.takeLedgerPending(); len(pending) != 1 || pending[0] != "CW-1" {
+		t.Fatalf("ledger queue after the quiescent pass = %v, want [CW-1] kept for the resume", pending)
+	}
+}

@@ -301,6 +301,11 @@ func (cr *CityRuntime) runRouteRecoveryBackstopLoop(ctx context.Context, lane *r
 // tick's delta pass found in no binding (work beads on a work leg, read-audit
 // R11). An empty queue reads nothing and builds no plan.
 func (cr *CityRuntime) runRouteRecoveryLedgerDeferred() routeRecoveryReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume, and
+		// the queue waits for it.
+		return routeRecoveryReport{lane: "ledger-delta"}
+	}
 	lane := cr.routeRecoveryLaneOf()
 	candidates := lane.takeLedgerPending()
 	if len(candidates) == 0 {

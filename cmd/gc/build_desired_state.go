@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -3019,51 +3018,52 @@ type readyDemandCache struct {
 	point string
 	// gateLegs are a split city's ready legs, set by withCrossStoreGate. When
 	// set, every ready snapshot is passed through the same cross-store rule
-	// `gc ready` applies (readywork.GateLegReady), so the demand the controller
-	// counts and the work a seat is served agree row for row. Nil on a city
-	// with no class binding, whose snapshots are the stores' own answer.
+	// `gc ready` applies (gate), so the demand the controller counts and the
+	// work a seat is served agree row for row. Nil on a city with no class
+	// binding, whose snapshots are the stores' own answer.
 	gateLegs []readywork.Leg
+	// gate is that rule over gateLegs for this cache's one read point. It
+	// keeps every blocker verdict, judged row and absent-blocker listing it
+	// reads, so a blocker is read once per read point rather than once per
+	// gated snapshot (a store's live and cached snapshots are both gated).
+	gate *readywork.LegGate
 }
 
 // withCrossStoreGate arms the cache with the city's ready legs when the city
-// is split, and returns it. A city that relocates nothing (or one whose
-// topology cannot be planned, which its readers report themselves) is left
-// ungated.
+// is split (crossStoreGateLegs), and returns it. A city that relocates nothing
+// (or one whose topology cannot be planned, which its readers report
+// themselves) is left ungated. Only a pass that may read remotely arms it:
+// the v2 gather serves snapshots the external-reads lane already gated
+// (gatherDemand).
 func (c *readyDemandCache) withCrossStoreGate(cityPath string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool) *readyDemandCache {
-	if c == nil || cityStore == nil {
+	if c == nil {
 		return c
 	}
-	legs, err := readyLegsForTopology(residencyTopologyForCity(cityPath, cfg, cityStore, servingRigStores(cfg, rigStores, suspendedRigPaths))) // residency:allow — the same planned legs `gc ready` federates, so demand gates exactly as serve does
-	if err != nil || !readywork.IsSplit(legs) {
+	return c.withGateLegs(crossStoreGateLegs(cityPath, cfg, cityStore, rigStores, suspendedRigPaths))
+}
+
+// withGateLegs arms the cache with legs, a split city's gate legs, and returns
+// it; nil legs leave it ungated.
+func (c *readyDemandCache) withGateLegs(legs []readywork.Leg) *readyDemandCache {
+	if c == nil || legs == nil {
 		return c
 	}
 	c.gateLegs = legs
+	c.gate = readywork.NewLegGate(legs, beads.ReadyQuery{TierMode: beads.TierBoth})
 	return c
 }
 
-// gateSnapshot applies the cross-store rule to one store's ready snapshot. A
-// store that is not one of the legs is left as read. A gate that cannot be
-// evaluated keeps the ungated rows and reports a partial result: demand must
-// never be under-counted from a read hiccup (see readyDemandCache).
+// gateSnapshot applies the cross-store rule to one store's ready snapshot,
+// waiting at most crossStoreGateDeadline (gateReadyRows). A store that is not
+// one of the legs is left as read. A gate that cannot be evaluated in time
+// keeps the ungated rows and reports a partial result: demand must never be
+// under-counted from a read hiccup (see readyDemandCache).
 func (c *readyDemandCache) gateSnapshot(store beads.Store, rows []beads.Bead, err error) ([]beads.Bead, error) {
-	if c == nil || len(c.gateLegs) == 0 || (err != nil && !beads.IsPartialResult(err)) {
+	if c == nil || len(c.gateLegs) == 0 {
 		return rows, err
 	}
-	own := -1
-	for i, leg := range c.gateLegs {
-		if leg.Store == store {
-			own = i
-			break
-		}
-	}
-	if own < 0 {
-		return rows, err
-	}
-	gated, gateErr := readywork.GateLegReady(context.Background(), c.gateLegs, own, rows, beads.ReadyQuery{TierMode: beads.TierBoth})
-	if gateErr != nil {
-		return rows, errors.Join(err, &beads.PartialResultError{Op: "controller ready demand cross-store gate", Err: gateErr})
-	}
-	return gated, err
+	gated, gateErr := gateReadyRows(c.gate, crossStoreGateLeg(c.gateLegs, store), rows, err, crossStoreGateDeadline)
+	return gated, joinGateErr(err, gateErr)
 }
 
 type readyDemandEntry struct {

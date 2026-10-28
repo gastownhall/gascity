@@ -3080,12 +3080,12 @@ func TestReleaseCrossStoreGatesKeepsAGateWhoseBlockerNoStoreHolds(t *testing.T) 
 // storesResolver resolves gate blockers against stores, one batched read per
 // store, as the controller's resolver does.
 func storesResolver(stores ...beads.Store) CrossStoreBlockerResolver {
-	return func(ids []string) (map[string][]beads.Bead, map[string]bool, error) {
+	return func(ids []string) (CrossStoreBlockerResolution, error) {
 		copies := make(map[string][]beads.Bead)
 		for _, store := range stores {
 			found, err := beads.GetMany(store, ids)
 			if err != nil {
-				return nil, nil, err
+				return CrossStoreBlockerResolution{}, err
 			}
 			for _, id := range ids {
 				if b, ok := found[id]; ok {
@@ -3093,7 +3093,7 @@ func storesResolver(stores ...beads.Store) CrossStoreBlockerResolver {
 				}
 			}
 		}
-		return copies, nil, nil
+		return CrossStoreBlockerResolution{Copies: copies}, nil
 	}
 }
 
@@ -3698,5 +3698,107 @@ func TestProcessDrainReHoldsAReopenedControlsItemBehindARetiredGate(t *testing.T
 	}
 	if drainRowRunnable(t, graph, drain.ID) {
 		t.Fatal("the control was reopened with rg-77 still open, yet its item stays runnable")
+	}
+}
+
+// TestProcessDrainGatesABlockerClosedBlocked: a blocker closed with
+// gc.work_outcome=blocked does not release its dependents — readiness vetoes
+// it (beads.DependencySatisfied), and so does the release pass — so a drain
+// that finds its member's out-of-convoy blocker closed blocked holds the item
+// behind a gate, as it holds one behind an open blocker, and the release pass
+// keeps that gate. An ordinarily closed blocker constrains nothing and mints no
+// gate.
+func TestProcessDrainGatesABlockerClosedBlocked(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		closing  map[string]string
+		wantGate bool
+	}{
+		{name: "closed blocked", closing: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, wantGate: true},
+		{name: "closed", closing: map[string]string{}, wantGate: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := beads.NewMemStore()
+			graph, drain, memberIDs, dir := splitSQLiteDrain(t, work)
+			blocker, err := work.Create(beads.Bead{Title: "outside the convoy", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := work.CloseAll([]string{blocker.ID}, tc.closing); err != nil {
+				t.Fatal(err)
+			}
+			mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
+			opts := ProcessOptions{FormulaSearchPaths: []string{dir}, MemberStores: []beads.Store{work}}
+			if _, err := ProcessControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+				t.Fatal(err)
+			}
+			assertNoUnresolvableBlockingDeps(t, graph)
+			gates := crossStoreGatesIn(t, graph)
+			if !tc.wantGate {
+				if len(gates) != 0 || !drainRowRunnable(t, graph, drain.ID) {
+					t.Fatalf("gates = %+v, item runnable = %v; want no gate and the item runnable: a closed blocker constrains nothing", gates, drainRowRunnable(t, graph, drain.ID))
+				}
+				return
+			}
+			if len(gates) != 1 || gates[0].Status == "closed" || gates[0].Metadata[beadmeta.CrossStoreBlockerMetadataKey] != blocker.ID {
+				t.Fatalf("gates = %+v, want one open gate mirroring %s", gates, blocker.ID)
+			}
+			for pass := 0; pass < 2; pass++ {
+				if drainRowRunnable(t, graph, drain.ID) {
+					t.Fatalf("pass %d: the item runs although its blocker %s closed blocked", pass, blocker.ID)
+				}
+				report, err := ReleaseCrossStoreGates(graph, storesResolver(work))
+				if err != nil || len(report.Released) != 0 {
+					t.Fatalf("pass %d: release = %+v, %v; want the gate kept: a blocker closed blocked does not release", pass, report, err)
+				}
+				if _, err := ProcessControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+					t.Fatal(err)
+				}
+			}
+			if again := crossStoreGatesIn(t, graph); len(again) != 1 {
+				t.Fatalf("gates after more passes = %+v, want the one gate reused", again)
+			}
+		})
+	}
+}
+
+// TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked: a blocker
+// that closes (its gate released, the item runnable), is reopened and closes
+// again blocked holds its dependents again, as on a single-store city. The
+// drain finding it closed blocked is evidence enough to reopen the gate the
+// release pass had released, exactly as finding it open is.
+func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.T) {
+	work := beads.NewMemStore()
+	graph, drain, memberIDs, dir := splitSQLiteDrain(t, work)
+	blocker, err := work.Create(beads.Bead{Title: "outside the convoy", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
+	opts := ProcessOptions{FormulaSearchPaths: []string{dir}, MemberStores: []beads.Store{work}}
+	if _, err := ProcessControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatal(err)
+	}
+	if err := work.Close(blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := ReleaseCrossStoreGates(graph, storesResolver(work)); err != nil || len(report.Released) != 1 || !drainRowRunnable(t, graph, drain.ID) {
+		t.Fatalf("release after %s closed = %+v, %v; want the gate released and the item runnable", blocker.ID, report, err)
+	}
+	if err := work.Reopen(blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := work.CloseAll([]string{blocker.ID}, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProcessControl(graph, mustGetBead(t, graph, drain.ID), opts); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatal(err)
+	}
+	if drainRowRunnable(t, graph, drain.ID) {
+		t.Fatalf("blocker %s closed blocked again but the item is runnable: the released gate stayed released", blocker.ID)
+	}
+	gates := crossStoreGatesIn(t, graph)
+	if len(gates) != 1 || gates[0].Status == "closed" || gates[0].Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
+		t.Fatalf("gates = %+v; want the one gate reopened as an ordinary open gate", gates)
 	}
 }

@@ -115,6 +115,14 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 		_, ephemeral := applier.(beads.EphemeralGraphApplyStore)
 		return ok && ephemeral
 	},
+	// Handle-only: the cache's LIVE handle forwards its backing's exact batch
+	// read, which is the read beads.GetMany takes by id. The cache itself does
+	// not carry it, so a caller reading by id through the cache (PrefetchExact)
+	// keeps reading the cache.
+	"GetExactBatch": func(store beads.Store) bool {
+		_, ok := beads.HandlesFor(store).Live.(beads.ExactBatchGetter)
+		return ok
+	},
 	// Engine-only (see above). CloseStore is also lifecycle: the storage
 	// routes stop the cache and close the engine once (storageRoutes.close).
 	"CloseStore":           nil,

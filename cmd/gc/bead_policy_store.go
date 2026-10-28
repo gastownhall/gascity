@@ -288,6 +288,16 @@ var (
 	_ beads.AbsentBlockedReader = (*beadPolicyGraphStore)(nil)
 )
 
+// StrandsAbsentTargets answers for the wrapped store
+// (beads.AbsentBlockedReader): the policy layer strands nothing of its own.
+// Over bd/Dolt, which reads an absent target as external, it is false, so a
+// federated reader re-judges every row this store serves instead of taking it
+// as already judged (#8360 review, Finding 1).
+func (s *beadPolicyStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
 // ReadyBlockedByAbsent forwards the absent-blocker listing
 // (beads.AbsentBlockedReader) at the policy's expanded read tier, exactly as
 // Ready reads. Explicit for the reason DeleteBatch is: the embedded Store
@@ -378,6 +388,24 @@ func (r beadPolicyLiveReader) List(query beads.ListQuery) ([]beads.Bead, error) 
 func (r beadPolicyLiveReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return r.LiveReader.Ready(expandPolicyReadyQuery(query...))
 }
+
+// GetExactBatch forwards the wrapped live handle's exact batch read, as the
+// store's own GetExactBatch forwards the store's: the policy layer shapes
+// creation and listing, not exact reads by id. It must be explicit, because the
+// embedded LiveReader interface does not promote it, and beads.GetMany reads
+// every cross-store verdict through it: without it, each by-id read of a
+// controller leg (this policy over a CachingStore over bd or native Dolt) is a
+// Get per id (#8360 review, iteration 2). A live handle without the batch
+// reports beads.ErrExactBatchGetUnsupported, and the caller reads per id.
+func (r beadPolicyLiveReader) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := r.LiveReader.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var _ beads.ExactBatchGetter = beadPolicyLiveReader{}
 
 func (s *beadPolicyStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	return s.List(beads.ListQuery{

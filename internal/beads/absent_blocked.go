@@ -30,6 +30,15 @@ import (
 //
 // # The contract
 //
+// StrandsAbsentTargets reports whether the store's Ready reads an absent target
+// as a blocker. The engines whose Ready does (MemStore, FileStore, SQLiteStore)
+// answer true. A wrapper has to declare both methods to keep the listing
+// reachable, because the embedded Store interface does not promote it, and it
+// answers for the store it wraps. A wrapper over bd/Dolt therefore answers
+// false: a reader that took the method's mere presence as "this store strands"
+// would trust every row bd served as already judged, and serve a dependent
+// whose blocker is open in another store.
+//
 // ReadyBlockedByAbsent returns the open beads that pass Ready's own candidate
 // filters for query (status open, an actionable type, not deferred, the
 // requested tier and assignee) and that carry at least one ready-blocking edge
@@ -43,14 +52,19 @@ import (
 // (bd/Dolt) has no such rows and does not implement this: its dependents are
 // already in its ready set, where the caller finds them.
 type AbsentBlockedReader interface {
+	StrandsAbsentTargets() bool
 	ReadyBlockedByAbsent(query ReadyQuery) ([]Bead, error)
 }
 
 // ReadyBlockedByAbsentFor returns store's absent-blocker listing, or false
-// when the store has none.
+// when the store strands nothing: it has no listing, or it wraps a store that
+// has none (StrandsAbsentTargets).
 func ReadyBlockedByAbsentFor(store Store) (AbsentBlockedReader, bool) {
 	reader, ok := store.(AbsentBlockedReader)
-	return reader, ok
+	if !ok || !reader.StrandsAbsentTargets() {
+		return nil, false
+	}
+	return reader, true
 }
 
 var (
@@ -59,6 +73,10 @@ var (
 	_ AbsentBlockedReader = (*SQLiteStore)(nil)
 	_ AbsentBlockedReader = (*CachingStore)(nil)
 )
+
+// StrandsAbsentTargets reports true: the in-memory store's Ready reads an
+// absent blocker as never closed. FileStore inherits it.
+func (m *MemStore) StrandsAbsentTargets() bool { return true }
 
 // ReadyBlockedByAbsent implements AbsentBlockedReader for the in-memory store,
 // whose Ready reads an absent blocker as never closed.
@@ -106,6 +124,19 @@ func (fs *FileStore) ReadyBlockedByAbsent(query ReadyQuery) ([]Bead, error) {
 	return fs.MemStore.ReadyBlockedByAbsent(query)
 }
 
+// StrandsAbsentTargets answers for the backing store, whose listing this cache
+// forwards: over bd/Dolt it is false.
+//
+// It describes the backing store's Ready, which every live read here reaches.
+// The cache's own ready projection reads a target it does not hold as no
+// blocker, so a row served from that projection can carry an absent target; the
+// listing below names every such row, which is how a reader gating cached rows
+// finds them.
+func (c *CachingStore) StrandsAbsentTargets() bool {
+	_, ok := ReadyBlockedByAbsentFor(c.backing)
+	return ok
+}
+
 // ReadyBlockedByAbsent reads the backing store. The listing is an
 // authoritative read for a readiness decision, like Live.Ready, so it never
 // answers from the cache; a backing store without the listing has no such rows.
@@ -116,6 +147,10 @@ func (c *CachingStore) ReadyBlockedByAbsent(query ReadyQuery) ([]Bead, error) {
 	}
 	return reader.ReadyBlockedByAbsent(query)
 }
+
+// StrandsAbsentTargets reports true: SQLite's ready projection reads an absent
+// blocker as never closed (sqliteReadyBlockerExists).
+func (s *SQLiteStore) StrandsAbsentTargets() bool { return true }
 
 // ReadyBlockedByAbsent implements AbsentBlockedReader for SQLite, whose ready
 // projection LEFT JOINs the blocker and so reads an absent one as never closed

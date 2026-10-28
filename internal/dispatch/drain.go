@@ -783,8 +783,8 @@ type drainBlockerProjection struct {
 	BlockerIDs []string
 
 	// Gated are the out-of-manifest blockers, held in another store and still
-	// open, that the item waits for through a cross-store gate rather than an
-	// edge. Sorted.
+	// holding their dependents (open, or closed blocked), that the item waits
+	// for through a cross-store gate rather than an edge. Sorted.
 	Gated []string
 }
 
@@ -802,14 +802,16 @@ const (
 	drainBlockerProjectable
 
 	// drainBlockerSatisfied: the blocker is not co-resident, but it is already
-	// terminal, so it constrains nothing. Omitting the edge loses no meaning —
-	// on a single-store city the edge exists and the readiness reader ignores it
-	// for exactly the same reason.
+	// closed — and not closed blocked (beads.DependencySatisfied) — so it
+	// constrains nothing. Omitting the edge loses no meaning — on a single-store
+	// city the edge exists and the readiness reader ignores it for exactly the
+	// same reason.
 	drainBlockerSatisfied
 
 	// drainBlockerUnprojectable: the blocker is not co-resident and the drain
-	// found it still OPEN. No edge can name it, so the item waits behind a
-	// cross-store gate instead.
+	// found it still holding its dependents: OPEN, or closed blocked, which
+	// readiness and the release pass veto alike. No edge can name it, so the
+	// item waits behind a cross-store gate instead.
 	drainBlockerUnprojectable
 
 	// drainBlockerUnresolved: the blocker is not co-resident and the drain's
@@ -832,9 +834,9 @@ const (
 // because the store holding the edge can never see that row (and bd/Dolt, the
 // other way round, reads a cross-prefix target as external and never blocks on
 // it). So no edge may name a blocker the item's store does not hold: an open
-// one is mirrored by a cross-store gate in the item's own store, which the
-// controller releases when the blocker closes (cross_store_gate.go), and a
-// closed one constrains nothing.
+// one — or one closed blocked — is mirrored by a cross-store gate in the item's
+// own store, which the controller releases when the blocker closes
+// (cross_store_gate.go), and a closed one constrains nothing.
 //
 // Single-store callers skip the check entirely: there is one store, so every id
 // it resolves is co-resident and the probe would be pure overhead.
@@ -867,7 +869,14 @@ func classifyDrainBlocker(store beads.Store, blockerID string, opts ProcessOptio
 		// every serving store, decides.
 		return drainBlockerUnresolved, nil
 	}
-	if convoycore.IsTerminalStatus(owner.Bead.Status) {
+	// Judged by the rule the release pass releases a gate by (blockerReleased)
+	// and readiness releases an edge by, so a blocker closed blocked holds the
+	// item whether it closed before the drain expanded or after. The frame reads
+	// two stores, and the item's own store, asked first, does not hold the
+	// blocker: the copy resolved here is the only one the frame can judge. A copy
+	// in a store outside it (another rig) is the release pass's to judge, which
+	// reads every copy of a gated blocker.
+	if beads.DependencySatisfied(owner.Bead.Status, beads.ReadinessWorkOutcome(owner.Bead.Metadata)) {
 		return drainBlockerSatisfied, nil
 	}
 	return drainBlockerUnprojectable, nil
@@ -941,13 +950,13 @@ func drainProjectedBlockerIDs(store beads.Store, control beads.Bead, memberID st
 		case drainBlockerProjectable:
 			projection.BlockerIDs = append(projection.BlockerIDs, blockerID)
 		case drainBlockerSatisfied:
-			opts.tracef("drain: member %s blocker %s is already terminal and lives outside the item workflow's store; not projecting an edge that would constrain nothing", memberID, blockerID)
+			opts.tracef("drain: member %s blocker %s is already closed and lives outside the item workflow's store; not projecting an edge that would constrain nothing", memberID, blockerID)
 		case drainBlockerUnprojectable, drainBlockerUnresolved:
 			// The item waits for the blocker through a gate in its own store,
 			// never through an edge naming an id that store cannot hold
 			// (cross_store_gate.go). "" means no gate holds the item: the
 			// release pass released it and this pass did not find the blocker
-			// open, or an operator overrode it.
+			// holding (open, or closed blocked), or an operator overrode it.
 			gateID, err := ensureCrossStoreGate(store, control, blockerID, residence == drainBlockerUnprojectable)
 			if err != nil {
 				return drainBlockerProjection{}, fmt.Errorf("gating member %s on blocker %s: %w", memberID, blockerID, err)

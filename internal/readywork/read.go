@@ -494,14 +494,16 @@ type legBlockers struct {
 //
 // Each row's edges are read with the same per-row DepList the sequential walk
 // used, so every row's blockers come back in the order that read returns them.
-// The distinct targets are then read in one batched call against the serving
-// leg (blockerStatuses, crossstore.go); on a split city a target that leg does
-// not hold is read from the other legs, likewise batched, and reported with
-// the status of the store that holds it and a reason. A target no store holds
-// is reported as BlockerUnresolved, which every blocked_by reader treats as
-// gated: an unresolvable blocker blocks its row, and never fails the tier. An
-// "external:<rig>:<capability>" target names no bead and is omitted, as bd
-// omits it. A blocker READ that fails still fails the answer.
+// The distinct targets are then read by id from the serving leg in one call
+// (blockerStatuses, crossstore.go); on a split city every target is read
+// from every leg, one call each, judged from every copy as the ready arm
+// judges it, and reported with the status of the copy that holds it and a
+// reason. A target no store holds is reported as BlockerUnresolved, and one
+// whose every unreleased copy is closed blocked as BlockerClosedBlocked; every
+// blocked_by reader treats both as gated: such a blocker blocks its row, and
+// never fails the tier. An "external:<rig>:<capability>" target names no bead
+// and is omitted, as bd omits it. A blocker READ that fails still fails the
+// answer.
 func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, ids []string) legBlockers {
 	leg := legs[own]
 	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(ids)), errs: make(map[string]error)}

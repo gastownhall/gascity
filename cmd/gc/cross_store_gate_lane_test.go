@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,7 +155,9 @@ func TestCrossStoreGateLaneReadsEachStoreOncePerPass(t *testing.T) {
 
 // TestCrossStoreGateLaneKeepsAGateWhileAStoreIsUnreadable: a store whose read
 // fails might hold an open copy of any blocker, so no gate is released and none
-// is marked unresolved until the store can be read.
+// is marked unresolved until the store can be read. The hold is not silent:
+// every pass names the store it could not read, why, and the gates held only
+// on it, on stderr.
 func TestCrossStoreGateLaneKeepsAGateWhileAStoreIsUnreadable(t *testing.T) {
 	c := newGateLaneCity(t, "myrig")
 	blocker, err := c.work.Create(beads.Bead{Title: "blocker", Type: "task"})
@@ -167,15 +170,33 @@ func TestCrossStoreGateLaneKeepsAGateWhileAStoreIsUnreadable(t *testing.T) {
 	gate, _ := c.gate(t, blocker.ID)
 	ghost, _ := c.gate(t, "gc-404")
 	c.cr.standaloneRigStores["myrig"] = unreadableGateLeg{Store: c.rigs["myrig"]}
+	held := []string{gate.ID, ghost.ID}
+	slices.Sort(held)
 
-	report := c.cr.releaseCrossStoreGates()
-	if len(report.Released) != 0 || len(report.Unresolved) != 0 {
-		t.Fatalf("report = %+v; want both gates kept while the rig store is unreadable", report)
-	}
-	for _, id := range []string{gate.ID, ghost.ID} {
-		got, err := c.binding.Get(id)
-		if err != nil || got.Status == "closed" || got.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
-			t.Fatalf("gate %s = %+v, %v; want it open and unmarked", id, got, err)
+	for pass := 0; pass < 2; pass++ {
+		var stderr bytes.Buffer
+		c.cr.stderr = &stderr
+		report := c.cr.releaseCrossStoreGates()
+		if len(report.Released) != 0 || len(report.Unresolved) != 0 {
+			t.Fatalf("pass %d: report = %+v; want both gates kept while the rig store is unreadable", pass, report)
+		}
+		for _, id := range held {
+			got, err := c.binding.Get(id)
+			if err != nil || got.Status == "closed" || got.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
+				t.Fatalf("pass %d: gate %s = %+v, %v; want it open and unmarked", pass, id, got, err)
+			}
+		}
+		if len(report.Unreadable) != 1 || !strings.Contains(report.Unreadable[0].Error(), "rig myrig") || !strings.Contains(report.Unreadable[0].Error(), "store unavailable") {
+			t.Fatalf("pass %d: unreadable = %v; want rig myrig named with its read error", pass, report.Unreadable)
+		}
+		if !slices.Equal(report.Undecided, held) {
+			t.Fatalf("pass %d: undecided = %v, want both gates %v held only on the unreadable store", pass, report.Undecided, held)
+		}
+		log := stderr.String()
+		for _, want := range []string{"rig myrig", "store unavailable", "2 open gate(s)"} {
+			if !strings.Contains(log, want) {
+				t.Fatalf("pass %d: stderr = %q; want it to name %q: an unreadable store must not freeze gates silently", pass, log, want)
+			}
 		}
 	}
 }
@@ -271,6 +292,56 @@ func TestCrossStoreGateLaneReportsAnUnresolvedControlOnce(t *testing.T) {
 	}
 }
 
+// TestCrossStoreGateLaneReportsEveryUnresolvedGateOfAControl: a control that
+// already waits on an unresolved gate and finds a second one unresolved is
+// announced again, and that control.stalled covers every unresolved gate it
+// waits on — attempts the count of them, first_seen the earliest anchor — as
+// the per-control contract says, not just the gate that changed this pass.
+func TestCrossStoreGateLaneReportsEveryUnresolvedGateOfAControl(t *testing.T) {
+	c := newGateLaneCity(t)
+	first, _ := c.gate(t, "gc-404")
+	control := first.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey]
+	anchorAt := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
+	restore := dispatch.PinCrossStoreGateClockForTest(func() time.Time { return anchorAt })
+	c.cr.releaseCrossStoreGates()
+	restore()
+	second, err := c.binding.Create(beads.Bead{
+		Title:  "waits for gc-405",
+		Type:   "gate",
+		Labels: []string{dispatch.CrossStoreGateLabel},
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:          "gcg-root",
+			beadmeta.CrossStoreGateOwnerMetadataKey: control,
+			beadmeta.CrossStoreBlockerMetadataKey:   "gc-405",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.cr.releaseCrossStoreGates()
+	var stalled []events.Event
+	for _, evt := range c.rec.Events {
+		if evt.Type == events.ControlStalled {
+			stalled = append(stalled, evt)
+		}
+	}
+	if len(stalled) != 2 {
+		t.Fatalf("control.stalled events = %d, want 2: one per pass that newly found an unresolved gate", len(stalled))
+	}
+	var payload events.ControlStalledPayload
+	if err := json.Unmarshal(stalled[1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.BeadID != control || payload.Attempts != 2 || payload.FirstSeen != anchorAt.Format(time.RFC3339) {
+		t.Fatalf("second payload = %+v; want control %s, 2 gates, first_seen the first gate's anchor %s", payload, control, anchorAt.Format(time.RFC3339))
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if !strings.Contains(payload.Error, id) {
+			t.Fatalf("second event %q does not name gate %s; it must list every unresolved gate the control waits on", payload.Error, id)
+		}
+	}
+}
+
 func mustBeadMeta(t *testing.T, store beads.Store, id, key string) string {
 	t.Helper()
 	b, err := store.Get(id)
@@ -281,21 +352,35 @@ func mustBeadMeta(t *testing.T, store beads.Store, id, key string) string {
 }
 
 // TestCrossStoreGateLaneReadsNothingWhileTheCityIsQuiescent: a quiescent
-// city's stores are not touched, gates included.
+// city's stores are not touched, gates included — whether the runtime serves a
+// controller state or runs without one, on the runtime's own flag as every
+// sibling off-tick lane reads it.
 func TestCrossStoreGateLaneReadsNothingWhileTheCityIsQuiescent(t *testing.T) {
-	c := newGateLaneCity(t, "myrig")
-	blocker, err := c.work.Create(beads.Bead{Title: "blocker", Type: "task"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.gate(t, blocker.ID)
-	quiescent := new(atomic.Bool)
-	quiescent.Store(true)
-	c.cr.cs = &controllerState{beadsQuiescent: quiescent, cityBeadStore: c.work, storageRoutes: c.cr.storageRoutes, beadStores: c.cr.standaloneRigStores}
-	c.work.lists, c.work.gets = 0, 0
-	report := c.cr.releaseCrossStoreGates()
-	if report.Open != 0 || c.work.reads() != 0 || c.rigs["myrig"].reads() != 0 {
-		t.Fatalf("quiescent pass: report %+v, work reads %d, rig reads %d; want nothing read", report, c.work.reads(), c.rigs["myrig"].reads())
+	for _, tc := range []struct {
+		name    string
+		quiesce func(c *gateLaneCity)
+	}{
+		{name: "with a controller state", quiesce: func(c *gateLaneCity) {
+			quiescent := new(atomic.Bool)
+			quiescent.Store(true)
+			c.cr.cs = &controllerState{beadsQuiescent: quiescent, cityBeadStore: c.work, storageRoutes: c.cr.storageRoutes, beadStores: c.cr.standaloneRigStores}
+		}},
+		{name: "without a controller state", quiesce: func(c *gateLaneCity) { c.cr.beadsQuiescent.Store(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGateLaneCity(t, "myrig")
+			blocker, err := c.work.Create(beads.Bead{Title: "blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.gate(t, blocker.ID)
+			tc.quiesce(c)
+			c.work.lists, c.work.gets, c.work.batches = 0, 0, 0
+			report := c.cr.releaseCrossStoreGates()
+			if report.Open != 0 || c.work.reads() != 0 || c.rigs["myrig"].reads() != 0 {
+				t.Fatalf("quiescent pass: report %+v, work reads %d, rig reads %d; want nothing read", report, c.work.reads(), c.rigs["myrig"].reads())
+			}
+		})
 	}
 }
 
@@ -318,14 +403,14 @@ func TestCrossStoreBlockerResolverMatchesASuspendedRigsNamespaceWhole(t *testing
 	cfg := &config.City{Rigs: []config.Rig{{Name: "ops", Path: "rigs/ops", Prefix: "gc-ops"}}}
 	resolve := crossStoreBlockerResolver(beads.NewMemStore(), beads.NewMemStore(), cfg,
 		map[string]beads.Store{"ops": beads.NewMemStore()}, map[string]bool{"rigs/ops": true})
-	_, undecided, err := resolve([]string{"gc-ops-12", "gc-12"})
+	resolved, err := resolve([]string{"gc-ops-12", "gc-12"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !undecided["gc-ops-12"] {
+	if !resolved.Undecided["gc-ops-12"] {
 		t.Error("gc-ops-12 is in suspended rig ops (prefix gc-ops) but reads as decided")
 	}
-	if undecided["gc-12"] {
+	if resolved.Undecided["gc-12"] {
 		t.Error("gc-12 is not in rig ops's namespace but reads as undecided")
 	}
 }

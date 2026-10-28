@@ -1,13 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -128,6 +132,106 @@ func TestCrossStoreGatesCheckReportsUnresolvedGates(t *testing.T) {
 	res := check.Run(nil)
 	if res.Status != doctor.StatusWarning || len(res.Details) != 1 || !strings.Contains(res.Details[0], gate.ID) {
 		t.Fatalf("Run = %+v, want a warning naming gate %s", res, gate.ID)
+	}
+}
+
+// TestCrossStoreGatesCheckReportsGatesHeldOnlyByAnUnreadableStore: a store the
+// release pass cannot read may hold an open copy of any blocker, so the pass
+// leaves every gate it cannot judge exactly as it is — and gc doctor says so.
+// It names each open gate held only because a store could not be read, with
+// the store and the error, whether the store would not open or its read
+// failed. A gate an open copy in a readable store holds is held by that copy
+// and is not reported, and once the store reads again neither is.
+func TestCrossStoreGatesCheckReportsGatesHeldOnlyByAnUnreadableStore(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		openRig func(rig beads.Store) (beads.Store, error)
+		wantErr string
+	}{
+		{
+			name:    "rig store would not open",
+			openRig: func(beads.Store) (beads.Store, error) { return nil, errors.New("dolt server restarting") },
+			wantErr: "dolt server restarting",
+		},
+		{
+			name:    "rig store read fails",
+			openRig: func(rig beads.Store) (beads.Store, error) { return unreadableGateLeg{Store: rig}, nil },
+			wantErr: "store unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			binding := sessionSplitRoutes(t, cityPath)
+			work := beads.NewMemStore()
+			rig := beads.NewMemStore()
+			closedBlocker, err := work.Create(beads.Bead{Title: "closed blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := work.Close(closedBlocker.ID); err != nil {
+				t.Fatal(err)
+			}
+			openBlocker, err := work.Create(beads.Bead{Title: "open blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			control, err := binding.Create(beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-root"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateOn := func(blocker string) beads.Bead {
+				t.Helper()
+				gate, err := binding.Create(beads.Bead{
+					Title:  "waits for " + blocker,
+					Type:   "gate",
+					Labels: []string{dispatch.CrossStoreGateLabel},
+					Metadata: map[string]string{
+						beadmeta.RootBeadIDMetadataKey:          "gcg-root",
+						beadmeta.CrossStoreGateOwnerMetadataKey: control.ID,
+						beadmeta.CrossStoreBlockerMetadataKey:   blocker,
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return gate
+			}
+			heldByStore := gateOn(closedBlocker.ID)
+			heldByCopy := gateOn(openBlocker.ID)
+			cfg := &config.City{Rigs: []config.Rig{{Name: "rg", Path: "rigs/rg", Prefix: "rg"}}}
+			readable := false
+			check := newCrossStoreGatesCheck(cfg, cityPath, func(path string) (beads.Store, error) {
+				if path == "rigs/rg" {
+					if readable {
+						return rig, nil
+					}
+					return tc.openRig(rig)
+				}
+				return work, nil
+			})
+
+			res := check.Run(nil)
+			if res.Status != doctor.StatusWarning {
+				t.Fatalf("Run = %+v, want a warning: gate %s is held only because rig rg could not be read", res, heldByStore.ID)
+			}
+			var named []string
+			for _, detail := range res.Details {
+				if strings.Contains(detail, "gate "+heldByCopy.ID+" ") {
+					t.Fatalf("detail %q reports gate %s, which the open copy of %s holds", detail, heldByCopy.ID, openBlocker.ID)
+				}
+				if strings.Contains(detail, "gate "+heldByStore.ID+" ") {
+					named = append(named, detail)
+				}
+			}
+			if len(named) != 1 || !strings.Contains(named[0], "rig rg") || !strings.Contains(named[0], tc.wantErr) {
+				t.Fatalf("details = %q; want gate %s named once, with rig rg and %q", res.Details, heldByStore.ID, tc.wantErr)
+			}
+
+			readable = true
+			if res := check.Run(nil); res.Status != doctor.StatusOK {
+				t.Fatalf("Run with every store readable = %+v, want OK: no gate is held only by an unreadable store", res)
+			}
+		})
 	}
 }
 
@@ -391,14 +495,13 @@ func TestDanglingBlockingEdgesHonorsRuntimeSuspension(t *testing.T) {
 	}
 }
 
-// batchReadFailing fails the batched id read the scan resolves targets with.
+// batchReadFailing fails the batched id read the scan resolves targets with:
+// beads.GetMany reads a store by id through its exact batch read, which every
+// production work store has (bd, native Dolt).
 type batchReadFailing struct{ beads.Store }
 
-func (s batchReadFailing) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if len(q.IDs) > 0 {
-		return nil, errors.New("injected: batch read failed")
-	}
-	return s.Store.List(q)
+func (s batchReadFailing) GetExactBatch([]string) (map[string]beads.Bead, []string, error) {
+	return nil, nil, errors.New("injected: batch read failed")
 }
 
 // TestDanglingBlockingEdgesReportsNothingWhenABatchReadFails: a store whose
@@ -810,18 +913,19 @@ func TestDanglingBlockingEdgesFixKeepsALiteralWhenItsBeadCannotBeReRead(t *testi
 	}
 }
 
-// failingIDReadOf fails a by-id read that asks for id, once armed.
+// failingIDReadOf fails a by-id read of id, once armed. It has no exact batch
+// read, so beads.GetMany reads it with one Get per id.
 type failingIDReadOf struct {
 	beads.Store
 	id    string
 	armed bool
 }
 
-func (s *failingIDReadOf) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if s.armed && slices.Contains(q.IDs, s.id) {
-		return nil, errors.New("injected: store unreachable")
+func (s *failingIDReadOf) Get(id string) (beads.Bead, error) {
+	if s.armed && id == s.id {
+		return beads.Bead{}, errors.New("injected: store unreachable")
 	}
-	return s.Store.List(q)
+	return s.Store.Get(id)
 }
 
 // TestDanglingBlockingEdgesFixReportsAFailedReCheckOfALiteralsBead: before a
@@ -850,5 +954,462 @@ func TestDanglingBlockingEdgesFixReportsAFailedReCheckOfALiteralsBead(t *testing
 	}
 	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != literal {
 		t.Fatalf("deps = %+v; want the literal kept", deps)
+	}
+}
+
+// exactBatchMisses is a store whose exact batch read leaves every id
+// unresolved, the answer beads.ExactBatchGetter permits for an id it does not
+// answer exactly, while its Get finds the bead.
+type exactBatchMisses struct{ beads.Store }
+
+var _ beads.ExactBatchGetter = exactBatchMisses{}
+
+func (exactBatchMisses) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	return map[string]beads.Bead{}, slices.Clone(ids), nil
+}
+
+// TestDanglingBlockingEdgesFixConfirmsAnUnresolvedTargetWithGet: the re-check
+// before a removal reads the target with beads.GetMany, which takes an id an
+// exact batch read left unresolved as absent, where the batch contract leaves
+// that id for Get to settle. A store whose batch leaves the target unresolved
+// while its Get finds it holds the target, and the edge is kept.
+func TestDanglingBlockingEdgesFixConfirmsAnUnresolvedTargetWithGet(t *testing.T) {
+	cityPath := t.TempDir()
+	sessionSplitRoutes(t, cityPath)
+	work := beads.NewMemStore()
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	if err := work.DepAdd(row.ID, "gc-404", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	edges, _ := check.collect()
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v", edges)
+	}
+	rig := beads.NewMemStore()
+	rig.HonorExplicitIDs = true
+	if _, err := rig.Create(beads.Bead{ID: "gc-404", Title: "held", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	check.scopes = append(check.scopes, doctorScope{label: "rig", store: exactBatchMisses{rig}})
+	if err := fixDanglingEdge(edges[0], check.stillAbsent); err != nil {
+		t.Fatal(err)
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 {
+		t.Fatalf("deps = %+v; want the edge to gc-404 kept: the rig's Get holds it", deps)
+	}
+}
+
+// danglingEdgeBd is a bd CLI double that drives the dangling-edge check
+// through a real *beads.BdStore. A beadstest.FakeBd answers the bead rows
+// (list, query and a one-id show); the double owns the dependency table, so it
+// can hold an edge whose target has no row, and answers the edge commands as
+// bd v1.3 does:
+//
+//   - `bd dep list <id> --json` prints the depended-on beads' rows, a join
+//     that leaves out an edge whose target has no row;
+//   - `bd dep list <id> <id>... --json` prints the raw dependency records, an
+//     anchor's records once per time it is named;
+//   - `bd dep add` and `bd dep remove` take an "external:" target only as
+//     external:<project>:<capability>; remove takes an edge by its exact
+//     target, and add a target bd holds;
+//   - `bd show --json <ids...>` prints the rows it holds and skips the rest,
+//     failing only when it holds none.
+type danglingEdgeBd struct {
+	rows  *beadstest.FakeBd // answers every command but the edge commands and show
+	mu    sync.Mutex        // a two-tier List runs its two bd reads at once
+	edges []beads.Dep
+	calls []string
+	// batchErr, when set, is how a multi-id `bd dep list` fails.
+	batchErr error
+	// removeErr, when set, is how every `bd dep remove` fails.
+	removeErr error
+}
+
+func newDanglingEdgeBd() *danglingEdgeBd {
+	return &danglingEdgeBd{rows: beadstest.NewFakeBd()}
+}
+
+// seed stores an open bead titled title.
+func (f *danglingEdgeBd) seed(t *testing.T, title string) beads.Bead {
+	t.Helper()
+	b, err := f.rows.Seed(beads.Bead{Title: title, Type: "task"})
+	if err != nil {
+		t.Fatalf("seed %q: %v", title, err)
+	}
+	return b
+}
+
+// seedBlocks stores issue's blocks edge to target unvalidated, whatever its
+// target, as a create-time dependency or an import writes one.
+func (f *danglingEdgeBd) seedBlocks(issue, target string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.edges = append(f.edges, beads.Dep{IssueID: issue, DependsOnID: target, Type: "blocks"})
+}
+
+// stored lists issue's edges as the double stores them, "target:type": the
+// table itself, not what bd's one-id dep list shows of it.
+func (f *danglingEdgeBd) stored(issue string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, e := range f.edges {
+		if e.IssueID == issue {
+			out = append(out, e.DependsOnID+":"+e.Type)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ran returns the bd commands run so far, each as its space-joined argv.
+func (f *danglingEdgeBd) ran() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+func (f *danglingEdgeBd) run(dir, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, strings.Join(args, " "))
+	if len(args) >= 2 && args[0] == "dep" {
+		switch args[1] {
+		case "list":
+			return f.depList(args[2:])
+		case "add":
+			return f.depAdd(args[2:])
+		case "remove":
+			return f.depRemove(args[2:])
+		}
+	}
+	if len(args) > 0 && args[0] == "show" {
+		return f.show(dir, args[1:])
+	}
+	return f.rows.Run(dir, name, args...)
+}
+
+func (f *danglingEdgeBd) depList(args []string) ([]byte, error) {
+	var ids []string
+	for _, arg := range args {
+		switch {
+		case arg == "--json":
+		case strings.HasPrefix(arg, "-"):
+			return nil, fmt.Errorf("danglingEdgeBd: dep list %s is not modeled", arg)
+		default:
+			ids = append(ids, arg)
+		}
+	}
+	if len(ids) == 1 {
+		rows := []map[string]string{}
+		for _, e := range f.edges {
+			if e.IssueID != ids[0] {
+				continue
+			}
+			target, err := f.rows.Bead(e.DependsOnID)
+			if err != nil {
+				continue // the join: an edge whose target has no row is not printed
+			}
+			rows = append(rows, map[string]string{"id": target.ID, "title": target.Title, "status": target.Status, "dependency_type": e.Type})
+		}
+		return json.Marshal(rows)
+	}
+	if f.batchErr != nil {
+		return nil, f.batchErr
+	}
+	records := []map[string]string{}
+	for _, id := range ids {
+		for _, e := range f.edges {
+			if e.IssueID == id {
+				records = append(records, map[string]string{"issue_id": e.IssueID, "depends_on_id": e.DependsOnID, "type": e.Type})
+			}
+		}
+	}
+	return json.Marshal(records)
+}
+
+// edgeArgs splits `bd dep add|remove` arguments into the two ids and --type.
+func edgeArgs(args []string) (issue, target, depType string, err error) {
+	var ids []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--type" && i+1 < len(args):
+			depType = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "-"):
+			return "", "", "", fmt.Errorf("danglingEdgeBd: flag %s is not modeled", args[i])
+		default:
+			ids = append(ids, args[i])
+		}
+	}
+	if len(ids) != 2 {
+		return "", "", "", fmt.Errorf("danglingEdgeBd: want two ids, got %v", ids)
+	}
+	return ids[0], ids[1], depType, nil
+}
+
+// bdExternalRef is bd's validateExternalRef: an "external:" target must be
+// external:<project>:<capability>.
+func bdExternalRef(target string) error {
+	parts := strings.SplitN(target, ":", 3)
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+		return fmt.Errorf("invalid external reference format: expected 'external:<project>:<capability>', got '%s'", target)
+	}
+	return nil
+}
+
+func (f *danglingEdgeBd) depAdd(args []string) ([]byte, error) {
+	issue, target, depType, err := edgeArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.rows.Bead(issue); err != nil {
+		return nil, fmt.Errorf("resolving %s: no issue found matching %q", issue, issue)
+	}
+	if strings.HasPrefix(target, "external:") {
+		if err := bdExternalRef(target); err != nil {
+			return nil, err
+		}
+	} else if _, err := f.rows.Bead(target); err != nil {
+		return nil, fmt.Errorf("resolving dependency ID %s: no issue found matching %q", target, target)
+	}
+	for _, e := range f.edges {
+		if e.IssueID == issue && e.DependsOnID == target {
+			return nil, fmt.Errorf("dependency %s -> %s already exists", issue, target)
+		}
+	}
+	f.edges = append(f.edges, beads.Dep{IssueID: issue, DependsOnID: target, Type: depType})
+	return []byte(`{"status":"added"}`), nil
+}
+
+func (f *danglingEdgeBd) depRemove(args []string) ([]byte, error) {
+	issue, target, _, err := edgeArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if f.removeErr != nil {
+		return nil, f.removeErr
+	}
+	if strings.HasPrefix(target, "external:") {
+		if err := bdExternalRef(target); err != nil {
+			return nil, err
+		}
+	}
+	for i, e := range f.edges {
+		if e.IssueID == issue && e.DependsOnID == target {
+			f.edges = slices.Delete(f.edges, i, i+1)
+			return []byte(`{"status":"removed"}`), nil
+		}
+	}
+	return nil, fmt.Errorf("resolving dependency ID %s: no issue found matching %q", target, target)
+}
+
+func (f *danglingEdgeBd) show(dir string, args []string) ([]byte, error) {
+	rows := []json.RawMessage{}
+	for _, id := range args {
+		if strings.HasPrefix(id, "-") {
+			continue
+		}
+		out, err := f.rows.Run(dir, "bd", "show", "--json", id)
+		if err != nil {
+			continue // bd notes "Issue <id> not found" on stderr and goes on
+		}
+		var one []json.RawMessage
+		if err := json.Unmarshal(out, &one); err != nil {
+			return nil, err
+		}
+		rows = append(rows, one...)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("no issues found matching the provided IDs")
+	}
+	return json.Marshal(rows)
+}
+
+// bdDoctorCity returns the dangling-edge check of a split city whose work
+// store is a *beads.BdStore over bd, and that store.
+func bdDoctorCity(t *testing.T, bd *danglingEdgeBd) (*danglingBlockingEdgesCheck, *beads.BdStore) {
+	t.Helper()
+	cityPath := t.TempDir()
+	sessionSplitRoutes(t, cityPath)
+	store := beads.NewBdStore("/fake-bd", bd.run)
+	return newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return store, nil }), store
+}
+
+// TestDanglingBlockingEdgesReadsALoneBdRowsRawEdges is a bd work store with
+// ONE open row. bd's one-row `bd dep list` joins the row's edges onto the
+// beads they name, so it never shows the edge this check exists for; the
+// check reads bd's raw dependency records, for the scan and again right before
+// it writes. A literal whose bead no store holds is removed, and one whose
+// bead the row's store holds (closed, so not a row) is rewritten as the typed
+// edge.
+func TestDanglingBlockingEdgesReadsALoneBdRowsRawEdges(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		heldOrigin bool
+	}{
+		{name: "a literal whose bead no store holds is removed"},
+		{name: "a literal whose bead the store holds is rewritten", heldOrigin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bd := newDanglingEdgeBd()
+			originID, action, wantStored := "gc-404", danglingRemove, []string(nil)
+			if tc.heldOrigin {
+				origin := bd.seed(t, "origin")
+				if _, err := bd.rows.Run("", "bd", "close", origin.ID); err != nil {
+					t.Fatal(err)
+				}
+				originID, action, wantStored = origin.ID, danglingRewrite, []string{origin.ID + ":discovered-from"}
+			}
+			row := bd.seed(t, "lone row")
+			literal := "discovered-from:" + originID
+			bd.seedBlocks(row.ID, literal)
+			check, store := bdDoctorCity(t, bd)
+			if deps, err := store.DepList(row.ID, "down"); err != nil || len(deps) != 0 {
+				t.Fatalf("bd's one-row dep list = (%v, %v); the double must leave out the edge to %s, as bd does", deps, err, literal)
+			}
+			edges, skipped := check.collect()
+			if len(skipped) != 0 || len(edges) != 1 || edges[0].rowID != row.ID || edges[0].target != literal || edges[0].action != action {
+				t.Fatalf("edges = %+v, skipped = %v; want %s -> %s reported with action %d", edges, skipped, row.ID, literal, action)
+			}
+			if err := check.Fix(nil); err != nil {
+				t.Fatalf("Fix: %v", err)
+			}
+			if got := bd.stored(row.ID); !slices.Equal(got, wantStored) {
+				t.Fatalf("edges bd stores for %s after --fix = %v, want %v", row.ID, got, wantStored)
+			}
+			if res := check.Run(nil); res.Status != doctor.StatusOK {
+				t.Fatalf("Run after --fix = %+v, want OK", res)
+			}
+		})
+	}
+}
+
+// TestDanglingBlockingEdgesFixOnABdStore runs both rewrite cases and a removal
+// through a *beads.BdStore: a plain literal becomes the discovered-from edge, a
+// literal beside a real blocks edge is removed with the blocks edge kept, and
+// an edge to a bead no store holds is removed. bd is asked to remove each
+// literal by its exact target, and never the real edge.
+func TestDanglingBlockingEdgesFixOnABdStore(t *testing.T) {
+	bd := newDanglingEdgeBd()
+	origin := bd.seed(t, "origin")
+	plain := bd.seed(t, "plain literal row")
+	both := bd.seed(t, "literal and real blocks")
+	gone := bd.seed(t, "edge to nothing")
+	bd.seedBlocks(plain.ID, "discovered-from:"+origin.ID)
+	bd.seedBlocks(both.ID, origin.ID)
+	bd.seedBlocks(both.ID, "discovered-from:"+origin.ID)
+	bd.seedBlocks(gone.ID, "gc-404")
+	check, _ := bdDoctorCity(t, bd)
+	if edges, skipped := check.collect(); len(skipped) != 0 || len(edges) != 3 {
+		t.Fatalf("edges = %+v, skipped = %v; want the two literals and the edge to gc-404", edges, skipped)
+	}
+	for i := 0; i < 2; i++ {
+		if err := check.Fix(nil); err != nil {
+			t.Fatalf("Fix %d: %v", i, err)
+		}
+	}
+	for _, want := range []struct {
+		row   string
+		edges []string
+	}{
+		{plain.ID, []string{origin.ID + ":discovered-from"}},
+		{both.ID, []string{origin.ID + ":blocks"}},
+		{gone.ID, nil},
+	} {
+		if got := bd.stored(want.row); !slices.Equal(got, want.edges) {
+			t.Errorf("edges bd stores for %s after --fix = %v, want %v", want.row, got, want.edges)
+		}
+	}
+	if slices.Contains(bd.ran(), "dep remove "+both.ID+" "+origin.ID) {
+		t.Errorf("bd was asked to remove the real blocks edge %s -> %s (commands %q)", both.ID, origin.ID, bd.ran())
+	}
+	if res := check.Run(nil); res.Status != doctor.StatusOK {
+		t.Fatalf("Run after --fix = %+v, want OK", res)
+	}
+}
+
+// TestDanglingBlockingEdgesSkipsABdScopeWhoseRawEdgesCannotBeRead: when bd's
+// batched dep read fails, or the bd backend refuses it, the scope's edges
+// cannot be read as stored. Reading the rows one by one instead would hide
+// every dangling edge and call the scope clean, so the scope is reported as
+// skipped, the check warns, and --fix refuses to act.
+func TestDanglingBlockingEdgesSkipsABdScopeWhoseRawEdgesCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "the batched read fails", err: errors.New("exit status 1: Error: dolt: connection refused")},
+		{name: "the backend refuses the batched read", err: errors.New(`exit status 1: Error: operation "IssueRelations" not supported by the postgres backend`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bd := newDanglingEdgeBd()
+			row := bd.seed(t, "row")
+			const literal = "discovered-from:gc-404"
+			bd.seedBlocks(row.ID, literal)
+			bd.batchErr = tc.err
+			check, _ := bdDoctorCity(t, bd)
+			edges, skipped := check.collect()
+			if len(edges) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], "city skipped") {
+				t.Fatalf("edges = %+v, skipped = %q; want the city scope reported as skipped, not read row by row", edges, skipped)
+			}
+			if res := check.Run(nil); res.Status != doctor.StatusWarning {
+				t.Fatalf("Run = %+v, want a warning: the city's edges could not be read", res)
+			}
+			if err := check.Fix(nil); err == nil {
+				t.Fatal("Fix succeeded although the city's edges could not be read")
+			}
+			if got := bd.stored(row.ID); !slices.Equal(got, []string{literal + ":blocks"}) {
+				t.Fatalf("edges bd stores for %s = %v, want the literal untouched", row.ID, got)
+			}
+		})
+	}
+}
+
+// TestDanglingBlockingEdgesLeavesATwoPartExternalRefInABdStore: bd's `dep
+// remove` takes an "external:" target only as external:<project>:<capability>,
+// so a dangling "external:<id>" edge in a bd store cannot be removed through
+// bd. The check reports it for the operator, saying why, and --fix does not
+// ask bd for a removal it refuses. (A store that can remove it does:
+// TestDanglingBlockingEdgesCheckFindsAndRemovesOnlyDanglingEdges.)
+func TestDanglingBlockingEdgesLeavesATwoPartExternalRefInABdStore(t *testing.T) {
+	bd := newDanglingEdgeBd()
+	row := bd.seed(t, "row")
+	const ref = "external:gc-405"
+	bd.seedBlocks(row.ID, ref)
+	check, _ := bdDoctorCity(t, bd)
+	res := check.Run(nil)
+	if res.Status != doctor.StatusWarning || len(res.Details) != 1 || !strings.Contains(res.Details[0], ref) || !strings.Contains(res.Details[0], "external:<project>:<capability>") {
+		t.Fatalf("Run = %+v; want %s reported for the operator, with the reason bd will not remove it", res, ref)
+	}
+	if err := check.Fix(nil); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, call := range bd.ran() {
+		if strings.HasPrefix(call, "dep remove ") {
+			t.Fatalf("Fix ran bd %s, a removal bd refuses", call)
+		}
+	}
+	if got := bd.stored(row.ID); !slices.Equal(got, []string{ref + ":blocks"}) {
+		t.Fatalf("edges bd stores for %s = %v, want %s left for the operator", row.ID, got, ref)
+	}
+}
+
+// TestDanglingBlockingEdgesFixReportsARemovalBdRefuses: bd before v1.3 refuses
+// to remove an edge to a same-prefix bead it cannot resolve. The refusal is
+// --fix's error, naming the row and the edge, and the edge is kept.
+func TestDanglingBlockingEdgesFixReportsARemovalBdRefuses(t *testing.T) {
+	bd := newDanglingEdgeBd()
+	row := bd.seed(t, "row")
+	bd.seedBlocks(row.ID, "gc-404")
+	bd.removeErr = errors.New("exit status 1: Error: resolving the dependency ID: no issue found")
+	check, _ := bdDoctorCity(t, bd)
+	err := check.Fix(nil)
+	if err == nil || !strings.Contains(err.Error(), row.ID) || !strings.Contains(err.Error(), `"gc-404"`) {
+		t.Fatalf("Fix = %v; want bd's refusal, naming row %s and the edge to gc-404", err, row.ID)
+	}
+	if got := bd.stored(row.ID); !slices.Equal(got, []string{"gc-404:blocks"}) {
+		t.Fatalf("edges bd stores for %s = %v, want the edge kept", row.ID, got)
 	}
 }

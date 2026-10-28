@@ -122,6 +122,16 @@ func (r logicalLiveStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.DepList(id, direction)
 }
 
+// GetExactBatch is the store's own exact batch read, or
+// ErrExactBatchGetUnsupported for a store without one.
+func (r logicalLiveStoreReader) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	getter, ok := r.store.(ExactBatchGetter)
+	if !ok {
+		return nil, nil, ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
 type cachedStoreReader struct {
 	store *CachingStore
 }
@@ -179,6 +189,26 @@ func (r liveStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
 func (r liveStoreReader) DepList(id, direction string) ([]Dep, error) {
 	return r.store.backing.DepList(id, direction)
 }
+
+// GetExactBatch is the backing store's exact batch read, or
+// ErrExactBatchGetUnsupported for a backing without one: a live read by id
+// never consults the cache. It belongs to the live handle, not to the
+// CachingStore, so a caller that reads by id through the cache itself
+// (PrefetchExact) keeps reading the cache.
+func (r liveStoreReader) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	getter, ok := r.store.backing.(ExactBatchGetter)
+	if !ok {
+		return nil, nil, ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+// Both live handles expose the exact batch read beads.GetMany reads by id
+// through, answering for the store they read.
+var (
+	_ ExactBatchGetter = liveStoreReader{}
+	_ ExactBatchGetter = logicalLiveStoreReader{}
+)
 
 func logicalCachedListQuery(query ListQuery) ListQuery {
 	query.Live = false

@@ -43,6 +43,7 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.SawRows":                               "read",
 	"CachingStore.Stats":                                 "read",
 	"CachingStore.Stopped":                               "read",
+	"CachingStore.StrandsAbsentTargets":                  "read",
 	"CachingStore.WaitForParentProjection":               "read",
 	"CachingStore.WriteRev":                              "read",
 	"CachingStore.AtomicTx":                              "read: reports a backing capability",
@@ -56,6 +57,7 @@ var localWriteCensusExempt = map[string]string{
 	"cachedStoreReader.Ready":                            "read",
 	"liveStoreReader.DepList":                            "read",
 	"liveStoreReader.Get":                                "read",
+	"liveStoreReader.GetExactBatch":                      "read",
 	"liveStoreReader.List":                               "read",
 	"liveStoreReader.Ready":                              "read",
 	// Handle constructors: the handles' own methods are in the census.

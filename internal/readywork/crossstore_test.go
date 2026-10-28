@@ -9,6 +9,7 @@ package readywork
 // blocks its row and never fails the read.
 
 import (
+	"context"
 	"slices"
 	"sort"
 	"strings"
@@ -702,5 +703,371 @@ func TestReadInProgressReportsEverySpellingOfOneBlocker(t *testing.T) {
 	}
 	if got := rows[0].BlockedBy; len(got) != 2 || got[0].Status != "open" || got[1].Status != "open" {
 		t.Fatalf("blocked_by = %+v; want both spellings of %s, each open", got, step.ID)
+	}
+}
+
+// TestReadReJudgesTheRowsACachedBdLegServes is the premature half of R9 behind
+// the wrapping production puts on its work legs (#8360 review, Finding 1). A
+// cache forwards the absent-blocker listing whatever store it wraps, so a
+// reader that took the forwarded methods for "this store strands" trusted
+// every row a cached bd leg served as already judged, and served a row whose
+// blocker is open in another store.
+func TestReadReJudgesTheRowsACachedBdLegServes(t *testing.T) {
+	mem := beads.NewMemStore()
+	work := beads.NewCachingStoreForTest(externalBlockerStore{Store: mem}, nil)
+	if _, strands := beads.ReadyBlockedByAbsentFor(work); strands {
+		t.Error("a cache over a store that strands nothing reports an absent-blocker listing")
+	}
+	binding := sqliteBinding(t)
+	last := 4
+	step := mustCreate(t, binding, beads.Bead{Title: "graph step", Type: "task", Priority: &last})
+	external := mustCreate(t, mem, beads.Bead{Title: "external ref", Type: "task"})
+	crossPrefix := mustCreate(t, mem, beads.Bead{Title: "cross-prefix", Type: "task"})
+	dangling := mustCreate(t, mem, beads.Bead{Title: "dangling", Type: "task"})
+	clean := mustCreate(t, mem, beads.Bead{Title: "clean", Type: "task"})
+	for _, e := range [][2]string{
+		{external.ID, "external:" + step.ID},
+		{crossPrefix.ID, step.ID},
+		{dangling.ID, "gcg-404"},
+	} {
+		if err := mem.DepAdd(e[0], e[1], "blocks"); err != nil {
+			t.Fatalf("DepAdd(%s -> %s): %v", e[0], e[1], err)
+		}
+	}
+	legs := splitLegs(work, binding)
+	for _, q := range []Query{{}, {Limit: 1}, {Limit: 3, Sort: SortOldest}} {
+		got := readyIDs(t, legs, q)
+		for _, id := range []string{external.ID, crossPrefix.ID, dangling.ID} {
+			if slices.Contains(got, id) {
+				t.Errorf("ready(%+v) = %v served %s while its blocker is open or held by no store", q, got, id)
+			}
+		}
+		if !slices.Contains(got, clean.ID) {
+			t.Errorf("ready(%+v) = %v dropped the clean row %s", q, got, clean.ID)
+		}
+	}
+	closeBead(t, binding, step.ID)
+	got := readyIDs(t, legs, Query{})
+	if !slices.Contains(got, external.ID) || !slices.Contains(got, crossPrefix.ID) {
+		t.Errorf("ready = %v after %s closed, want %s and %s served", got, step.ID, external.ID, crossPrefix.ID)
+	}
+	if slices.Contains(got, dangling.ID) {
+		t.Errorf("ready = %v served %s, whose blocker no store holds", got, dangling.ID)
+	}
+}
+
+// countingStrandingLeg is a stranding work leg (the in-memory store) that
+// counts the reads by id it is asked for: beads.GetMany's blocker reads.
+type countingStrandingLeg struct {
+	*beads.MemStore
+	byID atomic.Int64
+}
+
+// Get counts a read by id: the in-memory store has no exact batch read, so
+// beads.GetMany reads each id it is asked for with one Get.
+func (s *countingStrandingLeg) Get(id string) (beads.Bead, error) {
+	s.byID.Add(1)
+	return s.MemStore.Get(id)
+}
+
+// TestReadHoldsAStrandingLegsRowOnACopyItDidNotJudge pins every copy on a
+// stranding leg (#8360 review, Codex): its Ready judged only its own copy of a
+// blocker, so a closed copy there must not hide an open copy of the same id in
+// another store. A binding's own reserved-namespace blocker has no other copy
+// and costs no read of another store.
+func TestReadHoldsAStrandingLegsRowOnACopyItDidNotJudge(t *testing.T) {
+	t.Run("a work row's blocker is closed here and open in the binding", func(t *testing.T) {
+		work := beads.NewMemStore()
+		binding := sqliteBinding(t)
+		blocker := mustCreate(t, work, beads.Bead{Title: "migrated blocker", Type: "task"})
+		closeBead(t, work, blocker.ID)
+		if _, err := binding.(beads.ForeignIDCreator).CreateWithForeignID(beads.Bead{ID: blocker.ID, Title: "migrated copy", Type: "task", Priority: intRef(4)}); err != nil {
+			t.Fatal(err)
+		}
+		row := mustCreate(t, work, beads.Bead{Title: "row", Type: "task"})
+		if err := work.DepAdd(row.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		legs := splitLegs(work, binding)
+		for _, q := range []Query{{}, {Limit: 1}} {
+			if got := readyIDs(t, legs, q); slices.Contains(got, row.ID) {
+				t.Errorf("ready(%+v) = %v served %s; its blocker %s is still open in the binding", q, got, row.ID, blocker.ID)
+			}
+		}
+		closeBead(t, binding, blocker.ID)
+		if got := readyIDs(t, legs, Query{}); !slices.Contains(got, row.ID) {
+			t.Errorf("ready = %v withholds %s after its blocker closed in every store", got, row.ID)
+		}
+	})
+	t.Run("a binding row's blocker is closed here and open in the work store", func(t *testing.T) {
+		work := beads.NewMemStore()
+		work.HonorExplicitIDs = true
+		binding := sqliteBinding(t)
+		relic, err := binding.(beads.ForeignIDCreator).CreateWithForeignID(beads.Bead{ID: "gc-relic-7", Title: "relic", Type: "task", Priority: intRef(4)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeBead(t, binding, relic.ID)
+		if _, err := work.Create(beads.Bead{ID: relic.ID, Title: "the original, still open", Type: "task", Priority: intRef(4)}); err != nil {
+			t.Fatal(err)
+		}
+		step := mustCreate(t, binding, beads.Bead{Title: "graph step", Type: "task"})
+		if err := binding.DepAdd(step.ID, relic.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		legs := splitLegs(work, binding)
+		for _, q := range []Query{{}, {Limit: 1}} {
+			if got := readyIDs(t, legs, q); slices.Contains(got, step.ID) {
+				t.Errorf("ready(%+v) = %v served %s; its blocker %s is still open in the work store", q, got, step.ID, relic.ID)
+			}
+		}
+		closeBead(t, work, relic.ID)
+		if got := readyIDs(t, legs, Query{}); !slices.Contains(got, step.ID) {
+			t.Errorf("ready = %v withholds %s after its blocker closed in every store", got, step.ID)
+		}
+	})
+	t.Run("a binding row's reserved-namespace blocker is judged by the binding alone", func(t *testing.T) {
+		work := &countingStrandingLeg{MemStore: beads.NewMemStore()}
+		binding := sqliteBinding(t)
+		done := mustCreate(t, binding, beads.Bead{Title: "done step", Type: "task", Priority: intRef(4)})
+		closeBead(t, binding, done.ID)
+		step := mustCreate(t, binding, beads.Bead{Title: "next step", Type: "task"})
+		if err := binding.DepAdd(step.ID, done.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if got := readyIDs(t, splitLegs(work, binding), Query{}); !slices.Contains(got, step.ID) {
+			t.Fatalf("ready = %v withholds %s, whose only blocker is closed in the binding", got, step.ID)
+		}
+		if n := work.byID.Load(); n != 0 {
+			t.Errorf("the work leg was asked for %d blocker read(s) for a blocker only the binding can hold, want 0", n)
+		}
+	})
+}
+
+// TestLegGateJudgesInFullARowACacheServesPastItsAbsentBlocker: a
+// cache's own ready projection reads a target it does not hold as no blocker
+// (the in-memory engine stamps no verdict of its own on its rows), so a cached
+// snapshot carries the row its backing store strands. That row reaches the
+// gate as a row the leg served, and the listing names it: it is judged in
+// full, and held until its blocker closes in the store that holds it, even
+// though no class binding holds that blocker.
+func TestLegGateJudgesInFullARowACacheServesPastItsAbsentBlocker(t *testing.T) {
+	mem := beads.NewMemStore()
+	rig := beads.NewMemStore()
+	rig.HonorExplicitIDs = true
+	binding := sqliteBinding(t)
+	blocker, err := rig.Create(beads.Bead{ID: "rg-1", Title: "rig blocker", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := mustCreate(t, mem, beads.Bead{Title: "row", Type: "task"})
+	if err := mem.DepAdd(row.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	work := beads.NewCachingStoreForTest(mem, nil)
+	if err := work.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := beads.HandlesFor(work).Cached.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("cached ready: %v", err)
+	}
+	if countID(cached, row.ID) != 1 {
+		t.Fatalf("fixture: the cache's ready projection = %v does not serve %s; the case does not arise", cached, row.ID)
+	}
+	legs := []Leg{testLeg("work", work), testLeg("rig:rg", rig), {Label: "graph", Store: binding, ClassBinding: true, ReservedPrefixes: []string{"gcg"}}}
+	q := beads.ReadyQuery{TierMode: beads.TierBoth}
+	gated, err := NewLegGate(legs, q).Gate(context.Background(), 0, cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countID(gated, row.ID) != 0 {
+		t.Fatalf("gated cached snapshot = %v serves %s while its blocker %s is open in the rig", gated, row.ID, blocker.ID)
+	}
+	closeBead(t, rig, blocker.ID)
+	gated, err = NewLegGate(legs, q).Gate(context.Background(), 0, cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countID(gated, row.ID); n != 1 {
+		t.Fatalf("gated cached snapshot = %v serves %s %d time(s) after its blocker closed, want once", gated, row.ID, n)
+	}
+}
+
+func countID(rows []beads.Bead, id string) int {
+	n := 0
+	for _, b := range rows {
+		if b.ID == id {
+			n++
+		}
+	}
+	return n
+}
+
+// TestLegGateReadsEachBlockerOncePerGate pins the memo a pass's gate keeps
+// (#8360 review, Finding 2): demand gates a live and a cached snapshot of
+// every store, and one gate reads each blocker, each row's edges and each
+// leg's listing once, however many snapshots it gates.
+func TestLegGateReadsEachBlockerOncePerGate(t *testing.T) {
+	mem := beads.NewMemStore()
+	work := &countingBdLeg{externalBlockerStore: externalBlockerStore{Store: mem}}
+	rigMem := beads.NewMemStore()
+	rig := &countingStrandingLeg{MemStore: rigMem}
+	binding := sqliteBinding(t)
+	step := mustCreate(t, binding, beads.Bead{Title: "graph step", Type: "task", Priority: intRef(4)})
+	var rows []beads.Bead
+	for i := 0; i < 3; i++ {
+		row := mustCreate(t, mem, beads.Bead{Title: "gated", Type: "task"})
+		if err := mem.DepAdd(row.ID, "external:"+step.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+	}
+	legs := []Leg{testLeg("work", work), testLeg("rig:r", rig), {Label: "graph", Store: binding, ClassBinding: true, ReservedPrefixes: []string{"gcg"}}}
+	gate := NewLegGate(legs, beads.ReadyQuery{TierMode: beads.TierBoth})
+	for i := 0; i < 3; i++ {
+		got, err := gate.Gate(context.Background(), 0, rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("gate %d served %v while %s is open", i, got, step.ID)
+		}
+	}
+	if n := work.depLists.Load(); n != 1 {
+		t.Errorf("the work leg's edges were read %d time(s) over three gates, want 1", n)
+	}
+	if n := rig.byID.Load(); n != 1 {
+		t.Errorf("the rig leg was asked for the blocker %d time(s) over three gates, want 1", n)
+	}
+	if got, err := NewLegGate([]Leg{testLeg("work", work)}, beads.ReadyQuery{}).Gate(context.Background(), 0, rows); err != nil || len(got) != len(rows) {
+		t.Fatalf("a city with no binding gated its rows to %v, %v; want them as read", got, err)
+	}
+}
+
+// TestReadInProgressReportsAnOpenCopyBehindAClosedBlockedOne (#8360 review,
+// Finding 9): a blocker whose first copy in leg order is closed blocked and
+// whose later copy is open reports the open copy, so a reader that judges by
+// status holds the row, as the ready arm does.
+func TestReadInProgressReportsAnOpenCopyBehindAClosedBlockedOne(t *testing.T) {
+	work := beads.NewMemStore()
+	rig := beads.NewMemStore()
+	rig.HonorExplicitIDs = true
+	binding := sqliteBinding(t)
+	bl := mustCreate(t, binding, beads.Bead{Title: "relic, open", Type: "task", Priority: intRef(4)})
+	if _, err := rig.Create(beads.Bead{ID: bl.ID, Title: "copy closed blocked", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.SetMetadata(bl.ID, "gc.work_outcome", "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	closeBead(t, rig, bl.ID)
+	row := mustCreate(t, work, beads.Bead{Title: "row", Type: "task"})
+	setInProgress(t, work, row.ID, "w1")
+	if err := work.DepAdd(row.ID, "external:"+bl.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	legs := []Leg{
+		testLeg("work", work),
+		testLeg("rig:r", rig), // the closed-blocked copy, first in leg order
+		{Label: "graph", Store: binding, ClassBinding: true, ReservedPrefixes: []string{"gcg"}},
+	}
+	rows, err := Read(legs, Query{Status: StatusInProgress, Assignee: "w1"})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("Read = %+v, %v", rows, err)
+	}
+	if got := rows[0].BlockedBy; len(got) != 1 || got[0].Status != "open" {
+		t.Fatalf("blocked_by = %+v; want %s reported open, as its graph copy is", got, bl.ID)
+	}
+}
+
+// closeBlocked closes id with gc.work_outcome=blocked: a close that does not
+// release its dependents (beads.DependencySatisfied).
+func closeBlocked(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	if err := store.SetMetadata(id, "gc.work_outcome", "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	closeBead(t, store, id)
+}
+
+// TestInProgressHoldsAClaimWhoseBlockerIsClosedBlockedInEveryCopy (#8360
+// review): a blocker whose every copy is closed with gc.work_outcome=blocked
+// releases nothing, and the ready arm and the drain hold its dependents. The
+// in-progress tier published such a copy as "closed", and both of its serve
+// gates (hasOpenBlocker, the hook's openBlockerCountJQ) read only the status,
+// so --until-unblocked resumed the claim. It holds both a claim blocked across
+// stores and one blocked in its own store, and the cut stops at the first
+// clean claim behind them; a normal close of the same blocker is the control.
+func TestInProgressHoldsAClaimWhoseBlockerIsClosedBlockedInEveryCopy(t *testing.T) {
+	work := beads.NewMemStore()
+	binding := sqliteBinding(t)
+	step := mustCreate(t, binding, beads.Bead{Title: "graph step", Type: "task"})
+	ownBlocker := mustCreate(t, work, beads.Bead{Title: "own blocker", Type: "task"})
+	closeBlocked(t, binding, step.ID)
+	closeBlocked(t, work, ownBlocker.ID)
+	byStep := inProgressRow(t, work, "blocked by a graph step closed blocked", 0, step.ID)
+	byOwn := inProgressRow(t, work, "blocked by its own store's bead closed blocked", 1, ownBlocker.ID)
+	clean := inProgressRow(t, work, "clean claim", 2)
+	legs := splitLegs(work, binding)
+
+	cut := untilUnblockedAndWhole(t, legs)
+	if got, want := rowIDs(cut), []string{byStep.ID, byOwn.ID, clean.ID}; !slices.Equal(got, want) {
+		t.Fatalf("cut = %v, want %v: a claim whose blocker released nothing is gated", got, want)
+	}
+	for _, row := range cut[:2] {
+		if len(row.BlockedBy) != 1 {
+			t.Fatalf("row %s blocked_by = %+v, want its one blocker", row.ID, row.BlockedBy)
+		}
+		if got := row.BlockedBy[0]; got.Status != BlockerClosedBlocked || !hasOpenBlocker(row.BlockedBy) {
+			t.Errorf("row %s blocker = %+v, want status %q, which every blocked_by reader counts as blocking", row.ID, got, BlockerClosedBlocked)
+		}
+	}
+
+	// The control: a normal close releases.
+	if err := binding.SetMetadata(step.ID, "gc.work_outcome", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if got := rowIDs(untilUnblockedAndWhole(t, legs)); !slices.Equal(got, []string{byStep.ID}) {
+		t.Fatalf("after the graph step's outcome cleared: cut = %v, want it to end at %s", got, byStep.ID)
+	}
+}
+
+// TestInProgressJudgesTheServingLegsCopyAgainstEveryOtherCopy (#8360 review):
+// the in-progress tier read a blocker its serving leg holds from that copy
+// alone, so a closed copy there hid an open copy in the binding (a migrated
+// relic) and the cut resumed a claim the ready arm holds. Every copy is
+// judged, as the ready arm judges it.
+func TestInProgressJudgesTheServingLegsCopyAgainstEveryOtherCopy(t *testing.T) {
+	work := beads.NewMemStore()
+	work.HonorExplicitIDs = true
+	binding := sqliteBinding(t)
+	relic, err := binding.(beads.ForeignIDCreator).CreateWithForeignID(beads.Bead{ID: "gc-relic-1", Title: "relic, open in the binding", Type: "task", Priority: intRef(4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := work.Create(beads.Bead{ID: relic.ID, Title: "frozen copy, closed", Type: "task", Priority: intRef(4)}); err != nil {
+		t.Fatal(err)
+	}
+	closeBead(t, work, relic.ID)
+	held := inProgressRow(t, work, "blocked by the relic", 0, relic.ID)
+	clean := inProgressRow(t, work, "clean claim", 1)
+	legs := splitLegs(work, binding)
+
+	cut := untilUnblockedAndWhole(t, legs)
+	if got, want := rowIDs(cut), []string{held.ID, clean.ID}; !slices.Equal(got, want) {
+		t.Fatalf("cut = %v, want %v: the relic is still open in the binding", got, want)
+	}
+	if got := cut[0].BlockedBy; len(got) != 1 || got[0].Status != "open" || !strings.Contains(got[0].Reason, "graph") {
+		t.Fatalf("blocked_by = %+v, want %s open, with a reason naming the graph store that holds it open", got, relic.ID)
+	}
+
+	closeBead(t, binding, relic.ID)
+	cut = untilUnblockedAndWhole(t, legs)
+	if got := rowIDs(cut); !slices.Equal(got, []string{held.ID}) {
+		t.Fatalf("after the binding's copy closed: cut = %v, want it to end at %s", got, held.ID)
+	}
+	if got := cut[0].BlockedBy; len(got) != 1 || got[0].Status != "closed" {
+		t.Fatalf("blocked_by = %+v, want %s closed in every copy", got, relic.ID)
 	}
 }

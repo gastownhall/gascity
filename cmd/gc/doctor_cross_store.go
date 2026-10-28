@@ -84,10 +84,17 @@ func inUnreadNamespace(id string, unread []string) bool {
 	return false
 }
 
-// crossStoreGatesCheck reports the open cross-store gates whose blocker no
-// store holds (gc.cross_store_gate_state=unresolved). Each holds a drain's
-// items forever: an unresolvable blocker blocks. The operator decides — close
-// the gate to release the items, or restore the blocker.
+// crossStoreGatesCheck reports the open cross-store gates that hold a drain's
+// items on something only an operator can change:
+//
+//   - a blocker no store holds (gc.cross_store_gate_state=unresolved). An
+//     unresolvable blocker blocks, forever; the operator decides — close the
+//     gate to release the items, or restore the blocker;
+//   - a store the release pass could not read. A store that would not open, or
+//     whose read failed, may hold an open copy of any blocker, so every gate
+//     it may decide is held exactly as it is; the check names each gate held
+//     only because of it (dispatch.CrossStoreGatesHeldUndecided), with the
+//     store and the error, so access can be restored.
 type crossStoreGatesCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -113,25 +120,79 @@ func (c *crossStoreGatesCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
 	gates, err := graph.List(beads.ListQuery{
 		Label:    dispatch.CrossStoreGateLabel,
 		Status:   "open",
-		Metadata: map[string]string{beadmeta.CrossStoreGateStateMetadataKey: dispatch.CrossStoreGateStateUnresolved},
 		Live:     true,
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return warnCheck(c.Name(), "could not list cross-store gates", "fix the class binding, then rerun gc doctor", []string{err.Error()})
 	}
-	if len(gates) == 0 {
-		return okCheck(c.Name(), "no cross-store gate waits on a blocker no store holds")
-	}
-	details := make([]string, 0, len(gates))
+	var details, findings, hints []string
+	var judged []beads.Bead
 	for _, gate := range gates {
+		if gate.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != dispatch.CrossStoreGateStateUnresolved {
+			judged = append(judged, gate)
+			continue
+		}
 		details = append(details, fmt.Sprintf("gate %s (drain %s) waits on %s, which no store holds", gate.ID, gate.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey], gate.Metadata[beadmeta.CrossStoreBlockerMetadataKey]))
 	}
+	if len(details) > 0 {
+		findings = append(findings, fmt.Sprintf("%d cross-store gate(s) hold drain items on a blocker no store holds", len(details)))
+		hints = append(hints, "restore the blocker, or close the gate (gc bd close <gate>) to release its drain items")
+	}
+	held, unreadable, err := c.heldByUnreadableStores(graph, judged)
+	if err != nil {
+		return warnCheck(c.Name(), "could not judge the open cross-store gates", "fix bead store access, then rerun gc doctor", append(details, err.Error()))
+	}
+	if len(held) > 0 {
+		why := crossStoreUnreadableText(unreadable)
+		for _, gate := range held {
+			details = append(details, fmt.Sprintf("gate %s (drain %s) waits on %s and is held only because a store could not be read: %s", gate.ID, gate.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey], gate.Metadata[beadmeta.CrossStoreBlockerMetadataKey], why))
+		}
+		findings = append(findings, fmt.Sprintf("%d cross-store gate(s) hold drain items only because a store could not be read", len(held)))
+		hints = append(hints, "restore access to the store named; the release pass judges its gates once it can read it")
+	}
+	if len(details) == 0 {
+		return okCheck(c.Name(), "no cross-store gate waits on a blocker no store holds, or on a store that could not be read")
+	}
 	sort.Strings(details)
-	return warnCheck(c.Name(),
-		fmt.Sprintf("%d cross-store gate(s) hold drain items on a blocker no store holds", len(gates)),
-		"restore the blocker, or close the gate (gc bd close <gate>) to release its drain items",
-		details)
+	return warnCheck(c.Name(), strings.Join(findings, "; "), strings.Join(hints, "; "), details)
+}
+
+// heldByUnreadableStores returns the open gates a release pass leaves holding
+// their drain items only because a store could not be read, and those stores,
+// judged over the stores the cross-store checks read (splitCityDoctorScopes)
+// as the controller's pass judges them. A store that would not open may hold
+// any blocker, as one whose read fails may. While every store was read it
+// returns none: a gate a suspended rig's namespace leaves undecided waits on
+// the operator's own suspension.
+func (c *crossStoreGatesCheck) heldByUnreadableStores(graph beads.Store, gates []beads.Bead) ([]beads.Bead, []error, error) {
+	if len(gates) == 0 {
+		return nil, nil, nil
+	}
+	scopes, unread, skipped := splitCityDoctorScopes(c.cfg, c.cityPath, c.newStore)
+	legs := make([]crossStoreBlockerLeg, 0, len(scopes))
+	for _, sc := range scopes {
+		legs = append(legs, crossStoreBlockerLeg(sc))
+	}
+	read := crossStoreBlockerResolverOver(graph, legs, unread)
+	resolve := func(ids []string) (dispatch.CrossStoreBlockerResolution, error) {
+		resolved, err := read(ids)
+		if err != nil || len(skipped) == 0 {
+			return resolved, err
+		}
+		for _, id := range ids {
+			resolved.Undecided[id] = true
+		}
+		for _, reason := range skipped {
+			resolved.Unreadable = append(resolved.Unreadable, errors.New(reason))
+		}
+		return resolved, nil
+	}
+	held, unreadable, err := dispatch.CrossStoreGatesHeldUndecided(graph, gates, resolve)
+	if err != nil || len(unreadable) == 0 {
+		return nil, nil, err
+	}
+	return held, unreadable, nil
 }
 
 // danglingBlockingEdgesCheck reports open and in-progress rows whose blocking
@@ -149,7 +210,9 @@ func (c *crossStoreGatesCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
 //     reported for the operator and left alone: a rewrite there would be a
 //     cross-store edge, which gc never writes.
 //   - Any other blocking edge whose target no store holds is removed from the
-//     row's own store. Nothing is written in its place.
+//     row's own store. Nothing is written in its place. The exception is an
+//     "external:<id>" edge in a store bd's CLI serves: `bd dep remove` refuses
+//     that target, so it is reported for the operator and left alone.
 //   - A target in the namespace of a suspended rig, or of a rig whose store
 //     would not open, is undecided: never reported, never touched.
 type danglingBlockingEdgesCheck struct {
@@ -181,6 +244,11 @@ const (
 	// danglingOperator: a "<type>:<id>" literal whose <id> only another store
 	// holds; left for the operator.
 	danglingOperator
+	// danglingUnremovable: an "external:<id>" edge no store resolves, in a
+	// store bd's CLI serves. `bd dep remove` takes an external: target only as
+	// external:<project>:<capability> and refuses this one, so it is left for
+	// the operator.
+	danglingUnremovable
 )
 
 // danglingEdge is one blocking edge no store resolves as written.
@@ -209,8 +277,8 @@ func typedDepLiteral(target string) (depType, id string, ok bool) {
 }
 
 // collect reads, per store, the open and in-progress rows (two lists), their
-// edges (one batched read) and then every distinct target from every store
-// (one batched read per store).
+// edges as stored (one batched read, doctorDepsFor) and then every distinct
+// target from every store (one batched read per store).
 func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []string) {
 	scopes, unread, skipped := splitCityDoctorScopes(c.cfg, c.cityPath, c.newStore)
 	c.scopes = scopes
@@ -222,6 +290,8 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 		rowID  string
 		raw    string
 		target string
+		// bdCLI: bd's CLI serves the row's store (bdCLIDeps).
+		bdCLI bool
 	}
 	var candidates []candidate
 	targetSet := make(map[string]bool)
@@ -249,6 +319,7 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing dependencies: %v", sc.label, err))
 			continue
 		}
+		bdCLI := bdCLIDeps(sc.store)
 		for _, id := range ids {
 			for _, dep := range deps[id] {
 				if !beads.IsReadyBlockingDependencyType(dep.Type) {
@@ -258,7 +329,7 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 				if capability || target == "" {
 					continue
 				}
-				candidates = append(candidates, candidate{scope: sc, rowID: id, raw: dep.DependsOnID, target: target})
+				candidates = append(candidates, candidate{scope: sc, rowID: id, raw: dep.DependsOnID, target: target, bdCLI: bdCLI})
 				targetSet[target] = true
 				if _, realID, ok := typedDepLiteral(target); ok {
 					targetSet[realID] = true
@@ -302,6 +373,10 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 			case len(heldBy[realID]) > 0 || inUnreadNamespace(realID, unread):
 				edge.action = danglingOperator
 			}
+		} else if cand.bdCLI && strings.HasPrefix(strings.TrimSpace(cand.raw), "external:") {
+			// A bead ref, not a capability (those were never candidates): the
+			// two-part shape bd's dep remove refuses.
+			edge.action = danglingUnremovable
 		}
 		edges = append(edges, edge)
 	}
@@ -314,12 +389,29 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 	return edges, skipped
 }
 
-// doctorDepsFor reads ids' down edges in one batched read where the store has
-// one, otherwise one DepList per row.
+// doctorDepsFor reads ids' down edges as the store holds them, an edge whose
+// target no store holds — the edge this check looks for — included. The scan
+// and the re-read before a fix both read through it.
+//
+// A store's batched read is that read, in one round trip; on bd it is bd's raw
+// dependency records. A batch that fails is an error, never a cue to read row
+// by row, and so is a bd backend that refuses the batched read
+// (beads.ErrDepListBatchUnsupported): on bd the per-row read is the one-row
+// `bd dep list`, which cannot show the edge, so falling back to it would
+// report a scope full of dangling edges as clean. Any other store without the
+// batch, or whose batch reports ErrDepListBatchUnsupported (a wrapper over one
+// without it, such as SQLite), keeps its own edge table and lists it as
+// stored, so it is read with one DepList per row.
 func doctorDepsFor(store beads.Store, ids []string) (map[string][]beads.Dep, error) {
 	if batch, ok := beads.DepListBatchFor(store); ok {
-		if deps, err := batch.DepListBatch(ids); err == nil {
+		deps, err := batch.DepListBatch(ids)
+		switch {
+		case err == nil:
 			return deps, nil
+		case !errors.Is(err, beads.ErrDepListBatchUnsupported):
+			return nil, err
+		case bdCLIDeps(store):
+			return nil, fmt.Errorf("%w (bd's one-row dep list cannot show an edge to a bead with no row, so it is no substitute)", err)
 		}
 	}
 	out := make(map[string][]beads.Dep, len(ids))
@@ -333,12 +425,23 @@ func doctorDepsFor(store beads.Store, ids []string) (map[string][]beads.Dep, err
 	return out, nil
 }
 
+// bdCLIDeps reports whether bd's CLI serves store's dependency edges, behind
+// the class, policy and cache wrappers. Two of its answers matter here: its
+// one-row `bd dep list` joins a row's edges onto the beads they name, so it
+// cannot show an edge to a bead with no row, and its `bd dep remove` takes an
+// "external:" target only as external:<project>:<capability>.
+func bdCLIDeps(store beads.Store) bool {
+	return storeBackedBy[*beads.BdStore](store)
+}
+
 func (e danglingEdge) describe() string {
 	switch e.action {
 	case danglingRewrite:
 		return fmt.Sprintf("%s row %s blocks on the malformed literal %q; --fix rewrites it as a %s edge to %s", e.label, e.rowID, e.target, e.depType, e.realID)
 	case danglingOperator:
 		return fmt.Sprintf("%s row %s blocks on the malformed literal %q; %s is held by another store, so it is left for the operator (gc never writes a cross-store edge)", e.label, e.rowID, e.target, e.realID)
+	case danglingUnremovable:
+		return fmt.Sprintf("%s row %s blocks on %s, which no store holds; bd dep remove takes an external: target only as external:<project>:<capability> and refuses this one, so it is left for the operator", e.label, e.rowID, e.target)
 	default:
 		return fmt.Sprintf("%s row %s blocks on %s, which no store holds; --fix removes the edge", e.label, e.rowID, e.target)
 	}
@@ -375,7 +478,7 @@ func (c *danglingBlockingEdgesCheck) Fix(*doctor.CheckContext) error {
 	}
 	var errs []error
 	for _, e := range edges {
-		if e.action == danglingOperator {
+		if e.action == danglingOperator || e.action == danglingUnremovable {
 			continue
 		}
 		if err := fixDanglingEdge(e, c.stillAbsent); err != nil {
@@ -386,7 +489,11 @@ func (c *danglingBlockingEdgesCheck) Fix(*doctor.CheckContext) error {
 	return errors.Join(errs...)
 }
 
-// stillAbsent re-asks every store the scan read whether id is held now.
+// stillAbsent re-asks every store the scan read whether id is held now. An id
+// a store's batched read does not return is confirmed with a live Get before
+// it counts as absent there: beads.GetMany takes an id an exact batch read left
+// unresolved as absent, where the batch contract (beads.ExactBatchGetter)
+// leaves that id for Get to settle, and an edge is not removed on less.
 func (c *danglingBlockingEdgesCheck) stillAbsent(id string) (bool, error) {
 	for _, sc := range c.scopes {
 		found, err := beads.GetMany(sc.store, []string{id})
@@ -396,15 +503,23 @@ func (c *danglingBlockingEdgesCheck) stillAbsent(id string) (bool, error) {
 		if len(found) > 0 {
 			return false, nil
 		}
+		_, err = beads.HandlesFor(sc.store).Live.Get(id)
+		switch {
+		case err == nil:
+			return false, nil
+		case !errors.Is(err, beads.ErrNotFound):
+			return false, fmt.Errorf("%s: re-reading %s: %w", sc.label, id, err)
+		}
 	}
 	return true, nil
 }
 
 // fixDanglingEdge applies one edge's fix, re-reading right before it writes
-// (an agent may have changed things since the scan): the row's edges, and —
-// for a removal — that no store holds the target now, or — for a rewrite —
-// that the row's own store still holds the real id. A premise that moved
-// leaves the edge for the next run.
+// (an agent may have changed things since the scan): the row's edges, with the
+// scan's own read (doctorDepsFor; bd's one-row dep list cannot show the edge),
+// and — for a removal — that no store holds the target now, or — for a
+// rewrite — that the row's own store still holds the real id. A premise that
+// moved leaves the edge for the next run.
 //
 // A rewrite never retypes an edge the row already has: on SQLite and the
 // in-memory stores adding an edge to a target the row already points at
@@ -416,12 +531,12 @@ func (c *danglingBlockingEdgesCheck) stillAbsent(id string) (bool, error) {
 // literal is removed only once the add succeeded, so a failed add loses
 // nothing. (A creator is not carried: the store interface does not expose it.)
 func fixDanglingEdge(e danglingEdge, stillAbsent func(string) (bool, error)) error {
-	deps, err := e.store.DepList(e.rowID, "down")
+	deps, err := doctorDepsFor(e.store, []string{e.rowID})
 	if err != nil {
 		return fmt.Errorf("%s row %s: re-reading edges before the fix: %w", e.label, e.rowID, err)
 	}
 	literalPresent, realPresent := false, false
-	for _, d := range deps {
+	for _, d := range deps[e.rowID] {
 		switch d.DependsOnID {
 		case e.target:
 			literalPresent = literalPresent || beads.IsReadyBlockingDependencyType(d.Type)
