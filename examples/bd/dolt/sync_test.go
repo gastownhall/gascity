@@ -2030,3 +2030,26 @@ func TestSyncFailedRunDeclaresNoSkipOutcome(t *testing.T) {
 	}
 	assertNoCompactOutcome(t, outcomeFile)
 }
+
+// TestSyncFailsWhenOutcomeDeclarationCannotBeWritten covers a skip run whose
+// GC_ORDER_OUTCOME_FILE cannot be written: the skip would otherwise be
+// recorded as success, so the run exits 1 and names the path last.
+func TestSyncFailsWhenOutcomeDeclarationCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	writeSyncCLIDatabase(t, cityPath, "app", "")
+	binDir := t.TempDir()
+	_ = writeSyncFakeDolt(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+	outcomeFile := filepath.Join(t.TempDir(), "missing", "outcome.json")
+
+	out, err := runSync(t, binDir, cityPath, []string{orders.ExecOutcomeFileEnv + "=" + outcomeFile})
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1 when the outcome declaration cannot be written, got %v:\n%s", err, out)
+	}
+	wantLast := "sync: unable to write order outcome declaration to " + outcomeFile
+	if got := lastSyncOutputLine(out); got != wantLast {
+		t.Fatalf("last output line = %q, want %q\nout:\n%s", got, wantLast, out)
+	}
+}

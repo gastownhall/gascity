@@ -464,8 +464,11 @@ write_order_outcome() {
     outcome_kind=skipped
     outcome_reason="no database was synced to a remote"
   fi
-  printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
-    "$outcome_kind" "$outcome_reason" "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"
+  if ! printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$outcome_reason" "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"; then
+    printf 'sync: unable to write order outcome declaration to %s\n' "$GC_ORDER_OUTCOME_FILE" >&2
+    return 1
+  fi
 }
 
 sync_database_sql() {
@@ -803,9 +806,10 @@ if [ "$skip_count" -gt 0 ] && [ "$skip_count" -eq "$total_count" ]; then
   echo "sync: $skip_count/$total_count database(s) skipped, nothing synced: $skipped_summary" >&2
 fi
 # The order runner reads the declaration only from a run that exits 0; a
-# failed run records order.failed from the failure summary below instead.
+# failed run records order.failed from the failure summary below instead. An
+# unwritable declaration fails the run rather than recording a skip as success.
 if [ "$exit_code" -eq 0 ]; then
-  write_order_outcome
+  write_order_outcome || exit 1
 fi
 
 # Positioned as the last line of output: an OrderFailed event built from this
