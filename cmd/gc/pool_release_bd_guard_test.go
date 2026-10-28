@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -26,7 +28,10 @@ func (e bdGuardExit) ExitCode() int { return e.code }
 // are checked against the stored row inside the write, an empty assignee
 // means unassigned, and a mismatch writes nothing and exits 13. noGuards
 // models a bd without the flags, and beforeUpdate lands a concurrent write
-// just before a guarded update is evaluated.
+// just before a guarded update is evaluated. `bd list` filters on the RAW
+// stored status, as bd does, so a row bd records deferred is absent from
+// --status=open; a label filter matches nothing, since the row carries none,
+// and the ephemeral-tier `bd query` leg is empty.
 type bdGuardLedger struct {
 	mu           sync.Mutex
 	bead         beads.Bead
@@ -47,6 +52,11 @@ func (l *bdGuardLedger) run(_, name string, args ...string) ([]byte, error) {
 		return []byte("Usage: bd " + args[0]), nil
 	case args[0] == "show":
 		return l.render()
+	case args[0] == "list":
+		return l.list(args[1:])
+	case args[0] == "query":
+		// The ephemeral-tier leg of a both-tier list: the row is durable.
+		return []byte(`[]`), nil
 	case args[0] == "update":
 		return l.update(args[1:])
 	}
@@ -54,7 +64,11 @@ func (l *bdGuardLedger) run(_, name string, args ...string) ([]byte, error) {
 }
 
 func (l *bdGuardLedger) render() ([]byte, error) {
-	return json.Marshal([]map[string]any{{
+	return json.Marshal([]map[string]any{l.renderRow()})
+}
+
+func (l *bdGuardLedger) renderRow() map[string]any {
+	row := map[string]any{
 		"id":         l.bead.ID,
 		"title":      l.bead.Title,
 		"status":     l.bead.Status,
@@ -62,7 +76,23 @@ func (l *bdGuardLedger) render() ([]byte, error) {
 		"issue_type": "task",
 		"created_at": nowForBDJSONTest(),
 		"metadata":   l.bead.Metadata,
-	}})
+	}
+	if l.bead.DeferUntil != nil {
+		row["defer_until"] = l.bead.DeferUntil.UTC().Format(time.RFC3339)
+	}
+	return row
+}
+
+func (l *bdGuardLedger) list(args []string) ([]byte, error) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--label") {
+			return []byte(`[]`), nil
+		}
+		if statuses, ok := strings.CutPrefix(arg, "--status="); ok && !slices.Contains(strings.Split(statuses, ","), l.bead.Status) {
+			return []byte(`[]`), nil
+		}
+	}
+	return json.Marshal([]map[string]any{l.renderRow()})
 }
 
 func (l *bdGuardLedger) update(args []string) ([]byte, error) {
@@ -302,4 +332,58 @@ func TestReleaseWorkBead_BdStoreGuardedRelease(t *testing.T) {
 			t.Fatalf("assignee = %q, want it left assigned", got.Assignee)
 		}
 	})
+}
+
+// sweepBdGuardLedger runs the pool orphan-release loop once over the ledger's
+// row, snapshotted through the bd-backed store as the reconciler reads it.
+func sweepBdGuardLedger(t *testing.T, store beads.Store, ledger *bdGuardLedger) []releasedPoolAssignment {
+	t.Helper()
+	wb, err := store.Get(ledger.row().ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{wb},
+		[]beads.Store{store},
+		[]string{""},
+		nil,
+		nil,
+		nil, nil,
+	)
+}
+
+// TestReleaseOrphanedPoolAssignments_BdStoreKeepsStoreDeferredRow pins the
+// release loop's non-change for issue #6207. While bd records the routed row
+// deferred, even with an elapsed defer_until, its dead assignee is kept and
+// nothing is written: a release would write status=open, silently un-defer
+// the row and strand its date, which UpdateOpts cannot clear.
+func TestReleaseOrphanedPoolAssignments_BdStoreKeepsStoreDeferredRow(t *testing.T) {
+	elapsed := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Second)
+	ledger := newBdGuardLedger("deferred", "worker-dead", nil)
+	ledger.bead.DeferUntil = &elapsed
+	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+
+	var logs bytes.Buffer
+	restore := captureLogOutput(&logs)
+	defer restore()
+
+	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 0 {
+		t.Fatalf("released = %#v while bd records the row deferred, want none", released)
+	}
+	if len(ledger.updates) != 0 {
+		t.Fatalf("bd updates = %v, want no write to a row bd records deferred", ledger.updates)
+	}
+	// The keep must come from the live raw-status re-read, not a failed one.
+	if strings.Contains(logs.String(), "validation failed") || !strings.Contains(logs.String(), "moved") {
+		t.Fatalf("log output = %q, want the row kept as moved by a successful live re-read", logs.String())
+	}
+	got := ledger.row()
+	if got.Status != "deferred" || got.Assignee != "worker-dead" || got.DeferUntil == nil || !got.DeferUntil.Equal(elapsed) {
+		t.Fatalf("row = status %q assignee %q defer_until %v, want deferred, worker-dead, %v unchanged", got.Status, got.Assignee, got.DeferUntil, elapsed)
+	}
 }
