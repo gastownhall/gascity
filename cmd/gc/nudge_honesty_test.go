@@ -116,7 +116,7 @@ func TestManagedNudgeWakeReportsASkippedWake(t *testing.T) {
 	if !strings.Contains(warnings.String(), "no managed wake was requested") {
 		t.Fatalf("warnings = %q, want the skipped wake reported", warnings.String())
 	}
-	if !strings.Contains(warnings.String(), "no session store") {
+	if !strings.Contains(warnings.String(), "no bead store") {
 		t.Fatalf("warnings = %q, want the missing precondition named", warnings.String())
 	}
 }

@@ -1657,10 +1657,7 @@ func nudgeObservationBusy(obs worker.LiveObservation) bool {
 }
 
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
-	return store != nil &&
-		strings.TrimSpace(target.cityPath) != "" &&
-		target.sessionID != "" &&
-		nudgeCityUsesManagedReconciler(target.cityPath)
+	return managedNudgeWakeSkipReason(target, store) == ""
 }
 
 // queueManagedSessionNudgeWake queues a nudge for a managed session that is
@@ -1691,7 +1688,7 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
 		return 0, err
 	}
-	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
+	outcome, err := requestManagedNudgeWake(target, store)
 	if err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
 			return 0, managedWakeRollbackError(item.ID, err, rollbackErr)
@@ -1712,37 +1709,42 @@ func managedWakeRollbackError(itemID string, wakeErr, rollbackErr error) error {
 
 // requestManagedNudgeWake asks the controller to wake a managed session that
 // owns queued nudges, never over an operator's hold (CONTRACT v5.9 D8): a
-// held row keeps its nudge queued until an operator resumes it. sessFront is
-// the session-class front door (cliSessionFrontDoor).
-func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) (session.WakeRequestOutcome, error) {
-	if !sessFront.Backed() || target.sessionID == "" {
+// held row keeps its nudge queued until an operator resumes it.
+func requestManagedNudgeWake(target nudgeTarget, store beads.Store) (session.WakeRequestOutcome, error) {
+	if reason := managedNudgeWakeSkipReason(target, store); reason != "" {
 		// The item IS enqueued; what did not happen is the wake that gets a
 		// stopped session to drain it. Returning nil silently made those two
 		// facts indistinguishable, so a nudge to a stopped session with no
-		// session-store backing looked delivered and simply sat in the queue.
+		// bead-store backing looked delivered and simply sat in the queue.
 		// Report the downgrade rather than failing the enqueue: the queued item
 		// is still valid and the controller's own patrol tick can deliver it.
 		if nudgeWarningWriter != nil {
 			fmt.Fprintf(nudgeWarningWriter, //nolint:errcheck // best-effort warning
 				"gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
-				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront))
+				target.agentKey(), reason)
 		}
 		return 0, nil
 	}
-	return sessFront.RequestWakeUnlessHeld(target.sessionID, false, time.Now().UTC())
+	return cliSessionFrontDoor(store, target.cfg, target.cityPath).RequestWakeUnlessHeld(target.sessionID, false, time.Now().UTC())
 }
 
-// managedNudgeWakeSkipReason names which precondition of the managed wake was
-// missing, so the downgrade line is actionable rather than merely present.
-func managedNudgeWakeSkipReason(target nudgeTarget, sessFront *session.Store) string {
+// managedNudgeWakeSkipReason names the first precondition the managed wake is
+// missing, "" when every one holds, so a skipped wake is reported with its
+// cause instead of plain success. canRequestManagedNudgeWake is its boolean
+// form. The reconciler probe runs last, and only when the rest hold, so a
+// store-less or session-less call never probes the city.
+func managedNudgeWakeSkipReason(target nudgeTarget, store beads.Store) string {
 	switch {
-	case !sessFront.Backed():
-		return "no session store is backing this command"
+	case store == nil:
+		return "no bead store is backing this command"
+	case strings.TrimSpace(target.cityPath) == "":
+		return "the command resolved to no city"
 	case target.sessionID == "":
 		return "the target resolved to no session bead id"
-	default:
-		return "unknown"
+	case !nudgeCityUsesManagedReconciler(target.cityPath):
+		return fmt.Sprintf("no controller or supervisor was detected for %s", target.cityPath)
 	}
+	return ""
 }
 
 // requestWorkerSiteNudgeWake is a courtesy nudge's worker-site arm (gc sling's
@@ -2108,13 +2110,20 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
 	}
 	// Session-class store for the observe/handle reads and the last-nudge stamp
-	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
+	// below; the raw store keeps flowing to managedNudgeWakeSkipReason,
 	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
 	// -> nil (identity), preserving the store-less WithProvider caller.
 	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	if err != nil {
 		return false, err
+	}
+	// wakeSkip names the first precondition a managed wake for a not-running
+	// target is missing, "" when one can be requested; probing the reconciler
+	// once here keeps the plain-enqueue branch below from re-probing it.
+	wakeSkip := ""
+	if !obs.Running {
+		wakeSkip = managedNudgeWakeSkipReason(target, store)
 	}
 	if obs.Running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
@@ -2142,7 +2151,7 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			}
 		}
 	}
-	if !obs.Running && canRequestManagedNudgeWake(target, store) {
+	if !obs.Running && wakeSkip == "" {
 		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
 		outcome, err := enqueueManagedNudgeThenWake(target, store, item)
 		if err != nil {
@@ -2176,6 +2185,13 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 	}
 	if obs.Running {
 		maybeStartNudgePoller(target)
+	} else if nudgeWarningWriter != nil {
+		// The nudge is queued but nothing will wake the session for it: name
+		// the precondition the managed wake is missing, so a sender can tell
+		// this from a queued nudge the controller will wake and drain.
+		fmt.Fprintf(nudgeWarningWriter, //nolint:errcheck // best-effort warning
+			"gc mail notify: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
+			target.agentKey(), wakeSkip)
 	}
 	return true, nil
 }
