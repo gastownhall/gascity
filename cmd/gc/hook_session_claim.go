@@ -411,6 +411,41 @@ func sessionWorkStartedVia(front sessionFrontGetter, sessionID string) (string, 
 	return info.WorkStartedRaw, nil
 }
 
+// hookSessionTriggerBead is the production ReadSessionTrigger seam: the
+// trigger bead id stamped on the session row, read through the routed front
+// door. It is the demand-divergence classifier's only source for the id —
+// the shell never carries a copy (gascity#5738) — so unlike
+// hookResolveSessionWorkDir a failed read is an ERROR, not a logged-away
+// "": an unreadable row must classify unknown, not masquerade as an
+// unstamped seat.
+func hookSessionTriggerBead(sessionID string) (string, error) {
+	return sessionTriggerBeadVia(sessionCurrentClaimFrontDoor, sessionID)
+}
+
+// sessionTriggerBeadVia is hookSessionTriggerBead through front.
+func sessionTriggerBeadVia(front sessionFrontGetter, sessionID string) (string, error) {
+	trimmed := strings.TrimSpace(sessionID)
+	if trimmed == "" {
+		return "", nil
+	}
+	sessFront, err := front()
+	if err != nil {
+		return "", err
+	}
+	// Resolved EXACTLY, like SetCurrentClaim and the work-dir seam: bd's fuzzy
+	// resolver could let a prefix collision classify against a different
+	// session's demand record.
+	resolved, err := sessFront.ResolveIDByExactID(trimmed)
+	if err != nil {
+		return "", err
+	}
+	info, err := sessFront.Get(resolved)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(info.TriggerBeadID), nil
+}
+
 // hookClaimStoreRefForDir is the production StoreRef seam: the work leg at
 // dir, as the work cells key a claim residing in it ("city" or
 // "rig:<name>"), or "" when the city or its config cannot be read or dir is

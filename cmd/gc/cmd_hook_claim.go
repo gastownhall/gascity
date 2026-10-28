@@ -283,6 +283,14 @@ type hookClaimOps struct {
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
 	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ReadSessionTrigger returns the trigger bead id stamped on the SESSION row
+	// named by sessionID — the controller-side demand record this seat was
+	// minted from (beadmeta.TriggerBeadIDMetadataKey) — or "" when the row
+	// carries no stamp. It is the diagnostics-only source the demand/claim
+	// divergence classifier classifies against: the id never reaches a session
+	// shell (gascity#5738), so the live row is the only readable copy, and a
+	// failed read is an honest error, not a silent empty stamp.
+	ReadSessionTrigger hookReadSessionTriggerFunc
 	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
 	// dependencies rather than bd's denormalized is_blocked projection (which
 	// production reads do not carry). Diagnostics-only: the demand/claim
@@ -388,10 +396,13 @@ type (
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
-	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc     func(sessionID, beadID string) error
-	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
-	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	// hookReadSessionTriggerFunc returns the trigger bead id stamped on the
+	// session row named by sessionID, or "" when the row carries no stamp.
+	hookReadSessionTriggerFunc func(sessionID string) (string, error)
+	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc  func(sessionID, beadID string) error
+	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
 	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
 	// the lease and, if so, the previous owner.
@@ -710,6 +721,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkStarted == nil {
 		ops.ReadWorkStarted = hookSessionWorkStarted
+	}
+	if ops.ReadSessionTrigger == nil {
+		ops.ReadSessionTrigger = hookSessionTriggerBead
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir

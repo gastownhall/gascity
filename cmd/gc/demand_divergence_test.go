@@ -36,12 +36,23 @@ func divergenceOptions(env ...string) hookClaimOptions {
 }
 
 // demandSpawnEnv is the env a seat the controller minted from counted demand
-// carries: the presence-only origin marker plus the trigger id the diagnostics
-// classify against.
+// carries: the presence-only origin marker. The trigger id the diagnostics
+// classify against lives on the session row (gc.trigger_bead_id), never in
+// the shell (gascity#5738).
 const demandSpawnTriggerID = "wb-1"
 
 func demandSpawnEnv() []string {
-	return []string{"GC_SPAWN_ORIGIN=demand", "GC_TRIGGER_WORK_BEAD_ID=" + demandSpawnTriggerID}
+	return []string{"GC_SPAWN_ORIGIN=demand"}
+}
+
+// withSessionTrigger sets the ReadSessionTrigger seam on ops: the trigger id
+// the session row carries (or the read failure a flaky store produces). The
+// classifier reads the live row through this seam, never the env.
+func withSessionTrigger(ops hookClaimOps, id string, err error) hookClaimOps {
+	ops.ReadSessionTrigger = func(string) (string, error) {
+		return id, err
+	}
+	return ops
 }
 
 // captureDivergence swaps the emitter seam and records what it was called with,
@@ -224,7 +235,7 @@ func TestSiblingRaceLoserClassifiesBenign(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(winner, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, withSessionTrigger(demandDivergenceOpsForBead(winner), demandSpawnTriggerID, nil), &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("events = %d, want exactly 1", len(rec.Events))
@@ -259,7 +270,7 @@ func TestDivergenceCaseIsReportedToTheWorkerStderr(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, withSessionTrigger(demandDivergenceOpsForBead(stillThere), demandSpawnTriggerID, nil), &stderr)
 
 	if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimDivergence {
 		t.Fatalf("events = %+v, want one divergence-classified event", rec.Events)
@@ -286,7 +297,7 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
 	}
 
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, withSessionTrigger(demandDivergenceOpsForBead(stillThere), demandSpawnTriggerID, nil), &stderr)
 
 	if len(rec.Events) != 0 {
 		t.Fatalf("events = %+v, want none for a seat not spawned from demand", rec.Events)
@@ -300,5 +311,85 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 func TestDemandClaimDivergenceStaysOffTheExportAllowlist(t *testing.T) {
 	if eventexport.IsAllowed(events.SessionDemandClaimDivergence) {
 		t.Fatal("session.demand_claim_divergence is on the redacted-export allowlist; that is an egress-surface change and needs its own review")
+	}
+}
+
+// TestDemandDivergenceClassifiesTheLiveSessionStamp pins where the trigger id
+// comes from after gascity#5738: the SESSION ROW, read through the
+// ReadSessionTrigger seam, never the shell env. A demand seat's shell carries
+// no trigger id at all, and an old shell can still carry a stale
+// GC_TRIGGER_WORK_BEAD_ID frozen at exec — neither may decide the
+// classification, and neither may rename the row the event reports.
+func TestDemandDivergenceClassifiesTheLiveSessionStamp(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"no trigger id in the shell": nil,
+		"stale id-shaped leftover":   {"GC_TRIGGER_WORK_BEAD_ID=wb-env"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			opts := divergenceOptions(append(demandSpawnEnv(), extra...)...)
+			winner := beads.Bead{
+				ID: "wb-1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+			}
+
+			var stderr bytes.Buffer
+			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts,
+				withSessionTrigger(demandDivergenceOpsForBead(winner), "wb-1", nil), &stderr)
+
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %d, want exactly 1", len(rec.Events))
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.TriggerBeadID != "wb-1" {
+				t.Errorf("payload trigger = %q, want the live stamp wb-1, never an env copy", payload.TriggerBeadID)
+			}
+			if payload.Classification != events.DemandClaimBenign {
+				t.Errorf("classification = %q, want benign: a sibling's claim is correct pull", payload.Classification)
+			}
+		})
+	}
+}
+
+// TestDemandDivergenceReadFailureClassifiesUnknown pins the failure arm of the
+// row read: a store that cannot serve the session row must classify unknown
+// with an empty trigger rather than inventing a divergence — and the drain it
+// reports on is untouched, so its output and exit code are the ones already
+// written.
+func TestDemandDivergenceReadFailureClassifiesUnknown(t *testing.T) {
+	rec := events.NewFake()
+	prev := demandDivergenceRecorder
+	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+	t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+	opts := divergenceOptions(demandSpawnEnv()...)
+	stillThere := beads.Bead{
+		ID: "wb-1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+
+	var stderr bytes.Buffer
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts,
+		withSessionTrigger(demandDivergenceOpsForBead(stillThere), "", errors.New("session row read failed")), &stderr)
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %d, want the event still recorded with an empty trigger", len(rec.Events))
+	}
+	var payload events.SessionDemandClaimDivergencePayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.TriggerBeadID != "" || payload.Classification != events.DemandClaimUnknown {
+		t.Fatalf("payload = %+v, want an empty trigger classified unknown", payload)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want silence: an unknown classification is not operator-facing", stderr.String())
 	}
 }
