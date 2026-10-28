@@ -3333,6 +3333,58 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 	}
 }
 
+// TestReconcile_UnknownStateRowWithPendingRequestsStaysActionFree pins the
+// action-free half of the #1497 contract: an open row in a state the
+// controller skips is only skipped and signaled, even when it carries an
+// explicit wake and a requested fresh restart — no start, no state or
+// status change, the request flags untouched — and the only writes are the
+// unknown-state signal's throttle markers. Escalation is a notification,
+// not a recovery action: `gc session close` is what releases the row.
+func TestReconcile_UnknownStateRowWithPendingRequestsStaysActionFree(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":             "future-state",
+		"wake_request":      "explicit",
+		"restart_requested": "true",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Errorf("expected 0 woken for an unknown-state row carrying pending requests, got %d", woken)
+	}
+	if env.sp.IsRunning("worker") {
+		t.Error("the reconciler started a session whose state it skips")
+	}
+
+	final, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if final.Status != "open" {
+		t.Errorf("status = %q, want open (no close of a skipped row)", final.Status)
+	}
+	for key, want := range map[string]string{
+		"state":             "future-state",
+		"wake_request":      "explicit",
+		"restart_requested": "true",
+	} {
+		if got := final.Metadata[key]; got != want {
+			t.Errorf("%s = %q, want %q (a skipped row is not acted on)", key, got, want)
+		}
+	}
+	// The only writes are the unknown-state signal's throttle markers.
+	if got := final.Metadata["unknown_state_first_seen"]; got == "" {
+		t.Error("unknown_state_first_seen not stamped; the skip's signal did not fire")
+	}
+	if got := final.Metadata["unknown_state_value"]; got != "future-state" {
+		t.Errorf("unknown_state_value = %q, want future-state", got)
+	}
+}
+
 // TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted verifies that
 // state=failed-create cannot reach the provider start path even if a stale
 // desired-state entry points at that session_name.
