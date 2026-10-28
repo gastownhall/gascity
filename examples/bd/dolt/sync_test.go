@@ -2032,3 +2032,29 @@ func TestSyncFailedRunWritesNoOutcomeDeclaration(t *testing.T) {
 		t.Fatalf("last line = %q, want %q\nout:\n%s", last, wantLast, out)
 	}
 }
+
+// TestSyncUnwritableOutcomeFileFailsRun covers the write-failure path: a
+// run with a skipped database whose declaration cannot be written must fail
+// loudly instead of exiting 0 with the skip unrecorded — the exact
+// silent-success class #8317 reports.
+func TestSyncUnwritableOutcomeFileFailsRun(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	writeSyncCLIDatabase(t, dataDir, "app", "")
+	binDir := t.TempDir()
+	_ = writeSyncFakeDolt(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+	// A path under a missing directory: the write at the end of the run fails.
+	outcomePath := filepath.Join(t.TempDir(), "missing-dir", "outcome.json")
+
+	out, err := runSync(t, binDir, cityPath, []string{orders.ExecOutcomeFileEnv + "=" + outcomePath, "GC_DOLT_REMOTE_APP="})
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("want exit 1 when the outcome declaration cannot be written, got err=%v\nout:\n%s", err, out)
+	}
+	wantLast := "sync: unable to write order outcome declaration to " + outcomePath
+	if last := lastSyncOutputLine(out); last != wantLast {
+		t.Fatalf("last line = %q, want %q\nout:\n%s", last, wantLast, out)
+	}
+}

@@ -726,8 +726,11 @@ write_order_outcome() {
     outcome_kind=skipped
     outcome_reason="no database was synced to a remote"
   fi
-  printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
-    "$outcome_kind" "$outcome_reason" "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"
+  if ! printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$outcome_reason" "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"; then
+    printf 'sync: unable to write order outcome declaration to %s\n' "$GC_ORDER_OUTCOME_FILE" >&2
+    return 1
+  fi
 }
 
 # Optional GC phase: purge closed ephemerals while server is still up.
@@ -809,7 +812,7 @@ fi
 # failed run already records order.failed with its stderr tail — so declare
 # only when the run is about to exit 0.
 if [ "$exit_code" -eq 0 ]; then
-  write_order_outcome
+  write_order_outcome || exit 1
 fi
 
 # Positioned as the last line of output: an OrderFailed event built from this
