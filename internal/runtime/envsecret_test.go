@@ -21,6 +21,7 @@ func TestArgvSecretEnvValue(t *testing.T) {
 		{"SOME_BRAND_NEW_SECRET", "x", true, "an unknown name defaults to secret — that is the point of an allow list"},
 		{"LANG", "en_US.UTF-8", false, ""},
 		{"GC_RIG", "kernel", false, ""},
+		{"GC_CITY_NAME", "maintainer-city", false, "an identity, by default the basename of the argv-safe GC_CITY_PATH"},
 		{"GT_ROLE", "rig/crew/name", false, ""},
 		{"ANTHROPIC_AUTH_TOKEN", "", false, "an empty value means 'withhold this var' and reveals nothing"},
 	}

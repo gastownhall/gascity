@@ -69,8 +69,7 @@ description = "Send the current agent's reply to a voice conversation"
 
 `run.sh` turns the agent's reply into an outbound publish. It runs inside the
 agent's session, so `GC_SESSION_ID` identifies the replying agent. `gc` sets
-`GC_CITY_NAME` — the city's effective runtime identity — for agent sessions,
-pack commands, exec orders and services alike, and `GC_SUPERVISOR_URL` when the supervisor
+`GC_CITY_NAME` for pack commands, and `GC_SUPERVISOR_URL` when the supervisor
 API is plain `http` on loopback. It needs `curl` and `jq`:
 
 ```sh
