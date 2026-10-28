@@ -4611,23 +4611,18 @@ func resolveTemplateForSessionBeadInfo(
 	if err != nil {
 		return tp, err
 	}
-	if triggerID := strings.TrimSpace(info.TriggerBeadID); triggerID != "" {
+	if strings.TrimSpace(info.TriggerBeadID) != "" {
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
 		}
 		// A POOL-LEVEL marker, presence only: this seat exists because the
-		// controller counted demand. Nothing on the claim path may read the
-		// trigger id to decide what to claim — the pool is pull, and the
-		// controller does not choose the bead — but a seat that drains no_work
-		// is worth telling apart from one started for any other reason, which is
-		// what the divergence diagnostics key on (demand_divergence.go).
+		// controller counted demand. The trigger id itself is controller-side
+		// demand bookkeeping that stays on the session bead (gc.trigger_bead_id)
+		// and never reaches the shell — the pool is pull, the controller does
+		// not choose the bead, and an id-shaped env key is one ${…:-} away
+		// from closing a foreign bead (gascity#5738). The divergence
+		// diagnostics read the durable stamp, not the env (demand_divergence.go).
 		tp.Env["GC_SPAWN_ORIGIN"] = "demand"
-		tp.Env["GC_TRIGGER_BEAD_ID"] = triggerID
-		tp.Env["GC_TRIGGER_WORK_BEAD_ID"] = triggerID
-		if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-			tp.Env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-			tp.Env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-		}
 		if pack := strings.TrimSpace(info.Pack); pack != "" {
 			tp.Env["GC_PACKER_PACK"] = pack
 		}

@@ -156,7 +156,8 @@ func TestTemplateResolverMatchesLegacyOverlay(t *testing.T) {
 // named adjustments, and a resolver that rebinds the trigger: with a live
 // trigger the resolver's params equal legacy's; with a parked one, legacy
 // clears the stamp by a store write, while the resolver writes nothing and
-// differs from legacy only in that stamp's env.
+// differs from legacy only in the presence marker derived from that stamp.
+// Neither may export a trigger id into the shell (gascity#5738).
 func TestTemplateResolverNamedMatchesLegacyWithoutRebind(t *testing.T) {
 	for _, parked := range []bool{false, true} {
 		t.Run(fmt.Sprintf("parked=%v", parked), func(t *testing.T) {
@@ -187,13 +188,25 @@ func TestTemplateResolverNamedMatchesLegacyWithoutRebind(t *testing.T) {
 			if cleared := lc.info(t, info.ID).TriggerBeadID == ""; cleared != parked {
 				t.Fatalf("legacy cleared the trigger = %v, want %v", cleared, parked)
 			}
+			for _, r := range []struct {
+				name string
+				tp   TemplateParams
+			}{{"resolver", got.TP}, {"legacy", want.TP}} {
+				for _, k := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+					if _, ok := r.tp.Env[k]; ok {
+						t.Fatalf("%s named-template env exports %s; a trigger id never reaches a session shell (gascity#5738)", r.name, k)
+					}
+				}
+				if r.name == "legacy" {
+					if origin, ok := r.tp.Env["GC_SPAWN_ORIGIN"]; (ok && origin == "demand") != !parked {
+						t.Fatalf("legacy GC_SPAWN_ORIGIN = %q (parked=%v), want demand exactly when the stamp survives", origin, parked)
+					}
+				}
+			}
 			if parked {
-				if got.TP.Env["GC_TRIGGER_BEAD_ID"] != info.TriggerBeadID || want.TP.Env["GC_TRIGGER_BEAD_ID"] != "" {
-					t.Fatalf("trigger env: resolver %q, legacy %q; want the row's stamp and none", got.TP.Env["GC_TRIGGER_BEAD_ID"], want.TP.Env["GC_TRIGGER_BEAD_ID"])
-				}
-				for _, k := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID"} {
-					delete(got.TP.Env, k)
-				}
+				// The resolver does not clear the parked stamp, so its env still
+				// carries the presence marker legacy's clear removed.
+				delete(got.TP.Env, "GC_SPAWN_ORIGIN")
 			}
 			if !reflect.DeepEqual(got.TP, want.TP) {
 				t.Fatalf("resolver = %+v, want legacy's %+v", got.TP, want.TP)
