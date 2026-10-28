@@ -94,3 +94,45 @@ func TestEffectiveWorkQueryOpenMailToEveryIdentityDoesNotStarveRoutedWisp(t *tes
 		})
 	}
 }
+
+// TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp pins the
+// assigned-ready tier: an older mail wisp must not take the tier's single row
+// ahead of a real assigned task. The subtests spell the message type every way
+// the hook's hookClaimCandidateIsMessage refuses it, so the query never serves
+// a row the hook is certain to drop.
+func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	env := mailStarvationSessionEnv()
+	task := `{"id":"gcg-assigned-task","status":"open","issue_type":"task","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{}}`
+
+	for _, tc := range []struct {
+		name     string
+		typeJSON string
+	}{
+		{name: "issue_type", typeJSON: `"issue_type":"message"`},
+		{name: "mixed case", typeJSON: `"issue_type":"Message"`},
+		{name: "padded", typeJSON: `"issue_type":" message "`},
+		{name: "legacy type field", typeJSON: `"type":"message"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mail := `{"id":"gcg-mail-1","status":"open",` + tc.typeJSON + `,"assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+				fakeBdEphemeralSnapshots(mail+","+task, ""))
+			if strings.Contains(out, "gcg-mail-1") || !strings.Contains(out, "gcg-assigned-task") {
+				t.Fatalf("older mail wisp displaced the assigned task: work query served %q, want gcg-assigned-task", out)
+			}
+		})
+	}
+
+	// A non-string issue_type must not make the shared selector error out: jq
+	// errors are discarded, so an erroring filter reads as an empty tier.
+	t.Run("non-string issue_type", func(t *testing.T) {
+		odd := `{"id":"gcg-odd-type","status":"open","issue_type":5,"assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+			fakeBdEphemeralSnapshots(odd+","+task, ""))
+		if !strings.Contains(out, "gcg-odd-type") {
+			t.Fatalf("a non-string issue_type emptied the assigned tier: work query served %q, want gcg-odd-type", out)
+		}
+	})
+}
