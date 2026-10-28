@@ -964,3 +964,80 @@ func TestQuestionDialogIgnoresQuotedFramesAndComposerDrafts(t *testing.T) {
 		})
 	}
 }
+
+// No dialog gc handles today is a question. Every approval capture under
+// testdata must stay an approval — the question detector runs first on the
+// pane, so a false question would swallow respond and the approval
+// dismissal — and the mid-session dialogs the nudge path dismisses keep
+// their own footers: "Enter to confirm", "0: Dismiss", "Upgrade", the Codex
+// model switch's confirm line. The session-limit chooser must still be
+// dismissed (1, Enter) and the nudge delivered past it.
+func TestApprovalAndMidSessionDialogsAreNotQuestions(t *testing.T) {
+	for _, dir := range []string{"claude-approval", "codex-approval"} {
+		entries, err := os.ReadDir(filepath.Join("testdata", dir))
+		if err != nil {
+			t.Fatalf("reading testdata/%s: %v", dir, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("testdata/%s holds no captures; the parity below would pass vacuously", dir)
+		}
+		for _, entry := range entries {
+			t.Run(filepath.Join(dir, entry.Name()), func(t *testing.T) {
+				data, err := os.ReadFile(filepath.Join("testdata", dir, entry.Name()))
+				if err != nil {
+					t.Fatalf("reading fixture: %v", err)
+				}
+				lines := strings.Split(strings.ReplaceAll(string(data), "\r", ""), "\n")
+				if q := parseQuestionDialog(lines); q != nil {
+					t.Fatalf("parseQuestionDialog = %+v; an approval capture must not read as a question", q)
+				}
+			})
+		}
+	}
+
+	// spendLimitModalPane is a reconstruction of Claude's spend-limit modal
+	// from its known footer: it shares the resume dialog's "Enter to confirm".
+	spendLimitModalPane := "You've hit your spend limit\n" +
+		"❯ 1. Pause the fleet\n" +
+		"  2. Raise the limit\n" +
+		"Enter to confirm · Esc to cancel"
+	modelSwitchModal := "Approaching rate limits\n" +
+		"Switch to gpt-5.4-mini for lower credit usage?\n" +
+		"  2. Keep current model\n" +
+		"Press enter to confirm or esc to go back"
+	for name, pane := range map[string]string{
+		"claude-resume dialog":     resumeDialogPane,
+		"session feedback dialog":  feedbackSurveySessionFixture,
+		"session-limit chooser":    sessionLimitChooserPane,
+		"Codex model-switch modal": modelSwitchModal,
+		"spend-limit modal":        spendLimitModalPane,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if q := parseQuestionDialog(strings.Split(pane, "\n")); q != nil {
+				t.Fatalf("parseQuestionDialog = %+v; a dialog the nudge path dismisses must not read as a question", q)
+			}
+		})
+	}
+}
+
+// The question guard sits before the mid-session dismissers and must not
+// swallow them: a nudge reaching the session-limit chooser still dismisses it
+// with its own keys (1, Enter) and delivers.
+func TestNudgeSessionStillDismissesSessionLimitChooserAndDelivers(t *testing.T) {
+	ex := &stagedPaneExecutor{
+		screens: [2]string{sessionLimitChooserPane, "❯ \n"},
+		inMode:  "0",
+		trigger: func(args []string) bool { return sendsKeys(args) && slices.Contains(args, "1") },
+	}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	err := tm.NudgeSession("auq", "hello")
+	if err != nil {
+		t.Fatalf("NudgeSession = %v; the chooser is dismissed, not refused", err)
+	}
+	if callIndexWithTokens(ex.calls, "send-keys", "1") < 0 || callIndexWithTokens(ex.calls, "send-keys", "Enter") < 0 {
+		t.Fatalf("the chooser was not dismissed with 1, Enter; calls=%v", ex.calls)
+	}
+	if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") < 0 {
+		t.Fatal("the message was never pasted; the nudge was not delivered")
+	}
+}
