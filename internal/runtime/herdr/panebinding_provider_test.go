@@ -60,7 +60,13 @@ agent_get)
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
-  printf '%s' '{"result":{"agents":[]}}' ;;
+  # $STATE/agents.json lets a test serve a literal herdr-shaped registry;
+  # absent it, the registry is empty.
+  if [ -e "$STATE/agents.json" ]; then
+    cat "$STATE/agents.json"
+  else
+    printf '%s' '{"result":{"agents":[]}}'
+  fi ;;
 agent_start)
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
@@ -494,6 +500,45 @@ func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
 		if !want[n] {
 			t.Fatalf("ListRunning = %v; unexpected %q", got, n)
 		}
+	}
+}
+
+// A registry entry with no registered name is a pane herdr detected but
+// nobody named: it is not a session, so ListRunning must never surface it —
+// not even under the empty prefix, which every name satisfies. Named
+// foreign/manual agents still list under their registered names.
+func TestListRunningOmitsUnnamedRegistryEntries(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	agents := `{"result":{"agents":[` +
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"manual-1","pane_id":"w4:p1","agent_status":"idle"}]}}`
+	if err := os.WriteFile(filepath.Join(state, "agents.json"), []byte(agents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	want := map[string]bool{"alpha": true, "beta": true, "manual-1": true}
+	if len(got) != len(want) {
+		t.Fatalf("ListRunning = %v; want exactly alpha, beta, manual-1", got)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Fatalf("ListRunning = %v; unexpected %q", got, n)
+		}
+	}
+
+	if got, err := p.ListRunning("op"); err != nil || len(got) != 0 {
+		t.Fatalf("ListRunning(\"op\") = %v, %v; want empty: no phantom kind-named session", got, err)
 	}
 }
 
