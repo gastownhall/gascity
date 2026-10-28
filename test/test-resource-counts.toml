@@ -965,7 +965,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/order_dispatch_test.go"
 resource = "environment"
-calls = 6
+calls = 7
 
 [[count]]
 path = "cmd/gc/order_dispatch_test.go"
@@ -980,7 +980,7 @@ calls = 6
 [[count]]
 path = "cmd/gc/order_dispatch_test.go"
 resource = "subprocess"
-calls = 1
+calls = 2
 
 [[count]]
 path = "cmd/gc/order_dynamic_integration_test.go"
@@ -2661,7 +2661,7 @@ calls = 2
 [[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
 resource = "fixed_sleep"
-calls = 7
+calls = 8
 
 [[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
