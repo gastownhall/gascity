@@ -974,3 +974,82 @@ func startSessionResetTestController(t *testing.T, cityDir string) {
 		os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
 	})
 }
+
+// TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting: a reset of a row
+// in a state the controller skips is refused before any write. It names the
+// raw state and the close that releases the row, queues no fresh restart,
+// rotates nothing, records no op, and sends the controller nothing past the
+// liveness probe: no circuit-breaker reset for the named row and no keyed
+// reconcile poke. Kills a reset that queues a restart the controller never
+// applies.
+func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, map[string]string{"state": "future-state", "session_key": "original-key"})
+
+	sockPath := controllerSocketPath(c.dir)
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	t.Cleanup(func() { os.Remove(sockPath) }) //nolint:errcheck
+	commands := make(chan string, 16)
+	go func() {
+		defer close(commands)
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 512)
+			n, _ := conn.Read(buf)
+			cmd := string(buf[:n])
+			commands <- cmd
+			reply := "ok\n"
+			switch {
+			case cmd == "ping\n":
+				reply = "123\n"
+			case strings.HasPrefix(cmd, "session-circuit-reset:"):
+				reply = `{"outcome":"ok"}` + "\n"
+			}
+			conn.Write([]byte(reply)) //nolint:errcheck
+			conn.Close()              //nolint:errcheck
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionReset([]string{c.bead.ID}, "", &stdout, &stderr, false)
+	lis.Close() //nolint:errcheck
+	if code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"gc session reset: session " + c.bead.ID + " cannot be reset: ",
+		`"future-state"`,
+		"gc session close " + c.bead.ID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	var got []string
+	for cmd := range commands {
+		got = append(got, cmd)
+	}
+	if len(got) != 2 || got[0] != "ping\n" || got[1] != "poke\n" {
+		t.Fatalf("controller commands = %q, want only the ping and poke liveness probe", got)
+	}
+	if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
+		t.Fatalf("op rows = %+v, want none", ops)
+	}
+	row, err := c.reload(t).Get(c.bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", c.bead.ID, err)
+	}
+	for key, want := range map[string]string{
+		"state": "future-state", "restart_requested": "", "continuation_reset_pending": "", "session_key": "original-key",
+	} {
+		if row.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, row.Metadata[key], want)
+		}
+	}
+}
