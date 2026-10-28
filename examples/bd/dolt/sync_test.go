@@ -1947,3 +1947,58 @@ func TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkip(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncDeclaresNothingWhenNoDatabaseSkipsForRemote covers runs with no
+// remote-policy skip: every database syncs, only .no-sync opt-outs exist, or
+// the data dir holds no database. None of them declares an outcome or prints
+// the skip summary.
+func TestSyncDeclaresNothingWhenNoDatabaseSkipsForRemote(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, cityPath string)
+	}{
+		{
+			name: "every database syncs",
+			setup: func(t *testing.T, cityPath string) {
+				writeSyncCLIDatabase(t, cityPath, "app", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+			},
+		},
+		{
+			name: "only no-sync databases",
+			setup: func(t *testing.T, cityPath string) {
+				writeSyncCLIDatabase(t, cityPath, "app", "")
+				if err := os.WriteFile(filepath.Join(cityPath, "data", "app", ".no-sync"), []byte("skip\n"), 0o644); err != nil {
+					t.Fatalf("write no-sync marker: %v", err)
+				}
+			},
+		},
+		{
+			name: "no databases",
+			setup: func(t *testing.T, cityPath string) {
+				if err := os.MkdirAll(filepath.Join(cityPath, "data"), 0o755); err != nil {
+					t.Fatalf("mkdir data dir: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cityPath := t.TempDir()
+			tc.setup(t, cityPath)
+			binDir := t.TempDir()
+			_ = writeSyncFakeDolt(t, binDir)
+			_ = writeSyncFakeBeadsBD(t, cityPath)
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_APP="})
+			if err != nil {
+				t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
+			}
+			if strings.Contains(out, "database(s) skipped") {
+				t.Fatalf("a run with no remote-policy skip must not print the skip summary:\n%s", out)
+			}
+			assertNoCompactOutcome(t, outcomeFile)
+		})
+	}
+}
