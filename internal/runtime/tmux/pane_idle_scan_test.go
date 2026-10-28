@@ -39,3 +39,79 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 		})
 	}
 }
+
+// An open Claude Code AskUserQuestion dialog renders its focused option as
+// "❯ 1. …", which matches the ready-prompt prefix. It is not an idle boundary:
+// a nudge pasted now and followed by Enter selects that option instead of
+// reaching the composer (#8150).
+func TestPaneShowsIdlePromptAskUserQuestionDialogIsNotIdle(t *testing.T) {
+	lines := []string{
+		"⏺ I have a few questions before I plan this.",
+		"",
+		"────────────────────────────────────────────────────────────",
+		" ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →",
+		"",
+		"Which scope should the change cover?",
+		"",
+		"❯ 1. Small",
+		"     Only the bug fix",
+		"  2. Medium",
+		"     Fix plus regression tests",
+		"  3. Large",
+		"     Fix, tests and a refactor",
+		"  4. Type something.",
+		"────────────────────────────────────────────────────────────",
+		"  5. Chat about this",
+		"",
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+	}
+	if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+		t.Errorf("PaneShowsIdlePrompt reported an open AskUserQuestion dialog as idle; a nudge would answer it")
+	}
+	if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); err == nil && idle {
+		t.Errorf("ClassifyIdlePane(AskUserQuestion dialog) = (true, nil), want not idle")
+	}
+}
+
+// A question page still owns the pane when its marks the older detector keyed
+// on are gone: the answered-question page's chips read ☒ instead of ☐, focus
+// in "Type something." draws no ❯ cursor, and a narrow pane wraps the select
+// footer. None of those panes is an idle boundary — Enter on each answers the
+// dialog (#8150).
+func TestPaneShowsIdlePromptQuestionPagesWithoutCursorOrHeaderChips(t *testing.T) {
+	// questionPaneFocusInTypeSomething is a reconstruction: the 2.1.304
+	// multi-question page with focus in the free-text row, which draws no ❯.
+	questionPaneFocusInTypeSomething := []string{
+		" ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →",
+		"",
+		"Which scope should the change cover?",
+		"",
+		"  1. Small",
+		"     Only the bug fix",
+		"  2. Medium",
+		"     Fix plus regression tests",
+		"  3. Large",
+		"     Fix, tests and a refactor",
+		"  4. Type something.",
+		"     fix it fast",
+		"────────────────────────────────────────────────────────────",
+		"  5. Chat about this",
+		"",
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+	}
+	panes := map[string][]string{
+		"focus in Type something, no cursor": questionPaneFocusInTypeSomething,
+		"page after one Enter, ☒ chips":      readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"),
+		"wrapped select footer":              readQuestionFixture(t, "question-multi-wrapped-footer-40x18.txt"),
+	}
+	for name, lines := range panes {
+		t.Run(name, func(t *testing.T) {
+			if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+				t.Errorf("PaneShowsIdlePrompt = true; a nudge's Enter would answer this dialog")
+			}
+			if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); err == nil && idle {
+				t.Errorf("ClassifyIdlePane = (true, nil), want not idle")
+			}
+		})
+	}
+}

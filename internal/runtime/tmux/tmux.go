@@ -5397,7 +5397,7 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 	// An open AskUserQuestion dialog is no idle boundary either: its focused
 	// row ("❯ 1. …") matches the ready prefix, and the nudge's Enter would
 	// select that option.
-	if parseAskUserQuestion(lines) != nil {
+	if parseQuestionDialog(lines) != nil {
 		return false
 	}
 

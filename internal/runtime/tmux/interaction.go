@@ -877,7 +877,7 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	if err != nil {
 		return paneDialog{}, err
 	}
-	if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+	if q := parseQuestionDialog(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
 		return paneDialog{question: q}, nil
 	}
 	approval := parseApprovalPrompt(paneText)
