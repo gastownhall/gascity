@@ -12,9 +12,12 @@ import (
 var ErrBeadEventIdentityMismatch = errors.New("bead event subject does not match payload bead id")
 
 // EncodeBeadEventPayload marshals a canonical raw bead-event snapshot. A bd
-// status-based indefinite deferral is restored only for its normalized open
-// state; explicit Gas City transitions such as close or claim must win over a
-// stale internal marker.
+// status-based deferral, dated or not, is restored only for its normalized
+// open state; explicit Gas City transitions such as close or claim must win
+// over a stale internal marker. Dated deferrals carry status="deferred" here
+// too; the direct .gc/events.jsonl readers (cmd/gc's events, hook-claim and
+// reliability-analysis commands, and internal/api/dashboardbff) hold no
+// status-specific logic, so that widening changes none of their answers.
 func EncodeBeadEventPayload(b Bead) (json.RawMessage, error) {
 	if b.Status == "open" && b.IndefinitelyDeferred {
 		b.Status = "deferred"
@@ -75,7 +78,7 @@ func decodeRawBead(data json.RawMessage) (Bead, bool) {
 	// Only bd's deferred status needs re-derivation here; leaving every other
 	// raw status untouched keeps the ga-3mv5d3 collapse off the event path.
 	if b.Status == "deferred" {
-		b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status, b.DeferUntil)
+		b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status)
 	}
 	if b.Type == "" {
 		var compat struct {

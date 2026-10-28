@@ -239,27 +239,38 @@ func TestNativeDoltStoreConvertsDefaultPriorityAsUnset(t *testing.T) {
 }
 
 func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
 	tests := []struct {
+		name               string
 		upstream           beadslib.Status
+		deferUntil         *time.Time
 		want               string
 		wantIndefiniteHold bool
 	}{
-		{beadslib.StatusOpen, "open", false},
-		{beadslib.StatusInProgress, "in_progress", false},
-		{beadslib.StatusClosed, "closed", false},
-		{beadslib.Status("blocked"), "open", false},
-		{beadslib.Status("deferred"), "open", true},
-		{beadslib.Status("pinned"), "open", false},
-		{beadslib.Status("hooked"), "open", false},
+		{"open", beadslib.StatusOpen, nil, "open", false},
+		{"in_progress", beadslib.StatusInProgress, nil, "in_progress", false},
+		{"closed", beadslib.StatusClosed, nil, "closed", false},
+		{"blocked", beadslib.Status("blocked"), nil, "open", false},
+		{"deferred", beadslib.Status("deferred"), nil, "open", true},
+		// bd's deferred status holds whatever its date says: only the store's
+		// own wake (status back to open) lifts it, as bd ready requires.
+		{"deferred_past_date", beadslib.Status("deferred"), &past, "open", true},
+		{"deferred_future_date", beadslib.Status("deferred"), &future, "open", true},
+		{"open_past_date", beadslib.StatusOpen, &past, "open", false},
+		{"pinned", beadslib.Status("pinned"), nil, "open", false},
+		{"hooked", beadslib.Status("hooked"), nil, "open", false},
 	}
 
 	for _, tt := range tests {
-		t.Run(string(tt.upstream), func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			bead, err := beadFromNativeIssue(&beadslib.Issue{
-				ID:        "gc-status",
-				Title:     "status mapping",
-				Status:    tt.upstream,
-				IssueType: beadslib.TypeTask,
+				ID:         "gc-status",
+				Title:      "status mapping",
+				Status:     tt.upstream,
+				IssueType:  beadslib.TypeTask,
+				DeferUntil: tt.deferUntil,
 			})
 			if err != nil {
 				t.Fatalf("beadFromNativeIssue: %v", err)
@@ -272,6 +283,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			}
 			if bead.SourceStatus != string(tt.upstream) {
 				t.Fatalf("SourceStatus = %q, want bd's %q", bead.SourceStatus, tt.upstream)
+			}
+			if got, want := IsDeferred(bead, now), tt.wantIndefiniteHold || tt.deferUntil == &future; got != want {
+				t.Fatalf("IsDeferred = %v, want %v", got, want)
 			}
 		})
 	}

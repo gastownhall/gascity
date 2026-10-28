@@ -1193,7 +1193,7 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status)
 	return Bead{
 		ID:                   b.ID,
 		Title:                b.Title,
@@ -1407,11 +1407,14 @@ func mapBdStatus(s string) string {
 	}
 }
 
-// normalizedBdReadState preserves bd's status-based indefinite deferral after
-// richer bd statuses collapse to Gas City's three-state model. A time-bound
-// deferral remains governed by DeferUntil so it can become ready after expiry.
-func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
-	return mapBdStatus(status), status == "deferred" && deferUntil == nil
+// normalizedBdReadState preserves bd's status-based deferral after richer bd
+// statuses collapse to Gas City's three-state model. bd's deferred status is a
+// deferral in its own right, dated or not: bd ready hides the row while the
+// store records it, whatever its defer_until says. The date only tells bd's
+// sweep when it may wake the row (status back to open, date cleared), and gc
+// honors that wake once the store records it.
+func normalizedBdReadState(status string) (string, bool) {
+	return mapBdStatus(status), status == "deferred"
 }
 
 type optionalBool struct {

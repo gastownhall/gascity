@@ -2910,27 +2910,40 @@ func TestBdStoreReadyReturnsParseErrorOnMalformedJSON(t *testing.T) {
 // --- Status mapping ---
 
 func TestBdStoreStatusMapping(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	tests := []struct {
+		name               string
 		bdStatus           string
+		deferUntil         string
 		wantStatus         string
 		wantIndefiniteHold bool
 	}{
-		{"open", "open", false},
-		{"in_progress", "in_progress", false},
-		{"blocked", "open", false},
-		{"deferred", "open", true},
-		{"review", "open", false},
-		{"testing", "open", false},
-		{"closed", "closed", false},
+		{"open", "open", "", "open", false},
+		{"in_progress", "in_progress", "", "in_progress", false},
+		{"blocked", "blocked", "", "open", false},
+		{"deferred", "deferred", "", "open", true},
+		// bd's deferred status holds whatever its date says: only the store's
+		// own wake (status back to open) lifts it, as bd ready requires.
+		{"deferred_past_date", "deferred", past, "open", true},
+		{"deferred_future_date", "deferred", future, "open", true},
+		{"open_past_date", "open", past, "open", false},
+		{"review", "review", "", "open", false},
+		{"testing", "testing", "", "open", false},
+		{"closed", "closed", "", "closed", false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.bdStatus, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			deferField := ""
+			if tt.deferUntil != "" {
+				deferField = fmt.Sprintf(`,"defer_until":%q`, tt.deferUntil)
+			}
 			runner := fakeRunner(map[string]struct {
 				out []byte
 				err error
 			}{
 				`bd show --json bd-x`: {
-					out: []byte(fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`, tt.bdStatus)),
+					out: []byte(fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"%s}]`, tt.bdStatus, deferField)),
 				},
 			})
 			s := beads.NewBdStore("/city", runner)
@@ -2946,6 +2959,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			}
 			if b.SourceStatus != tt.bdStatus {
 				t.Errorf("SourceStatus = %q, want bd's %q", b.SourceStatus, tt.bdStatus)
+			}
+			if got := beads.IsDeferred(b, time.Now()); got != (tt.wantIndefiniteHold || tt.deferUntil == future) {
+				t.Errorf("IsDeferred = %v for status %q defer_until %q", got, tt.bdStatus, tt.deferUntil)
 			}
 		})
 	}

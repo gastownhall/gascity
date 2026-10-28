@@ -150,8 +150,26 @@ func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
 	if expired.Status != "open" {
 		t.Fatalf("expired Status = %q, want normalized open", expired.Status)
 	}
-	if IsDeferred(expired, time.Now()) {
-		t.Fatal("expired time-bound deferral remained deferred")
+	// bd's deferred status holds past its date until the store wakes the row:
+	// bd ready still hides it, so gc must not read it as ready.
+	if !expired.IndefinitelyDeferred || !IsDeferred(expired, time.Now()) {
+		t.Fatalf("store-recorded deferral with an elapsed date read as ready: %+v", expired)
+	}
+
+	payload, err := EncodeBeadEventPayload(expired)
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	var wire struct {
+		Status     string     `json:"status"`
+		DeferUntil *time.Time `json:"defer_until"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatalf("decode encoded payload: %v", err)
+	}
+	if wire.Status != "deferred" || wire.DeferUntil == nil || !wire.DeferUntil.Equal(*expired.DeferUntil) {
+		t.Fatalf("round-trip wire = status %q defer_until %v, want deferred with %v; payload=%s",
+			wire.Status, wire.DeferUntil, expired.DeferUntil, payload)
 	}
 }
 
