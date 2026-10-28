@@ -135,3 +135,26 @@ func TestWakeStartRefusalReadsTheWorkStoreOnASplitCity(t *testing.T) {
 		t.Fatalf("WakeStartRefusal = %q, want none: the work store's claim overrides the latch", got)
 	}
 }
+
+// TestWakeStartRefusalRefusesUnknownStateRows: a row in a state the
+// controller skips is refused for certain, naming the raw state and the close
+// that releases it, with or without a loaded city config, so the API wake
+// answers 409 wake-will-not-start. Kills a predicate that returns early on a
+// nil config or never consults the controller's skip.
+func TestWakeStartRefusalRefusesUnknownStateRows(t *testing.T) {
+	for _, withConfig := range []bool{true, false} {
+		for _, info := range []sessionpkg.Info{
+			{ID: "gc-1", Template: "worker", MetadataState: "future-state"},
+			{ID: "gc-1", Template: "worker", MetadataState: "archived", ContinuityEligible: "true"},
+		} {
+			cs := &controllerState{cityPath: t.TempDir(), cityBeadStore: beads.NewMemStore(), sp: runtime.NewFake()}
+			if withConfig {
+				cs.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			}
+			got, certain := cs.WakeStartRefusal(info)
+			if !certain || !strings.Contains(got, `"`+info.MetadataState+`"`) || !strings.Contains(got, "gc session close gc-1") {
+				t.Fatalf("config=%v state=%q: WakeStartRefusal = %q, certain %v; want a certain refusal naming the state and `gc session close gc-1`", withConfig, info.MetadataState, got, certain)
+			}
+		}
+	}
+}
