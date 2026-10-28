@@ -869,3 +869,46 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 		t.Errorf("RequestID %q is the same on the next page; it must move with the page", pending.RequestID)
 	}
 }
+
+// A question dialog is answered by a human in the terminal, never by Respond:
+// its numbered options are its own, and even an action whose approval meaning
+// would pick one of them is refused with ErrInteractionActionUnavailable —
+// with or without a request ID, and whatever the request ID names. That
+// includes a question whose text reads "Do you want to …?": the approval
+// parser's question key matches it, so the question-first read of the pane is
+// what keeps respond from typing "1" into a human's question.
+func TestRespondRefusesEveryQuestionDialogLookalike(t *testing.T) {
+	// No cursor: at the old detector this page parsed as an approval prompt.
+	const approvalLookalikeQuestionPage = ` ←  ☐ Scope  ✔ Submit  →
+Do you want to include the regression tests?
+  1. Yes, the full suite
+  2. Only the new tests
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+	tm, _ := questionTmux(approvalLookalikeQuestionPage)
+	pending, err := (&Provider{tm: tm}).Pending("auq")
+	if err != nil || pending == nil {
+		t.Fatalf("Pending = %+v, %v; the lookalike page is a question, not an approval", pending, err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		requestID string
+	}{
+		{"no request ID", ""},
+		{"the question's own request ID", pending.RequestID},
+		{"a request ID naming another request", "tmux-question-0123456789abcdef"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, action := range []string{"approve", "deny", "approve_always", ""} {
+				ex := &paneExecutor{pane: approvalLookalikeQuestionPage, inMode: "1"}
+				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+				err := tm.Respond("auq", runtime.InteractionResponse{RequestID: tc.requestID, Action: action})
+				if !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+					t.Fatalf("Respond(%q, %q) = %v, want runtime.ErrInteractionActionUnavailable", tc.requestID, action, err)
+				}
+				requireNoKeys(t, ex.calls, false)
+			}
+		})
+	}
+}
