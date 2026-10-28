@@ -526,6 +526,51 @@ func TestCascadeNudgeRetriesFailedRoutedNudge(t *testing.T) {
 	}
 }
 
+// TestCascadeNudgeSkipsARoutedDependentStillBlocked pins the still-held skip
+// on the routed wake-up too. A routed, unassigned dependent another blocker
+// still holds is no more claimable than an assigned one: its pool members
+// would wake for nothing. Its pair is recorded like an assigned one's, and
+// the close of its last blocker still wakes the routed target's member.
+func TestCascadeNudgeSkipsARoutedDependentStillBlocked(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	routed := `[{"id":"ga-dep","status":"open","assignee":"","metadata":{"gc.routed_to":"gascity/pool"}}]`
+	run := func(t *testing.T, blocker, down string) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		binDir, logPath := fakeGCBin(t, cascadeFake{
+			eventsPath: writeCascadeCloseEvent(t, blocker),
+			depJSON:    routed,
+			downJSON:   down,
+			members:    map[string][]string{"gascity/pool": {"pool-1"}},
+			failDir:    dir,
+		}.body())
+		if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+			t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+		}
+		_, logged := countNudges(t, logPath)
+		return stateDir, logged
+	}
+
+	t.Run("another open blocker holds it", func(t *testing.T) {
+		stateDir, logged := run(t, "ga-blk", `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"open"}]`)
+		if strings.Contains(logged, "gc session nudge ") || strings.Contains(logged, "gc session list") {
+			t.Fatalf("a held routed dependent must wake no one and need no pool lookup; gc calls:\n%s", logged)
+		}
+		if !cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep") {
+			t.Fatal("the held pair must be recorded, as an assigned dependent's is")
+		}
+	})
+	t.Run("the last blocker's close wakes the member", func(t *testing.T) {
+		_, logged := run(t, "ga-other", `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed"}]`)
+		if !strings.Contains(logged, "gc session nudge pool-1 blocker ga-other closed — routed dependent ga-dep may be ready to claim") {
+			t.Fatalf("the last blocker's close must wake the routed target's member; gc calls:\n%s", logged)
+		}
+	})
+}
+
 // cascadeNudgeOnce runs the script once over one close of ga-blk whose
 // dependent ga-dep, assigned to worker-1, has the blockers down answers for
 // (a JSON array, or a shell command's exit for a failed read), and returns
