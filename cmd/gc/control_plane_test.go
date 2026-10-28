@@ -606,3 +606,39 @@ func TestControlPlaneGateExemptsDoctorThroughRun(t *testing.T) {
 		t.Fatal("the exempt invocation was not marked a worker site")
 	}
 }
+
+func TestNoteDeferredSessionStart(t *testing.T) {
+	t.Run("poke reached a controller", func(t *testing.T) {
+		var stderr bytes.Buffer
+		if !noteDeferredSessionStart(&stderr, "gc session new", "gc-1", nil) {
+			t.Fatal("reached = false, want true")
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+	})
+	t.Run("worker site", func(t *testing.T) {
+		var stderr bytes.Buffer
+		if noteDeferredSessionStart(&stderr, "gc session new", "gc-1", errWorkerSiteNoController) {
+			t.Fatal("reached = true, want false")
+		}
+		if got, want := stderr.String(), "gc session new: "+errWorkerSiteNoController.Error()+"\n"; got != want {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	})
+	t.Run("poke failed", func(t *testing.T) {
+		var stderr bytes.Buffer
+		if noteDeferredSessionStart(&stderr, "gc session wake", "gc-1", errors.New("dial failed")) {
+			t.Fatal("reached = true, want false")
+		}
+		got := stderr.String()
+		for _, want := range []string{"gc session wake: warning: poke failed: dial failed", "gc-1", "gc supervisor start"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("stderr = %q, want it to contain %q", got, want)
+			}
+		}
+		if n := strings.Count(got, "\n"); n != 1 {
+			t.Fatalf("stderr lines = %d, want 1: %q", n, got)
+		}
+	})
+}

@@ -490,6 +490,22 @@ func noteWorkerSitePoke(stderr io.Writer, command string, err error) bool {
 	return true
 }
 
+// noteDeferredSessionStart reports on stderr how a session start deferred to
+// the reconciler will proceed after a poke that returned pokeErr, and returns
+// whether a controller answered the poke. A worker site gets its notice; any
+// other failure gets a warning naming session id and how to bring the
+// supervisor up.
+func noteDeferredSessionStart(stderr io.Writer, command, id string, pokeErr error) bool {
+	if pokeErr == nil {
+		return true
+	}
+	if noteWorkerSitePoke(stderr, command, pokeErr) {
+		return false
+	}
+	fmt.Fprintf(stderr, "%s: warning: poke failed: %v; session %s will start when the city's controller next reconciles (if the supervisor is stopped, run \"gc supervisor start\")\n", command, pokeErr, id) //nolint:errcheck // best-effort stderr
+	return false
+}
+
 // controllerWillReconcile reports whether a controller will act on a durable
 // session write after a poke that returned pokeErr: the poke reached one, or
 // cityPath is a worker site, whose remote controller acts at its next
