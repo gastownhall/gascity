@@ -1388,6 +1388,7 @@ go_test(
         "demand_snapshot_budget_test.go",
         "demand_trace_test.go",
         "detached_orphan_lane_test.go",
+        "detached_probe_split_env_test.go",
         "detached_probe_test.go",
         "detached_probe_tmpdir_test.go",
         "dispatch_bd_call_counter_test.go",
