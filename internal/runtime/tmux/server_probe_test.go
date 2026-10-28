@@ -52,7 +52,10 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 	for _, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
 			socketName := "gc-live-socket"
-			tmuxTmpDir := "/tmux-private"
+			tmuxTmpDir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("EvalSymlinks: %v", err)
+			}
 			t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 			socketPath := filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 			observerCalls := 0
@@ -71,7 +74,7 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 					return fmt.Errorf("live socket path=%s inode=97 peer_pid=4242", gotPath)
 				},
 			}
-			err := variant.call(tm)
+			err = variant.call(tm)
 			if !errors.Is(err, ErrServerDegraded) {
 				t.Fatalf("err = %v, want ErrServerDegraded", err)
 			}
@@ -351,10 +354,20 @@ func TestProbeServerAliveAcceptsEmptyLiveServer(t *testing.T) {
 }
 
 func TestNamedSocketPathUsesTMUXTMPDIRAndIgnoresTMPDIR(t *testing.T) {
-	t.Setenv("TMUX_TMPDIR", "/tmux-private")
+	tmuxTmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 	t.Setenv("TMPDIR", "/must-not-be-used")
-	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmux-private", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
+	if got, want := namedSocketPath("gc-test"), filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
+	}
+}
+
+func TestSocketPathAbsoluteRef(t *testing.T) {
+	if got, want := SocketPath("/var/run//gc/../gc/city.sock"), "/var/run/gc/city.sock"; got != want {
+		t.Fatalf("SocketPath(abs) = %q, want %q", got, want)
 	}
 }
 

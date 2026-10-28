@@ -142,14 +142,40 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	return append(args, "attach-session", "-t", target)
 }
 
-// namedSocketPath resolves the exact path tmux uses for a named -L socket.
-// tmux honors TMUX_TMPDIR here; TMPDIR is deliberately not a fallback.
-func namedSocketPath(socketName string) string {
-	tmpDir := os.Getenv("TMUX_TMPDIR")
-	if tmpDir == "" {
-		tmpDir = "/tmp"
+// SocketPath returns the socket path a tmux client in this process's
+// environment talks to for ref. An absolute ref is a -S socket path and is
+// returned cleaned. Any other ref is a -L socket name under
+// <base>/tmux-<uid>/, where <base> is TMUX_TMPDIR resolved through symlinks
+// when it names a directory, else /tmp resolved through symlinks: tmux
+// falls back to /tmp for an unset, empty or unresolvable TMUX_TMPDIR, and
+// never reads TMPDIR.
+func SocketPath(ref string) string {
+	if filepath.IsAbs(ref) {
+		return filepath.Clean(ref)
 	}
-	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	return filepath.Join(socketBaseDir(), fmt.Sprintf("tmux-%d", os.Getuid()), ref)
+}
+
+// socketBaseDir is the directory tmux puts its tmux-<uid> directory in:
+// TMUX_TMPDIR when it resolves to a directory, else /tmp, each resolved
+// through symlinks as tmux does.
+func socketBaseDir() string {
+	if dir := os.Getenv("TMUX_TMPDIR"); dir != "" {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+				return resolved
+			}
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil {
+		return resolved
+	}
+	return "/tmp"
+}
+
+// namedSocketPath resolves the exact path tmux uses for a named -L socket.
+func namedSocketPath(socketName string) string {
+	return SocketPath(socketName)
 }
 
 // serverSocketPath returns the socket path of the server t talks to: its
