@@ -97,6 +97,11 @@ joserfc>=1.6.8
 # constraint carries the patched version itself.
 mcp>=1.30.0
 
+# Security floor: CVE-2026-114605 (HIGH, excessive CPU in
+# dns.name.from_wire_parser) in dnspython < 2.9.0. dnspython arrives via
+# email-validator; drop once its constraint carries the patched release.
+dnspython>=2.9.0
+
 # Ceiling: filelock 4.x can truncate the mail SQLite database at shutdown.
 # mcp-agent-mail's emergency fd cleanup (storage.cleanup_leaked_lockfile_fds)
 # closes leaked lock fds without clearing filelock's per-thread context, so a
