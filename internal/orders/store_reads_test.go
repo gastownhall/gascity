@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -630,6 +631,50 @@ func runsContain(runs []OrderRun, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestSweepReadsOldestFirst proves both sweep reads return tracking beads in
+// creation order (created ascending, ties by id ascending): the callers'
+// close budget of 4 must drain the OLDEST jam, not whichever four a
+// store-defined or map order hands it.
+func TestSweepReadsOldestFirst(t *testing.T) {
+	mem := beads.NewMemStore()
+	var created []string
+	for i := range 6 {
+		b, err := mem.Create(beads.Bead{
+			Title:  fmt.Sprintf("order:run-%d", i),
+			Labels: []string{fmt.Sprintf("order-run:run-%d", i), "order-tracking"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created = append(created, b.ID)
+	}
+	st := ordersStoreOver(mem)
+
+	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	var staleIDs []string
+	for _, r := range stale {
+		staleIDs = append(staleIDs, r.ID)
+	}
+	if !reflect.DeepEqual(staleIDs, created) {
+		t.Errorf("StaleOpenRuns() = %v, want creation order %v (oldest first)", staleIDs, created)
+	}
+
+	orphaned, err := st.OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	var orphanedIDs []string
+	for _, r := range orphaned {
+		orphanedIDs = append(orphanedIDs, r.ID)
+	}
+	if !reflect.DeepEqual(orphanedIDs, created) {
+		t.Errorf("OrphanedOpenRuns() = %v, want creation order %v (oldest first)", orphanedIDs, created)
+	}
 }
 
 // TestClosedRunsForRetentionBestEffortName proves closed tracking beads are

@@ -4106,6 +4106,46 @@ func TestSweepOrphanedOrderTrackingLimit_ClosesAtMostBudget(t *testing.T) {
 	}
 }
 
+// TestSweepOrphanedOrderTrackingLimitClosesOldestFirst pins WHICH beads the
+// close budget spends: with six orphans and a budget of four, the four OLDEST
+// are closed and the two newest stay open. A store-defined or map read order
+// would close a random four; the sweep read is oldest-first so the budget
+// drains the oldest jam (#5832).
+func TestSweepOrphanedOrderTrackingLimitClosesOldestFirst(t *testing.T) {
+	store := beads.NewMemStore()
+
+	ids := make([]string, 0, 6)
+	for i := range 6 {
+		b, err := store.Create(beads.Bead{
+			Title:     fmt.Sprintf("order:jam-%d", i),
+			Labels:    []string{fmt.Sprintf("order-run:jam-%d", i), labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(jam-%d): %v", i, err)
+		}
+		ids = append(ids, b.ID)
+	}
+
+	if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingLimit: %v", err)
+	}
+
+	for i, id := range ids {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if i < orderTrackingSweepCloseBudget {
+			if got.Status != "closed" {
+				t.Errorf("bead %d of 6 (%s) status = %s, want closed (one of the four oldest)", i, id, got.Status)
+			}
+		} else if got.Status != "open" {
+			t.Errorf("bead %d of 6 (%s) status = %s, want open (one of the two newest the budget must spare)", i, id, got.Status)
+		}
+	}
+}
+
 func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T) {
 	inner := beads.NewMemStore()
 	for _, name := range []string{"one", "two", "three", "four"} {

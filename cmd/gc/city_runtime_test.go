@@ -2385,6 +2385,49 @@ func TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache(t *testing.T) 
 	}
 }
 
+// TestOrderTrackingSweepWatchdogClosesOldestFirst pins WHICH beads the
+// watchdog's close budget spends: with six stale tracking beads and a budget
+// of four, the four OLDEST are closed and the two newest stay open.
+func TestOrderTrackingSweepWatchdogClosesOldestFirst(t *testing.T) {
+	store := beads.NewMemStore()
+	ids := make([]string, 0, orderTrackingSweepCloseBudget+2)
+	for i := range orderTrackingSweepCloseBudget + 2 {
+		b, err := store.Create(beads.Bead{
+			Title:     fmt.Sprintf("order:stale-%d", i),
+			Labels:    []string{fmt.Sprintf("order-run:stale-%d", i), labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(stale-%d): %v", i, err)
+		}
+		ids = append(ids, b.ID)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+
+	for i, id := range ids {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if i < orderTrackingSweepCloseBudget {
+			if got.Status != "closed" {
+				t.Errorf("bead %d of %d (%s) status = %s, want closed (one of the four oldest)", i, len(ids), id, got.Status)
+			}
+		} else if got.Status != "open" {
+			t.Errorf("bead %d of %d (%s) status = %s, want open (one of the two newest the budget must spare)", i, len(ids), id, got.Status)
+		}
+	}
+}
+
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
