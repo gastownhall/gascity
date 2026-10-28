@@ -208,3 +208,146 @@ func TestTraceStoreFailedWriteRollsBackPartialBatch(t *testing.T) {
 		}
 	})
 }
+
+// TestTraceStoreFailedRollbackAbandonsSegment pins the rollback half where
+// the segment cannot be cut back (issue #7954): the next batch starts a
+// segment with a higher index, the failed batch's seqs are retired, and the
+// committed batches around the torn tail stay readable.
+func TestTraceStoreFailedRollbackAbandonsSegment(t *testing.T) {
+	// Fail after the first record line and partway into the second, so a
+	// complete-but-uncommitted line and a torn line stay on disk, and make
+	// the rollback truncate fail too.
+	failTornBatch := func(t *testing.T, store *SessionReconcilerTraceStore) error {
+		injectTraceWriteFailure(t, store, func(p []byte) int { return bytes.IndexByte(p, '\n') + 1 + 20 }, errors.New("truncate refused"))
+		failed := make([]SessionReconcilerTraceRecord, 2)
+		now := time.Now().UTC().Add(time.Second)
+		for i := range failed {
+			failed[i] = traceStoreTestRecord("cycle-b", now)
+		}
+		return store.AppendBatch(failed, TraceDurabilityDurable)
+	}
+	assertRecovered := func(t *testing.T, cityDir string) []SessionReconcilerTraceRecord {
+		t.Helper()
+		root := traceStoreTestRoot(cityDir)
+		segments := traceStoreTestSegments(t, root)
+		if len(segments) != 2 {
+			t.Fatalf("segments = %d, want 2 (the next batch lands in a new segment)", len(segments))
+		}
+		torn, err := os.ReadFile(segments[0])
+		if err != nil {
+			t.Fatalf("read torn segment: %v", err)
+		}
+		if !bytes.Contains(torn, []byte("cycle-b")) || bytes.HasSuffix(torn, []byte("\n")) {
+			t.Fatalf("first segment should keep the torn batch bytes without a trailing newline:\n%s", torn)
+		}
+		fresh, err := os.ReadFile(segments[1])
+		if err != nil {
+			t.Fatalf("read fresh segment: %v", err)
+		}
+		if bytes.Contains(fresh, []byte("cycle-b")) {
+			t.Fatalf("fresh segment holds bytes of the failed batch:\n%s", fresh)
+		}
+		records, err := ReadTraceRecords(root, TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		counts := traceTestRecordCountByTraceID(records)
+		if counts["cycle-a"] != 2 || counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+			t.Fatalf("records by trace = %v, want cycle-a and cycle-c committed, no cycle-b", counts)
+		}
+		// The failed batch would have committed at seq 5 (records 3 and 4).
+		commit := traceTestCommitRecord(t, records, "cycle-c")
+		if commit.FirstSeq <= 5 {
+			t.Fatalf("batch c first seq = %d, want > 5 (greater than the failed batch's commit seq)", commit.FirstSeq)
+		}
+		assertTraceSeqsUnique(t, records)
+		return records
+	}
+
+	t.Run("same-store", func(t *testing.T) {
+		cityDir := t.TempDir()
+		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		defer store.Close() //nolint:errcheck
+		appendTraceStoreTestBatch(t, store, "cycle-a", 1, 0, TraceDurabilityDurable)
+		if err := failTornBatch(t, store); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("append batch b error = %v, want ENOSPC", err)
+		}
+		appendTraceStoreTestBatch(t, store, "cycle-c", 1, 2*time.Second, TraceDurabilityDurable)
+		assertRecovered(t, cityDir)
+	})
+
+	t.Run("reopened-store", func(t *testing.T) {
+		cityDir := t.TempDir()
+		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		appendTraceStoreTestBatch(t, store, "cycle-a", 1, 0, TraceDurabilityDurable)
+		if err := failTornBatch(t, store); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("append batch b error = %v, want ENOSPC", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		reopened, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("reopen store: %v", err)
+		}
+		defer reopened.Close() //nolint:errcheck
+		if quarantined := traceTestQuarantined(t, traceStoreTestRoot(cityDir)); len(quarantined) != 0 {
+			t.Fatalf("quarantined = %v, want none", quarantined)
+		}
+		seq, err := reopened.LatestSeq()
+		if err != nil {
+			t.Fatalf("LatestSeq after reopen: %v", err)
+		}
+		if seq != 5 {
+			t.Fatalf("LatestSeq after reopen = %d, want 5 (the failed batch's commit seq is retired)", seq)
+		}
+		appendTraceStoreTestBatch(t, reopened, "cycle-c", 1, 2*time.Second, TraceDurabilityDurable)
+		assertRecovered(t, cityDir)
+	})
+}
+
+func traceTestQuarantined(t *testing.T, root string) []string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceQuarantine, "*"))
+	if err != nil {
+		t.Fatalf("glob quarantine: %v", err)
+	}
+	return found
+}
+
+// assertTraceSeqsUnique fails when two records share a seq.
+func assertTraceSeqsUnique(t *testing.T, records []SessionReconcilerTraceRecord) {
+	t.Helper()
+	seen := make(map[uint64]SessionReconcilerTraceRecord)
+	for _, rec := range records {
+		if prev, ok := seen[rec.Seq]; ok {
+			t.Fatalf("seq %d reused: %s %s and %s %s", rec.Seq, prev.TraceID, prev.RecordType, rec.TraceID, rec.RecordType)
+		}
+		seen[rec.Seq] = rec
+	}
+}
+
+func traceTestRecordCountByTraceID(records []SessionReconcilerTraceRecord) map[string]int {
+	counts := make(map[string]int)
+	for _, rec := range records {
+		counts[rec.TraceID]++
+	}
+	return counts
+}
+
+func traceTestCommitRecord(t *testing.T, records []SessionReconcilerTraceRecord, traceID string) SessionReconcilerTraceRecord {
+	t.Helper()
+	for _, rec := range records {
+		if rec.RecordType == TraceRecordBatchCommit && rec.TraceID == traceID {
+			return rec
+		}
+	}
+	t.Fatalf("no batch commit for %s among %d records", traceID, len(records))
+	return SessionReconcilerTraceRecord{}
+}
