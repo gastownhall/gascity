@@ -1,10 +1,12 @@
 package scripts_test
 
 import (
+	"encoding/json"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -278,5 +280,245 @@ func TestDispatchMacRegressionInputsAreAcceptedByMacRegression(t *testing.T) {
 	}
 	if !slices.Contains(inputs["suite"].Options, "full") {
 		t.Errorf("mac-regression.yml suite options = %q, want full among them", inputs["suite"].Options)
+	}
+}
+
+// The tests above read the workflow's shape; none of them runs the dispatcher.
+// dispatchMacDriver runs the dispatch step's Python body with urllib's urlopen
+// replaced by a recorder. Its arguments are the body file, the file the recorded
+// requests are written to, and the HTTP status the stubbed response carries (400
+// and above raise HTTPError, as a rejected request does). The body's own exit is
+// left to propagate, so the process succeeds exactly when the step would.
+const dispatchMacDriver = `import json
+import sys
+import urllib.error
+import urllib.request
+
+body_path, calls_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
+calls = []
+
+
+class Response:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def urlopen(request, timeout=None):
+    calls.append({
+        "url": request.full_url,
+        "method": request.get_method(),
+        "headers": {key.lower(): value for key, value in request.header_items()},
+        "body": request.data.decode("utf-8"),
+        "timeout": timeout,
+    })
+    if status >= 400:
+        raise urllib.error.HTTPError(request.full_url, status, "stub", {}, None)
+    return Response(status)
+
+
+urllib.request.urlopen = urlopen
+try:
+    with open(body_path, encoding="utf-8") as body:
+        exec(compile(body.read(), body_path, "exec"), {"__name__": "__main__"})
+finally:
+    with open(calls_path, "w", encoding="utf-8") as out:
+        json.dump(calls, out)
+`
+
+type dispatchMacRequest struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+	Timeout float64           `json:"timeout"`
+}
+
+// dispatchMacPythonBody returns the Python that the dispatch step hands to python3.
+func dispatchMacPythonBody(t *testing.T, run string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(run, "python3 - <<'PY'\n")
+	if !ok {
+		t.Fatalf("dispatch step does not run a quoted python3 heredoc:\n%s", run)
+	}
+	body, tail, ok := strings.Cut(rest, "\nPY")
+	if !ok || strings.TrimSpace(tail) != "" {
+		t.Fatalf("dispatch step's heredoc is not the end of its script:\n%s", run)
+	}
+	return body + "\n"
+}
+
+// runDispatchMacScript runs body in a directory whose .github/blacksmith-allowlist.txt
+// holds allowlist, with env as the step's environment and the stubbed API answering
+// status. It returns the requests the script sent, its output, and whether the
+// process succeeded.
+func runDispatchMacScript(t *testing.T, body, allowlist string, env map[string]string, status int) ([]dispatchMacRequest, string, bool) {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, ".github", "blacksmith-allowlist.txt"), allowlist)
+	writeTestFile(t, filepath.Join(dir, "body.py"), body)
+	writeTestFile(t, filepath.Join(dir, "driver.py"), dispatchMacDriver)
+	callsPath := filepath.Join(dir, "calls.json")
+	cmd := testCommand("python3", filepath.Join(dir, "driver.py"), filepath.Join(dir, "body.py"), callsPath, strconv.Itoa(status))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	for name, value := range env {
+		cmd.Env = append(cmd.Env, name+"="+value)
+	}
+	output, runErr := cmd.CombinedOutput()
+	// The driver records the requests even when the body exits or raises, so a
+	// missing file means the driver itself did not run, not that the step failed.
+	raw, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("driver recorded no requests (%v); python3 run: %v\n%s", err, runErr, output)
+	}
+	var calls []dispatchMacRequest
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		t.Fatalf("parse recorded requests %q: %v", raw, err)
+	}
+	return calls, string(output), runErr == nil
+}
+
+// The dispatch step is what keeps a fork PR's author from reaching the secrets
+// that Mac Regression's workflow_dispatch run holds, so this test runs its
+// script. A trusted author's non-draft PR is dispatched exactly once, at the
+// base ref, with the exact fork head and the full suite; an author who is not
+// trusted, or a draft, is never dispatched; a dispatch GitHub does not accept
+// fails the step; and nothing the PR controls reaches the URL, a header, or the
+// log.
+func TestDispatchMacRegressionScriptDispatchesOnlyTrustedNonDraftAuthors(t *testing.T) {
+	step, _ := dispatchMacStepAndJob(t, readDispatchMacRegression(t))
+	body := dispatchMacPythonBody(t, step.Run)
+	base := map[string]string{
+		"GH_TOKEN":       "test-token",
+		"REPOSITORY":     "example/repo",
+		"BASE_REF":       "main",
+		"PR_NUMBER":      "123",
+		"PR_DRAFT":       "false",
+		"PR_AUTHOR":      "fork-author",
+		"PR_ASSOCIATION": "NONE",
+		"PR_HEAD_REPO":   "fork-owner/repo",
+		"PR_HEAD_REF":    "feature/x",
+		"PR_HEAD_SHA":    strings.Repeat("a", 40),
+	}
+	if got, want := slices.Sorted(maps.Keys(step.Env)), slices.Sorted(maps.Keys(base)); !slices.Equal(got, want) {
+		t.Fatalf("dispatch step env = %q, want the variables this test supplies, %q", got, want)
+	}
+	const allowlist = "# Logins allowed to run automatically.\n" +
+		"# One login per line. Blank lines and # comments are ignored.\n" +
+		"#\n" +
+		"# Sponsored is a word in a comment, not a login.\n" +
+		"Trusted-One\n" +
+		"\n" +
+		"trusted-two\n"
+	hostileRef := "x\"; $(touch pwned) `id` \\ ${{ github.token }}\n::error::boom"
+
+	const (
+		dispatches = iota // one request GitHub accepts, and the step succeeds
+		skips             // no request, and the step succeeds
+		fails             // one request GitHub does not accept, and the step fails
+	)
+	assoc := func(association string) map[string]string {
+		return map[string]string{"PR_ASSOCIATION": association}
+	}
+	author := func(login string) map[string]string {
+		return map[string]string{"PR_AUTHOR": login}
+	}
+	cases := []struct {
+		name   string
+		env    map[string]string // overrides of base
+		status int               // the API's answer; 0 is 204
+		want   int
+	}{
+		{name: "owner", env: assoc("OWNER"), want: dispatches},
+		{name: "member", env: assoc("MEMBER"), want: dispatches},
+		{name: "collaborator", env: assoc("COLLABORATOR"), want: dispatches},
+		{name: "allowlisted login in other case", env: author("TRUSTED-ONE"), want: dispatches},
+		{name: "allowlisted login after a blank line", env: author("trusted-two"), want: dispatches},
+		{name: "hostile head ref", env: map[string]string{"PR_ASSOCIATION": "OWNER", "PR_HEAD_REF": hostileRef}, want: dispatches},
+
+		{name: "no association", env: assoc("NONE"), want: skips},
+		{name: "contributor", env: assoc("CONTRIBUTOR"), want: skips},
+		{name: "first time contributor", env: assoc("FIRST_TIME_CONTRIBUTOR"), want: skips},
+		{name: "first timer", env: assoc("FIRST_TIMER"), want: skips},
+		{name: "mannequin", env: assoc("MANNEQUIN"), want: skips},
+		{name: "empty association", env: assoc(""), want: skips},
+		{name: "unknown author", env: map[string]string{"PR_AUTHOR": "", "PR_ASSOCIATION": ""}, want: skips},
+		{name: "login that extends an allowlisted one", env: author("trusted-one-evil"), want: skips},
+		{name: "word from an allowlist comment", env: author("Sponsored"), want: skips},
+		{name: "draft from an owner", env: map[string]string{"PR_ASSOCIATION": "OWNER", "PR_DRAFT": "true"}, want: skips},
+		{name: "draft from an allowlisted login", env: map[string]string{"PR_AUTHOR": "trusted-one", "PR_DRAFT": "true"}, want: skips},
+
+		{name: "dispatch rejected", env: assoc("OWNER"), status: 422, want: fails},
+		{name: "unexpected success status", env: assoc("OWNER"), status: 202, want: fails},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := maps.Clone(base)
+			maps.Copy(env, tc.env)
+			status := tc.status
+			if status == 0 {
+				status = 204
+			}
+			calls, output, ok := runDispatchMacScript(t, body, allowlist, env, status)
+			if want := tc.want != fails; ok != want {
+				t.Errorf("step succeeded = %v, want %v\n%s", ok, want, output)
+			}
+			wantCalls := 1
+			if tc.want == skips {
+				wantCalls = 0
+			}
+			if len(calls) != wantCalls {
+				t.Fatalf("script sent %d dispatch requests, want %d\n%s", len(calls), wantCalls, output)
+			}
+			if strings.Contains(output, env["PR_HEAD_REF"]) {
+				t.Errorf("script printed the PR head ref %q:\n%s", env["PR_HEAD_REF"], output)
+			}
+			if len(calls) == 0 {
+				return
+			}
+			call := calls[0]
+			if want := "https://api.github.com/repos/example/repo/actions/workflows/mac-regression.yml/dispatches"; call.Method != "POST" || call.URL != want {
+				t.Errorf("request = %s %s, want POST %s", call.Method, call.URL, want)
+			}
+			if got, want := call.Headers["authorization"], "Bearer test-token"; got != want {
+				t.Errorf("Authorization header = %q, want %q", got, want)
+			}
+			if call.Timeout <= 0 {
+				t.Errorf("request timeout = %v, want a positive timeout", call.Timeout)
+			}
+			if strings.Contains(call.URL, env["PR_HEAD_REF"]) {
+				t.Errorf("request URL carries the PR head ref: %s", call.URL)
+			}
+			for name, value := range call.Headers {
+				if strings.Contains(value, env["PR_HEAD_REF"]) {
+					t.Errorf("request header %s carries the PR head ref: %q", name, value)
+				}
+			}
+			var payload struct {
+				Ref    string            `json:"ref"`
+				Inputs map[string]string `json:"inputs"`
+			}
+			decoder := json.NewDecoder(strings.NewReader(call.Body))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&payload); err != nil {
+				t.Fatalf("request body %q: %v", call.Body, err)
+			}
+			wantInputs := map[string]string{
+				"suite":     "full",
+				"pr_number": env["PR_NUMBER"],
+				"head_repo": env["PR_HEAD_REPO"],
+				"head_ref":  env["PR_HEAD_REF"],
+				"head_sha":  env["PR_HEAD_SHA"],
+			}
+			if payload.Ref != env["BASE_REF"] || !maps.Equal(payload.Inputs, wantInputs) {
+				t.Errorf("request body = ref %q inputs %q, want ref %q inputs %q", payload.Ref, payload.Inputs, env["BASE_REF"], wantInputs)
+			}
+		})
 	}
 }
