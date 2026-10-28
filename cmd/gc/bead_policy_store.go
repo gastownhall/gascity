@@ -368,11 +368,15 @@ func (s *beadPolicyStore) Children(parentID string, opts ...beads.QueryOpt) ([]b
 	})
 }
 
+// ListByLabel lists beads carrying label newest-first, the order every
+// unwrapped ListByLabel returns. The sort is explicit because SortDefault over
+// a cache snapshot is map order, so a limit would keep an arbitrary row.
 func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	return s.List(beads.ListQuery{
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Sort:          beads.SortCreatedDesc,
 		TierMode:      policyTierFromOpts(opts),
 	})
 }

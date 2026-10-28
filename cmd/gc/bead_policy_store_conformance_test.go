@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -99,14 +100,14 @@ func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 			},
 		},
 		{
-			name: "ListByLabel expands default issues tier to both tiers",
+			name: "ListByLabel expands default issues tier to both tiers, newest-first",
 			run: func() error {
 				_, err := store.ListByLabel("scope", 7)
 				return err
 			},
 			want: func(q beads.ListQuery) error {
-				if q.Label != "scope" || q.Limit != 7 || q.TierMode != beads.TierBoth {
-					return fmt.Errorf("query = %#v, want label scope, limit 7, and TierBoth", q)
+				if q.Label != "scope" || q.Limit != 7 || q.Sort != beads.SortCreatedDesc || q.TierMode != beads.TierBoth {
+					return fmt.Errorf("query = %#v, want label scope, limit 7, created desc, and TierBoth", q)
 				}
 				return nil
 			},
@@ -203,6 +204,42 @@ func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 				t.Fatalf("Ready TierMode = %v, want %v", backing.readyQueries[0].TierMode, tc.want)
 			}
 		})
+	}
+}
+
+// TestBeadPolicyStoreListByLabelNewestFirstOverPrimedCache proves the wrapper's
+// ListByLabel keeps the newest-first contract every unwrapped ListByLabel
+// has. Over a primed CachingStore the query is served from the snapshot map,
+// where an unsorted query returns map order and a limit keeps an arbitrary row.
+func TestBeadPolicyStoreListByLabelNewestFirstOverPrimedCache(t *testing.T) {
+	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(cache, &config.City{})
+	var created []string
+	for i := range 3 {
+		b, err := store.Create(beads.Bead{Title: fmt.Sprintf("labeled-%d", i), Labels: []string{"scope"}})
+		if err != nil {
+			t.Fatalf("Create(labeled-%d): %v", i, err)
+		}
+		created = append(created, b.ID)
+	}
+	newestFirst := []string{created[2], created[1], created[0]}
+
+	all, err := store.ListByLabel("scope", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 0): %v", err)
+	}
+	if got := beadIDs(all); !slices.Equal(got, newestFirst) {
+		t.Fatalf("ListByLabel(scope, 0) IDs = %v, want newest-first %v", got, newestFirst)
+	}
+	newest, err := store.ListByLabel("scope", 1)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 1): %v", err)
+	}
+	if got := beadIDs(newest); !slices.Equal(got, newestFirst[:1]) {
+		t.Fatalf("ListByLabel(scope, 1) IDs = %v, want only the newest %v", got, newestFirst[:1])
 	}
 }
 
