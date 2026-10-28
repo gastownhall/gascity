@@ -658,7 +658,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a detached probe alive keeps the slot unstamped (SESS-624)", func(t *testing.T) {
-		installFakeTmux(t, "exit 0")
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff"))
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", detachedClaim())
 		s := c.run(t, gone().tmux())
@@ -667,7 +667,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a detached probe dead stamps the slot (SESS-624)", func(t *testing.T) {
-		installFakeTmux(t, "exit 1")
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions())
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", detachedClaim())
 		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || c.row(t).Metadata[strandedEventEmittedKey] == "" {
@@ -675,7 +675,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
-		installFakeTmux(t, "exit 0") // the claim's detached probe is alive
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff")) // the claim's detached probe is alive
 		c := orphan(t)
 		claim := c.work(t, "in_progress", detachedClaim())
 		s := c.run(t, gone().tmux())
@@ -694,7 +694,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a short budget never counts a live handoff stranded", func(t *testing.T) {
-		installFakeTmux(t, "exit 0") // alive
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff")) // alive
 		for _, c := range []struct {
 			name     string
 			blocked  bool // the read waits out the Probe's bound
@@ -855,7 +855,7 @@ func (s blockedListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 // ConditionalWritesResolveTarget keeps the inner store's fenced writes.
 func (s blockedListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
-// detachedClaim is a routed claim with a detached runtime installFakeTmux
+// detachedClaim is a routed claim with a detached runtime installFakeTmuxServer
 // answers for.
 func detachedClaim() map[string]string {
 	meta := routedClaim()

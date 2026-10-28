@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 const (
@@ -62,6 +63,14 @@ func parseDetachedProbeSpec(spec string) (detachedProbeSpec, error) {
 	if socket == "" || session == "" {
 		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: socket and session are required", spec)
 	}
+	// tmux never names a session with ':' or '.', so such a session could
+	// never be listed and would read as dead forever.
+	if strings.ContainsAny(session, ":.") {
+		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: session %q is not a tmux session name", spec, session)
+	}
+	if strings.Contains(socket, "/") && !filepath.IsAbs(socket) {
+		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: socket %q is neither a socket name nor an absolute path", spec, socket)
+	}
 	return detachedProbeSpec{
 		Kind:    kind,
 		Socket:  socket,
@@ -73,6 +82,9 @@ func probeDetachedWork(ctx context.Context, spec string) detachedProbeResult {
 	return probeDetachedWorkWithTimeout(ctx, spec, detachedProbeDefaultTimeout)
 }
 
+// probeDetachedWorkWithTimeout projects tmux.ProbeSession onto the probe
+// statuses: only an attested-dead session is dead; anything the probe could
+// not observe is timeout when the probe's deadline cut it short, else error.
 func probeDetachedWorkWithTimeout(ctx context.Context, spec string, timeout time.Duration) detachedProbeResult {
 	parsed, err := parseDetachedProbeSpec(spec)
 	if err != nil {
@@ -84,18 +96,17 @@ func probeDetachedWorkWithTimeout(ctx context.Context, spec string, timeout time
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(probeCtx, "tmux", "-L", parsed.Socket, "has-session", "-t", parsed.Session)
-	if err := cmd.Run(); err != nil {
-		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
-			return detachedProbeResult{Status: detachedProbeTimeout, Spec: parsed, Err: probeCtx.Err()}
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return detachedProbeResult{Status: detachedProbeDead, Spec: parsed}
-		}
-		return detachedProbeResult{Status: detachedProbeError, Spec: parsed, Err: err}
+	presence, err := sessiontmux.ProbeSession(probeCtx, parsed.Socket, parsed.Session)
+	switch presence {
+	case sessiontmux.PresenceAlive:
+		return detachedProbeResult{Status: detachedProbeAlive, Spec: parsed}
+	case sessiontmux.PresenceDead:
+		return detachedProbeResult{Status: detachedProbeDead, Spec: parsed}
 	}
-	return detachedProbeResult{Status: detachedProbeAlive, Spec: parsed}
+	if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+		return detachedProbeResult{Status: detachedProbeTimeout, Spec: parsed, Err: err}
+	}
+	return detachedProbeResult{Status: detachedProbeError, Spec: parsed, Err: err}
 }
 
 func incrementDetachedProbeErrorCount(id string) int {

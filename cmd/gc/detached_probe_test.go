@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 func TestParseDetachedProbeSpec(t *testing.T) {
@@ -27,13 +30,30 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "session keeps extra colons",
-			spec: "tmux:gascity:scope:soak-loop",
+			name: "absolute socket path",
+			spec: "tmux:/run/gc/city.sock:soak-loop",
 			want: detachedProbeSpec{
 				Kind:    "tmux",
-				Socket:  "gascity",
-				Session: "scope:soak-loop",
+				Socket:  "/run/gc/city.sock",
+				Session: "soak-loop",
 			},
+		},
+		{
+			// tmux session names never contain ':' or '.', so such a spec
+			// could never be observed alive and must not read as dead.
+			name:    "session with a colon",
+			spec:    "tmux:gascity:scope:soak-loop",
+			wantErr: true,
+		},
+		{
+			name:    "session with a dot",
+			spec:    "tmux:gascity:soak.loop",
+			wantErr: true,
+		},
+		{
+			name:    "relative socket path",
+			spec:    "tmux:run/city.sock:soak-loop",
+			wantErr: true,
 		},
 		{
 			name:    "unsupported kind",
@@ -76,34 +96,43 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 	}
 }
 
-func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
+// AC-1: a probe that reaches no tmux server at the canonical socket path
+// observed nothing, so it reports error, never dead: the socket file is
+// absent, is not a socket, or a live socket's server cannot be queried.
+func TestProbeDetachedWork_UnobservableServerIsNeverDead(t *testing.T) {
+	noServer := `echo "no server running on $TMUX_TMPDIR" >&2; exit 1`
 	tests := []struct {
-		name       string
-		exitCode   string
-		wantStatus detachedProbeStatus
+		name  string
+		setup func(t *testing.T)
 	}{
-		{name: "alive on exit zero", exitCode: "0", wantStatus: detachedProbeAlive},
-		{name: "dead on exit one", exitCode: "1", wantStatus: detachedProbeDead},
-		{name: "error on other exit", exitCode: "2", wantStatus: detachedProbeError},
+		{name: "socket file absent", setup: func(t *testing.T) {
+			t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+			installFakeTmux(t, noServer)
+		}},
+		{name: "socket path is not a socket", setup: func(t *testing.T) {
+			t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+			path := sessiontmux.SocketPath("gascity")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatalf("mkdir socket dir: %v", err)
+			}
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("write regular file at socket path: %v", err)
+			}
+			installFakeTmux(t, noServer)
+		}},
+		{name: "live socket whose server does not answer", setup: func(t *testing.T) {
+			installFakeTmuxServer(t, "gascity", `echo "error connecting to $TMUX_TMPDIR" >&2; exit 1`)
+		}},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			argsFile := filepath.Join(t.TempDir(), "args")
-			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
-			t.Setenv("FAKE_TMUX_ARGS", argsFile)
-
+			tt.setup(t)
 			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
-			if got.Status != tt.wantStatus {
-				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, tt.wantStatus, got.Err)
+			if got.Status != detachedProbeError {
+				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, detachedProbeError, got.Err)
 			}
-			args, err := os.ReadFile(argsFile)
-			if err != nil {
-				t.Fatalf("read fake tmux args: %v", err)
-			}
-			wantArgs := "-L\ngascity\nhas-session\n-t\nsoak-loop\n"
-			if string(args) != wantArgs {
-				t.Fatalf("tmux args = %q, want %q", string(args), wantArgs)
+			if got.Err == nil {
+				t.Fatal("Err = nil, want the reason nothing was observed")
 			}
 		})
 	}
@@ -120,7 +149,7 @@ func TestProbeDetachedWork_MalformedSpecIsError(t *testing.T) {
 }
 
 func TestProbeDetachedWork_Timeout(t *testing.T) {
-	installFakeTmux(t, "sleep 1")
+	installFakeTmuxServer(t, "gascity", "sleep 1")
 
 	got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", 10*time.Millisecond)
 	if got.Status != detachedProbeTimeout {
@@ -144,4 +173,53 @@ func installFakeTmux(t *testing.T, body string) {
 		pathEnv += string(os.PathListSeparator) + existing
 	}
 	t.Setenv("PATH", pathEnv)
+}
+
+// shortTmuxTmpDir returns a fresh directory under /tmp, short enough that a
+// tmux socket path below it fits a unix sun_path.
+func shortTmuxTmpDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gcdp")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// installFakeTmuxServer points TMUX_TMPDIR at a fresh directory, binds a unix
+// listener at the canonical path of the -L socket name there, so the detached
+// probe observes a live server socket, and installs a fake tmux running body.
+func installFakeTmuxServer(t *testing.T, socket, body string) {
+	t.Helper()
+	t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+	path := sessiontmux.SocketPath(socket)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	installFakeTmux(t, body)
+}
+
+// fakeTmuxListSessions is a fake tmux body that records its arguments in
+// $FAKE_TMUX_ARGS, when set, and lists sessions one per line.
+func fakeTmuxListSessions(sessions ...string) string {
+	body := `[ -n "$FAKE_TMUX_ARGS" ] && printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`
+	for _, s := range sessions {
+		body += "\necho " + s
+	}
+	return body + "\nexit 0"
 }

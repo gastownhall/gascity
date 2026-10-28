@@ -641,6 +641,11 @@ resource = "slow_process_gate"
 calls = 2
 
 [[count]]
+path = "cmd/gc/detached_probe_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
 resource = "subprocess"
 calls = 1
@@ -2471,6 +2476,12 @@ calls = 1
 path = "internal/runtime/tmux/session_env_file_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/socket_path_integration_test.go"
+resource = "subprocess"
+calls = 4
 tagged = true
 
 [[count]]
