@@ -522,7 +522,7 @@ func TestWorkerSiteSlingNudgePokesAreNotices(t *testing.T) {
 		sp := runtime.NewFake()
 		deps, stdout, stderr := testDeps(cfg, sp, newFakeRunner().run)
 
-		doSlingNudge(&a, deps.CityName, dir, cfg, sp, deps.Store, stdout, stderr)
+		doSlingNudge(&a, deps.CityName, dir, cfg, sp, deps.Store, "", stdout, stderr)
 
 		assertWorkerSitePokeNotice(t, stderr.String())
 		if strings.Contains(stdout.String(), "poked controller") {
@@ -548,7 +548,7 @@ func TestWorkerSiteSlingNudgePokesAreNotices(t *testing.T) {
 		t.Helper()
 		dials := countSocketDials(t)
 		var out, errOut bytes.Buffer
-		deliverSlingNudge(target, fake, store, target.cityPath, &out, &errOut)
+		deliverSlingNudge(target, fake, store, store, target.cityPath, "", &out, &errOut)
 		if got := dials.Load(); got != 0 {
 			t.Fatalf("the sling nudge dialed %d gc sockets, want 0", got)
 		}
@@ -630,7 +630,7 @@ func TestWorkerSiteHookContinuationNudgeQueuesNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	hookContinuationNudgeEnqueue(sessionID)
+	hookContinuationNudgeEnqueue(sessionID, "", io.Discard)
 
 	assertNoNudgeQueued(t, cityDir)
 	if len(pollers) != 0 {

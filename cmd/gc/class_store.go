@@ -513,7 +513,7 @@ type queryTopologyWorkProbe struct{ beads.Store }
 func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) mail.Provider {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
-	return newMailProviderWithSessionStore(msgStore, sessStore)
+	return withMailNoticeWithdrawal(newMailProviderWithSessionStore(msgStore, sessStore), sessStore, cfg, nil)
 }
 
 // newCityExtMsgServices builds the controller's external-messaging services as
