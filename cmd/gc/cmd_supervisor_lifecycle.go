@@ -1830,9 +1830,13 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"LC_CTYPE":                                 true,
 	"LOGNAME":                                  true,
 	"SHELL":                                    true,
-	"USER":                                     true,
-	"XDG_CONFIG_HOME":                          true,
-	"XDG_STATE_HOME":                           true,
+	// tmux resolves its socket directory from TMUX_TMPDIR alone (TMPDIR is
+	// ignored), so the supervisor must keep the installing shell's value to
+	// probe and manage the same tmux servers.
+	"TMUX_TMPDIR":     true,
+	"USER":            true,
+	"XDG_CONFIG_HOME": true,
+	"XDG_STATE_HOME":  true,
 }
 
 var supervisorServiceFixedEnvKeys = map[string]bool{

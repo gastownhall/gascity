@@ -7917,3 +7917,28 @@ func TestSupervisorLogTail(t *testing.T) {
 		t.Fatalf("tail = %q, want %q", got, want)
 	}
 }
+
+// AC-8: the service file carries TMUX_TMPDIR, so the supervisor resolves
+// the same tmux socket directory as the shell that installed it, but not
+// TMPDIR, which tmux ignores when it resolves a socket.
+func TestBuildSupervisorServiceDataPersistsTmuxTmpdirNotTmpdir(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	t.Setenv("TMUX_TMPDIR", "/run/gc-tmux")
+	t.Setenv("TMPDIR", "/run/gc-tmp")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["TMUX_TMPDIR"] != "/run/gc-tmux" {
+		t.Fatalf("ExtraEnv[TMUX_TMPDIR] = %q, want %q (all env: %#v)", got["TMUX_TMPDIR"], "/run/gc-tmux", got)
+	}
+	if v, ok := got["TMPDIR"]; ok {
+		t.Fatalf("ExtraEnv[TMPDIR] = %q, want omitted (all env: %#v)", v, got)
+	}
+}
