@@ -52,7 +52,7 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 	for _, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
 			socketName := "gc-live-socket"
-			tmuxTmpDir := "/tmux-private"
+			tmuxTmpDir := resolvedTempDir(t)
 			t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 			socketPath := filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 			observerCalls := 0
@@ -351,9 +351,10 @@ func TestProbeServerAliveAcceptsEmptyLiveServer(t *testing.T) {
 }
 
 func TestNamedSocketPathUsesTMUXTMPDIRAndIgnoresTMPDIR(t *testing.T) {
-	t.Setenv("TMUX_TMPDIR", "/tmux-private")
+	dir := resolvedTempDir(t)
+	t.Setenv("TMUX_TMPDIR", dir)
 	t.Setenv("TMPDIR", "/must-not-be-used")
-	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmux-private", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
+	if got, want := namedSocketPath("gc-test"), filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
 	}
 }
@@ -361,8 +362,89 @@ func TestNamedSocketPathUsesTMUXTMPDIRAndIgnoresTMPDIR(t *testing.T) {
 func TestNamedSocketPathFallsBackToTmpWhenTMUXTMPDIREmpty(t *testing.T) {
 	t.Setenv("TMUX_TMPDIR", "")
 	t.Setenv("TMPDIR", "/must-not-be-used")
-	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmp", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
+	if got, want := namedSocketPath("gc-test"), filepath.Join(resolvedTmp(t), fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
+	}
+}
+
+// TestSocketPathResolvesLikeTmux pins SocketPath to tmux's own -L resolution:
+// a TMUX_TMPDIR directory with its symlinks resolved, else the resolved /tmp,
+// and never TMPDIR. socket_path_integration_test.go checks the same rows
+// against a real server's #{socket_path}.
+func TestSocketPathResolvesLikeTmux(t *testing.T) {
+	uidDir := fmt.Sprintf("tmux-%d", os.Getuid())
+	tmp := resolvedTmp(t)
+	dir := resolvedTempDir(t)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	tests := []struct {
+		name   string
+		set    bool
+		tmuxTD string
+		want   string
+	}{
+		{name: "unset", want: filepath.Join(tmp, uidDir, "gc-test")},
+		{name: "empty", set: true, want: filepath.Join(tmp, uidDir, "gc-test")},
+		{name: "directory", set: true, tmuxTD: dir, want: filepath.Join(dir, uidDir, "gc-test")},
+		{name: "symlink to a directory", set: true, tmuxTD: link, want: filepath.Join(dir, uidDir, "gc-test")},
+		{name: "nonexistent directory", set: true, tmuxTD: filepath.Join(dir, "missing"), want: filepath.Join(tmp, uidDir, "gc-test")},
+		{name: "not a directory", set: true, tmuxTD: file, want: filepath.Join(tmp, uidDir, "gc-test")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("TMUX_TMPDIR", tt.tmuxTD)
+			} else {
+				unsetEnvForTest(t, "TMUX_TMPDIR")
+			}
+			t.Setenv("TMPDIR", dir)
+			if got := SocketPath("gc-test"); got != tt.want {
+				t.Fatalf("SocketPath(gc-test) = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSocketPathKeepsAnAbsoluteSocket(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", resolvedTempDir(t))
+	if got, want := SocketPath("/run/user/1000/../1000/tmux.sock"), "/run/user/1000/tmux.sock"; got != want {
+		t.Fatalf("SocketPath(absolute) = %q, want %q", got, want)
+	}
+}
+
+// resolvedTempDir returns a fresh temp directory with its symlinks resolved,
+// the form tmux reports in #{socket_path}.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving temp dir: %v", err)
+	}
+	return dir
+}
+
+// resolvedTmp returns /tmp with its symlinks resolved (/private/tmp on macOS).
+func resolvedTmp(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatalf("resolving /tmp: %v", err)
+	}
+	return dir
+}
+
+// unsetEnvForTest unsets key for the test and restores its prior value.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unsetenv %s: %v", key, err)
 	}
 }
 

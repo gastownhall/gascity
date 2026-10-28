@@ -142,14 +142,54 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	return append(args, "attach-session", "-t", target)
 }
 
-// namedSocketPath resolves the exact path tmux uses for a named -L socket.
-// tmux honors TMUX_TMPDIR here; TMPDIR is deliberately not a fallback.
-func namedSocketPath(socketName string) string {
-	tmpDir := os.Getenv("TMUX_TMPDIR")
-	if tmpDir == "" {
-		tmpDir = "/tmp"
+// SocketPath returns the path of the tmux server socket ref names, resolved
+// the way tmux resolves it in this process's environment. An absolute ref is
+// the -S form and is returned cleaned. Any other ref is a -L name, placed under
+// <base>/tmux-<uid>/: base is TMUX_TMPDIR with its symlinks resolved when it
+// names a directory, and otherwise the resolved /tmp, which is where tmux
+// falls back to for a missing TMUX_TMPDIR. TMPDIR is never consulted; tmux
+// does not read it.
+func SocketPath(ref string) string {
+	if filepath.IsAbs(ref) {
+		return filepath.Clean(ref)
 	}
-	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	return filepath.Join(socketBaseDir(), fmt.Sprintf("tmux-%d", os.Getuid()), ref)
+}
+
+// socketBaseDir is the directory tmux puts its per-user socket directory in.
+func socketBaseDir() string {
+	if dir := os.Getenv("TMUX_TMPDIR"); dir != "" {
+		if resolved, ok := resolvedDirectory(dir); ok {
+			return resolved
+		}
+	}
+	if resolved, ok := resolvedDirectory("/tmp"); ok {
+		return resolved
+	}
+	return "/tmp"
+}
+
+// resolvedDirectory returns dir as an absolute path with its symlinks
+// resolved, when it names an existing directory.
+func resolvedDirectory(dir string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return resolved, true
+}
+
+// namedSocketPath resolves the exact path tmux uses for a named -L socket.
+func namedSocketPath(socketName string) string {
+	return SocketPath(socketName)
 }
 
 // serverSocketPath returns the socket path of the server t talks to: its
