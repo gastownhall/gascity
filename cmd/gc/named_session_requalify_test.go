@@ -328,3 +328,28 @@ func TestAmbiguousBareNamedSessionRowIsKeptUntouched(t *testing.T) {
 		})
 	}
 }
+
+// AC-5: a row born under the qualified identity never carried the bare one,
+// so bare-assigned work does not belong to it: the assignee matchers stay
+// exact.
+func TestBornQualifiedNamedSessionRowDoesNotOwnBareAssignee(t *testing.T) {
+	row := sessionRow("gc-1",
+		"template", requalifiedQualified, "state", "active", "session_name", requalifiedRuntime, "alias", requalifiedQualified,
+		"configured_named_session", "true", "configured_named_identity", requalifiedQualified, "configured_named_mode", "always",
+		"generation", "1")
+	store := beads.NewMemStoreFrom(0, []beads.Bead{row, requalifiedWork()}, nil)
+
+	if liveOpenSessionAssignmentExists(store, requalifiedBare) {
+		t.Errorf("liveOpenSessionAssignmentExists(%q) matched the born-qualified row", requalifiedBare)
+	}
+	if !liveOpenSessionAssignmentExists(store, requalifiedQualified) {
+		t.Errorf("liveOpenSessionAssignmentExists(%q) missed the born-qualified row", requalifiedQualified)
+	}
+	info := sessionInfoFromBead(row)
+	if len(info.AliasHistory) != 0 {
+		t.Fatalf("born-qualified row has alias_history %v, want none", info.AliasHistory)
+	}
+	if ids := session.AssigneeIdentities(info); slices.Contains(ids, requalifiedBare) {
+		t.Errorf("AssigneeIdentities = %v, want no %q", ids, requalifiedBare)
+	}
+}
