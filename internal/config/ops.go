@@ -97,11 +97,13 @@ type OpsConfig struct {
 	// when gc mail or the API reads, marks read, archives or deletes its
 	// message, or SessionStart archives a handoff; a message consumed any
 	// other way can leave its notice open. A ready wait's nudge is a lane
-	// notice from gc:wait, which finalizes the wait from its outcome. gc
-	// session submit's local fallback keeps its legacy delivery in this
-	// build; it answers from the API's lane op under its key rather than
-	// delivering again, on any sessions store, the content gate's builtin
-	// default notwithstanding.
+	// notice from gc:wait to a session a lane host can type into, and its
+	// outcome finalizes the wait; for a session no lane serves, or a note the
+	// op store refuses, it keeps its legacy delivery. gc session submit's
+	// local fallback keeps its legacy delivery in this build; it answers
+	// from the API's lane op under its key rather than delivering again, on
+	// any sessions store, the content gate's builtin default
+	// notwithstanding.
 	// Listing interrupt switches the API's POST
 	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
 	// each proposes interrupt ops the controller's lane host runs, and

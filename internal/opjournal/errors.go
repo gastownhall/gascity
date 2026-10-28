@@ -56,6 +56,15 @@ var (
 	ErrNoNamespace = errors.New("opjournal: store has no id prefix")
 )
 
+// Undecodable reports an error that a retry will not clear: a stored row this
+// build cannot decode, because it is corrupt (ErrCorruptOp) or a newer build
+// wrote it under a kind, schema revision or vocabulary value this one does
+// not know.
+func Undecodable(err error) bool {
+	return errors.Is(err, ErrCorruptOp) || errors.Is(err, ErrUnsupportedSchema) ||
+		errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrUnsupportedKind)
+}
+
 // KeyReuseError reports that a client key already names an op with another
 // request digest. Existing is the op already stored under the id.
 type KeyReuseError struct {
