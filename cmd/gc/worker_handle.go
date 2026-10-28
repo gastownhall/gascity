@@ -460,12 +460,12 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	)
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
-		// GC_CITY_NAME is the city's effective runtime identity — the same
-		// resolution pack commands use (registered name, else
-		// [workspace].name, else the city directory basename). Written after
-		// the identity anchors and always, even empty, so the session never
-		// inherits a supervisor value naming a different city (upstream
-		// #8151).
+		// GC_CITY_NAME is the city's effective runtime identity, resolved
+		// from cfg as pack commands resolve it: the registered name when the
+		// controller stamped cfg, else the site-bound or declared name, else
+		// the city directory basename. Written after the identity anchors
+		// and always, even empty, so the session never inherits a
+		// supervisor value naming a different city (upstream #8151).
 		sessionEnv["GC_CITY_NAME"] = loadedCityName(cfg, cityPath)
 	}
 	return sessionEnv

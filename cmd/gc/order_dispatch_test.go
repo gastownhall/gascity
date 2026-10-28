@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -11233,6 +11234,8 @@ func TestOrderExecEnvCarriesItsOwnCityName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("orderTriggerOptionsForTarget: %v", err)
 		}
-		singleGCCityName(t, mergedOrderExecEnv(opts.ConditionEnv), "own-city")
+		// The condition runner's own merge (orders.mergeConditionEnv), not
+		// the exec runner's.
+		singleGCCityName(t, execenv.MergeEntries(os.Environ(), opts.ConditionEnv), "own-city")
 	})
 }
