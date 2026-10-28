@@ -1868,7 +1868,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 					return rc
 				}
 				preCheckConclusive = conclusive
-				blockingLabel, blockingID = sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
+				blockingLabel, blockingID = deps.FindBlockingMolecule(querier, opts.BeadOrFormula)
 			}
 			w("Default formula:")
 			w("  Formula: " + defaultFormula)
@@ -2102,7 +2102,7 @@ func printBeadInfo(w func(string), q BeadQuerier, beadID string) {
 // children" pass even when a live convoy-first workflow from the same
 // formula would have blocked the real launch.
 func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, formulaName string, stderr io.Writer) (int, bool) {
-	if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
+	if label, id := deps.FindBlockingMolecule(querier, opts.BeadOrFormula); label != "" {
 		fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}

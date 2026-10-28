@@ -98,6 +98,11 @@ type Request struct {
 	Principal    string
 	Actor        string
 	Key          string
+	// KeyNamespace, when set, is the namespace the request's command keeps
+	// its clients' keys in (KeyNamespaceRequestRestart,
+	// KeyNamespaceHandoff): the op is stored under KeyNamespace+Key, and a
+	// minted key as minted. The Admission still names Key.
+	KeyNamespace string
 	Payload      string
 	Causation    string
 	Kind         opjournal.Kind
@@ -243,12 +248,16 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 	if err != nil {
 		return r.cannotRecord(req.Kind, key, minted, StageOpen, openReason(err), err)
 	}
+	stored, err := req.storedKey(key, minted)
+	if err != nil {
+		return r.unrecordable(req, key, minted, err)
+	}
 	oreq := opjournal.Request{
 		Conversation: req.Conversation,
 		Kind:         req.Kind,
 		Executor:     r.Executor,
 		MintedKey:    minted,
-		ClientKey:    key,
+		ClientKey:    stored,
 		Producer:     opjournal.Producer{Principal: req.Principal, Actor: req.Actor},
 		Payload:      req.Payload,
 		Policy:       req.Policy,
@@ -402,14 +411,14 @@ func (r *Recorder) adopt(st *opjournal.Store, key string, minted bool, op opjour
 	return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
 }
 
-// unrecordable answers a request Preview refuses: run it unrecorded in auto,
-// refuse it in require.
+// unrecordable answers a request its key (ValidateKey) or Preview refuses:
+// run it unrecorded in auto, refuse it in require.
 func (r *Recorder) unrecordable(req Request, key string, minted bool, err error) (*Admission, error) {
 	reason := ReasonInvalidRequest
 	switch {
 	case errors.Is(err, opjournal.ErrPayloadTooLarge):
 		reason = ReasonPayloadTooLarge
-	case opjournal.ValidateClientKey(key) != nil:
+	case ValidateKey(req.Kind, req.KeyNamespace, key) != nil:
 		reason = ReasonInvalidKey
 	}
 	if r.Mode == gate.Require {

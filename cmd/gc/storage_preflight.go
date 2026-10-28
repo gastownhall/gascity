@@ -144,14 +144,21 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	// 3. The expensive one, and the reason this verb most earns its place: a bead
 	// in a rig scope is refused BY NAME and no command this binary carries can
 	// repair it. Finding that out inside a stopped-city window is the worst
-	// possible time. It runs here, ahead of the convergence read, because that is
-	// where the migration runs it — a converged city with rig residue is refused
-	// by the census, so a rehearsal that returned early on the marker would clear
-	// it.
-	if err := censusRigInfraResidue(request.CityPath, request.Cfg); err != nil {
+	// possible time. It runs here, ahead of the served-binding and cutover
+	// checks, because that is where the migration runs it — and, as there, it
+	// gates only a copy. A city that already converged copies nothing, so the
+	// migration does not census it (doStorageMigrate), and what the census
+	// finds there is named without blocking.
+	state, stateErr := readInfraConvergenceState(target)
+	converged := stateErr == nil && state == infraConvergenceMarked
+	switch err := censusRigInfraResidue(request.CityPath, request.Cfg); {
+	case err == nil:
+		preflightPass(stdout, "rig scopes", "no infrastructure bead lives outside this city's work store")
+	case converged:
+		preflightNote(stdout, "rig scopes", fmt.Sprintf("this city already converged: the migration copies nothing here and does not census rig scopes, so these rows do not stop it and stay as reachable as they are now. The census finds: %v", err))
+	default:
 		return preflightBlock(stdout, "rig scopes", err)
 	}
-	preflightPass(stdout, "rig scopes", "no infrastructure bead lives outside this city's work store")
 
 	// 4. The served-binding note, which is the migration's own first check and an
 	// unconditional hold: a note naming another binding means infrastructure
@@ -170,9 +177,8 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	// report stranded or uncheckable. That answer lives on the destination this
 	// rehearsal will not open, which is why the report hands off to
 	// `gc storage status` rather than answering it.
-	state, err := readInfraConvergenceState(target)
-	if err != nil {
-		return preflightBlock(stdout, "binding root", err)
+	if stateErr != nil {
+		return preflightBlock(stdout, "binding root", stateErr)
 	}
 	if state == infraConvergenceMarked {
 		preflightPass(stdout, "cutover", "already converged — the marker is present, so the migration would not copy")
@@ -266,7 +272,9 @@ const (
 	// preflightPassTag and preflightBlockTag are the two verdicts a check has.
 	preflightPassTag  = "[ok]"
 	preflightBlockTag = "[BLOCK]"
-	// preflightTagColumn fits the wider of the two tags plus its trailing space.
+	// preflightNoteTag marks a finding the migration would not refuse over.
+	preflightNoteTag = "[note]"
+	// preflightTagColumn fits the widest tag plus its trailing space.
 	preflightTagColumn = len(preflightBlockTag) + 1
 	// preflightCheckColumn fits the longest check name this report prints,
 	// which is "served binding".
@@ -286,6 +294,12 @@ var (
 // preflightPass records a check the migration would clear.
 func preflightPass(stdout io.Writer, check, detail string) {
 	fmt.Fprintf(stdout, preflightRowFormat, preflightPassTag, check, detail) //nolint:errcheck // best-effort stdout
+}
+
+// preflightNote records what a check found that the migration would not
+// refuse over.
+func preflightNote(stdout io.Writer, check, detail string) {
+	fmt.Fprintf(stdout, preflightRowFormat, preflightNoteTag, check, detail) //nolint:errcheck // best-effort stdout
 }
 
 // preflightBlock records the check that would refuse the migration and returns

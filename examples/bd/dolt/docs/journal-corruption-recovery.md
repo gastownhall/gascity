@@ -99,6 +99,9 @@ gc stop 2>/dev/null || true
 #     staging directory, registers it on the restored copy again, and only
 #     then swaps the copy in for the corrupt store
 # WARNING: all changes after the backup snapshot are lost
+# SPLIT-STORE CITY: restore only a backup taken AFTER the split. One taken
+# before it holds that time's infrastructure rows, which land in the work
+# store, and the next boot refuses. Use 4b with --skip-infra for an older backup.
 
 # 4b. Reconstruct from the core JSONL archive (lossy last resort)
 # WARNING: JSONL recovery loses all non-issue history (events, wisps, comment and
@@ -252,6 +255,17 @@ gc bd backup restore /path/to/city/.dolt-backup/<dbname> --force
 gc start
 ```
 
+On a **split-store city** (one that serves its infrastructure classes from a
+separate binding), `gc bd backup restore` is refused, with no override. gc
+cannot verify a backup's age against the split, and a backup taken before the
+split would bring that time's infrastructure rows back into the work store all
+at once. Restore the backup into a scratch single-store city instead (a
+throwaway `gc init` city with no `[storage]` split, where `gc bd backup
+restore` is forwarded unchanged), `gc bd export` it there, and import the
+export into the split city with `gc bd import <file> --skip-infra` (Step 4b),
+which keeps only the rows the work store holds. The next `gc start` checks the
+work store for stranded rows.
+
 No maintenance order ever runs a restore.
 
 If no backup is registered or the backup itself is corrupt, proceed to the JSONL fallback.
@@ -277,7 +291,8 @@ ls -l /path/to/city/.gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
 # Keep the corrupt store; never delete it
 mv <data_dir>/<dbname> <somewhere-safe>
 
-# Re-initialize the store that the import fills
+# Re-initialize the store that the import fills (on a split-store city, gc bd refuses --db;
+# see "gc bd on split cities" in docs/runbooks/split-storage-classes.md)
 gc bd init --db <dbname>
 
 # Import the latest JSONL archive snapshot of this database (written by the
@@ -287,6 +302,14 @@ gc bd import /path/to/city/.gc/runtime/packs/core/jsonl-archive/<dbname>/issues.
 # Inspect open/in-progress beads and correct state if needed
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
+
+> **Split-store cities.** On a city that serves its infrastructure classes
+> (graph, sessions, messaging, orders, nudges) from a separate binding, the
+> work store holds work beads only. An archive taken before the split carries
+> infrastructure rows, and `gc bd import` refuses such a file rather than
+> strand them in the work store. It names the rows by class. Re-run it with
+> `--skip-infra` to import the work rows only. The binding already holds the
+> live infrastructure state, so those rows are left out, not restored over it.
 
 ---
 

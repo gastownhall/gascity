@@ -19,6 +19,7 @@ nudge-unconfirmed
 dolt-topology
 dolt-drift
 config-valid
+bd-command-inventory
 legacy-suspended-field
 daemon-session-reconciler
 beads-ledger-feed

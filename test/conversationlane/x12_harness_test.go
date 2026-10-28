@@ -944,9 +944,9 @@ func x12Baselines(t *testing.T) map[string]x12Shape {
 }
 
 func learnBaselines(t *testing.T) map[string]x12Shape {
-	// Two on_demand sessions for the mail notify and spare, and two per
-	// surface for the lifecycle signatures.
-	c := newX12City(t, armSQLite, "off", 6, false)
+	// Two on_demand sessions for the mail notify and spare, two per surface
+	// for the lifecycle signatures, and one for the CLI's request-restart.
+	c := newX12City(t, armSQLite, "off", 7, false)
 	c.start("")
 	w := c.worker()
 	out := map[string]x12Shape{}
@@ -1065,6 +1065,12 @@ func learnLifecycle(t *testing.T, c *x12City, surface string, out map[string]x12
 		s.gen = generation(c.sessionRow(s.id))
 	}
 	learn(c.materialize(false), "close")
+	if surface == surfaceCLI {
+		// OJ-6's in-session restart requests: request-restart on its own
+		// session, a handoff on the always-on worker it restarts.
+		learn(c.materialize(false), "request-restart")
+		learn(c.worker(), "handoff")
+	}
 }
 
 // shapeReminderBatch is the framing of a batch of queued reminders, its
@@ -1134,5 +1140,40 @@ func (c *x12City) send(v x12Verb, s x12Session, key, payload string, extra []str
 	if v.surface == surfaceAPI {
 		return c.apiPost(v, s.id, key, payload)
 	}
-	return c.cliRun(extra, v.cliArgs(s, key, payload)...)
+	if v.inSession {
+		extra = append(append([]string(nil), extra...), c.inSessionEnv(s)...)
+	}
+	a := c.cliRun(extra, v.cliArgs(s, key, payload)...)
+	if v.noJSON && a.code == "" && a.status == 1 {
+		a.code = cliRefusalCode(a.stderr)
+	}
+	return a
+}
+
+// inSessionEnv is the environment of a process running inside session s:
+// its alias, its runtime name and its current incarnation's token, read
+// fresh from its row. GC_SESSION_ID stays unset, so the CLI's principal is
+// the operator, as operatorOpID derives.
+func (c *x12City) inSessionEnv(s x12Session) []string {
+	c.t.Helper()
+	row := c.sessionRow(s.id)
+	return []string{
+		"GC_ALIAS=" + s.name,
+		"GC_SESSION_NAME=" + row.Metadata["session_name"],
+		"GC_INSTANCE_TOKEN=" + row.Metadata["instance_token"],
+	}
+}
+
+// cliRefusalCode is the op refusal code a CLI verb with no --json names on
+// stderr, or "".
+func cliRefusalCode(stderr string) string {
+	switch {
+	case strings.Contains(stderr, " is in progress"):
+		return "op_in_progress"
+	case strings.Contains(stderr, " closed failed"):
+		return "op_already_failed"
+	case strings.Contains(stderr, "op journal cannot record this request"):
+		return "op_journal_unavailable"
+	}
+	return ""
 }

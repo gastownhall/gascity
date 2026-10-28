@@ -2741,6 +2741,13 @@ func assertWorkflowDeleteLeavesNothingStranded(store beads.Store, id string, als
 // see — an open descendant recorded outside the collected set — not a
 // replacement for the per-bead guard.
 func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []string) error {
+	return assertWorkflowDeleteSetLeavesNothingStrandedFor(store, ids, ids)
+}
+
+// assertWorkflowDeleteSetLeavesNothingStrandedFor is the set-level guard for a
+// delete of ids that asks only about check, a subset of ids the caller could
+// not already rule out as owners of gc.root_bead_id members.
+func assertWorkflowDeleteSetLeavesNothingStrandedFor(store beads.Store, ids, check []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -2750,7 +2757,7 @@ func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []strin
 	}
 	skip := workflowDeleteSkip(deleting)
 	reader := beads.HandlesFor(store).Live
-	for _, id := range ids {
+	for _, id := range check {
 		members, err := reader.List(beads.ListQuery{
 			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: id},
 			TierMode: beads.TierBoth,
@@ -2810,6 +2817,15 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	}
 	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
 		return err
+	}
+	return deleteWorkflowBeadsBatchGuarded(store, ids)
+}
+
+// deleteWorkflowBeadsBatchGuarded is deleteWorkflowBeadsBatch for a caller
+// that already ran the set-level strand guard.
+func deleteWorkflowBeadsBatchGuarded(store beads.Store, ids []string) error {
+	if len(ids) == 0 {
+		return nil
 	}
 	if cd, ok := store.(beads.BatchDeleter); ok {
 		// A policy/capability wrapper advertises BatchDeleter to forward it, but

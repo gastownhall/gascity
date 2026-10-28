@@ -480,7 +480,7 @@ func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.G
 // which decides only store routing. It is the verbatim pre-lift classifier.
 func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 	for _, node := range plan.Nodes {
-		if isWispPolicyMetadata(node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
+		if isWispPolicyBead(node.Type, node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
 			return beadPolicyWisp
 		}
 	}
@@ -500,7 +500,7 @@ func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 // keyed on these names, not on the coordination class.
 func policyNameForBead(b beads.Bead) string {
 	switch {
-	case isWispPolicyMetadata(b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
+	case isWispPolicyBead(b.Type, b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
 		return beadPolicyWisp
 	case hasBeadLabel(b.Labels, labelOrderTracking):
 		return beadPolicyOrderTracking
@@ -519,6 +519,20 @@ func policyNameForBead(b beads.Bead) string {
 
 func isWispPolicyMetadata(metadata map[string]string) bool {
 	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
+}
+
+// isWispPolicyBead reports whether a bead of beadType with metadata takes the
+// wisp storage policy (the ephemeral tier under bd-1.0.5 semantics).
+//
+// An ATTACHED root-only wisp does not. sling's privatizeAttachedRootOnlyWisp
+// keeps its gc.kind=wisp marker (it is graph class) but types it as a
+// molecule container, and it lives exactly as long as the source bead it is
+// attached to. On the ephemeral tier it would be reapable by bd's own wisp
+// GC (`gc bd mol wisp gc --age`) while that source is still live, so it stays
+// on the durable tier like the molecule container it is. A standalone
+// root-only wisp is an executable task, and keeps the wisp policy.
+func isWispPolicyBead(beadType string, metadata map[string]string) bool {
+	return isWispPolicyMetadata(metadata) && !beads.IsMoleculeType(beadType)
 }
 
 func isWorkflowPolicyMetadata(metadata map[string]string) bool {

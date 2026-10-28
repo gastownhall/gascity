@@ -1913,3 +1913,32 @@ func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]st
 	}
 	return index, nil
 }
+
+// RecipeClass returns the coordination class of the beads instantiating recipe
+// produces, which decides the store its molecule belongs in.
+//
+// Instantiate materializes a recipe as one atomic plan, so the plan is
+// classified wholesale, as coordclass.ClassifyGraphPlan does: a single
+// graph-marked step makes the whole molecule graph class, which keeps its
+// intra-plan edges inside one store. Steps a RootOnly recipe never creates are
+// skipped, matching Instantiate's own RootOnly cut. A graph.v2 workflow or a
+// root-only wisp is graph class; a v1 POURED recipe (a molecule container plus
+// plain steps) is work class and belongs on the work ledger.
+func RecipeClass(recipe *formula.Recipe) coordclass.Class {
+	if recipe == nil {
+		return coordclass.ClassWork
+	}
+	for i, step := range recipe.Steps {
+		if recipe.RootOnly && i > 0 {
+			break
+		}
+		stepType := step.Type
+		if stepType == "" {
+			stepType = "task"
+		}
+		if coordclass.Classify(beads.Bead{Type: stepType, Labels: step.Labels, Metadata: step.Metadata}) == coordclass.ClassGraph {
+			return coordclass.ClassGraph
+		}
+	}
+	return coordclass.ClassWork
+}
