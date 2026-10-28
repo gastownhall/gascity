@@ -113,11 +113,11 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 		"DOLT_ESCALATE_SCRIPT="+filepath.Join(c.binDir, "escalate.sh"),
 		"GC_CALL_LOG="+c.gcLog,
 	)
-	// Every HTTPS request a child makes goes to a black hole. A proxied scope's
-	// `bd init` probes `dolt version`, whose update check is a network call
-	// unless HOME's dolt config disables it; on a healthy network that call
-	// returns in 0.2 s and hides a missing config, so the slow network is
-	// reproduced deterministically instead of waited for.
+	// Every HTTPS request a child makes goes to a normally unroutable proxy. A
+	// proxied scope's `bd init` probes `dolt version`, whose update check is a
+	// network call unless HOME's dolt config disables it; on a healthy network
+	// that call returns in 0.2 s and hides a missing config, so on most hosts
+	// the slow network is reproduced instead of waited for.
 	c.env = append(c.env, testutil.UnroutableHTTPSProxyEnv()...)
 	writeExecutable(t, filepath.Join(c.binDir, "escalate.sh"), "#!/bin/sh\nprintf 'ESCALATION %s\\n' \"$*\" >> \""+c.gcLog+"\"\n")
 	t.Cleanup(c.stopProcesses)
