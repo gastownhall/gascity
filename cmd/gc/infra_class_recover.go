@@ -752,7 +752,7 @@ func reportInfraEdgePlan(stdout io.Writer, plan infraEdgePlan) {
 // substitute for one that did not; then the writers; then the guard — and only
 // under the guard, the manifest, because a read-modify-write that straddles the
 // lock can silently drop the ids a concurrent run published.
-func doStorageRecoverStranded(ctx context.Context, request storageOperatorRequest, opts strandedRecoveryOptions, stdout, stderr io.Writer) int {
+func doStorageRecoverStranded(ctx context.Context, request storageOperatorRequest, opts strandedRecoveryOptions, stdout, stderr io.Writer) (code int) {
 	logPrefix := storageRecoveryLogPrefix()
 
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
@@ -920,10 +920,20 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	//     received. Only the operator knows, so each such id needs --move
 	//     (copy it in) or --record-carried (record it as the bead the copy
 	//     carried; the clear then deletes it).
+	//
+	// One more answer moves such a row: a --replace-binding-row that an
+	// earlier run recorded for the id, repeated. That run removed the
+	// binding's row under the id and failed before its copy, so the binding
+	// holds none, and moving the work-store row is what the choice asked.
 	var idOnlyOpen []beads.Bead
 	var recordCarried []beads.Bead
 	// chosen maps each row a per-id flag answered to that flag.
 	chosen := map[string]string{}
+	choicesBefore, err := infraRecoverChoiceIDs(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	for _, b := range rows {
 		match := manifest.Match(b)
 		if resolvable[b.ID] {
@@ -948,6 +958,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 				continue
 			case opts.Move[b.ID]:
 				chosen[b.ID] = strandedMoveFlag
+			case opts.ReplaceBindingRow[b.ID] && choicesBefore[strandedReplaceBindingRowFlag][b.ID]:
 			case b.Status == "closed":
 			default:
 				idOnlyOpen = append(idOnlyOpen, b)
@@ -1015,11 +1026,6 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	for _, b := range stranded {
 		strandedSet[b.ID] = true
 	}
-	choicesBefore, err := infraRecoverChoiceIDs(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	var misnamedLegacy, misnamedHeld, already, movedAnyway []string
 	for flag, ids := range map[string]map[string]bool{strandedMoveFlag: opts.Move, strandedRecordCarriedFlag: opts.RecordCarried} {
 		for id := range ids {
@@ -1077,11 +1083,18 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stdout, "note: the binding holds no row under %s any more, so each is moved like any stranded row\n", strings.Join(movedAnyway, ", ")) //nolint:errcheck // best-effort stdout
 	}
 	// The evidence an operator decides each open row on. The refusal states
-	// the two answers and what each does; it does not lean toward either.
+	// the two answers and what each does; it does not lean toward either,
+	// except for a row an earlier --replace-binding-row already answered:
+	// with the binding's row removed, the work-store row is the only live
+	// copy of the id, and --record-carried would let the clear delete it.
 	reportIDOnlyOpen := func(w io.Writer) {
 		for _, b := range idOnlyOpen {
 			fmt.Fprintf(w, "  %s  status=%s  type=%s  created=%s  updated=%s  title=%q\n", //nolint:errcheck // best-effort output
 				b.ID, b.Status, b.Type, b.CreatedAt.UTC().Format(time.RFC3339), b.UpdatedAt.UTC().Format(time.RFC3339), b.Title)
+			if choicesBefore[strandedReplaceBindingRowFlag][b.ID] {
+				fmt.Fprintf(w, "    an earlier run removed the binding's row under %s by --%s (it is backed up in %s), so this row is the only live copy: finish that choice with --%s %s, not --%s, which would let the clear delete it\n", //nolint:errcheck // best-effort output
+					b.ID, strandedReplaceBindingRowFlag, target.RecoverChoicesBackupPath(), strandedReplaceBindingRowFlag, b.ID, strandedRecordCarriedFlag)
+			}
 		}
 	}
 	idOnlyOpenRefusal := func() {
@@ -1288,6 +1301,18 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 		copied++
 	}
+	// A failure from here until the manifest is rewritten says only that the
+	// manifest was NOT extended. The rows the per-id choices removed stay
+	// removed all the same, so such a run ends by naming them, their backup,
+	// and the resume.
+	manifestRewritten := false
+	if removedByChoice != "" {
+		defer func() {
+			if code != 0 && !manifestRewritten {
+				fmt.Fprintf(stderr, "%s: the per-id choices took effect before this run failed, and they stand:\n%s\nRun this again with the same flags to resume: a choice that already took effect is a no-op\n", logPrefix, infraHeldChoiceSummary(target, replaceMovable, drop)) //nolint:errcheck // best-effort stderr
+			}
+		}()
+	}
 
 	// Dep edges, after every row exists, so an edge's far endpoint can be
 	// resolved. Only edges the binding lacks are written: the pass is a diff, so
@@ -1319,15 +1344,6 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	defer closeBeadStoreHandle(verifier) //nolint:errcheck // best-effort close
-	after, err := verifier.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: listing the reopened binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	witnessed := make(map[string]bool, len(after))
-	for _, b := range after {
-		witnessed[b.ID] = true
-	}
 	moved := make(map[string]bool, len(movable))
 	for _, b := range movable {
 		moved[b.ID] = true
@@ -1370,7 +1386,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 				return 1
 			}
 		}
-		if diff := recoveredEdgesDifference(b, proof, verifier, resident, witnessed, moved[b.ID]); diff != "" {
+		if diff := recoveredEdgesDifference(b, proof, verifier, resident, moved[b.ID]); diff != "" {
 			fmt.Fprintf(stderr, "%s: %s\n", logPrefix, diff) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1500,6 +1516,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v. The previous manifest is at %s\n", logPrefix, err, backup) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	manifestRewritten = true
 	extendedManifest, _, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: re-reading the extended manifest: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1654,12 +1671,16 @@ func setOf(ids []string) map[string]bool {
 // too, because anything extra on it would be fabricated; a bead that was
 // already resident may hold edges the source never had, legitimately.
 //
+// Resident is the plan's set (planInfraEdges), in both directions: an id the
+// binding holds for a different bead is not resident, so an edge into it,
+// which the plan leaves for the operator's per-id choice, is not demanded.
+//
 // A bead whose edges the second read cannot state is no disagreement: an edge
 // nobody can read is a topology this stage cannot prove, not a copy it can
 // disprove, so the rows this run copied still stand. A bead the plan's own read
 // could not state either is named unstatable there, and the exit code carries
 // it.
-func recoveredEdgesDifference(b beads.Bead, proof *sourceDepReader, verifier beads.Store, resident, witnessed map[string]bool, moved bool) string {
+func recoveredEdgesDifference(b beads.Bead, proof *sourceDepReader, verifier beads.Store, resident map[string]bool, moved bool) string {
 	wantDeps, depsOK, _ := proof.deps(b)
 	if !depsOK {
 		return ""
@@ -1677,7 +1698,7 @@ func recoveredEdgesDifference(b beads.Bead, proof *sourceDepReader, verifier bea
 	if !moved {
 		return ""
 	}
-	if diff := infraDepDifference(b.ID, wantDeps, gotDeps, witnessed); diff != "" {
+	if diff := infraDepDifference(b.ID, wantDeps, gotDeps, resident); diff != "" {
 		return diff + ". The manifest was NOT extended"
 	}
 	return ""

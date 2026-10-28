@@ -752,6 +752,122 @@ func TestRecoverRefusesAHeldChoiceForARowThatNeedsNone(t *testing.T) {
 	}
 }
 
+// A stranded bead with an edge into an id the binding holds for a different
+// bead: the plan counts that edge and leaves it unwritten until the operator
+// chooses, and the proof holds the moved bead to the same far ends. The run
+// moves and records the bead and asks for the choice; once the choice
+// replaces the binding's row, the edge is restored onto the work-store bead.
+//
+// Red before: the proof demanded the edge the plan declined to write, and the
+// run exited 1 with "dep ... missing from binding" before the manifest was
+// extended or the choice was asked for.
+func TestRecoverMovesABeadWithAnEdgeIntoAHeldDifferentID(t *testing.T) {
+	cityPath, cfg, source, target, original, reused := heldReusedIDCity(t)
+	id := reused.ID
+	late := mustCreateInfraBead(t, source, beads.Bead{Title: "a mail written after the cutover", Type: "message"})
+	if err := source.DepAdd(late.ID, id, "blocks"); err != nil {
+		t.Fatalf("giving %s an edge into %s: %v", late.ID, id, err)
+	}
+
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code == 0 {
+		t.Errorf("recover exited 0 with %s awaiting a choice: %s", id, stdout)
+	}
+	if strings.Contains(stderr, "missing from binding") || strings.Contains(stderr, "NOT extended") {
+		t.Fatalf("the proof demanded the edge the plan left for the operator's choice: %s %s", stdout, stderr)
+	}
+	manifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.IDs[late.ID] {
+		t.Errorf("the manifest does not record the moved %s", late.ID)
+	}
+	for _, want := range []string{"Under 1 of those ids", id, "--" + strandedReplaceBindingRowFlag, "--" + strandedDropWorkRowFlag} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the run does not ask for the choice (%q missing): %s", want, stdout)
+		}
+	}
+	binding := openMigratedDestination(t, target)
+	if _, err := binding.Get(late.ID); err != nil {
+		t.Errorf("recover did not move %s: %v", late.ID, err)
+	}
+	if deps, err := binding.DepList(late.ID, "down"); err != nil || len(deps) != 0 {
+		t.Errorf("binding %s edges = %+v (err %v); the edge into %s was written onto the binding's different bead", late.ID, deps, err, id)
+	}
+	if got, err := binding.Get(id); err != nil || got.Title != original.Title {
+		t.Errorf("binding %s = %q (err %v), want the original left in place", id, got.Title, err)
+	}
+	if got := strandedIDs(t, cityPath, target); !slices.Equal(got, []string{id}) {
+		t.Errorf("stranded = %v, want only %s, which awaits the choice", got, id)
+	}
+
+	code, stdout, stderr = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{ReplaceBindingRow: map[string]bool{id: true}})
+	if code != 0 {
+		t.Fatalf("recover --%s %s exited %d: %s %s", strandedReplaceBindingRowFlag, id, code, stdout, stderr)
+	}
+	binding = openMigratedDestination(t, target)
+	deps, err := binding.DepList(late.ID, "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != id || deps[0].Type != "blocks" {
+		t.Errorf("binding %s edges = %+v, want the blocks edge into %s restored once the work-store row holds the id", late.ID, deps, id)
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("still stranded after the replace: %v", got)
+	}
+	assertClearProceeds(t, cityPath, target)
+}
+
+// A run that fails after its per-id choices took effect, and before the
+// manifest was extended, ends by naming the removals that stand, their backup,
+// and the resume; the same flags then finish it.
+//
+// Red before: the run's last word was the failure and "The previous manifest
+// is at ...", with nothing about the binding row it had already removed.
+func TestRecoverNamesTheChoicesThatStandWhenItFailsAfterThem(t *testing.T) {
+	cityPath, cfg, _, target, _, reused := heldReusedIDCity(t)
+	id := reused.ID
+	prevRename := infraMigrationRename
+	infraMigrationRename = func(from, to string) error {
+		if filepath.Base(to) == filepath.Base(target.ManifestPath()) {
+			return errors.New("injected: the manifest rename did not land")
+		}
+		return prevRename(from, to)
+	}
+	t.Cleanup(func() { infraMigrationRename = prevRename })
+	replace := strandedRecoveryOptions{ReplaceBindingRow: map[string]bool{id: true}}
+
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, replace)
+	if code == 0 {
+		t.Fatalf("recover exited 0 with the manifest write failing: %s %s", stdout, stderr)
+	}
+	for _, want := range []string{
+		"the per-id choices took effect before this run failed",
+		"replaced the binding's row (by --" + strandedReplaceBindingRowFlag + "): " + id,
+		target.RecoverChoicesBackupPath(),
+		"Run this again with the same flags to resume",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the failed run does not say %q: %s", want, stderr)
+		}
+	}
+
+	infraMigrationRename = prevRename
+	code, stdout, stderr = runStrandedRecoveryWith(t, cityPath, cfg, replace)
+	if code != 0 || !strings.Contains(stdout, "already resolved") {
+		t.Fatalf("the resume = %d, want a no-op choice and exit 0: %s %s", code, stdout, stderr)
+	}
+	if got, err := openMigratedDestination(t, target).Get(id); err != nil || got.Title != reused.Title {
+		t.Errorf("binding %s = %q (err %v), want the work-store row %q", id, got.Title, err, reused.Title)
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("still stranded after the resume: %v", got)
+	}
+	assertClearProceeds(t, cityPath, target)
+}
+
 // The classification table, independent of any store.
 func TestInfraContainmentClassifyTable(t *testing.T) {
 	written := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
@@ -2208,6 +2324,74 @@ func TestRecoverAsksBeforeMovingAPresumedReusedRowTheBindingCollected(t *testing
 			}
 		})
 	}
+}
+
+// A --replace-binding-row that removed the binding's row and failed before its
+// copy resumes with the same flag on a legacy manifest too, where the open
+// work-store row reads as presumed reused once the binding no longer holds its
+// id. Run with no flag, the refusal names the choice the id already has rather
+// than steering it to --record-carried, which would let the clear delete the
+// only live copy.
+//
+// Red before: the resume was refused ("name only work-store rows whose id the
+// binding holds for a different bead"), and the refusal offered only --move
+// and --record-carried.
+func TestRecoverResumesAnInterruptedReplaceOnALegacyManifest(t *testing.T) {
+	prevSlack := infraManifestClockSlack
+	infraManifestClockSlack = 0
+	t.Cleanup(func() { infraManifestClockSlack = prevSlack })
+
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	id := carriedMessageID(t, source)
+	backdateHeldOriginal(t, target, id)
+	writeLegacyManifest(t, target)
+	waitPastMarkerBound(t, target)
+	reused := reuseCarriedID(t, source, id)
+	manifest, _, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Match(reused); got != infraManifestPresumedReused {
+		t.Fatalf("precondition: Match(%s) = %d, want presumed reused (%d)", id, got, infraManifestPresumedReused)
+	}
+
+	// The first run, up to the copy that failed: the choice took effect.
+	dest, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := dest.Get(id)
+	if err != nil {
+		t.Fatalf("the fixture's binding lost the original %s: %v", id, err)
+	}
+	if err := applyInfraHeldChoices(target, source, dest, []beads.Bead{reused}, nil, map[string]beads.Bead{id: original}); err != nil {
+		t.Fatalf("applying the replace: %v", err)
+	}
+	if err := closeBeadStoreHandle(dest); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code == 0 {
+		t.Errorf("recover exited 0 over the open %s with no flag: %s", id, stdout)
+	}
+	for _, want := range []string{"an earlier run removed the binding's row under " + id, "finish that choice with --" + strandedReplaceBindingRowFlag + " " + id} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the refusal does not say %q: %s", want, stderr)
+		}
+	}
+
+	code, stdout, stderr = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{ReplaceBindingRow: map[string]bool{id: true}})
+	if code != 0 {
+		t.Fatalf("the resume with --%s %s exited %d: %s %s", strandedReplaceBindingRowFlag, id, code, stdout, stderr)
+	}
+	if got, err := openMigratedDestination(t, target).Get(id); err != nil || got.Title != reused.Title {
+		t.Errorf("binding %s = %q (err %v), want the work-store row %q", id, got.Title, err, reused.Title)
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("still stranded after the resume: %v", got)
+	}
+	assertClearProceeds(t, cityPath, target)
 }
 
 // How the manifest reads a row against an entry that records no created_at
