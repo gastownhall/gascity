@@ -567,6 +567,62 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 	}
 }
 
+// commitOnLivenessProvider is a remote runtime with no is-running: every box
+// reads not running. Its first liveness read runs commit, standing in for a
+// start that commits the row after a pass listed it and before the pass
+// reaches the row's teardown.
+type commitOnLivenessProvider struct {
+	runtime.Provider
+	commit func()
+}
+
+func (p *commitOnLivenessProvider) IsRunning(string) bool {
+	if p.commit != nil {
+		p.commit()
+		p.commit = nil
+	}
+	return false
+}
+
+// TestReapStaleSessionBeads_PoolRowCommittedAfterListKeepsItsRuntime: the
+// stuck-creating reaper decides from the rows it listed, so a bead-scoped pool
+// row whose start commits it active after the list must not have its box
+// stopped or the row closed.
+//
+// Kills: the reaper's pool teardown stopping from its listed snapshot.
+func TestReapStaleSessionBeads_PoolRowCommittedAfterListKeepsItsRuntime(t *testing.T) {
+	env, session, name := newRestartedPendingCreate(t, rowPool)
+	// The store stamps CreatedAt from the wall clock.
+	clk := &clock.Fake{Time: time.Now().Add(24 * time.Hour)}
+	sp := &commitOnLivenessProvider{Provider: execProfile(env.sp), commit: func() {
+		env.setSessionMetadata(&session, map[string]string{
+			"state":                     string(sessionpkg.StateActive),
+			"state_reason":              "creation_complete",
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+			"instance_token":            "test-token-2",
+			"generation":                "2",
+			"last_woke_at":              clk.Now().UTC().Format(time.RFC3339),
+		})
+	}}
+
+	reaped := reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, nil, env.store, nil), sp, env.dt, nil, clk, &env.stderr)
+
+	if sp.commit != nil {
+		t.Fatal("fixture: the reaper never read the row's liveness, so the commit never landed")
+	}
+	if n := countCalls(env.sp, "Stop"); n != 0 || !env.sp.IsRunning(name) {
+		t.Fatalf("Stop called %d times, running=%v; want the committed start's box left running; stderr=%s", n, env.sp.IsRunning(name), env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 0 || got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("reaped=%d status=%s state=%q, want the row open and active; stderr=%s", reaped, got.Status, got.Metadata["state"], env.stderr.String())
+	}
+}
+
 // TestReleaseRowOwnedRuntimeLeased_ManualRowBoundsItsReads: a tick's identity
 // reads go through the session's bounded observation, so while an earlier
 // observation of the session has not returned they answer at once as
