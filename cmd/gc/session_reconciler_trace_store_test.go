@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"testing"
 	"time"
@@ -176,6 +177,81 @@ func TestTraceStoreFailedWriteRollsBackPartialBatch(t *testing.T) {
 		}
 		if seqAfter != got.seqBefore {
 			t.Fatalf("LatestSeq after failed write = %d, want %d", seqAfter, got.seqBefore)
+		}
+	})
+}
+
+func traceStoreTestSegments(t *testing.T, root string) []string {
+	t.Helper()
+	segments, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceSegments, "*", "*", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob segments: %v", err)
+	}
+	sort.Strings(segments)
+	return segments
+}
+
+// assertTraceSeqsUnique fails when two records share a seq.
+func assertTraceSeqsUnique(t *testing.T, records []SessionReconcilerTraceRecord) {
+	t.Helper()
+	seen := make(map[uint64]SessionReconcilerTraceRecord)
+	for _, rec := range records {
+		if prev, ok := seen[rec.Seq]; ok {
+			t.Fatalf("seq %d reused: %s %s and %s %s", rec.Seq, prev.TraceID, prev.RecordType, rec.TraceID, rec.RecordType)
+		}
+		seen[rec.Seq] = rec
+	}
+}
+
+// traceRecordCounts counts the records of each trace id.
+func traceRecordCounts(records []SessionReconcilerTraceRecord) map[string]int {
+	counts := make(map[string]int)
+	for _, rec := range records {
+		counts[rec.TraceID]++
+	}
+	return counts
+}
+
+func TestTraceStoreAppendAfterRolledBackWriteContinuesSegment(t *testing.T) {
+	forEachFailedTraceAppend(t, func(t *testing.T, fresh bool, durability TraceDurabilityTier, cut func(p []byte) int) {
+		got := failTraceAppendOnce(t, fresh, durability, cut)
+		if got.appendErr == nil {
+			t.Fatal("append batch b: want a write error, got nil")
+		}
+		next := traceStoreTestRecord("cycle-c", time.Now().UTC().Add(2*time.Second))
+		if err := got.store.AppendBatch([]SessionReconcilerTraceRecord{next}, durability); err != nil {
+			t.Fatalf("append batch c: %v", err)
+		}
+
+		segments := traceStoreTestSegments(t, got.root)
+		if len(segments) != 1 || segments[0] != got.segPath {
+			t.Fatalf("segments = %v, want only %s (the rolled-back segment keeps being used)", segments, got.segPath)
+		}
+		after, err := os.ReadFile(got.segPath)
+		if err != nil {
+			t.Fatalf("read segment: %v", err)
+		}
+		if !bytes.HasPrefix(after, got.before) || !bytes.HasPrefix(after[len(got.before):], []byte(`{"`)) {
+			t.Fatalf("batch c does not start on its own line after the committed bytes:\n%s", after)
+		}
+
+		records, err := ReadTraceRecords(got.root, TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		assertTraceSeqsUnique(t, records)
+		counts := traceRecordCounts(records)
+		wantA := 2
+		if fresh {
+			wantA = 0
+		}
+		if counts["cycle-a"] != wantA || counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+			t.Fatalf("records by trace = %v, want cycle-a=%d cycle-c=2 and no cycle-b", counts, wantA)
+		}
+		for _, rec := range records {
+			if rec.TraceID == "cycle-c" && rec.RecordType == TraceRecordBatchCommit && rec.FirstSeq != got.seqBefore+1 {
+				t.Fatalf("batch c first_seq = %d, want %d", rec.FirstSeq, got.seqBefore+1)
+			}
 		}
 	})
 }
