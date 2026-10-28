@@ -658,6 +658,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a detached probe alive keeps the slot unstamped (SESS-624)", func(t *testing.T) {
+		listenDetachedProbeServer(t, "gctest-c5c1")
 		installFakeTmux(t, "exit 0")
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", detachedClaim())
@@ -667,6 +668,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a detached probe dead stamps the slot (SESS-624)", func(t *testing.T) {
+		listenDetachedProbeServer(t, "gctest-c5c1")
 		installFakeTmux(t, "exit 1")
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", detachedClaim())
@@ -675,6 +677,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
+		listenDetachedProbeServer(t, "gctest-c5c1")
 		installFakeTmux(t, "exit 0") // the claim's detached probe is alive
 		c := orphan(t)
 		claim := c.work(t, "in_progress", detachedClaim())
@@ -694,6 +697,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a short budget never counts a live handoff stranded", func(t *testing.T) {
+		listenDetachedProbeServer(t, "gctest-c5c1")
 		installFakeTmux(t, "exit 0") // alive
 		for _, c := range []struct {
 			name     string

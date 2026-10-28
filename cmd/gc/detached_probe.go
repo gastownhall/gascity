@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 const (
@@ -84,18 +84,18 @@ func probeDetachedWorkWithTimeout(ctx context.Context, spec string, timeout time
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(probeCtx, "tmux", "-L", parsed.Socket, "has-session", "-t", parsed.Session)
-	if err := cmd.Run(); err != nil {
+	presence, err := sessiontmux.ProbeSession(probeCtx, parsed.Socket, parsed.Session)
+	switch presence {
+	case sessiontmux.PresenceAlive:
+		return detachedProbeResult{Status: detachedProbeAlive, Spec: parsed}
+	case sessiontmux.PresenceDead:
+		return detachedProbeResult{Status: detachedProbeDead, Spec: parsed}
+	default:
 		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
-			return detachedProbeResult{Status: detachedProbeTimeout, Spec: parsed, Err: probeCtx.Err()}
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return detachedProbeResult{Status: detachedProbeDead, Spec: parsed}
+			return detachedProbeResult{Status: detachedProbeTimeout, Spec: parsed, Err: err}
 		}
 		return detachedProbeResult{Status: detachedProbeError, Spec: parsed, Err: err}
 	}
-	return detachedProbeResult{Status: detachedProbeAlive, Spec: parsed}
 }
 
 func incrementDetachedProbeErrorCount(id string) int {

@@ -241,19 +241,56 @@ func observeNamedSocketWith(
 	lstat func(string) (os.FileInfo, error),
 	dial func(context.Context, string) (net.Conn, error),
 ) error {
+	state, err := classifyNamedSocketWith(ctx, path, lstat, dial)
+	switch state {
+	case namedSocketAbsent, namedSocketStale, namedSocketVanished:
+		return nil
+	default:
+		return err
+	}
+}
+
+// namedSocketState is what one observation of a named socket path found.
+type namedSocketState int
+
+const (
+	// namedSocketUnproven is any observation that proves nothing: an lstat or
+	// dial failure, a non-socket file, a replaced inode, or an ended context.
+	namedSocketUnproven namedSocketState = iota
+	// namedSocketAbsent means the path did not exist at the first lstat.
+	namedSocketAbsent
+	// namedSocketStale means the socket refused connections on a stable
+	// inode, or refused and was then removed: its server is gone.
+	namedSocketStale
+	// namedSocketVanished means the socket was removed between the lstat and
+	// the dial.
+	namedSocketVanished
+	// namedSocketLive means a dial connected and the peer pid was read.
+	namedSocketLive
+)
+
+// classifyNamedSocketWith observes path once and names what it found. The
+// error describes every state but absent, stale, and vanished; for a live
+// socket it carries the peer pid.
+func classifyNamedSocketWith(
+	ctx context.Context,
+	path string,
+	lstat func(string) (os.FileInfo, error),
+	dial func(context.Context, string) (net.Conn, error),
+) (namedSocketState, error) {
 	before, err := lstatWithContext(ctx, lstat, path)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
+		return namedSocketUnproven, fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return namedSocketAbsent, nil
 	}
 	if err != nil {
-		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
+		return namedSocketUnproven, fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
 	}
 	inode := socketInode(before)
 	if before.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=not-unix-socket", path, inode)
+		return namedSocketUnproven, fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=not-unix-socket", path, inode)
 	}
 
 	conn, err := dial(ctx, path)
@@ -261,31 +298,31 @@ func observeNamedSocketWith(
 		defer func() { _ = conn.Close() }()
 		unixConn, ok := conn.(*net.UnixConn)
 		if !ok {
-			return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unexpected-connection-type-%T", path, inode, conn)
+			return namedSocketUnproven, fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unexpected-connection-type-%T", path, inode, conn)
 		}
 		peerPID, peerErr := socketPeerPID(unixConn)
 		if peerErr != nil {
-			return fmt.Errorf("path=%s inode=%s peer_pid=unknown peer_pid_reason=%w", path, inode, peerErr)
+			return namedSocketUnproven, fmt.Errorf("path=%s inode=%s peer_pid=unknown peer_pid_reason=%w", path, inode, peerErr)
 		}
-		return fmt.Errorf("path=%s inode=%s peer_pid=%d reason=live-unix-socket", path, inode, peerPID)
+		return namedSocketLive, fmt.Errorf("path=%s inode=%s peer_pid=%d reason=live-unix-socket", path, inode, peerPID)
 	}
 
 	after, afterErr := lstatWithContext(ctx, lstat, path)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown post_lstat=%w", path, inode, contextErr)
+		return namedSocketUnproven, fmt.Errorf("path=%s inode=%s peer_pid=unknown post_lstat=%w", path, inode, contextErr)
 	}
 	pathAbsent := errors.Is(afterErr, os.ErrNotExist)
 	stable := afterErr == nil && os.SameFile(before, after)
 	if errors.Is(err, syscall.ECONNREFUSED) && (pathAbsent || stable) {
-		return nil
+		return namedSocketStale, nil
 	}
 	if errors.Is(err, os.ErrNotExist) && pathAbsent {
-		return nil
+		return namedSocketVanished, nil
 	}
 	if afterErr != nil {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)
+		return namedSocketUnproven, fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)
 	}
-	return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_inode=%s reason=socket-identity-changed-or-dial-failed", path, inode, err, socketInode(after))
+	return namedSocketUnproven, fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_inode=%s reason=socket-identity-changed-or-dial-failed", path, inode, err, socketInode(after))
 }
 
 type lstatResult struct {

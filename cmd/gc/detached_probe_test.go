@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 func TestParseDetachedProbeSpec(t *testing.T) {
@@ -90,6 +93,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := filepath.Join(t.TempDir(), "args")
+			listenDetachedProbeServer(t, "gascity")
 			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
@@ -120,6 +124,7 @@ func TestProbeDetachedWork_MalformedSpecIsError(t *testing.T) {
 }
 
 func TestProbeDetachedWork_Timeout(t *testing.T) {
+	listenDetachedProbeServer(t, "gascity")
 	installFakeTmux(t, "sleep 1")
 
 	got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", 10*time.Millisecond)
@@ -129,6 +134,88 @@ func TestProbeDetachedWork_Timeout(t *testing.T) {
 	if got.Err == nil {
 		t.Fatal("Err = nil, want timeout error")
 	}
+}
+
+// AC-1: a probe that reaches no server at the canonical socket path reports
+// error, never dead, whatever tmux's exit status says.
+func TestProbeDetachedWork_UnreachableServerIsNeverDead(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{name: "socket file absent", setup: func(*testing.T, string) {}},
+		{name: "socket path is not a socket", setup: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("write non-socket: %v", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := useDetachedProbeSocketDir(t, "gascity")
+			tt.setup(t, path)
+			installFakeTmux(t, `echo "no server running on $0" >&2; exit 1`)
+
+			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+			if got.Status != detachedProbeError {
+				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, detachedProbeError, got.Err)
+			}
+			if got.Err == nil {
+				t.Fatal("Err = nil, want the unobserved socket explained")
+			}
+		})
+	}
+}
+
+// AC-1: a socket that refuses connections on a stable inode belonged to a
+// server that is gone, so the session it hosted is dead.
+func TestProbeDetachedWork_StaleRefusedSocketIsDead(t *testing.T) {
+	path := useDetachedProbeSocketDir(t, "gascity")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen %s: %v", path, err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	installFakeTmux(t, `echo "no server running on $0" >&2; exit 1`)
+
+	got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+	if got.Status != detachedProbeDead {
+		t.Fatalf("Status = %q, want %q (err=%v)", got.Status, detachedProbeDead, got.Err)
+	}
+}
+
+// useDetachedProbeSocketDir points TMUX_TMPDIR at a fresh directory short
+// enough for a unix socket address and returns the socket path the detached
+// probe resolves name to under it. Nothing listens there yet.
+func useDetachedProbeSocketDir(t *testing.T, name string) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/tmp", "gcdp")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("TMUX_TMPDIR", root)
+	path := sessiontmux.SocketPath(name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
+	}
+	return path
+}
+
+// listenDetachedProbeServer stands in for a live tmux server on socket name:
+// a unix listener at the path the detached probe resolves, so the probe
+// reaches its tmux client call, which installFakeTmux answers.
+func listenDetachedProbeServer(t *testing.T, name string) {
+	t.Helper()
+	path := useDetachedProbeSocketDir(t, name)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
 }
 
 func installFakeTmux(t *testing.T, body string) {
