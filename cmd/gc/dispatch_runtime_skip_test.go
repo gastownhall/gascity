@@ -276,3 +276,77 @@ func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
 		t.Fatalf("closed control bead dispatched %d times, want once per sweep (4)", got)
 	}
 }
+
+// TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow: a stale closed
+// control bead sharing the queue with a processable one must not stop the
+// processable one from advancing, and once it has, the stale row alone must not
+// keep the drain re-polling: the drain takes the same workflowServeIdlePollAttempts
+// re-polls an empty queue would after progress, then exits.
+func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) {
+	store := beads.NewMemStore()
+	cityDir := newSkipDispatchCity(t, store)
+	stale := createNonOpenScopeCheck(t, store, "closed")
+	// An orphaned scope-check is the cheapest control bead that processes: its
+	// root is missing, so ProcessControl closes it as orphaned-workflow.
+	live, err := store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindScopeCheck,
+			beadmeta.RootBeadIDMetadataKey:   "ga-missing-root",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed live control bead: %v", err)
+	}
+
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	t.Cleanup(func() {
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 3
+
+	listCalls := stubServeQueue(t, func() []hookBead {
+		queue := []hookBead{controlQueueRow(stale)}
+		current, err := store.Get(live.ID)
+		if err != nil {
+			t.Fatalf("read live control bead: %v", err)
+		}
+		if current.Status == "open" {
+			queue = append(queue, controlQueueRow(current))
+		}
+		return queue
+	})
+	dispatches := countServeDispatches(t)
+
+	result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, cityDir, cityDir, "bd ready", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if !result.processedAny || result.pendingAny {
+		t.Errorf("drain result = %+v, want processed and not pending", result)
+	}
+	if !dispatchWakeFileExists(t, cityDir) {
+		t.Errorf("dispatch wake file missing after the live control bead advanced")
+	}
+	if got := dispatches[live.ID]; got != 1 {
+		t.Errorf("live control bead dispatched %d times, want 1", got)
+	}
+	wantStale := 2 + workflowServeIdlePollAttempts
+	if got := dispatches[stale.ID]; got != wantStale {
+		t.Errorf("closed control bead dispatched %d times, want %d (the processing pass plus %d idle re-polls plus the exit pass)", got, wantStale, workflowServeIdlePollAttempts)
+	}
+	if *listCalls != wantStale {
+		t.Errorf("serve queue queried %d times, want %d", *listCalls, wantStale)
+	}
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatalf("read live control bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("live control bead status = %q, want closed by the orphaned-workflow dispatch", got.Status)
+	}
+}
