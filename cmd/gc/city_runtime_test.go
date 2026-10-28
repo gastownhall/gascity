@@ -2291,6 +2291,58 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	}
 }
 
+// TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache reproduces the
+// production stack (policy wrapper over a fully-primed CachingStore) and a
+// tracking bead written straight to the backing after the prime: the watchdog's
+// stale sweep must close it. Reading through the caching snapshot (issue #5832)
+// left the sweep blind to exactly the writes a dispatched order makes, so the
+// jam it exists to clear stayed open forever.
+func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(cached, &config.City{})
+	written, err := backing.Create(beads.Bead{
+		Title:  "order:digest",
+		Labels: []string{"order-run:digest", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Vacuity guard: the wrapped store's cached ListByLabel really is blind to
+	// the backing write, so a snapshot-served sweep proves nothing below.
+	cachedList, err := store.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	for _, b := range cachedList {
+		if b.ID == written.ID {
+			t.Fatalf("vacuity guard failed: snapshot already lists %s", written.ID)
+		}
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, written.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+
+	got, err := backing.Get(written.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", written.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("tracking bead written behind the cache: status = %s, want closed by the watchdog sweep", got.Status)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{

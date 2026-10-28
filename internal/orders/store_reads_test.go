@@ -150,6 +150,38 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 		t.Fatalf("OpenRuns(): %v", err)
 	}
 	assertAllLive(t, "OpenRuns", spy.queries)
+
+	spy.queries = nil
+	if _, err := st.StaleOpenRuns(time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	assertAllLive(t, "StaleOpenRuns", spy.queries)
+	assertSweepQuery(t, "StaleOpenRuns", spy.queries)
+}
+
+// assertSweepQuery pins the sweep reads' query shape: both tiers, not-closed
+// beads only, no status filter, no backing limit (both sweeps post-filter before
+// the caller's close budget), and oldest-first so the budget drains the oldest
+// jam.
+func assertSweepQuery(t *testing.T, name string, queries []beads.ListQuery) {
+	t.Helper()
+	for i, q := range queries {
+		if q.Sort != beads.SortCreatedAsc {
+			t.Errorf("%s query[%d].Sort = %q, want SortCreatedAsc (budgeted closes drain the oldest jam)", name, i, q.Sort)
+		}
+		if q.TierMode != beads.TierBoth {
+			t.Errorf("%s query[%d].TierMode = %v, want TierBoth (legacy issues and wisp)", name, i, q.TierMode)
+		}
+		if q.IncludeClosed {
+			t.Errorf("%s query[%d].IncludeClosed = true, want false (closed tracking beads are retention's, not the sweep's)", name, i)
+		}
+		if q.Status != "" {
+			t.Errorf("%s query[%d].Status = %q, want none (an in_progress tracking bead is a jam the sweep must see)", name, i, q.Status)
+		}
+		if q.Limit != 0 {
+			t.Errorf("%s query[%d].Limit = %d, want 0 (no backing limit ahead of the post-filters)", name, i, q.Limit)
+		}
+	}
 }
 
 func assertAllLive(t *testing.T, name string, queries []beads.ListQuery) {
@@ -404,6 +436,94 @@ func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {
 	if len(runs) != 1 || runs[0].Scoped != "a" {
 		t.Fatalf("OrphanedOpenRuns() = %+v, want only a (trigger-env-failed excluded)", runs)
 	}
+}
+
+// TestStaleOpenRunsBypassCache proves the stale sweep's read reaches the
+// backing: a tracking bead written straight to the backing AFTER a full Prime
+// (so the caching snapshot never absorbed it, and a cached ListByLabel does not
+// list it) is still returned by StaleOpenRuns. The sweep exists to clear jams
+// the dispatch gate (OpenRuns, also Live) would otherwise see, so reading the
+// snapshot leaves it blind to exactly the writes a dispatched order makes.
+func TestStaleOpenRunsBypassCache(t *testing.T) {
+	mem := beads.NewMemStore()
+	prePrime, err := mem.Create(beads.Bead{Title: "order:pre", Labels: []string{"order-run:pre", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStore(mem, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	behindCache, err := mem.Create(beads.Bead{Title: "order:behind", Labels: []string{"order-run:behind", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Vacuity guard: the caching snapshot really is blind to the backing write,
+	// so a read served from it (ListByLabel) proves nothing below.
+	cachedList, err := cache.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		t.Fatalf("cached ListByLabel: %v", err)
+	}
+	for _, b := range cachedList {
+		if b.ID == behindCache.ID {
+			t.Fatalf("vacuity guard failed: snapshot already lists %s", behindCache.ID)
+		}
+	}
+
+	runs, err := ordersStoreOver(cache).StaleOpenRuns(behindCache.CreatedAt.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if !runsContain(runs, prePrime.ID) {
+		t.Errorf("StaleOpenRuns() = %+v; missing pre-prime bead %s", runs, prePrime.ID)
+	}
+	if !runsContain(runs, behindCache.ID) {
+		t.Errorf("StaleOpenRuns() = %+v; missed %s written behind the cache (read the snapshot, not the Live tier)", runs, behindCache.ID)
+	}
+}
+
+// TestStaleOpenRunsKeepsInProgressAndExcludesClosed pins the sweep reads'
+// status edge: an in_progress tracking bead is an open-work jam the sweep must
+// return, while a closed one is retention's business.
+func TestStaleOpenRunsKeepsInProgressAndExcludesClosed(t *testing.T) {
+	mem := beads.NewMemStore()
+	open, err := mem.Create(beads.Bead{Title: "order:open", Labels: []string{"order-run:open", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress, err := mem.Create(beads.Bead{Title: "order:wip", Labels: []string{"order-run:wip", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := mem.Create(beads.Bead{Title: "order:done", Labels: []string{"order-run:done", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	st := ordersStoreOver(mem)
+	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if !runsContain(stale, open.ID) || !runsContain(stale, inProgress.ID) {
+		t.Errorf("StaleOpenRuns() = %+v; want the open and in_progress beads (%s, %s)", stale, open.ID, inProgress.ID)
+	}
+	if runsContain(stale, closed.ID) {
+		t.Errorf("StaleOpenRuns() = %+v; must not return the closed bead %s", stale, closed.ID)
+	}
+}
+
+func runsContain(runs []OrderRun, id string) bool {
+	for _, r := range runs {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // TestClosedRunsForRetentionBestEffortName proves closed tracking beads are
