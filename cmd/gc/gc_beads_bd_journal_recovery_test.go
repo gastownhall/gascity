@@ -168,12 +168,16 @@ func (e journalRecoveryEnv) run(t *testing.T, harness string, extraEnv ...string
 // captured-output contracts of run_with_timeout (#4462, #8392): the command
 // substitution yields the command's output without waiting for the
 // watchdog's sleep, and the call stops that sleep instead of leaving it to
-// run out the timeout holding the substitution pipe.
+// run out the timeout holding the substitution pipe, under bash and sh.
 func TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
+	forEachPinShell(t, func(t *testing.T, shell string) {
+		capturedOutputDoesNotWaitPin(t, shell)
+	})
+}
 
+// capturedOutputDoesNotWaitPin runs the captured-output pin of
+// TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep under shell.
+func capturedOutputDoesNotWaitPin(t *testing.T, shell string) {
 	root := repoRootForLint(t)
 	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
 	if err != nil {
@@ -214,7 +218,7 @@ printf 'finished\n' >&"$SLEEP_SIGNAL_FD"
 result=$(run_with_timeout 120 sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gate" = go ]; printf command-output')
 printf 'result=%s\n' "$result"
 `
-	env := journalRecoveryEnv{binDir: binDir}
+	env := journalRecoveryEnv{binDir: binDir, shell: shell}
 	cmd := env.command(harness,
 		"SLEEP_SIGNAL_FD=3",
 		"SLEEP_RELEASE_FD=4",
