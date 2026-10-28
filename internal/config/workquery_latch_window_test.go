@@ -26,6 +26,12 @@ func stampedExpandedRoot(id string) latchWindowRow {
 	}}
 }
 
+func unstampedExpandedRoot(id string) latchWindowRow {
+	return latchWindowRow{ID: id, Status: "open", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": latchWindowTarget,
+	}}
+}
+
 func topologyLatch(id, kind string) latchWindowRow {
 	return latchWindowRow{ID: id, Status: "open", Metadata: map[string]string{
 		"gc.kind": kind, "gc.routed_to": latchWindowTarget,
@@ -108,6 +114,22 @@ esac
 	return script, env, logPath
 }
 
+// routedReadReads returns the logged routed ready reads for latchWindowTarget.
+func routedReadReads(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd invocation log: %v", err)
+	}
+	var reads []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "ready ") && strings.Contains(line, "gc.routed_to="+latchWindowTarget) {
+			reads = append(reads, line)
+		}
+	}
+	return reads
+}
+
 // TestEffectiveWorkQueryLatchWindowServesReadyMember pins issue #7436's
 // residual on a fully stamped city: the routed tier reads a bounded window
 // before dropping latches, so a full window of expanded workflow roots and
@@ -127,5 +149,55 @@ func TestEffectiveWorkQueryLatchWindowServesReadyMember(t *testing.T) {
 		if strings.HasPrefix(id, "latch-") {
 			t.Fatalf("EffectiveWorkQuery() candidates = %v, served latch %q", ids, id)
 		}
+	}
+}
+
+// TestEffectiveWorkQueryLatchWindowRereadsOnlyAFullAllLatchWindow pins the
+// re-read's trigger: a short window is the whole routed set, and a full
+// window with one row surviving the latch filter already has an answer, so
+// both keep the single bounded read and the base candidates. The unbounded
+// read serves an extra ready step so an unwanted re-read would show in the
+// candidates as well as in the read log.
+func TestEffectiveWorkQueryLatchWindowRereadsOnlyAFullAllLatchWindow(t *testing.T) {
+	lateStep := scopeMemberStep("late-step")
+	for _, tc := range []struct {
+		name    string
+		bounded []latchWindowRow
+		want    []string
+	}{
+		{
+			name:    "short window with executable work",
+			bounded: append(fullLatchWindow()[:5], scopeMemberStep("member-step")),
+			want:    []string{"member-step"},
+		},
+		{
+			name:    "short window of only latches",
+			bounded: fullLatchWindow()[:routedReadyWindowRows-1],
+			want:    []string{},
+		},
+		{
+			name:    "full window with executable work",
+			bounded: append(fullLatchWindow()[:routedReadyWindowRows-1], scopeMemberStep("member-step")),
+			want:    []string{"member-step"},
+		},
+		{
+			name:    "full window with an unstamped graph.v2 workflow root",
+			bounded: append(fullLatchWindow()[:routedReadyWindowRows-1], unstampedExpandedRoot("unstamped-root")),
+			want:    []string{"unstamped-root"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			unbounded := append(append([]latchWindowRow{}, tc.bounded...), lateStep)
+			script, env, logPath := latchWindowFakeBd(t, tc.bounded, unbounded, false)
+
+			ids := workQueryOutputIDOrder(t, runEffectiveWorkQuery(t, Agent{Name: "worker", Dir: "hello-world"}, env, script))
+			if strings.Join(ids, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("EffectiveWorkQuery() candidates = %v, want %v", ids, tc.want)
+			}
+			reads := routedReadReads(t, logPath)
+			if len(reads) != 1 || !strings.Contains(reads[0], "--limit="+fmt.Sprint(routedReadyWindowRows)) {
+				t.Fatalf("routed ready reads = %q, want exactly one bounded read", reads)
+			}
+		})
 	}
 }
