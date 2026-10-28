@@ -377,7 +377,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		// worker site has no controller to enqueue to; say so instead.
 		// A failed probe poke still enqueues: a controller may have come
 		// up since.
-		noteDeferredSessionStart(stderr, "gc session new", info.ID, pokeErr)
+		reached := noteDeferredSessionStart(stderr, "gc session new", info.ID, pokeErr)
 		if !errors.Is(pokeErr, errWorkerSiteNoController) {
 			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 		}
@@ -413,6 +413,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			if !jsonOutput {
 				fmt.Fprintln(stdout, "Worker site: the remote controller runs this session; not attaching.") //nolint:errcheck // best-effort stdout
 			}
+			return 0
+		}
+		// No controller answered, so none will start the session before
+		// the wait times out: say how to start and attach instead.
+		if !reached {
+			fmt.Fprintf(stdout, "No controller answered; not attaching. Start the supervisor (\"gc supervisor start\"), then attach with \"gc session attach %s\" once \"gc session list\" shows the session running.\n", info.ID) //nolint:errcheck // best-effort stdout
 			return 0
 		}
 

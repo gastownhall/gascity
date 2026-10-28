@@ -963,7 +963,7 @@ func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
 // materialized row is left for the reconciler, and one warning says so.
 func TestCmdSessionWakeRegisteredCitySupervisorDownDefersNamedStart(t *testing.T) {
 	cityDir := newSupervisorDownSessionCity(t)
-	registerCityWithSupervisorForTest(t, cityDir, "test-city")
+	registerCityWithSupervisorForTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionWake([]string{"mayor"}, "", &stdout, &stderr, false); code != 0 {

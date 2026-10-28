@@ -2570,11 +2570,12 @@ func newSupervisorDownSessionCity(t *testing.T) string {
 	return cityDir
 }
 
-// registerCityWithSupervisorForTest registers cityDir in the test GC_HOME's
-// supervisor registry without starting a supervisor.
-func registerCityWithSupervisorForTest(t *testing.T, cityDir, name string) {
+// registerCityWithSupervisorForTest registers cityDir under the fixture's
+// workspace name in the test GC_HOME's supervisor registry without starting a
+// supervisor.
+func registerCityWithSupervisorForTest(t *testing.T, cityDir string) {
 	t.Helper()
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, name); err != nil {
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, namedSessionTestWorkspace); err != nil {
 		t.Fatalf("Register(%q): %v", cityDir, err)
 	}
 }
@@ -2593,7 +2594,7 @@ func assertDeferredSessionBead(t *testing.T, b beads.Bead) {
 
 func TestCmdSessionNewRegisteredCitySupervisorDownDefersStart(t *testing.T) {
 	cityDir := newSupervisorDownSessionCity(t)
-	registerCityWithSupervisorForTest(t, cityDir, "test-city")
+	registerCityWithSupervisorForTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
@@ -2618,6 +2619,31 @@ func TestCmdSessionNewRegisteredCitySupervisorDownDefersStart(t *testing.T) {
 	for _, want := range []string{b.ID, "gc supervisor start"} {
 		if !strings.Contains(errText, want) {
 			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+}
+
+// TestCmdSessionNewRegisteredCitySupervisorDownDoesNotWaitToAttach covers an
+// attaching gc session new whose poke reached no controller: it returns once
+// the bead is written and says how to start and attach, instead of waiting
+// for a start that cannot come until the supervisor runs.
+func TestCmdSessionNewRegisteredCitySupervisorDownDoesNotWaitToAttach(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", false, false, time.Millisecond, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(attach, supervisor down) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	assertDeferredSessionBead(t, b)
+	out := stdout.String()
+	if strings.Contains(out, "Waiting for session to start...") {
+		t.Fatalf("stdout = %q, want no wait for a start no controller will make", out)
+	}
+	for _, want := range []string{"gc supervisor start", "gc session attach " + b.ID} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, want it to contain %q", out, want)
 		}
 	}
 }
