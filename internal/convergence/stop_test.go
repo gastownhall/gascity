@@ -143,6 +143,80 @@ func TestStopHandler_ForceClose(t *testing.T) {
 	}
 }
 
+// addActiveWispSteps puts step beads under wisp-iter-2: step-a open,
+// step-b in_progress, step-b1 open under step-b, and step-c already closed
+// with its own close_reason and gc.outcome.
+func addActiveWispSteps(store *fakeStore) {
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-b", "in_progress", "wisp-iter-2", "", nil)
+	store.addBead("step-b1", "open", "step-b", "", nil)
+	store.addBead("step-c", "closed", "wisp-iter-2", "", map[string]string{
+		"close_reason": "step finished by its worker normally",
+		"gc.outcome":   "pass",
+	})
+}
+
+func assertLoopStopped(t *testing.T, store *fakeStore) {
+	t.Helper()
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateTerminated)
+	}
+	if meta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("terminal_reason = %q, want %q", meta[FieldTerminalReason], TerminalStopped)
+	}
+	root, _ := store.GetBead("root-1")
+	if root.Status != "closed" {
+		t.Errorf("root status = %q, want closed", root.Status)
+	}
+}
+
+// assertClosedBeforeWisp checks that each id was closed, and closed before
+// the wisp-iter-2 root.
+func assertClosedBeforeWisp(t *testing.T, store *fakeStore, ids ...string) {
+	t.Helper()
+	at := make(map[string]int, len(store.CloseLog))
+	for i, id := range store.CloseLog {
+		at[id] = i
+	}
+	wispAt, ok := at["wisp-iter-2"]
+	if !ok {
+		t.Fatalf("CloseLog = %v, wisp-iter-2 never closed", store.CloseLog)
+	}
+	for _, id := range ids {
+		if i, ok := at[id]; !ok || i > wispAt {
+			t.Errorf("CloseLog = %v, want %s closed before wisp-iter-2", store.CloseLog, id)
+		}
+	}
+}
+
+func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
+	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
+	addActiveWispSteps(store)
+
+	if _, err := handler.StopHandler(context.Background(), "root-1", "alice", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, id := range []string{"step-a", "step-b", "step-b1"} {
+		info, _ := store.GetBead(id)
+		if info.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, info.Status)
+		}
+		meta, _ := store.GetMetadata(id)
+		if meta["close_reason"] != CloseReasonManualSupersede {
+			t.Errorf("%s close_reason = %q, want %q", id, meta["close_reason"], CloseReasonManualSupersede)
+		}
+		if meta["gc.outcome"] != "skipped" {
+			t.Errorf("%s gc.outcome = %q, want skipped", id, meta["gc.outcome"])
+		}
+	}
+
+	assertClosedBeforeWisp(t, store, "step-a", "step-b", "step-b1")
+
+	assertLoopStopped(t, store)
+}
+
 func TestStopHandler_ForceClose_SyntheticEvent(t *testing.T) {
 	// Active wisp is open -> force-close emits synthetic iteration event.
 	handler, _, emitter := setupActiveHandler(t, "in_progress", nil)
