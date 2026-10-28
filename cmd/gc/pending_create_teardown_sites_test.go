@@ -514,6 +514,19 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 			},
 			wantHold: "row_reread_failed.pending_create_teardown",
 		},
+		{
+			// A closed pool row still stops its bead-scoped box: the name
+			// embeds this row's bead ID, so no successor can start under it,
+			// and nothing else can address an unstamped box under it. The
+			// ga-vcjr9 leak guard; a manual row's closed answer is no stop.
+			name: "row closed",
+			after: func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
+				if err := env.store.Close(session.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantStop: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, session, name := newRestartedPendingCreate(t, rowPool)
@@ -536,11 +549,14 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 			}
 			released := releaseRowOwnedRuntimeLeased(env.city, store, snapshot, execProfile(env.sp), &stderr, hold)
 			stopped := countCalls(env.sp, "Stop") > 0
-			if stopped || released {
-				t.Fatalf("stopped=%v released=%v, want no stop: the row moved on after the snapshot; stderr=%s", stopped, released, stderr.String())
+			if stopped != tc.wantStop || released != tc.wantStop {
+				t.Fatalf("stopped=%v released=%v, want %v; stderr=%s", stopped, released, tc.wantStop, stderr.String())
 			}
-			if !env.sp.IsRunning(name) {
+			if !tc.wantStop && !env.sp.IsRunning(name) {
 				t.Fatal("the box of a row that moved on was stopped")
+			}
+			if tc.wantStop && env.sp.IsRunning(name) {
+				t.Fatal("the box of a row that stayed current was left running")
 			}
 			if tc.wantHold != "" && (len(holds) != 1 || holds[0] != tc.wantHold) {
 				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, tc.wantHold, stderr.String())

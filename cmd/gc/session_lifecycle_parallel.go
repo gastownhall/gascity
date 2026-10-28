@@ -4349,7 +4349,10 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 // box stopped by a decision made from the older read. So it re-reads the row
 // from store and tears down only while the fresh row still matches the
 // snapshot (teardownSnapshotCurrent); otherwise it holds without a stop,
-// and the next tick decides from a fresh snapshot. A read does not bump the
+// and the next tick decides from a fresh snapshot. A pool row whose fresh row
+// is closed is the one exception: its bead-scoped name cannot be re-minted
+// under a successor row, so the stop proceeds and the box is not leaked. A
+// read does not bump the
 // row's revision. The identity reads and the post-stop confirmation are held
 // to postStartObservationBound each, so a wedged backend costs a tick at most
 // one unbounded Stop per held row; a read that does not answer in time holds.
@@ -4390,7 +4393,18 @@ func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessi
 				"session reconciler: holding pending create %s open: re-reading it before tearing down its runtime %q: %v", info.ID, name, err))
 			return false
 		}
-		if !teardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
+		fresh := sessionInfoFromBead(b)
+		if pool {
+			// A closed pool row proceeds to the stop: its bead-scoped name
+			// embeds this row's bead ID, so no successor can start under it,
+			// and nothing else can address an unstamped box under it
+			// (reapRuntimesBoundToClosedBeads needs a readable
+			// GC_SESSION_ID). A manual row keeps its answer: closed means no
+			// stop.
+			if !fresh.Closed && !teardownSnapshotCurrent(info, fresh) {
+				return false
+			}
+		} else if !teardownSnapshotCurrent(info, fresh) {
 			return false
 		}
 	}
