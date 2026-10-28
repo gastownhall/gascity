@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -346,6 +347,19 @@ func pinHarness(fn, scenario string) string {
 	return "#!/usr/bin/env bash\nset -eu\n" + fn + "\n" + scenario
 }
 
+// pipeSeesEOF reads r once and reports whether that read hit EOF: every
+// writer the harness handed down must be gone.
+func pipeSeesEOF(r *os.File, timeout time.Duration) error {
+	if err := r.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set EOF probe deadline: %w", err)
+	}
+	var one [1]byte
+	if _, err := r.Read(one[:]); err != io.EOF {
+		return fmt.Errorf("read returned %w, want EOF", err)
+	}
+	return nil
+}
+
 // readerSeesEOF drains br (which may hold buffered bytes in front of r, so a
 // raw r.Read would miss them) and reports whether it ends at EOF without
 // further data arriving within timeout.
@@ -501,6 +515,67 @@ run_with_timeout 120 sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gat
 		releaseControls()
 		if err := readerSeesEOF(signalR, signalReader, testutil.ExecRaceTimeout); err != nil {
 			t.Fatalf("watchdog sleep outlived the call through the signal pipe: %v", err)
+		}
+	})
+}
+
+// TestRunWithTimeoutLeavesNothingAfterInstantCommands pins the #8392 race
+// window at its narrowest: a TERM that lands between the watchdog's
+// `sleep &` and the pid assignment must not leak the sleep either. Two
+// hundred back-to-back calls of an instant command under set -eu; the
+// caller holds the write end of a pipe on fd 3, and once it exits its whole
+// process group must be gone and the pipe must see EOF. The timeout is 2 s
+// so a red run's leftovers expire on their own.
+func TestRunWithTimeoutLeavesNothingAfterInstantCommands(t *testing.T) {
+	forEachPinShell(t, func(t *testing.T, shell string) {
+		pipeR, pipeW, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("create fd-3 pipe: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = pipeR.Close()
+			_ = pipeW.Close()
+		})
+
+		harness := pinHarness(runWithTimeoutFn(t), `
+i=0
+while [ "$i" -lt 200 ]; do
+    run_with_timeout 2 true
+    i=$((i + 1))
+done
+`)
+		env := journalRecoveryEnv{binDir: t.TempDir(), shell: shell}
+		cmd := env.command(harness)
+		cmd.ExtraFiles = []*os.File{pipeW}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start run_with_timeout harness: %v", err)
+		}
+		_ = pipeW.Close()
+		pgid := cmd.Process.Pid
+
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		timer := time.NewTimer(testutil.ExecRaceTimeout + 6*time.Second)
+		defer timer.Stop()
+		var runErr error
+		select {
+		case runErr = <-done:
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			runErr = <-done
+			t.Fatalf("run_with_timeout harness did not finish 200 instant calls in time: %v", runErr)
+		}
+		if runErr != nil {
+			t.Fatalf("run_with_timeout harness failed: %v", runErr)
+		}
+		if err := waitForProcessGroupExit(pgid, time.Second); err != nil {
+			t.Fatalf("processes started by the run_with_timeout calls outlived the caller: %v", err)
+		}
+		if err := pipeSeesEOF(pipeR, time.Second); err != nil {
+			t.Fatalf("fd 3 write end handed down to the calls was not released: %v", err)
 		}
 	})
 }
