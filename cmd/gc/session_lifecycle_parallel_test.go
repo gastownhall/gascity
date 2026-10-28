@@ -168,22 +168,22 @@ func (s *panicMetadataBatchStore) SetMetadataBatch(string, map[string]string) er
 	panic("metadata batch panic")
 }
 
-func TestSessionTriggerBeadEnv(t *testing.T) {
-	env := sessionTriggerBeadEnv(sessionpkg.Info{
-		TriggerBeadID:       "gp-59q",
-		TriggerBeadStoreRef: "rig:gascity-packs",
-	})
-	if got := env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+// TestSessionDemandSpawnEnv pins that a stamped row contributes only the
+// presence-only demand marker: never the trigger bead id or its store ref.
+func TestSessionDemandSpawnEnv(t *testing.T) {
+	want := map[string]string{"GC_SPAWN_ORIGIN": "demand"}
+	for _, info := range []sessionpkg.Info{
+		{TriggerBeadID: "gp-59q", TriggerBeadStoreRef: "rig:gascity-packs"},
+		{TriggerBeadID: "gp-59q"},
+	} {
+		if got := sessionDemandSpawnEnv(info); !reflect.DeepEqual(got, want) {
+			t.Errorf("sessionDemandSpawnEnv(%+v) = %v, want %v", info, got, want)
+		}
 	}
-	if got := env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-	}
-	if got := env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-	}
-	if got := env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+	for _, stamp := range []string{"", "  "} {
+		if got := sessionDemandSpawnEnv(sessionpkg.Info{TriggerBeadID: stamp, TriggerBeadStoreRef: "rig:gascity-packs"}); got != nil {
+			t.Errorf("sessionDemandSpawnEnv(stamp %q) = %v, want nil", stamp, got)
+		}
 	}
 }
 

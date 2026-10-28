@@ -1109,16 +1109,18 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 }
 
 // Kills a launch env carrying the trigger the template was resolved under
-// after PreWake cleared or re-pointed it: the trigger env and the demand
-// origin follow the bound row (legacy binds, then resolves).
+// after PreWake cleared or re-pointed it, and one that hands the shell a
+// trigger bead id at all: the demand origin follows the bound row (legacy
+// binds, then resolves), no GC_TRIGGER_* key survives the bind, and unrelated
+// template env is kept.
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
 	for _, c := range []struct {
 		name, bind string
-		want       map[string]string
+		wantOrigin bool
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", false},
+		{"re-pointed", "w-new", true},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1127,10 +1129,13 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
 			t.Fatalf("%s: settlement %+v, want one launch", c.name, s)
 		}
-		for key, want := range c.want {
-			if got := leaf.cfgs[0].Env[key]; got != want {
-				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
-			}
+		env := leaf.cfgs[0].Env
+		assertNoTriggerBeadEnv(t, env)
+		if origin, ok := env["GC_SPAWN_ORIGIN"]; ok != c.wantOrigin || (ok && origin != "demand") {
+			t.Errorf("%s: launch GC_SPAWN_ORIGIN = %q (present %v), want demand present %v", c.name, origin, ok, c.wantOrigin)
+		}
+		if got := env["GC_KEEP"]; got != "1" {
+			t.Errorf("%s: launch GC_KEEP = %q, want 1", c.name, got)
 		}
 	}
 }

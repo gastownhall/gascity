@@ -440,11 +440,12 @@ const (
 	// `gc hook --claim`. It is the durable back-channel that makes the claimed
 	// step id readable from the step's own shell: GC_BEAD_ID exists only in the
 	// dispatch condition-script environment (internal/convergence/condition.go),
-	// and GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
-	// pool-level spawn marker (cmd/gc/build_desired_state.go) — is absent on
-	// other seats and never drives claim selection, so without this stamp a
-	// formula step cannot reliably name the bead it is running and silently
-	// skips its own close. `gc hook current` reads it back.
+	// and no session shell carries a trigger bead id: a demand-spawned seat gets
+	// only the presence marker GC_SPAWN_ORIGIN=demand
+	// (cmd/gc/build_desired_state.go), and the trigger stamp names the row the
+	// controller counted, never the claim. Without this stamp a formula step
+	// cannot reliably name the bead it is running and silently skips its own
+	// close. `gc hook current` reads it back.
 	//
 	// It is deliberately distinct from internal/session.CurrentBeadIDKey
 	// ("currently_processing_bead_id"), which the session RECONCILER stamps when

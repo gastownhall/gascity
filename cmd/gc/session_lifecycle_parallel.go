@@ -1641,29 +1641,6 @@ func samePreparedWorkDirPath(a, b string) bool {
 	return samePath(a, b)
 }
 
-// sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
-// (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. The trigger key IS mutated on the start-prep path —
-// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
-// clears a stamp whose target is no longer workable (gascity#4373) — so
-// coherence here depends on that refresh folding its returned Info onto
-// candidate.info, not on the key being immutable.
-func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
-	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
-	if triggerBeadID == "" {
-		return nil
-	}
-	env := map[string]string{
-		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
-		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
-	}
-	if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-	}
-	return env
-}
-
 // sessionDemandSpawnEnv is the launch env a row's trigger stamp contributes:
 // the presence-only marker GC_SPAWN_ORIGIN=demand when the row is stamped,
 // otherwise nil. It never carries the trigger bead id or its store ref. The
@@ -1671,8 +1648,11 @@ func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
 // controller counted, not the bead the seat claims — and a shell copy is
 // frozen at exec while the stamp keeps moving, so an exported id would be a
 // foreign close target (gastownhall/gascity#5738). A seat names its own bead
-// through gc hook current --id-only. Like sessionTriggerBeadEnv it reads the
-// typed twin, so the start-prep refresh must fold its returned Info first.
+// through gc hook current --id-only. It reads the typed twin
+// (Info.TriggerBeadID), and the trigger key IS mutated on the start-prep path:
+// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
+// clears a stamp whose target is no longer workable (gascity#4373), so the
+// refresh must fold its returned Info onto candidate.info first.
 func sessionDemandSpawnEnv(info sessionpkg.Info) map[string]string {
 	if strings.TrimSpace(info.TriggerBeadID) == "" {
 		return nil
