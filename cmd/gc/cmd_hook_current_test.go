@@ -163,12 +163,12 @@ func TestHookCurrentIsWiredIntoTheHookCommandFamily(t *testing.T) {
 }
 
 // TestHookCurrentDocIdiomPrefersClaimOverTriggerHint pins the documented close
-// idiom in the Long help text: it must resolve to the session's own claim
-// before ever consulting $GC_TRIGGER_BEAD_ID. That variable is frozen in the
-// process environment at exec and is frequently a foreign bead on named
-// singleton sessions (mayor, deacon) that also carry it — a step following
-// the old chain would close someone else's work. This guards the doc text
-// against silently regressing back to preferring the frozen hint.
+// idiom in the Long help text: it must resolve to the session's own claim,
+// with no fallback to an id-shaped trigger hint. No session shell receives a
+// trigger bead id at all (gascity#5738) — the id is controller-side demand
+// bookkeeping on the session bead, and a step following the old chain would
+// close someone else's work. This guards the doc text against silently
+// regressing back to naming a controller-chosen bead.
 func TestHookCurrentDocIdiomPrefersClaimOverTriggerHint(t *testing.T) {
 	long := newHookCurrentCmd(io.Discard, io.Discard).Long
 	if !strings.Contains(long, `BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"`) {
@@ -176,5 +176,8 @@ func TestHookCurrentDocIdiomPrefersClaimOverTriggerHint(t *testing.T) {
 	}
 	if strings.Contains(long, "${GC_TRIGGER_BEAD_ID:-$(gc hook current") {
 		t.Error("documented idiom still consults the frozen GC_TRIGGER_BEAD_ID hint before the claim")
+	}
+	if strings.Contains(long, "GC_TRIGGER_BEAD_ID") {
+		t.Error("the help still mentions GC_TRIGGER_BEAD_ID; no session shell receives a trigger id (gascity#5738)")
 	}
 }

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Session shells no longer receive `GC_TRIGGER_BEAD_ID`,
+  `GC_TRIGGER_WORK_BEAD_ID`, or either `*_STORE_REF` twin (gascity#5738).**
+  These were exported into demand-spawned pool seats' and stamped named
+  sessions' shells as a "presence-only" marker, but they carried a real,
+  resolvable, foreign bead id that a `${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}}`
+  close chain could mistake for the bead the session actually claimed — the
+  id leaked ahead of `gc hook current` and closed other runs' beads. The
+  durable controller-side stamps (`gc.trigger_bead_id`,
+  `gc.trigger_bead_store_ref`) are unchanged. Shell-side, replace any use of
+  the variables with `gc hook current --id-only` to name your own bead, and
+  read `GC_SPAWN_ORIGIN=demand` (still exported, presence only) to tell that
+  a seat was demand-spawned. The demand/claim divergence diagnostics now read
+  the live session row instead of the frozen env copy. Shells that are
+  already running keep their exec-time copy until their next start; the
+  shipped core-pack formulas stop consulting the variable in the same change,
+  so a refreshed formula is safe even inside an old shell.
+
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state

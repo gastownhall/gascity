@@ -338,12 +338,23 @@ const (
 	SyntheticMetadataKey          = "gc.synthetic"
 	TemplateMetadataKey           = "gc.template"
 	TerminalMetadataKey           = "gc.terminal"
-	TriggerBeadIDMetadataKey      = "gc.trigger_bead_id"
+	// TriggerBeadIDMetadataKey records, on a POOL-MANAGED session bead, the
+	// work row the controller counted when it minted or re-pointed that seat.
+	// It is controller-side demand bookkeeping, never an assignment: it is
+	// never exported to the session's shell (gascity#5738) and nothing on the
+	// claim path may consult it to decide what to claim — the pool is pull.
+	// The demand-spawn presence alone is exported, as GC_SPAWN_ORIGIN=demand,
+	// and the demand/claim divergence classifier reads this stamp back
+	// through the session front door.
+	TriggerBeadIDMetadataKey = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
-	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
+	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
+	// TriggerBeadStoreRefMetadataKey is the store ref (city or rig:<name>)
+	// pairing with TriggerBeadIDMetadataKey: where the counted row lives.
+	// Same contract — controller-side bookkeeping, never exported to a shell.
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -440,11 +451,11 @@ const (
 	// `gc hook --claim`. It is the durable back-channel that makes the claimed
 	// step id readable from the step's own shell: GC_BEAD_ID exists only in the
 	// dispatch condition-script environment (internal/convergence/condition.go),
-	// and GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
-	// pool-level spawn marker (cmd/gc/build_desired_state.go) — is absent on
-	// other seats and never drives claim selection, so without this stamp a
-	// formula step cannot reliably name the bead it is running and silently
-	// skips its own close. `gc hook current` reads it back.
+	// and no session shell carries a trigger bead id at all (gascity#5738 —
+	// the trigger stamp is controller-side bookkeeping, never exported), so
+	// without this stamp a formula step cannot reliably name the bead it is
+	// running and silently skips its own close. `gc hook current` reads it
+	// back.
 	//
 	// It is deliberately distinct from internal/session.CurrentBeadIDKey
 	// ("currently_processing_bead_id"), which the session RECONCILER stamps when
