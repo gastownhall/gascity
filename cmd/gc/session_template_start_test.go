@@ -235,7 +235,7 @@ func TestEnsureSessionForTemplateRegisteredCityDefersStart(t *testing.T) {
 			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
 			cityPath := shortSocketTempDir(t, "gc-materialize-city-")
-			registerCityWithSupervisorForTest(t, cityPath, "test-city")
+			registerCityWithSupervisorForTest(t, cityPath)
 
 			store := beads.NewMemStore()
 			cfg := &config.City{
