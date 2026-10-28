@@ -169,7 +169,8 @@ var (
 	v2PreWake = v2("cmd/gc/reconcile_effect_launch.go", "preWakeStep")
 	// opMint is every Manager start's incarnation mint (I-MINT, E1), and the
 	// legacy PreWake's CAS: generation g+1, a fresh token, last_woke_at and the
-	// continuation epoch, a fresh context consuming the reset.
+	// continuation epoch, a fresh context consuming the reset (a Manager
+	// start's, its reset_committed_at with it).
 	opMint = op("internal/session/incarnation.go", "Store.MintIncarnation")
 	// opUnmint withdraws a start's mint no process ran under: it writes back
 	// what opMint replaced while the row still records the mint.
@@ -403,7 +404,7 @@ var registry = slices.Concat([]Field{
 			legacy("cmd/gc/drain_reminder.go", "drainReminderContentHeld")),
 		Clears: sites(op("internal/session/content_hold.go", "Store.ClearContentHold")),
 	},
-	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},
+	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"), opUnmint), Clears: sites(opMint)},
 	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},
 	{Key: "unknown_state_first_seen", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},

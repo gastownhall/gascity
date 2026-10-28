@@ -416,12 +416,12 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return atStart
 			},
 		},
-		"internal/session/incarnation.go:Store.MintIncarnation": { // a fresh context consumes the reset
-			[]string{"continuation_reset_pending", "true"},
+		"internal/session/incarnation.go:Store.MintIncarnation": { // a Manager start's fresh context consumes the reset, its commit time with it
+			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: func(session.Info) bool { return true }}
+				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: func(session.Info) bool { return true }, ConsumeResetCommit: true}
 				if _, err := sessionFrontDoor(m).MintIncarnation(context.Background(), nil, req); err != nil {
 					t.Fatal(err)
 				}

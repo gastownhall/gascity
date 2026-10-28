@@ -141,6 +141,41 @@ func TestMintIncarnationAdvancesTheRow(t *testing.T) {
 	}
 }
 
+// TestMintIncarnationConsumesTheResetCommitOnlyWhenAsked: a fresh context
+// clears the restart handoff's reset_committed_at only for a mint that asks
+// (MintRequest.ConsumeResetCommit, a Manager start's). The controller's
+// PreWake mint leaves it to its start commit, and a mint that opens no fresh
+// context consumes nothing, asked or not.
+func TestMintIncarnationConsumesTheResetCommitOnlyWhenAsked(t *testing.T) {
+	const committedAt = "2099-10-09T11:59:00Z"
+	for _, tc := range []struct {
+		fresh, asked bool
+		want         string
+	}{
+		{fresh: true, asked: true},
+		{fresh: true, want: committedAt},
+		{asked: true, want: committedAt},
+	} {
+		t.Run(fmt.Sprintf("fresh=%v/asked=%v", tc.fresh, tc.asked), func(t *testing.T) {
+			backing := openLeaseStore(t, t.TempDir())
+			b := mintRow(t, backing, "continuation_reset_pending", "true", ResetCommittedAtKey, committedAt)
+			req := mintReq(infoOf(t, backing, b.ID))
+			req.FreshContext = func(Info) bool { return tc.fresh }
+			req.ConsumeResetCommit = tc.asked
+			inc, err := NewStore(beads.SessionStore{Store: backing}).MintIncarnation(context.Background(), nil, req)
+			if err != nil {
+				t.Fatalf("MintIncarnation: %v", err)
+			}
+			if got := rowMeta(t, backing, b.ID)[ResetCommittedAtKey]; got != tc.want {
+				t.Fatalf("reset_committed_at = %q after the mint, want %q", got, tc.want)
+			}
+			if _, clears := inc.IdentityPatch()[ResetCommittedAtKey]; clears != (tc.want == "") {
+				t.Fatalf("IdentityPatch() clears reset_committed_at: %v, want %v", clears, tc.want == "")
+			}
+		})
+	}
+}
+
 // TestMintIncarnationRetriesFromTheFreshRead (M2): an unrelated write that
 // lands between the mint's read and its write loses it the fence; the retry
 // re-reads and lands g+1 of that read, keeping the unrelated write.
@@ -551,6 +586,63 @@ func TestManagerStartConsumesOnlyTheResetItDecidedOn(t *testing.T) {
 				sp.seen[0].env[runtime.ContinuationEpochEnv] != tc.wantEpoch {
 				t.Fatalf("row after the start = %v, Start env %v; want generation 4, epoch %s, reset pending %q",
 					after, sp.seen[0].env, tc.wantEpoch, tc.wantPending)
+			}
+		})
+	}
+}
+
+// TestManagerStartConsumesTheResetCommit: a Manager start that consumes the
+// reset a restart handoff committed clears the handoff's reset_committed_at in
+// the same mint, since no start commit (CommitStartedPatch) follows a Manager
+// start to clear it. The withdrawal of a mint no process ran under puts it
+// back with the reset, and a reset committed after the start read its row
+// keeps it, pending for the next start.
+func TestManagerStartConsumesTheResetCommit(t *testing.T) {
+	const committedAt = "2099-10-09T11:59:00Z"
+	committed := []string{"continuation_reset_pending", "true", ResetCommittedAtKey, committedAt}
+	for _, tc := range []struct {
+		name                   string
+		atRead                 []string
+		race                   map[string]string // lands after the start read its row, before its mint
+		startErr               error
+		wantEpoch, wantPending string
+		wantCommittedAt        string
+	}{
+		{name: "consumed by the start", atRead: committed, wantEpoch: "3"},
+		{
+			name: "restored by the withdrawn mint of a failed start", atRead: committed, startErr: errors.New("out of memory"),
+			wantEpoch: "2", wantPending: "true", wantCommittedAt: committedAt,
+		},
+		{
+			name: "committed after the start read its row", race: map[string]string{"continuation_reset_pending": "true", ResetCommittedAtKey: committedAt},
+			wantEpoch: "2", wantPending: "true", wantCommittedAt: committedAt,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openLeaseStore(t, t.TempDir())
+			b := mintRow(t, store, tc.atRead...)
+			sp := &livenessRacingProvider{mintSeeingProvider: &mintSeeingProvider{Fake: runtime.NewFake(), store: store, id: b.ID}}
+			if tc.race != nil {
+				sp.race = func() {
+					if err := store.SetMetadataBatch(b.ID, tc.race); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			var provider runtime.Provider = sp
+			if tc.startErr != nil {
+				provider = &startOverrideProvider{Fake: sp.Fake, startErr: tc.startErr}
+			}
+			mgr := newTestManager(t, store, provider)
+			err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
+			if (err != nil) != (tc.startErr != nil) {
+				t.Fatalf("Start = %v, want error %v", err, tc.startErr)
+			}
+			after := rowMeta(t, store, b.ID)
+			if after["continuation_epoch"] != tc.wantEpoch || after["continuation_reset_pending"] != tc.wantPending ||
+				after[ResetCommittedAtKey] != tc.wantCommittedAt {
+				t.Fatalf("row after the start = %v; want epoch %s, reset pending %q, reset_committed_at %q",
+					after, tc.wantEpoch, tc.wantPending, tc.wantCommittedAt)
 			}
 		})
 	}

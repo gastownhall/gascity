@@ -3812,6 +3812,7 @@ export const zWaitView = z.object({
     note: z.string().optional(),
     nudge_id: z.string().optional(),
     registered_epoch: z.string().optional(),
+    registered_reset_pending: z.boolean().optional(),
     session_id: z.string(),
     session_name: z.string().optional(),
     state: z.string(),

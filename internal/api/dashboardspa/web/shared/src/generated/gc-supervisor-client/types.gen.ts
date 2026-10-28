@@ -11571,6 +11571,10 @@ export type WaitView = {
      */
     registered_epoch?: string;
     /**
+     * True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.
+     */
+    registered_reset_pending?: boolean;
+    /**
      * Session bead ID the wait is registered against.
      */
     session_id: string;

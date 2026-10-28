@@ -30216,6 +30216,10 @@
             "description": "Session continuation epoch at registration.",
             "type": "string"
           },
+          "registered_reset_pending": {
+            "description": "True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.",
+            "type": "boolean"
+          },
           "session_id": {
             "description": "Session bead ID the wait is registered against.",
             "type": "string"

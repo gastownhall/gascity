@@ -11317,6 +11317,9 @@ type WaitView struct {
 	// RegisteredEpoch Session continuation epoch at registration.
 	RegisteredEpoch *string `json:"registered_epoch,omitempty"`
 
+	// RegisteredResetPending True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.
+	RegisteredResetPending *bool `json:"registered_reset_pending,omitempty"`
+
 	// SessionId Session bead ID the wait is registered against.
 	SessionId string `json:"session_id"`
 
