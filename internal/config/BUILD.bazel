@@ -198,6 +198,7 @@ go_test(
         "workquery_inprogress_federated_test.go",
         "workquery_inprogress_federation_test.go",
         "workquery_inprogress_hold_test.go",
+        "workquery_latch_window_test.go",
         "workquery_named_routed_gate_test.go",
         "workquery_parity_test.go",
         "workquery_recovery_test.go",

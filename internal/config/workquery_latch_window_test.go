@@ -1,0 +1,82 @@
+package config
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
+
+// This file pins the routed ready tier's window contract (#7436): the tier's
+// bounded read (--limit=20) takes its rows BEFORE the prefer script drops the
+// structural workflow latches, so a window whose 20 oldest routed rows are all
+// stamped expanded roots (or scope/spec latches) hides a ready routed
+// scope-member step that sorts after them. The worker answers "[]" while the
+// reconciler's unbounded count-form still counts that step, so the pool keeps
+// spawning workers that drain on nothing. The conditional unbounded re-read
+// restores reachability exactly when a full window was all latches.
+
+// latchWindowRows builds n open, unassigned, stamped graph.v2 workflow roots
+// routed to the mayor target: the rows that fill a routed window and are all
+// removed by the prefer script's executable-workflow filter.
+func latchWindowRows(n int) []string {
+	rows := make([]string, n)
+	for i := range rows {
+		rows[i] = fmt.Sprintf(`{"id":"gcg-latch-window-%03d","issue_type":"task","status":"open","created_at":"2026-10-01T00:00:%02dZ",`+
+			`"metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true","gc.formula_contract":"graph.v2","gc.routed_to":"mayor"}}`, i+1, i)
+	}
+	return rows
+}
+
+// routedLatchMemberRow is a real ready routed work bead: an unassigned
+// scope-member step behind the window's latches.
+func routedLatchMemberRow() string {
+	return `{"id":"gcg-ready-member","issue_type":"task","status":"open","created_at":"2026-10-02T00:00:00Z","metadata":{"gc.scope_role":"member","gc.routed_to":"mayor"}}`
+}
+
+// latchWindowBdScript answers a full work query for one target:
+//
+//   - the bounded routed read (gc.routed_to, --limit=20) with $GC_TEST_ROUTED_WINDOW,
+//   - the unbounded routed re-read (gc.routed_to, --limit 0) with $GC_TEST_ROUTED_ALL,
+//   - every other tier with [].
+//
+// The gc.run_target migration tier is matched before the routed ones because
+// its metadata-field set (gc.run_target, gc.kind) is disjoint from gc.routed_to.
+const latchWindowBdScript = `#!/bin/sh
+set -eu
+case "$1" in
+  list) printf '[]' ;;
+  query) printf '[]' ;;
+  ready)
+    case "$*" in
+      *"gc.run_target="*) printf '[]' ;;
+      *"--limit 0"*) printf '%s' "$GC_TEST_ROUTED_ALL" ;;
+      *"gc.routed_to="*) printf '%s' "$GC_TEST_ROUTED_WINDOW" ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  *) printf '[]' ;;
+esac
+`
+
+// TestEffectiveWorkQueryLatchWindowServesReadyMember is AC-1: a routed window
+// holding routedReadyWindowRows stamped expanded roots sorts ahead of a ready
+// routed scope-member step, so the bounded read returns only latches. The work
+// query must serve the member — the same row the reconciler's unbounded
+// count-form counts — instead of "[]".
+//
+// The unbounded re-read also carries the latches: proving the member survives
+// the same prefer filter there, not just a hand-picked one-row answer.
+func TestEffectiveWorkQueryLatchWindowServesReadyMember(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	latches := strings.Join(latchWindowRows(routedReadyWindowRows), ",")
+	window := "[" + latches + "]"
+	all := "[" + latches + "," + routedLatchMemberRow() + "]"
+
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_TEST_ROUTED_WINDOW": window,
+		"GC_TEST_ROUTED_ALL":    all,
+	}, latchWindowBdScript)
+	if !strings.Contains(out, "gcg-ready-member") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want the ready routed scope-member served past a window of %d stamped latches", out, routedReadyWindowRows)
+	}
+}
