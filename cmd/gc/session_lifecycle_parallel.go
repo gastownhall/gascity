@@ -4343,14 +4343,14 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 // name holds the row open for a later tick. A manual row whose name a
 // composite cannot route yet is held without taking the flock.
 //
-// For a manual row it decides again under the flock: info is the tick's
-// snapshot, and a start that committed the row (or a writer that closed or
-// re-woke it) after the snapshot and before the flock was free would have its
-// box stopped by a decision made from the older read. So it re-reads the row
-// from store and tears down only while the fresh row still matches the
-// snapshot (manualTeardownSnapshotCurrent); otherwise it holds without a stop,
-// and the next tick decides from a fresh snapshot. A read does not bump the
-// row's revision. The identity reads and the post-stop confirmation are held
+// It decides again under the flock: info is the tick's snapshot, and a start
+// that committed the row (or a writer that closed or re-woke it) after the
+// snapshot and before the flock was free would have its box stopped by a
+// decision made from the older read (#7751). So it re-reads the row from store
+// and tears down only while the fresh row still matches the snapshot
+// (teardownSnapshotCurrent); otherwise it holds without a stop, and the next
+// tick decides from a fresh snapshot. A read does not bump the row's
+// revision. The identity reads and the post-stop confirmation are held
 // to postStartObservationBound each, so a wedged backend costs a tick at most
 // one unbounded Stop per held row; a read that does not answer in time holds.
 func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
@@ -4383,27 +4383,27 @@ func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessi
 		return false
 	}
 	defer release()
-	if !pool && store != nil {
+	if store != nil {
 		b, err := store.Get(info.ID)
 		if err != nil {
 			hold("row_reread_failed.pending_create_teardown", fmt.Sprintf(
 				"session reconciler: holding pending create %s open: re-reading it before tearing down its runtime %q: %v", info.ID, name, err))
 			return false
 		}
-		if !manualTeardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
+		if !teardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
 			return false
 		}
 	}
 	return releaseRowOwnedRuntime(info, sp, stderr, hold, boundedRowRuntimeProbes(cityPath))
 }
 
-// manualTeardownSnapshotCurrent reports whether fresh, the row re-read under
-// its name's flock, is still the incarnation snapshot was decided from: open,
+// teardownSnapshotCurrent reports whether fresh, the row re-read under its
+// name's flock, is still the incarnation snapshot was decided from: open,
 // not active, with the same instance token, generation, last_woke_at and
 // claim. A commit (state active, claim cleared), a close or a re-wake changes
 // one of them. Other state changes are not compared: heal can project an
 // advisory awake onto a pending create (PendingCreateLease.CanRollback).
-func manualTeardownSnapshotCurrent(snapshot, fresh sessionpkg.Info) bool {
+func teardownSnapshotCurrent(snapshot, fresh sessionpkg.Info) bool {
 	return !fresh.Closed &&
 		sessionpkg.State(strings.TrimSpace(fresh.MetadataState)) != sessionpkg.StateActive &&
 		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(snapshot.InstanceToken) &&

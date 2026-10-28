@@ -382,7 +382,7 @@ func TestTearDownManualRowRuntime_Edges(t *testing.T) {
 // re-reads the row under the name's flock and stops only while it still
 // matches; a re-read that fails holds the row.
 //
-// Kills: no fresh re-read under the flock; manualTeardownSnapshotCurrent
+// Kills: no fresh re-read under the flock; teardownSnapshotCurrent
 // without any one of its terms; a failed re-read that tears down.
 func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *testing.T) {
 	for _, tc := range []struct {

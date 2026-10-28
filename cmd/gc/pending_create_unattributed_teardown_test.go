@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // These tests pin the pending-create teardown of a manual session's runtime
@@ -83,14 +84,22 @@ func reconcileTeardownTick(t *testing.T, env *reconcilerTestEnv, sp runtime.Prov
 	if err != nil {
 		t.Fatal(err)
 	}
+	return reconcileTeardownTickOver(t, env, sp, cur)
+}
+
+// reconcileTeardownTickOver runs one reconciler tick on sp over snapshot,
+// which may be older than the store's row, and returns the row as stored
+// after the tick.
+func reconcileTeardownTickOver(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, snapshot beads.Bead) beads.Bead {
+	t.Helper()
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeadsTraced(
-		context.Background(), env.city, []beads.Bead{cur}, env.desiredState, cfgNames, env.cfg, sp,
+		context.Background(), env.city, []beads.Bead{snapshot}, env.desiredState, cfgNames, env.cfg, sp,
 		env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, newPoolDesiredStateTestTrace("worker"),
 		env.startOptions...,
 	)
-	got, err := env.store.Get(id)
+	got, err := env.store.Get(snapshot.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +228,47 @@ func TestPendingCreateRollback_TearsDownManualRowsUnattributedRuntime(t *testing
 				}
 			})
 		}
+	}
+}
+
+// TestPendingCreateRollback_PoolRowCommittedAfterSnapshotKeepsItsRuntime: a
+// tick whose snapshot still reads a bead-scoped pool row as a claimed pending
+// create past its in-flight window, after the row's start committed it
+// active and released the name's flock, reads the start's unstamped box as
+// another session's and rolls the row back. The teardown before the rollback
+// must decide from the committed row, not the snapshot: it leaves the box
+// running and the row active (#7751: a 1-2 min exec/k8s start torn down after
+// it succeeded).
+//
+// Kills: a pool teardown that stops from the tick's snapshot.
+func TestPendingCreateRollback_PoolRowCommittedAfterSnapshotKeepsItsRuntime(t *testing.T) {
+	env, session, name := newRestartedPendingCreate(t, rowPool)
+	stale, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := env.clk.Now().UTC()
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"state_reason":              "creation_complete",
+		"creation_complete_at":      now.Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"instance_token":            "test-token-2",
+		"generation":                "2",
+		"last_woke_at":              now.Add(-2 * time.Minute).Format(time.RFC3339),
+	})
+
+	got := reconcileTeardownTickOver(t, env, execProfile(env.sp), stale)
+
+	if n := countCalls(env.sp, "Stop"); n != 0 || !env.sp.IsRunning(name) {
+		t.Fatalf("Stop called %d times, running=%v; want the committed start's box left running; stderr=%s", n, env.sp.IsRunning(name), env.stderr.String())
+	}
+	if got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("status=%s state=%q, want the row open and active; stderr=%s", got.Status, got.Metadata["state"], env.stderr.String())
+	}
+	if strings.Contains(env.stderr.String(), "rolling back pending create") {
+		t.Fatalf("the committed row was rolled back; stderr=%s", env.stderr.String())
 	}
 }
 
