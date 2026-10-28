@@ -41,12 +41,21 @@ type SessionReconcilerTraceStore struct {
 	currentDay     string
 	currentSegment int
 	currentPath    string
-	currentFile    *os.File
+	currentFile    traceSegmentFile
 	currentBytes   int64
 	currentBatches int
 	disabled       bool
 	lowSpace       bool
 	lastPrune      time.Time
+}
+
+// traceSegmentFile is the open segment AppendBatch writes to; *os.File
+// satisfies it. Tests substitute one whose writes fail partway.
+type traceSegmentFile interface {
+	io.Writer
+	Truncate(size int64) error
+	Sync() error
+	Close() error
 }
 
 type sessionReconcilerTraceHead struct {
@@ -418,6 +427,7 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 	writeBuf = append(writeBuf, commitLine...)
 
 	if _, err := s.currentFile.Write(writeBuf); err != nil {
+		s.discardFailedWriteLocked()
 		return err
 	}
 	s.seq = seq
@@ -434,6 +444,16 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 		fmt.Fprintf(s.stderr, "trace: prune: %v\n", pruneErr) //nolint:errcheck
 	}
 	return syncErr
+}
+
+// discardFailedWriteLocked removes what a failed batch write left in the
+// segment, so the next batch starts on its own line. The byte count Write
+// reports is not trusted: the segment is cut back to s.currentBytes, the end
+// of the last batch whose commit record reached disk.
+func (s *SessionReconcilerTraceStore) discardFailedWriteLocked() {
+	if err := s.currentFile.Truncate(s.currentBytes); err != nil && s.stderr != nil {
+		fmt.Fprintf(s.stderr, "trace: rolling back failed write to %s: %v\n", s.currentPath, err) //nolint:errcheck
+	}
 }
 
 func (s *SessionReconcilerTraceStore) rotateSegment(now time.Time) error {

@@ -2014,6 +2014,7 @@ go_test(
         "session_reconciler_tick_budget_test.go",
         "session_reconciler_timer_trace_test.go",
         "session_reconciler_trace_integration_test.go",
+        "session_reconciler_trace_store_test.go",
         "session_reconciler_trace_test.go",
         "session_reconciler_trace_types_test.go",
         "session_reconciler_wi6w6_mirror_test.go",
