@@ -118,6 +118,7 @@ go_test(
         "container_tool_security_test.go",
         "contrib_dependency_pins_test.go",
         "conversationlane_targets_test.go",
+        "dispatch_mac_regression_test.go",
         "docker_session_protocol_test.go",
         "dolt_version_pin_test.go",
         "gh_expr_test.go",
