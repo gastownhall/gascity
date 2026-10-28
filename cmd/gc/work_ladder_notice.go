@@ -39,8 +39,10 @@ package main
 // block, a busy seat, a host that never delivered) counts as failed, so a
 // wedged seat escalates, recycles and releases as on the direct path. A mark
 // still unsettled ladderNoticeSettleBound after it was reserved counts as
-// failed (WN4), so no lost op can silence a seat. The events follow the
-// fold: work.nudged means the notice reached the seat.
+// failed (WN4), and so does each later attempt a notice in flight that long
+// keeps from being proposed (Exclusive: the seat's notices wait on it), so
+// no lost op, nor one a lane never finishes, can silence a seat. The events
+// follow the fold: work.nudged means the notice reached the seat.
 //
 // A held ladder gate (ladderGate: a stop request, a drain, a kill, a start,
 // a restart, a content or operator hold, a wait, a heartbeat, a quarantine),
@@ -84,7 +86,9 @@ var (
 	// ladderNoticeSettleBound (4m55s) is how long after its reservation a
 	// mark may stay unsettled: past it no notice is still deliverable
 	// (start_by, then a full lease plus skew for one taken just before it),
-	// so an op still open or unreadable counts as failed (WN4).
+	// so an op still open or unreadable counts as failed (WN4), as does each
+	// attempt an op in flight that long after its proposal blocks
+	// (ladderNoticeStuck).
 	ladderNoticeSettleBound = ladderNoticeStartWithin + opjournal.DefaultLeaseTTL + opjournal.LeaseSkew
 )
 
@@ -515,11 +519,12 @@ func (p *ladderPass) withdrawDropped(row beads.Bead, ops []string) {
 // proposeNotice proposes n's notice, whose attempt landed marked m, through
 // route, and settles the mark at once when the proposal cannot stand: the
 // route changed under the pass or a ladder notice is in flight (withdrawn),
-// or the op store refuses the request itself (failed: it counts, as a
-// delivery error does). Any other error leaves the mark: the op may have
-// landed though the call failed (a create whose follow-up read failed), so
-// the next pass's fold reads it by id and settles its real fate, or, if it
-// never landed, settles it never proposed.
+// or the op store refuses the request itself, or the notice in flight has
+// stood past its bound (failed: it counts, as a delivery error does). Any
+// other error leaves the mark: the op may have landed though the call failed
+// (a create whose follow-up read failed), so the next pass's fold reads it
+// by id and settles its real fate, or, if it never landed, settles it never
+// proposed.
 func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e workladder.Entry, gen int64, m workladder.NoticeMark, route *ladderRoute) {
 	notice := ladderNotice(n.Key, e, p.nudgeText(row, n))
 	out, op, err := proposePlannerNotice(route.lane, row, notice)
@@ -535,6 +540,15 @@ func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e worklad
 		if _, logNow := route.lane.noticeFailed(tally); logNow {
 			fmt.Fprintf(p.l.stderr, "work-ladder: %s: proposing its notice about %s: %v; the next pass settles notice %s\n", row.ID, n.Key.Bead, err, m.Op) //nolint:errcheck // best-effort stderr
 		}
+	case out == plannerNoticePending && ladderNoticeStuck(op, p.now):
+		// WN4: the seat's notices wait on this one (Exclusive) for as long as
+		// it stays in flight, so each attempt it blocks past its bound counts,
+		// as a mark unsettled that long does: a lane that never finishes it
+		// cannot keep the seat from recycling, releasing and escalating.
+		fields.Reason = "notice not proposed: ladder notice " + op.ID + " in flight past its bound"
+		fmt.Fprintf(p.l.stderr, "work-ladder: %s: proposing its notice about %s: %s\n", row.ID, n.Key.Bead, fields.Reason) //nolint:errcheck // best-effort stderr
+		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
+		p.settleMark(row.ID, m.Op, workladder.NoticeFailed)
 	case out == plannerNoticeDirect, out == plannerNoticePending:
 		why := "no lane serves the seat now"
 		if out == plannerNoticePending {
@@ -552,6 +566,14 @@ func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e worklad
 		route.lane.noticeRecovered(tally)
 		fmt.Fprintf(p.l.stderr, "work-ladder: %s: queued notice %s about %s\n", row.ID, op.ID, n.Key.Bead) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// ladderNoticeStuck reports whether op, a ladder notice a lane has started,
+// has stood ladderNoticeSettleBound since it was proposed: as for a mark
+// unsettled that long (WN4), no lane still delivers it in its window; its
+// host is wedged, or renews a lease it never finishes.
+func ladderNoticeStuck(op opjournal.Op, now time.Time) bool {
+	return !now.Before(op.CreatedAt.Add(ladderNoticeSettleBound))
 }
 
 // settleMark settles row id's mark op with fate, one that raises no alert

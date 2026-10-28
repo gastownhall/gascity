@@ -319,8 +319,9 @@ func TestWorkLadderSettlesItsNoticeFromItsOutcome(t *testing.T) {
 		{"open past start_by at a pending interaction", 2*time.Minute + 50*time.Second, func(lc *ladderLaneCity, _ opjournal.Op) { lc.promptUp() }, want{false, 0, 1, 1, 0, 1}},
 		{"in flight", 3 * time.Minute, func(lc *ladderLaneCity, op opjournal.Op) { lc.startOp(op.ID) }, want{true, 1, 0, 0, 0, 0}},
 		// Past its bound it counts; the next due attempt, reserved the same
-		// pass, waits on the op still in flight, so it is withdrawn.
-		{"in flight past its bound", 5 * time.Minute, func(lc *ladderLaneCity, op opjournal.Op) { lc.startOp(op.ID) }, want{false, 1, 1, 0, 0, 1}},
+		// pass, waits on the op still in flight past its bound, so it counts
+		// too, proposing nothing (WN4).
+		{"in flight past its bound", 5 * time.Minute, func(lc *ladderLaneCity, op opjournal.Op) { lc.startOp(op.ID) }, want{false, 2, 0, 0, 0, 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lc := newLadderLaneCity(t, "message")
@@ -441,28 +442,36 @@ func TestWorkLadderKeepsOneLadderNoticePerSeat(t *testing.T) {
 // S4 (the review's P7): once a mark settles at its bound while its op is
 // still in flight, the seat's nudge slot is free, and only the notice's
 // Exclusive (its purpose's one notice in the conversation) keeps the seat's
-// other claim, due then, from opening a second notice beside it.
+// other claim, due then, from opening a second notice beside it. WN4: each
+// attempt the stuck notice blocks counts as failed, so the seat still
+// releases its unstarted claim, recycles its started one, and escalates.
 func TestWorkLadderExclusiveKeepsOneNoticeWhileOneIsInFlight(t *testing.T) {
 	lc := newLadderLaneCity(t, "message")
-	lc.startedClaim()
-	lc.claim("not started")
+	started := lc.startedClaim()
+	unstarted := lc.claim("not started")
 	lc.at(0)
 	lc.at(halfPast(1))
 	stuck := lc.onlyOp()
 	lc.startOp(stuck.ID) // in flight, and never closed
-	lc.run(time.Hour, 30*time.Second, func() {
-		if ops := lc.ladderOps(); len(ops) > 1 {
-			t.Fatalf("at %v: %d open ladder notices %+v, want at most the one in flight", lc.now.Sub(lc.start), len(ops), ops)
+	lc.run(4*time.Hour, 30*time.Second, func() {
+		if ops := lc.ladderOps(); len(ops) != 1 || ops[0].ID != stuck.ID {
+			t.Fatalf("at %v: open ladder notices %+v, want only the one in flight", lc.now.Sub(lc.start), ops)
 		}
 	})
-	// The attempts reserved after the stuck one settled were withdrawn,
-	// each re-counted as paused, while it stayed in flight.
-	withdrawn := 0
-	for _, e := range lc.cell().Entries {
-		withdrawn += e.Paused
+	if got := lc.op(stuck.ID); got.Status != opjournal.StatusExecuting || markedWith(lc.cell(), stuck.ID) {
+		t.Fatalf("stuck notice %s, cell %+v: want it in flight throughout, its mark settled", got.Status, lc.cell())
 	}
-	if markedWith(lc.cell(), stuck.ID) || withdrawn < 2 {
-		t.Fatalf("cell %+v: want the stuck notice settled and later attempts withdrawn beside it", lc.cell())
+	if b, _ := lc.work.Get(unstarted); b.Status != "open" || len(lc.events(events.WorkReleased)) != 1 {
+		t.Fatalf("claim %s %q, want released after its counted reminders", unstarted, b.Status)
+	}
+	if len(lc.posted) != 1 || lc.posted[0].Generation != "7" {
+		t.Fatalf("recycles %+v, want one at generation 7", lc.posted)
+	}
+	if got := escalations(lc.ladderCity); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertStartedRecycled, workladder.AlertStartedUnanswered}) {
+		t.Fatalf("escalations %v, want the recycle's, then started_unanswered", got)
+	}
+	if e := lc.entry(started); e.Rung != workladder.RungEscalated || e.Paused != 0 {
+		t.Fatalf("entry %+v, want escalated on counted attempts, none withdrawn", e)
 	}
 }
 
@@ -1016,9 +1025,52 @@ func TestWorkLadderUnsettledNoticeCountsPastItsBound(t *testing.T) {
 		t.Fatalf("entry %+v, want pending inside its bound", e)
 	}
 	lc.at(halfPast(1) + ladderNoticeSettleBound)
+	// The next attempt, due and reserved the same pass, waits on the op
+	// still in flight, now at its bound too: it counts, proposing nothing.
 	fails := lc.events(events.WorkNudgeFailed)
-	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts < 1 || len(fails) != 1 || !strings.Contains(fails[0].Message, "notice unsettled") {
-		t.Fatalf("entry %+v, failures %+v; want counted failed past the bound", e, fails)
+	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 2 || e.Paused != 0 || len(fails) != 2 ||
+		!strings.Contains(fails[0].Message, "notice unsettled") || !strings.Contains(fails[1].Message, op.ID+" in flight past its bound") {
+		t.Fatalf("entry %+v, failures %+v; want the notice and the attempt it blocks counted failed at the bound", e, fails)
+	}
+	if ops := lc.ladderOps(); len(ops) != 1 || ops[0].ID != op.ID {
+		t.Fatalf("open ladder notices %+v, want only the one in flight", ops)
+	}
+}
+
+// WN4 for the attempts a ladder notice in flight blocks (Exclusive: the
+// seat's notices wait on it): one blocked while that notice is inside its
+// bound is withdrawn, re-counted as paused, since the lane may yet deliver
+// it; one blocked past its bound counts as failed and proposes nothing, so a
+// lane that never finishes the notice cannot hold the seat's count down.
+func TestWorkLadderCountsTheAttemptsAStuckNoticeBlocks(t *testing.T) {
+	lc := newLadderLaneCity(t, "message")
+	ended := lc.claim("ended")
+	lc.at(0)
+	lc.at(halfPast(1))
+	stuck := lc.onlyOp()
+	lc.startOp(stuck.ID) // in flight, and never closed
+	closed := "closed"
+	if err := lc.work.Update(ended, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	next := lc.claim("next")
+	lc.at(2 * time.Minute) // the ended work's mark drops; its notice keeps the cancel as a request
+	lc.at(halfPast(4))     // next's first attempt: past its grace, and Base after the seat's last nudge
+	if e := lc.entry(next); e.Attempts != 0 || e.Paused != 1 || !e.Notice.IsZero() {
+		t.Fatalf("entry %+v, want the attempt blocked inside the stuck notice's bound withdrawn", e)
+	}
+	if n := len(lc.events(events.WorkNudgeFailed)); n != 0 {
+		t.Fatalf("work.nudge_failed = %d for a withdrawn attempt", n)
+	}
+	lc.at(halfPast(7)) // its next, Base later: past the stuck notice's bound
+	if e := lc.entry(next); e.Attempts != 1 || e.Paused != 1 || !e.Notice.IsZero() {
+		t.Fatalf("entry %+v, want the attempt blocked past the stuck notice's bound counted", e)
+	}
+	if fails := lc.events(events.WorkNudgeFailed); len(fails) != 1 || !strings.Contains(fails[0].Message, stuck.ID) {
+		t.Fatalf("work.nudge_failed = %+v, want one naming the stuck notice %s", fails, stuck.ID)
+	}
+	if ops := lc.ladderOps(); len(ops) != 1 || ops[0].ID != stuck.ID || ops[0].Status != opjournal.StatusExecuting {
+		t.Fatalf("open ladder notices %+v, want only the stuck one, in flight", ops)
 	}
 }
 
