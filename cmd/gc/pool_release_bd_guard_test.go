@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -47,14 +49,19 @@ func (l *bdGuardLedger) run(_, name string, args ...string) ([]byte, error) {
 		return []byte("Usage: bd " + args[0]), nil
 	case args[0] == "show":
 		return l.render()
+	case args[0] == "list":
+		return l.list(args[1:])
 	case args[0] == "update":
 		return l.update(args[1:])
+	case args[0] == "query":
+		// The wisps tier's ephemeral leg: the one ledger bead is durable.
+		return []byte(`[]`), nil
 	}
 	return nil, fmt.Errorf("bd %v: unsupported by the fake", args)
 }
 
 func (l *bdGuardLedger) render() ([]byte, error) {
-	return json.Marshal([]map[string]any{{
+	row := map[string]any{
 		"id":         l.bead.ID,
 		"title":      l.bead.Title,
 		"status":     l.bead.Status,
@@ -62,7 +69,44 @@ func (l *bdGuardLedger) render() ([]byte, error) {
 		"issue_type": "task",
 		"created_at": nowForBDJSONTest(),
 		"metadata":   l.bead.Metadata,
-	}})
+	}
+	if l.bead.DeferUntil != nil {
+		row["defer_until"] = l.bead.DeferUntil.Format(time.RFC3339Nano)
+	}
+	return json.Marshal([]map[string]any{row})
+}
+
+// list answers `bd list` with the pinned bd's raw-status semantics, the same
+// door fakeBdStatusCLI models (cmd_ready_bd_status_inventory_test.go):
+// `--status=a,b` matches the STORED status literally, no --status returns
+// every non-closed row, --all adds closed ones, and a --label filter finds
+// nothing because the ledger bead carries no labels. The orphan release's
+// live re-read (liveWorkAssignmentAssigneeMatches) relies on exactly this: a
+// raw-deferred row is invisible to `bd list --status=open`.
+func (l *bdGuardLedger) list(args []string) ([]byte, error) {
+	var statuses []string
+	all := false
+	labeled := false
+	for _, arg := range args {
+		if v, ok := strings.CutPrefix(arg, "--status="); ok {
+			statuses = strings.Split(v, ",")
+		}
+		if strings.HasPrefix(arg, "--label=") {
+			labeled = true
+		}
+		if arg == "--all" {
+			all = true
+		}
+	}
+	if labeled {
+		return []byte(`[]`), nil
+	}
+	row := l.bead
+	if (len(statuses) > 0 && !slices.Contains(statuses, row.Status)) ||
+		(len(statuses) == 0 && !all && row.Status == "closed") {
+		return []byte(`[]`), nil
+	}
+	return l.render()
 }
 
 func (l *bdGuardLedger) update(args []string) ([]byte, error) {
@@ -302,4 +346,50 @@ func TestReleaseWorkBead_BdStoreGuardedRelease(t *testing.T) {
 			t.Fatalf("assignee = %q, want it left assigned", got.Assignee)
 		}
 	})
+}
+
+// TestReleaseOrphanedPoolAssignments_BdStoreKeepsRawDeferredRow pins the
+// deliberate non-change for the #6207 residue: while bd still records the row
+// status=deferred — elapsed defer_until or none — the orphan release must not
+// write. The live re-read behind the release is a raw-status filter
+// (`bd list --status=open`), so the row is invisible to it and the dead
+// assignee is kept, exactly as dateless deferrals already are. Releasing here
+// would write status=open over bd's parked row (silently un-deferring it) and
+// strand the past defer_until, which UpdateOpts cannot clear.
+func TestReleaseOrphanedPoolAssignments_BdStoreKeepsRawDeferredRow(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	ledger := newBdGuardLedger("deferred", "worker-dead", nil)
+	ledger.bead.DeferUntil = &past
+	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+
+	// The production-shaped snapshot the census would hand the sweep: bd's
+	// richer status reads collapsed through the three-state model. The pin
+	// is the store effect — no write while the raw row stays deferred —
+	// whatever deferral marker the snapshot carries.
+	wb, err := store.Get("bd-7")
+	if err != nil {
+		t.Fatalf("snapshot Get: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{wb},
+		[]beads.Store{store},
+		[]string{""},
+		nil, nil, nil, nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %+v, want the store-recorded deferral kept", released)
+	}
+	if len(ledger.updates) != 0 {
+		t.Fatalf("bd updates = %v, want no write while the store records the row deferred", ledger.updates)
+	}
+	got := ledger.row()
+	if got.Status != "deferred" || got.Assignee != "worker-dead" || got.DeferUntil == nil || !got.DeferUntil.Equal(past) {
+		t.Fatalf("row = status %q assignee %q defer %v, want it untouched", got.Status, got.Assignee, got.DeferUntil)
+	}
 }
