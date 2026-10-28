@@ -2684,6 +2684,48 @@ func TestCmdSessionNewCorruptRegistryFailsLoudly(t *testing.T) {
 	}
 }
 
+// TestCmdSessionNewUnregisteredCityStartsDirectly: a city absent from the
+// supervisor registry, with no controller, still starts the session in this
+// process.
+func TestCmdSessionNewUnregisteredCityStartsDirectly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		register func(t *testing.T)
+	}{
+		{name: "no registry file", register: func(*testing.T) {}},
+		{name: "other city registered", register: func(t *testing.T) {
+			other := shortSocketTempDir(t, "gc-other-city-")
+			if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(other, "other-city"); err != nil {
+				t.Fatalf("Register(%q): %v", other, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := newSupervisorDownSessionCity(t)
+			tc.register(t)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdSessionNew(unregistered) = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			var got sessionNewJSON
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("decoding JSON %q: %v", stdout.String(), err)
+			}
+			if got.DeferredStart {
+				t.Fatalf("deferred_start = true, want false; stdout=%s", stdout.String())
+			}
+			b := onlySessionBead(t, cityDir)
+			if state := b.Metadata["state"]; state == string(session.StateStartPending) || state == "creating" {
+				t.Fatalf("state = %q, want a direct-start state", state)
+			}
+			if strings.Contains(stderr.String(), "poke failed") {
+				t.Fatalf("stderr = %q, want no poke-failed warning", stderr.String())
+			}
+		})
+	}
+}
+
 // namedSessionTestWorkspace is the workspace_name this fixture writes to
 // .gc/site.toml. gc derives the tmux socket from the workspace name, so any
 // test using this fixture that reaches the real tmux adapter drives a real
