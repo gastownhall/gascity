@@ -2876,10 +2876,8 @@ func TestInstallClaudeExplainsGeneratedRuntimeSettings(t *testing.T) {
 				if !strings.Contains(runtimeData, "override_key") {
 					t.Errorf("override key should still be present: %s", runtimeData)
 				}
-			} else {
-				if !strings.Contains(runtimeData, "simulated_custom_key") {
-					t.Errorf("runtime key should remain without override: %s", runtimeData)
-				}
+			} else if !strings.Contains(runtimeData, "simulated_custom_key") {
+				t.Errorf("runtime key should remain without override: %s", runtimeData)
 			}
 
 			fs.Calls = nil
