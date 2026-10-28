@@ -237,7 +237,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// by path (see [stagedEnv]). Staging runs before PreStart because the prelude
 	// PreStart carries is what names the staged file.
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
-	staged, err := p.stageSecretEnv(ctx, secretEnv, args)
+	staged, err := p.stageSecretEnv(ctx, secretEnv, [][]string{args})
 	if err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, err)
 	}
@@ -301,6 +301,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("ssh start %q: tmux new-session exited %d", name, code)
 	}
 	p.markAgentPane(ctx, name, pane)
+	p.recordLaunchEnvKeys(ctx, name, cfg.Env)
 
 	// SessionSetup, SessionSetupScript, and SessionLive run on the box,
 	// best-effort, with the same cwd + env prelude.
@@ -372,10 +373,13 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 //
 // PreStart is NOT re-run (it is provision-half here — it prepares the box).
 // NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs PreStart on
-// Relaunch (launch-half); ssh intentionally keeps it provision-half. Env is
-// also provision-half: respawn-pane has no -e, so the session keeps the env set
-// by the original new-session; a launch-only env change is not re-applied
-// (matching tmux B1's "does not re-inject env hints").
+// Relaunch (launch-half); ssh intentionally keeps it provision-half.
+//
+// Env is launch-half: a relaunch is how a launch-only env change is applied.
+// respawn-pane takes no env, and the respawned agent inherits the session
+// environment, so that is first brought to what Start would have set for cfg
+// (see [Provider.applyLaunchEnv]); otherwise the agent would restart on the
+// values the session was created with.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -387,17 +391,29 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
-	// respawn-pane takes no -e, so nothing is re-injected into the session
-	// environment; the staged file exists only so the setup prelude can export
-	// secrets without putting them on a command line.
+	// The env update is planned from the session's current environment, so it
+	// is read before anything is staged. A box whose environment cannot be
+	// read is not respawned: the caller falls back to a full restart.
+	envCmds, err := p.planLaunchEnv(ctx, name, cfg.Env)
+	if err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	}
+
+	// The staged files carry the secret env: the sh file for the setup
+	// prelude, and the env update as a tmux command file, so no value reaches
+	// a command line.
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
-	staged, err := p.stageSecretEnv(ctx, secretEnv, nil)
+	staged, err := p.stageSecretEnv(ctx, secretEnv, envCmds)
 	if err != nil {
 		return fmt.Errorf("ssh relaunch %q: %w", name, err)
 	}
 	defer p.cleanupStagedEnv(ctx, name, staged)
 
 	prelude := setupPrelude(cfg, name, staged.envPath)
+
+	if err := p.applyLaunchEnv(ctx, name, envCmds, staged); err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	}
 
 	// Respawn the agent pane, never the active one: a human who split the
 	// session or opened a window would otherwise have that pane killed and the
@@ -435,6 +451,54 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	if cfg.Nudge != "" {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+	return nil
+}
+
+// recordLaunchEnvKeys records which keys a launch set in the session
+// environment ([runtime.TmuxLaunchEnvKeysOption]), so a later relaunch can
+// remove a key its config dropped. Best-effort and logged, as markAgentPane: a
+// session with no record still gets changed values on relaunch, but nothing is
+// removed from it until a relaunch has written one.
+func (p *Provider) recordLaunchEnvKeys(ctx context.Context, name string, env map[string]string) {
+	if _, code, err := p.tmux(ctx, name, runtime.TmuxLaunchEnvRecordArgs(paneTarget(name), env)...); err != nil || code != 0 {
+		log.Printf("ssh session %q: recording launch env keys failed (exit %d): %v", name, code, err)
+	}
+}
+
+// planLaunchEnv reads the session's environment and launch-key record in one
+// remote call and returns the tmux commands that bring it to what Start would
+// have set for env (see [runtime.PlanTmuxLaunchEnv]); nil when nothing
+// differs. Start puts every key in the session environment with -e, so the
+// server's global environment is no base here: a dropped key is unset and the
+// global value shows through, as in a session created without it.
+func (p *Provider) planLaunchEnv(ctx context.Context, name string, env map[string]string) ([][]string, error) {
+	out, code, err := p.tmux(ctx, name, runtime.TmuxLaunchEnvStateArgs(sessionTarget(name), paneTarget(name))...)
+	if err != nil {
+		return nil, fmt.Errorf("reading session env: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("reading session env: tmux exited %d", code)
+	}
+	return runtime.PlanTmuxLaunchEnv(sessionTarget(name), paneTarget(name), runtime.ParseTmuxLaunchEnvState(out), env, nil), nil
+}
+
+// applyLaunchEnv runs the env update as one tmux command sequence: from the
+// staged tmux command file when the env carries a secret, else as argv (every
+// value is then inert). The sequence stops at its first failure, which fails
+// the relaunch before the respawn.
+func (p *Provider) applyLaunchEnv(ctx context.Context, name string, cmds [][]string, staged stagedEnv) error {
+	if len(cmds) == 0 {
+		return nil
+	}
+	args := runtime.TmuxCommandSequence(cmds)
+	if staged.tmuxPath != "" {
+		args = []string{"source-file", staged.tmuxPath}
+	}
+	if _, code, err := p.tmux(ctx, name, args...); err != nil {
+		return fmt.Errorf("updating session env: %w", err)
+	} else if code != 0 {
+		return fmt.Errorf("updating session env: tmux exited %d", code)
 	}
 	return nil
 }
@@ -749,7 +813,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 		_, _, _ = p.tmux(ctx, name, args...)
 		return nil
 	}
-	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, args)
+	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, [][]string{args})
 	if err != nil {
 		return nil // best-effort; never fall back to argv
 	}
