@@ -1242,6 +1242,20 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 		return syncAnswer{}, humaResolveError(err)
 	}
 
+	// A row whose state the controller skips is refused before any write: the
+	// controller will not apply the queued restart, and recording one would
+	// surprise the operator later, when a gc version that manages the state
+	// picks the row up (issue #1497).
+	if refuser, ok := s.state.(ResetRefuser); ok {
+		info, err := session.NewStore(store).Get(id)
+		if err != nil {
+			return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be reset: reading it: " + err.Error())
+		}
+		if why := refuser.ResetRefusal(info); why != "" {
+			return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be reset: " + why)
+		}
+	}
+
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)

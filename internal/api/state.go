@@ -297,12 +297,21 @@ type RawConfigProvider interface {
 // WakeStartRefuser is an optional State capability: the controller names
 // why it will not start a session whose wake was just recorded (an
 // idle-latched row, a suspended rig or agent, no runnable template, a
-// dependency-only row, a startup-health quarantine), or "" when it will.
+// dependency-only row, a startup-health quarantine, or a row whose state the
+// controller skips), or "" when it will.
 // certain is false when it does not refuse but cannot tell (a pool seat that
 // starts only for demand). info is the row after the wake was recorded.
 // Optional for the same reason as WebhookDispatchProvider.
 type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
+}
+
+// ResetRefuser is an optional State capability: the controller names why it
+// will not act on a recorded reset of a session (a row whose state the
+// controller skips), or "" when it will. Optional for the same reason as
+// WakeStartRefuser.
+type ResetRefuser interface {
+	ResetRefusal(info session.Info) string
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live

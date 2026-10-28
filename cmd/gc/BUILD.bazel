@@ -67,6 +67,7 @@ go_library(
         "api_state.go",
         "api_state_conditional_writes.go",
         "api_state_emergency_relay.go",
+        "api_state_reset_refusal.go",
         "api_state_wake_refusal.go",
         "apiroute.go",
         "assigned_work_defer_tracker.go",

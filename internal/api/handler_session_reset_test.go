@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -203,5 +204,65 @@ func TestHandleSessionResetRequiresCSRFHeader(t *testing.T) {
 	}
 	if got := b.Metadata["restart_requested"]; got != "" {
 		t.Errorf("restart_requested = %q after CSRF rejection, want unset", got)
+	}
+}
+
+// resetRefusingFakeState is fakeState plus api.ResetRefuser, refusing rows in
+// a state the controller skips the way the controller's own ResetRefusal
+// does, so the reset handler's capability wiring is exercised.
+type resetRefusingFakeState struct {
+	*fakeState
+}
+
+func (r resetRefusingFakeState) ResetRefusal(info session.Info) string {
+	if info.MetadataState != "future-state" {
+		return ""
+	}
+	return "its state \"future-state\" is not one this gc version's controller manages, so the controller skips it; use `gc session close " + info.ID + "` to release it"
+}
+
+// TestHandleSessionResetRefusesRowInSkippedState is issue #1497's API half:
+// a reset of a row whose state the controller skips answers 409
+// session-conflict naming the raw state and the close that releases the row,
+// and writes nothing — no restart request flags, no restart op.
+func TestHandleSessionResetRefusesRowInSkippedState(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "reset-unknown-state")
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "future-state"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	pokesBefore := fs.pokeCount
+	h := newTestCityHandler(t, resetRefusingFakeState{fs})
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/reset", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reset unknown-state status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var problem apierr.ErrorModel
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode problem: %v", err)
+	}
+	if problem.Code != apierr.SessionConflict.Code {
+		t.Errorf("problem code = %q, want %q", problem.Code, apierr.SessionConflict.Code)
+	}
+	if !strings.Contains(problem.Detail, "cannot be reset") || !strings.Contains(problem.Detail, `"future-state"`) || !strings.Contains(problem.Detail, "gc session close "+info.ID) {
+		t.Errorf("refusal detail = %q, want it to name the raw state and the close that releases the row", problem.Detail)
+	}
+
+	b, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", info.ID, err)
+	}
+	if got := b.Metadata["restart_requested"]; got != "" {
+		t.Errorf("restart_requested = %q, want nothing written", got)
+	}
+	if got := b.Metadata["continuation_reset_pending"]; got != "" {
+		t.Errorf("continuation_reset_pending = %q, want nothing written", got)
+	}
+	if fs.pokeCount != pokesBefore {
+		t.Errorf("pokeCount = %d, want %d (no poke on a refused reset)", fs.pokeCount, pokesBefore)
 	}
 }
