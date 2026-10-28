@@ -351,3 +351,92 @@ func traceTestCommitRecord(t *testing.T, records []SessionReconcilerTraceRecord,
 	t.Fatalf("no batch commit for %s among %d records", traceID, len(records))
 	return SessionReconcilerTraceRecord{}
 }
+
+// TestTraceStoreNextBatchAfterFailedWrite pins the batch appended after a
+// rolled-back failure (issue #7954): it goes to the same segment, starts on
+// its own line with the next unused seq, and leaves no trace of the failed
+// batch.
+func TestTraceStoreNextBatchAfterFailedWrite(t *testing.T) {
+	t.Run("after-committed-batch", func(t *testing.T) {
+		cityDir := t.TempDir()
+		root := traceStoreTestRoot(cityDir)
+		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		defer store.Close() //nolint:errcheck
+		appendTraceStoreTestBatch(t, store, "cycle-a", 1, 0, TraceDurabilityDurable)
+		preSeq, err := store.LatestSeq()
+		if err != nil {
+			t.Fatalf("LatestSeq: %v", err)
+		}
+		injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, nil)
+		failed := []SessionReconcilerTraceRecord{
+			traceStoreTestRecord("cycle-b", time.Now().UTC().Add(time.Second)),
+			traceStoreTestRecord("cycle-b", time.Now().UTC().Add(time.Second)),
+		}
+		if err := store.AppendBatch(failed, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("append batch b error = %v, want ENOSPC", err)
+		}
+		appendTraceStoreTestBatch(t, store, "cycle-c", 1, 2*time.Second, TraceDurabilityDurable)
+
+		segments := traceStoreTestSegments(t, root)
+		if len(segments) != 1 {
+			t.Fatalf("segments = %d, want 1 (the rolled-back segment keeps being used)", len(segments))
+		}
+		records, err := ReadTraceRecords(root, TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		counts := traceTestRecordCountByTraceID(records)
+		if counts["cycle-a"] != 2 || counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+			t.Fatalf("records by trace = %v, want cycle-a and cycle-c committed, no cycle-b", counts)
+		}
+		commit := traceTestCommitRecord(t, records, "cycle-c")
+		if commit.FirstSeq != preSeq+1 {
+			t.Fatalf("batch c first_seq = %d, want %d (the failed batch's seqs are reused safely)", commit.FirstSeq, preSeq+1)
+		}
+		assertTraceSeqsUnique(t, records)
+	})
+
+	t.Run("on-fresh-segment", func(t *testing.T) {
+		cityDir := t.TempDir()
+		root := traceStoreTestRoot(cityDir)
+		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		defer store.Close() //nolint:errcheck
+		now := time.Now().UTC()
+		segmentPath := filepath.Join(traceDayDir(filepath.Join(root, sessionReconcilerTraceSegments), now), traceSegmentFileName(1))
+		if err := os.MkdirAll(filepath.Dir(segmentPath), sessionReconcilerTraceOwnerDirPerm); err != nil {
+			t.Fatalf("mkdir segment dir: %v", err)
+		}
+		if err := store.openSegment(segmentPath, 0, 0); err != nil {
+			t.Fatalf("openSegment: %v", err)
+		}
+		injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, nil)
+		if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-b", now)}, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("append batch b error = %v, want ENOSPC", err)
+		}
+		appendTraceStoreTestBatch(t, store, "cycle-c", 1, time.Second, TraceDurabilityDurable)
+
+		segments := traceStoreTestSegments(t, root)
+		if len(segments) != 1 {
+			t.Fatalf("segments = %d, want 1 (the truncated fresh segment keeps being used)", len(segments))
+		}
+		records, err := ReadTraceRecords(root, TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		counts := traceTestRecordCountByTraceID(records)
+		if counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+			t.Fatalf("records by trace = %v, want only cycle-c", counts)
+		}
+		commit := traceTestCommitRecord(t, records, "cycle-c")
+		if commit.FirstSeq != 1 {
+			t.Fatalf("batch c first_seq = %d, want 1", commit.FirstSeq)
+		}
+		assertTraceSeqsUnique(t, records)
+	})
+}
