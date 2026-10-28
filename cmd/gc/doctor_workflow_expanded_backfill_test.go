@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -94,5 +95,58 @@ func TestWorkflowExpandedBackfillCheckWarnsOnLegacyExpandedRoot(t *testing.T) {
 		if strings.Contains(details, notWant) {
 			t.Fatalf("details should not mention %q:\n%s", notWant, details)
 		}
+	}
+}
+
+// TestWorkflowExpandedBackfillCheckFixStampsRootAndEndsClaimability is AC-5:
+// --fix stamps gc.workflow_expanded=true on the flagged root, the re-run
+// reports OK, and the hook's claim gate refuses the stamped root on its own
+// route — the loop #7436 describes ends there.
+func TestWorkflowExpandedBackfillCheckFixStampsRootAndEndsClaimability(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WR-1", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "mayor",
+		}},
+		{ID: "FIN-1", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow-finalize", "gc.root_bead_id": "WR-1",
+		}},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return cityStore, nil
+	}
+
+	check := newWorkflowExpandedBackfillCheck(cfg, cityDir, factory)
+
+	// Control: before the fix the unstamped expanded root is claimable.
+	wr1, err := cityStore.Get("WR-1")
+	if err != nil {
+		t.Fatalf("get WR-1: %v", err)
+	}
+	if !hookCandidateClaimable(wr1, []string{"mayor"}, time.Now()) {
+		t.Fatalf("unstamped expanded root is not claimable before the fix; the control of this test is broken")
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	wr1, err = cityStore.Get("WR-1")
+	if err != nil {
+		t.Fatalf("get WR-1: %v", err)
+	}
+	if got := wr1.Metadata["gc.workflow_expanded"]; got != "true" {
+		t.Errorf("WR-1 gc.workflow_expanded = %q, want true after gc doctor --fix", got)
+	}
+	if hookCandidateClaimable(wr1, []string{"mayor"}, time.Now()) {
+		t.Errorf("stamped expanded root is still claimable on its route after gc doctor --fix")
+	}
+
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res.Status, res)
 	}
 }
