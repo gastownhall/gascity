@@ -27,6 +27,8 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -3753,6 +3755,89 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	}
 	if nudgeCalled {
 		t.Error("nudgeFn should not be called when recipient is human")
+	}
+}
+
+// TestMailSendNotifyAllReportsEachSkippedWake pins the --all/--reply half of
+// the #7629 city-site --notify honesty: every recipient whose wake was not
+// recorded gets its own gc mail notify: line on stderr, while stdout (the
+// "Sent message"/"Replied to" lines escalate.sh reads) carries exactly what a
+// notify-less run prints.
+func TestMailSendNotifyAllReportsEachSkippedWake(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	newHeldRecipient := func(name string) (nudgeTarget, session.Info) {
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: name, Title: name, Command: "claude", WorkDir: dir, Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
+			t.Fatalf("Suspend(%s): %v", name, err)
+		}
+		return nudgeTarget{cityPath: dir, cfg: &config.City{}, sessionID: info.ID, sessionName: info.SessionName, identity: name, agent: config.Agent{Name: name, Provider: "claude"}}, info
+	}
+	targetA, infoA := newHeldRecipient("holder-a")
+	targetB, infoB := newHeldRecipient("holder-b")
+
+	targets := map[string]nudgeTarget{"holder-a": targetA, "holder-b": targetB}
+	nf := func(recipient, messageID string) (string, error) {
+		return sendMailNotifyWithOp(targets[recipient], store, fake, "human", messageID)
+	}
+
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"holder-a": true, "holder-b": true}
+	var stdout, stderr bytes.Buffer
+	prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
+	nudgeCityUsesManagedReconciler = func(string) bool { return true }
+	nudgePokeController = func(string, reconcilekey.Key) error { return nil }
+	prevWarn := nudgeWarningWriter
+	nudgeWarningWriter = &stderr
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController = prevManaged, prevPoke
+		nudgeWarningWriter = prevWarn
+	})
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"hello"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailSendAllJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	// stdout is byte-identical to a notify-less run: the two Sent lines and
+	// nothing else — the skip report belongs to stderr.
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 2 ||
+		!strings.HasPrefix(lines[0], "Sent message ") || !strings.HasSuffix(lines[0], " to holder-a") ||
+		!strings.HasPrefix(lines[1], "Sent message ") || !strings.HasSuffix(lines[1], " to holder-b") {
+		t.Fatalf("stdout = %q, want exactly the two Sent lines", stdout.String())
+	}
+	if n := strings.Count(stderr.String(), "gc mail notify:"); n != 2 {
+		t.Fatalf("gc mail notify: lines = %d, want 2; stderr: %q", n, stderr.String())
+	}
+	for _, id := range []string{infoA.ID, infoB.ID} {
+		if !strings.Contains(stderr.String(), "queued for "+id) || !strings.Contains(stderr.String(), "held by an operator") {
+			t.Fatalf("stderr = %q, want a held line naming %s", stderr.String(), id)
+		}
+	}
+
+	// The reply leg reports its own recipient the same way.
+	original, err := mp.Send("holder-a", "human", "", "greetings")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doMailReply(mp, events.Discard, original.ID, "human", "", "hi", nf, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailReply = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "Replied to "+original.ID) || strings.Count(stdout.String(), "\n") != 1 {
+		t.Fatalf("stdout = %q, want the single Replied line", stdout.String())
+	}
+	if n := strings.Count(stderr.String(), "gc mail notify:"); n != 1 {
+		t.Fatalf("gc mail notify: lines = %d, want 1; stderr: %q", n, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "queued for "+infoA.ID) {
+		t.Fatalf("stderr = %q, want the held line naming %s", stderr.String(), infoA.ID)
 	}
 }
 
