@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -2551,6 +2552,73 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}
 	if got := b.Metadata["state"]; got == "creating" {
 		t.Fatalf("state = %q, want direct-start state (not creating)", got)
+	}
+}
+
+// newSupervisorDownSessionCity writes the named-session fixture city under a
+// test GC_HOME and runtime dir in which no controller or supervisor socket
+// listens, as while a supervisor restarts.
+func newSupervisorDownSessionCity(t *testing.T) string {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+	cityDir := shortSocketTempDir(t, "gc-session-city-")
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	return cityDir
+}
+
+// registerCityWithSupervisorForTest registers cityDir in the test GC_HOME's
+// supervisor registry without starting a supervisor.
+func registerCityWithSupervisorForTest(t *testing.T, cityDir, name string) {
+	t.Helper()
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, name); err != nil {
+		t.Fatalf("Register(%q): %v", cityDir, err)
+	}
+}
+
+// assertDeferredSessionBead fails unless b was created for the reconciler to
+// start: start-pending with the pending-create claim.
+func assertDeferredSessionBead(t *testing.T, b beads.Bead) {
+	t.Helper()
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Fatalf("state = %q, want %q (deferred to the reconciler)", got, session.StateStartPending)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+}
+
+func TestCmdSessionNewRegisteredCitySupervisorDownDefersStart(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(registered, supervisor down) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got sessionNewJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decoding JSON %q: %v", stdout.String(), err)
+	}
+	if !got.DeferredStart {
+		t.Fatalf("deferred_start = false, want true; stdout=%s", stdout.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	assertDeferredSessionBead(t, b)
+	if got.SessionID != b.ID {
+		t.Fatalf("session_id = %q, want %q", got.SessionID, b.ID)
+	}
+	errText := stderr.String()
+	if n := strings.Count(errText, "gc session new: warning: poke failed:"); n != 1 {
+		t.Fatalf("poke-failed warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	for _, want := range []string{b.ID, "gc supervisor start"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
 	}
 }
 

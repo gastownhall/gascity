@@ -178,6 +178,25 @@ func cityUsesManagedReconciler(cityPath string) bool {
 	return supervisorAlive() != 0
 }
 
+// sessionStartOwnedByReconciler reports whether starting a session in cityPath
+// belongs to a controller rather than to this CLI process: a worker site, a
+// city whose controller answers, or a city registered with the supervisor,
+// whether or not the supervisor is running now. A registry that cannot be read
+// or parsed is an error, never "unregistered".
+func sessionStartOwnedByReconciler(cityPath string) (bool, error) {
+	if onWorkerSite(cityPath) {
+		return true, nil
+	}
+	if controllerAlive(cityPath) != 0 {
+		return true, nil
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
+	}
+	return registered, nil
+}
+
 // justRestartedSupervisorPID records the PID of a supervisor we just
 // auto-restarted in this invocation. Set by runStartDriftCheck after a
 // successful restart so that ensureNoStandaloneController can recognize

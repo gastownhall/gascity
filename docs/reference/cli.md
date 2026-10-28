@@ -4584,6 +4584,12 @@ and refined by the title model in the background.
 If the template config sets tmux_alias, it controls the runtime tmux
 session_name. --alias still sets the public command and mail alias.
 
+In a city registered with the supervisor, or one whose controller is
+running, the reconciler starts the session; this holds while the
+supervisor is stopped, and the session starts once it runs again. Only
+an unregistered city with no running controller starts the session
+directly in this process.
+
 ```
 gc session new <template> [flags]
 ```

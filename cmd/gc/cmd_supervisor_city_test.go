@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3139,5 +3140,139 @@ func TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeilin
 	}
 	if got := initFailureBackoffDelay(7, transientMsg); got == structuralInitFailureBackoff {
 		t.Errorf("initFailureBackoffDelay(7, transient) = %s, must not equal the structural backoff by coincidence", got)
+	}
+}
+
+// TestSessionStartOwnedByReconciler pins who owns a session start: a worker
+// site, a city whose controller answers, and a registered city (supervisor
+// running or not) defer to the reconciler; a registry that cannot be read is
+// an error, never "unregistered".
+func TestSessionStartOwnedByReconciler(t *testing.T) {
+	const corruptRegistry = "[[cities]]\n  path = \"/x\"\n  name = \"broken\n"
+	writeRegistry := func(t *testing.T, data string) string {
+		t.Helper()
+		path := supervisor.RegistryPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cases := []struct {
+		name string
+		// setup prepares the city and registry and returns the city path.
+		setup     func(t *testing.T) string
+		want      bool
+		wantErrIn []string
+		noDials   bool
+	}{
+		{
+			name: "worker site",
+			setup: func(t *testing.T) string {
+				cityDir, _ := newWorkerSiteSessionCity(t, nil)
+				writeRegistry(t, corruptRegistry)
+				return cityDir
+			},
+			want:    true,
+			noDials: true,
+		},
+		{
+			name: "controller answers ping, corrupt registry",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-owned-city-")
+				startFakeControllerSocket(t, cityDir, "4242\n")
+				writeRegistry(t, corruptRegistry)
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name: "registered, no sockets",
+			setup: func(t *testing.T) string {
+				cityDir := t.TempDir()
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "owned-city"); err != nil {
+					t.Fatal(err)
+				}
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name: "registry lists other cities only",
+			setup: func(t *testing.T) string {
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(t.TempDir(), "other-city"); err != nil {
+					t.Fatal(err)
+				}
+				return t.TempDir()
+			},
+			want: false,
+		},
+		{
+			name:  "cities.toml missing",
+			setup: func(t *testing.T) string { return t.TempDir() },
+			want:  false,
+		},
+		{
+			name: "corrupt cities.toml",
+			setup: func(t *testing.T) string {
+				writeRegistry(t, corruptRegistry)
+				return t.TempDir()
+			},
+			wantErrIn: []string{"parsing registry"},
+		},
+		{
+			name: "unreadable cities.toml",
+			setup: func(t *testing.T) string {
+				if os.Geteuid() == 0 {
+					t.Skip("root reads a mode-0 file")
+				}
+				path := writeRegistry(t, "")
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+				return t.TempDir()
+			},
+			wantErrIn: []string{"reading registry"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetControlPlaneForTest(t)
+			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+			cityDir := tc.setup(t)
+			var dials *atomic.Int32
+			if tc.noDials {
+				dials = countSocketDials(t)
+			}
+
+			got, err := sessionStartOwnedByReconciler(cityDir)
+			if len(tc.wantErrIn) > 0 {
+				if err == nil {
+					t.Fatalf("sessionStartOwnedByReconciler = (%v, nil), want an error", got)
+				}
+				for _, want := range append([]string{supervisor.RegistryPath()}, tc.wantErrIn...) {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error = %q, want it to contain %q", err, want)
+					}
+				}
+				if got {
+					t.Fatal("owned = true alongside an error, want false")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sessionStartOwnedByReconciler: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("sessionStartOwnedByReconciler = %v, want %v", got, tc.want)
+			}
+			if dials != nil && dials.Load() != 0 {
+				t.Fatalf("socket dials = %d, want 0", dials.Load())
+			}
+		})
 	}
 }
