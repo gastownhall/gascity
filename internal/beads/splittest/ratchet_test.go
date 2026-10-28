@@ -246,6 +246,20 @@ func TestGateFinishReportsRatchetAndTestsSeparately(t *testing.T) {
 	if err != nil || !strings.Contains(string(table), "internal/api/new.go\tapi.fresh\tget\twork\tgraph\t-\t3\t\t1\t1\tTestNew\t") {
 		t.Fatalf("observed table = %q, %v", table, err)
 	}
+
+	// A fixture row reached from a test it is not bound to fails the
+	// ratchet, and the summary line counts it.
+	gateSink.reset()
+	run = newTestGateRun(t)
+	close(run.done)
+	gateSink.record(SplitViolation{View: "work", Op: "get", Class: "sessions", ID: "gcs-1", Site: Site{File: "cmd/gc/fix.go", Line: 3, Func: "gc.fix"}, Pkg: Site{File: "cmd/gc/caller.go", Line: 9, Func: "gc.fixCaller"}, Test: "TestElsewhere"})
+	out.Reset()
+	if code := finishGate(0, run, files, &out); code != 1 {
+		t.Fatalf("a run reaching a fixture row out of its scope exited %d:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "SPLIT-STRICT RATCHET: FAIL (1 key(s) observed, 0 new, 0 triage, 0 past their line cap, 1 out of scope)") {
+		t.Fatalf("the summary does not count the out-of-scope fixture row:\n%s", out.String())
+	}
 }
 
 func TestGateFinishFoldsInHelperProcessEvents(t *testing.T) {

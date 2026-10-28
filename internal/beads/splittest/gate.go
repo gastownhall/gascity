@@ -450,9 +450,9 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	if len(lines) > 0 {
 		fmt.Fprintln(out) //nolint:errcheck // best-effort test log
 	}
-	fmt.Fprint(out, report)                                                                                        //nolint:errcheck // best-effort test log
-	fmt.Fprintf(out, "SPLIT-STRICT RATCHET: %s (%d key(s) observed, %d new, %d triage, %d past their line cap)\n", //nolint:errcheck // best-effort test log
-		ratchet, len(observed), len(result.New), len(result.Triage), len(result.LineCap))
+	fmt.Fprint(out, report)                                                                                                         //nolint:errcheck // best-effort test log
+	fmt.Fprintf(out, "SPLIT-STRICT RATCHET: %s (%d key(s) observed, %d new, %d triage, %d past their line cap, %d out of scope)\n", //nolint:errcheck // best-effort test log
+		ratchet, len(observed), len(result.New), len(result.Triage), len(result.LineCap), len(result.OutOfScope))
 	fmt.Fprintf(out, "SPLIT-STRICT TESTS: %s (%d failing, %d not in %s%s)\n", tests, len(failing), len(newFailing), files.KnownFailures, hungNote(hung)) //nolint:errcheck // best-effort test log
 	for _, name := range newFailing {
 		fmt.Fprintf(out, "  NEW FAILING %s\n", name) //nolint:errcheck // best-effort test log
