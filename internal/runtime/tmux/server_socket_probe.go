@@ -142,14 +142,30 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	return append(args, "attach-session", "-t", target)
 }
 
-// namedSocketPath resolves the exact path tmux uses for a named -L socket.
-// tmux honors TMUX_TMPDIR here; TMPDIR is deliberately not a fallback.
-func namedSocketPath(socketName string) string {
-	tmpDir := os.Getenv("TMUX_TMPDIR")
-	if tmpDir == "" {
-		tmpDir = "/tmp"
+// tmuxBasePath returns the directory tmux roots its socket tree in: the
+// realpath of TMUX_TMPDIR when it names an existing directory, else the
+// realpath of /tmp. tmux itself resolves its base before binding — a server
+// with TMUX_TMPDIR naming a missing directory falls back to /tmp, one with
+// a symlinked TMUX_TMPDIR binds under what the link points at — so any
+// process that must reach the same server, or prove it cannot, has to
+// resolve the same way. TMPDIR is never consulted: tmux does not read it.
+func tmuxBasePath() string {
+	if root := os.Getenv("TMUX_TMPDIR"); root != "" {
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			if info, statErr := os.Stat(resolved); statErr == nil && info.IsDir() {
+				return resolved
+			}
+		}
 	}
-	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil {
+		return resolved
+	}
+	return "/tmp"
+}
+
+// namedSocketPath resolves the exact path tmux uses for a named -L socket.
+func namedSocketPath(socketName string) string {
+	return filepath.Join(tmuxBasePath(), fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 }
 
 // SocketPath resolves the path tmux itself uses for a socket reference: an

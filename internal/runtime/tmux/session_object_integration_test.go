@@ -352,6 +352,86 @@ func TestServerConfirmedDeadRealTmuxKilledServer(t *testing.T) {
 	}
 }
 
+// SocketPath must answer whatever path tmux itself binds, including across
+// the TMUX_TMPDIR shapes tmux honors: a real directory, a symlinked one, and
+// a missing one (tmux realpaths its base and falls back to /tmp for that).
+func TestSocketPathMatchesRealTmuxSocketPath(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	root, err := os.MkdirTemp("/tmp", "gc-sp-")
+	if err != nil {
+		t.Fatalf("create socket root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	real := filepath.Join(root, "r")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(root, "l")); err != nil {
+		t.Fatalf("link socket dir: %v", err)
+	}
+
+	variants := []struct {
+		name string
+		dir  string
+	}{
+		{name: "empty TMUX_TMPDIR", dir: ""},
+		{name: "real TMUX_TMPDIR", dir: real},
+		{name: "symlinked TMUX_TMPDIR", dir: filepath.Join(root, "l")},
+		{name: "nonexistent TMUX_TMPDIR", dir: filepath.Join(root, "absent")},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			t.Setenv("TMUX_TMPDIR", variant.dir)
+			p := newObjectServer(t)
+			want := objectFormat(t, p, "keep", "#{socket_path}")
+			if got := SocketPath(p.tm.cfg.SocketName); got != want {
+				t.Fatalf("SocketPath = %q, want the server's own socket path %q", got, want)
+			}
+		})
+	}
+}
+
+// A server started with a TMUX_TMPDIR naming a missing directory runs on
+// tmux's fallback root. The probe must find that live server — never confirm
+// it dead by looking at the verbatim join where nothing binds — and confirm
+// it dead once kill-server has stopped it.
+func TestServerConfirmedDeadRealTmuxNonexistentTMUXTMPDIR(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("TMUX_TMPDIR", filepath.Join(t.TempDir(), "absent"))
+	p := newObjectServer(t)
+	pidOfServer, err := strconv.Atoi(objectFormat(t, p, "keep", "#{pid}"))
+	if err != nil {
+		t.Fatalf("server pid: %v", err)
+	}
+	// kill-server below stops it; the pid kill guards the fallback-root server
+	// against outliving a failed assertion.
+	t.Cleanup(func() { _ = syscall.Kill(pidOfServer, syscall.SIGTERM) })
+	if p.ServerConfirmedDead() {
+		t.Fatal("ServerConfirmedDead() = true for a live server on tmux's fallback root")
+	}
+	if err := p.tm.KillServer(); err != nil {
+		t.Fatalf("kill-server: %v", err)
+	}
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for processAlive(strconv.Itoa(pidOfServer)) {
+		select {
+		case <-timer.C:
+			t.Fatalf("tmux server %d still running after kill-server", pidOfServer)
+		case <-ticker.C:
+		}
+	}
+	if !p.ServerConfirmedDead() {
+		t.Fatal("ServerConfirmedDead() = false for a server stopped after starting on the fallback root")
+	}
+}
+
 // attachAfterCheck reads name detached, as the recycle's attach check does,
 // then attaches a real client to it before the kill (J17).
 func attachAfterCheck(t *testing.T, p *Provider, name string) {

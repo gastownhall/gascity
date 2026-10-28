@@ -126,6 +126,7 @@ go_test(
         "session_object_integration_test.go",
         "session_probe_test.go",
         "session_roster_test.go",
+        "socket_path_test.go",
         "staging_test.go",
         "start_held_name_test.go",
         "start_ops_construction_test.go",
