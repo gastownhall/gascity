@@ -3723,3 +3723,31 @@ func TestCmdSessionNew_UnreadableRegistryFailsLoudly(t *testing.T) {
 		t.Errorf("session beads = %d, want none created before the registry read failed", len(created))
 	}
 }
+
+// TestCmdSessionNew_UnregisteredCityKeepsDirectStart pins the ad-hoc half of
+// issue #8382: a city absent from $GC_HOME/cities.toml with no controller
+// keeps today's direct in-process start — registered cities gained the
+// deferred start, unregistered ad-hoc cities must not.
+func TestCmdSessionNew_UnregisteredCityKeepsDirectStart(t *testing.T) {
+	cityDir := sessionStartOwnershipEnv(t)
+	// No registry entry: $GC_HOME/cities.toml stays absent, so the city is
+	// unregistered.
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(unregistered) = %d, want 0 (direct start); stderr=%s", code, stderr.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["state"]; got == string(session.StateStartPending) || got == "creating" {
+		t.Errorf("state = %q, want a direct-start state (not start-pending/creating)", got)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "" {
+		t.Errorf("pending_create_claim = %q, want empty (nothing claimed the start)", got)
+	}
+	if strings.Contains(stderr.String(), "poke failed") {
+		t.Errorf("stderr must not carry a poke warning for an unregistered city:\n%s", stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "created from template") {
+		t.Errorf("stdout = %q, want the direct-create report", got)
+	}
+}
