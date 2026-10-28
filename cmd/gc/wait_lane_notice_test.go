@@ -498,17 +498,13 @@ func TestWaitNudgeRollbackKeepsTheOpenNotice(t *testing.T) {
 }
 
 // neverProposedNoticeWait is a ready wait left as a crash between recording
-// its notice and proposing it, then a rollback whose record of the queue
-// item it took failed, leave it: nudge_id still names the notice, which no
-// op has, and the attempt is an open queue item. It returns the wait, its
-// notice's op id and the queue item's id.
-func neverProposedNoticeWait(t *testing.T, f *laneFixture, store *waitNudgeIDRefusingStore) (sessionpkg.WaitInfo, string, string) {
+// its notice and proposing it, then a rollback of message, leave it:
+// nudge_id names the notice, which no op has, and nothing is queued for the
+// attempt. It returns the wait and its notice's op id.
+func neverProposedNoticeWait(t *testing.T, f *laneFixture) (sessionpkg.WaitInfo, string) {
 	t.Helper()
-	f.cfg.Ops.Authoritative = []string{"message"}
-	newNoticeLaneHost(t, f, "message")
-	st := f.laneStore(t)
 	wait := readyWait(t, f, "never proposed")
-	opID, err := opjournal.DeriveID(st.Prefix(), f.id, waitNoticePrincipal, waitNoticeKey(waitNudgeID(wait)))
+	opID, err := opjournal.DeriveID(f.laneStore(t).Prefix(), f.id, waitNoticePrincipal, waitNoticeKey(waitNudgeID(wait)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,35 +513,67 @@ func neverProposedNoticeWait(t *testing.T, f *laneFixture, store *waitNudgeIDRef
 	}
 	f.cfg.Ops.Authoritative = nil
 	newNoticeLaneHost(t, f)
-	store.refuse = wait.ID
-	err = dispatchReadyWaitNudgesWithSnapshot(f.dir, f.cfg, sessionFrontDoor(f.store), beads.NudgesStore{Store: f.store}, time.Now().UTC(), nil)
-	if err == nil || !strings.Contains(err.Error(), "setting wait nudge_id") {
-		t.Fatalf("dispatch = %v, want the queue item's refused record", err)
-	}
-	store.refuse = ""
-	queueID := waitNudgeID(wait)
-	if _, open, err := nudgeShadows(beads.NudgesStore{Store: f.store}).Find(queueID); err != nil || !open {
-		t.Fatalf("queue item %s open %v, %v; want it open", queueID, open, err)
-	}
-	noticeOpAbsent(t, st, opID)
-	if got := waitNow(t, f, wait).NudgeID; got != opID {
-		t.Fatalf("nudge_id = %q, want the never-proposed notice %s", got, opID)
-	}
-	return wait, opID, queueID
+	return waitNow(t, f, wait), opID
 }
 
-// A nudge_id naming a notice that was never proposed leaves the attempt to
-// its queue item: once the queue delivers it, the next prepare closes the
-// wait from it and sheds the wait's hold, and a dispatch repoints the
-// nudge_id at the item, which a withdrawal by that id then finds.
+// queueWaitAttempt queues wait's current attempt as the legacy queue's item,
+// leaving the wait's nudge_id as it is, and returns the item's id.
+func queueWaitAttempt(t *testing.T, f *laneFixture, wait sessionpkg.WaitInfo) string {
+	t.Helper()
+	id := waitNudgeID(wait)
+	item := newQueuedNudgeWithOptions("worker", "Wait satisfied ("+wait.ID+")", "wait", time.Now().UTC(), queuedNudgeOptions{
+		ID:                id,
+		SessionID:         f.id,
+		ContinuationEpoch: wait.RegisteredEpoch,
+		Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
+	})
+	if err := enqueueQueuedNudgeWithStore(f.dir, beads.NudgesStore{Store: f.store}, item); err != nil {
+		t.Fatalf("queueing wait %s's attempt: %v", wait.ID, err)
+	}
+	return id
+}
+
+// After a rollback, a nudge_id naming a notice that was never proposed
+// leaves the attempt to the queue. The queue records its item as the wait's
+// nudge_id before it queues it, so a refused record queues nothing and
+// leaves the attempt to the next pass. A wait that names the notice while
+// the queue holds the attempt is closed by the next prepare from the item
+// once the queue delivers it, which sheds the wait's hold.
 func TestWaitNeverProposedNoticeLeavesTheAttemptToItsQueueItem(t *testing.T) {
-	t.Run("finalize", func(t *testing.T) {
+	t.Run("recorded before it is queued", func(t *testing.T) {
 		store := &waitNudgeIDRefusingStore{laneTestStore: newLaneTestStore()}
 		f := newLaneFixtureOver(t, store)
+		wait, opID := neverProposedNoticeWait(t, f)
+		queueID := waitNudgeID(wait)
+		shadows := nudgeShadows(beads.NudgesStore{Store: f.store})
+		store.refuse = wait.ID
+		err := dispatchReadyWaitNudgesWithSnapshot(f.dir, f.cfg, sessionFrontDoor(f.store), beads.NudgesStore{Store: f.store}, time.Now().UTC(), nil)
+		if err == nil || !strings.Contains(err.Error(), "setting wait nudge_id") {
+			t.Fatalf("dispatch = %v, want the queue item's refused record", err)
+		}
+		if _, ok, err := shadows.FindIncludingTerminal(queueID); err != nil || ok {
+			t.Fatalf("queue item %s after the refused record: exists %v, %v; want nothing queued", queueID, ok, err)
+		}
+		if got := waitNow(t, f, wait).NudgeID; got != opID {
+			t.Fatalf("nudge_id after the refused record = %q, want the never-proposed notice %s", got, opID)
+		}
+		store.refuse = ""
+		dispatchWaits(t, f)
+		if got := waitNow(t, f, wait).NudgeID; got != queueID {
+			t.Fatalf("nudge_id = %q, want the queue item %s in place of %s", got, queueID, opID)
+		}
+		if _, open, err := shadows.Find(queueID); err != nil || !open {
+			t.Fatalf("queue item %s open %v, %v; want it open", queueID, open, err)
+		}
+		noticeOpAbsent(t, f.laneStore(t), opID)
+	})
+	t.Run("finalize", func(t *testing.T) {
+		f := newLaneFixture(t)
 		if err := setSessionWaitHold(sessionFrontDoor(f.store), f.id); err != nil {
 			t.Fatalf("setting the wait hold: %v", err)
 		}
-		wait, _, queueID := neverProposedNoticeWait(t, f, store)
+		wait, _ := neverProposedNoticeWait(t, f)
+		queueID := queueWaitAttempt(t, f, wait)
 		shadows := nudgequeue.NewStore(beads.NudgesStore{Store: f.store})
 		shadow, _, err := shadows.Find(queueID)
 		if err != nil {
@@ -568,22 +596,41 @@ func TestWaitNeverProposedNoticeLeavesTheAttemptToItsQueueItem(t *testing.T) {
 			t.Fatalf("disposition = %+v, want the wait hold gone", d)
 		}
 	})
-	t.Run("repoint", func(t *testing.T) {
-		store := &waitNudgeIDRefusingStore{laneTestStore: newLaneTestStore()}
-		f := newLaneFixtureOver(t, store)
-		wait, opID, queueID := neverProposedNoticeWait(t, f, store)
-		dispatchWaits(t, f)
-		if got := waitNow(t, f, wait).NudgeID; got != queueID {
-			t.Fatalf("nudge_id = %q, want the queue item %s in place of %s", got, queueID, opID)
+}
+
+// gc wait cancel withdraws the queue item a rollback queues for a wait whose
+// nudge_id named a notice that was never proposed, even when the cancel
+// lands the moment the item is queued: the item is the wait's nudge_id by
+// then, so the cancel withdraws it, not the never-proposed notice, and the
+// canceled wait's reminder is never delivered.
+func TestWaitCancelAsTheQueueTakesANeverProposedNoticesAttemptWithdrawsIt(t *testing.T) {
+	c := cliWaitCity(t)
+	wait, opID := neverProposedNoticeWait(t, c.laneFixture)
+	queueID := waitNudgeID(wait)
+	var cancel struct {
+		ran    bool
+		code   int
+		stderr string
+	}
+	prevPing := pingNudgeWakeSocket
+	pingNudgeWakeSocket = func(string) {
+		if !cancel.ran {
+			cancel.ran = true
+			_, cancel.code, cancel.stderr = gcWait(wait.ID, waitStateCanceled)
 		}
-		noticeOpAbsent(t, f.laneStore(t), opID)
-		if err := openNudgeQueue(f.dir, beads.NudgesStore{Store: f.store}).Queue.WithdrawQueuedWaitNudges([]string{waitNow(t, f, wait).NudgeID}); err != nil {
-			t.Fatalf("withdraw: %v", err)
-		}
-		if _, open, err := nudgeShadows(beads.NudgesStore{Store: f.store}).Find(queueID); err != nil || open {
-			t.Fatalf("queue item after the withdrawal open %v, %v; want it withdrawn", open, err)
-		}
-	})
+	}
+	t.Cleanup(func() { pingNudgeWakeSocket = prevPing })
+	dispatchWaits(t, c.laneFixture)
+	if !cancel.ran || cancel.code != 0 {
+		t.Fatalf("gc wait cancel as the item was queued: ran %v, exit %d, stderr %q", cancel.ran, cancel.code, cancel.stderr)
+	}
+	if _, open, err := nudgeShadows(beads.NudgesStore{Store: c.store}).Find(queueID); err != nil || open {
+		t.Fatalf("queue item %s after gc wait cancel open %v, %v; want it withdrawn", queueID, open, err)
+	}
+	if got := waitNow(t, c.laneFixture, wait); got.State != waitStateCanceled || got.NudgeID != queueID {
+		t.Fatalf("wait after gc wait cancel is %s naming %q, want canceled naming the queue item %s", got.State, got.NudgeID, queueID)
+	}
+	noticeOpAbsent(t, c.laneStore(t), opID)
 }
 
 // unreadableNotice makes op's row one this build cannot decode: a schema
@@ -606,16 +653,16 @@ func unreadableNotice(t *testing.T, f *laneFixture, op opjournal.Op) {
 func TestWaitReArmReadsItsNoticeForTheNextAttempt(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		setup func(t *testing.T, f *laneFixture, store *waitNudgeIDRefusingStore) sessionpkg.WaitInfo
+		setup func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo
 		next  string
 	}{
-		{"open", func(t *testing.T, f *laneFixture, _ *waitNudgeIDRefusingStore) sessionpkg.WaitInfo {
+		{"open", func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo {
 			newNoticeLaneHost(t, f, "message")
 			wait := readyWait(t, f, "open")
 			dispatchWaits(t, f)
 			return wait
 		}, ""},
-		{"executing", func(t *testing.T, f *laneFixture, _ *waitNudgeIDRefusingStore) sessionpkg.WaitInfo {
+		{"executing", func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo {
 			newNoticeLaneHost(t, f, "message")
 			wait := readyWait(t, f, "executing")
 			dispatchWaits(t, f)
@@ -625,7 +672,7 @@ func TestWaitReArmReadsItsNoticeForTheNextAttempt(t *testing.T) {
 			}
 			return wait
 		}, ""},
-		{"closed", func(t *testing.T, f *laneFixture, _ *waitNudgeIDRefusingStore) sessionpkg.WaitInfo {
+		{"closed", func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo {
 			newNoticeLaneHost(t, f, "message")
 			wait := readyWait(t, f, "closed")
 			dispatchWaits(t, f)
@@ -635,33 +682,26 @@ func TestWaitReArmReadsItsNoticeForTheNextAttempt(t *testing.T) {
 			}
 			return wait
 		}, "2"},
-		{"unreadable", func(t *testing.T, f *laneFixture, _ *waitNudgeIDRefusingStore) sessionpkg.WaitInfo {
+		{"unreadable", func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo {
 			newNoticeLaneHost(t, f, "message")
 			wait := readyWait(t, f, "unreadable")
 			dispatchWaits(t, f)
 			unreadableNotice(t, f, waitNotice(t, f, f.laneStore(t), wait))
 			return wait
 		}, "2"},
-		{"never proposed", func(t *testing.T, f *laneFixture, _ *waitNudgeIDRefusingStore) sessionpkg.WaitInfo {
-			wait := readyWait(t, f, "never proposed")
-			opID, err := opjournal.DeriveID(f.laneStore(t).Prefix(), f.id, waitNoticePrincipal, waitNoticeKey(waitNudgeID(wait)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := sessionFrontDoor(f.store).SetWaitNudgeID(wait.ID, opID); err != nil {
-				t.Fatal(err)
-			}
+		{"never proposed", func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo {
+			wait, _ := neverProposedNoticeWait(t, f)
 			return wait
 		}, "2"},
-		{"never proposed, queued", func(t *testing.T, f *laneFixture, store *waitNudgeIDRefusingStore) sessionpkg.WaitInfo {
-			wait, _, _ := neverProposedNoticeWait(t, f, store)
+		{"never proposed, queued", func(t *testing.T, f *laneFixture) sessionpkg.WaitInfo {
+			wait, _ := neverProposedNoticeWait(t, f)
+			queueWaitAttempt(t, f, wait)
 			return wait
 		}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &waitNudgeIDRefusingStore{laneTestStore: newLaneTestStore()}
-			f := newLaneFixtureOver(t, store)
-			w := waitNow(t, f, tc.setup(t, f, store))
+			f := newLaneFixture(t)
+			w := waitNow(t, f, tc.setup(t, f))
 			if !opjournal.IsOpID(w.NudgeID) {
 				t.Fatalf("nudge_id = %q, want a notice's op id", w.NudgeID)
 			}

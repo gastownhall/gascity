@@ -18,8 +18,11 @@ package main
 // their shared entry points. An attempt stays with the path that recorded it
 // first across a flip or rollback of message in [ops] authoritative: a queued
 // attempt gets no notice, and a noticed one no queue item
-// (waitNoticeRecorded). A nudge_id naming a notice that was never proposed
-// leaves the attempt to the queue's item for it, which the readers then use.
+// (waitNoticeRecorded). The queue records its item as nudge_id before it
+// queues it, as the lane does its op before proposing it, so a withdrawal,
+// which reads nudge_id, finds whichever of the two can be live. A nudge_id
+// naming a notice that was never proposed holds no delivery, and the
+// readers then read the attempt's queue item.
 
 import (
 	"errors"
@@ -66,12 +69,12 @@ func waitNoticeRequest(conv string, wait sessionpkg.WaitInfo, nudgeID, message s
 // notice and rings the lane. Recording first means no op exists that its
 // wait does not name: a crash between the two writes leaves a nudge_id that
 // names no op, which reads as not found everywhere, so the next pass
-// proposes the notice, or after a rollback queues it, and the queue item
-// then stands for the attempt (repointWaitAtQueueItem). It reports handled
-// false, having written nothing, when the lane does not serve the session
-// or the op store refuses the notice itself (a note past the inline payload
-// limit, or not UTF-8): the attempt takes the legacy queue. An error leaves
-// the attempt to the next pass.
+// proposes the notice, or after a rollback records the attempt's queue item
+// in its place and queues it. It reports handled false, having written
+// nothing, when the lane does not serve the session or the op store refuses
+// the notice itself (a note past the inline payload limit, or not UTF-8):
+// the attempt takes the legacy queue. An error leaves the attempt to the
+// next pass.
 func dispatchWaitNotice(lane plannerNoticeLane, sessFront *sessionpkg.Store, info sessionpkg.Info, wait sessionpkg.WaitInfo, nudgeID, message string) (bool, error) {
 	st, err := lane.noticeStore()
 	if err != nil {
@@ -280,29 +283,6 @@ func waitNoticeInFlight(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, o
 		return false, false, fmt.Errorf("reading wait %s's notice %s: %w", wait.ID, opID, err)
 	}
 	return found && op.Status != opjournal.StatusClosed, found, nil
-}
-
-// repointWaitAtQueueItem records queue item nudgeID, which holds wait's
-// attempt, as wait's nudge_id when that is still a lane notice op id naming
-// no op: the notice was recorded and never proposed, the queue took the
-// attempt after a rollback, and its record of the item failed. Withdraw then
-// finds the item. A nudge_id that is not an op id, or names an op, is left
-// as it is.
-func repointWaitAtQueueItem(sessFront *sessionpkg.Store, wait sessionpkg.WaitInfo, nudgeID string) error {
-	if !opjournal.IsOpID(wait.NudgeID) {
-		return nil
-	}
-	_, found, err := waitNoticeOp(sessFront, wait.NudgeID)
-	switch {
-	case opjournal.Undecodable(err), err == nil && found:
-		return nil
-	case err != nil:
-		return fmt.Errorf("reading wait %s's notice %s: %w", wait.ID, wait.NudgeID, err)
-	}
-	if err := sessFront.SetWaitNudgeID(wait.ID, nudgeID); err != nil {
-		return fmt.Errorf("recording wait %s's queue item %s in place of its unproposed notice %s: %w", wait.ID, nudgeID, wait.NudgeID, err)
-	}
-	return nil
 }
 
 // splitWaitNudgeIDs splits a wait's nudge ids into lane notice op ids and
