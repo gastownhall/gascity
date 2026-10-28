@@ -48,8 +48,10 @@ type reapOrphanResult struct {
 // touched-but-open step is genuinely in flight (parked, not orphaned) and
 // must be left alone. Molecules with zero descendants are skipped too, since
 // that shape means instantiation has not finished yet rather than that the
-// molecule is orphaned.
-func reapOrphanMolecules(store beads.Store, _ events.Recorder, opts reapOrphansOptions, stdout io.Writer) ([]reapOrphanResult, error) {
+// molecule is orphaned. Each closed root is announced on rec with the same
+// bead.closed / molecule.resolved pair the autoclose path records; a dry run
+// closes nothing and records nothing.
+func reapOrphanMolecules(store beads.Store, rec events.Recorder, opts reapOrphansOptions, stdout io.Writer) ([]reapOrphanResult, error) {
 	candidates, err := store.List(beads.ListQuery{Type: "molecule"})
 	if err != nil {
 		return nil, fmt.Errorf("listing open molecules: %w", err)
@@ -77,6 +79,7 @@ func reapOrphanMolecules(store beads.Store, _ events.Recorder, opts reapOrphansO
 		if err != nil {
 			return nil, fmt.Errorf("closing orphan molecule %s: %w", root.ID, err)
 		}
+		recordMoleculeClosed(rec, root, root.Status, reapOrphanCloseReason)
 		results = append(results, reapOrphanResult{RootID: root.ID, Title: root.Title, Closed: closed})
 		fmt.Fprintf(stdout, "reaped orphan molecule %s %q (%d beads closed)\n", root.ID, root.Title, closed) //nolint:errcheck // best-effort stdout
 	}
@@ -140,7 +143,7 @@ func beadWasEntered(b beads.Bead) bool {
 // operator cds into a city or rig and runs it to clear molecule roots
 // stranded by crn-vbsr0. Unlike the autoclose hook commands it is not
 // best-effort — failures are surfaced to the caller.
-func newMoleculeReapOrphansCmd(stdout io.Writer) *cobra.Command {
+func newMoleculeReapOrphansCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:    "reap-orphans",
@@ -162,7 +165,7 @@ orphaned subtree. Use --dry-run to preview without closing anything.
 			if err != nil {
 				return fmt.Errorf("opening store: %w", err)
 			}
-			results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{DryRun: dryRun}, stdout)
+			results, err := reapOrphanMolecules(store, openCityRecorderAt(cityPath, stderr), reapOrphansOptions{DryRun: dryRun}, stdout)
 			if err != nil {
 				return err
 			}
