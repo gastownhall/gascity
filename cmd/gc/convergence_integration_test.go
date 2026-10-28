@@ -1219,6 +1219,7 @@ func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
 		wantInReady bool // the step is offered to the worker before the stop
 	}{
 		{name: "manual-gate/iteration-1", params: map[string]string{}},
+		{name: "condition-gate/iteration-2", params: map[string]string{"gate_mode": "condition"}, iterations: 1, wantInReady: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cr, store := setupConvergenceRuntime(t)
