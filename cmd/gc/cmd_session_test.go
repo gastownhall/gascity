@@ -522,7 +522,7 @@ func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
 	// matches the production path.
 	store = cliSessionStore(store, cfg, cityDir)
 
-	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "ant-fenrir")
+	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "ant-fenrir", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(ant-fenrir): %v", err)
 	}
@@ -2598,6 +2598,18 @@ func writeCorruptSupervisorRegistryForTest(t *testing.T) string {
 	return path
 }
 
+// neverStartedDeadlineForTest is the RFC 3339 deadline by which a controller
+// must start the deferred session b before the reconciler rolls it back: its
+// pending_create_started_at plus pendingCreateNeverStartedTimeout.
+func neverStartedDeadlineForTest(t *testing.T, b beads.Bead) string {
+	t.Helper()
+	started, err := time.Parse(time.RFC3339, b.Metadata["pending_create_started_at"])
+	if err != nil {
+		t.Fatalf("pending_create_started_at = %q: %v", b.Metadata["pending_create_started_at"], err)
+	}
+	return started.Add(pendingCreateNeverStartedTimeout).UTC().Format(time.RFC3339)
+}
+
 // assertDeferredSessionBead fails unless b was created for the reconciler to
 // start: start-pending with the pending-create claim.
 func assertDeferredSessionBead(t *testing.T, b beads.Bead) {
@@ -2634,7 +2646,7 @@ func TestCmdSessionNewRegisteredCitySupervisorDownDefersStart(t *testing.T) {
 	if n := strings.Count(errText, "gc session new: warning: poke failed:"); n != 1 {
 		t.Fatalf("poke-failed warnings = %d, want 1; stderr=%s", n, errText)
 	}
-	for _, want := range []string{b.ID, "gc supervisor start"} {
+	for _, want := range []string{b.ID, "gc supervisor start", "rolled back if none has started it by " + neverStartedDeadlineForTest(t, b)} {
 		if !strings.Contains(errText, want) {
 			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
 		}
@@ -2659,11 +2671,142 @@ func TestCmdSessionNewRegisteredCitySupervisorDownDoesNotWaitToAttach(t *testing
 	if strings.Contains(out, "Waiting for session to start...") {
 		t.Fatalf("stdout = %q, want no wait for a start no controller will make", out)
 	}
-	for _, want := range []string{"gc supervisor start", "gc session attach " + b.ID} {
+	for _, want := range []string{"gc supervisor start", "by " + neverStartedDeadlineForTest(t, b) + ", or the reconciler rolls this session back", "gc session attach " + b.ID} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout = %q, want it to contain %q", out, want)
 		}
 	}
+}
+
+// TestCmdSessionNewWaitsToAttachWhileAControllerIsUp covers an attaching gc
+// session new whose probe poke failed while a controller is up: one that
+// answers ping but not the poke, or one that came up after the probe and
+// answers the enqueue. Either starts the session at its next reconcile, so
+// the command waits for the start, bounded by --wait-timeout, instead of
+// telling the operator to start the supervisor.
+func TestCmdSessionNewWaitsToAttachWhileAControllerIsUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// respond answers each command line the city's controller socket gets.
+		respond         func(line string) string
+		registered      bool
+		wantPokeWarning bool
+	}{
+		{
+			name: "controller answers ping but not the poke",
+			respond: func(line string) string {
+				if line == "ping" {
+					return "4242\n"
+				}
+				return ""
+			},
+			wantPokeWarning: true,
+		},
+		{
+			name: "controller answers only the enqueue",
+			respond: func(line string) string {
+				if strings.HasPrefix(line, pokeKeyedCommandPrefix) {
+					return "ok\n"
+				}
+				return ""
+			},
+			registered: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := newSupervisorDownSessionCity(t)
+			if tc.registered {
+				registerCityWithSupervisorForTest(t, cityDir)
+			}
+			startFakeUnixSocket(t, controllerSocketPath(cityDir), tc.respond)
+
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionNew([]string{"mayor"}, "", "", "", false, false, time.Millisecond, &stdout, &stderr)
+			out, errText := stdout.String(), stderr.String()
+			// Nothing in the test starts the session, so the wait times out.
+			if code != 1 || !strings.Contains(errText, "did not start within") {
+				t.Fatalf("cmdSessionNew = %d, want 1 from the bounded wait timing out; stdout=%s stderr=%s", code, out, errText)
+			}
+			if !strings.Contains(out, "Waiting for session to start...") {
+				t.Fatalf("stdout = %q, want the wait for the controller's start", out)
+			}
+			if strings.Contains(out, "No controller answered") || strings.Contains(out, "gc supervisor start") {
+				t.Fatalf("stdout = %q, want no supervisor advice while a controller is up", out)
+			}
+			assertDeferredSessionBead(t, onlySessionBead(t, cityDir))
+			if got := strings.Contains(errText, "gc session new: warning: poke failed:"); got != tc.wantPokeWarning {
+				t.Fatalf("stderr = %q; poke-failed warning = %v, want %v", errText, got, tc.wantPokeWarning)
+			}
+		})
+	}
+}
+
+// TestCmdSessionPinRegisteredCitySupervisorDownDefersNamedStart pins a
+// configured named session with no bead yet in a registered city whose
+// supervisor is down: the row the pin materializes is left start-pending for
+// the reconciler, and one warning says a controller starts it. Pin clears
+// the pending-create claim, so the row is never rolled back and the warning
+// states no limit.
+func TestCmdSessionPinRegisteredCitySupervisorDownDefersNamedStart(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionPin([]string{"mayor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionPin(registered, supervisor down) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Fatalf("state = %q, want %q (left for the reconciler, not started here)", got, session.StateStartPending)
+	}
+	if got := b.Metadata["pin_awake"]; got != "true" {
+		t.Fatalf("pin_awake = %q, want true", got)
+	}
+	errText := stderr.String()
+	if n := strings.Count(errText, "gc session pin: warning: poke failed:"); n != 1 {
+		t.Fatalf("poke-failed warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	for _, want := range []string{b.ID, "gc supervisor start"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+	if strings.Contains(errText, "rolled back") {
+		t.Fatalf("stderr = %q, want no rollback limit for a row with no pending-create claim", errText)
+	}
+}
+
+// TestDeferredSessionStartRollsBackAfterNeverStartedTimeout pins the limit gc
+// session new states for a start it defers to the reconciler while no
+// controller runs: a bead-only create, the row worker.CreateModeDeferred
+// writes, that a controller first reconciles within
+// pendingCreateNeverStartedTimeout is started, and one it first reconciles
+// after that is rolled back.
+func TestDeferredSessionStartRollsBackAfterNeverStartedTimeout(t *testing.T) {
+	limit := fmt.Sprintf("%d minutes", int(pendingCreateNeverStartedTimeout/time.Minute))
+	if help := newSessionNewCmd(io.Discard, io.Discard).Long; !strings.Contains(help, limit) {
+		t.Fatalf("gc session new help does not state the %s limit:\n%s", limit, help)
+	}
+	t.Run("controller back within the limit", func(t *testing.T) {
+		h := newSessionChaosHarness(t, 20261028)
+		h.createSessionIntent()
+		h.env.clk.Advance(pendingCreateNeverStartedTimeout - time.Minute)
+		h.reconcileTick()
+		h.assertStarted()
+	})
+	t.Run("controller back after the limit", func(t *testing.T) {
+		h := newSessionChaosHarness(t, 20261028)
+		h.createSessionIntent()
+		h.env.clk.Advance(pendingCreateNeverStartedTimeout + time.Minute)
+		h.reconcileTick()
+		b := h.mustBead()
+		if b.Status != "closed" || b.Metadata["state"] != string(session.StateFailedCreate) {
+			t.Fatalf("status = %q, state = %q, want closed %q", b.Status, b.Metadata["state"], session.StateFailedCreate)
+		}
+		if h.env.sp.IsRunning(h.sessionName) {
+			t.Fatalf("runtime %q started after the never-started timeout", h.sessionName)
+		}
+	})
 }
 
 // TestCmdSessionNewCorruptRegistryFailsLoudly: a cities.toml that cannot be
@@ -2757,6 +2900,237 @@ func TestCmdSessionNewLiveControllerPokeFailureDefers(t *testing.T) {
 	if !strings.Contains(stderr.String(), "gc session new: warning: poke failed:") {
 		t.Fatalf("stderr = %q, want the poke-failed warning", stderr.String())
 	}
+}
+
+// TestCmdSessionAttachRegisteredCitySupervisorDownLeavesNamedStartToReconciler
+// attaches to a configured named session with no bead yet in a registered
+// city whose supervisor is down. The row the resolution materializes is left
+// start-pending for the reconciler, with one warning saying so, and attach
+// does not start it from this process: it says how to start the supervisor
+// and attach, and fails.
+func TestCmdSessionAttachRegisteredCitySupervisorDownLeavesNamedStartToReconciler(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionAttach([]string{"mayor"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionAttach(registered, supervisor down) = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	assertDeferredSessionBead(t, b)
+	if strings.Contains(stdout.String(), "Attaching to session") {
+		t.Fatalf("stdout = %q, want no attach to a session no controller has started", stdout.String())
+	}
+	errText := stderr.String()
+	if n := strings.Count(errText, "session materialize: warning: poke failed:"); n != 1 {
+		t.Fatalf("deferred-start warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	for _, want := range []string{"not attaching", "gc supervisor start", "by " + neverStartedDeadlineForTest(t, b) + ", or the reconciler rolls this session back", "gc session attach " + b.ID} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+}
+
+// TestCmdSessionAttachRegisteredCitySupervisorDownLeavesDeferredSessionToReconciler
+// attaches, while the supervisor is still down, to the session an earlier gc
+// session new --no-attach left to the reconciler: attach does not start it
+// from this process either.
+func TestCmdSessionAttachRegisteredCitySupervisorDownLeavesDeferredSessionToReconciler(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("cmdSessionNew(--no-attach) = %d, want 0", code)
+	}
+	created := onlySessionBead(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionAttach([]string{created.ID}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionAttach(deferred session, supervisor down) = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	if b.ID != created.ID {
+		t.Fatalf("session bead = %s, want %s", b.ID, created.ID)
+	}
+	assertDeferredSessionBead(t, b)
+	if errText := stderr.String(); !strings.Contains(errText, "not attaching") || !strings.Contains(errText, "gc supervisor start") {
+		t.Fatalf("stderr = %q, want the not-attaching notice", errText)
+	}
+}
+
+// TestCmdSessionAttachUnregisteredCityStartsNamedSession: in an unregistered
+// city with no controller, attach still starts and attaches the named
+// session in this process.
+func TestCmdSessionAttachUnregisteredCityStartsNamedSession(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionAttach([]string{"mayor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionAttach(unregistered) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Attaching to session") {
+		t.Fatalf("stdout = %q, want the attach", stdout.String())
+	}
+	if state := onlySessionBead(t, cityDir).Metadata["state"]; state == string(session.StateStartPending) {
+		t.Fatalf("state = %q, want a session this process started", state)
+	}
+	if errText := stderr.String(); strings.Contains(errText, "not attaching") || strings.Contains(errText, "poke failed") {
+		t.Fatalf("stderr = %q, want no deferral", errText)
+	}
+}
+
+// TestCmdSessionSubmitRegisteredCitySupervisorDownLeavesNamedStartToReconciler
+// submits to a configured named session with no bead yet in a registered city
+// whose supervisor is down. The default intent queues the message for the
+// session the reconciler starts and reports the deferred start once; an intent
+// that would start the runtime in this process is refused.
+func TestCmdSessionSubmitRegisteredCitySupervisorDownLeavesNamedStartToReconciler(t *testing.T) {
+	t.Run("default intent queues", func(t *testing.T) {
+		cityDir := newSupervisorDownSessionCity(t)
+		registerCityWithSupervisorForTest(t, cityDir)
+
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{"mayor", "hello"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionSubmit(default) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Queued") {
+			t.Fatalf("stdout = %q, want the message queued", stdout.String())
+		}
+		b := onlySessionBead(t, cityDir)
+		assertDeferredSessionBead(t, b)
+		errText := stderr.String()
+		if n := strings.Count(errText, "session materialize: warning: poke failed:"); n != 1 {
+			t.Fatalf("deferred-start warnings = %d, want 1; stderr=%s", n, errText)
+		}
+		if want := "rolled back if none has started it by " + neverStartedDeadlineForTest(t, b); !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	})
+	for _, intent := range []session.SubmitIntent{session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow} {
+		t.Run(string(intent)+" refuses", func(t *testing.T) {
+			cityDir := newSupervisorDownSessionCity(t)
+			registerCityWithSupervisorForTest(t, cityDir)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSubmit([]string{"mayor", "hello"}, intent, "", false, &stdout, &stderr); code != 1 {
+				t.Fatalf("cmdSessionSubmit(%s) = %d, want 1; stdout=%s stderr=%s", intent, code, stdout.String(), stderr.String())
+			}
+			assertDeferredSessionBead(t, onlySessionBead(t, cityDir))
+			errText := stderr.String()
+			for _, want := range []string{"has not started", "gc supervisor start", "default intent"} {
+				if !strings.Contains(errText, want) {
+					t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+				}
+			}
+		})
+	}
+}
+
+// TestCmdSessionNudgeRegisteredCitySupervisorDownLeavesStartToReconciler
+// nudges a configured named session in a registered city whose supervisor is
+// down. The nudge is queued with a wake for the reconciler; the session is not
+// started from this process, whether the nudge materialized its row or the
+// row already slept.
+func TestCmdSessionNudgeRegisteredCitySupervisorDownLeavesStartToReconciler(t *testing.T) {
+	t.Run("missing named session", func(t *testing.T) {
+		cityDir := newSupervisorDownSessionCity(t)
+		registerCityWithSupervisorForTest(t, cityDir)
+
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionNudge([]string{"mayor", "hello"}, nudgeDeliveryWaitIdle, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionNudge = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Queued nudge for") {
+			t.Fatalf("stdout = %q, want the nudge queued", stdout.String())
+		}
+		b := onlySessionBead(t, cityDir)
+		assertDeferredSessionBead(t, b)
+		errText := stderr.String()
+		if n := strings.Count(errText, "session materialize: warning: poke failed:"); n != 1 {
+			t.Fatalf("deferred-start warnings = %d, want 1; stderr=%s", n, errText)
+		}
+		if want := "rolled back if none has started it by " + neverStartedDeadlineForTest(t, b); !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	})
+	t.Run("asleep named session", func(t *testing.T) {
+		cityDir := newSupervisorDownSessionCity(t)
+		registerCityWithSupervisorForTest(t, cityDir)
+		id := asleepNamedSessionForTest(t, cityDir)
+
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionNudge([]string{"mayor", "hello"}, nudgeDeliveryWaitIdle, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionNudge = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Queued nudge for") {
+			t.Fatalf("stdout = %q, want the nudge queued", stdout.String())
+		}
+		b := onlySessionBead(t, cityDir)
+		if b.ID != id {
+			t.Fatalf("session bead = %s, want %s", b.ID, id)
+		}
+		if got := b.Metadata["state"]; got != string(session.StateAsleep) {
+			t.Fatalf("state = %q, want %q: the session is left for the reconciler to wake", got, session.StateAsleep)
+		}
+		if got := b.Metadata["wake_request"]; got != string(session.WakeCauseExplicit) {
+			t.Fatalf("wake_request = %q, want %q", got, session.WakeCauseExplicit)
+		}
+	})
+}
+
+// TestDeliverMailNotifyRegisteredCitySupervisorDownRequestsWake: a mail
+// notice to a stopped session in a registered city whose supervisor is down
+// is queued with a wake for the reconciler, as while the supervisor runs.
+func TestDeliverMailNotifyRegisteredCitySupervisorDownRequestsWake(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+	id := asleepNamedSessionForTest(t, cityDir)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	nudges := openNudgeBeadStore(cityDir)
+	target, err := resolveNudgeTargetInStore(cityDir, cfg, nudges, "mayor", false, nil)
+	if err != nil {
+		t.Fatalf("resolveNudgeTargetInStore: %v", err)
+	}
+
+	queued, err := deliverMailNotifyLegacy(target, nudges.Store, runtime.NewFake(), mailNotifyText("human"), "")
+	if err != nil || !queued {
+		t.Fatalf("deliverMailNotifyLegacy = (%v, %v), want (true, nil)", queued, err)
+	}
+	b := onlySessionBead(t, cityDir)
+	if b.ID != id {
+		t.Fatalf("session bead = %s, want %s", b.ID, id)
+	}
+	if got := b.Metadata["wake_request"]; got != string(session.WakeCauseExplicit) {
+		t.Fatalf("wake_request = %q, want %q", got, session.WakeCauseExplicit)
+	}
+}
+
+// asleepNamedSessionForTest leaves the fixture's configured named session as
+// an asleep row in cityDir, as one is after a controller stopped it, and
+// returns its id.
+func asleepNamedSessionForTest(t *testing.T, cityDir string) string {
+	t.Helper()
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("cmdSessionNew(--no-attach) = %d, want 0", code)
+	}
+	b := onlySessionBead(t, cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if err := store.Update(b.ID, beads.UpdateOpts{Metadata: map[string]string{
+		"state":                     string(session.StateAsleep),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"last_woke_at":              time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		"slept_at":                  time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+	}}); err != nil {
+		t.Fatalf("Update(%s): %v", b.ID, err)
+	}
+	return b.ID
 }
 
 // namedSessionTestWorkspace is the workspace_name this fixture writes to

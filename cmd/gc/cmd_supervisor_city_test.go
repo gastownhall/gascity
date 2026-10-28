@@ -3309,3 +3309,123 @@ func TestSessionStartOwnedByReconciler(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionStartAwaitsSupervisor pins the one city whose session starts
+// wait for the supervisor: registered with it while neither the city's
+// controller nor the supervisor answers. A worker site and a city with a
+// live controller or supervisor have someone to start the session; an
+// unregistered city starts it in-process; a registry that cannot be read is
+// an error.
+func TestSessionStartAwaitsSupervisor(t *testing.T) {
+	const corruptRegistry = "[[cities]]\n  path = \"/x\"\n  name = \"broken\n"
+	writeRegistry := func(t *testing.T, data string) {
+		t.Helper()
+		path := supervisor.RegistryPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	register := func(t *testing.T, cityDir string) {
+		t.Helper()
+		if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "awaits-city"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		// setup prepares the city, registry and sockets and returns the city path.
+		setup   func(t *testing.T) string
+		want    bool
+		wantErr bool
+		noDials bool
+	}{
+		{
+			name: "registered, no controller or supervisor",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+				register(t, cityDir)
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name: "registered, supervisor answers",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+				register(t, cityDir)
+				startFakeUnixSocket(t, supervisorSocketPath(), func(line string) string {
+					if line == "ping" {
+						return "4242\n"
+					}
+					return ""
+				})
+				return cityDir
+			},
+		},
+		{
+			name: "registered, controller answers",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+				register(t, cityDir)
+				startFakeControllerSocket(t, cityDir, "4242\n")
+				return cityDir
+			},
+		},
+		{
+			name: "worker site, corrupt registry",
+			setup: func(t *testing.T) string {
+				cityDir, _ := newWorkerSiteSessionCity(t, nil)
+				writeRegistry(t, corruptRegistry)
+				return cityDir
+			},
+			noDials: true,
+		},
+		{
+			name: "unregistered",
+			setup: func(t *testing.T) string {
+				register(t, t.TempDir())
+				return shortSocketTempDir(t, "gc-awaits-city-")
+			},
+		},
+		{
+			name: "corrupt cities.toml",
+			setup: func(t *testing.T) string {
+				writeRegistry(t, corruptRegistry)
+				return shortSocketTempDir(t, "gc-awaits-city-")
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetControlPlaneForTest(t)
+			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+			cityDir := tc.setup(t)
+			var dials *atomic.Int32
+			if tc.noDials {
+				dials = countSocketDials(t)
+			}
+
+			got, err := sessionStartAwaitsSupervisor(cityDir)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), supervisor.RegistryPath()) {
+					t.Fatalf("sessionStartAwaitsSupervisor = (%v, %v), want an error naming %s", got, err, supervisor.RegistryPath())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sessionStartAwaitsSupervisor: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("sessionStartAwaitsSupervisor = %v, want %v", got, tc.want)
+			}
+			if dials != nil && dials.Load() != 0 {
+				t.Fatalf("socket dials = %d, want 0", dials.Load())
+			}
+		})
+	}
+}

@@ -133,11 +133,13 @@ and refined by the title model in the background.
 If the template config sets tmux_alias, it controls the runtime tmux
 session_name. --alias still sets the public command and mail alias.
 
-In a city registered with the supervisor, or one whose controller is
-running, the reconciler starts the session; this holds while the
-supervisor is stopped, and the session starts once it runs again. Only
-an unregistered city with no running controller starts the session
-directly in this process.`,
+In a worker site, a city whose controller is running, or a city
+registered with the supervisor, the reconciler starts the session. That
+holds while the supervisor is stopped: the session starts once the
+supervisor runs again, provided that is within 10 minutes. The
+reconciler rolls back a session no controller has started 10 minutes
+after its creation; run gc session new again then. Only a city that is
+none of these starts the session directly in this process.`,
 		Example: `  gc session new helper
   gc session new helper --alias sky
   gc session new helper --title "debugging auth"
@@ -381,12 +383,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 		// Enqueue the new session to trigger an immediate reconcile. A
 		// worker site has no controller to enqueue to; say so instead.
-		// A failed probe poke still enqueues: a controller may have come
-		// up since.
-		reached := noteDeferredSessionStart(stderr, "gc session new", info.ID, pokeErr)
-		if !errors.Is(pokeErr, errWorkerSiteNoController) {
-			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
-		}
+		reached := noteDeferredSessionStart(stderr, "gc session new", info, enqueueDeferredSessionStart(cityPath, info.ID, pokeErr))
 
 		if jsonOutput {
 			if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
@@ -421,10 +418,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			}
 			return 0
 		}
-		// No controller answered, so none will start the session before
-		// the wait times out: say how to start and attach instead.
-		if !reached {
-			fmt.Fprintf(stdout, "No controller answered; not attaching. Start the supervisor (\"gc supervisor start\"), then attach with \"gc session attach %s\" once \"gc session list\" shows the session running.\n", info.ID) //nolint:errcheck // best-effort stdout
+		// Neither poke reached a controller. One that still answers ping
+		// starts the session at its next reconcile, so wait for it as
+		// usual; with none, nothing starts it before the wait times out:
+		// say how to start and attach instead.
+		if !reached && controllerAlive(cityPath) == 0 {
+			noteNotAttachingUntilSupervisor(stdout, info)
 			return 0
 		}
 
@@ -1596,6 +1595,11 @@ If the session is active with a live tmux session, reattaches.
 If the session is suspended or the tmux session died, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
+A session still waiting for the reconciler to start it, in a city
+registered with the supervisor while neither the supervisor nor the
+city's controller runs, is not started here: start the supervisor,
+then attach once the session runs.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1630,7 +1634,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	// coordination-class store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 
-	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, args[0])
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, args[0], stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1651,6 +1655,15 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	info, err := catalog.Get(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// A start left to the reconciler is not made here while no controller
+	// runs: attaching would start the session from this process's environment.
+	if awaits, err := pendingStartAwaitsSupervisor(cityPath, info, sp); err != nil {
+		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if awaits {
+		noteNotAttachingUntilSupervisor(stderr, info)
 		return 1
 	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
@@ -2988,7 +3001,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		return 1
 	}
 
-	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, target)
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, target, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -3012,6 +3025,11 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 
 	sp, err := newSessionProvider()
 	if err != nil {
+		op.finishMessage(false, err)
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := refuseSubmitStartingDeferredSession(cityPath, sessionFrontDoor(sessStore), sp, sessionID, intent); err != nil {
 		op.finishMessage(false, err)
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -3084,6 +3102,27 @@ func resumeForAcceptedLaneOp(sessStore beads.Store, apiOp opjournal.Op) error {
 		return nil
 	}
 	return sessionFrontDoor(sessStore).ResumeHeld(apiOp.Conversation, apiOp.CreatedAt, time.Now().UTC())
+}
+
+// refuseSubmitStartingDeferredSession refuses, as a cliMessageRefusal, a
+// submit whose intent would start session id's runtime in this process when
+// that start is left to a controller none of which runs
+// (pendingStartAwaitsSupervisor). Only the follow_up and interrupt_now intents
+// start a start-pending row; the default intent queues its message for the
+// controller's start (session.Manager.Submit), so it is never refused here.
+func refuseSubmitStartingDeferredSession(cityPath string, sessFront *session.Store, sp runtime.Provider, id string, intent session.SubmitIntent) error {
+	if intent != session.SubmitIntentFollowUp && intent != session.SubmitIntentInterruptNow {
+		return nil
+	}
+	row, err := sessFront.Get(id)
+	if err != nil {
+		return err
+	}
+	awaits, err := pendingStartAwaitsSupervisor(cityPath, row, sp)
+	if err != nil || !awaits {
+		return err
+	}
+	return &cliMessageRefusal{why: cliOpRefusedWillNotStart, err: fmt.Errorf("session %s has not started, and only the city's controller starts it while none runs: start the supervisor (\"gc supervisor start\"), or submit with the default intent to queue the message for its start", id)}
 }
 
 // emitSessionSubmitAccepted reports a submit whose local fallback found its
@@ -3173,7 +3212,7 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, json
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	targetInfo, err := resolveSessionNudgeTarget(target, sessionNudgeOpRequest(message, delivery, key, jsonOutput, stdout, stderr))
+	targetInfo, err := resolveSessionNudgeTarget(target, sessionNudgeOpRequest(message, delivery, key, jsonOutput, stdout, stderr), stderr)
 	if errors.Is(err, errMessageOpRefused) {
 		return 1
 	}

@@ -116,7 +116,7 @@ func (s *sessionSubmitLane) fallback(key string) int {
 		Intent: s.intent,
 		Resume: true,
 		Resolve: func(context.Context) (string, error) {
-			return resolveSessionIDMaterializingNamed(s.cityPath, cfg, s.sessions, s.target)
+			return resolveSessionIDMaterializingNamed(s.cityPath, cfg, s.sessions, s.target, s.stderr)
 		},
 		Pending: s.pending,
 	})

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"maps"
 	"net"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/connect"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -610,7 +613,7 @@ func TestControlPlaneGateExemptsDoctorThroughRun(t *testing.T) {
 func TestNoteDeferredSessionStart(t *testing.T) {
 	t.Run("poke reached a controller", func(t *testing.T) {
 		var stderr bytes.Buffer
-		if !noteDeferredSessionStart(&stderr, "gc session new", "gc-1", nil) {
+		if !noteDeferredSessionStart(&stderr, "gc session new", session.Info{ID: "gc-1", PendingCreateClaim: true}, nil) {
 			t.Fatal("reached = false, want true")
 		}
 		if stderr.Len() != 0 {
@@ -619,26 +622,210 @@ func TestNoteDeferredSessionStart(t *testing.T) {
 	})
 	t.Run("worker site", func(t *testing.T) {
 		var stderr bytes.Buffer
-		if noteDeferredSessionStart(&stderr, "gc session new", "gc-1", errWorkerSiteNoController) {
+		if noteDeferredSessionStart(&stderr, "gc session new", session.Info{ID: "gc-1", PendingCreateClaim: true}, errWorkerSiteNoController) {
 			t.Fatal("reached = true, want false")
 		}
 		if got, want := stderr.String(), "gc session new: "+errWorkerSiteNoController.Error()+"\n"; got != want {
 			t.Fatalf("stderr = %q, want %q", got, want)
 		}
 	})
-	t.Run("poke failed", func(t *testing.T) {
-		var stderr bytes.Buffer
-		if noteDeferredSessionStart(&stderr, "gc session wake", "gc-1", errors.New("dial failed")) {
-			t.Fatal("reached = true, want false")
-		}
-		got := stderr.String()
-		for _, want := range []string{"gc session wake: warning: poke failed: dial failed", "gc-1", "gc supervisor start"} {
-			if !strings.Contains(got, want) {
-				t.Fatalf("stderr = %q, want it to contain %q", got, want)
+	const anchor = "2026-10-28T09:00:00Z"
+	deadline := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC).Add(pendingCreateNeverStartedTimeout).Format(time.RFC3339)
+	rollbackLimit := "rolled back if none has started it by " + deadline
+	for _, tc := range []struct {
+		name      string
+		row       session.Info
+		wantLimit bool
+	}{
+		{name: "no pending create", row: session.Info{ID: "gc-1", PendingCreateStartedAt: anchor}},
+		{name: "pending create never started", row: session.Info{ID: "gc-1", PendingCreateClaim: true, PendingCreateStartedAt: anchor}, wantLimit: true},
+		{name: "pending create with a recorded start", row: session.Info{ID: "gc-1", PendingCreateClaim: true, PendingCreateStartedAt: anchor, LastWokeAt: "2026-10-28T09:01:00Z"}},
+	} {
+		t.Run("poke failed, "+tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if noteDeferredSessionStart(&stderr, "gc session wake", tc.row, errors.New("dial failed")) {
+				t.Fatal("reached = true, want false")
 			}
-		}
-		if n := strings.Count(got, "\n"); n != 1 {
-			t.Fatalf("stderr lines = %d, want 1: %q", n, got)
+			got := stderr.String()
+			for _, want := range []string{"gc session wake: warning: poke failed: dial failed", "gc-1", "gc supervisor start"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("stderr = %q, want it to contain %q", got, want)
+				}
+			}
+			if n := strings.Count(got, "\n"); n != 1 {
+				t.Fatalf("stderr lines = %d, want 1: %q", n, got)
+			}
+			if gotLimit := strings.Contains(got, rollbackLimit); gotLimit != tc.wantLimit {
+				t.Fatalf("stderr = %q; states the rollback limit = %v, want %v", got, gotLimit, tc.wantLimit)
+			}
+		})
+	}
+}
+
+// TestEnqueueDeferredSessionStart pins the poke result a deferred start
+// proceeds under: a controller reached by either the probe poke or the enqueue
+// counts, and a worker site's probe skips the enqueue.
+func TestEnqueueDeferredSessionStart(t *testing.T) {
+	resetControlPlaneForTest(t)
+	// The supervisor fallback of every poke below is refused, so only the
+	// fake controller socket can answer.
+	countSocketDials(t)
+	probeErr := errors.New("probe poke failed")
+
+	t.Run("enqueue reached a controller", func(t *testing.T) {
+		cityDir := shortSocketTempDir(t, "gc-enqueue-city-")
+		startFakeUnixSocket(t, controllerSocketPath(cityDir), func(line string) string {
+			if strings.HasPrefix(line, pokeKeyedCommandPrefix) {
+				return "ok\n"
+			}
+			return ""
+		})
+		if err := enqueueDeferredSessionStart(cityDir, "gc-1", probeErr); err != nil {
+			t.Fatalf("enqueueDeferredSessionStart = %v, want nil: the enqueue reached a controller", err)
 		}
 	})
+	t.Run("probe reached a controller", func(t *testing.T) {
+		if err := enqueueDeferredSessionStart(t.TempDir(), "gc-1", nil); err != nil {
+			t.Fatalf("enqueueDeferredSessionStart = %v, want nil: the probe reached a controller", err)
+		}
+	})
+	t.Run("neither reached a controller", func(t *testing.T) {
+		err := enqueueDeferredSessionStart(t.TempDir(), "gc-1", probeErr)
+		if err == nil || errors.Is(err, probeErr) {
+			t.Fatalf("enqueueDeferredSessionStart = %v, want the enqueue's own error", err)
+		}
+	})
+	t.Run("worker site probe", func(t *testing.T) {
+		cityDir := shortSocketTempDir(t, "gc-enqueue-city-")
+		accepted := startFakeUnixSocket(t, controllerSocketPath(cityDir), func(string) string { return "ok\n" })
+		if err := enqueueDeferredSessionStart(cityDir, "gc-1", errWorkerSiteNoController); !errors.Is(err, errWorkerSiteNoController) {
+			t.Fatalf("enqueueDeferredSessionStart = %v, want %v", err, errWorkerSiteNoController)
+		}
+		select {
+		case <-accepted:
+			t.Fatal("a worker site's deferred start enqueued to the controller socket")
+		default:
+		}
+	})
+}
+
+// TestNeverStartedRollbackLimit pins the rollback limit the deferred-start
+// notices state to the deadline the reconciler rolls a never-started pending
+// create back at: its anchor (pending_create_started_at, else CreatedAt) plus
+// pendingCreateNeverStartedTimeout, not the timeout counted from now.
+func TestNeverStartedRollbackLimit(t *testing.T) {
+	started := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	created := started.Add(-3 * time.Minute)
+	for _, tc := range []struct {
+		name       string
+		row        session.Info
+		wantAnchor time.Time
+	}{
+		{name: "pending_create_started_at", row: session.Info{PendingCreateClaim: true, PendingCreateStartedAt: started.Format(time.RFC3339), CreatedAt: created}, wantAnchor: started},
+		{name: "CreatedAt when no start is recorded", row: session.Info{PendingCreateClaim: true, CreatedAt: created}, wantAnchor: created},
+		{name: "CreatedAt when the start does not parse", row: session.Info{PendingCreateClaim: true, PendingCreateStartedAt: "not-a-time", CreatedAt: created}, wantAnchor: created},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deadline := tc.wantAnchor.Add(pendingCreateNeverStartedTimeout)
+			if got, want := neverStartedRollbackLimit(tc.row), "by "+deadline.Format(time.RFC3339); got != want {
+				t.Fatalf("neverStartedRollbackLimit = %q, want %q", got, want)
+			}
+			// The stated deadline is the reconciler's: the lease has not
+			// expired just before it and has just after.
+			if pendingCreateNeverStartedLeaseExpiredAt(tc.row, deadline.Add(-time.Second)) {
+				t.Fatalf("lease expired a second before the stated deadline %s", deadline.Format(time.RFC3339))
+			}
+			if !pendingCreateNeverStartedLeaseExpiredAt(tc.row, deadline.Add(time.Second)) {
+				t.Fatalf("lease still live a second after the stated deadline %s", deadline.Format(time.RFC3339))
+			}
+		})
+	}
+	t.Run("no anchor", func(t *testing.T) {
+		want := "within " + pendingCreateNeverStartedTimeout.String() + " of its creation"
+		if got := neverStartedRollbackLimit(session.Info{PendingCreateClaim: true}); got != want {
+			t.Fatalf("neverStartedRollbackLimit = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestNoteNotAttachingUntilSupervisor(t *testing.T) {
+	const anchor = "2026-10-28T09:00:00Z"
+	deadline := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC).Add(pendingCreateNeverStartedTimeout).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name      string
+		row       session.Info
+		wantLimit bool
+	}{
+		{name: "pending create never started", row: session.Info{ID: "gc-1", PendingCreateClaim: true, PendingCreateStartedAt: anchor}, wantLimit: true},
+		{name: "start request with no pending create", row: session.Info{ID: "gc-1", PendingCreateStartedAt: anchor}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			noteNotAttachingUntilSupervisor(&out, tc.row)
+			got := out.String()
+			for _, want := range []string{"not attaching", "gc supervisor start", "gc session attach gc-1"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("output = %q, want it to contain %q", got, want)
+				}
+			}
+			limit := "by " + deadline + ", or the reconciler rolls this session back"
+			if gotLimit := strings.Contains(got, limit); gotLimit != tc.wantLimit {
+				t.Fatalf("output = %q; states %q = %v, want %v", got, limit, gotLimit, tc.wantLimit)
+			}
+			if !tc.wantLimit && strings.Contains(got, "rolls this session back") {
+				t.Fatalf("output = %q, want no rollback for a row with no pending create", got)
+			}
+		})
+	}
+}
+
+// TestPendingStartAwaitsSupervisor pins which rows a command refuses to start
+// in this process: a start-pending row whose runtime is not running, in a
+// city whose session starts wait for the supervisor. Any other row is decided
+// without reading the city, so a registry that does not parse only fails the
+// one row whose answer depends on it.
+func TestPendingStartAwaitsSupervisor(t *testing.T) {
+	resetControlPlaneForTest(t)
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+	cityDir := shortSocketTempDir(t, "gc-awaits-city-")
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "awaits-city"); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "s-running", runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	pending := session.Info{ID: "gc-1", SessionName: "s-pending", MetadataState: string(session.StateStartPending), PendingCreateClaim: true}
+	for _, tc := range []struct {
+		name string
+		row  session.Info
+		want bool
+	}{
+		{name: "start-pending, runtime not running", row: pending, want: true},
+		{name: "start-pending, runtime running", row: session.Info{ID: "gc-2", SessionName: "s-running", MetadataState: string(session.StateStartPending), PendingCreateClaim: true}},
+		{name: "asleep", row: session.Info{ID: "gc-3", SessionName: "s-asleep", MetadataState: string(session.StateAsleep)}},
+		{name: "creating", row: session.Info{ID: "gc-4", SessionName: "s-creating", MetadataState: string(session.StateCreating), PendingCreateClaim: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pendingStartAwaitsSupervisor(cityDir, tc.row, sp)
+			if err != nil {
+				t.Fatalf("pendingStartAwaitsSupervisor: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("pendingStartAwaitsSupervisor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	path := supervisor.RegistryPath()
+	if err := os.WriteFile(path, []byte("[[cities]\npath = \"unterminated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := pendingStartAwaitsSupervisor(cityDir, session.Info{ID: "gc-3", SessionName: "s-asleep", MetadataState: string(session.StateAsleep)}, sp); got || err != nil {
+		t.Fatalf("pendingStartAwaitsSupervisor(asleep row, corrupt registry) = (%v, %v), want (false, nil): the city is not read", got, err)
+	}
+	if _, err := pendingStartAwaitsSupervisor(cityDir, pending, sp); err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("pendingStartAwaitsSupervisor(start-pending row, corrupt registry) error = %v, want one naming %s", err, path)
+	}
 }

@@ -735,42 +735,56 @@ func canInferSlingDefaultTargetFromBead(cfg *config.City, beadOrFormula string) 
 }
 
 // populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
-func populateSlingDepsCallbacks(deps *slingDeps) {
+// stderr receives the direct-session resolver's report of a named session it
+// materialized for the reconciler to start (cliDirectSessionResolverTo).
+func populateSlingDepsCallbacks(deps *slingDeps, stderr io.Writer) {
 	deps.Resolver = cliAgentResolver{}
 	deps.Branches = cliBranchResolver{}
 	deps.Notify = &cliNotifier{}
-	deps.DirectSessionResolver = cliDirectSessionResolver
+	deps.DirectSessionResolver = cliDirectSessionResolverTo(stderr)
 	deps.Router = cliBeadRouter{deps: deps}
 }
 
+// cliDirectSessionResolver is cliDirectSessionResolverTo for graph routing
+// that has no caller's stderr to report to.
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
-	if cfg == nil {
-		return "", false, nil
+	return cliDirectSessionResolverTo(nil)(store, cityName, cityPath, cfg, target, rigContext)
+}
+
+// cliDirectSessionResolverTo returns the resolver that binds a direct graph
+// assignee naming a configured named session to that session's row,
+// materializing the row when it has none. stderr receives the materializer's
+// report of a start it left to the reconciler; nil discards it.
+func cliDirectSessionResolverTo(stderr io.Writer) graphroute.DirectSessionResolver {
+	return func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
+		if cfg == nil {
+			return "", false, nil
+		}
+		target = strings.TrimSpace(target)
+		if target == "" {
+			return "", false, nil
+		}
+		if cityName == "" {
+			cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+		}
+		spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
+		if err != nil {
+			return "", false, err
+		}
+		if !ok {
+			return "", false, nil
+		}
+		// A named session bead is session class. The caller's store is whatever
+		// scope the sling or drain runs in (a rig work store, for a rig scope), so
+		// on a split city resolve and materialize through the sessions binding
+		// instead: through the scope store the canonical bead is invisible and a
+		// duplicate is minted where nothing reads it (write-audit B6).
+		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity, stderr)
+		if err != nil {
+			return "", false, err
+		}
+		return id, true, nil
 	}
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", false, nil
-	}
-	if cityName == "" {
-		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
-	}
-	spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
-	if err != nil {
-		return "", false, err
-	}
-	if !ok {
-		return "", false, nil
-	}
-	// A named session bead is session class. The caller's store is whatever
-	// scope the sling or drain runs in (a rig work store, for a rig scope), so
-	// on a split city resolve and materialize through the sessions binding
-	// instead: through the scope store the canonical bead is invisible and a
-	// duplicate is minted where nothing reads it (write-audit B6).
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity)
-	if err != nil {
-		return "", false, err
-	}
-	return id, true, nil
 }
 
 // cliAgentResolver implements sling.AgentResolver using the CLI's
@@ -973,7 +987,7 @@ func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 
 // doSling creates a Sling instance and dispatches to the right intent method.
 func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr io.Writer) int {
-	populateSlingDepsCallbacks(&deps)
+	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck
@@ -1027,7 +1041,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 }
 
 func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
-	populateSlingDepsCallbacks(&deps)
+	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck

@@ -292,7 +292,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // printNudgePreview) while the queued-nudge enqueue stays on the plain store
 // (nudges class, its own E1.2 routing). TWO sling-root session sites remain
 // DEFERRED because their store is threaded cross-package and cannot be routed at
-// the CLI root: (a) cliDirectSessionResolver (populateSlingDepsCallbacks →
+// the CLI root: (a) cliDirectSessionResolverTo (populateSlingDepsCallbacks →
 // internal/sling → internal/graphroute → resolveSessionIDMaterializingNamed)
 // materializes session beads on the WORK source store and needs a two-store
 // SlingDeps/graphroute.Deps split (a session-class store added to the deps); and

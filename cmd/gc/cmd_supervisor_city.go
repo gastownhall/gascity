@@ -197,6 +197,23 @@ func sessionStartOwnedByReconciler(cityPath string) (bool, error) {
 	return registered, nil
 }
 
+// sessionStartAwaitsSupervisor reports whether starting a session in cityPath
+// belongs to a controller that does not run now: the city is registered with
+// the supervisor while neither its controller nor the supervisor answers, so
+// sessionStartOwnedByReconciler owns the start and cityUsesManagedReconciler
+// sees no one to make it. A registry that cannot be read or parsed is an
+// error, as for sessionStartOwnedByReconciler.
+func sessionStartAwaitsSupervisor(cityPath string) (bool, error) {
+	if onWorkerSite(cityPath) || controllerAlive(cityPath) != 0 {
+		return false, nil
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
+	}
+	return registered && supervisorAlive() == 0, nil
+}
+
 // justRestartedSupervisorPID records the PID of a supervisor we just
 // auto-restarted in this invocation. Set by runStartDriftCheck after a
 // successful restart so that ensureNoStandaloneController can recognize

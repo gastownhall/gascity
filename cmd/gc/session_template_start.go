@@ -11,7 +11,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -206,10 +205,7 @@ func materializeSessionForTemplateWithOptions(
 				return createErr
 			})
 			if createErr == nil {
-				noteDeferredSessionStart(stderr, "session materialize", info.ID, pokeErr)
-				if !errors.Is(pokeErr, errWorkerSiteNoController) {
-					_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
-				}
+				noteDeferredSessionStart(stderr, "session materialize", info, enqueueDeferredSessionStart(cityPath, info.ID, pokeErr))
 				return info.SessionName, nil
 			}
 			if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
@@ -372,10 +368,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 			return createErr
 		})
 		if createErr == nil {
-			noteDeferredSessionStart(stderr, "session materialize", info.ID, pokeErr)
-			if !errors.Is(pokeErr, errWorkerSiteNoController) {
-				_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
-			}
+			noteDeferredSessionStart(stderr, "session materialize", info, enqueueDeferredSessionStart(cityPath, info.ID, pokeErr))
 			return info.SessionName, nil
 		}
 		return "", createErr

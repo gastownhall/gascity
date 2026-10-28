@@ -4500,6 +4500,11 @@ If the session is active with a live tmux session, reattaches.
 If the session is suspended or the tmux session died, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
+A session still waiting for the reconciler to start it, in a city
+registered with the supervisor while neither the supervisor nor the
+city's controller runs, is not started here: start the supervisor,
+then attach once the session runs.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4656,11 +4661,13 @@ and refined by the title model in the background.
 If the template config sets tmux_alias, it controls the runtime tmux
 session_name. --alias still sets the public command and mail alias.
 
-In a city registered with the supervisor, or one whose controller is
-running, the reconciler starts the session; this holds while the
-supervisor is stopped, and the session starts once it runs again. Only
-an unregistered city with no running controller starts the session
-directly in this process.
+In a worker site, a city whose controller is running, or a city
+registered with the supervisor, the reconciler starts the session. That
+holds while the supervisor is stopped: the session starts once the
+supervisor runs again, provided that is within 10 minutes. The
+reconciler rolls back a session no controller has started 10 minutes
+after its creation; run gc session new again then. Only a city that is
+none of these starts the session directly in this process.
 
 ```
 gc session new <template> [flags]

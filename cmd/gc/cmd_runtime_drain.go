@@ -671,7 +671,7 @@ func resolveDrainCheckNamedTarget(identifier string, stderr io.Writer) (sessionR
 	if err != nil {
 		return sessionRuntimeTarget{}, nil, fmt.Errorf("loading the city config: %w", err)
 	}
-	target, err := resolveSessionRuntimeTargetInCity(cityPath, cfg, identifier)
+	target, err := resolveSessionRuntimeTargetInCity(cityPath, cfg, identifier, stderr)
 	if err != nil {
 		return sessionRuntimeTarget{}, nil, err
 	}
