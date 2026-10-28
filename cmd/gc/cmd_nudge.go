@@ -2149,7 +2149,12 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			return false, err
 		}
 		if outcome == session.WakeHeld {
-			return true, nil // a held session keeps the nudge queued; no poke
+			// A held session keeps the nudge queued and gets no poke; the
+			// sender sees the same held note gc session nudge prints.
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: queued for %s%s\n", target.agentKey(), queuedNudgeDowngradeNote(target, worker.NudgeQueuedHeld)) //nolint:errcheck // best-effort warning
+			}
+			return true, nil
 		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			if nudgeWarningWriter != nil {
