@@ -205,3 +205,55 @@ func TestHandleSessionResetRequiresCSRFHeader(t *testing.T) {
 		t.Errorf("restart_requested = %q after CSRF rejection, want unset", got)
 	}
 }
+
+// resetRefusingState is a controller that names why it will not act on a
+// recorded reset.
+type resetRefusingState struct {
+	*fakeState
+	refusal string
+	seen    session.Info
+}
+
+func (s *resetRefusingState) ResetRefusal(info session.Info) string {
+	s.seen = info
+	return s.refusal
+}
+
+// TestHandleSessionResetRefusedByTheController: when the controller names why
+// it will not act on a reset of the row (a state it skips), the API reset
+// answers 409 session-conflict with that reason, judged on the stored row,
+// and writes nothing: no fresh-restart request, no restart op, no reconcile
+// poke. Kills a reset that queues a restart the controller never applies.
+func TestHandleSessionResetRefusedByTheController(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "auto")
+	info := e.session(t, "Skipped")
+	refuser := &resetRefusingState{fakeState: e.fs, refusal: "its state \"future-state\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"}
+	e.resolver.state = refuser
+	pokesBefore := e.fs.pokeCount
+
+	rec := e.post(t, "/session/"+info.ID+"/reset", "", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reset status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	for _, want := range []string{"session-conflict", "session " + info.ID + " cannot be reset: ", `\"future-state\"`, "gc session close " + info.ID} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("body missing %q: %s", want, rec.Body.String())
+		}
+	}
+	if refuser.seen.ID != info.ID {
+		t.Fatalf("refuser read %+v, want the stored row %s", refuser.seen, info.ID)
+	}
+	b, err := e.fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", info.ID, err)
+	}
+	if b.Metadata["restart_requested"] != "" || b.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("metadata = %v, want no fresh restart requested", b.Metadata)
+	}
+	if rows := e.opRows(t); len(rows) != 0 {
+		t.Fatalf("op rows = %d, want none", len(rows))
+	}
+	if e.fs.pokeCount != pokesBefore {
+		t.Fatalf("pokeCount = %d, want %d", e.fs.pokeCount, pokesBefore)
+	}
+}

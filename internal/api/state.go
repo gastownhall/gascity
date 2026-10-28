@@ -306,6 +306,15 @@ type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
+// ResetRefuser is an optional State capability: the controller names why it
+// will not act on a fresh-restart request for a session (a state the
+// controller skips), or "" when it will. info is the stored row before the
+// reset writes anything. Optional for the same reason as
+// WebhookDispatchProvider.
+type ResetRefuser interface {
+	ResetRefusal(info session.Info) string
+}
+
 // WebhookDispatchProvider is optionally implemented by State to expose the live
 // order dispatcher the supervisor webhook receiver (E3) fires verified+matched
 // deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives

@@ -1241,6 +1241,18 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
+	// A reset the controller will not act on is refused before anything is
+	// written: a queued fresh restart would never run, or would run later
+	// under a controller that manages the row's state.
+	if refuser, ok := s.state.(ResetRefuser); ok {
+		info, err := session.NewStore(store).Get(id)
+		if err != nil {
+			return syncAnswer{}, humaSessionManagerError(err)
+		}
+		if why := refuser.ResetRefusal(info); why != "" {
+			return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be reset: " + why)
+		}
+	}
 
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
