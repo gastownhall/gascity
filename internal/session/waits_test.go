@@ -774,3 +774,28 @@ func TestWaitInfoContinuationStale(t *testing.T) {
 		})
 	}
 }
+
+func TestWaitInfoHeldForPendingReset(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		flagged      bool
+		sessionEpoch string
+		resetPending string
+		want         bool
+	}{
+		{name: "flagged/outgoing-incarnation", flagged: true, sessionEpoch: "2", resetPending: "true", want: true},
+		{name: "flagged/reset-withdrawn", flagged: true, sessionEpoch: "2"},
+		{name: "flagged/started", flagged: true, sessionEpoch: "3"},
+		{name: "flagged/blank-marker", flagged: true, sessionEpoch: "2", resetPending: "  "},
+		{name: "unflagged/reset-pending", sessionEpoch: "2", resetPending: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WaitInfo{RegisteredEpoch: "2", RegisteredResetPending: tc.flagged}
+			s := Info{ContinuationEpoch: tc.sessionEpoch, ContinuationResetPending: tc.resetPending}
+			if got := w.HeldForPendingReset(s); got != tc.want {
+				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q) = %v, want %v",
+					tc.flagged, tc.sessionEpoch, tc.resetPending, got, tc.want)
+			}
+		})
+	}
+}
