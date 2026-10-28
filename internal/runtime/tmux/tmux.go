@@ -4,12 +4,12 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	goruntime "runtime"
 	"slices"
@@ -106,6 +106,43 @@ func nudgeSubmitKeySequenceForFamily(family string) []string {
 		return seq
 	}
 	return defaultNudgeSubmitKeySequence
+}
+
+// submitSequenceInterrupts reports whether a submit key sequence carries a key
+// that interrupts a running turn when it reaches a busy pane: Escape (Codex
+// reads it as cancel, which is why its submit leads with it) or Ctrl-C. Enter
+// alone does not; a busy Claude pane queues the message instead.
+func submitSequenceInterrupts(keys []string) bool {
+	for _, key := range keys {
+		switch key {
+		case "Escape", "Esc", "C-c":
+			return true
+		}
+	}
+	return false
+}
+
+// refuseInterruptingSubmitWhileBusy returns an error wrapping
+// runtime.ErrSessionBusy when session's agent pane shows a running turn and its
+// provider's submit sequence would interrupt that turn (see
+// submitSequenceInterrupts). It sends no keys. A pane that cannot be resolved
+// or read returns nil: the delivery that follows takes its own looks and
+// refuses a pane it cannot read.
+func (t *Tmux) refuseInterruptingSubmitWhileBusy(session string) error {
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return nil
+	}
+	family := t.nudgeSubmitFamily(target)
+	keys := nudgeSubmitKeySequenceForFamily(family)
+	if !submitSequenceInterrupts(keys) {
+		return nil
+	}
+	if busy, err := t.turnRunning(target, family); err != nil || !busy {
+		return nil
+	}
+	return fmt.Errorf("%w: session %q is still running a turn and its submit keys (%s) would interrupt it",
+		runtime.ErrSessionBusy, session, strings.Join(keys, " "))
 }
 
 // Config holds configurable timeouts and intervals for the tmux provider.
@@ -229,6 +266,13 @@ var (
 	// been delivered, so a caller that must not deliver twice treats it as
 	// possibly delivered.
 	ErrNudgeSubmitUnconfirmed = fmt.Errorf("%w: submit Enter delivered to tmux but not confirmed (busy state never observed)", runtime.ErrNudgeDeliveryUnconfirmed)
+	// errNudgeSubmitHeld means a nudge typed its message but a running turn
+	// held its interrupting submit back for the whole confirm window, and
+	// the typed message could not be cleared: it sits in the composer,
+	// unsubmitted. No submit was sent, so it is not ErrNudgeSubmitUnconfirmed,
+	// and something typed is left, so it is not runtime.ErrSessionBusy.
+	// Callers count the attempt as failed.
+	errNudgeSubmitHeld = errors.New("nudge typed but its submit was held back and the typed message was not cleared")
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -243,6 +287,13 @@ var (
 	// days of production logs). It wraps runtime.ErrNudgeDeliveredUnobserved
 	// so callers that only know the runtime contract treat it as delivered.
 	ErrNudgeSubmitDeliveredUnobserved = fmt.Errorf("%w: submit Enter delivered and composer drained but busy state was never observed", runtime.ErrNudgeDeliveredUnobserved)
+	// ErrNudgeSubmitLost indicates the provider's own record proves the
+	// message did not land: the turn the submit started ended (Codex's
+	// rollout records turn_aborted) before the provider recorded the message
+	// as a user turn. A drained composer is then no proof of delivery. It
+	// wraps ErrNudgeSubmitUnconfirmed, so callers that retry an unconfirmed
+	// submit retry this one too, and none reports it delivered.
+	ErrNudgeSubmitLost = fmt.Errorf("%w: the provider ended the turn before it recorded the message", ErrNudgeSubmitUnconfirmed)
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -423,6 +474,17 @@ type Tmux struct {
 	// terminateProcessKillPlan; tests inject a recorder to observe when
 	// termination happens without signaling real processes.
 	certifiedPaneTerminator func(processKillPlan) error
+
+	// backgroundStopSleep pauses between the steps of closing the background
+	// work an interrupted turn left running (stopCodexBackgroundTerminals,
+	// stopClaudeBackgroundShells). Nil selects sleepWithContext; tests inject
+	// one so the pauses take no wall time.
+	backgroundStopSleep func(context.Context, time.Duration) error
+
+	// codexRolloutHeld returns the one Codex rollout the process tree rooted
+	// at a pane's PID holds open, or "" (see heldCodexRollout). Nil selects
+	// heldCodexRollout; tests inject one so no live process table is read.
+	codexRolloutHeld func(panePID int) string
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -2533,7 +2595,7 @@ func nextPasteBufferName() string {
 }
 
 func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
+	if len(text) > maxSendKeysLiteralLen || t.pastesMultilineText(target, text) {
 		return t.pasteLiteralText(ctx, target, text)
 	}
 	_, err := t.runCtx(ctx, append([]string{"send-keys", "-t", paneTarget(target), "-l"}, runtime.TmuxLiteralArgs(text)...)...)
@@ -2541,6 +2603,16 @@ func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
 		return t.pasteLiteralText(ctx, target, text)
 	}
 	return err
+}
+
+// pastesMultilineText reports whether text must reach target as one bracketed
+// paste even under maxSendKeysLiteralLen. Codex (codex-cli 0.162.1) reads
+// typed multi-line text as a paste burst and takes the submit Enter that
+// follows as one more newline, so the message stays drafted in its composer:
+// every Mayor startup prompt did. A bracketed paste arrives as one paste, and
+// the Enter after it submits.
+func (t *Tmux) pastesMultilineText(target, text string) bool {
+	return strings.Contains(text, "\n") && sessionlog.ProviderFamily(t.providerEnv(target)) == "codex"
 }
 
 func (t *Tmux) pasteLiteralText(ctx context.Context, target, text string) error {
@@ -2742,53 +2814,80 @@ const (
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
 func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
+	confirmed, sawIdle, _, err := submitAndConfirm(sendSubmit, wake, busy, nil, sleep)
+	return confirmed, sawIdle, err
+}
+
+// submitAndConfirm is submitEnterAndConfirm for a submit sequence of either
+// kind, also reporting how many submits it sent. mayResend is nil for a
+// sequence that cannot interrupt a turn (plain Enter). For one that can
+// (Codex's Escape-led submit, see submitSequenceInterrupts) it is set, and the
+// loop then sends only into a pane it has evidence is waiting for the submit:
+//
+//   - the first submit is held while the baseline reading is busy (a turn
+//     running since before the call), and is sent at a later round once the
+//     pane reads idle and mayResend agrees;
+//   - every later submit needs mayResend to report, from a look taken right
+//     before the send, that the message still sits unsubmitted in an idle
+//     composer. A drained composer means the earlier submit was taken: its
+//     turn may be running without a visible busy row yet (a UserPromptSubmit
+//     hook, a contended host), and an Escape sent into it aborts the turn
+//     before the provider records the message (healthy-direct, 2026-10-15). A
+//     look that fails is not evidence, so it sends nothing either.
+func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
 	// Baseline reading before the first send: an idle baseline lets send 0's
 	// own polls confirm, while a busy or failed one leaves the pane needing
 	// an idle reading first.
 	watch := busyTransition{busy: busy}
-	watch.observe()
+	baselineBusy, _ := watch.observe()
 
 	var lastErr error
-	sent := false
 	for send := 0; send < submitEnterMaxSends; send++ {
-		resend := true
-		if send > 0 {
+		var resend bool
+		if send == 0 {
+			// An interrupting submit is never sent into a running turn.
+			resend = mayResend == nil || !baselineBusy
+		} else {
 			isBusy, confirmed := watch.observe()
 			if confirmed {
-				return true, true, nil
+				return true, true, sent, nil
 			}
 			// Busy without an idle reading yet: the turn running since before
 			// this call has not finished. Never submit into it; keep watching.
 			resend = !isBusy
 			sleep(submitReEnterBackoff)
+			if resend && mayResend != nil {
+				waiting, lookErr := mayResend()
+				resend = lookErr == nil && waiting
+			}
 		}
 		if resend {
 			if err := sendSubmit(); err != nil {
 				if isLookRefusal(err) {
 					// Never re-send into a permission prompt, or into a pane a
 					// look could not read.
-					return false, watch.seenIdle, err
+					return false, watch.seenIdle, sent, err
 				}
 				lastErr = err
-				if sent {
+				if sent > 0 {
 					// An earlier send reached the pane and may have
 					// submitted: a failed re-send leaves delivery in doubt.
 					lastErr = fmt.Errorf("%w: re-send failed: %w", ErrNudgeSubmitUnconfirmed, err)
 				}
 				continue
 			}
+			sent++
 			lastErr = nil // a later send succeeded; don't surface an earlier transient failure
-			sent = true
 			wake()
 		}
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
 			if _, confirmed := watch.observe(); confirmed {
-				return true, true, nil
+				return true, true, sent, nil
 			}
 			sleep(submitConfirmPollInterval)
 		}
 	}
-	return false, watch.seenIdle, lastErr
+	return false, watch.seenIdle, sent, lastErr
 }
 
 // busyTransition tracks the idle->busy transition that confirms a submit. A
@@ -2843,7 +2942,7 @@ type stagedDraftMarker struct {
 // a placeholder has not drained.
 var stagedDraftMarkers = map[string]stagedDraftMarker{
 	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
-	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
+	"codex":  {promptPrefix: codexPromptPrefix, marker: "[Pasted Content "},
 }
 
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
@@ -3059,15 +3158,21 @@ func BusyIndicatorReadable(family string) bool {
 // GC_PROVIDER pane environment variable, falling back to a process-name
 // sniff for panes without it (ad hoc sessions, some test harnesses).
 func (t *Tmux) nudgeSubmitKeySequence(target string) []string {
+	return nudgeSubmitKeySequenceForFamily(t.nudgeSubmitFamily(target))
+}
+
+// nudgeSubmitFamily is the provider family nudgeSubmitKeySequence resolves
+// for target, or "" for a pane it cannot identify.
+func (t *Tmux) nudgeSubmitFamily(target string) string {
 	if provider := t.providerEnv(target); provider != "" {
-		return nudgeSubmitKeySequenceForFamily(sessionlog.ProviderFamily(provider))
+		return sessionlog.ProviderFamily(provider)
 	}
 	for family := range nudgeSubmitKeySequences {
 		if t.targetLooksLikeProvider(target, family) {
-			return nudgeSubmitKeySequenceForFamily(family)
+			return family
 		}
 	}
-	return defaultNudgeSubmitKeySequence
+	return ""
 }
 
 // nudgeSubmitKeySettle is the pause between successive keys within a
@@ -3128,6 +3233,7 @@ func (t *Tmux) nudgeSessionCtx(ctx context.Context, session, message string) err
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		t.pendingPromptRecheck(session),
+		true,
 	)
 }
 
@@ -3160,6 +3266,7 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		nil,
+		false,
 	)
 }
 
@@ -3219,6 +3326,18 @@ func (g *nudgePromptGuard) refused(err error) error {
 // noPendingPrompt, when set, is checked under the nudge lock before the first
 // key, immediately before the paste, and immediately before every submit key;
 // its error aborts the nudge with no further keys sent.
+//
+// guardTurn makes a nudge whose submit keys would interrupt a running turn
+// (Codex's Escape-led submit, see submitSequenceInterrupts) wait for the
+// agent's composer to be idle before it types anything, and defer with an
+// error wrapping runtime.ErrSessionBusy, nothing typed, when a turn is still
+// running at the end of that wait (see awaitIdleComposerBeforeTyping). The
+// startup nudge does not take that wait (the start's own readiness wait
+// precedes it); like every nudge, it still never sends an interrupting
+// submit into a turn its confirm loop sees running (see submitAndConfirm).
+// A message whose submit that loop held back for its whole window is cleared
+// from the composer, and the nudge defers with runtime.ErrSessionBusy as well
+// (see clearHeldDraft).
 func (t *Tmux) nudgeSession(
 	ctx context.Context,
 	session, message string,
@@ -3226,6 +3345,7 @@ func (t *Tmux) nudgeSession(
 	shouldSendEscape func(string) bool,
 	submitKeySequence func(string) []string,
 	noPendingPrompt func(target string) error,
+	guardTurn bool,
 ) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
@@ -3271,6 +3391,16 @@ func (t *Tmux) nudgeSession(
 	// render/input loop so the paste is actually consumed. The post-send wake
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session, target)
+
+	// The submit keys this nudge ends with. When they would interrupt a
+	// running turn, nothing is typed until the composer reads idle.
+	submitKeys := submitKeySequence(target)
+	interrupts := submitSequenceInterrupts(submitKeys)
+	if guardTurn && interrupts {
+		if err := t.awaitIdleComposerBeforeTyping(session, target, submitKeys); err != nil {
+			return err
+		}
+	}
 
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
@@ -3328,6 +3458,9 @@ func (t *Tmux) nudgeSession(
 	if err := prompt.check(); err != nil {
 		return err
 	}
+	// The provider's own record of this delivery is read from here on (see
+	// unobservedSubmitVerdict).
+	typedAt := time.Now()
 	if err := sendText(ctx, target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -3361,18 +3494,24 @@ func (t *Tmux) nudgeSession(
 	// with a known staged-draft marker get a slower, bounded recovery
 	// (recoverStagedDraft). Providers without a reliable indicator keep
 	// best-effort delivery.
-	submitKeys := submitKeySequence(target)
-	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
-	// Escape is only safe to repeat while the pane is still idle. If the first
-	// attempt actually submitted and the pane went busy, a re-sent Escape is an
-	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
-	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
-	// re-checks busy before every re-send, which is why the verified path is safe
-	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
-	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
-	// only for single-key (plain Enter) sequences, which is what every family
-	// without a table entry has. Adding a multi-key entry for a family that is
-	// not submit-verify eligible would need that gap closed first.
+	//
+	// RE-SEND HAZARD: a submit sequence that leads with Escape is safe to
+	// repeat only while the message still waits in an idle composer. If the
+	// first attempt submitted, a re-sent Escape is an INTERRUPT for the very
+	// TUIs that need the Escape (codex reads it as cancel), and it kills the
+	// turn it just started. The pane's busy row is not enough to tell: a
+	// Codex turn can run for seconds before it draws one (its
+	// UserPromptSubmit hook runs first, and a contended host draws late), and
+	// an Escape in that window aborts the turn before Codex records the
+	// message (healthy-direct, 2026-10-15: turn_aborted 1609 ms in, the
+	// marker never recorded, the submit reported delivered). So the verified
+	// path sends an interrupting sequence again only when a look right before
+	// the send shows the message still in an idle composer (mayResend below,
+	// see submitAndConfirm). The best-effort fallback below and NudgePane's
+	// retry loop do NOT look; they are safe only for single-key (plain Enter)
+	// sequences, which is what every family without a table entry has. Adding
+	// a multi-key entry for a family that is not submit-verify eligible would
+	// need that gap closed first.
 	//
 	// Every submit is preceded by a look for a permission prompt: Enter on
 	// one picks its highlighted option (see nudgePromptGuard.refused).
@@ -3381,13 +3520,42 @@ func (t *Tmux) nudgeSession(
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
-		confirmed, sawIdle, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		busy := func() (bool, error) { return t.paneBusy(target) }
+		var mayResend func() (bool, error)
+		if interrupts {
+			// An interrupting submit is held and sent on the live screen's
+			// turn state alone (turnRunning), so a stale busy row in the
+			// scrollback cannot hold it back for good.
+			family := t.nudgeSubmitFamily(target)
+			busy = func() (bool, error) { return t.turnRunning(target, family) }
+			mayResend = func() (bool, error) { return t.submitStillWaiting(target, family) }
+		}
+		confirmed, sawIdle, sent, err := submitAndConfirm(sendSubmit, wake, busy, mayResend, time.Sleep)
 		if isLookRefusal(err) {
 			delivered = prompt.submitsSent > 0
 			return prompt.refused(err)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
+		}
+		if sent == 0 {
+			// Every round found a turn running (or no message waiting), so the
+			// interrupting submit was never sent: the message sits typed in
+			// the composer, undelivered. It is gc's own draft, so it is
+			// cleared even with a client attached, and the nudge is then
+			// deferred like one that typed nothing (runtime.ErrSessionBusy):
+			// a deferring caller queues it, and the startup ladder re-runs it.
+			// A draft that will not clear is still typed, so that nudge is
+			// neither a deferral nor a submit in doubt (errNudgeSubmitHeld).
+			// The clear's error is kept in the text only: a sentinel it
+			// carries (a permission prompt, a pane gone) would tell a caller
+			// that nothing was typed.
+			if err := t.clearHeldDraft(ctx, target, prompt.check); err != nil {
+				return fmt.Errorf("%w: session %q: a turn held its submit keys (%s) back, and clearing the typed message failed: %s",
+					errNudgeSubmitHeld, session, strings.Join(submitKeys, " "), err.Error())
+			}
+			return fmt.Errorf("%w: session %q: a turn was running when the message was ready to submit, so its submit keys (%s) were held back and the typed message was cleared",
+				runtime.ErrSessionBusy, session, strings.Join(submitKeys, " "))
 		}
 		delivered = true
 		if !confirmed {
@@ -3407,7 +3575,7 @@ func (t *Tmux) nudgeSession(
 					case stagedDraftSubmittedBusy:
 						return nil
 					case stagedDraftCleared:
-						return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+						return t.unobservedSubmitVerdict(session, typedAt, message)
 					}
 					// stagedDraftUnresolved falls through to the handling below.
 				}
@@ -3427,7 +3595,7 @@ func (t *Tmux) nudgeSession(
 			// only the busy-state OBSERVATION missed it — so that case must be
 			// reported as proven delivery, not requeued as a failure.
 			if lines, capErr := t.captureInputLines(target); capErr == nil && paneShowsDrainedComposer(lines) {
-				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+				return t.unobservedSubmitVerdict(session, typedAt, message)
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
@@ -4128,6 +4296,12 @@ func parsePaneProcessState(output, target string) (paneProcessState, error) {
 		return paneProcessState{}, fmt.Errorf("%w for target %s", errEmptyPaneProcessState, target)
 	}
 	fields := strings.Fields(output)
+	// tmux 3.8 prints an empty #{pane_pid} for a dead pane, so the observation
+	// is "\t1" (session targets, after the marker column is cut) or "1" (pane
+	// targets, trimmed by the executor): a lone "1" is a dead pane with no PID.
+	if len(fields) == 1 && fields[0] == "1" {
+		return paneProcessState{Dead: true}, nil
+	}
 	if len(fields) != 2 {
 		return paneProcessState{}, fmt.Errorf("unexpected pane process state %q for target %s", output, target)
 	}
@@ -5175,6 +5349,16 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 	if err != nil {
 		return false, err
 	}
+	return ClassifyIdlePane(lines, promptPrefix)
+}
+
+// ClassifyIdlePane classifies captured pane lines the way every pane-scanning
+// idle check does: a busy-indicator string anywhere in lines is the busy
+// reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
+// (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
+// pane showing neither is not evidence of work. The tmux idle wait and its
+// exec twin both classify each capture through it.
+func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
 		return false, nil
 	}
@@ -5246,8 +5430,9 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 //  2. Requires IdleRequiredObservations consecutive idle polls before
 //     confirming idle state.
 //
-// Returns nil if the agent becomes idle within the timeout.
-// Returns an error if the timeout expires while the agent is still busy.
+// Returns nil if the agent becomes idle within the timeout. At the timeout it
+// returns ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well unless
+// a reading showed the session busy.
 //
 // Its twin is the exec provider's waitForPaneIdle loop
 // (internal/runtime/exec/idle.go), which runs the same check over the exec
@@ -5266,6 +5451,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	}
 
 	consecutiveIdle := 0
+	sawBusy := false
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -5293,12 +5479,23 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 			}
 		} else {
 			consecutiveIdle = 0
+			sawBusy = true
 		}
 		if err := waitForIdlePoll(ctx); err != nil {
 			return err
 		}
 	}
-	return ErrIdleTimeout
+	return idleTimeout(sawBusy)
+}
+
+// idleTimeout is the error an idle or interrupt-boundary wait returns at its
+// deadline: ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well when
+// no reading showed the session busy.
+func idleTimeout(sawBusy bool) error {
+	if sawBusy {
+		return ErrIdleTimeout
+	}
+	return fmt.Errorf("%w: %w", ErrIdleTimeout, runtime.ErrWaitUnobserved)
 }
 
 func waitForIdlePoll(ctx context.Context) error {
@@ -5312,8 +5509,11 @@ func waitForIdlePoll(ctx context.Context) error {
 	}
 }
 
-// WaitForInterruptBoundary waits for a provider-native interrupt
-// acknowledgement before the next user turn is injected.
+// WaitForInterruptBoundary waits, before the next user turn is injected,
+// until the turn an interrupt sent at since was stopping has ended. For Codex
+// that is the session's own rollout recording no running turn
+// (waitForCodexInterruptBoundary), which a session interrupted between turns
+// does at once.
 func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
 	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
 	switch strings.TrimSpace(provider) {
@@ -5326,26 +5526,43 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 	if strings.TrimSpace(provider) == "" && !t.targetLooksLikeProvider(session, "codex") {
 		return runtime.ErrInteractionUnsupported
 	}
-	codexHome, err := t.GetEnvironment(session, "CODEX_HOME")
-	if err != nil {
+	// The boundary is read from the rollout the session's own Codex holds
+	// open (see codexRolloutOf), never the newest rollout under a home that
+	// other sessions share. A session whose rollout cannot be named has no
+	// boundary to wait for, as before when it had no CODEX_HOME.
+	rollout := t.codexRolloutOf(session)
+	if rollout == "" {
 		return runtime.ErrInteractionUnsupported
 	}
-	codexHome = strings.TrimSpace(codexHome)
-	if codexHome == "" {
-		return runtime.ErrInteractionUnsupported
-	}
-	return waitForCodexInterruptBoundary(ctx, codexHome, since, timeout)
+	return waitForCodexInterruptBoundary(ctx, rollout, since, timeout)
 }
 
-func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since time.Time, timeout time.Duration) error {
+// waitForCodexInterruptBoundary waits until the Codex rollout at path records
+// no running turn (codexRolloutTurnState reads idle): the interrupted turn
+// ended, whether the interrupt aborted it or it completed before the interrupt
+// landed. Codex records nothing when an interrupt reaches it between turns, so
+// a session that was running no turn reads that way at once and the wait
+// returns at once. Where the rollout cannot tell (it records no lifecycle
+// event, ends in a torn row, or its latest turn start lies beyond the
+// lifecycle scan), the rollout written since since recording the interrupted
+// turn's turn_aborted marker ends the wait. At the timeout it returns
+// ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well unless a poll
+// read the rollout recording a running turn.
+func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.Time, timeout time.Duration) error {
+	sawRunning := false
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		transcriptPath, modTime, err := latestCodexTranscriptPath(codexHome)
-		if err == nil && !modTime.Before(since) {
-			tail, err := readFileTail(transcriptPath, codexInterruptBoundaryTailBytes)
+		switch codexRolloutTurnState(path) {
+		case codexTurnIdle:
+			return nil
+		case codexTurnRunning:
+			sawRunning = true
+		}
+		if info, err := os.Stat(path); err == nil && !info.ModTime().Before(since) {
+			tail, err := readFileTail(path, codexInterruptBoundaryTailBytes)
 			if err == nil && codexTranscriptTailContainsTurnAborted(tail) {
 				return nil
 			}
@@ -5354,37 +5571,39 @@ func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since 
 			return err
 		}
 	}
-	return ErrIdleTimeout
+	return idleTimeout(sawRunning)
 }
 
-func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
-	root := filepath.Join(codexHome, "sessions")
-	var latestPath string
-	var latestMod time.Time
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if latestPath == "" || info.ModTime().After(latestMod) {
-			latestPath = path
-			latestMod = info.ModTime()
-		}
-		return nil
-	})
-	if latestPath == "" {
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		return "", time.Time{}, os.ErrNotExist
+// codexTurnState is one reading of a Codex rollout's latest turn.
+type codexTurnState int
+
+const (
+	// codexTurnUnknown: the rollout cannot be read, or its activity cannot
+	// be told.
+	codexTurnUnknown codexTurnState = iota
+	// codexTurnIdle: the rollout records its latest turn start as ended.
+	codexTurnIdle
+	// codexTurnRunning: the rollout records a turn start with no end.
+	codexTurnRunning
+)
+
+// codexRolloutTurnState reads the Codex rollout at path the way the
+// session's activity is read (sessionlog.ExtractCodexTailMeta): idle when its
+// latest turn start has ended, running when it has not, and unknown when the
+// rollout cannot be read or its activity cannot be told.
+func codexRolloutTurnState(path string) codexTurnState {
+	meta, err := sessionlog.ExtractCodexTailMeta(path)
+	if err != nil || meta == nil {
+		return codexTurnUnknown
 	}
-	return latestPath, latestMod, nil
+	switch meta.Activity {
+	case "idle":
+		return codexTurnIdle
+	case "in-turn":
+		return codexTurnRunning
+	default:
+		return codexTurnUnknown
+	}
 }
 
 func readFileTail(path string, maxBytes int64) (_ string, err error) {
@@ -5416,6 +5635,11 @@ func readFileTail(path string, maxBytes int64) (_ string, err error) {
 	return string(buf), nil
 }
 
+// codexTranscriptTailContainsTurnAborted reports whether one of the last
+// codexInterruptBoundaryRecentLines rollout rows records an interrupted turn.
+// Codex has recorded it as a <turn_aborted> user message and, since
+// codex-cli 0.162.1, as a <turn_aborted> developer message followed by a
+// turn_aborted event.
 func codexTranscriptTailContainsTurnAborted(tail string) bool {
 	lines := strings.Split(strings.TrimSpace(tail), "\n")
 	seen := 0
@@ -5425,15 +5649,31 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 			continue
 		}
 		seen++
+		if codexRowIsTurnAbortedEvent(line) {
+			return true
+		}
 		if !strings.Contains(line, "<turn_aborted>") {
 			continue
 		}
 		if strings.Contains(line, `"role":"user"`) || strings.Contains(line, `"role": "user"`) ||
+			strings.Contains(line, `"role":"developer"`) || strings.Contains(line, `"role": "developer"`) ||
 			strings.Contains(line, `"type":"user_message"`) || strings.Contains(line, `"type": "user_message"`) {
 			return true
 		}
 	}
 	return false
+}
+
+// codexRowIsTurnAbortedEvent reports whether a rollout row is Codex's
+// turn_aborted event.
+func codexRowIsTurnAbortedEvent(line string) bool {
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	return json.Unmarshal([]byte(line), &row) == nil && row.Type == "event_msg" && row.Payload.Type == "turn_aborted"
 }
 
 // claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an

@@ -796,6 +796,10 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // returned immediately. The returned directory maps back to the owning
 // candidate.
 //
+// A suspended rig's store is not probed unless beadID routes to that rig (see
+// byIDStoreOpener): uniqueness is enforced among the stores something awake
+// reads, and suspension stays quiescence for every by-id caller.
+//
 // # The binding leg comes first, and it short-circuits the uniqueness contract
 //
 // A relocated class binding is not one of the city's directories, so the scan
@@ -821,6 +825,7 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 	if err != nil {
 		return nil, "", err
 	}
+	openStore = byIDStoreOpener(cfg, cityPath, beadID, openStore)
 	if ownedByBinding {
 		if err := refuseBindingRigCollision(beadID, cfg, cityPath, openStore); err != nil {
 			return nil, "", err
@@ -856,6 +861,35 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 		return nil, "", beads.ErrNotFound
 	}
 	return foundStore, foundDir, nil
+}
+
+// byIDStoreOpener wraps openStore for a by-id probe so that a suspended rig's
+// store is left closed: the wrapped opener returns a nil store for it, which
+// the probes skip. A store the city or an awake rig also reads stays open, as
+// in convoyCheckStoreCandidates.
+//
+// By-id resolution runs unattended — bd's on-close autoclose hooks, the
+// supervisor's autoclose sweep, execution-fact emission on a primary-store
+// miss, and gc convoy status run by orders — and its uniqueness probe reads
+// every candidate. On a bd-owned proxied rig that read restarts the pair the
+// controller stopped when the rig was suspended (beads_quiescence.go), so the
+// probe alone would keep a suspended rig warm. An id whose prefix routes to a
+// suspended rig is a question about that rig's bead, so that rig's store is
+// still read.
+func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) func(string) (beads.Store, error) {
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
+		return openStore
+	}
+	if rd := rigDirForBead(cfg, beadID); rd != "" {
+		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
+	}
+	return func(dir string) (beads.Store, error) {
+		if len(asleep[normalizePathForCompare(dir)]) > 0 {
+			return nil, nil
+		}
+		return openStore(dir)
+	}
 }
 
 // refuseBindingRigCollision restores the uniqueness contract to the one case
@@ -934,12 +968,32 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 // reads from.
 func convoyCheckStoreCandidates(cfg *config.City, cityPath string) (candidates, skipped []string) {
 	candidates = convoyStoreCandidates(cfg, cityPath, "") // residency:allow — the list openConvoyStores walks, minus suspended rigs; decides no binding, namespace or leg order
-	suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
-	if len(suspended) == 0 {
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
 		return candidates, nil
 	}
-	awake := map[string]bool{normalizePathForCompare(cityPath): true}
+	kept := make([]string, 0, len(candidates))
+	for _, dir := range candidates {
+		if names := asleep[normalizePathForCompare(dir)]; len(names) > 0 {
+			skipped = append(skipped, names...)
+			continue
+		}
+		kept = append(kept, dir)
+	}
+	return kept, skipped
+}
+
+// suspendedRigStoreRoots maps the normalized store root of each suspended rig
+// to the suspended rigs rooted there, leaving out a root the city or an awake
+// rig also reads: suspension retires a rig, not a store something awake reads
+// from. It returns an empty map when no rig is suspended.
+func suspendedRigStoreRoots(cfg *config.City, cityPath string) map[string][]string {
 	asleep := map[string][]string{}
+	suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
+	if len(suspended) == 0 {
+		return asleep
+	}
+	awake := map[string]bool{normalizePathForCompare(cityPath): true}
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
@@ -951,16 +1005,10 @@ func convoyCheckStoreCandidates(cfg *config.City, cityPath string) (candidates, 
 			awake[root] = true
 		}
 	}
-	kept := make([]string, 0, len(candidates))
-	for _, dir := range candidates {
-		root := normalizePathForCompare(dir)
-		if names := asleep[root]; len(names) > 0 && !awake[root] {
-			skipped = append(skipped, names...)
-			continue
-		}
-		kept = append(kept, dir)
+	for root := range awake {
+		delete(asleep, root)
 	}
-	return kept, skipped
+	return asleep
 }
 
 // openConvoyCheckStoresAt opens the stores gc convoy check walks: it is

@@ -182,6 +182,7 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if !processAlive(secondPanePID) {
 		t.Fatalf("stubborn second-pane process %s is not alive before certified stop", secondPanePID)
 	}
+	stubbornTarget := mustSnapshotTarget(t, mustProcessSnapshot(t), mustPID(t, secondPanePID))
 	// A second provider instance owns the real hidden PTY. It is therefore
 	// untracked by p, exactly like a human client from the certifier's point of
 	// view; p must observe it without closing or detaching it.
@@ -245,9 +246,12 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if has, err := p.tm.HasSession(name); err != nil || has {
 		t.Fatalf("certified stop left session present: has=%v err=%v", has, err)
 	}
-	if processAlive(secondPanePID) {
-		t.Fatalf("certified stop left stubborn second-pane process %s alive", secondPanePID)
-	}
+	// The stop returns once it has sent SIGKILL, before the stubborn process
+	// has exited and before tmux, its parent, has reaped it; kill(0) reads both
+	// states as alive. Wait for its start identity to go instead. It ignores HUP
+	// and TERM, so a stop that never sent the KILL still leaves it running past
+	// the deadline.
+	waitForProcessTargetsGone(t, []processTarget{stubbornTarget}, testutil.ExecRaceTimeout)
 
 	if err := p.TeardownServer(); err != nil {
 		t.Fatalf("tear down exact named tmux server: %v", err)
@@ -747,6 +751,16 @@ func TestProvider_JoinedForeignAgentPaneIsNotTheAgent(t *testing.T) {
 	foreign := f.mustRun(t, "list-panes", "-t", "=gc-test-other:", "-F", "#{pane_id}")
 	f.mustRun(t, "new-session", "-d", "-s", "gc-test-keepalive", "sleep 300")
 	f.mustRun(t, "join-pane", "-b", "-s", foreign, "-t", f.agent)
+	agentWindow := f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{window_id}")
+	if got := f.mustRun(t, "display-message", "-p", "-t", foreign, "#{window_id}"); got != agentWindow {
+		t.Fatalf("joined pane %s is in window %s, want the agent's %s (precondition)", foreign, got, agentWindow)
+	}
+	// Whether join-pane -b lists the joined pane first depends on the tmux
+	// version, so put it first by id: the foreign pane must lead the list for
+	// a first-pane resolver to mistake it for the agent.
+	if first, _, _ := strings.Cut(f.mustRun(t, "list-panes", "-s", "-t", paneTarget(f.name), "-F", "#{pane_id}"), "\n"); first != foreign {
+		f.mustRun(t, "swap-pane", "-s", f.agent, "-t", foreign)
+	}
 	first, _, _ := strings.Cut(f.mustRun(t, "list-panes", "-s", "-t", paneTarget(f.name), "-F", "#{pane_id}"), "\n")
 	if first != foreign {
 		t.Fatalf("first pane = %s, want the joined foreign pane %s (precondition)", first, foreign)

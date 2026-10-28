@@ -145,6 +145,12 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// cached one, which the IncludeClosed=false scan does not do. Its
 		// exactly-once behavior is pinned by caching_store_close_event_test.go.
 		"unannouncedCloses": true, "hasUnannouncedCloses": true,
+		// unannouncedUpdates is the update-shaped twin: an announcement queue
+		// that only read refetches (announceRead) fill. The seam never queues
+		// into it; it can only drop an entry, when it installs a different row
+		// (announced by the merge's own diff) or evicts the row. Its behavior
+		// is pinned by caching_store_read_announce_test.go.
+		"unannouncedUpdates": true, "hasUnannouncedUpdates": true,
 		// closeIntents counts closing writes in flight between their backing
 		// write and their announcement claim; only those writers touch it, and
 		// the seam reads it only through trackCloseTransitionLocked's queueing

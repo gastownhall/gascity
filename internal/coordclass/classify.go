@@ -1,6 +1,8 @@
 package coordclass
 
 import (
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -21,6 +23,10 @@ const (
 	// labelOrderTracking marks order-dispatch tracking beads.
 	// Canonical: cmd/gc/order_dispatch.go (labelOrderTracking).
 	labelOrderTracking = "order-tracking"
+	// labelWisp and labelGCWisp mark wisps (graph class). The bare form is
+	// also an order-tracking OUTCOME marker; see classifyFields.
+	labelWisp   = "wisp"
+	labelGCWisp = "gc:wisp"
 	// labelNudge marks queued-nudge beads.
 	// Canonical: cmd/gc/nudge_beads.go (nudgeBeadLabel).
 	labelNudge = "gc:nudge"
@@ -167,7 +173,7 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 	// reordering the arms: every other bead the wisp arm claims still reaches it
 	// first.
 	case !hasLabel(labels, labelOrderTracking) &&
-		(isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp")):
+		(isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, labelGCWisp) || hasLabel(labels, labelWisp)):
 		return ClassGraph
 	case beadType == typeMessage || hasLabelPrefix(labels, labelExtmsgPrefix):
 		return ClassMessaging
@@ -198,7 +204,7 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 
 // isWispMetadata mirrors bead_policy_store.isWispPolicyMetadata.
 func isWispMetadata(metadata map[string]string) bool {
-	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
+	return classMeta(metadata, beadmeta.KindMetadataKey) == beadmeta.KindWisp
 }
 
 // isWorkflowMetadata mirrors bead_policy_store.isWorkflowPolicyMetadata: a bead
@@ -210,9 +216,9 @@ func isWorkflowMetadata(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
-		metadata[beadmeta.FormulaContractMetadataKey] == formulaContractGraphV2 ||
-		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
+	return classMeta(metadata, beadmeta.KindMetadataKey) == beadmeta.KindWorkflow ||
+		classMeta(metadata, beadmeta.FormulaContractMetadataKey) == formulaContractGraphV2 ||
+		strings.TrimSpace(classMeta(metadata, beadmeta.RootBeadIDMetadataKey)) != ""
 }
 
 // isSyntheticConvoy reports whether a convoy bead is system-minted glue
@@ -239,13 +245,81 @@ func isSyntheticConvoy(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	if strings.TrimSpace(metadata[beadmeta.SyntheticMetadataKey]) != "" {
+	if strings.TrimSpace(classMeta(metadata, beadmeta.SyntheticMetadataKey)) != "" {
 		return true
 	}
-	return strings.TrimSpace(metadata[beadmeta.SyntheticKindMetadataKey]) != ""
+	return strings.TrimSpace(classMeta(metadata, beadmeta.SyntheticKindMetadataKey)) != ""
+}
+
+// The class-relevant vocabulary: every label, label prefix and metadata key
+// Classify can see. It is the ONE table both Classify and Mutation.TouchesClass
+// read. Classify reads labels and metadata only through hasLabel,
+// hasLabelPrefix and classMeta, and each of those answers as if a label, prefix
+// or key outside the table were absent. So a new arm that reads something
+// outside the table never fires (and the golden table fails), and anything a
+// write touches outside the table cannot change a class — which is what lets
+// TouchesClass skip the before-read for it.
+var (
+	classifierLabels = map[string]bool{
+		labelWisp: true, labelGCWisp: true, labelOrderTracking: true, labelSession: true,
+		labelWait: true, labelOp: true, labelFact: true, labelRuntime: true,
+		labelNudge: true, labelNudgeQueue: true,
+	}
+	classifierLabelPrefixes = []string{labelExtmsgPrefix}
+	classifierMetadataKeys  = map[string]bool{
+		beadmeta.KindMetadataKey: true, beadmeta.FormulaContractMetadataKey: true,
+		beadmeta.RootBeadIDMetadataKey: true, beadmeta.SyntheticMetadataKey: true,
+		beadmeta.SyntheticKindMetadataKey: true,
+	}
+)
+
+// ClassifierLabels returns the labels Classify matches exactly. It and its two
+// siblings return copies of the class-relevant vocabulary, for tests that
+// enumerate it.
+func ClassifierLabels() []string { return sortedKeys(classifierLabels) }
+
+// ClassifierLabelPrefixes returns the label prefixes Classify matches.
+func ClassifierLabelPrefixes() []string { return append([]string(nil), classifierLabelPrefixes...) }
+
+// ClassifierMetadataKeys returns the metadata keys Classify reads.
+func ClassifierMetadataKeys() []string { return sortedKeys(classifierMetadataKeys) }
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isClassifierLabel reports whether label l is in the class-relevant
+// vocabulary.
+func isClassifierLabel(l string) bool {
+	if classifierLabels[l] {
+		return true
+	}
+	for _, p := range classifierLabelPrefixes {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// classMeta reads metadata key k as Classify sees it: "" for a key outside the
+// table.
+func classMeta(metadata map[string]string, k string) string {
+	if !classifierMetadataKeys[k] {
+		return ""
+	}
+	return metadata[k]
 }
 
 func hasLabel(labels []string, want string) bool {
+	if !classifierLabels[want] {
+		return false
+	}
 	for _, l := range labels {
 		if l == want {
 			return true
@@ -255,6 +329,9 @@ func hasLabel(labels []string, want string) bool {
 }
 
 func hasLabelPrefix(labels []string, prefix string) bool {
+	if !slices.Contains(classifierLabelPrefixes, prefix) {
+		return false
+	}
 	for _, l := range labels {
 		if strings.HasPrefix(l, prefix) {
 			return true

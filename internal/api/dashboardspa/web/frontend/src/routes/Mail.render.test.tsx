@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidate } from '../api/cache';
 import { AttentionProvider } from '../attention/context';
@@ -528,7 +528,7 @@ describe('MailPage supervisor reads', () => {
 
   it('marks attention mail rows without filtering out non-attention mail', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AttentionProvider
             contributors={[
@@ -555,7 +555,7 @@ describe('MailPage supervisor reads', () => {
 
   it('marks attention messages inside an opened thread', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AttentionProvider
             contributors={[
@@ -686,10 +686,7 @@ describe('MailPage bulk read-state selection (gascity-dashboard-mp3g)', () => {
 
 function renderMailPage(initialEntry = '/mail', options: { readOnly?: boolean } = {}) {
   render(
-    <MemoryRouter
-      initialEntries={[initialEntry]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[initialEntry]}>
       <NowProvider intervalMs={1_000_000}>
         <ReadOnlyProvider readOnly={options.readOnly ?? false}>
           <MailPage />

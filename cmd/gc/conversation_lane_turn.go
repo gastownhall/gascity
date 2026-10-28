@@ -114,12 +114,12 @@ func (l laneTurnLook) boundary() opjournal.Tri {
 // keystroke-mode one, whose boundary is the quiescence rule, no turn source
 // for this executor, noted.
 func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
-	e.turnHandle, e.traits = nil, laneTurnTraits{}
+	e.turnHandle, e.traits, e.turnCaps, e.turnCapsUnread = nil, laneTurnTraits{}, worker.TurnCapabilities{}, false
 	h, err := e.turns()
 	if err == nil {
 		var caps worker.TurnCapabilities
 		if caps, err = h.TurnCapabilities(ctx); err == nil {
-			e.turnHandle = h
+			e.turnHandle, e.turnCaps = h, caps
 			e.traits = laneTurnTraitsOf(caps, e.target.sessionTransport())
 			return nil
 		}
@@ -131,6 +131,7 @@ func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
 		return fmt.Errorf("%w: %w", errLaneTurnsUnavailable, err)
 	case errors.Is(err, runtime.ErrRuntimeUnavailable):
 		e.note("turns", fmt.Errorf("session %s's turn capabilities unreadable; linking its deliveries none: %w", e.info.ID, err))
+		e.turnCapsUnread = true
 		return nil
 	default:
 		return err
@@ -163,21 +164,13 @@ func (e *conversationLaneExec) readTurns(ctx context.Context) (runtime.TurnHisto
 // delivery can be told from a turn another input started: by the runtime's
 // stamp of the message (rec.MessageAt), by a start on this host's clock
 // (SameClock, the history diff's cutoff), or by only gc's input starting
-// turns (Serial). A T3 source has none of these until the runtime's message
-// stamp is recorded (OJ-7): X11 §5.4 links its delivery only by that stamp,
-// and a history diff would link a turn the delivery did not start (a turn T3
-// restores as latest after the probe, or a human's started meanwhile). Its
-// delivery links none, no_source.
+// turns (Serial). A T3 delivery links only by its receipt's stamp (X11 §5.4;
+// DES-O1 §4.8 row 3, requested_at), never by a history diff, which would link
+// a turn the delivery did not start (a turn T3 restores as latest after the
+// probe, or a human's started meanwhile); a turn whose start is not the stamp
+// never matches it.
 func (e *conversationLaneExec) linkEvidence(ctx context.Context, rec opjournal.DeliveryRecord) opjournal.TurnEvidence {
-	tellable := e.traits.sameClock || e.traits.serial || !rec.MessageAt.IsZero()
-	ev := opjournal.TurnEvidence{
-		HasSource:   e.traits.starts && e.turnHandle != nil && tellable,
-		SameClock:   e.traits.sameClock,
-		Serial:      e.traits.serial,
-		LiveAtProbe: e.lastTurn.live,
-		LiveTurn:    e.lastTurn.turn,
-		Known:       slices.Clone(e.lastTurn.known),
-	}
+	ev := e.linkStart(rec)
 	if !ev.HasSource {
 		return ev
 	}
@@ -197,6 +190,21 @@ func (e *conversationLaneExec) linkEvidence(ctx context.Context, rec opjournal.D
 			return ev
 		}
 		backoff = min(2*backoff, laneLinkBackoffMax)
+	}
+}
+
+// linkStart is the evidence linkEvidence starts from, before any read: the
+// source's traits and the probe's look. A replayed delivery's evidence is
+// this alone.
+func (e *conversationLaneExec) linkStart(rec opjournal.DeliveryRecord) opjournal.TurnEvidence {
+	tellable := e.traits.sameClock || e.traits.serial || !rec.MessageAt.IsZero()
+	return opjournal.TurnEvidence{
+		HasSource:   e.traits.starts && e.turnHandle != nil && tellable,
+		SameClock:   e.traits.sameClock,
+		Serial:      e.traits.serial,
+		LiveAtProbe: e.lastTurn.live,
+		LiveTurn:    e.lastTurn.turn,
+		Known:       slices.Clone(e.lastTurn.known),
 	}
 }
 

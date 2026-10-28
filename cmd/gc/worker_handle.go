@@ -36,12 +36,30 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
 }
 
+// workerFactoryWithStaleKeyDetectionWaiter builds a factory whose usage
+// attribution reads work beads from store only: city-resident beads. A caller
+// that serves rig-resident work uses workerFactoryWithAttribution.
 func workerFactoryWithStaleKeyDetectionWaiter(
 	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
+	return workerFactoryWithAttribution(cityPath, store, sp, cfg, waiter, nil, nil)
+}
+
+// workerFactoryWithAttribution is the factory constructor with formula
+// attribution injected: resolveBead reads a work bead wherever it lives (nil
+// falls back to store) and memo outlives the factory (nil derives every time).
+func workerFactoryWithAttribution(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+	resolveBead func(id string) (beads.Bead, error),
+	memo *worker.FormulaNameMemo,
 ) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
@@ -95,6 +113,8 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
+		ResolveBead:             resolveBead,
+		FormulaMemo:             memo,
 		// The zero store resolves no class store: a deferred submit writes
 		// no shadow, so it opens nothing.
 		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,

@@ -115,6 +115,22 @@ func (g *opGen) op() Op {
 			op.Scope.Interaction = g.text(10)
 		}
 	}
+	if kind == KindRespond {
+		// A respond carries a RespondPayload and, on the lane, answers an
+		// occurrence at most once (validateRespondShape).
+		p := RespondPayload{Action: pick(r, []string{"approve", "deny", "approve_always"})}
+		if r.IntN(2) == 0 {
+			p.Text = g.text(12)
+		}
+		if r.IntN(2) == 0 {
+			p.Metadata = map[string]string{"source": g.text(8)}
+		}
+		op.Payload, _ = EncodeRespondPayload(p)
+		if op.Executor == ExecutorLane {
+			op.Scope.Interaction = fmt.Sprintf("req-%d#%d", r.IntN(1000), 1+r.IntN(5))
+			op.Policy.Guarantee = GuaranteeAtMostOnce
+		}
+	}
 	if spec.AllowsAfter && r.IntN(2) == 0 {
 		op.After = g.opID()
 	}

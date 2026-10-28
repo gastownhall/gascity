@@ -91,6 +91,26 @@ func TestInitDisablesDoltEventFlush(t *testing.T) {
 	}
 }
 
+// TestLaneFailpointIsALeakVector pins GC_LANE_FAILPOINT into
+// LeakVectorVars: a value leaked from a developer's shell would make a
+// test-hooks gc child (or a unit test that enables the stamp) SIGKILL itself
+// at a lane stage, so the scrub must own it.
+func TestLaneFailpointIsALeakVector(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_LANE_FAILPOINT") {
+		t.Error("GC_LANE_FAILPOINT missing from LeakVectorVars; an ambient value would make a test's gc child kill itself")
+	}
+}
+
+// TestOpsFailpointIsALeakVector pins GC_OPS_FAILPOINT into LeakVectorVars: a
+// value leaked from a developer's shell would make a test-hooks gc child kill
+// itself, park a request or fail an op's closes at an op recording crash
+// point, so the scrub must own it.
+func TestOpsFailpointIsALeakVector(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_OPS_FAILPOINT") {
+		t.Error("GC_OPS_FAILPOINT missing from LeakVectorVars; an ambient value would make a test's gc child kill itself")
+	}
+}
+
 // TestInitPassthroughPreservesNamed verifies that GC_TESTENV_PASSTHROUGH
 // preserves the named leak-vector vars, scrubs the rest, and unsets itself.
 func TestInitPassthroughPreservesNamed(t *testing.T) {

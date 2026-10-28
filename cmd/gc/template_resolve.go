@@ -389,7 +389,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// prompt template to render.
 	defaultBranch := ""
 	if cfgAgent.PromptTemplate != "" {
-		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+		defaultBranch = p.defaultBranch(rigName, workDir)
 	}
 	topo := config.QueryTopology{}
 	if p.city != nil {
@@ -678,26 +678,34 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			mcpCity.PackMCPDir = cityMCPDir
 		}
 	}
-	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
+	// Shared-layer servers the provider cannot receive are left out of
+	// mcpCatalog and mcpProjection (the agent starts without them; stage 1
+	// warns), while agent-local ones fail this agent's start. An ACP session
+	// receives every server in-band (session/new), whatever its harness's
+	// file projection can carry.
+	mcpInBand := sessionTransport == config.SessionTransportACP
+	mcp, err := resolveAgentMCPProjection(
 		p.cityPath,
 		mcpCity,
 		cfgAgent,
 		qualifiedName,
 		workDir,
 		resolvedProviderLaunchFamily(resolved),
+		mcpInBand,
 	)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
+	mcpCatalog, mcpProjection := mcp.Catalog, mcp.Projection
+	if resolvedServers := len(mcpCatalog.Servers) + len(mcp.Skipped); mcpCityIsSynthetic && resolvedServers > 0 {
 		return TemplateParams{}, fmt.Errorf(
 			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) - "+
 				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
 				"cannot see import/implicit/bootstrap layers and would diverge from production)",
-			qualifiedName, len(mcpCatalog.Servers),
+			qualifiedName, resolvedServers,
 		)
 	}
-	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
+	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
 		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
 		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
@@ -706,7 +714,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			if stage2Delivers {
 				projectAgent := templateNameFor(cfgAgent, qualifiedName)
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
+				warnStage2MCPAdoptionRefusal(p.cityPath, qualifiedName, mcpProjection, p.fs, p.stderr)
 			}
+		case mcpInBand:
+			// No file reaches this session; session/new carries the servers.
 		default:
 			return TemplateParams{}, fmt.Errorf(
 				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
@@ -715,7 +726,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == config.SessionTransportACP {
+	if mcpInBand {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
 

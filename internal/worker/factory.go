@@ -50,6 +50,18 @@ type FactoryConfig struct {
 	// once across requests rather than once per request. Nil gives the factory
 	// a private memo.
 	ActivityMemo *DerivedActivityMemo
+	// ResolveBead reads one work bead by id, wherever it lives. Usage
+	// attribution uses it to find the formula the session's acting bead was
+	// compiled from: the worker takes the lookup as an injected func and never
+	// enumerates stores itself. Nil falls back to the Store's Get, which sees
+	// only the city-resident beads; a caller that serves rig-resident work
+	// injects a resolver over its own stores.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to. A caller
+	// that builds a Factory per request or per tick holds one memo for its
+	// lifetime and passes it here, so the lookup is paid once across
+	// factories. Nil resolves on every batch.
+	FormulaMemo *FormulaNameMemo
 	// DeferredSubmits is where the factory's manager queues a submit a
 	// session cannot take yet. Nil keeps the city's state.json queue.
 	DeferredSubmits sessionpkg.DeferredSubmitQueue
@@ -60,6 +72,8 @@ type FactoryConfig struct {
 type Factory struct {
 	manager               *sessionpkg.Manager
 	store                 beads.Store
+	resolveBead           func(id string) (beads.Bead, error)
+	formulaMemo           *FormulaNameMemo
 	provider              runtime.Provider
 	searchPaths           []string
 	recorder              events.Recorder
@@ -117,6 +131,8 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 	return &Factory{
 		manager:               manager,
 		store:                 cfg.Store,
+		resolveBead:           factoryBeadResolver(cfg),
+		formulaMemo:           cfg.FormulaMemo,
 		provider:              cfg.Provider,
 		searchPaths:           factorySearchPaths(cfg),
 		recorder:              cfg.Recorder,
@@ -125,6 +141,19 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 		pricing:               cfg.Pricing,
 		activityMemo:          memo,
 	}, nil
+}
+
+// factoryBeadResolver returns the by-id bead lookup usage attribution uses:
+// the injected ResolveBead, else the factory store's Get (city-resident beads
+// only), else nil.
+func factoryBeadResolver(cfg FactoryConfig) func(id string) (beads.Bead, error) {
+	if cfg.ResolveBead != nil {
+		return cfg.ResolveBead
+	}
+	if cfg.Store != nil {
+		return cfg.Store.Get
+	}
+	return nil
 }
 
 // factorySearchPaths returns the transcript search roots for a factory: the
@@ -169,6 +198,8 @@ func (f *Factory) UsageSink() usage.Sink {
 func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 	return NewSessionHandle(SessionHandleConfig{
 		Manager:     f.manager,
+		ResolveBead: f.resolveBead,
+		FormulaMemo: f.formulaMemo,
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Adapter:     f.Adapter(),
 		Recorder:    f.recorder,

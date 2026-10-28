@@ -127,8 +127,25 @@ const (
 	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
 	// envelope written by gc-outcome-close.
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
-	CurrentRunIDMetadataKey                          = "gc.current_run_id"
-	CwdMetadataKey                                   = "gc.cwd"
+	// CrossStoreBlockerMetadataKey names, on a cross-store gate, the blocker
+	// it mirrors: a bead held in another store that the gate's dependents must
+	// wait for (internal/dispatch cross_store_gate.go).
+	CrossStoreBlockerMetadataKey = "gc.cross_store_blocker"
+	// CrossStoreGateOwnerMetadataKey names, on a cross-store gate, the drain
+	// control that minted it. One gate serves every item of that drain waiting
+	// on the same blocker, and the gate is released once the control closes.
+	CrossStoreGateOwnerMetadataKey = "gc.cross_store_gate_owner"
+	// CrossStoreGateStateMetadataKey records a cross-store gate's state:
+	// "unresolved" (open; no store holds its blocker), "released" (closed by
+	// the controller; reopened if its blocker opens again) or "overridden"
+	// (closed by an operator; final).
+	CrossStoreGateStateMetadataKey = "gc.cross_store_gate_state"
+	// CrossStoreGateUnresolvedAtMetadataKey is when a cross-store gate was
+	// first found unresolved (RFC3339): the persisted anchor its control.stalled
+	// event reports as first_seen.
+	CrossStoreGateUnresolvedAtMetadataKey = "gc.cross_store_gate_unresolved_at"
+	CurrentRunIDMetadataKey               = "gc.current_run_id"
+	CwdMetadataKey                        = "gc.cwd"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
@@ -346,10 +363,11 @@ const (
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
 	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
-	// IS the unit of work and must remain claimable via the
-	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
-	// children have all closed and is only waiting on workflow-finalize —
-	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	// IS the unit of work and must remain claimable via its RoutedToMetadataKey
+	// or the legacy RunTargetMetadataKey fallback, from an expanded root, which
+	// is a latch closed by workflow-finalize and is never fresh worker demand
+	// through any route, an explicit RoutedToMetadataKey included — see
+	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
@@ -541,6 +559,10 @@ var KnownMetadataKeys = []string{
 	ControllerRetryFirstSeenMetadataKey,
 	ControllerRetryCountMetadataKey,
 	CoordinatorOutcomeProducerDispositionMetadataKey,
+	CrossStoreBlockerMetadataKey,
+	CrossStoreGateOwnerMetadataKey,
+	CrossStoreGateStateMetadataKey,
+	CrossStoreGateUnresolvedAtMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,

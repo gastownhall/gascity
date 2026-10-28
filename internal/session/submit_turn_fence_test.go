@@ -663,7 +663,7 @@ func (b probeBackend) Nudge(name string, content []runtime.ContentBlock) error {
 	return b.FullFake.Nudge(name, content)
 }
 
-func (b probeBackend) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+func (b probeBackend) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	b.probe("Nudge", nil, 0)
 	return b.FullFake.NudgeKeyed(name, content, key)
 }

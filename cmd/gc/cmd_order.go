@@ -1083,7 +1083,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
 	}
 	timeout := effectiveTimeout(a, maxTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := withOrderTimeout(context.Background(), timeout)
 	defer cancel()
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
@@ -1116,7 +1116,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 	// success paths, matching the controller dispatch path (order_dispatch.go).
 	redactionEnv := append(os.Environ(), env...)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: exec failed: %s\n", execenv.RedactText(err.Error(), redactionEnv)) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc order run: exec failed: %s\n", execenv.RedactText(orderRunErrorText(ctx, err), redactionEnv)) //nolint:errcheck
 		if len(output) > 0 {
 			fmt.Fprintf(stderr, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
 		}

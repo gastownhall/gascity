@@ -128,9 +128,11 @@ type stalledClaim struct {
 //
 // The execution backstop requests the stop, and its own record is
 // execution_claim_started at the row's current instance token (startedValue),
-// the stamp that already vetoes its drain. Only that keeps the claim:
-// work_started names every claim the hook handed out, and a stamp from an
-// earlier incarnation names one the seat was woken on and never ran, so
+// the stamp that already vetoes its drain, written from a step_started of
+// the claim or from its work_started entry at the row's current generation
+// (workStartedAtGen). Only that keeps the claim: work_started read whole
+// names every claim the hook handed out, at any generation, and a stamp from
+// an earlier incarnation names one the seat was woken on and never ran, so
 // keeping either would leave the seat asleep holding the claim, the
 // assigned-work wake would restart it on it, and the backstop would drain it
 // again: the v5.10x loop.

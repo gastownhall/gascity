@@ -45,8 +45,8 @@ func (e recordingDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery)
 func probeSteer(t *testing.T, f *laneFixture) bool {
 	t.Helper()
 	st := f.laneStore(t)
-	v, info := f.view(t)
-	p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+	v, row := f.view(t)
+	p, err := newConversationLaneExec(f.deps(st), row).Probe(context.Background(), v)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
@@ -97,8 +97,8 @@ func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 		f.sp.SteerModeValue = runtime.SteerProtocol
 		st := f.laneStore(t)
 		stampHost(t, f, st, 1, opjournal.KindMessage)
-		v, info := f.view(t)
-		p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+		v, row := f.view(t)
+		p, err := newConversationLaneExec(f.deps(st), row).Probe(context.Background(), v)
 		if err != nil || p.Caps.Live || p.Caps.Steer {
 			t.Fatalf("Probe = %+v, %v; want neither live nor steer", p.Caps, err)
 		}
@@ -120,10 +120,10 @@ func TestLaneExecSteerCapAsksAboutTheProbedRow(t *testing.T) {
 		t.Run(fmt.Sprint(answer), func(t *testing.T) {
 			f := newLaneFixture(t, func(m map[string]string) { m["provider"], m["builtin_ancestor"] = "my-wrap", "codex" })
 			st := f.laneStore(t)
-			v, info := f.view(t)
+			v, row := f.view(t)
 			deps := f.deps(st)
 			deps.sp = steerModeForName{Fake: f.sp, name: f.name, mode: runtime.SteerKeystroke}
-			e := newConversationLaneExec(deps, info)
+			e := newConversationLaneExec(deps, row)
 			type ask struct {
 				info session.Info
 				mode runtime.SteerMode
@@ -166,9 +166,11 @@ func (s steerModeForName) SteerMode(name string) runtime.SteerMode {
 }
 
 // TestLaneSteerCapNeedsAKeyedSteer kills a lane that steers a runtime that
-// deduplicates by delivery key: a steer goes out through the immediate
-// nudge, which no runtime keys yet, so a re-taken steer would be applied
-// twice while the planner drops the D-NOTE repeat line for a dedup runtime.
+// deduplicates by delivery key: to such a runtime a keyed immediate nudge is
+// its keyed send, a deduplicated turn start that is not a steer, and its
+// steer, NudgeNow, takes no key, so a re-taken steer would either not steer
+// or be applied twice while the planner drops the D-NOTE repeat line for a
+// dedup runtime.
 func TestLaneSteerCapNeedsAKeyedSteer(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -231,8 +233,8 @@ func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 				t.Fatalf("session reads supports_steer = %v, want %v: the runtime's steer mode with the family, not gated on the lane", got, want)
 			}
 			st := f.laneStore(t)
-			v, info := f.view(t)
-			p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+			v, row := f.view(t)
+			p, err := newConversationLaneExec(f.deps(st), row).Probe(context.Background(), v)
 			if err != nil || p.Caps.Live || p.Caps.Steer {
 				t.Fatalf("Probe = %+v, %v; want neither live nor steer", p.Caps, err)
 			}

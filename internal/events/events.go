@@ -53,6 +53,25 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// BeadClaimFailed fires when gc hook --claim skips a routed candidate
+	// because the claim write itself failed: not a lost race (that is
+	// BeadClaimRejected) but an error. The seat goes on to its other
+	// candidates and, if none claims, drains claims_errored. The payload names
+	// the seat (template, session, runtime epoch) and the error text. It is
+	// the input of the controller's claim-loop guard
+	// (cmd/gc/claim_loop_guard.go): the same bead failing the same way for
+	// every seat a template spawns is a spawn loop, not a slow claim.
+	BeadClaimFailed = "bead.claim_failed"
+	// BeadClaimLoopHeld fires when the controller's claim-loop guard stops
+	// counting a bead in a template's default routed-work demand, because the
+	// template's seats failed to claim it with the same error enough times in a
+	// row, and again, with the hold's new end, each time a probe seat fails to
+	// claim it. A custom scale_check count is not withheld. It is an operator
+	// alert: the payload names the template, the bead (Subject), the error, the
+	// failure count and when the next probe seat may spawn. The bead counts as
+	// demand again when it changes, when the city config changes, or for one
+	// probe seat each time the hold's backoff runs out.
+	BeadClaimLoopHeld = "bead.claim_loop_held"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -375,6 +394,12 @@ const (
 	RequestResultSessionSubmit  = "request.result.session.submit"
 	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
+	// RequestAccepted records that the API accepted an async session request
+	// (session create, message or submit) and returned its 202. It is the
+	// durable marker the request-outcome lookup reads to tell an accepted
+	// request from an unknown id; it is not an outcome. The terminal outcome
+	// is a request.result.* or request.failed event with the same request_id.
+	RequestAccepted = "request.accepted"
 
 	// RigProvisionProgress reports one provisioning step of a server-side
 	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
@@ -513,6 +538,26 @@ const (
 	// D13).
 	OpsRecordingDegraded = "ops.recording_degraded"
 
+	// OpChanged fires when an operation-journal op row changes: proposed,
+	// accepted, taken, released, settled, canceled or closed. The payload is
+	// the op as its row reads after the change (DES-O1 D18), without the
+	// message text. The controller derives it once from the row's post-image
+	// in its cache-notification bridge, and journal rows record no bead.*
+	// event: a one-shot CLI's write to one journals nothing and rings the
+	// controller, which refreshes the row through its cache. A write no
+	// controller answers is announced only partly: a running controller's
+	// next reconcile announces a row it finds open and changed, but not the
+	// close of a row it did not hold, and a controller started later
+	// announces nothing for it. No writer may record one itself
+	// (IsJournalDerived). The row is
+	// authoritative: a consumer that reconnects reads a non-terminal op
+	// again with GET .../session/{id}/ops/{op}.
+	OpChanged = "op.changed"
+	// FactRecorded fires when an occurrence fact row is recorded: a session
+	// or turn started or ended, an interaction raised or resolved. It is
+	// derived like OpChanged, once per fact.
+	FactRecorded = "fact.recorded"
+
 	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
 	// recompute over one bd-backed scope as a one-shot upgrade step: the
 	// first start under a bd version the scope has not been repaired with.
@@ -549,6 +594,14 @@ const (
 	StorageBindingNotConfigured = "storage.binding.not_configured"
 )
 
+// IsJournalDerived reports whether eventType is one the controller derives
+// from an operation-journal row's post-image (op.changed, fact.recorded). No
+// writer may author one, whatever its payload: a consumer renders it as the
+// row's state, and only the row can say what that is.
+func IsJournalDerived(eventType string) bool {
+	return eventType == OpChanged || eventType == FactRecorded
+}
+
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every
 // event type has a registered payload — a missing registration is a
@@ -575,6 +628,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	BeadClaimFailed, BeadClaimLoopHeld,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
@@ -592,7 +646,7 @@ var KnownEventTypes = []string{
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
-	RigProvisionProgress,
+	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
@@ -610,6 +664,7 @@ var KnownEventTypes = []string{
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
 	OpsRecordingDegraded,
+	OpChanged, FactRecorded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
@@ -712,6 +767,13 @@ type TailProvider interface {
 // fakes, exec scripts) need not implement it.
 type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
+}
+
+// InFlightContextProvider is an optional extension for providers whose
+// in-flight-aware read ([InFlightProvider]) can stop when ctx is done, so a
+// read whose caller has gone does not run to the end of a long history.
+type InFlightContextProvider interface {
+	ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error)
 }
 
 // Watcher yields events one at a time. Created by [Provider.Watch].

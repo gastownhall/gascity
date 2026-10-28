@@ -28,7 +28,9 @@ This page also imports the A1-A17 guarantees into the repository
 
 `[daemon] session_reconciler` selects the reconciler. It accepts:
 
-- `legacy` (the default): the tick reconciler.
+- unset (the default): `v2` when the city can run it, else `legacy`
+  (mc-dpo2b; see [Admission](#admission)).
+- `legacy`: the tick reconciler.
 - `v2`: the keyed reconciler.
 - `off`, `auto` and `require`: the gc-enterprise spellings. They are
   deprecated aliases for `legacy`, and each one loads with a non-fatal
@@ -41,17 +43,57 @@ supervisor) call it before the controller socket starts. The latched mode
 never changes for the life of the process. When a reload finds a different
 value on disk, it warns once per transition ("pending restart") and keeps
 running the latched mode. An unknown value refuses to start the city.
-`runsV2()` is the single predicate every v2 branch reads.
+`runsV2()` is the single predicate every v2 branch reads. The controller's
+`identify` socket reply names the latched mode, and `gc runtime drain`,
+`drain-ack` (`gc hook`'s drain-ack among them) and `undrain` follow it
+(`cityRunsV2`), so a config edit cannot split them from the running
+reconciler before restart. A controller whose `identify` reply parses
+without the field predates it and the v2 default, so it is read as legacy
+unless the config sets `session_reconciler = "v2"`. When no `identify` reply
+parses (no controller runs, or only the `ping` fallback answers, as it does
+for a current controller that missed the identify deadline), they fall back
+to the config's resolution. `gc hook` asks only when it prints
+the drain-pending hint, so a claim makes no socket call.
 
 ### Admission
 
 Since the cutover (C9), a city that selects `v2` latches it from config
 alone, and its passes act. The latch still refuses v2 when the composed
-config enables a feature v2 defers (`v2LatchRefusals`: the identity
-circuit breaker, `depends_on`, `max_session_age`, the stall timeouts,
-chat auto-suspend, an unadmitted runtime), and a city whose class
-stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
-remove the key to run legacy.
+config enables a feature v2 defers (`v2LatchRefusals`: `depends_on`,
+`max_session_age`, chat auto-suspend, an unadmitted runtime), and a city
+whose class stores fail C0.7 does not boot. An explicit `v2` that is
+refused never falls back to legacy: set `session_reconciler = "legacy"`.
+
+v2 accepts and ignores the identity circuit breaker and the two stall
+timeouts (`v2IgnoredSettings`, mc-ymynp): the work ladder replaces them,
+or, with `[daemon] work_ladder = "off"`, the backstops it replaced. The
+controller logs each one as deprecated at boot, and doctor warns. Legacy
+still honours them, and only a legacy controller refuses a wake for an open
+respawn circuit (`wakeWillNotStart`).
+
+An unset key resolves from config alone too (`resolveReconcilerMode`,
+`cmd/gc/reconcile_mode.go`, with `v2DefaultFallbacks` in
+`cmd/gc/reconcile_default.go`), so the latch, `gc start` and doctor agree.
+It is v2 unless `v2DefaultFallbacks` names a reason, and then legacy, with
+a boot warning and a doctor warning naming each reason:
+- a latch refusal, as above;
+- conditional writes resolved off (`[beads] conditional_writes = "off"`,
+  or `GC_BEADS_CONDITIONAL_WRITES=off`; unset means `auto`);
+- the sessions or graph class on a store that config does not show to be
+  one C0.7 admits. Only a `sqlite-beads` binding is. The `work` binding's
+  store is decided when it opens, so a class there falls back, and the
+  warning names the storage migration that moves it.
+
+Under the `conditional_writes` builtin default (`auto`, origin `builtin`),
+a store that cannot fence runs as off (`conditionalWritesDefaultAuto`): the
+open logs at debug, no `beads.conditional_writes.degraded` event is recorded,
+and the status block lists no incapable store. No released bd has
+`--if-revision`, so a loud default would warn on every command of every bd
+or exec city. An explicit `auto` or `require` stays loud.
+
+The boot census (unknown-state or duplicate named-claim rows) is store
+state, not config: it stays a hard boot refusal for an unset key resolved
+to v2, and `v2-session-migration` warns about it ahead of time.
 
 A custom `scale_check` is admitted (PAR-SC). The external-reads lane runs
 every custom check off the pass (`allocator_scalecheck_lane.go`), and the
@@ -90,11 +132,17 @@ lasts about one run.
 
 | Value | Result |
 |---|---|
-| `legacy` or unset | OK |
+| `legacy` | OK |
+| unset, resolving to v2 | OK |
+| unset, falling back to legacy | WARN, naming each reason |
 | an alias | WARN |
 | `v2`, admissible | OK |
+| v2 (set or default) with a setting v2 ignores | WARN |
 | `v2`, refused by the latch or by C0.7 | ERROR |
 | an unknown value | ERROR |
+
+Its message names the resolved mode and why: set explicitly, the v2
+default, or the legacy fallback.
 
 ## Model: keys, queue, router
 
@@ -463,7 +511,7 @@ whatever main already has.
 | A5 | A drain-ack stop finalizes only on proven, complete runtime absence. Every re-kill re-certifies first. The close is atomic and comes before the stop | GUAR-005 | The drain-ack tests in `session_reconciler_test.go` | **Adopt** at P4.2. A partial or uncertain observation never finalizes |
 | A6 | Never terminate an attached user's pane, and kill only the exact certified pane | GUAR-006 | `TestAutoSuspendSkipsAttachedSessions` | **Adopt** at P4.2 (drain and stop) and P4.4 (chat auto-suspend) |
 | A7 | Nudges never inject unguarded keystrokes: every tmux send-keys is wrapped in an if-shell token guard | GUAR-007 | None. **Unmet on main under both reconcilers**: tmux nudges call send-keys with no guard (`SendKeysDebounced` for the text and the Enter, and `sendLiteralText`, in `internal/runtime/tmux/tmux.go`) | **Adopt; owner P4 (nudge delivery)**. The gap is in the effect path, so v2 does not widen it, but P4.3's nudge effects must add the guard, and A7 is unmet until they do |
-| A8 | Each due nudge is delivered exactly once, to the right session, across a controller restart | GUAR-008 | The store-backed nudge queue: `TestClaimDueQueuedNudgesClaimsOnceUntilAck`, `TestBeadsNudgeQueueClaimHasExactlyOneWinner`, `TestDispatchAllQueuedNudgesDeliversAndAcks`. None crosses a restart | **Adopt** at P4.3. Until then the nudge patrol fallback runs as maintenance in both modes |
+| A8 | Each due nudge is claimed by one deliverer at a time and delivered at least once, to the right session, across a controller restart. A nudge is delivered again only after an attempt whose outcome is unknown: a crash, timeout or lost acknowledgement between the delivery and its ack, such as an API crash at X12's K3, or a failed close at K5, followed by a same-key retry. A conversation-lane repeat (a re-take after a lapsed lease, or the take of an op released after an attempt whose outcome is unknown) reuses the op's delivery key (`gc:<key>`), unless the runtime refused that key, which a runtime does only for a key that never landed. Every other lane take mints a new key, one after a definite non-delivery included. A nudge-queue repeat reuses the key its batch was pinned to at claim (`DeliveryBatch`), except in two cases: when the bookkeeping for a withheld member of the batch fails (dead-lettering it on a fence mismatch, or withdrawing it), the rest of the batch goes out under a new key (`rekeyQueuedNudgesAfterFailedBookkeeping`), and the hook drain (`claimDueQueuedNudgesForTarget`) delivers into the agent's hook output with no key. A runtime that deduplicates by key (`Caps.Dedup`) drops a repeat under the same key, so the effect lands at most once per key. An adopted legacy API op runs again under its one key, `gc:<op id>:1` (`legacyop.Admission.DeliveryKey`), and such a runtime drops that repeat only when the first run sent the message live. A message the first run queued is delivered by the queue under the queue's own key (`worker.MessageRequest.DeliveryKey`): the retry's lookup misses it, and the message is delivered again (open bug ga-udhujn). The two nudge-queue exceptions and the legacy op's queued message can land twice even on such a runtime. On every runtime, the conversation lane records on the op the last attempt whose outcome is unknown (`maybe_delivered`). The lane's repeat to a `Caps.Dedup` runtime looks its key up first, and a delivery the runtime already holds is replayed, not sent again. On a runtime that cannot deduplicate, the lane's redelivered text carries the plain line "(this message may repeat an earlier one)", with no id: as the text's last line or, in a batch of only notices rendered as a system-reminder block (tmux and the hook), as the last line inside the block (`RenderDelivery`). No nudge-queue or legacy-op repeat carries that line. A lane op declared `at_most_once` is never delivered again: its ambiguous attempt closes `failed{ambiguous_delivery}`. Once NQ-3b wires the queue-mode shim (`cmd/gc/nudge_queue_shim.go`, no production caller yet), a mode switch adds repeats. A move clears an item's `DeliveryBatch`, so an item whose send under the old key had an unknown outcome repeats under a new key, which a `Caps.Dedup` runtime cannot drop. Three others follow no unknown outcome: a claimant still on the old mode can deliver an item the shim also moves, a crash between the move's two steps can deliver an item twice when the destination delivers the copy before the move re-runs, and the open duplicate ga-c9fwn7 queues a wait reminder again after the beads queue delivered it | GUAR-008 | The store-backed nudge queue: `TestClaimDueQueuedNudgesClaimsOnceUntilAck`, `TestBeadsNudgeQueueClaimHasExactlyOneWinner`, `TestDispatchAllQueuedNudgesDeliversAndAcks`. The two claim tests prove a claim has one winner until its ack, and the dispatch test proves one injection on a fault-free dispatch. None injects a fault between the delivery and its ack, and none crosses a restart. The file queue (in production) and the beads queue (no production caller yet) are both at least once (DES-NQ §9, as the header of `cmd/gc/nudge_queue_shim.go` records): a delivery whose ack is lost stays in flight until its lease expires, then is redelivered (`cmd/gc/nudge_queue_lock_policy.go`). X12 (`test/conversationlane/x12_matrix_test.go`) accepts more than one execution only in the window between an effect and its ack (API K3 or K5 with a retry) | **Adopt, amended**, at P4.3. Exactly-once delivery is not a goal: no path can close the gap between an effect and its ack, and a keystroke runtime has no key to deduplicate on. A restart-crossing test of the at-least-once bound is still owed. Until P4.3 the nudge patrol fallback runs as maintenance in both modes |
 | A9 | Routed work gets a pool member: reuse the oldest idle member, else grow, else fall back at the cap. Manual and dependency-only sole members are refused | GUAR-009 | `build_desired_state_test.go` | **Adopt** at P3 (allocator). Caps count the cache plus the intent ledger |
 | A10/A11 | A session waiting on a dependency starts once when the dependency closes. A canceled or revoked wait starts nothing | GUAR-010 | None | **Adopt** at P4.3, through a router dependency-to-waiter index. The cancellation is re-read before the start |
 | A12 | On ambiguous input, refuse with zero effects: no writes, no runtime calls | GUAR-011 | Scattered fail-closed checks; no zero-effect counters | **Adopt as house style** for every P3/P4 decide. Each refusal test asserts a zero-effect counter. The P2 skeleton meets it vacuously (`TestV2TraceOnlyControllersWriteNothing`) |

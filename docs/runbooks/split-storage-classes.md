@@ -229,6 +229,217 @@ On a converged city `source:` reads 0 and `binding:` carries the count. On an
 unconverged city `binding:` reads zero without the database being created to
 learn it.
 
+## gc bd on split cities
+
+On a split city, `gc bd` is an allowlist. bd writes whatever it is told into
+the work store. A bead that lands there with an infrastructure class (a
+`gc:session` label, a `gc.root_bead_id`, a `message` type, and so on) is
+stranded, and every later routed `gc` command refuses until it is repaired.
+
+How a command gets through:
+
+- **The bd binary's command tree must match a pinned inventory.** gc does
+  not trust the version string: every Enterprise build reports 1.3.0, and an
+  OSS build from main reports 1.3.2 with a tree that differs from the 1.3.2
+  tag's. Instead gc walks the binary's `--help` for every visible command and
+  compares the commands, aliases and flags (shorthand, type, default,
+  no-value default, usage) with the visible projection of each pinned
+  inventory: bd 1.3.2, and the bd 1.3.0 Enterprise build at commit
+  `77612097cec0`. A binary that matches one is judged against that
+  inventory; any other is refused, with a `gc_bd.refused` event and a
+  `gc doctor` error (check `bd-command-inventory`, which `gc start` also
+  warns about). The inventory is bd's own command tree, hidden flags
+  included, dumped from source by `internal/bdflags/inventorygen/generate.sh`
+  with its provenance (commit, build tags, Go, cobra and pflag versions).
+  Hidden commands and flags are not in `--help`, so for those gc relies on
+  the pinned inventory of the build whose visible tree matched.
+- **The walk is isolated and must be conclusive.** gc runs each
+  `bd <path> --help` in a scratch directory under `.gc/cache/tmp` that is
+  also bd's `HOME` and `TMPDIR`, with only `PATH` besides, so a caller's
+  environment (`CLICOLOR_FORCE`, `BD_NAME`, `BEADS_DIR`, `TMPDIR`) cannot
+  change what it reads. The walk stops at the first level of the tree that
+  no inventory matches, and never runs a command no inventory knows. On a
+  city whose `.gc` is read-only the cache is read but not written. Each run
+  is killed with its process group after 20 seconds, and the whole walk
+  after two minutes; stale scratch dirs are removed on the next walk. The
+  binary must also be a Go build of bd's `cmd/bd` with the cobra and pflag
+  versions the matched inventory records, which rejects a mise or asdf shim
+  or a wrapper script: point `PATH` at the real binary.
+- **Only conclusive verdicts are cached.** gc keys a verdict by the binary's
+  resolved path, device, inode, size, modification time and change time, and
+  by the set of inventories this gc embeds, in `.gc/cache/bd-inventory.json`
+  (locked across processes, so a cold cache costs one walk). Any replacement
+  (`cp`, `cp -p`, `install -p`, `rsync -t`, `tar`, a rename into place) and
+  any gc upgrade that changes the inventories re-judges the binary. A walk
+  that fails, times out or reads a root with no commands is reported as an
+  error and remembered for a minute; it is never cached as a refusal.
+- **The vouch is a convenience.** `gc storage vouch-bd` (with `--rig <rig>`
+  for a rig's bd) walks the binary for real, never trusting a cached verdict
+  or an existing vouch, and, only if its tree matches, records the binary's
+  path, its bytes (sha256), the inventory and this gc's inventory set in
+  `.gc/bd-inventory-vouch.json`. That binary is then admitted without a walk.
+  The first admission by a vouch in each gc process (from the vouch or from
+  the cached verdict it produced) records a `gc_bd.vouch_used` event. A
+  binary that matches nothing is refused and nothing is written. A gc whose
+  pinned inventories differ (an upgrade) ignores the vouch and walks the
+  binary again. The vouch never goes in `city.toml`, so every gc version
+  still loads the city, and you never edit a file to vouch.
+- **Neither the vouch nor the cache is a security boundary.** Anyone who can
+  write `.gc` can forge either. `gc doctor` therefore walks each distinct bd
+  binary for real once per run and reports a binary whose cached or vouched
+  verdict the walk contradicts (the walk also corrects the cache). An
+  unreadable vouch file is ignored with a doctor warning. `gc start`'s
+  warm-up reports from the cache only: a binary gc has not judged yet is
+  "pending", not a failure.
+- **gc resolves the command exactly as bd does,** with a mirror of that tree
+  under the same cobra and pflag versions. It refuses any argv where cobra's
+  command lookup and pflag's flag parse disagree about which arguments name
+  the command. It also refuses any short-flag run that ends in a flag taking
+  the next argument (`-qC x`); spell such a flag on its own.
+- **Only the commands and flags below are forwarded.** Anything else is
+  refused, and nothing is written. The refusal names the command and the `gc`
+  alternative. `--help` on any command is allowed, because bd only prints
+  help.
+
+Single-store cities are unaffected: there `gc bd` forwards everything
+unchanged.
+
+**Reads:** `show`, `list`, `ready`, `search`, `query`, `count`, `children`,
+`blocked`, `stale`, `status`, `statuses`, `types`, `where`, `info`, `context`,
+`version`, `help`, `human`, `prime`, `history`, `graph`, `export`, `state`,
+`state list`, `comments`, `comments list`, `label list`, `label list-all`,
+`dep list`, `dep tree`, `dep cycles`, `mol current`, `mol show`,
+`mol progress`, `formula list`, `formula show`, `gate list`, `config get`,
+`config list`, `config show`, `backup status`, `dolt status`, `dolt show`.
+gc serves its own `release-if-current` itself.
+
+**Writes that change no field the class depends on:** `close`, `reopen`,
+`assign`, `priority`, `note`, `comment`, `comments add`,
+`heartbeat`, `unclaim`, `reclaim`, `defer`, `undefer`, `dep remove`,
+`dep unrelate`, `promote`, `gate resolve`, `gate check`,
+`backup sync`, `backup init`, `dolt start`,
+`dolt stop`, `dolt push`, `dolt commit`, and `init` (only `--prefix`,
+`--non-interactive`, `--skip-hooks`, `--skip-agents`, `--init-if-missing` and
+`--recreate-missing`).
+
+**Writes gc judges:**
+
+- `create` and `q`: the new bead's type, labels and metadata are classified,
+  including a `--metadata @file`, which gc reads, and the labels bd copies
+  from a `--parent` (unless `--no-inherit-labels`). bd copies the labels of
+  the parent its own store holds, so a parent that store's read does not find
+  exactly is refused. An `--id` inside a class
+  binding's reserved namespace is refused. `create --graph` is refused: a
+  graph plan mints a bead per node and no shipped workflow uses it.
+- `delete` (positionals and `--from-file`): every id must name exactly one
+  bead of the work store (bd would delete whatever bead a short id
+  prefixes). Refused when a class-binding bead depends on one of the beads,
+  or an open cross-store drain gate waits on it (`gc.cross_store_blocker`),
+  because that edge or gate would dangle; `--gc-allow-dangling-edges` (gc's
+  own flag; bd never sees it) overrides that check, not the id check.
+  `--cascade` is refused.
+- `init`: a `--prefix` inside a class binding's reserved namespace is
+  refused.
+- `update`, `label add`, `label remove`, `tag` and `set-state`: the write is
+  judged against the bead its id resolves to. If the id resolves to no bead,
+  to a different bead (a short or partial id), or cannot be read, a write that
+  touches type, labels or metadata is refused.
+- `label propagate`: a class-marker label is refused.
+- `import`: rows of a class the store does not hold are refused, or left out
+  with `--skip-infra`. gc reads the file the way bd's import does: a line
+  with a `_schema` key is the export header, a line whose `_type` key is
+  exactly `"memory"` is a memory record, and a row whose status is
+  `tombstone` is skipped. bd imports every other line as an issue, whatever
+  else its `_type` says, so gc classifies every other line.
+- `mol burn` (the gastown patrols): every id must name exactly one bead of
+  the work store, as for `delete`. The burn is refused when a class-binding
+  bead depends on, or an open cross-store drain gate waits on, the molecule
+  or any bead bd lists below it (`bd list --parent`, recursively), because
+  bd deletes all of them at once. For a persistent (non-wisp) molecule it is
+  also refused when one waits on a bead that depends on any of those,
+  through any edge (`bd dep list --direction=up`, transitively): on a
+  proxied-server store bd's burn deletes those beads too. `--dry-run`
+  deletes nothing.
+- `mol wisp gc` (the deacon prompt): gc first asks bd which wisps the same
+  command would delete (it runs it with `--dry-run --json`). It refuses when
+  a class-binding bead depends on, or an open cross-store drain gate waits
+  on, any of them. Otherwise gc has bd delete exactly the wisps it checked
+  (`bd delete --force`, which prints delete's report) instead of running the
+  gc, which would select again: a wisp that becomes a candidate after the
+  check is left for the next gc, and a checked wisp that a second dry run no
+  longer selects is left out. `--closed --force`, which deletes every closed
+  wisp whatever its age, is refused. So is an `--age` under an hour (bd's
+  default): a shorter age reaches wisps closed so recently that the gate
+  sweep may not yet have released the class-binding gates waiting on them,
+  and gc would refuse the whole gc while one of those gates is open.
+- `purge` and `prune` (the core reaper's purge and session prune): bd
+  deletes the closed beads it selects all at once, and its dry run counts
+  them without naming them, so gc cannot check each one against the class
+  binding as it does for `delete`. gc holds a run that deletes (`--force`
+  without `--dry-run`) to age instead: it must give `--older-than`, which gc
+  reads as bd does (`7`, `7d`, `1w`, `168h`), and an age under a week (168h)
+  is refused, as is `prune --ignore-references`. The gate sweep, which runs
+  every 30 seconds, releases a class-binding gate once its work blocker
+  closes, so a bead closed a week ago is clear of the open cross-store drain
+  gates unless the sweep has not run since then. The reaper's default ages
+  (`GC_REAPER_PURGE_AGE` 168h, `GC_REAPER_SESSION_PURGE_AGE` 720h) meet that
+  floor. Set either one under 168h and that reaper step's `gc bd` call is
+  refused each time the step runs: the reaper records an anomaly, and gc
+  records a `gc_bd.refused` event. Age does not cover a dependency edge that a
+  class-binding bead itself holds on a closed work bead (a migration can carry
+  such edges into the binding): `purge` and `prune` can delete that work bead
+  and leave the edge dangling.
+- `batch`: every `create` line is classified.
+- `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
+  no backtick-quoted Dolt names.
+- `config set`: only `types.custom` and `types.infra`.
+- `mol wisp` and `mol wisp create`: only with `--root-only` (the gastown
+  patrols' shape). That creates a single bead, and gc judges every bead bd
+  could clone for it before bd runs.
+- `cook`: only without `--persist`.
+- **No edge ever crosses stores.** `dep add` (positionals, `--blocked-by`,
+  `--depends-on`), `dep relate`, `link`, `duplicate` (`--of`), `supersede`
+  (`--with`), `gate create` (`--blocks`), `create`/`q`/`update --parent`, `create --deps` and
+  `--waits-for`, the `dep add` lines of a `batch`, and the dependencies of an
+  `import` must each name beads of the city's work stores that no class
+  binding holds. Each endpoint is read in the work store its id prefix names,
+  so a dependency between a rig's bead and the city's (or another rig's) is
+  allowed. An `external:` reference is not a bead and is allowed. Through the
+  by-id door, `update --parent` of a binding resident must name a parent the
+  same binding holds. `dep add --file` is refused.
+
+**Aliases forwarded:** `new` (create), `done` (close), `view` (show), `hb`
+(heartbeat), `stats` (status), `dep rm` (dep remove). Every other alias is
+refused, `mol fart` and `protomolecule` included.
+
+**Notable refusals and what to use instead:**
+
+| Refused | Use instead |
+|---|---|
+| `mol pour`, `mol bond`, `mol wisp` without `--root-only`, `cook --persist`, `swarm` | `gc sling <target> <formula>` or `gc formula cook <formula>`, which put every bead in the store that holds its class |
+| `backup restore` | the split-city path in `examples/bd/dolt/docs/journal-corruption-recovery.md` |
+| `dolt pull`, `vc`, `federation`, `sync`, `branch`, `conflicts`, `migrate`, `admin`, `init --db` | not available through `gc bd` on a split city: these maintain the store itself, and gc cannot judge what they write. Stop the city (`gc stop`) and have the store's operator carry out the maintenance under that operation's own runbook; then `gc start`, whose boot check refuses to serve if the work store holds an infrastructure row, and `gc doctor` |
+| `serve` | the gc API, which routes writes by class |
+| `create-form`, `edit` | `gc bd create` / `gc bd update` with flags |
+| flags that point bd at another store: `-C`/`--directory`, `--db`, `--database`, `--profile`, `--server-url`, `--global`, `create`/`gate create --repo`, `dolt push --remote`, `cook --search-path`, and init's backend, server and remote flags | `gc bd --rig <rig>` to pick a scope; for anything else, none |
+
+There is no override flag for these. gc cannot verify a backup's age or a
+merged revision's contents against the split, so these commands stay refused.
+No refusal sends you around gc: going around it would skip every check above.
+
+Every refusal also writes a `gc_bd.refused` event to the city's event log,
+with the command path, the verb, the scope, the caller (`GC_AGENT`) and the
+session, so a script's `|| true` cannot hide one.
+
+**Requesting an addition.** The allowlist lives in
+`cmd/gc/bd_split_allowlist.go`. To add a command, open an issue or a PR that
+names the workflow that needs it and says why the command cannot change a
+bead's class or write a cross-store edge, or how a judge would decide it. Add
+a row and its tests, and add it to this section;
+`TestGcBdSplitAllowlistIsDocumented` checks that this section lists every
+allowlisted command. Until then the command is not available through `gc bd`
+on a split city.
+
 ## Upgrading a city migrated by gc 1.5.0
 
 gc 1.5.0's migration kept the work store's copies of every bead it moved. A

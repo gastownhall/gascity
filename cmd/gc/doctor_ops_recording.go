@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -60,7 +61,10 @@ func (*opsRecordingDoctorCheck) WarmupEligible() bool { return false }
 func (*opsRecordingDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // Run implements doctor.Check. With a gate on: an Error (any gate require)
-// or a Warning (auto only) when the store cannot record ops, else OK. With
+// or a Warning (auto only) when the store cannot record ops, else OK; gates
+// that are auto only by their builtin default treat a store that cannot
+// record ops at all as off (defaultCannotRecord), and record nothing on a
+// sessions store that is not SQLite-backed (defaultNotRecorded). With
 // every gate off: OK while the sessions store holds no submitted op row
 // (opjournal.HasSubmittedOps), and a Warning when that cannot be read. Then,
 // for either, a Warning for expired legacy ops left open or a scan for them
@@ -96,12 +100,21 @@ func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 			return r
 		}
 	}
+	if gates != "" && opsGatesBuiltinDefaultOnly(c.flags) {
+		if err := opjournal.CheckRecordsByDefault(sessions); err != nil {
+			return c.defaultNotRecorded(r, sessions, err)
+		}
+	}
 	st, err := opjournal.NewStore(sessions, c.clk)
 	if err != nil {
 		if gates == "" {
 			return offCannotRead(r, err)
 		}
-		return c.cannotRecord(r, gates, require, legacyop.DegradeReason(err), err)
+		reason := legacyop.DegradeReason(err)
+		if legacyop.CannotRecord(reason) && opsGatesBuiltinDefaultOnly(c.flags) {
+			return defaultCannotRecord(r, sessions, reason, err)
+		}
+		return c.cannotRecord(r, gates, require, reason, err)
 	}
 	return c.scanExpired(r, st, gates)
 }
@@ -116,6 +129,12 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 		state = "ops recording on (" + gates + ")"
 		capable = state + ": the sessions store can record ops"
 	}
+	return c.scanExpiredAs(r, st, gates, state, capable)
+}
+
+// scanExpiredAs is scanExpired reporting state, and capable when nothing is
+// wrong.
+func (c *opsRecordingDoctorCheck) scanExpiredAs(r *doctor.CheckResult, st *opjournal.Store, gates, state, capable string) *doctor.CheckResult {
 	scan, err := st.ListExpiredLegacy(c.clk.Now().Add(-opsRecordingStaleAfter), opSweepLimit)
 	if err != nil {
 		r.Status = doctor.StatusWarning
@@ -124,7 +143,7 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 	}
 	oldest := staleOpDetails(r, scan.Expired)
 	if len(scan.Undecodable) > 0 {
-		r.Details = append(r.Details, fmt.Sprintf("%d op row(s) this gc cannot decode, which a newer gc may have written:%s",
+		r.Details = append(r.Details, fmt.Sprintf("%d op row(s) this gc cannot decode (a newer gc wrote them, or they are not valid to this one):%s",
 			len(scan.Undecodable), opSweepIDs(scan.Undecodable)))
 	}
 	switch {
@@ -149,7 +168,7 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 		r.Status = doctor.StatusWarning
 		r.Message = capable + ", but the scan for expired legacy ops stopped at its page cap " +
 			"behind a head of lane, undecodable or not yet stale legacy op rows, so the legacy ops behind that head were not checked"
-		r.FixHint = "upgrade this gc if a newer gc wrote the rows it cannot decode (see the details), or find why so many lane or legacy ops are still open; " +
+		r.FixHint = "inspect the rows this gc cannot decode (see the details), and upgrade it if a newer gc wrote them, or find why so many lane or legacy ops are still open; " +
 			"the controller's op sweeper misses the legacy ops behind a head of lane, undecodable or in-flight rows the same way, until that head shrinks"
 		if gates == "" {
 			r.FixHint += " (with every ops gate off it stops at that head, so restart the controller once the head has shrunk)"
@@ -177,14 +196,7 @@ func staleOpDetails(r *doctor.CheckResult, stale []opjournal.Op) (oldest time.Ti
 // gatesOn lists the gates that are not off, as key=mode, and whether any is
 // require.
 func (c *opsRecordingDoctorCheck) gatesOn() (on []string, require bool) {
-	for _, g := range []struct {
-		key  string
-		mode rollout.Mode
-	}{
-		{rollout.KeyOpsContent, c.flags.OpsContent()},
-		{rollout.KeyOpsControl, c.flags.OpsControl()},
-		{rollout.KeyOpsLifecycle, c.flags.OpsLifecycle()},
-	} {
+	for _, g := range opsGateModes(c.flags) {
 		if g.mode == rollout.Auto || g.mode == rollout.Require {
 			on = append(on, g.key+"="+string(g.mode))
 			require = require || g.mode == rollout.Require
@@ -209,6 +221,80 @@ func (c *opsRecordingDoctorCheck) cannotRecord(r *doctor.CheckResult, gates stri
 	return r
 }
 
+// defaultCannotRecord reports a sessions store that cannot record ops under
+// gates that are auto only by their builtin default, which treat it as off:
+// OK while the store holds no submitted op row, as with every gate off, and a
+// Warning when it holds one, since those ops cannot be checked or swept.
+func defaultCannotRecord(r *doctor.CheckResult, sessions beads.SessionStore, reason string, err error) *doctor.CheckResult {
+	has, herr := opjournal.HasSubmittedOps(sessions)
+	if herr != nil {
+		return offCannotRead(r, herr)
+	}
+	state := fmt.Sprintf("the ops gates are auto by default, but the sessions store cannot record ops (%s), so requests run unrecorded", reason)
+	if !has {
+		r.Message = state
+		return r
+	}
+	r.Status = doctor.StatusWarning
+	r.Message = state + "; it holds open op rows that cannot be checked or swept"
+	r.Details = append(r.Details, err.Error())
+	r.FixHint = opsRecordingRemedy(reason, false)
+	return r
+}
+
+// defaultNotRecorded reports a sessions store the builtin auto default does
+// not record on (err is the *opjournal.NotRecordedByDefaultError): OK, as
+// with every gate off, so the store is only checked for the expired legacy
+// ops an earlier explicit gate may have left, which the sweeper still closes.
+// A store holding none is told whether an explicit gate would record there
+// (explicitGateHint).
+func (c *opsRecordingDoctorCheck) defaultNotRecorded(r *doctor.CheckResult, sessions beads.SessionStore, err error) *doctor.CheckResult {
+	where := "a sessions store that is not SQLite-backed"
+	var notDefault *opjournal.NotRecordedByDefaultError
+	if errors.As(err, &notDefault) {
+		if notDefault.Backend.DoltServed {
+			where = "a Dolt-served sessions store"
+		} else {
+			where += " (" + notDefault.Backend.Kind + ")"
+		}
+	}
+	state := "ops recording: auto (default) records nothing on " + where
+	has, herr := opjournal.HasSubmittedOps(sessions)
+	if herr != nil {
+		return offCannotRead(r, herr)
+	}
+	if !has {
+		r.Message = state + "; " + c.explicitGateHint(sessions)
+		return r
+	}
+	st, oerr := opjournal.NewStore(sessions, c.clk)
+	if oerr != nil {
+		reason := legacyop.DegradeReason(oerr)
+		if legacyop.CannotRecord(reason) {
+			return defaultCannotRecord(r, sessions, reason, oerr)
+		}
+		return offCannotRead(r, oerr)
+	}
+	return c.scanExpiredAs(r, st, "", state, state)
+}
+
+// explicitGateHint says whether an explicit [ops] gate would record over
+// sessions, a store the builtin default records nothing on: it opens the op
+// store as such a gate would, capability probe included, so a store that
+// cannot record ops at all (a released bd, a store with no id prefix) is not
+// offered an opt-in that would only run its requests unrecorded, or refuse
+// them under require.
+func (c *opsRecordingDoctorCheck) explicitGateHint(sessions beads.SessionStore) string {
+	_, err := opjournal.NewStore(sessions, c.clk)
+	if err == nil {
+		return "set the [ops] gates to auto or require to record ops here"
+	}
+	if reason := legacyop.DegradeReason(err); legacyop.CannotRecord(reason) {
+		return fmt.Sprintf("the store cannot record ops (%s), so an explicit [ops] gate would not record here either", reason)
+	}
+	return "an [ops] gate set to auto or require records here if the store can record ops"
+}
+
 // offCannotRead reports, with every gate off, a sessions store that could
 // not be checked for expired legacy ops: a Warning, as nothing is refused,
 // but the ops the sweeper may have left open go unseen.
@@ -230,7 +316,7 @@ func opsRecordingRemedy(reason string, gatesOn bool) string {
 	}
 	switch reason {
 	case legacyop.DegradeConditionalWritesUnsupported:
-		return "use a sessions store with conditional writes (for example a bd that supports --if-revision)" + orOff
+		return "use a sessions store with conditional writes (a native store; no released bd supports --if-revision yet)" + orOff
 	case legacyop.DegradeNoNamespace:
 		return "configure an id prefix for the sessions store" + orOff
 	default:

@@ -6,7 +6,10 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-var _ runtime.FencedInputProvider = (*Provider)(nil)
+var (
+	_ runtime.FencedInputProvider       = (*Provider)(nil)
+	_ runtime.FencedInteractionProvider = (*Provider)(nil)
+)
 
 // InputFencing reports how the backend name routes to fences its input.
 func (p *Provider) InputFencing(name string) runtime.InputFencing {
@@ -40,4 +43,16 @@ func (p *Provider) InterruptFenced(ctx context.Context, name string, fence runti
 		return err
 	}
 	return fp.InterruptFenced(ctx, name, fence)
+}
+
+// ResponseFencing reports how the backend name routes to fences its answers.
+func (p *Provider) ResponseFencing(name string) runtime.InputFencing {
+	return runtime.ResponseFencingFor(p.route(name), name)
+}
+
+// RespondFenced forwards to the routed backend, or refuses with
+// runtime.ErrInputFenceUnsupported when it cannot fence answers to name. It
+// never falls through to the other backend.
+func (p *Provider) RespondFenced(ctx context.Context, name string, fence runtime.InputFence, response runtime.InteractionResponse) error {
+	return runtime.RespondFencedVia(ctx, p.route(name), name, fence, response)
 }

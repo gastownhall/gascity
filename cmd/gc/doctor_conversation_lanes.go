@@ -66,68 +66,103 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		kinds = c.cfg.Ops.Authoritative
 	}
 	if len(kinds) == 0 {
-		r.Message = "conversation lanes are off"
-		// The controller reads the list once, at start, so it serves the list
-		// it started with until it restarts. A controller that does not
-		// answer, or refused its list, serves none.
-		st, err := c.ask(ctx)
-		if err == nil && len(st.Kinds) > 0 && (st.State == laneHostStateRunning || st.State == laneHostStateUnavailable) {
-			r.Status = doctor.StatusWarning
-			r.Severity = doctor.SeverityAdvisory
-			r.Message = fmt.Sprintf("conversation lanes are off in city.toml, but the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", "))
-			r.FixHint = "restart the controller to apply the emptied list"
-		}
+		c.reportOff(ctx, r)
 		return r
 	}
 	listed := strings.Join(kinds, ", ")
+	if c.storeProblem(r, listed) {
+		return r
+	}
+	st, err := c.ask(ctx)
+	if laneHostProblem(r, listed, st, err) {
+		return r
+	}
+	reportLaneService(r, listed, kinds, st)
+	return r
+}
+
+// reportOff reports the list empty on r: OK, unless the controller still
+// serves, or waits for its store to serve, the list it started with.
+func (c *conversationLanesDoctorCheck) reportOff(ctx *doctor.CheckContext, r *doctor.CheckResult) {
+	r.Message = "conversation lanes are off"
+	// The controller reads the list once, at start, so it serves the list
+	// it started with until it restarts. A controller that does not
+	// answer, or refused its list, serves none.
+	st, err := c.ask(ctx)
+	if err == nil && len(st.Kinds) > 0 && (st.State == laneHostStateRunning || st.State == laneHostStateUnavailable) {
+		r.Status = doctor.StatusWarning
+		r.Severity = doctor.SeverityAdvisory
+		r.Message = fmt.Sprintf("conversation lanes are off in city.toml, but the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", "))
+		r.FixHint = "restart the controller to apply the emptied list"
+	}
+}
+
+// storeProblem reports on r, and says whether, the sessions store cannot
+// host the listed kinds: the city store does not open or has no sessions
+// store, a Warning, or cannot apply guarded batches, an Error.
+func (c *conversationLanesDoctorCheck) storeProblem(r *doctor.CheckResult, listed string) bool {
 	store, err := c.open()
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("conversation lanes on (%s); opening the city store failed: %v", listed, err)
-		return r
+		return true
 	}
 	capErr := laneStoreCapability(c.sessions(store))
 	_ = closeBeadStoreHandle(store)
-	if errors.Is(capErr, errLaneStoreMissing) {
+	switch {
+	case errors.Is(capErr, errLaneStoreMissing):
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("conversation lanes on (%s): the city store has no sessions store", listed)
-		return r
-	}
-	if capErr != nil {
+	case capErr != nil:
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("conversation lanes on (%s): %v", listed, capErr)
 		r.FixHint = "remove the kind from [ops] authoritative, or bind the sessions class to a native store"
-		return r
+	default:
+		return false
 	}
-	st, err := c.ask(ctx)
+	return true
+}
+
+// laneHostProblem reports on r, and says whether, the controller's
+// lane-status reply st (or its error) shows no lane host serving: no reply,
+// or a host that waits for its sessions store, a Warning; no host, or one it
+// refused to start, an Error.
+func laneHostProblem(r *doctor.CheckResult, listed string, st conversationLaneStatus, err error) bool {
 	switch {
 	case err != nil:
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("conversation lanes on (%s): no lane-status reply (controller not answering, or a gc that predates the lane host)", listed)
 		r.Details = append(r.Details, err.Error())
-		return r
 	case st.State == laneHostStateNone || st.State == "":
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("conversation lanes on (%s): the controller runs no lane host for this city, so the listed kinds go unserved", listed)
 		r.FixHint = "the running controller predates the lane host; restart the city (`gc stop`, then `gc start`), or empty [ops] authoritative"
-		return r
 	case st.State == laneHostStateUnavailable:
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("conversation lanes on (%s): the lane host waits for the controller's sessions store: %s", listed, st.Reason)
 		r.FixHint = "check the controller log for why the city store did not open"
-		return r
 	case st.State == laneHostStateRefused:
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("conversation lanes on (%s): the controller refused to start the lane host: %s", listed, st.Reason)
 		r.FixHint = "remove the kind from [ops] authoritative, or bind the sessions class to a native store, then restart the controller"
-		return r
+	default:
+		return false
 	}
+	return true
+}
+
+// reportLaneService reports a running lane host's service of the listed
+// kinds on r: a Warning when it runs another list than city.toml's, has
+// quarantined op rows, or failed its last pass or anything since its last
+// good one; else OK with the last pass's age. Its quarantined rows, last
+// error and waits are details.
+func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st conversationLaneStatus) {
 	var warnings []string
 	if !slices.Equal(st.Kinds, kinds) {
 		warnings = append(warnings, fmt.Sprintf("the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", ")))
 	}
 	if st.Quarantined > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined, which a newer gc may have written", st.Quarantined))
+		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined: a newer gc wrote them, or they are not valid to this one", st.Quarantined))
 		r.Details = append(r.Details, st.QuarantinedIDs...)
 	}
 	if st.LastError != "" {
@@ -136,28 +171,38 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	for _, w := range st.Waiting {
 		r.Details = append(r.Details, laneWaitingDetail(w))
 	}
-	pass := "no pass yet"
-	if st.LastPassAt != "" {
-		pass = "last pass " + laneAge(st.LastPassAgeMS) + " ago"
-	}
-	switch {
-	case st.LastPassFailed:
-		warnings = append(warnings, "the last pass failed")
-	case st.ErrorsSinceSuccess > 0:
-		warnings = append(warnings, fmt.Sprintf("%d failure(s) since the last pass that succeeded", st.ErrorsSinceSuccess))
-	}
-	if (st.LastPassFailed || st.ErrorsSinceSuccess > 0) && st.LastSuccessAt != "" {
-		pass += ", last success " + laneAge(st.LastSuccessAgeMS) + " ago"
+	pass, failure := lanePassSummary(st)
+	if failure != "" {
+		warnings = append(warnings, failure)
 	}
 	if len(warnings) > 0 {
 		r.Status = doctor.StatusWarning
 		r.Severity = doctor.SeverityAdvisory
 		r.Message = fmt.Sprintf("conversation lanes on (%s), %s: %s", listed, pass, strings.Join(warnings, "; "))
-		r.FixHint = "see the details and the controller log; upgrade this gc if a newer gc wrote the rows it cannot decode; restart the controller to apply a changed list"
-		return r
+		r.FixHint = "see the details and the controller log; inspect the rows this gc cannot decode, and upgrade it if a newer gc wrote them; restart the controller to apply a changed list"
+		return
 	}
 	r.Message = fmt.Sprintf("conversation lanes on (%s): %s, %d conversation(s) in service", listed, pass, st.Workers)
-	return r
+}
+
+// lanePassSummary is the lane host's last pass as the check reports it, with
+// the last success's age after a failure, and the warning its failures
+// raise, "" for none.
+func lanePassSummary(st conversationLaneStatus) (pass, failure string) {
+	pass = "no pass yet"
+	if st.LastPassAt != "" {
+		pass = "last pass " + laneAge(st.LastPassAgeMS) + " ago"
+	}
+	switch {
+	case st.LastPassFailed:
+		failure = "the last pass failed"
+	case st.ErrorsSinceSuccess > 0:
+		failure = fmt.Sprintf("%d failure(s) since the last pass that succeeded", st.ErrorsSinceSuccess)
+	}
+	if failure != "" && st.LastSuccessAt != "" {
+		pass += ", last success " + laneAge(st.LastSuccessAgeMS) + " ago"
+	}
+	return pass, failure
 }
 
 // ask is the lane-status reply of ctx's city's controller.

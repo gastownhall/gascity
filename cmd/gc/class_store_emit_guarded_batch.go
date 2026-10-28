@@ -18,9 +18,10 @@ import (
 // Only an update that writes a status is read before the batch: one that
 // leaves the status alone cannot open or close the row, so it is an update
 // whatever the row's state. Each row is still re-read once after the batch for
-// its payload. Journal rows written through batches are expected to stop
-// emitting bead.* events altogether (DES-O1 D18, V2-16); until then this keeps
-// the cost to one read per item. The pre-batch reads run before the backing
+// its payload; an operation-journal row's re-read names the conversation
+// whose controller doorbell emit rings for it instead of a bead.* event
+// (DES-O1 D18, class_store_emit_oprows.go). The pre-batch reads run before
+// the backing
 // validates the batch, so a batch it refuses as invalid still pays them.
 //
 // None of the wrapper's own reads outlast ctx: a caller bounds the batch by it
@@ -30,7 +31,9 @@ import (
 // backing does with an ended ctx. Once ctx ends after the batch landed, the
 // re-reads stop and nothing is journaled, with one diagnostic: the batch
 // still succeeded, and the op-journal rows guarded batches write are read
-// live by the lane host, not through these events.
+// live by the lane host. Nothing rings the controller for them then, so
+// they are announced only as a write no controller answered is
+// (class_store_emit_oprows.go).
 func (s *emittingClassStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
 	batcher, ok := beads.GuardedBatcherFor(s.Store)
 	if !ok {

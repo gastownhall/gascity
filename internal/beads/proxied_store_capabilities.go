@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -126,8 +127,9 @@ func (s *ProxiedStore) DepMetadata(issueID, dependsOnID string) (string, bool, e
 // guard exists to keep a relocated id from becoming.
 //
 // A demoted store answers with the bd leaf's own semantics, through its batch
-// when it has one. A bd leaf without one is looped through DepList on THIS
-// store, which keeps the demotion routing live on every id.
+// when it has one. A bd leaf without one, or whose backend refuses the batch
+// (ErrDepListBatchUnsupported), is looped through DepList on THIS store, which
+// keeps the demotion routing live on every id.
 func (s *ProxiedStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if native := s.nativeLeaf(); native != nil {
 		if err := s.guardRelocatedIDs("dep list batch", ids...); err != nil {
@@ -137,7 +139,10 @@ func (s *ProxiedStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 		return deps, s.classifyReadError(err)
 	}
 	if batch, ok := DepListBatchFor(s.bd); ok {
-		return batch.DepListBatch(ids)
+		deps, err := batch.DepListBatch(ids)
+		if !errors.Is(err, ErrDepListBatchUnsupported) {
+			return deps, err
+		}
 	}
 	result := make(map[string][]Dep, len(ids))
 	for _, id := range ids {

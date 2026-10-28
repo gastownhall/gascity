@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -995,6 +996,15 @@ store, copy them into the binding with
 				return nil
 			}
 
+			// --meta is parsed before anything is cooked: the class-must-not-flip
+			// guard below judges it against the recipe root, and a refused
+			// stamp must leave no molecule behind.
+			rootMeta, err := parseMetadataArgs(metadata)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
+			cookRoutes := cliStorageRoutes(cityPath)
+
 			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
@@ -1040,6 +1050,9 @@ store, copy them into the binding with
 				// the store that will own it, so the root's identity metadata is
 				// written where the root lands.
 				rootStore = moleculeClassStore(recipe, store, graphStore)
+				if flip := cookMetaClassFlip(recipe, rootMeta, routesClassHolds(cookRoutes, rootStore)); flip != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, cookMetaFlipError(args[0], flip))
+				}
 				graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, rootStore, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("decorate formulas v2 recipe: %w", err))
@@ -1068,18 +1081,27 @@ store, copy them into the binding with
 				// where it always was.
 				opts := molecule.Options{Title: title, Vars: cookVars}
 				var err error
+				var refused error
 				result, rootStore, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
-					return moleculeClassStore(recipe, store, graphStore)
+					chosen := moleculeClassStore(recipe, store, graphStore)
+					// The chooser runs after compile and before instantiate:
+					// the one point where the root's class and its store are
+					// both known and nothing has been written. A nil store
+					// stops the cook; the refusal is reported below.
+					if flip := cookMetaClassFlip(recipe, rootMeta, routesClassHolds(cookRoutes, chosen)); flip != nil {
+						refused = cookMetaFlipError(args[0], flip)
+						return nil
+					}
+					return chosen
 				})
+				if refused != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, refused)
+				}
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 			}
 
-			rootMeta, err := parseMetadataArgs(metadata)
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-			}
 			if len(rootMeta) > 0 {
 				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
 					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
@@ -1306,6 +1328,34 @@ func parseFormulaVars(varFlags []string) map[string]string {
 		return nil
 	}
 	return vars
+}
+
+// cookMetaClassFlip is the `gc formula cook --meta` door onto the one
+// class-must-not-flip guard (coordclass.CheckFlip). The stamp lands on the
+// cooked root, whose shape before the stamp is the recipe root (Steps[0]); holds
+// is what the store the root is about to be minted in holds. A v1 poured root
+// is minted in the work store, so `--meta gc.root_bead_id=…` (or gc.kind=wisp)
+// would make it a graph-class bead there — the stranded row the audit's R3
+// reproduced, after which every routed gc command refused. A single-store city
+// holds nil and is never refused.
+func cookMetaClassFlip(recipe *formula.Recipe, meta map[string]string, holds []coordclass.Class) *coordclass.Flip {
+	if len(meta) == 0 {
+		return nil
+	}
+	var root beads.Bead
+	if recipe != nil && len(recipe.Steps) > 0 {
+		step := recipe.Steps[0]
+		root = beads.Bead{Type: step.Type, Labels: step.Labels, Metadata: step.Metadata}
+		if root.Type == "" {
+			root.Type = "task"
+		}
+	}
+	return coordclass.CheckFlip(root, coordclass.Mutation{SetMetadata: meta}.Apply(root), holds)
+}
+
+// cookMetaFlipError renders a refused --meta stamp.
+func cookMetaFlipError(formulaName string, flip *coordclass.Flip) error {
+	return fmt.Errorf("%s", classFlipRefusalText(fmt.Sprintf("--meta on the root of %q", formulaName), flip))
 }
 
 func parseMetadataArgs(items []string) (map[string]string, error) {

@@ -24,7 +24,7 @@ func TestWorkStartedCodec(t *testing.T) {
 		t.Fatalf("encoded %s, want %s", raw, want)
 	}
 	back, err := DecodeWorkStarted(raw)
-	if err != nil || !back.Names("rig:gascity", "ga-12ab") || len(back.Claims) != 1 {
+	if err != nil || !back.Names("rig:gascity", "ga-12ab", 7) || len(back.Claims) != 1 {
 		t.Fatalf("decode(%s) = %+v, %v; want the one entry back", raw, back, err)
 	}
 	if empty, err := DecodeWorkStarted(""); err != nil || len(empty.Claims) != 0 {
@@ -39,9 +39,11 @@ func TestWorkStartedCodec(t *testing.T) {
 
 // TestWorkStartedNames: an entry names its own (store, bead); one recorded
 // with no store names its bead in every store, and a lookup with no store
-// matches the bead in any; another store or bead does not match.
+// matches the bead in any; another store or bead does not match. The entries
+// here are resident (the residence spelling), so a store is exact at every
+// generation; work_cells_resident_test.go has the unmarked entries.
 func TestWorkStartedNames(t *testing.T) {
-	w := WorkStarted{}.With(startedEntry("rig:gascity", "ga-1")).With(startedEntry("", "ga-2"))
+	w := WorkStarted{}.With(residentEntry("rig:gascity", "ga-1", 7)).With(startedEntry("", "ga-2"))
 	for _, c := range []struct {
 		store, bead string
 		want        bool
@@ -53,18 +55,18 @@ func TestWorkStartedNames(t *testing.T) {
 		{"rig:gascity", "ga-3", false},
 		{"rig:gascity", "", false},
 	} {
-		if got := w.Names(c.store, c.bead); got != c.want {
-			t.Errorf("Names(%q, %q) = %v, want %v", c.store, c.bead, got, c.want)
+		if got := w.Names(c.store, c.bead, 7); got != c.want {
+			t.Errorf("Names(%q, %q, 7) = %v, want %v", c.store, c.bead, got, c.want)
 		}
 	}
-	if w = w.Without("rig:gascity", "ga-1"); w.Names("rig:gascity", "ga-1") || !w.Names("city", "ga-2") {
+	if w = w.Without("rig:gascity", "ga-1", 7); w.Names("rig:gascity", "ga-1", 7) || !w.Names("city", "ga-2", 7) {
 		t.Errorf("Without dropped the wrong entries: %+v", w)
 	}
 	// With matches as Names and Without do: recording a claim drops every
 	// entry naming it, an unknown store's included, and keeps another store's.
-	w = WorkStarted{}.With(startedEntry("", "ga-5")).With(startedEntry("city", "ga-6")).With(startedEntry("rig:x", "ga-6"))
-	w = w.With(startedEntry("city", "ga-5"))
-	if len(w.Claims) != 3 || w.Claims[0] != startedEntry("city", "ga-5") || !w.Names("city", "ga-6") || !w.Names("rig:x", "ga-6") {
+	w = WorkStarted{}.With(startedEntry("", "ga-5")).With(residentEntry("city", "ga-6", 7)).With(residentEntry("rig:x", "ga-6", 7))
+	w = w.With(residentEntry("city", "ga-5", 7))
+	if len(w.Claims) != 3 || w.Claims[0] != residentEntry("city", "ga-5", 7) || !w.Names("city", "ga-6", 7) || !w.Names("rig:x", "ga-6", 7) {
 		t.Errorf("With over a storeless entry: %+v; want it replaced, the two ga-6 stores kept", w.Claims)
 	}
 }
@@ -76,7 +78,7 @@ func TestWorkStartedCap(t *testing.T) {
 	for i := 1; i <= 10; i++ {
 		w = w.With(startedEntry("city", fmt.Sprintf("b-%d", i)))
 	}
-	if len(w.Claims) != workStartedCap || w.Claims[0].Bead != "b-10" || w.Claims[7].Bead != "b-3" || w.Names("city", "b-2") {
+	if len(w.Claims) != workStartedCap || w.Claims[0].Bead != "b-10" || w.Claims[7].Bead != "b-3" || w.Names("city", "b-2", 7) {
 		t.Fatalf("after 10 records: %+v; want b-10..b-3, newest first", w.Claims)
 	}
 	w = w.With(startedEntry("city", "b-5"))

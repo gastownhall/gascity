@@ -363,8 +363,9 @@ type sourceDepReader struct {
 // more current than the snapshot row being copied anyway.
 //
 // AN ANSWER WITH NOTHING IN IT IS NOT KEPT. BdStore answers a batch that bd
-// refuses as "not found" or "unsupported" — one anchor bd cannot resolve is
-// enough — with an empty map and no error, whatever edges the other anchors
+// refuses as "not found" — one anchor bd cannot resolve is enough — with an
+// empty map and no error (a backend that refuses the read as unsupported
+// answers ErrDepListBatchUnsupported, handled above), whatever edges the other anchors
 // carry, and the verify pass's own batched read would answer the same nothing
 // and agree with it. So an empty answer over a non-empty anchor list is set
 // aside and every bead is read on its own, exactly as if the store could not

@@ -21,20 +21,18 @@ import (
 )
 
 // v2RefusalCases is one config per deferred feature, each hitting exactly one
-// refusal (IMPLEMENTATION-PLAN B4).
+// refusal (IMPLEMENTATION-PLAN B4). The identity breaker and the two stall
+// recyclers are not here: v2 ignores them (v2IgnoredSettings, mc-ymynp).
 var v2RefusalCases = []struct {
 	name   string
 	cfg    func(*config.City)
 	config string // the setting the refusal must name
 	pr     string
 }{
-	{"breaker", func(c *config.City) { c.Daemon.SessionCircuitBreaker = true }, "[daemon] session_circuit_breaker = true", "PAR-BRK"},
 	{"depends_on", func(c *config.City) { c.Agents = []config.Agent{{Name: "worker", DependsOn: []string{"db"}}} }, "agent depends_on on worker", "PAR-DEP"},
 	{"max_session_age", func(c *config.City) {
 		c.Agents = []config.Agent{{Name: "a", MaxSessionAge: "5h"}, {Name: "b"}, {Name: "c", MaxSessionAge: "1h"}}
 	}, "agent max_session_age on a, c", "PAR-AGE"},
-	{"progress_stall", func(c *config.City) { c.Session.ProgressStallTimeout = "30m" }, "[session] progress_stall_timeout", "PAR-STALL-1"},
-	{"claim_holder_stall", func(c *config.City) { c.Session.ClaimHolderStallTimeout = "30m" }, "[session] claim_holder_stall_timeout", "PAR-STALL-2"},
 	{"chat idle_timeout", func(c *config.City) { c.ChatSessions.IdleTimeout = "30m" }, "[chat_sessions] idle_timeout", "PAR-CHAT"},
 	{"k8s", func(c *config.City) { c.Session.Provider = "k8s" }, `[session] provider = "k8s"`, "PAR-K8S"},
 	{"hybrid", func(c *config.City) { c.Session.Provider = "hybrid" }, `[session] provider = "hybrid"`, "PAR-K8S"},
@@ -82,8 +80,8 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 		c.ChatSessions.IdleTimeout = "30m"
 		c.Session.Provider = "k8s"
 	})
-	if got := len(v2LatchRefusals(all, nil)); got != 7 {
-		t.Errorf("v2LatchRefusals(every feature, nil) = %d refusals, want 7", got)
+	if got := len(v2LatchRefusals(all, nil)); got != 4 {
+		t.Errorf("v2LatchRefusals(every feature, nil) = %d refusals, want 4", got)
 	}
 	_, err := latchReconcilerMode(all, noEnv)
 	if err == nil {
@@ -170,7 +168,7 @@ func TestV2LatchRuntimeAllowlist(t *testing.T) {
 // no longer lists the pack agent's custom scale_check (PAR-SC).
 func TestDoctorListsLatchRefusalsUnderLegacy(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test\"\n\n[imports.local]\nsource = \"packs/local\"\n\n[chat_sessions]\nidle_timeout = \"1h\"\n")
+	fs.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test\"\n\n[daemon]\nsession_reconciler = \"legacy\"\n\n[imports.local]\nsource = \"packs/local\"\n\n[chat_sessions]\nidle_timeout = \"1h\"\n")
 	fs.Files["/city/packs/local/pack.toml"] = []byte("[pack]\nname = \"local\"\nschema = 2\n")
 	fs.Files["/city/packs/local/agents/witness/agent.toml"] = []byte("max_session_age = \"5h\"\nscale_check = \"echo 2\"\n")
 	cfg, _, err := config.LoadWithIncludes(fs, "/city/city.toml")

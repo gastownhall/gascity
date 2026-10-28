@@ -812,7 +812,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
 		hookAgent.QualifiedName(),
 		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
-		mergeRuntimeEnv(nil, hookEnv), hookEnv)
+		mergeRuntimeEnv(nil, hookEnv), hookEnv, nil)
 	if want := 1 + len(e.cfg.Rigs); len(fanout) != want {
 		t.Errorf("`gc hook --claim` fans out over %d store(s), want %d (city + %d rig) — a leg appeared or vanished; the class binding is reached through hookClaimOps, never as a leg, because it is not a bd workspace", len(fanout), want, len(e.cfg.Rigs))
 	}
@@ -2591,8 +2591,10 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		// fell through would print `[]` and exit 0, which is the same fail-open one
 		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
 		// EXECUTES this; the clause is pinned here so the split-topology row cannot
-		// go green on a command that swallows it.
-		if !strings.Contains(cmd, `|| exit $?`) {
+		// go green on a command that swallows it. The work query's clause names the
+		// failed read on stderr before exiting with its status (`exit "$gc_rc"`);
+		// the count-form exits with it directly (`|| exit $?`).
+		if !strings.Contains(cmd, `|| exit $?`) && !strings.Contains(cmd, `exit "$gc_rc"`) {
 			t.Errorf("a split city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
 		}
 	}

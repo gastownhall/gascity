@@ -34,7 +34,7 @@ func (s *interleavedStore) ConditionalWritesResolveTarget() beads.Store { return
 
 func stampedMemStore(t *testing.T, store beads.Store) {
 	t.Helper()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 }

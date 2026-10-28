@@ -285,8 +285,10 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
 // runs the check script. An iteration that failed hard closes the control as a
-// hard failure without running the check; a GatePass closes the control;
-// anything else spawns the next iteration or exhausts.
+// hard failure without running the check; a GatePass closes the control; a
+// run without a verdict re-runs the check attempt-free while the
+// infrastructure budget lasts (spendCheckInfraRetry); anything else spawns the
+// next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
@@ -314,6 +316,25 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	checkResult, err := runRalphCheck(store, reloaded, iteration, iterationNum, opts)
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
+	}
+	// A check that ran past its timeout, or read blind (exit 75 or a typed
+	// stderr marker), produced no verdict: re-run it on a later sweep against
+	// this same iteration, charged to the control's infrastructure budget
+	// instead of an attempt. Returning before the attempt log is written
+	// leaves the control untouched. A GateError is a failed start
+	// (formula-spec-v2 §3.1) and is graded like any failure, as is a blind
+	// read once the budget is spent: the outcome itself is left as the gate
+	// reported it.
+	infra := checkResult.Outcome == convergence.GateTimeout
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s",
+			bead.ID, iterationNum, reason, formatGateExitCode(checkResult.ExitCode))
+		infra = true
+	}
+	if infra {
+		if err := spendCheckInfraRetry(store, reloaded, checkResult.Outcome, iterationNum, opts); err != nil {
+			return attemptEvaluation{}, err
+		}
 	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
 	if checkResult.Outcome == convergence.GatePass {

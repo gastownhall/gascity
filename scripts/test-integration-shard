@@ -134,6 +134,9 @@ cmd_gc_integration_tests=(
   TestBlockedRepairOnRealBdRestoresOverBlockedWork
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestGcBdBurnAndWispGCJudgesReadRealBd
+  TestGcBdBurnJudgeCoversAProxiedServerCascade
+  TestGcBdMolWispRootOnlyMintsOneWorkBead
   TestInitializingARealEmbeddedRigLetsItCreateGcTypedBeads
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility

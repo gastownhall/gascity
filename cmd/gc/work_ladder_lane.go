@@ -186,7 +186,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			c := cs[0]
 			target := backstopTarget{ID: c.WorkBeadID, RootID: c.RootBeadID, StoreRef: c.StoreRef, Assignee: c.Assignee, Store: c.Store}
 			ts = append(ts, ladderTarget{
-				work:    workladder.Work{Key: workladder.ClaimKey{Store: normalizeIdleClaimStoreRef(c.StoreRef), Bead: c.WorkBeadID}, Kind: workladder.KindContinuation},
+				work:    workladder.Work{Key: workladder.ClaimKey{Store: claimStoreRef(c.StoreRef), Bead: c.WorkBeadID}, Kind: workladder.KindContinuation},
 				recheck: func() backstopResolution { return unlessHeld(revalidateContinuation(target)) },
 			})
 		}
@@ -196,6 +196,8 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			}
 			target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
 			ts = append(ts, ladderTarget{
+				// c.StoreRef is claimStoreRef's: the claim's residence, as the
+				// hook's work_started entry and the backstop key it.
 				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
 				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
 				recheck:      func() backstopResolution { return unlessHeld(revalidateExecutionClaim(target)) },
@@ -228,7 +230,7 @@ func (p *ladderPass) trigger(snap idleClaimWorkSnapshot, row beads.Bead) (workla
 	if !ok || !isUnclaimedTrigger(p.cfg, w) || beadmeta.HasDispatchHold(w.Labels) {
 		return workladder.ClaimKey{}, false
 	}
-	return workladder.ClaimKey{Store: key.StoreRef, Bead: id}, true
+	return workladder.ClaimKey{Store: claimStoreRef(key.StoreRef), Bead: id}, true
 }
 
 // triggerRecheck re-reads a trigger live through the store that owns it,
@@ -453,7 +455,7 @@ func ladderStarted(meta map[string]string, prev workladder.Record, gen int64, ta
 			continue
 		}
 		switch {
-		case err == nil && cell.Names(t.work.Key):
+		case err == nil && cell.Names(t.work.Key, gen):
 			started[t.work.Key] = workladder.SrcAgent
 		case seeding:
 			if src, ok := ladderSeed(meta, t); ok {
@@ -487,9 +489,12 @@ func ladderSeed(meta map[string]string, t ladderTarget) (workladder.StartSource,
 
 // ladderGate is open, or held by what owns the seat for now: a stop request
 // (a drain, at the row's generation), a kill, a start in flight, a restart
-// request, an operator's suspend or an agent's wait, a quarantine, or an
-// agent's heartbeat (WL5). Every hold is one the row clears when it ends, so
-// none can silence a seat for good.
+// request, an operator's content hold on the conversation, an operator's
+// suspend or an agent's wait, a quarantine, or an agent's heartbeat (WL5).
+// Every hold but the content hold is one the row clears when it ends, so
+// none can silence a seat for good. A content hold stands until a resume
+// clears it (SESSION-RUNTIME-027): meanwhile the ladder nudges, recycles and
+// releases nothing for the seat, so a hold nobody clears keeps its claim.
 func ladderGate(info session.Info, meta map[string]string, now time.Time) workladder.Gate {
 	held := func(reason string) workladder.Gate { return workladder.Gate{Held: true, Reason: reason} }
 	state := session.State(strings.TrimSpace(info.MetadataState))
@@ -503,6 +508,8 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 		return held("starting")
 	case strings.TrimSpace(info.RestartRequested) != "":
 		return held("restart_pending")
+	case session.ContentHeldInfo(info):
+		return held("content_held")
 	}
 	d := session.DecodeDisposition(meta)
 	switch {
@@ -543,6 +550,14 @@ func (p *ladderPass) commit(id string, targets []ladderTarget, hold map[workladd
 			if i < 0 {
 				break
 			}
+			// The seeds read off resp are this revision's, but claimSession
+			// (the bead's gc.session_id naming the seat) is the planner
+			// snapshot's: this CAS is on the session row and cannot re-read
+			// the bead. A release that lands here on a claim the hook stamped
+			// after the snapshot is caught by release(), which re-reads the
+			// bead live before any write to it and keeps a bead whose
+			// gc.session_id names the seat, its write fenced on that read.
+			// That live read is the last guard for such a claim: keep it.
 			src, seeded := ladderSeed(resp.Metadata, targets[i])
 			if !seeded {
 				break // the CAS proves it: unstarted on this revision
@@ -744,6 +759,8 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
 		outcome = "gone" // parked on a hold since the snapshot: not the ladder's
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
+		// The live read of gc.session_id, which commit's CAS takes from the
+		// snapshot: the guard for a claim the hook stamped after it was read.
 		outcome = "started"
 	default:
 		out := releaseListed(hits, releaseLadder, releaseSeatOfInfo(info), p.cfg, ReleaseOpts{})

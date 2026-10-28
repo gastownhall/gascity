@@ -1,6 +1,7 @@
 package opjournal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -30,6 +31,12 @@ type Store struct {
 	// batcher applies the conversation lane's guarded batches; nil for a
 	// store opened with NewStore rather than NewLaneStore.
 	batcher beads.GuardedBatcher
+	// beforeRelowerRead, when set (tests), runs between RelowerNowUnits'
+	// scan of a unit and its read of the unit's interrupt by id.
+	beforeRelowerRead func(scanned Op)
+	// beforeRelowerBatch, when set (tests), runs between RelowerNowUnits'
+	// read of an interrupt and the batch that moves it.
+	beforeRelowerBatch func(read Op)
 }
 
 // Option configures NewStore.
@@ -127,6 +134,11 @@ func (s *Store) Preview(req Request) (Op, error) {
 	if err != nil {
 		return Op{}, err
 	}
+	if op.Kind == KindRespond {
+		if err := validateRespondKey(s.prefix, op); err != nil {
+			return Op{}, err
+		}
+	}
 	op.ID, err = DeriveID(s.prefix, op.Conversation, op.Producer.Principal, op.ClientKey)
 	if err != nil {
 		return Op{}, err
@@ -152,8 +164,7 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 	if err != nil {
 		return Op{}, false, err
 	}
-	b, err := EncodeOp(op)
-	if err != nil {
+	if _, err := EncodeOp(op); err != nil {
 		return Op{}, false, err
 	}
 	// Read first: a retry then never reaches Create, so a store that
@@ -169,6 +180,16 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 		case !errors.Is(getErr, beads.ErrNotFound):
 			return Op{}, false, fmt.Errorf("reading op %s before creating it: %w", op.ID, getErr)
 		}
+	}
+	return s.create(op)
+}
+
+// create writes op, a previewed op, create-if-absent at its pinned id, and
+// resolves a create that lost to a stored row as Propose does.
+func (s *Store) create(op Op) (Op, bool, error) {
+	b, err := EncodeOp(op)
+	if err != nil {
+		return Op{}, false, err
 	}
 	created, createErr := s.store.Create(b)
 	if createErr == nil {
@@ -645,7 +666,7 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		return "", Op{}, err
 	}
 	var result CancelResult
-	op, err := s.mutate(id, by, func(cur Op, spec Spec) (Op, bool, error) {
+	op, err := s.mutateWith(id, by, "opjournal: cancel", func(cur Op, spec Spec) (Op, bool, []beads.GuardedItem, error) {
 		cancel := cur.Cancel
 		if !cancel.Recorded() {
 			cancel = Cancel{By: by, At: utc(s.clk.Now()), Reason: reason}
@@ -653,35 +674,61 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		switch {
 		case cur.Status == StatusClosed:
 			result = CancelAlreadyTerminal
-			return cur, false, nil
+			return cur, false, nil, nil
 		case cur.Executor.Legacy():
-			return Op{}, false, fmt.Errorf("%w: %s op %s is closed only by its legacy path, an adopter or the sweeper", ErrIllegalTransition, cur.Executor, id)
+			return Op{}, false, nil, fmt.Errorf("%w: %s op %s is closed only by its legacy path, an adopter or the sweeper", ErrIllegalTransition, cur.Executor, id)
 		case cur.Status == StatusSettling:
 			result = CancelAlreadyDecided
-			return cur, false, nil
+			return cur, false, nil, nil
 		case cur.Status == StatusSubmitted,
 			cur.Status == StatusAccepted && spec.Lane == LaneConversation:
 			result = CancelClosed
 			next := cur
 			next.Cancel = cancel
-			return closed(next, Outcome{Arm: ArmCanceled}, by, s.clk), true, nil
+			next = closed(next, Outcome{Arm: ArmCanceled}, by, s.clk)
+			// A canceled lane respond ends its occurrence in the batch
+			// that closes it, as the lane's closes do (endItem): a close
+			// that loses its write to a Take ends nothing, so the answer
+			// that Take sends lands under an open occurrence.
+			end, ok, err := s.endItem(next, nil, utc(s.clk.Now()))
+			switch {
+			case err != nil:
+				return Op{}, false, nil, err
+			case ok:
+				return next, true, []beads.GuardedItem{end}, nil
+			}
+			return next, true, nil, nil
 		default:
 			result = CancelRequested
 			if cur.Cancel.Recorded() {
-				return cur, false, nil
+				return cur, false, nil, nil
 			}
 			next := cur
 			next.Cancel = cancel
-			return next, true, nil
+			return next, true, nil, nil
 		}
 	})
 	if err != nil {
 		return "", Op{}, err
 	}
+	// The close has landed even when its bead's repair fails, so the
+	// occurrence's end is recorded regardless.
+	var closeErr, endErr error
 	if result == CancelClosed || result == CancelAlreadyTerminal {
-		if err := s.closeBead(id); err != nil {
-			return "", Op{}, err
-		}
+		closeErr = s.closeBead(id)
+	}
+	switch result {
+	case CancelClosed:
+		// Another answer to the occurrence, closing at once, may have read
+		// this one open and withheld the end for it (Store.endClosed).
+		endErr = s.endClosed(op, utc(s.clk.Now()))
+	case CancelAlreadyTerminal:
+		// A lane respond closed outside the lane and Cancel, or whose
+		// re-check did not land, gets its end here (Store.endTerminal).
+		endErr = s.endTerminal(op, utc(s.clk.Now()))
+	}
+	if err := errors.Join(closeErr, endErr); err != nil {
+		return "", Op{}, err
 	}
 	return result, op, nil
 }
@@ -697,6 +744,19 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 // answers ErrConditionalWriteUnsupported itself and that error is returned as
 // is.
 func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, error)) (Op, error) {
+	return s.mutateWith(id, by, "", func(cur Op, spec Spec) (Op, bool, []beads.GuardedItem, error) {
+		next, write, err := decide(cur, spec)
+		return next, write, nil, err
+	})
+}
+
+// mutateWith is mutate for a write that may carry rows of its own: decide
+// also returns items, written with the op's update in one guarded batch
+// (reason names it) whose op item carries the same revision guard, so they
+// land exactly when the update does. A batch refused by a row that moved, or
+// by a create whose id another writer took first, is re-read and re-decided
+// as a lost revision race is.
+func (s *Store) mutateWith(id, by, reason string, decide func(cur Op, spec Spec) (Op, bool, []beads.GuardedItem, error)) (Op, error) {
 	var lastConflict error
 	for range casAttempts {
 		b, err := s.store.Get(id)
@@ -708,6 +768,7 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 			return Op{}, err
 		}
 		var next Op
+		var with []beads.GuardedItem
 		external := closedExternally(b)
 		if external {
 			next = closed(cur, cur.Outcome, by, s.clk)
@@ -717,7 +778,7 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 				return Op{}, err
 			}
 			var write bool
-			next, write, err = decide(cur, spec)
+			next, write, with, err = decide(cur, spec)
 			if err != nil {
 				return Op{}, err
 			}
@@ -729,7 +790,7 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 		if err != nil {
 			return Op{}, err
 		}
-		err = s.writer.UpdateIfMatch(id, b.Revision, opts)
+		err = s.writeWith(id, b.Revision, opts, reason, with)
 		if err == nil && external {
 			continue
 		}
@@ -737,12 +798,23 @@ func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, 
 			return next, nil
 		}
 		var stale *beads.PreconditionFailedError
-		if !errors.As(err, &stale) {
+		if !errors.As(err, &stale) && !errors.Is(err, beads.ErrAlreadyExists) {
 			return Op{}, fmt.Errorf("updating op %s: %w", id, err)
 		}
 		lastConflict = err
 	}
 	return Op{}, fmt.Errorf("%w: updating op %s lost %d revision races: %w", ErrContention, id, casAttempts, lastConflict)
+}
+
+// writeWith writes opts to op id under revision rev: one UpdateIfMatch, or,
+// with rows of its own, one guarded batch of the update and those rows.
+func (s *Store) writeWith(id string, rev int64, opts beads.UpdateOpts, reason string, with []beads.GuardedItem) error {
+	if len(with) == 0 {
+		return s.writer.UpdateIfMatch(id, rev, opts)
+	}
+	items := append([]beads.GuardedItem{{Update: &beads.GuardedUpdate{ID: id, Opts: opts, ExpectedRevision: &rev}}}, with...)
+	_, _, err := s.apply(context.Background(), reason, items)
+	return err
 }
 
 // patch is the update that turns row b, which decoded as cur, into next's

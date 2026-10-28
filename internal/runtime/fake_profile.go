@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -42,10 +44,12 @@ func (p Profile) String() string {
 type ProfileBackend interface {
 	Provider
 	AttachmentObserverWithError
+	BackgroundWorkStopper
 	DeadRuntimeSessionChecker
 	DialogProvider
 	EnvironmentBatchProvider
 	FencedInputProvider
+	FencedInteractionProvider
 	FreshLivenessObserver
 	IdleSnapshotProvider
 	IdleWaitProvider
@@ -70,6 +74,7 @@ type ProfileBackend interface {
 	TurnEventProvider
 	TurnFenceProvider
 	TurnObservationProvider
+	TurnRunningProvider
 	UnattendedSessionStopper
 }
 
@@ -80,7 +85,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -156,10 +161,12 @@ type (
 	tmuxProfile struct {
 		Provider
 		AttachmentObserverWithError
+		BackgroundWorkStopper
 		DeadRuntimeSessionChecker
 		DialogProvider
 		EnvironmentBatchProvider
 		FencedInputProvider
+		FencedInteractionProvider
 		FreshLivenessObserver
 		IdleSnapshotProvider
 		IdleWaitProvider
@@ -178,6 +185,7 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait
 		localTranscriptTrait
@@ -273,7 +281,7 @@ func (t3bridgeProfile) InputFencing(string) InputFencing { return InputFencingCh
 // trait the profile answers itself; a test pins it to production.
 var t3bridgeTurnCapabilities = TurnCapabilities{
 	Start:    TurnStartRecorded,
-	End:      TurnEndRecorded,
+	End:      TurnEndInferred,
 	Fence:    TurnFenceChecked,
 	Link:     TurnLinkCorrelated,
 	Lossless: false,
@@ -305,8 +313,10 @@ func (f FullFake) liveness(method, name string) (Liveness, error) {
 }
 
 // NudgeKeyed implements [KeyedNudgeProvider]: it records a Nudge call
-// carrying key and answers as [Fake.Nudge] does.
-func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) error {
+// carrying key, a repeated key included, and answers as [Fake.Nudge] does.
+// A delivery that succeeds is held under key unless one already is, and its
+// receipt is the held one (fakeReceipt).
+func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) (DeliveryReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{
@@ -317,12 +327,78 @@ func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) er
 		DeliveryKey: key,
 	})
 	if f.broken {
-		return fmt.Errorf("session unavailable")
+		return DeliveryReceipt{}, fmt.Errorf("session unavailable")
 	}
-	if err, ok := f.NudgeErrors[name]; ok {
+	if err, ok := f.NudgeErrors[name]; ok && err != nil {
+		return DeliveryReceipt{}, err
+	}
+	return f.holdLocked(name, key), nil
+}
+
+// NudgeFenced is [Fake.NudgeFenced]; a fenced nudge under a delivery key
+// that succeeds is held as NudgeKeyed holds it, and its receipt fills
+// n.Receipt when set.
+func (f FullFake) NudgeFenced(ctx context.Context, name string, content []ContentBlock, n FencedNudge) error {
+	if err := f.Fake.NudgeFenced(ctx, name, content, n); err != nil {
 		return err
 	}
+	if n.DeliveryKey == "" {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.holdLocked(name, n.DeliveryKey)
+	if n.Receipt != nil {
+		*n.Receipt = r
+	}
 	return nil
+}
+
+// LookupDelivery implements [KeyedNudgeProvider]: it records a
+// LookupDelivery call carrying key and answers from KeyedDeliveries, a
+// broken fake with ErrRuntimeUnavailable and LookupDeliveryErrors first.
+func (f FullFake) LookupDelivery(_ context.Context, name, key string) (DeliveryReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "LookupDelivery", Name: name, DeliveryKey: key})
+	if f.broken {
+		return DeliveryReceipt{}, ErrRuntimeUnavailable
+	}
+	if err := f.LookupDeliveryErrors[name]; err != nil {
+		return DeliveryReceipt{}, err
+	}
+	if r, ok := f.KeyedDeliveries[name][key]; ok {
+		return r, nil
+	}
+	return DeliveryReceipt{}, fmt.Errorf("session %q: %w", name, ErrDeliveryNotFound)
+}
+
+// holdLocked holds a delivery to name under key unless one is held, and
+// returns the held receipt. The caller holds f.mu.
+func (f FullFake) holdLocked(name, key string) DeliveryReceipt {
+	if r, ok := f.KeyedDeliveries[name][key]; ok {
+		return r
+	}
+	if f.KeyedDeliveries == nil {
+		f.KeyedDeliveries = make(map[string]map[string]DeliveryReceipt)
+	}
+	if f.KeyedDeliveries[name] == nil {
+		f.KeyedDeliveries[name] = make(map[string]DeliveryReceipt)
+	}
+	r := fakeReceipt(name, key)
+	f.KeyedDeliveries[name][key] = r
+	return r
+}
+
+// fakeReceipt is a fake runtime's receipt of a delivery to name under key:
+// a message id derived from both, carrying neither, and a stamp of now at
+// millisecond precision.
+func fakeReceipt(name, key string) DeliveryReceipt {
+	sum := sha256.Sum256([]byte(name + "\x00" + key))
+	return DeliveryReceipt{
+		MessageID: "fake-message-" + hex.EncodeToString(sum[:8]),
+		MessageAt: time.Now().UTC().Truncate(time.Millisecond),
+	}
 }
 
 // SessionBinding implements [SessionBindingProvider] from the fake's
@@ -393,6 +469,17 @@ func (f FullFake) SnapshotIdle(name string) (bool, error) {
 	defer f.mu.Unlock()
 	_, running := f.sessions[name]
 	return running, nil
+}
+
+// TurnRunning implements [TurnRunningProvider]: a running session runs no
+// turn, and a session that is not running cannot be looked at.
+func (f FullFake) TurnRunning(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, running := f.sessions[name]; !running {
+		return false, fmt.Errorf("turn of %q: %w", name, ErrSessionNotFound)
+	}
+	return false, nil
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,

@@ -527,11 +527,15 @@ func TestWorkLadderPausesWhileTheProviderIsDegraded(t *testing.T) {
 
 // L7 (WL5). A held gate gets no nudge however long the seat is quiet: a
 // stop request at the row's generation, a kill in progress, an agent's
-// heartbeat hold, a wait hold, a start in flight.
+// heartbeat hold, a wait hold, a start in flight, an operator's content
+// hold on the conversation (SESSION-RUNTIME-027).
 func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 	for name, meta := range map[string]func(now time.Time) map[string]string{
 		"draining": func(now time.Time) map[string]string {
 			return map[string]string{session.DrainIntentReasonKey: drainOrphaned, session.DrainIntentAtKey: now.Format(time.RFC3339), session.DrainIntentIncarnationKey: "7"}
+		},
+		"content held": func(now time.Time) map[string]string {
+			return map[string]string{session.ContentHoldKey: session.ContentHold{By: "operator", At: now}.String()}
 		},
 		"kill pending": func(now time.Time) map[string]string {
 			return map[string]string{"state": "asleep", "state_reason": session.KillPendingReason, "sleep_reason": "killed", "slept_at": now.Format(time.RFC3339)}
@@ -1234,8 +1238,33 @@ func TestWorkLadderAndTheHookShareTheCells(t *testing.T) {
 	for _, store := range []string{key.Store, ""} {
 		raw := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: store, Bead: key.Bead, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaAdopt}))
 		cell, err := workladder.DecodeStarted(raw)
-		if err != nil || !cell.Names(key) {
+		if err != nil || !cell.Names(key, 7) {
 			t.Fatalf("store %q: the ladder reads %q as %+v, %v; want it naming %v", store, raw, cell, err, key)
+		}
+	}
+	// The two decoders of the one cell agree on what it names, resident and
+	// unmarked entries alike, at every generation: the hook's writer and the
+	// ladder's reader can never disagree on whether a claim is started.
+	for _, resident := range []bool{false, true} {
+		for _, entryGen := range []int64{0, 1, 2} {
+			raw := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{
+				Store: "rig:gascity", Bead: "gcg-1", Gen: entryGen, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: resident,
+			}))
+			hook, err := session.DecodeWorkStarted(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ladderCell, err := workladder.DecodeStarted(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range []workladder.ClaimKey{{Store: "city", Bead: "gcg-1"}, {Store: "rig:gascity", Bead: "gcg-1"}, {Store: "rig:other", Bead: "gcg-1"}, {Bead: "gcg-1"}, {Store: "city", Bead: "gcg-2"}} {
+				for _, rowGen := range []int64{0, 1, 2, 3} {
+					if h, l := hook.Names(k.Store, k.Bead, rowGen), ladderCell.Names(k, rowGen); h != l {
+						t.Errorf("%s: key %+v at row gen %d: the hook reads %v, the ladder %v", raw, k, rowGen, h, l)
+					}
+				}
+			}
 		}
 	}
 	if _, err := workladder.DecodeStarted(`{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"at":"","via":"claim"}]}`); err == nil {

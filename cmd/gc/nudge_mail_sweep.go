@@ -293,18 +293,27 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	return result, nil
 }
 
-// liveNudgeIDSet returns the set of nudge IDs currently in pending or in-flight state.
-// Returns nil (no live IDs) when nudgeState is nil.
+// liveNudgeIDSet returns the set of nudge IDs whose shadow the stale-shadow
+// sweep must leave alone: the items pending or in flight, and the retired items
+// and dead letters whose shadow debt is unpaid (their payer will write the
+// terminal record). Returns nil (no live IDs) when nudgeState is nil.
 func liveNudgeIDSet(state *nudgequeue.State) map[string]bool {
 	if state == nil {
 		return nil
 	}
-	live := make(map[string]bool, len(state.Pending)+len(state.InFlight))
+	live := make(map[string]bool, len(state.Pending)+len(state.InFlight)+len(state.Retired))
 	for _, item := range state.Pending {
 		live[item.ID] = true
 	}
 	for _, item := range state.InFlight {
 		live[item.ID] = true
+	}
+	for _, bucket := range [][]nudgequeue.Item{state.Dead, state.Retired} {
+		for _, item := range bucket {
+			if item.Shadow != nil && !item.Shadow.Paid {
+				live[item.ID] = true
+			}
+		}
 	}
 	return live
 }

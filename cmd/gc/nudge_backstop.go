@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // backstopPredicate adapts the shared nudge-backstop engine (observe → nudge
@@ -41,10 +43,15 @@ type backstopPredicate interface {
 	// content resolves the text to nudge with, or "" to skip silently.
 	content(s beads.Bead) string
 
-	// revalidate checks the exact target immediately before attempt reservation
-	// and delivery. It closes the desired-state-snapshot race without treating
-	// a read failure as proof that work disappeared.
-	revalidate(target backstopTarget) backstopResolution
+	// revalidate checks the exact target, and session s (runtime name
+	// sessName), immediately before attempt reservation and delivery. It
+	// closes the desired-state-snapshot race without treating a read failure
+	// as proof that work disappeared, and it is where a predicate whose
+	// resolve does not already prove the session quiet refuses to type into a
+	// running turn (claimNudgeBusyHold): Hold spends no attempt. A hold may
+	// name the gate that held, for backstopHoldObserver; "" names it
+	// backstopHoldRevalidate.
+	revalidate(s beads.Bead, sessName string, target backstopTarget) (backstopResolution, string)
 
 	// observe persists the start of a new assignment's grace window.
 	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
@@ -52,7 +59,10 @@ type backstopPredicate interface {
 	// reserve durably records a delivery attempt: before a direct nudge, or
 	// after its planner notice is proposed. false means the write failed:
 	// the provider must not be nudged, and a proposed notice's attempt is
-	// re-proposed (idempotently) on a later tick.
+	// re-proposed (idempotently) on a later tick. The engine also calls it
+	// with the previous attempts and time to refund a reservation whose
+	// direct nudge the runtime deferred (runtime.ErrSessionBusy), so it must
+	// write exactly what it is given.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
 	// exhausted is invoked once attempts reach the shared max attempts.
@@ -77,6 +87,9 @@ type backstopHoldObserver interface {
 const (
 	backstopHoldRuntimeNotRunning = "runtime_not_running"
 	backstopHoldRevalidate        = "revalidate_hold"
+	// backstopHoldContentHeld is a conversation an operator holds
+	// (backstopContentHeld) when the engine would act on it.
+	backstopHoldContentHeld = "content_held"
 )
 
 func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
@@ -89,6 +102,16 @@ func clearBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead,
 	if ho, ok := pred.(backstopHoldObserver); ok {
 		ho.clearHold(store, s, stdout)
 	}
+}
+
+// backstopContentHeld reports whether session row s's conversation holds its
+// content (session.ContentHeldInfo; SESSION-RUNTIME-027): an operator's Stop
+// holds its queue until a resume clears it. The lane holds a reminder's
+// notice there until its start_by, and a direct nudge would type past the
+// hold, so a backstop delivers neither and takes no terminal action while it
+// stands (runNudgeBackstop).
+func backstopContentHeld(s beads.Bead) bool {
+	return session.ContentHeldInfo(sessionInfoFromBead(s))
 }
 
 // clearBackstop acts on a resolution that nothing is outstanding for s: pred
@@ -186,6 +209,13 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 // lane host executes message ops for store, each attempt is a notice op the
 // lane delivers at the session's boundary (proposeBackstopNotice) instead of
 // a direct runtime.Provider.Nudge.
+//
+// A session whose conversation an operator holds (backstopContentHeld) is
+// held whenever the engine would nudge it or take pred's terminal action:
+// nothing is delivered, no attempt is spent and the terminal action waits,
+// so the hold spends none of a seat's reminders. Its pacing stands as it was
+// and resumes once the hold clears; an attempt spent before the hold still
+// counts, even when the lane then holds its notice undelivered.
 func runNudgeBackstop(
 	sp runtime.Provider,
 	store beads.Store,
@@ -246,7 +276,12 @@ func runNudgeBackstop(
 			continue
 		}
 
-		switch decideBackstopAction(attempts, last, now) {
+		action := decideBackstopAction(attempts, last, now)
+		if action != backstopActionWait && backstopContentHeld(*s) {
+			observeBackstopHold(pred, store, s, backstopHoldContentHeld, stdout)
+			continue
+		}
+		switch action {
 		case backstopActionWait:
 			clearBackstopHold(pred, store, s, stdout)
 			continue
@@ -258,9 +293,13 @@ func runNudgeBackstop(
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
-			switch pred.revalidate(target) {
+			resolution, hold := pred.revalidate(*s, sessName, target)
+			switch resolution {
 			case backstopResolutionHold:
-				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
+				if hold == "" {
+					hold = backstopHoldRevalidate
+				}
+				observeBackstopHold(pred, store, s, hold, stdout)
 				continue
 			case backstopResolutionClear:
 				clearBackstop(pred, store, s, label, stdout)
@@ -302,6 +341,18 @@ func runNudgeBackstop(
 				continue
 			}
 			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
+				if errors.Is(err, runtime.ErrSessionBusy) {
+					// The session went busy between revalidate and delivery,
+					// and the runtime typed nothing rather than interrupt its
+					// turn. Nothing was attempted, so the reservation is
+					// refunded: the marker goes back to the attempts and time
+					// it held, and the next tick that finds the session quiet
+					// tries again. A failed refund leaves the attempt spent,
+					// which is the write-ahead's ordinary failure mode.
+					pred.reserve(store, s, target, attempts, last, stdout)
+					fmt.Fprintf(stdout, "%s: %s is busy; deferred the nudge for %s without spending an attempt\n", label, sessName, target.ID) //nolint:errcheck // best-effort
+					continue
+				}
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
 				continue
 			}

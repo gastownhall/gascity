@@ -126,6 +126,10 @@ var builtinAuthorship = map[string]Authorship{
 	BeadUpdated: AuthorLedger,
 	BeadClosed:  AuthorLedger,
 	BeadDeleted: AuthorLedger,
+	// The controller's cache-notification bridge derives both from journal
+	// rows' post-images (DES-O1 D18), never the writer.
+	OpChanged:    AuthorLedger,
+	FactRecorded: AuthorLedger,
 
 	// Worker: emitted by session and agent-facing command processes (the
 	// claim hook, mail, handoff, runtime drain, the control-dispatcher
@@ -140,6 +144,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionDemandClaimDivergence:   AuthorWorker,
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
+	BeadClaimFailed:                AuthorWorker,
 	HookClaimReclaimedStale:        AuthorWorker,
 	ExecutionStepStarted:           AuthorWorker, // re-derived by the projector from a live step read (D13, CD §5)
 	ExecutionClaimWindowExpired:    AuthorWorker,
@@ -219,6 +224,7 @@ var builtinAuthorship = map[string]Authorship{
 	WorkReleased:          AuthorController,
 	WorkReleaseUnfinished: AuthorController,
 	WorkEscalated:         AuthorController,
+	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc
@@ -242,6 +248,7 @@ var builtinAuthorship = map[string]Authorship{
 	RequestResultSessionSubmit:    AuthorController,
 	RequestResultRigCreate:        AuthorController,
 	RequestFailed:                 AuthorController,
+	RequestAccepted:               AuthorController,
 	RigProvisionProgress:          AuthorController,
 	ExtMsgBound:                   AuthorController,
 	ExtMsgUnbound:                 AuthorController,

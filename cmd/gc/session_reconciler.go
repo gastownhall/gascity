@@ -255,6 +255,70 @@ func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps,
 	return info, sessionpkg.Decided{}, false
 }
 
+// configDriftSeatHasLiveWork reports whether info's seat holds open or
+// in_progress work, read live from the store rather than from the tick's seat
+// work snapshot: the config-drift drain's claim fence asks it at the stop's
+// commit point, where a claim that landed after the snapshot was read is
+// exactly the one it exists to see.
+func configDriftSeatHasLiveWork(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return sessionHasOpenAssignedWorkForReachableStore(sw.fresh(releaseScope(info, sw.Legs().cfg)), info)
+}
+
+// abandonConfigDriftStopPendingOnClaim is the post-write half of the
+// config-drift drain's claim fence. The drain-ack arm checks for live work,
+// then marks the row draining, and `gc hook --claim` refuses a seat whose row
+// reads draining. A claim whose fence read the row before the mark landed can
+// still commit after the arm's pre-check, so the arm re-reads the seat's work
+// AFTER the mark. If work is there, it reverts the mark, cancels the
+// config-drift drain and its ack, and reports true: the caller queues no stop.
+//
+// The revert is committed on the stop-pending decision (Store.Commit at
+// FactsLegacyDrainStop): it writes only if a fresh read of the row still
+// carries the state, state_reason, generation and instance_token the mark
+// left. How far that protects another writer's state (a different drain's
+// included) depends on the store:
+//   - With conditional writes, the write is fenced at the revision of that
+//     read, so the revert never overwrites another writer's state.
+//   - Without them (conditional_writes off, or auto over a store that cannot
+//     write conditionally), the read and the write are separate operations.
+//     A competing write the read sees makes the revert back off, but one that
+//     lands after the read and before the revert's write is overwritten with
+//     prior's lifecycle fields, and the drain is abandoned as if the row were
+//     still this arm's
+//     (TestConfigDriftDrainAck_RevertWithoutConditionalWritesCanOverwriteInWindow).
+//
+// With the claim's own post-claim re-read of the row
+// (writeHookClaimWorkResultForBead) this is a write-then-read on both sides.
+// On a store where a committed write is visible to every later read from any
+// process (read-after-write, which the bd/dolt store and MemStore provide), at
+// least one side sees the other, so a claim never stays on a session this
+// drain stops. When both see each other, both back off: the claim is released
+// and the drain abandoned; the drift is re-detected next tick and the released
+// work is claimable again.
+//
+// A failed probe fails closed (revert, keep the session running). A revert
+// that does not land leaves the stop to proceed exactly as before.
+func abandonConfigDriftStopPendingOnClaim(store beads.Store, sp runtime.Provider, dt *drainTracker, sw *SeatWork, prior, marked sessionpkg.Info, stop sessionpkg.Decided, name string, stderr io.Writer) (sessionpkg.Info, bool) {
+	hasWork, err := configDriftSeatHasLiveWork(sw, prior)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: re-checking assigned work after config-drift stop-pending mark for %s: %v\n", name, err) //nolint:errcheck
+		hasWork = true
+	}
+	if !hasWork {
+		return marked, false
+	}
+	patch := sessionpkg.RevertDrainAckStopPendingPatch(prior)
+	res, err := sessionFrontDoor(store).Commit(stop, patch)
+	if err != nil || res != sessionpkg.CommitLanded {
+		fmt.Fprintf(stderr, "session reconciler: config-drift stop of %s found claimed work after its mark but could not revert the mark (%v, %v); stopping as decided\n", name, res, err) //nolint:errcheck
+		return marked, false
+	}
+	if !cancelSessionConfigDriftDrainInfo(prior, sp, dt) {
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+	}
+	return marked.ApplyPatch(patch), true
+}
+
 func clearDrainTrackerForStopPending(id string, dt *drainTracker) {
 	if id == "" || dt == nil {
 		return
@@ -3320,6 +3384,38 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
+						// Re-check the live-assigned-work guard that gated the drift
+						// drain's begin, here at the commit point. The begin read an idle
+						// session, but the drain then spends ticks (begin, deferred ack,
+						// this stop) with the session row still awake, and the claim fence
+						// in `gc hook --claim` refuses only a row already marked draining.
+						// A claim that landed in that window would otherwise be stopped
+						// mid-work and re-served only after a restart. Abandon the drain
+						// instead: the drift check re-detects the drift each tick and
+						// defers it until the work completes. A failed probe fails closed
+						// (keep the session running), the verdict the drift check's own
+						// guard reaches.
+						if alive {
+							hasAssignedWork, assignedErr := configDriftSeatHasLiveWork(sw, infoByID[id])
+							if assignedErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain-ack stop for %s: %v\n", name, assignedErr) //nolint:errcheck
+								hasAssignedWork = true
+							}
+							if hasAssignedWork {
+								drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
+								if !drainCancelled {
+									_ = clearReconcilerDrainAckMetadata(sp, name)
+								}
+								logDrainSkip(dt, stdout, id, fmt.Sprintf("Abandoning config-drift drain for '%s': live assigned work found", name), clk.Now())
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDrift, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
+										"active_reason":  "live_assigned_work",
+										"drain_canceled": drainCancelled,
+									})
+								}
+								continue
+							}
+						}
 					}
 					// Only a live runtime can raise an interaction: a dead or zombie
 					// target's failed probe must not cancel the drain it acked.
@@ -3346,6 +3442,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					if alive {
 						if updated, stop, ok := markDrainAckStopPending(legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg, stderr: stderr}, infoByID[id], dops, dt, clk); ok {
+							if configDriftAck {
+								if reverted, abandoned := abandonConfigDriftStopPendingOnClaim(store, sp, dt, sw, infoByID[id], updated, stop, name, stderr); abandoned {
+									tick.set(id, reverted)
+									logDrainSkip(dt, stdout, id, fmt.Sprintf("Abandoning config-drift drain for '%s': work claimed before the drain was visible", name), clk.Now())
+									if trace != nil {
+										trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDrift, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
+											"active_reason": "live_assigned_work_after_mark",
+										})
+									}
+									continue
+								}
+							}
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
 							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
@@ -3400,6 +3508,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
+				// A pinned configured named session is never stopped on a
+				// recycler restart request: the restart-request guard below
+				// clears the marker and ends the tick for it. Requesting one
+				// anyway repeats that on every tick the session stays idle, and
+				// each of those ticks ends before the config-drift gate, so a
+				// pending drift is neither logged nor recorded as deferred.
+				if !exempt && pinnedConfiguredNamedSessionKillProtected(infoByID[id]) {
+					exempt = true
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonPinned, TraceOutcomeExempt, tp.TemplateName, name, nil)
+					}
+				}
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 					if attachErr != nil {
@@ -3703,7 +3823,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// checkStability returns the write-returns-Info result (Step 6d); the input
 		// Info unchanged when no stability event was recorded, so the assignment on the
 		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil, launchTranscriptRoots(cfg, tp), rec); stab {
+		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, cityPath, clk, nil, launchTranscriptRoots(cfg, tp), rec); stab {
 			tick.set(id, stabInfo)
 			continue // rapid exit recorded, skip further processing
 		}
@@ -3715,7 +3835,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Assign checkChurn's write-returns-Info result regardless of the bool —
 		// ExitProductiveDeath may clear churn_count (the default rapid-crash path
 		// returns the input Info unchanged). Pre-pass-masked (STEP6-PREPASS-AUDIT group 5).
-		churnInfo, churn := checkChurn(infoByID[id], cfg, alive, dt, sessFront, clk)
+		churnInfo, churn := checkChurn(infoByID[id], cfg, alive, dt, sessFront, cityPath, clk)
 		tick.set(id, churnInfo)
 		if churn {
 			continue // churn recorded, skip further processing
@@ -3978,9 +4098,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 							if hasAssignedWork {
+								// Abandon a config-drift drain begun on an earlier tick,
+								// before this work was claimed: skipping only the begin
+								// would let the drain scan publish its ack and the
+								// drain-ack arm stop the session mid-claim.
+								drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
-										"active_reason": "live_assigned_work",
+										"active_reason":  "live_assigned_work",
+										"drain_canceled": drainCancelled,
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())

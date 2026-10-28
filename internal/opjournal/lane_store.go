@@ -79,13 +79,19 @@ const (
 	batchUnknown
 )
 
-// apply runs one guarded batch. The returned error names the cause; for a
-// refusal it is the *beads.BatchItemError.
+// apply runs one guarded batch: through the lane store's batcher, or, on a
+// store opened with NewStore, through its backend's when it has one (a
+// Cancel that closes a lane respond with its occurrence's end). The returned
+// error names the cause; for a refusal it is the *beads.BatchItemError.
 func (s *Store) apply(ctx context.Context, reason string, items []beads.GuardedItem) (beads.GuardedResult, batchErr, error) {
-	if s.batcher == nil {
-		return beads.GuardedResult{}, batchInvalid, fmt.Errorf("%w: the op store was not opened with NewLaneStore", beads.ErrGuardedBatchUnsupported)
+	batcher := s.batcher
+	if batcher == nil {
+		batcher, _ = beads.GuardedBatcherFor(s.store)
 	}
-	res, err := s.batcher.ApplyGuarded(ctx, beads.GuardedBatch{Reason: reason, Items: items})
+	if batcher == nil {
+		return beads.GuardedResult{}, batchInvalid, fmt.Errorf("%w: the op store's backend applies no guarded batches", beads.ErrGuardedBatchUnsupported)
+	}
+	res, err := batcher.ApplyGuarded(ctx, beads.GuardedBatch{Reason: reason, Items: items})
 	if err == nil {
 		return res, batchOK, nil
 	}

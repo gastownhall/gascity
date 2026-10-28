@@ -1204,17 +1204,46 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 	if !settings.enabled {
 		maxSize = 0
 	}
-	return []events.FileRecorderOption{
+	opts := []events.FileRecorderOption{
 		events.WithMaxSize(maxSize),
 		events.WithRotationCheckRecords(settings.checkIntervalRecords),
 		events.WithRotationCheckInterval(settings.checkInterval),
 		events.WithArchiveRetainAge(settings.archiveRetainAge),
 	}
+	if mirror, ok := eventsMirrorOptions(eventsCfg.Mirror, stderr); ok {
+		opts = append(opts, events.WithMirror(mirror))
+	}
+	return opts
+}
+
+// eventsMirrorObserve, when set by a test, receives every step of the events
+// mirror copier, so the test can wait for a mirrored event.
+var eventsMirrorObserve func(events.MirrorProgress)
+
+// eventsMirrorOptions converts [events.mirror] into the recorder's mirror
+// options. It reports false when no mirror is configured, or when the
+// configured one is unusable, which it warns about: a bad mirror setting
+// disables the mirror, never the city.
+func eventsMirrorOptions(cfg config.EventsMirrorConfig, stderr io.Writer) (events.MirrorOptions, bool) {
+	if !cfg.Enabled() {
+		return events.MirrorOptions{}, false
+	}
+	if problem := cfg.Problem(); problem != "" {
+		warnEventsRotation(stderr, "events.mirror: warning: %s; the events mirror is disabled\n", problem)
+		return events.MirrorOptions{}, false
+	}
+	mode, _ := cfg.ModeOrDefault() // Problem already rejected a bad mode
+	return events.MirrorOptions{
+		Path:    cfg.Path,
+		Mode:    mode,
+		MaxSize: cfg.MaxSizeBytesOrDefault(),
+		Observe: eventsMirrorObserve,
+	}, true
 }
 
 // newFileEventsRecorder opens the city's rotation owner: the one long-lived
-// recorder that applies [events.rotation] and sweeps rotation leftovers on
-// open. Exactly one process per log may own it — the supervisor (its per-city
+// recorder that applies [events.rotation] and [events.mirror] and sweeps
+// rotation leftovers on open. Exactly one process per log may own it — the supervisor (its per-city
 // recorder and its own log) or, without a supervisor, the standalone
 // controller that holds .gc/controller.lock. Every other writer uses
 // newSecondaryFileEventsRecorder. Two rotators no longer lose events (the

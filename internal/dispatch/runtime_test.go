@@ -5184,6 +5184,107 @@ func TestProcessWorkflowFinalizeClosesIntraStoreSourceBeadWithoutResolver(t *tes
 	}
 }
 
+// TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled guards the race
+// between a run cancel and the work it interrupts. Run cancel durably stamps
+// gc.cancel_requested on the run root first, then interrupts the sessions
+// executing its steps while it closes the rest of the run. An interrupted agent
+// winding down its turn may still close its step as passed before the cancel
+// reaches it; that can make the workflow finalizer ready, and the finalizer is
+// exempt from the dispatcher's canceled-root gate because it is the bead that
+// settles the root. It must settle the root as canceled, not as a success
+// computed from the steps, and it must not close the source bead as done. A
+// drain item workflow whose own root is still live but whose parent run is
+// canceled finalizes the same way: the cancel will close it as canceled anyway.
+func TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		nested bool
+	}{
+		{name: "run root marked canceled"},
+		{name: "drain item under a run marked canceled", nested: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			source := mustCreateWorkflowBead(t, store, beads.Bead{Title: "work item", Type: "task"})
+			run := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "implement run",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+					"gc.cancel_requested": "true",
+				},
+			})
+			workflow := run
+			if tc.nested {
+				drain := mustCreateWorkflowBead(t, store, beads.Bead{
+					Title:    "drain work",
+					Type:     "task",
+					Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": run.ID},
+				})
+				workflow = mustCreateWorkflowBead(t, store, beads.Bead{
+					Title: "do-work item",
+					Type:  "task",
+					Metadata: map[string]string{
+						"gc.kind":             "workflow",
+						"gc.formula_contract": "graph.v2",
+						"gc.drain_control_id": drain.ID,
+					},
+				})
+			}
+			if err := store.SetMetadata(workflow.ID, "gc.source_bead_id", source.ID); err != nil {
+				t.Fatal(err)
+			}
+			// The interrupted agent closed its step as passed.
+			step := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "implement",
+				Type:     "task",
+				Status:   "closed",
+				Metadata: map[string]string{"gc.outcome": "pass", "gc.root_bead_id": workflow.ID},
+			})
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "Finalize workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": workflow.ID},
+			})
+			mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
+			mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-canceled" {
+				t.Fatalf("result = %+v, want processed workflow-canceled", result)
+			}
+			rootAfter, err := store.Get(workflow.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "canceled" {
+				t.Fatalf("workflow root = status %q outcome %q, want closed canceled: a step passed after the cancel must not settle the run as a success", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+			}
+			sourceAfter, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sourceAfter.Status == "closed" {
+				t.Fatalf("source bead closed with outcome %q; a canceled workflow must not close its source as done", sourceAfter.Metadata["gc.outcome"])
+			}
+			finalizerAfter, err := store.Get(finalizer.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+			}
+		})
+	}
+}
+
 func TestProcessWorkflowFinalizeStopsOnSourceChainCycle(t *testing.T) {
 	t.Parallel()
 

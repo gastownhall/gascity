@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AttentionProvider } from './context';
 import { AttentionSummaryPanel } from './AttentionSummaryPanel';
@@ -12,11 +12,7 @@ describe('AttentionSummaryPanel', () => {
 
   it('renders top attention items and grouped overflow from the shared model', () => {
     render(
-      <MemoryRouter
-        basename="/city/test-city"
-        initialEntries={['/city/test-city/']}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter basename="/city/test-city" initialEntries={['/city/test-city/']}>
         <AttentionProvider
           contributors={[
             contributor('runs', [
@@ -48,11 +44,7 @@ describe('AttentionSummaryPanel', () => {
 
   it('renders unavailable items with a muted tone, never the warn/accent badge colors', () => {
     render(
-      <MemoryRouter
-        basename="/city/test-city"
-        initialEntries={['/city/test-city/']}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter basename="/city/test-city" initialEntries={['/city/test-city/']}>
         <AttentionProvider
           contributors={[
             contributor('runs', [

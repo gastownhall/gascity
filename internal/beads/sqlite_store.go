@@ -1236,6 +1236,11 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			b.Metadata[k] = v
 		}
 	}
+	// Removing the key from the map is an exact unset, not an empty value:
+	// upsertBeadTx deletes every metadata row of the bead and re-inserts only
+	// the keys b.Metadata still carries. An absent key leaves the row
+	// unchanged, which rewriteBead commits as a no-op.
+	unsetMetadataKeys(b.Metadata, opts.UnsetMetadata)
 	if len(opts.Labels) > 0 {
 		b.Labels = append(b.Labels, opts.Labels...)
 	}

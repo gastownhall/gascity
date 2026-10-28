@@ -176,7 +176,8 @@ func TestAsyncAcceptedRequestIDDescriptionsNameTypedResultEvents(t *testing.T) {
 	}
 	assertCursorDescription("AsyncAcceptedBody", "after_seq")
 	assertCursorDescription("AsyncAcceptedResponse", "after_cursor")
-	assertCursorDescription("AsyncAcceptedBody", "no event provider")
+	assertCursorDescription("AsyncAcceptedBody", "/request/{requestId}")
+	assertCursorDescription("AsyncAcceptedBody", "event log was empty")
 	assertCursorDescription("AsyncAcceptedResponse", "no event provider")
 
 	got := openAPI.Components.Schemas["SessionCreateSucceededPayload"].Properties["session"].Description

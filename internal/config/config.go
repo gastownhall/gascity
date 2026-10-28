@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1440,8 +1441,11 @@ type BeadsConfig struct {
 	// ConditionalWrites selects the bead-write discipline: "off" (legacy,
 	// byte-identical), "auto" (compare-and-swap where the store is capable,
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
-	// defaults to "off". Any other value fails config load.
-	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// defaults to "auto", except that a store that cannot fence (an exec
+	// store, or a bd without --if-revision) runs as "off" without a warning.
+	// GC_BEADS_CONDITIONAL_WRITES overrides it. Any other value fails config
+	// load.
+	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// GuardedRelease selects the ownership-release discipline for work beads:
 	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
 	// release verbs where the bd binary is capable, loud degrade otherwise), or
@@ -1529,7 +1533,7 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 }
 
 // NormalizedConditionalWrites returns the configured conditional-writes value,
-// mapping ONLY the empty string to the built-in default "off". Unlike
+// mapping ONLY the empty string to the built-in default "auto". Unlike
 // NormalizedBDCompatibility, an unknown non-empty value passes through verbatim
 // rather than collapsing to the default: it is rejected upstream (by
 // internal/rollout on resolve), because a typo must never silently mean "off".
@@ -1537,7 +1541,7 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 // config free of a rollout import (cycle).
 func (b BeadsConfig) NormalizedConditionalWrites() string {
 	if b.ConditionalWrites == "" {
-		return "off"
+		return "auto"
 	}
 	return b.ConditionalWrites
 }
@@ -1575,9 +1579,9 @@ func (b BeadsConfig) NormalizedLedgerFeed() string {
 }
 
 // NormalizedNativeTransport returns the configured native-transport value,
-// mapping ONLY the empty string to the built-in default "auto" — unlike
-// ConditionalWrites/GuardedRelease, whose unset default is "off", this
-// switch's unset default is "auto" (today's eligibility-gated behavior).
+// mapping ONLY the empty string to the built-in default "auto" (today's
+// eligibility-gated behavior), as ConditionalWrites does; GuardedRelease's
+// unset default is "off".
 // Like the other two, an unknown non-empty value passes through verbatim
 // rather than collapsing to the default, because a typo must never silently
 // pick a mode: it is rejected upstream by validateNativeTransport on load.
@@ -1741,13 +1745,17 @@ type SessionConfig struct {
 	// Such a session has likely parked (e.g. its turn ended on a provider auth
 	// error) and will not self-recover. Set this above the longest legitimate
 	// alive-idle period for the city; values below 5m are clamped to 5m.
-	// Duration string (e.g. "30m"). Unset/zero disables it.
+	// Duration string (e.g. "30m"). Unset/zero disables it. Legacy only:
+	// deprecated and ignored under the v2 reconciler, whose work ladder
+	// replaces it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
 	// desired, alive session that holds in-progress work but has stopped making
 	// progress. Because recycling a claim-holder interrupts work, set this above
 	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
-	// Duration string (e.g. "20m"). Unset/zero disables it.
+	// Duration string (e.g. "20m"). Unset/zero disables it. Legacy only:
+	// deprecated and ignored under the v2 reconciler, whose work ladder
+	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
@@ -2037,6 +2045,10 @@ type EventsConfig struct {
 	// Rotation configures file-backed JSONL rotation. Defaults are applied
 	// by EventsRotationConfig helper methods when this table is absent.
 	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+	// Mirror configures an optional second copy of the city's event log,
+	// written outside .gc so a log shipper can read it. Absent or with an
+	// empty path, nothing is mirrored.
+	Mirror EventsMirrorConfig `toml:"mirror,omitempty"`
 }
 
 // UsageConfig holds usage-fact sink settings.
@@ -2116,6 +2128,92 @@ func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
 // return zero, which keeps all archives.
 func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 	return durationOr(c.ArchiveRetainAge, 0)
+}
+
+const (
+	// DefaultEventsMirrorMode is the default mode of the events mirror file.
+	DefaultEventsMirrorMode os.FileMode = 0o640
+	// DefaultEventsMirrorMaxSizeBytes is the default size at which the events
+	// mirror is renamed to <path>.1 and restarted.
+	DefaultEventsMirrorMaxSizeBytes int64 = 100 * 1024 * 1024
+)
+
+// EventsMirrorConfig configures the events mirror: a JSONL file outside the
+// city's .gc directory that receives a copy of every line of .gc/events.jsonl,
+// for a log shipper that may not enter .gc (which gc keeps at 0700). The
+// canonical .gc/events.jsonl is unchanged and stays what gc reads. The mirror
+// is written by the city's controller (or the supervisor running the city),
+// which tails the canonical log; a failing mirror never blocks or fails an
+// event write. Lines are copied as they are, redaction included: filtering
+// what leaves the host is the shipper's job.
+type EventsMirrorConfig struct {
+	// Path is the absolute path of the mirror file, outside the city's .gc
+	// directory. Its directory must already exist and be writable only by
+	// the city's user: gc creates only the file and never creates or changes
+	// the directory. gc writes only a regular file there: it does not follow
+	// a symbolic link at the path. Empty disables the mirror. Read when the
+	// controller opens the city's event log: a change takes effect at the
+	// next controller start.
+	Path string `toml:"path,omitempty"`
+	// Mode is the octal permission of the mirror file as a quoted string,
+	// for example "0640"; an unquoted TOML integer (0o640) is a type error
+	// that stops the config from loading. gc creates the file with it and
+	// sets it on every open. Defaults to "0640". The file's group follows
+	// the directory's: give the directory the shipper's group with the
+	// setgid bit (mode 2750) so the file inherits it.
+	Mode string `toml:"mode,omitempty" jsonschema:"default=0640"`
+	// MaxSizeBytes is the size at which the mirror is renamed to <path>.1
+	// (replacing the previous one) and a new file is started, so it stays
+	// under about twice this on disk. 0 turns gc's mirror rotation off for an
+	// external logrotate, which may rename the file away or copytruncate it.
+	// Defaults to 104857600 (100 MiB).
+	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=104857600"`
+}
+
+// Enabled reports whether a mirror path is configured.
+func (c EventsMirrorConfig) Enabled() bool {
+	return strings.TrimSpace(c.Path) != ""
+}
+
+// ModeOrDefault parses Mode, returning DefaultEventsMirrorMode when it is
+// empty. A value that is not an octal permission within 0777 is an error.
+func (c EventsMirrorConfig) ModeOrDefault() (os.FileMode, error) {
+	raw := strings.TrimSpace(c.Mode)
+	if raw == "" {
+		return DefaultEventsMirrorMode, nil
+	}
+	n, err := strconv.ParseUint(raw, 8, 32)
+	if err != nil || n > 0o777 || n == 0 {
+		return 0, fmt.Errorf("mode %q is not an octal permission between 0001 and 0777", c.Mode)
+	}
+	return os.FileMode(n), nil
+}
+
+// MaxSizeBytesOrDefault returns the configured rotation size.
+func (c EventsMirrorConfig) MaxSizeBytesOrDefault() int64 {
+	if c.MaxSizeBytes == nil {
+		return DefaultEventsMirrorMaxSizeBytes
+	}
+	return *c.MaxSizeBytes
+}
+
+// Problem reports why the configured mirror cannot be used, or "" when it can
+// (or none is configured). A mirror with a problem is skipped with a warning;
+// it never stops the city.
+func (c EventsMirrorConfig) Problem() string {
+	if !c.Enabled() {
+		return ""
+	}
+	if !filepath.IsAbs(c.Path) {
+		return fmt.Sprintf("path %q is not absolute", c.Path)
+	}
+	if _, err := c.ModeOrDefault(); err != nil {
+		return err.Error()
+	}
+	if c.MaxSizeBytes != nil && *c.MaxSizeBytes < 0 {
+		return fmt.Sprintf("max_size_bytes %d is negative", *c.MaxSizeBytes)
+	}
+	return ""
 }
 
 const (
@@ -2743,7 +2841,9 @@ type DaemonConfig struct {
 	RestartWindow string `toml:"restart_window,omitempty" jsonschema:"default=1h"`
 	// SessionCircuitBreaker enables the named-session respawn circuit breaker.
 	// When enabled, the controller suppresses no-progress named-session respawns
-	// after the configured restart threshold is exceeded.
+	// after the configured restart threshold is exceeded. Legacy only:
+	// deprecated and ignored under the v2 reconciler, whose work ladder
+	// replaces it.
 	SessionCircuitBreaker bool `toml:"session_circuit_breaker,omitempty"`
 	// SessionCircuitBreakerMaxRestarts overrides MaxRestarts for the
 	// named-session respawn circuit breaker. Nil reuses MaxRestartsOrDefault.
@@ -2800,8 +2900,10 @@ type DaemonConfig struct {
 	// disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
 	// WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives
-	// before being purged. Duration string (e.g., "24h", "7d"). Wisp GC is disabled
-	// unless both WispGCInterval and WispTTL are set.
+	// before being purged. Go duration string (e.g., "24h", or "168h" for seven
+	// days). Day units are not accepted: a value such as "7d" does not parse, so
+	// `gc start --foreground` refuses it and otherwise wisp GC stays disabled.
+	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispTTL string `toml:"wisp_ttl,omitempty"`
 	// DriftDrainTimeout is the maximum time to wait for an agent to acknowledge
 	// a drain signal during a config-drift restart. If the agent doesn't ack
@@ -2832,13 +2934,19 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
-	// SessionReconciler selects the controller's session reconciler. "legacy"
-	// (default) runs the tick reconciler. "v2" is reserved for the keyed
-	// reconciler and is refused in this build: a controller configured with it
-	// does not start. The gc-enterprise values "off", "auto" and "require" are
-	// deprecated aliases for "legacy". Boot-latched: a change applies at the next
-	// controller restart. Leave it unset.
-	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=legacy,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
+	// SessionReconciler selects the controller's session reconciler. Unset
+	// (default) runs the keyed "v2" reconciler when the city can run it, and
+	// falls back to "legacy", the tick reconciler, with a warning naming why
+	// when it cannot: a feature v2 does not support yet (agent depends_on or
+	// max_session_age, [chat_sessions] idle_timeout, a session provider other
+	// than tmux, acp or subprocess), conditional writes turned off, or a
+	// sessions or graph class store that is not on a sqlite-beads binding.
+	// "v2" runs v2 or refuses to start: a controller configured with it and
+	// such a feature does not start. "legacy" always runs the tick reconciler.
+	// The gc-enterprise values "off", "auto" and "require" are deprecated
+	// aliases for "legacy". Boot-latched: a change applies at the next
+	// controller restart.
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
 	// WorkLadder selects how the v2 reconciler paces outstanding work on pool
 	// seats. "on" (default) runs the work-progress ladder: nudges back off from
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
@@ -3083,12 +3191,16 @@ const (
 	SessionReconcilerV2     = "v2"
 )
 
-// SessionReconcilerMode returns the normalized mode ("legacy" or "v2"),
-// whether the spelling was a deprecated alias, and ok=false for an unknown
-// value. Parsing is case- and space-tolerant.
+// SessionReconcilerMode returns the normalized mode ("legacy" or "v2", or ""
+// when the key is unset), whether the spelling was a deprecated alias, and
+// ok=false for an unknown value. Parsing is case- and space-tolerant. An unset
+// key is resolved by the controller latch, from the whole config: v2 when the
+// city can run it, else legacy.
 func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(d.SessionReconciler)) {
-	case "", SessionReconcilerLegacy:
+	case "":
+		return "", false, true
+	case SessionReconcilerLegacy:
 		return SessionReconcilerLegacy, false, true
 	case SessionReconcilerV2:
 		return SessionReconcilerV2, false, true
@@ -3103,7 +3215,7 @@ func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
 // spelling of [daemon] session_reconciler. Matching it as a suffix keeps an
 // unknown value that quotes the marker from passing as an alias. Keep in sync
 // with IsSessionReconcilerAliasWarning.
-const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; remove the key, legacy is the default`
+const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; set session_reconciler = "legacy"`
 
 // sessionReconcilerWarnings returns the load warning for one config layer's
 // [daemon] session_reconciler: a non-fatal deprecation for an alias, and a
@@ -3117,7 +3229,7 @@ func sessionReconcilerWarnings(cfg *City, source string) []string {
 	_, alias, ok := cfg.Daemon.SessionReconcilerMode()
 	switch {
 	case !ok:
-		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, source, raw)}
+		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; set session_reconciler = "legacy" or "v2"`, source, raw)}
 	case alias:
 		return []string{fmt.Sprintf("%s: [daemon] session_reconciler = %q %s", source, raw, sessionReconcilerAliasMarker)}
 	}
@@ -3656,13 +3768,15 @@ type Agent struct {
 	SlingQuery string `toml:"sling_query,omitempty"`
 	// IdleTimeout is the maximum time an agent session can be inactive before
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
-	// Empty (default) disables idle checking.
+	// Empty (default) disables idle checking. Not applied to a [[named_session]]
+	// with mode = "always": the controller keeps that session running.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
 	// MaxSessionAge is the maximum wall-clock lifetime of a single runtime
 	// session before the controller preemptively restarts it. Duration string
 	// (e.g., "5h"). Empty (default) disables preemptive restarts. The restart
 	// is idle-gated: sessions with a pending interaction or an in-progress
-	// assigned work bead are left alone until they settle.
+	// assigned work bead are left alone until they settle. Not applied to a
+	// [[named_session]] with mode = "always".
 	//
 	// Motivation: provider SDKs that cache credentials at session start (e.g.,
 	// Claude Code via Bedrock) can wedge when the underlying token expires if
@@ -5059,7 +5173,7 @@ func validateBeadsModes(b BeadsConfig) error {
 // value at load time. This gate selects a correctness discipline: a typo like
 // "requre" silently meaning "off" would leave an operator believing the epoch
 // fence is enforced while every write runs unfenced, so the config fails to
-// load instead. The empty string (unset) is valid and defaults to off.
+// load instead. The empty string (unset) is valid and defaults to auto.
 func validateConditionalWrites(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil

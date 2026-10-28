@@ -1,6 +1,11 @@
 package worker
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"context"
+	"fmt"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // DeliveryKeysDeduplicated reports whether the runtime serving session name
 // through sp deduplicates keyed deliveries: a nudge sent under a
@@ -21,4 +26,20 @@ func DeliveryKeysDeduplicated(sp runtime.Provider, name string) bool {
 	}
 	_, ok := leaf.(runtime.KeyedNudgeProvider)
 	return ok
+}
+
+// heldDelivery runs a redelivery's lookup: found reports the receipt of the
+// delivery the runtime already holds under key, so nothing is sent again. A
+// lookup that cannot tell is an error wrapping runtime.ErrNudgeNotSent,
+// since nothing was sent, and the lookup's cause. With no redelivery or no
+// key it looks nothing up.
+func heldDelivery(ctx context.Context, redelivery bool, key string, lookup func(context.Context, string) (runtime.DeliveryReceipt, bool, error)) (runtime.DeliveryReceipt, bool, error) {
+	if !redelivery || key == "" {
+		return runtime.DeliveryReceipt{}, false, nil
+	}
+	r, found, err := lookup(ctx, key)
+	if err != nil {
+		return runtime.DeliveryReceipt{}, false, fmt.Errorf("looking up the earlier delivery: %w: %w", runtime.ErrNudgeNotSent, err)
+	}
+	return r, found, nil
 }

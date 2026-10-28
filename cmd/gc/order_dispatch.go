@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -336,6 +337,15 @@ type memoryOrderDispatcher struct {
 	// carryInapplicableReportsFrom hands it across dispatcher rebuilds, and the
 	// controller's webhook adapter hands every per-delivery dispatcher the same set.
 	inapplicableReported *inapplicableReportSet
+	// poursWork memoizes, per scoped order, whether its formula compiles to a
+	// WORK-class molecule (a v1 poured recipe), whose run evidence then lives
+	// in the order's target work store rather than the graph binding. Guarded
+	// by cacheMu; refreshed by every dispatch, which compiles the recipe anyway.
+	poursWork map[string]bool
+	// poursWorkFailedUntil holds, per scoped order, until when a failed
+	// compile is not retried for the gate (orderPoursWorkFailureTTL). Guarded
+	// by cacheMu.
+	poursWorkFailedUntil map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -722,7 +732,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if !legacyOK {
 			continue
 		}
-		storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, storeKey, legacyStore)
+		storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, storeKey, legacyStore, func() bool { return m.orderPoursWork(ctx, a) })
 		scoped := a.ScopedName()
 		// NoWorkGate orders (pure probes/sweeps that track no beads) opt out of
 		// BOTH open-work gates entirely. The gates exist to suppress re-dispatch
@@ -1819,7 +1829,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
-	childCtx, cancel := context.WithTimeout(ctx, timeout)
+	childCtx, cancel := withOrderTimeout(ctx, timeout)
 	defer cancel()
 
 	m.rec.Record(events.Event{
@@ -2032,7 +2042,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
-			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			execErrMsg = execenv.RedactText(orderRunErrorText(ctx, err), redactionEnv)
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
@@ -2320,7 +2330,19 @@ func (m *memoryOrderDispatcher) ordersStoreKey() string {
 // untouched — runOrderTrackingSweepWatchdog still sweeps the city store and every
 // rig, so the residue is closed on its own cadence rather than gating forever.
 // The convergence lane does not narrow; only the latency lane does.
-func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store, storeKey string, legacyStore beads.Store) ([]beads.Store, []string) {
+//
+// # A work-class order keeps its target work leg
+//
+// A v1 POURED order formula is the one recipe whose molecule is work class, so
+// the dispatch pours it into the order's target work store (dispatchWisp,
+// moleculeClassStore) and its root carries the order-run label and the event
+// cursor there. For such an order (poursWork) the target work store stays a
+// gate leg on a split city too: without it the open-work gate re-fires while
+// the run is still open, and the cooldown clock and the event cursor regress
+// once the tracking bead is gone (R17). Every other order keeps the binding
+// legs alone. poursWork is asked only when a binding exists, so a
+// single-store city never compiles a formula to build its gate; nil means no.
+func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store, storeKey string, legacyStore beads.Store, poursWork func() bool) ([]beads.Store, []string) {
 	workStores := []beads.Store{store}
 	workKeys := []string{storeKey}
 	if legacyStore != nil {
@@ -2339,9 +2361,73 @@ func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store
 		infraKeys = append(infraKeys, m.ordersStoreKey())
 	}
 	if len(infraStores) > 0 {
+		if poursWork != nil && store != nil && !storeListContains(infraStores, store) && poursWork() {
+			infraStores = append(infraStores, store)
+			infraKeys = append(infraKeys, storeKey)
+		}
 		return infraStores, infraKeys
 	}
 	return workStores, workKeys
+}
+
+// orderPoursWork reports whether a's formula compiles to a work-class molecule,
+// so its run evidence lands in the target work store (see gateStoresFor). The
+// answer is memoized per order; every dispatch refreshes it from the recipe it
+// actually poured (rememberOrderPoursWork), so an edited formula is picked up
+// by the next run. An exec order pours nothing into the work store.
+//
+// A formula that does not compile here answers TRUE and is not memoized: the
+// work leg then stays on the gate. Reading one store too many costs a read;
+// reading one too few would miss a previous run's evidence (after a restart
+// the memo is empty) and fire the order again.
+func (m *memoryOrderDispatcher) orderPoursWork(ctx context.Context, a orders.Order) bool {
+	if a.IsExec() || strings.TrimSpace(a.Formula) == "" {
+		return false
+	}
+	scoped := a.ScopedName()
+	now := time.Now()
+	m.cacheMu.Lock()
+	known, ok := m.poursWork[scoped]
+	failedUntil := m.poursWorkFailedUntil[scoped]
+	m.cacheMu.Unlock()
+	if ok {
+		return known
+	}
+	if now.Before(failedUntil) {
+		return true
+	}
+	recipe, err := orderGateCompile(ctx, a.Formula, orderFormulaSearchPaths(m.cfg, a), nil)
+	if err != nil {
+		// Remembered briefly, as "keep the work leg", so a broken formula is
+		// not recompiled every tick; never memoized as an answer.
+		m.cacheMu.Lock()
+		if m.poursWorkFailedUntil == nil {
+			m.poursWorkFailedUntil = make(map[string]time.Time)
+		}
+		m.poursWorkFailedUntil[scoped] = now.Add(orderPoursWorkFailureTTL)
+		m.cacheMu.Unlock()
+		return true
+	}
+	pours := recipeCoordClass(recipe) == coordclass.ClassWork
+	m.rememberOrderPoursWork(scoped, pours)
+	return pours
+}
+
+// orderGateCompile compiles an order's formula for the gate's class question.
+// Package var so tests can count compiles.
+var orderGateCompile = formula.CompileWithoutRuntimeVarValidation
+
+// orderPoursWorkFailureTTL is how long a formula that failed to compile for
+// the gate is not recompiled. The gate keeps the work leg meanwhile.
+var orderPoursWorkFailureTTL = 5 * time.Minute
+
+func (m *memoryOrderDispatcher) rememberOrderPoursWork(scoped string, pours bool) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.poursWork == nil {
+		m.poursWork = make(map[string]bool)
+	}
+	m.poursWork[scoped] = pours
 }
 
 // storeListContains reports whether stores already holds this exact store, so a
@@ -2379,7 +2465,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.orderFrontDoorFor(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
 		return
@@ -2412,7 +2498,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2453,26 +2539,16 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	// Everything from here on writes the molecule, which is graph class, so it
-	// goes to the graph store rather than the order-class store the tracking
-	// bead lives in. On a single-store city the two are the same value.
-	//
-	// KNOWN GAP, deliberately not closed here (ga-fk1a5). "Graph class" is true
-	// of a graph.v2 pour and a root-only wisp but NOT of a v1 POURED order
-	// formula, whose molecule container and assigned task steps are all
-	// ClassWork by coordclass.Classify — relocating those hides the assigned
-	// steps from `gc hook`, which reads the work scope. The CLI twin
-	// (doOrderRunWithJSON) gates this on moleculeClassStore and is correct.
-	// The dispatcher cannot simply follow, because this root is a TWO-CLASS
-	// object: it also carries the order:/seq: event-cursor labels, and
-	// orders.Store unions order-run evidence across the ORDERS and GRAPH legs
-	// only. Route the molecule by class and an event-triggered v1 poured order
-	// loses its cursor and re-fires; leave it and its steps stay unreachable.
-	// Closing it means persisting the cursor onto the orders-class tracking
-	// bead the way the exec arm already does (front.SetCursor at the exec
-	// branch above) — a production behavior change rather than wiring, so it is
-	// its own slice. TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass
-	// pins the current answer so that slice has a test to flip.
+	// The routing decoration resolves sessions and named targets, which live
+	// with the graph class, so it reads through the graph store. The molecule
+	// itself is poured below into the store its CLASS demands
+	// (moleculeClassStore, as `gc order run` does): a graph.v2 pour or a
+	// root-only wisp into the graph binding, a v1 POURED recipe — a molecule
+	// container plus plain assigned steps, all work class — into the order's
+	// target work store, where `gc hook` reads its steps (ga-fk1a5). Its root
+	// carries the order's run evidence there, which is why the order gate keeps
+	// that store as a leg for such an order (gateStoresFor). On a single-store
+	// city every one of these is the same store.
 	graphStore := m.graphStoreFor(store)
 
 	// Route before instantiation. A routing failure must not leave an
@@ -2496,13 +2572,15 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// the created bead text instead of the caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
+	moleculeStore := moleculeClassStore(recipe, store, graphStore)
+	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
+	cookResult, err := molecule.Instantiate(ctx, moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2534,7 +2612,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
-	if err := graphStore.Update(rootID, update); err != nil {
+	if err := moleculeStore.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
 		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
@@ -4032,6 +4110,42 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 		return maxTimeout
 	}
 	return t
+}
+
+// orderTimeoutError is the cause an order run's deadline carries. It names the
+// run's effective timeout, so a run the timeout stopped can say it timed out
+// and after how long. It unwraps to context.DeadlineExceeded, so an errors.Is
+// check for a deadline still matches it.
+type orderTimeoutError struct {
+	timeout time.Duration
+}
+
+func (e orderTimeoutError) Error() string {
+	return fmt.Sprintf("order timeout of %s exceeded", e.timeout)
+}
+
+func (e orderTimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+// withOrderTimeout bounds an order run by its effective timeout, with an
+// orderTimeoutError naming that timeout as the deadline's cause.
+func withOrderTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, timeout, orderTimeoutError{timeout: timeout})
+}
+
+// orderRunErrorText returns the failure text for err, an error from work an
+// order run did under ctx. When the run's order timeout ended ctx, the timeout
+// leads the text: err alone reads "context deadline exceeded", or "signal:
+// killed" from a runner that reports the kill, and neither says the order timed
+// out. Any other end of ctx, such as a controller shutdown, leaves err's text
+// as it is.
+func orderRunErrorText(ctx context.Context, err error) string {
+	var timeout orderTimeoutError
+	if !errors.As(context.Cause(ctx), &timeout) || errors.Is(err, timeout) {
+		return err.Error()
+	}
+	return timeout.Error() + ": " + err.Error()
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -200,19 +201,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	// A suspended city's bead stores are not read: a read restarts the
 	// retired bd proxy the controller just stopped, and an open dashboard
 	// polling this would cycle it. The body says so (StoresNotRead) and
 	// carries no work, mail, session-count or store-health figures.
-	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
-	sessionSnapshot := statusSessionSnapshot{
-		bySessionName: make(map[string]statusSessionInfo),
-		byTemplate:    make(map[string][]statusSessionInfo),
-	}
-	if !citySuspended {
-		sessionSnapshot = s.statusSessionSnapshot(ctx)
-	}
+	sessionSnapshot, citySt, citySuspended := s.citySessionSnapshot(ctx, cfg)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
@@ -223,18 +216,13 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
-	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
-	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
-	// the same set as suspendedRigs, which grows below to include rigs merely
-	// inferred suspended because every one of their agents is — those keep a
-	// refreshing cache and must still be asked for ready work.
-	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
-			suspendedRigs[r.Name] = true
-			cacheColdRigs[r.Name] = true
-		}
+	// cacheColdRigs is deliberately not the same set as suspendedRigs, which
+	// grows below to include rigs merely inferred suspended because every one
+	// of their agents is — those keep a refreshing cache and must still be
+	// asked for ready work.
+	cacheColdRigs := cacheColdRigNames(cfg, citySt)
+	for name := range cacheColdRigs {
+		suspendedRigs[name] = true
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
@@ -560,6 +548,81 @@ type statusSessionInfo struct {
 	agentName   string
 	template    string
 	state       session.State
+}
+
+// cacheColdRigNames returns the rigs suspended by effective state. It mirrors
+// the controller's per-rig cache refresh gate (rigStoreBackgroundRefresh): such
+// a rig gets no cache at all, so any read of its store goes to bd and restarts
+// the rig's retired proxy and Dolt. gc leaves a suspended scope untouched, so
+// neither status (statusWorkCounts) nor the active-bead lookup reads these
+// stores. The map is never nil.
+func cacheColdRigNames(cfg *config.City, st suspensionstate.State) map[string]bool {
+	cold := make(map[string]bool)
+	if cfg == nil {
+		return cold
+	}
+	for _, r := range cfg.Rigs {
+		if suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
+			cold[r.Name] = true
+		}
+	}
+	return cold
+}
+
+// loadCacheColdRigs reads the runtime suspension state and returns
+// cacheColdRigNames for the current config. An unreadable state file is
+// treated as no runtime overrides, so the config's startup defaults still
+// decide, as they do for the controller. It is logged once, naming the file,
+// until it reads again or fails differently (suspensionStateFaultChanged).
+// Without a city path there is no state file to read.
+func (s *Server) loadCacheColdRigs() map[string]bool {
+	cfg := s.state.Config()
+	cityPath := s.state.CityPath()
+	if cityPath == "" {
+		return cacheColdRigNames(cfg, suspensionstate.State{})
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if newFault := s.suspensionStateFaultChanged(err); err != nil {
+		if newFault {
+			log.Printf("api: reading suspension state %s: %v; applying the config's suspension defaults", citylayout.SuspensionStateFile(cityPath), err)
+		}
+		st = suspensionstate.State{}
+	}
+	return cacheColdRigNames(cfg, st)
+}
+
+// suspensionStateFaultChanged records err, nil once the state file reads
+// again, as the current suspension-state read fault and reports whether it
+// differs from the one recorded before. Every active-bead lookup loads the
+// file, once per row of a list, so a persistent fault is logged once rather
+// than on every row of every poll.
+func (s *Server) suspensionStateFaultChanged(err error) bool {
+	fault := ""
+	if err != nil {
+		fault = err.Error()
+	}
+	s.suspensionStateFaultMu.Lock()
+	defer s.suspensionStateFaultMu.Unlock()
+	changed := fault != s.suspensionStateFault
+	s.suspensionStateFault = fault
+	return changed
+}
+
+// citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
+// unless the city is suspended, and returns the city's suspension state with
+// whether it is in effect. A suspended city's snapshot is empty and reads no
+// bead store: a read restarts the retired bd proxy the controller just
+// stopped, and an open dashboard polling a view built on it would cycle it.
+// Every view that reads the session snapshot goes through here.
+func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (statusSessionSnapshot, suspensionstate.State, bool) {
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	if suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()) {
+		return statusSessionSnapshot{
+			bySessionName: make(map[string]statusSessionInfo),
+			byTemplate:    make(map[string][]statusSessionInfo),
+		}, citySt, true
+	}
+	return s.statusSessionSnapshot(ctx), citySt, false
 }
 
 // statusSessionSnapshot reads the session-class beads every session-derived
@@ -1081,7 +1144,6 @@ func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, c
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 		seenSessionNames[info.sessionName] = true

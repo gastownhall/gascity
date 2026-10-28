@@ -158,7 +158,8 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, 
 // "open" and filtered out there too. They were invisible to all four --status
 // legs, which the workflows pack uses as its exhaustive root inventory, so an
 // invisible root could be slung a duplicate child workflow. The native store
-// already answers open as "exclude closed and in_progress"; reading every
+// already answers a non-Live open as "exclude closed and in_progress" (a Live
+// open there is bd's raw one, nativeListPushesRawOpen); reading every
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).

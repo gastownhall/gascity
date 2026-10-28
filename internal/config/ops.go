@@ -12,54 +12,86 @@ import (
 // OpsConfig holds the operation-journal rollout gates, which record the
 // requests a session receives as ops beside their unchanged legacy execution,
 // and Authoritative, the conversation lane's switch, which is not a gate.
-// Each gate takes "off" (no op row; today's behavior), "auto" (shadow: the
-// request is recorded where the store can record it and runs unrecorded with a
-// loud degrade where it cannot) or "require" (durable: a request whose op
-// cannot be recorded is refused before any effect). Any other value fails
-// config load. A GC_OPS_CONTENT, GC_OPS_CONTROL or GC_OPS_LIFECYCLE env
-// override takes precedence; read the effective values through
-// internal/rollout.Flags, never these fields directly. The Go field names end
-// in Mode because cmd/gc's prompt-boundary lint forbids a gate's config field
-// name in prompt-rendering code, and a bare Content or Lifecycle would collide
-// with unrelated identifiers there.
+// Each gate takes "off" (no op row; the legacy behavior), "auto" (shadow: the
+// request is recorded where the store can record it and runs unrecorded where
+// it cannot, with a loud degrade when auto is set; the default for all three
+// gates when unset) or "require" (durable: a request whose op cannot be
+// recorded is refused before any effect; opt-in). Any other value fails
+// config load. Left unset, auto records only over a SQLite sessions store and
+// runs every request unrecorded, quietly, over any other, a Dolt-served one
+// included; an auto set in [ops] or GC_OPS_* records over any store that can.
+// A store served through bd can record once that bd's update, close, assign
+// and delete accept --if-revision, which no released bd does yet. A GC_OPS_CONTENT,
+// GC_OPS_CONTROL or GC_OPS_LIFECYCLE env override takes precedence; read the
+// effective values through internal/rollout.Flags, never these fields
+// directly. The Go field names end in Mode because cmd/gc's prompt-boundary
+// lint forbids a gate's config field name in prompt-rendering code, and a
+// bare Content or Lifecycle would collide with unrelated identifiers there.
 type OpsConfig struct {
 	// Records message deliveries (session submit and messages, nudge, mail
-	// notify) as message ops. "off" is the shipped default for all three
-	// gates. "auto" records where the store can and degrades loudly where it
-	// cannot. "require" refuses a request it cannot record before any effect.
-	// Experimental: each mode takes effect as each request surface gains op
-	// recording. A change takes effect at the next process start.
-	ContentMode string `toml:"content,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
-	// Records interrupt (stop) and respond requests as ops. "off" is the
-	// shipped default. "auto" records where the store can and degrades loudly
-	// where it cannot. "require" refuses a request it cannot record before any
-	// effect. Experimental: each mode takes effect as each request surface
-	// gains op recording. A change takes effect at the next process start.
-	ControlMode string `toml:"control,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
-	// Records wake, suspend, reset (restart), kill and close requests as ops.
-	// "off" is the shipped default. "auto" records where the store can and
-	// degrades loudly where it cannot. "require" refuses a request it cannot
-	// record before any effect. Experimental: each mode takes effect as each
-	// request surface gains op recording. A change takes effect at the next
+	// notify) as message ops. "auto" is the default for all three gates.
+	// Left unset, it records only over a SQLite sessions store and runs
+	// unrecorded, quietly, over any other (a Dolt-served one included). Set
+	// to "auto", it records where the store can and warns where it cannot; a
+	// store served through bd can record once that bd supports --if-revision,
+	// which no released bd does yet. "off" records nothing. "require" (opt-in) refuses a request it
+	// cannot record before any effect. A change takes effect at the next
 	// process start.
-	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
+	ContentMode string `toml:"content,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
+	// Records interrupt (stop) and respond requests as ops. "auto" is the
+	// default. Left unset, it records only over a SQLite sessions store and
+	// runs unrecorded, quietly, over any other (a Dolt-served one included).
+	// Set to "auto", it records where the store can and warns where it
+	// cannot; a store served through bd can record once that bd supports
+	// --if-revision, which no released bd does yet. "off" records nothing. "require" (opt-in)
+	// refuses a request it cannot record before any effect. A change takes
+	// effect at the next process start.
+	ControlMode string `toml:"control,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
+	// Records wake, suspend, reset (restart), kill and close requests as ops.
+	// "auto" is the default. Left unset, it records only over a SQLite
+	// sessions store and runs unrecorded, quietly, over any other (a
+	// Dolt-served one included). Set to "auto", it records where the store
+	// can and warns where it cannot; a store served through bd can record
+	// once that bd supports --if-revision, which no released bd does yet.
+	// "off" records nothing.
+	// "require" (opt-in) refuses a request it cannot record before any
+	// effect. A change takes effect at the next process start.
+	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
 	// of their legacy path. The default is empty, and message is not on by
-	// default anywhere yet. This build accepts message only. Experimental: no
-	// request surface writes lane ops yet, so listing a kind changes no
-	// request's delivery in this build. The city's controller, standalone
-	// or supervisor-hosted, runs the lane host that delivers lane ops, and
-	// gc doctor reports a listed kind as an error when no lane host serves
-	// the city. A keystroke-mode runtime (tmux) takes delivery at an idle
-	// boundary, a protocol-mode runtime (t3bridge) at its turn boundary.
+	// default anywhere yet. This build accepts message and respond.
+	// Experimental: listing message switches on the producers that write lane
+	// ops, whose messages the lane host then delivers: the API's POST
+	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
+	// operator proposing a message) and, for sessions a lane host can type
+	// into (a keystroke-mode runtime, or one a box host serves), the
+	// controller's planner notices (drain reminders, the nudge backstop) and
+	// gc session nudge. gc session nudge delivers inline what its delivery
+	// mode allows now, where it can type into the session: wait-idle only at
+	// an idle boundary; immediate there too, or into a running turn when the
+	// runtime can steer it, else at the next boundary. It leaves the rest to
+	// the controller's lane host, and the content gate no longer governs it.
+	// The API's submit and messages, gc session submit, mail --notify, sling
+	// --nudge and wait nudges keep their legacy delivery in this build. No
+	// request surface writes respond ops yet, so listing respond changes no
+	// request's delivery in this build.
+	// The city's controller, standalone or supervisor-hosted, runs the lane
+	// host that delivers lane ops, and gc doctor reports a listed kind as an
+	// error when no lane host serves the city. A keystroke-mode runtime (tmux)
+	// takes a boundary delivery at an idle boundary, a protocol-mode runtime
+	// (t3bridge) at its turn boundary. A message the ops route proposes with
+	// when now, or the legacy interrupt, runs as one deliver-now unit: the
+	// lane host interrupts the session's running turn, then delivers the
+	// message at the boundary the interrupt leaves.
 	// A listed kind needs a sessions store with guarded batches. A change
-	// takes effect at the next controller start.
-	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message"`
+	// takes effect at the controller's next start; gc session nudge reads it
+	// at once.
+	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=respond"`
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
 // execute, so the only kinds [ops] authoritative accepts.
-var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage}
+var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindRespond}
 
 // LaneExecutes reports whether [ops] authoritative lists kind.
 func (o OpsConfig) LaneExecutes(kind string) bool {
@@ -73,7 +105,7 @@ func (o OpsConfig) LaneExecutes(kind string) bool {
 // composed root, beside validateBeadsModes, because a fragment may supply any
 // of these fields. A typo must never read as "off": an operator who wrote
 // "requre" would believe requests are refused unless recorded while none is.
-// The empty string (unset) is valid and defaults to off. A blank value such as
+// The empty string (unset) is valid and defaults to auto. A blank value such as
 // " " is not unset, because internal/rollout reads any non-empty value as set,
 // so it is rejected like a typo.
 func validateOpsModes(o OpsConfig) error {

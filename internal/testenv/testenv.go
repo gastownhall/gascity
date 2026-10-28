@@ -184,8 +184,19 @@ var LeakVectorVars = []string{
 	"GC_DOLT_PORT",
 	"GC_DOLT_USER",
 	"GC_HOME",
+	// GC_LANE_FAILPOINT makes a test-hooks gc kill itself at a lane stage
+	// (cmd/gc/conversation_lane_failpoint.go). A leaked shell value would make
+	// a gc child a test starts, or a unit test that enables the stamp, kill
+	// itself, so the scrub owns it; tests that want it set it on the child.
+	"GC_LANE_FAILPOINT",
 	"GC_OPS_CONTENT",
 	"GC_OPS_CONTROL",
+	// GC_OPS_FAILPOINT makes a test-hooks gc kill itself, park a request or
+	// fail an op's closes at an op recording crash point
+	// (cmd/gc/ops_failpoint.go). A leaked shell value would make a gc child a
+	// test starts do so, so the scrub owns it; tests that want it set it on
+	// the child.
+	"GC_OPS_FAILPOINT",
 	"GC_OPS_LIFECYCLE",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",

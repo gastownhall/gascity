@@ -885,6 +885,51 @@ func TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget(t *testing
 	}
 }
 
+// TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime pins the probe
+// gc hook asks after a rig leg's read failed (hookRigRuntimeUnavailable): a rig
+// inheriting the city's managed Dolt runtime reports it unavailable while that
+// runtime is not running, without starting or publishing one, and available
+// once it runs; a rig whose store is not the managed bd contract never does.
+func TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	for dir, yaml := range map[string]string{
+		cityDir: "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+		rigDir:  "issue_prefix: repo\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+
+	if !rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if !hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("the probe published managed runtime state (stat err = %v); it must start nothing", err)
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	if hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = true for a rig whose store is not the managed bd contract")
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	writeReachableManagedDoltState(t, cityDir)
+	if rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = true with the city's managed runtime running")
+	}
+}
+
 func TestBdRuntimeEnvDisablesCLIRemoteSync(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")

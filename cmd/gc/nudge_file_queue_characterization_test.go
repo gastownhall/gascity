@@ -83,6 +83,76 @@ var nqCharVerbs = struct {
 	rekey: rekeyQueuedNudgesAfterFailedBookkeeping,
 }
 
+// nqLockProbeStore is the shadow store's delegate. Every bead-store call it
+// serves first probes the queue's flock on a fresh descriptor, and reports a
+// call made while the lock is held (ga-fsp5w9: the critical section is pure).
+type nqLockProbeStore struct {
+	beads.Store
+	h *nqCharHarness
+}
+
+func (s nqLockProbeStore) Create(b beads.Bead) (beads.Bead, error) {
+	s.h.probe("store Create")
+	return s.Store.Create(b)
+}
+
+func (s nqLockProbeStore) Get(id string) (beads.Bead, error) {
+	s.h.probe("store Get " + id)
+	return s.Store.Get(id)
+}
+
+func (s nqLockProbeStore) Update(id string, opts beads.UpdateOpts) error {
+	s.h.probe("store Update " + id)
+	return s.Store.Update(id, opts)
+}
+
+func (s nqLockProbeStore) Close(id string) error {
+	s.h.probe("store Close " + id)
+	return s.Store.Close(id)
+}
+
+func (s nqLockProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.h.probe("store List " + beadstest.DescribeListQuery(query))
+	return s.Store.List(query)
+}
+
+func (s nqLockProbeStore) SetMetadata(id, key, value string) error {
+	s.h.probe("store SetMetadata " + id)
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s nqLockProbeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.h.probe("store SetMetadataBatch " + id)
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// nudgeQueueLockHeldForTest reports whether some descriptor holds the queue's
+// flock, by trying it on a fresh one.
+func nudgeQueueLockHeldForTest(city string) bool {
+	f, err := os.OpenFile(nudgequeue.LockPath(city), os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint:errcheck
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.Is(err, syscall.EWOULDBLOCK)
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
+}
+
+// probe fails the test when what is a store call, store open or census made
+// while the queue lock is held.
+func (h *nqCharHarness) probe(what string) {
+	if h.lockHeldByTest {
+		return
+	}
+	if nudgeQueueLockHeldForTest(h.city) {
+		h.underLock = append(h.underLock, what)
+		h.t.Errorf("%s ran under the nudge queue lock", what)
+	}
+}
+
 // nqCharStore is the one shadow store every frame sees: the store a caller
 // passes and every store a frame opens for itself. It counts the closes of the
 // handles the frames open, and fails its writes while failWrites is set.
@@ -145,8 +215,14 @@ type nqCharHarness struct {
 	live       map[string]struct{}
 
 	opens, closes, census, pings int
-	warnings                     bytes.Buffer
-	out                          bytes.Buffer
+	// underLock lists the store calls, opens and census calls made while
+	// the queue lock was held.
+	underLock []string
+	// lockHeldByTest turns the probe off while the test itself holds the
+	// queue lock on purpose.
+	lockHeldByTest bool
+	warnings       bytes.Buffer
+	out            bytes.Buffer
 }
 
 func newNQCharHarness(t *testing.T) *nqCharHarness {
@@ -156,12 +232,13 @@ func newNQCharHarness(t *testing.T) *nqCharHarness {
 		t:    t,
 		city: t.TempDir(),
 		base: time.Now().UTC().Truncate(time.Second),
-		rec:  beadstest.NewOpRecordingStore(beads.NewMemStore()),
 		live: map[string]struct{}{"s-new": {}, "s-sib": {}},
 	}
+	h.rec = beadstest.NewOpRecordingStore(nqLockProbeStore{Store: beads.NewMemStore(), h: h})
 
 	prevOpen := openOwnedNudgeBeadStore
 	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		h.probe("store open")
 		h.opens++
 		if h.storeOff {
 			return beads.NudgesStore{}, nil
@@ -172,12 +249,14 @@ func newNQCharHarness(t *testing.T) *nqCharHarness {
 	t.Cleanup(func() { openOwnedNudgeBeadStore = prevOpen })
 	prevWork := openNudgeWorkStore
 	openNudgeWorkStore = func(string, string) (beads.Store, error) {
+		h.probe("work store open")
 		h.opens++
 		return h.store(), nil
 	}
 	t.Cleanup(func() { openNudgeWorkStore = prevWork })
 	prevCensus := liveNudgeFenceSessionIDs
 	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		h.probe("session census")
 		h.census++
 		return h.live
 	}
@@ -738,17 +817,20 @@ func TestNudgeFileQueueCharacterizationMaintenanceAndReads(t *testing.T) {
 	h.step("a sweep inside the debounce does nothing", func() string {
 		return nqCharErr(v.sweep(h.city, h.at(2*time.Hour+500*time.Millisecond)))
 	})
-	h.step("a sweep outside the debounce repairs, confirms and prunes", func() string {
+	h.step("a sweep inside the failed payment's backoff leaves the debt", func() string {
 		return nqCharErr(v.sweep(h.city, h.at(2*time.Hour+2*time.Second)))
 	})
+	h.step("a sweep after the backoff repairs and confirms; the next pass prunes", func() string {
+		return nqCharErr(v.sweep(h.city, h.at(2*time.Hour+31*time.Second)))
+	})
 	h.step("list for alpha (status)", func() string {
-		return nqCharBuckets(v.listFor(h.city, alpha, h.at(2*time.Hour+3*time.Second)))
+		return nqCharBuckets(v.listFor(h.city, alpha, h.at(2*time.Hour+32*time.Second)))
 	})
 	h.step("list for the exact agent", func() string {
-		return nqCharBuckets(v.listForAgent(h.city, " alpha ", h.at(2*time.Hour+3*time.Second)))
+		return nqCharBuckets(v.listForAgent(h.city, " alpha ", h.at(2*time.Hour+32*time.Second)))
 	})
 	h.step("list for the empty agent", func() string {
-		return nqCharBuckets(v.listForAgent(h.city, "", h.at(2*time.Hour+3*time.Second)))
+		return nqCharBuckets(v.listForAgent(h.city, "", h.at(2*time.Hour+32*time.Second)))
 	})
 	good := h.readState()
 	h.setState("{not json\n")
@@ -785,7 +867,7 @@ func TestNudgeFileQueueCharacterizationCLI(t *testing.T) {
 	h.step("gc nudge drop --json", func() string { return drop(true, "n-3", "n-1", "n-missing") })
 	h.step("queued nudge line", func() string {
 		var stdout, stderr bytes.Buffer
-		code := writeQueuedSessionNudgeResult(h.target("s-new", "2"), nudgeDeliveryQueue, false, "", &stdout, &stderr)
+		code := writeQueuedSessionNudgeResult(h.target("s-new", "2"), nudgeDeliveryQueue, false, "", nil, &stdout, &stderr)
 		return fmt.Sprintf("exit=%d\nstdout:\n%sstderr:\n%s", code, stdout.String(), stderr.String())
 	})
 	h.finish("cli")

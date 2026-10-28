@@ -78,7 +78,7 @@ func TestRuntimeHandleT3BridgeTurnSourceIsDerived(t *testing.T) {
 	fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {v1TurnCaps}}
 	want := "none none/none/none/none/false protocol none"
 	if _, ok := sp.(runtime.TurnObservationProvider); ok {
-		want = "protocol recorded/recorded/checked/correlated/false protocol none"
+		want = "protocol recorded/inferred/checked/correlated/false protocol none"
 	}
 	caps, err := h.TurnCapabilities(context.Background())
 	if err != nil || capsRow(caps) != want {

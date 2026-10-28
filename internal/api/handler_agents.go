@@ -98,7 +98,6 @@ type expandedAgent struct {
 	rig           string
 	pool          string
 	suspended     bool
-	provider      string
 	description   string
 }
 
@@ -127,7 +126,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		}}, nil
 	}
@@ -159,7 +157,6 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -177,7 +174,6 @@ func configuredPoolRow(a config.Agent) expandedAgent {
 		rig:           a.Dir,
 		pool:          qn,
 		suspended:     a.Suspended,
-		provider:      a.Provider,
 		description:   a.Description,
 	}
 }
@@ -246,7 +242,6 @@ func discoverUnlimitedPoolChecked(a config.Agent, poolName, cityName, sessTmpl s
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 	}
@@ -383,7 +378,8 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are
-// searched. Returns "" if no match.
+// searched. A store only rigs suspended by effective state reach is never
+// searched (activeBeadSearchScope). Returns "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
 }
@@ -391,6 +387,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
 // lower-frequency detail views where external reassignment freshness matters.
+// A store only rigs suspended by effective state reach is never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
@@ -399,18 +396,10 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // highest-priority identity: identity order first, then store order, then
 // newest first within a store. Cached reads use a targeted ListQuery with
 // Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores.
+// through findLiveActiveBeadInStores. Both read only the stores
+// activeBeadSearchScope picks.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
-	stores := s.state.BeadStores()
-	var rigNames []string
-	if rig != "" {
-		if _, ok := stores[rig]; ok {
-			rigNames = []string{rig}
-		}
-	}
-	if rigNames == nil {
-		rigNames = sortedRigNames(stores)
-	}
+	stores, rigNames := activeBeadSearchScope(s.state.BeadStores(), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
 	for _, assignee := range assignees {
@@ -453,14 +442,50 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 	return ""
 }
 
+// activeBeadSearchScope returns the stores an active-bead lookup may read and
+// the names to read them through, in order. A rig suspended by effective
+// state (cold, cacheColdRigNames) has no cache, and a read of its store
+// restarts its retired proxy and Dolt, so its name is dropped before
+// sortedRigNames dedupes the stores; a store it shares with a rig that is not
+// suspended, as in legacy shared-file mode, stays reachable through that
+// alias. A lookup scoped to a rig reads that rig's store alone: a suspended
+// rig's through such an alias, or nothing when the store has none, never the
+// other rigs' stores. An unscoped lookup, or one scoped to a rig that is not
+// suspended and has no store, reads every remaining store once.
+//
+// residency:allow — filters the caller's own rig map by effective suspension
+// and names the rigs to read it through; it opens no store and consults no
+// binding, namespace or leg order.
+func activeBeadSearchScope(all map[string]beads.Store, cold map[string]bool, rig string) (map[string]beads.Store, []string) {
+	stores := make(map[string]beads.Store, len(all))
+	for name, store := range all {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
+	if rig != "" && cold[rig] {
+		if shared := all[rig]; shared != nil {
+			for _, name := range sortedRigNames(stores) {
+				if stores[name] == shared {
+					return stores, []string{name}
+				}
+			}
+		}
+		return stores, nil
+	}
+	if _, ok := stores[rig]; ok && rig != "" {
+		return stores, []string{rig}
+	}
+	return stores, sortedRigNames(stores)
+}
+
 // findLiveActiveBeadInStores makes one live List call per store for all
-// identities instead of one per identity, because each live read can spawn
-// database commands. How far a store narrows that call varies:
-// DoltliteReadStore filters with assignee IN (...), NativeDoltStore issues one
-// keyed read per identity, and BdStore (given more than one identity) and
-// SQLiteStore read the store's whole in_progress set and filter it
-// client-side. Precedence matches the cached path. Reading stops once the
-// first identity has a match, since no later store can outrank it.
+// identities, not one per identity. That bounds the calls, not the backend
+// work: how far a store narrows its call varies. DoltliteReadStore filters
+// with assignee IN (...), NativeDoltStore and BdStore issue one keyed read per
+// identity, and SQLiteStore reads the store's whole in_progress set and
+// filters it client-side. Precedence matches the cached path. Reading stops
+// once the first identity has a match, since no later store can outrank it.
 func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
 	if len(identities) == 0 {
 		return ""
@@ -585,6 +610,31 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 	return provider, strings.ToUpper(provider[:1]) + provider[1:]
 }
 
+// agentProviderName is the provider an agent's sessions run under: its own,
+// else the workspace default. The SDK's control dispatcher
+// (config.IsDeterministicControlDispatcher) is providerless by design — its
+// start_command runs `gc convoy control --serve` — so it inherits none.
+func agentProviderName(a *config.Agent, cfg *config.City) string {
+	if config.IsDeterministicControlDispatcher(a) {
+		return ""
+	}
+	if a.Provider != "" {
+		return a.Provider
+	}
+	return cfg.Workspace.Provider
+}
+
+// agentProviderInfo is resolveProviderInfo for a configured agent, applying
+// agentProviderName: an agent without a provider reports none, and no
+// provider binary gates its availability.
+func agentProviderInfo(a *config.Agent, cfg *config.City) (provider, displayName string) {
+	provider = agentProviderName(a, cfg)
+	if provider == "" {
+		return "", ""
+	}
+	return resolveProviderInfo(provider, cfg)
+}
+
 // computeAgentState derives the state enum from existing agent data.
 func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
 	if suspended {
@@ -650,11 +700,7 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	}
 	count := 0
 	for _, a := range cfg.Agents {
-		provider := a.Provider
-		if provider == "" {
-			provider = cfg.Workspace.Provider
-		}
-		if provider == "claude" {
+		if agentProviderName(&a, cfg) == "claude" {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false

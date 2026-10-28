@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -68,11 +70,11 @@ func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	session := idleClaimPoolSession()
 	work := []beads.Bead{{ID: "work-a", Status: "open"}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	store := beads.NewMemStoreFrom(0, append([]beads.Bead{session}, work...), nil)
 	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	var out bytes.Buffer
 
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), liveClaimDrain(store, nil), &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
 		t.Fatalf("first tick Nudge calls = %d, want 0 inside grace", got)
 	}
@@ -82,7 +84,7 @@ func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 	}
 
 	clk.Advance(idleClaimNudgeGrace + time.Second)
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), liveClaimDrain(store, nil), &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
 		t.Fatalf("Nudge calls = %d, want 1 after grace", got)
 	}
@@ -109,12 +111,12 @@ func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) 
 			cfg.Agents[0].Nudge = tc.nudge
 			session := idleClaimPoolSession()
 			work := []beads.Bead{{ID: "work-a", Status: "open"}}
-			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			store := beads.NewMemStoreFrom(0, append([]beads.Bead{session}, work...), nil)
 			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			var out bytes.Buffer
 
-			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base, poolClaimDrain{}, &out)
-			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), poolClaimDrain{}, &out)
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base, liveClaimDrain(store, nil), &out)
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), liveClaimDrain(store, nil), &out)
 
 			for _, call := range sp.SnapshotCalls() {
 				if call.Method == "Nudge" && call.Name == "session-a" {
@@ -166,11 +168,13 @@ func TestNudgeStalledPoolClaims_MatchesTriggerStoreRefForDuplicateIDs(t *testing
 		{ID: "work-a", Status: "closed"},
 	}
 	storeRefs := []string{"rig:fixture", "city:test-city"}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	// The live re-read before delivery finds the trigger by residency, not by
+	// store ref (WorkLegs.readLive); this store models the rig's open copy.
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session, work[0]}, nil)
 	clk := &clock.Fake{Time: base.Add(idleClaimNudgeGrace + time.Second)}
 	var out bytes.Buffer
 
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, storeRefs, clk.Now(), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, storeRefs, clk.Now(), liveClaimDrain(store, nil), &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
 		t.Fatalf("Nudge calls = %d, want 1 for the open rig-scoped trigger", got)
 	}
@@ -246,11 +250,12 @@ func TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt(t *testing.T) {
 	session.Metadata[idleClaimNudgeCountKey] = "0"
 	session.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
 	work := []beads.Bead{{ID: "work-a", Status: "open"}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	store := beads.NewMemStoreFrom(0, append([]beads.Bead{session}, work...), nil)
 	clk := &clock.Fake{Time: base.Add(idleClaimNudgeGrace + time.Second)}
 	var out bytes.Buffer
+	live := liveClaimDrain(store, nil)
 
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
 	if sp.nudgeCalls != 1 {
 		t.Fatalf("delivery calls = %d, want 1 failed attempt", sp.nudgeCalls)
 	}
@@ -265,7 +270,7 @@ func TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt(t *testing.T) {
 	// The reservation paces the next retry exactly as a delivered nudge would:
 	// nothing more is attempted until the backoff elapses.
 	clk.Advance(idleClaimNudgeBackoff - time.Second)
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
 	if sp.nudgeCalls != 1 {
 		t.Fatalf("inside-backoff delivery calls = %d, want unchanged 1", sp.nudgeCalls)
 	}
@@ -273,7 +278,7 @@ func TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt(t *testing.T) {
 	for want := 2; want <= idleClaimNudgeMaxAttempts; want++ {
 		session = mustGetTestBead(t, store, session.ID)
 		clk.Advance(idleClaimNudgeBackoff + time.Second)
-		nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), poolClaimDrain{}, &out)
+		nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
 		if sp.nudgeCalls != want {
 			t.Fatalf("attempt %d delivery calls = %d, want %d", want, sp.nudgeCalls, want)
 		}
@@ -283,7 +288,7 @@ func TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt(t *testing.T) {
 	// being claimed: the lane stops attempting and leaves the cap in place.
 	session = mustGetTestBead(t, store, session.ID)
 	clk.Advance(time.Hour)
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
 	if sp.nudgeCalls != idleClaimNudgeMaxAttempts {
 		t.Fatalf("past-cap delivery calls = %d, want %d", sp.nudgeCalls, idleClaimNudgeMaxAttempts)
 	}
@@ -554,10 +559,10 @@ func TestNudgeStalledPoolClaims_RigPoolWithoutNudgeGetsTheDefault(t *testing.T) 
 	step := beads.Bead{ID: "gcg-step", Status: "open", Metadata: map[string]string{
 		"gc.routed_to": "beads/claude-max-gw", "gc.session_affinity": "require", "gc.continuation_group": "main",
 	}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session, step}, nil)
 	var out bytes.Buffer
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, []beads.Bead{step}, []string{"city:c"}, base, poolClaimDrain{}, &out)
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{mustGetTestBead(t, store, session.ID)}, []beads.Bead{step}, []string{"city:c"}, base.Add(idleClaimNudgeGrace+time.Second), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, []beads.Bead{step}, []string{"city:c"}, base, liveClaimDrain(store, nil), &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{mustGetTestBead(t, store, session.ID)}, []beads.Bead{step}, []string{"city:c"}, base.Add(idleClaimNudgeGrace+time.Second), liveClaimDrain(store, nil), &out)
 	if got := sp.CountCalls("Nudge", "beads--claude-max-gw-2-pool"); got != 1 {
 		t.Fatalf("nudges = %d (log %q), want the default claim nudge delivered", got, out.String())
 	}
@@ -757,11 +762,11 @@ func TestNudgeStalledPoolClaims_TemplateAssignedTriggerIsUnclaimed(t *testing.T)
 	cfg.Agents[0].MaxActiveSessions = intPtr(3) // agent-a is a pool
 	s := idleClaimPoolSession()
 	work := []beads.Bead{{ID: "work-a", Status: "open", Assignee: "agent-a"}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{s}, nil)
+	store := beads.NewMemStoreFrom(0, append([]beads.Bead{s}, work...), nil)
 	sp := runningIdleClaimFake(t, "session-a")
 	var out bytes.Buffer
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{s}, work, nil, base, poolClaimDrain{}, &out)
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{s}, work, nil, base, liveClaimDrain(store, nil), &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), liveClaimDrain(store, nil), &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
 		t.Fatalf("nudges = %d, want the template-assigned trigger treated as unclaimed", got)
 	}
@@ -789,5 +794,336 @@ func TestWorkLegsReadLiveReadsPastTheCache(t *testing.T) {
 	b, found, err := legs.readLive("hq-1")
 	if err != nil || !found || b.Status != "in_progress" {
 		t.Fatalf("readLive = %+v found %v err %v, want the live in_progress row", b, found, err)
+	}
+}
+
+// staleSnapshotClaimSession is the pool slot past its observe grace for
+// work-a, no attempt spent yet: the next tick's verdict is a nudge.
+func staleSnapshotClaimSession(base time.Time) beads.Bead {
+	s := idleClaimPoolSession()
+	s.Metadata[idleClaimNudgeTriggerKey] = "work-a"
+	s.Metadata[idleClaimNudgeCountKey] = "0"
+	s.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+	return s
+}
+
+// Kills a claim nudge aimed at a slot that already claimed (factory-lifecycle
+// oct14b, sr-wisp-hb3g5 / sfb-re2): on a slow store the tick's work snapshot
+// still read the trigger open while the slot had claimed it minutes earlier,
+// and the backstop's revalidation trusted that snapshot, so a working agent
+// was told to re-claim. The trigger is re-read live before delivery: claimed
+// since the snapshot (in_progress, assigned to the slot's bead ID, the
+// evidence's shape) or mid-claim (still open, assigned to the slot) is not
+// nudged and spends no attempt.
+func TestNudgeStalledPoolClaims_ClaimedSinceTheSnapshotIsNotNudged(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	for name, live := range map[string]beads.Bead{
+		"claimed since the snapshot": {ID: "work-a", Status: "in_progress", Assignee: "session-bead-a"},
+		"claim mid-flight":           {ID: "work-a", Status: "open", Assignee: "session-a"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := staleSnapshotClaimSession(base)
+			store := beads.NewMemStoreFrom(0, []beads.Bead{s, live}, nil)
+			sp := quietClaimFake(t, now)
+			var out bytes.Buffer
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, snapshot, nil, now, liveClaimDrain(store, nil), &out)
+			if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+				t.Fatalf("Nudge calls = %d (log %q), want 0 for a trigger the live store shows claimed", got, out.String())
+			}
+			if got := mustGetTestBead(t, store, s.ID).Metadata[idleClaimNudgeCountKey]; got == "1" {
+				t.Fatalf("attempt count = %q, want no attempt reserved", got)
+			}
+		})
+	}
+}
+
+// Kills delivering on evidence the backstop could not confirm: a live read
+// that fails, or no live reader at all, holds the nudge without spending an
+// attempt, and the next tick that can read the trigger open delivers it.
+func TestNudgeStalledPoolClaims_UnconfirmedTriggerHoldsTheNudge(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	for name, drain := range map[string]poolClaimDrain{
+		"read fails": {readTrigger: func(string) (beads.Bead, bool, error) {
+			return beads.Bead{}, false, errors.New("store contended")
+		}},
+		"no live reader": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := staleSnapshotClaimSession(base)
+			store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+			sp := quietClaimFake(t, now)
+			var out bytes.Buffer
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, snapshot, nil, now, drain, &out)
+			if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+				t.Fatalf("Nudge calls = %d, want the nudge held on unconfirmed evidence", got)
+			}
+			if got := mustGetTestBead(t, store, s.ID).Metadata[idleClaimNudgeCountKey]; got != "0" {
+				t.Fatalf("attempt count = %q, want 0: a hold spends nothing", got)
+			}
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, now, liveClaimDrain(store, nil), &out)
+			if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
+				t.Fatalf("Nudge calls = %d, want the confirmed-open trigger nudged", got)
+			}
+		})
+	}
+}
+
+// Kills a claim nudge that interrupts a running turn (factory-lifecycle
+// oct14b: the worker was mid-turn when the nudge landed, Codex logged
+// turn_aborted, and the nudge became its next prompt). The backstop keyed
+// only on bead state and never asked the runtime whether the slot was busy;
+// delivery then fell to the provider, whose wait-for-idle sends anyway once
+// its own timeout passes and whose Codex submit sequence leads with Escape.
+// A slot whose runtime shows output within the grace, or whose busy-readable
+// pane still shows the busy indicator, or whose pane cannot be read, is held
+// without spending an attempt; once it is quiet the still-unclaimed trigger
+// is nudged.
+func TestNudgeStalledPoolClaims_BusySlotIsNotNudged(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	for _, tc := range []struct {
+		name     string
+		activity time.Time
+		snapshot *executionBackstopIdleSnapshotProvider
+	}{
+		{name: "output within the grace", activity: now.Add(-5 * time.Second)},
+		{name: "busy indicator on a stale pane", activity: now.Add(-time.Hour), snapshot: &executionBackstopIdleSnapshotProvider{idle: false}},
+		{name: "busy reading fails", activity: now.Add(-time.Hour), snapshot: &executionBackstopIdleSnapshotProvider{err: errors.New("capture failed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := staleSnapshotClaimSession(base)
+			s.Metadata["provider"] = "codex"
+			store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+			fake := runningIdleClaimFake(t, "session-a")
+			fake.SetActivity("session-a", tc.activity)
+			var sp runtime.Provider = fake
+			if tc.snapshot != nil {
+				tc.snapshot.Fake = fake
+				sp = tc.snapshot
+			}
+			var out bytes.Buffer
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, snapshot, nil, now, liveClaimDrain(store, nil), &out)
+			if got := fake.CountCalls("Nudge", "session-a"); got != 0 {
+				t.Fatalf("Nudge calls = %d, want none delivered into a busy session", got)
+			}
+			if got := mustGetTestBead(t, store, s.ID).Metadata[idleClaimNudgeCountKey]; got != "0" {
+				t.Fatalf("attempt count = %q, want 0: a busy hold spends nothing", got)
+			}
+
+			fake.SetActivity("session-a", now.Add(-time.Hour))
+			if tc.snapshot != nil {
+				tc.snapshot.idle, tc.snapshot.err = true, nil
+			}
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, now, liveClaimDrain(store, nil), &out)
+			if got := fake.CountCalls("Nudge", "session-a"); got != 1 {
+				t.Fatalf("Nudge calls = %d, want the quiet slot nudged", got)
+			}
+		})
+	}
+}
+
+// busyAtDeliveryProvider is a runtime whose session looks quiet to every
+// look the backstop takes but has gone busy by the time the nudge is typed:
+// while busy is set its Nudge defers with runtime.ErrSessionBusy, typing
+// nothing, the way the tmux provider answers a Codex pane still running a
+// turn when its wait for idle runs out.
+type busyAtDeliveryProvider struct {
+	*runtime.Fake
+	busy     bool
+	deferred int
+}
+
+func (p *busyAtDeliveryProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if p.busy {
+		p.deferred++
+		return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+	}
+	return p.Fake.Nudge(name, content)
+}
+
+// Kills a deferred delivery spending the slot's bounded attempts (oct14b
+// follow-up): the busy look passes, the attempt is reserved, and then the
+// worker starts a turn before the nudge is typed. The runtime defers instead
+// of interrupting it, so the reservation is refunded — count and time back
+// to what they were — and the slot is neither drained early nor denied its
+// nudges; the next quiet tick delivers attempt 1.
+func TestNudgeStalledPoolClaims_BusyAtDeliveryRefundsTheAttempt(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	s := staleSnapshotClaimSession(base)
+	s.Metadata["instance_token"] = "tok-1"
+	s.Metadata[idleClaimNudgeTokenKey] = "tok-1"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	sp := &busyAtDeliveryProvider{Fake: quietClaimFake(t, now), busy: true}
+	drains := &drainRecorder{}
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	var out bytes.Buffer
+
+	ticks := idleClaimNudgeMaxAttempts + 2
+	for tick := 0; tick < ticks; tick++ {
+		at := now.Add(time.Duration(tick) * (idleClaimNudgeBackoff + time.Second))
+		sp.SetActivity("session-a", at.Add(-time.Hour))
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, at, liveClaimDrain(store, drains.request), &out)
+	}
+	if sp.deferred != ticks || sp.CountCalls("Nudge", "session-a") != 0 {
+		t.Fatalf("deferred %d delivered %d, want all %d ticks deferred and nothing delivered (log %q)", sp.deferred, sp.CountCalls("Nudge", "session-a"), ticks, out.String())
+	}
+	got := mustGetTestBead(t, store, s.ID)
+	if got.Metadata[idleClaimNudgeCountKey] != "0" || got.Metadata[idleClaimNudgeAtKey] != base.Format(time.RFC3339) {
+		t.Fatalf("marker count %q at %q, want the reservation refunded to 0 at %s", got.Metadata[idleClaimNudgeCountKey], got.Metadata[idleClaimNudgeAtKey], base.Format(time.RFC3339))
+	}
+	if len(drains.ids) != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+		t.Fatalf("drains %v latch %q, want no drain for a slot whose nudges were only deferred", drains.ids, got.Metadata[idleClaimNudgeStalledKey])
+	}
+	if !strings.Contains(out.String(), "deferred the nudge for work-a") {
+		t.Fatalf("log %q, want the deferral logged", out.String())
+	}
+
+	sp.busy = false
+	later := now.Add(time.Duration(ticks) * (idleClaimNudgeBackoff + time.Second))
+	sp.SetActivity("session-a", later.Add(-time.Hour))
+	nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, later, liveClaimDrain(store, drains.request), &out)
+	if got := mustGetTestBead(t, store, s.ID).Metadata[idleClaimNudgeCountKey]; sp.CountCalls("Nudge", "session-a") != 1 || got != "1" {
+		t.Fatalf("delivered %d count %q, want attempt 1 delivered once the session is quiet", sp.CountCalls("Nudge", "session-a"), got)
+	}
+}
+
+// liveTurnProvider is a runtime whose two screen readings disagree the way
+// tmux's do on an idle Codex composer under an earlier turn's Working row:
+// its idle snapshot counts that stale row and reads busy, while its live turn
+// reading (runtime.TurnRunningProvider) answers running and err.
+type liveTurnProvider struct {
+	*runtime.Fake
+	running bool
+	err     error
+}
+
+// SnapshotIdle is the capture scan's reading: busy.
+func (p *liveTurnProvider) SnapshotIdle(string) (bool, error) { return false, nil }
+
+// TurnRunning is the live screen's reading.
+func (p *liveTurnProvider) TurnRunning(string) (bool, error) { return p.running, p.err }
+
+// Kills the claim backstop holding a stalled slot for good on an earlier
+// turn's busy row (PR #7944 review): its busy hold read the idle snapshot,
+// which counts an indicator anywhere in the capture, so a Codex slot idle at
+// its composer under a stale "• Working (… esc to interrupt)" row was held,
+// spent nothing, and was never nudged. The hold reads the turn the way the
+// nudge's own guard does (runtime.TurnRunningProvider): no turn running is
+// nudged; a running turn, or a look that fails, holds, and the row names the
+// hold.
+func TestNudgeStalledPoolClaims_HoldsOnlyALiveTurn(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	for _, tc := range []struct {
+		name    string
+		running bool
+		err     error
+		hold    string // the breadcrumb's gate; "" when the slot is nudged
+	}{
+		{name: "idle composer under a stale busy row"},
+		{name: "turn running", running: true, hold: claimHoldTurnRunning},
+		{name: "turn unreadable", err: errors.New("capture failed"), hold: executionHoldSnapshotError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := staleSnapshotClaimSession(base)
+			s.Metadata["provider"] = "codex"
+			store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+			fake := quietClaimFake(t, now)
+			sp := &liveTurnProvider{Fake: fake, running: tc.running, err: tc.err}
+			var out bytes.Buffer
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, snapshot, nil, now, liveClaimDrain(store, nil), &out)
+			got := mustGetTestBead(t, store, s.ID)
+			nudges := fake.CountCalls("Nudge", "session-a")
+			if tc.hold == "" {
+				if nudges != 1 || got.Metadata[idleClaimNudgeCountKey] != "1" || got.Metadata[idleClaimNudgeHoldKey] != "" {
+					t.Fatalf("nudges %d count %q hold %q, want the idle slot nudged (log %q)", nudges, got.Metadata[idleClaimNudgeCountKey], got.Metadata[idleClaimNudgeHoldKey], out.String())
+				}
+				return
+			}
+			if nudges != 0 || got.Metadata[idleClaimNudgeCountKey] != "0" {
+				t.Fatalf("nudges %d count %q, want the slot held and nothing spent", nudges, got.Metadata[idleClaimNudgeCountKey])
+			}
+			if want := tc.hold + " " + now.Format(time.RFC3339); got.Metadata[idleClaimNudgeHoldKey] != want {
+				t.Fatalf("hold breadcrumb %q, want %q", got.Metadata[idleClaimNudgeHoldKey], want)
+			}
+		})
+	}
+}
+
+// Kills a busy hold that never ends (PR #7944 review): a hold spends no
+// attempt, so a slot whose screen reads busy for good (a frozen pane, an
+// indicator the reading cannot tell from a live one) was never nudged and so
+// never reached its drain. A run of holds is bounded: the breadcrumb keeps
+// the time the run began, whichever gate holds on a tick, and a slot held
+// for idleClaimNudgeBusyHoldLimit is nudged anyway, its runtime's own turn
+// guard deciding (a Codex turn still running defers it, refunded). The
+// delivery clears the breadcrumb.
+func TestNudgeStalledPoolClaims_BusyHoldIsBounded(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	s := staleSnapshotClaimSession(base)
+	s.Metadata["provider"] = "codex"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	fake := quietClaimFake(t, now)
+	sp := &liveTurnProvider{Fake: fake, running: true}
+	snapshot := []beads.Bead{{ID: "work-a", Status: "open"}}
+	var out bytes.Buffer
+	tick := func(at time.Time) beads.Bead {
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, snapshot, nil, at, liveClaimDrain(store, nil), &out)
+		return mustGetTestBead(t, store, s.ID)
+	}
+
+	tick(now)
+	almost := now.Add(idleClaimNudgeBusyHoldLimit - time.Second)
+	fake.SetActivity("session-a", almost.Add(-5*time.Second))
+	got := tick(almost)
+	if want := executionHoldNotQuiet + " " + now.Format(time.RFC3339); fake.CountCalls("Nudge", "session-a") != 0 || got.Metadata[idleClaimNudgeHoldKey] != want {
+		t.Fatalf("nudges %d hold %q, want the slot still held, the run's start kept: %q", fake.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeHoldKey], want)
+	}
+
+	due := now.Add(idleClaimNudgeBusyHoldLimit)
+	fake.SetActivity("session-a", due.Add(-time.Hour))
+	got = tick(due)
+	if fake.CountCalls("Nudge", "session-a") != 1 || got.Metadata[idleClaimNudgeCountKey] != "1" || got.Metadata[idleClaimNudgeHoldKey] != "" {
+		t.Fatalf("nudges %d count %q hold %q, want the slot nudged past the bound and the breadcrumb cleared (log %q)",
+			fake.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeCountKey], got.Metadata[idleClaimNudgeHoldKey], out.String())
+	}
+	if !strings.Contains(out.String(), "nudging anyway") {
+		t.Fatalf("log %q, want the delivery past the busy hold logged", out.String())
+	}
+}
+
+// Kills a stale busy row keeping a wedged slot's drain off for good (PR #7944
+// review): the terminal drain's quiet gate reads the screen the way the
+// nudges do, so a Codex slot at the cap, idle at its composer under an
+// earlier turn's Working row, is drained, and one still running a turn is
+// not.
+func TestNudgeStalledPoolClaims_DrainReadsTheLiveTurn(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeBackoff + time.Second)
+	for name, running := range map[string]bool{"idle composer under a stale busy row": false, "turn running": true} {
+		t.Run(name, func(t *testing.T) {
+			s := atCapSession(base, "tok-1")
+			s.Metadata["provider"] = "codex"
+			store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+			sp := &liveTurnProvider{Fake: quietClaimFake(t, now), running: running}
+			drains := &drainRecorder{}
+			var out bytes.Buffer
+			nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, []beads.Bead{{ID: "work-a", Status: "open"}}, nil, now, liveClaimDrain(store, drains.request), &out)
+			want := 1
+			if running {
+				want = 0
+			}
+			if len(drains.ids) != want {
+				t.Fatalf("drains %v, want %d (log %q)", drains.ids, want, out.String())
+			}
+		})
 	}
 }

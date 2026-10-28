@@ -38,6 +38,7 @@ var (
 	_ runtime.TurnInterruptCapabilityProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider    = (*Provider)(nil)
 	_ runtime.InputClearProvider              = (*Provider)(nil)
+	_ runtime.BackgroundWorkStopper           = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider     = (*Provider)(nil)
 	_ runtime.RelaunchProvider                = (*Provider)(nil)
 	_ runtime.LivenessObserver                = (*Provider)(nil)
@@ -450,12 +451,23 @@ func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
 }
 
 // NudgeKeyed delegates to the routed backend with its delivery key when that
-// backend deduplicates keyed deliveries, and to its Nudge otherwise.
-func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+// backend deduplicates keyed deliveries, returning its receipt, and to its
+// Nudge otherwise, with no receipt.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
 		return kp.NudgeKeyed(name, content, key)
 	}
-	return p.route(name).Nudge(name, content)
+	return runtime.DeliveryReceipt{}, p.route(name).Nudge(name, content)
+}
+
+// LookupDelivery delegates to the routed backend when it deduplicates keyed
+// deliveries; another backend keeps none, so it is answered
+// ErrInteractionUnsupported without a call.
+func (p *Provider) LookupDelivery(ctx context.Context, name, key string) (runtime.DeliveryReceipt, error) {
+	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
+		return kp.LookupDelivery(ctx, name, key)
+	}
+	return runtime.DeliveryReceipt{}, fmt.Errorf("%w: %q's backend keeps no keyed deliveries", runtime.ErrInteractionUnsupported, name)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit
@@ -553,6 +565,15 @@ func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeo
 		return tf.WaitTurnEnded(ctx, name, turnID, timeout)
 	}
 	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
+}
+
+// StopBackgroundWork delegates to the routed backend when it can stop work an
+// interrupted turn left running.
+func (p *Provider) StopBackgroundWork(ctx context.Context, name string) error {
+	if sp, ok := p.route(name).(runtime.BackgroundWorkStopper); ok {
+		return sp.StopBackgroundWork(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

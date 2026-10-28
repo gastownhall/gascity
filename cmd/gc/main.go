@@ -1851,14 +1851,15 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
 	}
 	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:         scopeRoot,
-		CityPath:          runtimeCityPath,
-		Provider:          provider,
-		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
-		Logger:            slog.Default(),
-		ConditionalWrites: mode,
-		NativeTransport:   nativeTransport,
-		LongLived:         longLived,
+		ScopeRoot:                  scopeRoot,
+		CityPath:                   runtimeCityPath,
+		Provider:                   provider,
+		PreflightChecker:           newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
+		Logger:                     slog.Default(),
+		ConditionalWrites:          mode,
+		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
+		NativeTransport:            nativeTransport,
+		LongLived:                  longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
 			return lazyConditionalWritesDegradeEmitter(

@@ -19,6 +19,11 @@ API projects over.
 - **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>** —
   the `gc events` JSONL line schema. It references DTO components in
   `openapi.json`, so the API remains the source of truth.
+- **The running supervisor** serves the spec for its own version at
+  `GET /openapi.json` and `GET /openapi.yaml` (OpenAPI 3.1), with OpenAPI 3.0
+  downgrades at `/openapi-3.0.json` and `/openapi-3.0.yaml`, and an interactive
+  reference page at `/docs`. The page's viewer loads from `unpkg.com`, so the
+  browser needs internet access.
 
 ## Endpoint families
 
@@ -74,6 +79,18 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
+
+## Agent counts
+
+Several endpoints report an agent count, and each counts something different:
+
+| Endpoint | Field | What it counts |
+|----------|-------|----------------|
+| `GET /v0/city/{cityName}` | `agent_count` | Agent entries in the city's composed config: a rig-scoped agent once per rig, a pool once. |
+| `GET /v0/city/{cityName}/status` | `agents.total`, and `agent_count` (deprecated, the same number) | Agent rows after pool expansion: every slot of a bounded pool (`max_active_sessions` of them), and the running or recorded sessions of an unlimited pool. |
+| `GET /v0/city/{cityName}/agents` | `total` (no `agent_count`) | The rows returned after the `rig`, `pool` and `running` filters: every slot of a bounded pool, and the running sessions of an unlimited pool, or one row under the pool's own name when none is running. |
+| `GET /v0/city/{cityName}/rigs`, `GET /v0/city/{cityName}/rig/{name}` | `agent_count` on each rig | That rig's agent rows: every slot of a bounded pool, and the running sessions of an unlimited pool. |
+| `GET /v0/city/{cityName}/config` | `patches.agent_count` | The `[[patches.agent]]` blocks the config declares, not agents. `/config/defaults` reports no `patches`. |
 
 ## Request and response headers
 

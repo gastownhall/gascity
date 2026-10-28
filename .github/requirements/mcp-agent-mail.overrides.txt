@@ -1,7 +1,9 @@
 # Security floor: FastMCP 2.13.0.2 and Authlib 1.5.2 are flagged by the
 # image vulnerability gate. Keep these overrides until mcp-agent-mail's
-# transitive constraints move past the fixed versions.
-fastmcp>=3.2.0
+# transitive constraints move past the fixed versions. FastMCP < 3.4.10 has
+# GHSA-7xgj-8392-5q4r; fastmcp exact-pins fastmcp-slim to its own version, so
+# this floor moves both.
+fastmcp>=3.4.10
 authlib>=1.6.9
 
 # Security floor: CVE-2026-48526 (HIGH, auth bypass) in PyJWT < 2.13.0, and

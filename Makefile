@@ -1,4 +1,4 @@
-GOLANGCI_LINT_VERSION := 2.12.0
+GOLANGCI_LINT_VERSION := 2.14.0
 OASDIFF_VERSION := 1.33.0
 BUILDX_VERSION := 0.21.2
 
@@ -105,7 +105,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-coarse-clock test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 .PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
 
@@ -542,9 +542,22 @@ test-herdr-live:
 # sharded via the mac-cmd-gc-process CI matrix job instead.
 MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
 
+## test-mac-pkgs-guard: fail when MAC_UNIT_PKGS is empty. A failed go list
+## expands it to nothing, and go test over no packages passes vacuously.
+.PHONY: test-mac-pkgs-guard
+test-mac-pkgs-guard:
+	@test -n "$(strip $(MAC_UNIT_PKGS))" || { echo "test-mac: go list found no packages; refusing to pass over an empty sweep" >&2; exit 1; }
+
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
-test-mac: test-fsys-darwin-compile
+test-mac: test-mac-pkgs-guard test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
+
+## test-coarse-clock: creation-order suites under a millisecond MemStore clock.
+## The gc_coarse_clock tag reproduces on Linux the same-tick creates macOS's
+## coarser wall clock hits; narrow it with COARSE_CLOCK_RUN='TestLane'.
+COARSE_CLOCK_RUN ?= .
+test-coarse-clock:
+	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-coarse-clock -- -tags gc_coarse_clock -count=1 -timeout 60m -run '$(COARSE_CLOCK_RUN)' ./internal/beads/ ./cmd/gc/
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
@@ -608,10 +621,14 @@ test-productmetrics-testhook:
 
 CMD_GC_PROCESS_SHARD ?= 1
 CMD_GC_PROCESS_TOTAL ?= 6
+# Soak knobs: run each shard's tests CMD_GC_PROCESS_COUNT times (go test
+# -count) under a CMD_GC_PROCESS_TIMEOUT package timeout.
+CMD_GC_PROCESS_COUNT ?= 1
+CMD_GC_PROCESS_TIMEOUT ?= 20m
 CMD_GC_COVER_TOTAL ?= 6
 CMD_GC_COVER_SHARD ?= 1
 test-cmd-gc-process-shard:
-	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
+	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=$(CMD_GC_PROCESS_COUNT) GO_TEST_TIMEOUT=$(CMD_GC_PROCESS_TIMEOUT) ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
 
 ## test-cmd-gc-process-parallel: run all cmd/gc process shards concurrently
 test-cmd-gc-process-parallel:
@@ -738,7 +755,7 @@ test-bd-cli-contract-home-isolation:
 ## is the only contract that needs a real CAS-capable bd. Every pinned bd
 ## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
 ## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
-## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.1):
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.2):
 ## strictly in //internal/beads:bd_conditional_release_contract_test, and in
 ## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
 ## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a

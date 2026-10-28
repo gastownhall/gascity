@@ -73,6 +73,7 @@ go_test(
         "bdstore_split_key_test.go",
         "bdstore_storage_conformance_test.go",
         "bdstore_test.go",
+        "bdstore_tier_pair_test.go",
         "bdstore_transfer_if_current_test.go",
         "bdstore_update_if_assignment_test.go",
         "bdtrace_smoke_test.go",
@@ -80,6 +81,7 @@ go_test(
         "beads_test.go",
         "binary_versions_test.go",
         "cached_read_exact_test.go",
+        "caching_store_batch_reads_test.go",
         "caching_store_batch_test.go",
         "caching_store_binding_test.go",
         "caching_store_cadence_internal_test.go",
@@ -94,6 +96,7 @@ go_test(
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",
         "caching_store_count_test.go",
+        "caching_store_delete_events_test.go",
         "caching_store_fence_retention_internal_test.go",
         "caching_store_graph_ready_test.go",
         "caching_store_internal_test.go",
@@ -104,6 +107,7 @@ go_test(
         "caching_store_overlay_test.go",
         "caching_store_partial_list_internal_test.go",
         "caching_store_primitives_test.go",
+        "caching_store_read_announce_test.go",
         "caching_store_ready_outcome_test.go",
         "caching_store_ready_prefer_cache_test.go",
         "caching_store_ready_projection_internal_test.go",
@@ -141,6 +145,7 @@ go_test(
         "class_store_test.go",
         "close_reason_internal_test.go",
         "conditional_labels_conformance_test.go",
+        "conditional_writes_backend_internal_test.go",
         "conditional_writes_inspect_test.go",
         "conditional_writes_resolve_internal_test.go",
         "corpus_decoder_test.go",
@@ -173,6 +178,7 @@ go_test(
         "lookup_limit_error_test.go",
         "membership_test.go",
         "membership_vocabulary_test.go",
+        "memstore_created_order_internal_test.go",
         "memstore_honor_ids_test.go",
         "memstore_test.go",
         "metadata_cas_operation_test.go",
@@ -231,6 +237,7 @@ go_test(
         "native_dolt_store_test.go",
         "native_dolt_store_update_force_test.go",
         "native_dolt_store_update_retry_test.go",
+        "native_dolt_store_wire_not_found_test.go",
         "native_list_plan_test.go",
         "native_list_pushdown_integration_test.go",
         "native_list_pushdown_test.go",
@@ -288,8 +295,8 @@ go_test(
         "@com_github_steveyegge_beads//internal/types:drift_srcs",
     ] + select({
         "//:gotags_integration": [
-            "@bd_bin_v1_3_1//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@bd_bin_v1_3_2//:bd",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
@@ -298,7 +305,7 @@ go_test(
     # the pinned binaries first on PATH (internal/testenv).
     env = select({
         "//:gotags_integration": {
-            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
         },
         "//conditions:default": {},
     }),
@@ -441,18 +448,18 @@ go_variant_test(
 
 # The ReleaseIfCurrent CAS contract against a real bd
 # (`make test-bd-conditional-release-contract`): beads_test built with
-# -tags integration, with deps.env BD_CURRENT_REF's bd (the v1.3.1 tag,
-# @bd_bin_v1_3_1) first on PATH (GC_TEST_TOOL_PATHS, internal/testenv).
+# -tags integration, with deps.env BD_CURRENT_REF's bd (the v1.3.2 tag,
+# @bd_bin_v1_3_2) first on PATH (GC_TEST_TOOL_PATHS, internal/testenv).
 # GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
 # failure. The integration-packages lane also runs the row (without that
 # switch); this target is the strict cell, and runs for fork PRs too.
 go_variant_test(
     name = "bd_conditional_release_contract_test",
     args = ["-test.run=^TestBdStoreReleaseIfCurrentAgainstRealBd$$"],
-    data = ["@bd_bin_v1_3_1//:bd"],
+    data = ["@bd_bin_v1_3_2//:bd"],
     env = {
         "GC_REQUIRE_BD_CONDITIONAL_RELEASE": "1",
-        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd)",
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd)",
     },
     gotags = ["integration"],
     test = ":beads_test",

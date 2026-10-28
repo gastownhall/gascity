@@ -405,7 +405,7 @@ remove them.
 | `status/human-review-required` | Opt-out from auto-merge; waits for a co-maintainer |
 | `needs-architectural-review` | Permanent hold pending architectural review; blocks auto-merge |
 | `status/needs-bugflow` | Bugflow investigation requested on an issue |
-| `needs-mac`, `needs-review-formulas` | Run optional CI lanes on this PR |
+| `needs-mac`, `needs-review-formulas` | Run optional CI lanes on this PR (`needs-mac` adds the full Mac tier; the Mac smoke tier runs on every non-docs PR) |
 
 ## Questions
 

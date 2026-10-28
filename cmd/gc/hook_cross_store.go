@@ -2,9 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -14,6 +19,9 @@ import (
 type hookStore struct {
 	dir string
 	env []string
+	// rig is the rig whose store this leg reads, "" for the agent's own store
+	// and the city store. A failed read is reported under it.
+	rig string
 	// command overrides the shared work query for this store, and is empty on
 	// every store production builds: one command is run against each leg in
 	// turn. It was set by scopeFederatedHookStores when that pinned the
@@ -91,8 +99,8 @@ func hookStoresScopeToPrimary(federatedCommand, singleStoreCommand string) bool 
 	return singleStoreCommand != "" && singleStoreCommand != strings.TrimSpace(federatedCommand)
 }
 
-// hookStoreQueryEnv builds one fan-out leg's work-query environment. A
-// variable so tests can count the legs built.
+// hookStoreQueryEnv builds one fan-out leg's work-query environment, the
+// agent's own leg included. A variable so tests can count the legs built.
 var hookStoreQueryEnv = hookQueryEnv
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
@@ -103,8 +111,9 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // hookWorkQueryStores is the whole fan-out `gc hook` queries, in probe order.
 //
 // A cross-store-eligible (city-scoped) agent federates its work query across all
-// stores — its own first, then every rig store — matched on its own identity
-// (vp-kvp stage iii). A rig-scoped agent ("<rig>/<name>") instead queries its own
+// stores — its own first, then every rig store that is not suspended
+// (suspendedRigs, keyed by rig name) — matched on its own identity (vp-kvp
+// stage iii). A rig-scoped agent ("<rig>/<name>") instead queries its own
 // <rig> store FIRST: its routed work lives there, but its city-scoped
 // work-query env does not reach it, so without this the hook returns empty and
 // the spawned session exits with nothing to do. The rig store goes first (as the
@@ -123,26 +132,26 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // this leg's workspace. This function is the seam that pins it
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
-func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
-	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, false)
+func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
+	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }
 
 // hookWorkQueryPrimaryStore is the first entry of hookWorkQueryStores, built
 // without building any other: what a federated claim reads (see
 // scopeFederatedHookStores).
 func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
-	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, true)[0]
+	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
 }
 
 // hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
 // entry when primaryOnly.
-func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, primaryOnly bool) []hookStore {
+func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool, primaryOnly bool) []hookStore {
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
 	if agentIsCrossStoreEligible(a) {
 		if primaryOnly {
 			return stores
 		}
-		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
+		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides, suspendedRigs)
 	}
 	rig := rigScopedHookRig(cfg, agentForQuery)
 	if rig == "" {
@@ -179,11 +188,21 @@ var hookIdentityEnvKeys = []string{
 // reads the RIG store but still matches work routed/assigned to the city agent.
 // Best-effort: a rig whose env cannot be built is skipped (the agent's own store
 // is always queried first by the caller).
-func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
+//
+// A rig named in suspendedRigs is not searched, the frame `gc ready` reads
+// (readyServingRigs) and the controller's census counts demand in: a suspended
+// rig's agents claim nothing, the controller stops the Dolt it owns, and its
+// work comes back when the rig is resumed. Searched anyway, its store would be
+// one every city-scoped seat fails to read for as long as the rig stays
+// suspended.
+func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
 	if cfg == nil || a == nil {
 		return stores
 	}
 	for i := range cfg.Rigs {
+		if suspendedRigs[cfg.Rigs[i].Name] {
+			continue
+		}
 		stores = appendOneRigHookStore(stores, cityPath, cfg, a, cfg.Rigs[i].Name, identityOverrides)
 	}
 	return stores
@@ -226,6 +245,7 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 	return append(stores, hookStore{
 		dir: agentCommandDir(cityPath, &view, cfg.Rigs),
 		env: mergeRuntimeEnv(os.Environ(), rigEnv),
+		rig: rigName,
 	})
 }
 
@@ -337,20 +357,66 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // coincide with a flat cross-store comparison; the dir grouping only matters for
 // same-dir multi-leg callers like the class-routing front door's test harness.
 //
+// # Failed reads
+//
+// A store whose read failed never contributes a candidate, and a store that did
+// answer with work is served regardless — a failed read elsewhere is not a
+// reason to withhold work this agent can see. What a failed read changes is the
+// "no work" answer: with any store unread, "no store has work" is not known,
+// and answering it anyway is how a seat drains as idle while its work sits in a
+// store the hook could not reach.
+//
 // When no store has ready work, an error on the agent's OWN store (identified by
-// primary, not by slice position) is surfaced so emitCityWorkQueryFailure can
-// classify it — preserving the single-store emit-on-timeout contract (a
-// work-query timeout must reach the reconciler, not be silently downgraded to
-// "no work"). Errors from federated rig stores are best-effort discovery (like
-// appendRigHookStores) and are not surfaced, so one flaky rig store can't wedge
-// the hook. primary is matched by identity rather than position because the
-// federated claim loop reselects over a shrinking store set: once the primary
-// store has been dropped it is no longer in stores, so no later federated store
-// may inherit its emit-on-timeout semantics.
-func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+// primary, not by slice position) takes precedence and is surfaced as itself so
+// emitCityWorkQueryFailure can classify it — preserving the single-store
+// emit-on-timeout contract (a work-query timeout must reach the reconciler, not
+// be silently downgraded to "no work"). Failing that, an error on a secondary
+// store is surfaced as a *hookSecondaryStoreFailure naming every store that
+// failed, so plain `gc hook` exits with its work-query-failed code and `gc hook
+// --claim` reports the failed read (reportClaimWorkQueryFailure) without a
+// drain result.
+//
+// One secondary failure does not hold the answer up: a rig leg whose store
+// resolves to a managed Dolt runtime that is not running, which the runner
+// marks errHookRigRuntimeUnavailable (hookRigLegRunner). Its store cannot
+// answer until that server is back, the controller cannot count demand in it
+// either, and holding the answer on it would keep every seat that searches the
+// rig from draining for as long as the server is down. It is passed to noted
+// and the answer is given without it.
+//
+// When secondary failures fail the query, each is recorded as its own
+// work-query-failure event naming the store (hookStoreFailureReport), never as
+// this session's own read failing, and none outranks the primary's own error.
+// primary is matched by identity rather than position because the federated
+// claim loop reselects over a shrinking store set: once the primary store has
+// been dropped it is no longer in stores, so no later federated store may
+// inherit its emit-on-timeout semantics.
+//
+// When work IS served, each secondary store that failed is passed to noted (when
+// given) so the caller can report it; the answer is right, but a store was still
+// unreadable and someone should hear about it.
+func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
+	// secondaryFailures hold the "no work" answer up; downFailures (rigs whose
+	// managed Dolt runtime is not running) do not.
+	var secondaryFailures, downFailures []*hookStoreReadError
+	note := func(failures []*hookStoreReadError) {
+		for _, n := range noted {
+			if n == nil {
+				continue
+			}
+			for _, failure := range failures {
+				n(failure)
+			}
+		}
+	}
+	served := func(out string, st hookStore) (string, hookStore, error) {
+		note(secondaryFailures)
+		note(downFailures)
+		return out, st, nil
+	}
 
 	var firstHitOut string
 	var firstHitStore hookStore
@@ -375,6 +441,13 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			if sameHookStore(st, primary) {
 				ownStoreOut, ownStoreErr = out, err
 				federatedPrimaryFailed = federationPinnedToPrimary
+				continue
+			}
+			failure := &hookStoreReadError{dir: st.dir, rig: st.rig, err: err}
+			if errors.Is(err, errHookRigRuntimeUnavailable) {
+				downFailures = append(downFailures, failure)
+			} else {
+				secondaryFailures = append(secondaryFailures, failure)
 			}
 			continue
 		}
@@ -385,7 +458,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			// overturn it, and refusing it would regress crash recovery whenever
 			// the primary is down. Take it and stop; discard every other answer.
 			if resumeOut, ok := hookOwnResumeAnswer(out, now); ok {
-				return resumeOut, st, nil
+				return served(resumeOut, st)
 			}
 			continue
 		}
@@ -404,7 +477,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		}
 		// Resuming this session's own in-progress work is unconditional.
 		if rank.tier == hookTierInProgress && sameHookStore(st, primary) {
-			return out, st, nil
+			return served(out, st)
 		}
 		// Collected raw (uncollapsed) so bestRankedCandidate can compare same-dir
 		// candidates on full tier before collapsing across dirs. See its doc
@@ -422,18 +495,234 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
 	if unrankable && firstHit {
-		return firstHitOut, firstHitStore, nil
+		return served(firstHitOut, firstHitStore)
 	}
 	if winner, ok := bestRankedCandidate(ranked); ok {
-		return winner.out, winner.store, nil
+		return served(winner.out, winner.store)
 	}
 	if firstHit {
-		return firstHitOut, firstHitStore, nil
+		return served(firstHitOut, firstHitStore)
 	}
 	if ownStoreErr != nil {
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
+	note(downFailures)
+	// No output alongside the error: an empty array next to a failure still
+	// reads as an empty queue to any caller that looks at stdout first.
+	if len(secondaryFailures) > 0 {
+		return "", hookStore{}, &hookSecondaryStoreFailure{failures: secondaryFailures}
+	}
 	return lastOut, hookStore{}, nil
+}
+
+// errHookRigRuntimeUnavailable marks a failed read of a secondary rig leg whose
+// store resolves to a managed Dolt runtime that is not running
+// (hookRigLegRunner). bestStoreWithWork reports such a read without letting it
+// hold the answer up.
+var errHookRigRuntimeUnavailable = errors.New("the rig's managed Dolt runtime is not running")
+
+// hookRigRuntimeUnavailable reports whether rig's store resolves to a managed
+// Dolt runtime that is not running (rigManagedRuntimeUnavailable). Only a rig
+// whose leg env is the managed bd runtime env (controllerQueryRuntimeEnv) can
+// be in that state. A variable so tests can stand in for the runtime.
+var hookRigRuntimeUnavailable = func(cityPath string, cfg *config.City, rig string) bool {
+	if cfg == nil {
+		return false
+	}
+	rigRoot := rigRootForName(rig, cfg.Rigs)
+	if rigRoot == "" || !scopeUsesManagedBdStoreContract(cityPath, rigRoot) {
+		return false
+	}
+	return rigManagedRuntimeUnavailable(cityPath, cfg, rigRoot)
+}
+
+// hookRigLegRunner is run for the fan-out stores, with one addition: when a
+// secondary rig leg's read fails and that rig's store resolves to a managed
+// Dolt runtime that is not running (hookRigRuntimeUnavailable), the error is
+// marked errHookRigRuntimeUnavailable. The runtime is asked only after a read
+// failed, and once per rig per invocation, since the claim loop reads its
+// stores more than once. The first store is the agent's own and is never
+// marked: its failure is this session's read failing, whatever the cause.
+func hookRigLegRunner(cityPath string, cfg *config.City, stores []hookStore, run hookStoreRunner) hookStoreRunner {
+	if len(stores) < 2 {
+		return run
+	}
+	secondary := stores[1:]
+	down := make(map[string]bool, len(secondary))
+	return func(command, dir string, env []string) (string, error) {
+		out, err := run(command, dir, env)
+		if err == nil {
+			return out, nil
+		}
+		rig := hookLegRig(secondary, dir, env)
+		if rig == "" {
+			return out, err
+		}
+		unavailable, asked := down[rig]
+		if !asked {
+			unavailable = hookRigRuntimeUnavailable(cityPath, cfg, rig)
+			down[rig] = unavailable
+		}
+		if !unavailable {
+			return out, err
+		}
+		return out, fmt.Errorf("%w: %w", errHookRigRuntimeUnavailable, err)
+	}
+}
+
+// hookLegRig returns the rig of the leg in stores that reads dir with env, or
+// "" when no rig leg does.
+func hookLegRig(stores []hookStore, dir string, env []string) string {
+	leg := hookStore{dir: dir, env: env}
+	for _, st := range stores {
+		if st.rig != "" && sameHookStore(st, leg) {
+			return st.rig
+		}
+	}
+	return ""
+}
+
+// hookStoreReadError is one store's failed work-query read, named by its rig
+// and store directory so an operator can tell WHICH leg of the fan-out could
+// not be read. Its message is bounded (workQueryFailureSummary); err keeps the
+// whole failure for errors.Is and for the store-unavailable classification.
+type hookStoreReadError struct {
+	dir string
+	rig string
+	err error
+}
+
+func (e *hookStoreReadError) Error() string {
+	store := "store " + e.dir
+	if e.rig != "" {
+		store = fmt.Sprintf("rig %q store %s", e.rig, e.dir)
+	}
+	return fmt.Sprintf("work query against %s failed: %s", store, workQueryFailureSummary(e.err))
+}
+
+func (e *hookStoreReadError) Unwrap() error { return e.err }
+
+// hookStoreFailureSummaryMax caps workQueryFailureSummary, in bytes.
+const hookStoreFailureSummaryMax = 200
+
+// workQueryFailureSummary is the one-line form of a failed read that a fan-out
+// report quotes: how the read ended and the first line the query wrote to
+// stderr. The command line shellWorkQueryWithEnv quotes into its error after
+// workQueryErrorPrefix is cut out: a generated work query runs to kilobytes,
+// and a report repeats it for every store that failed.
+func workQueryFailureSummary(err error) string {
+	msg := strings.TrimSpace(err.Error())
+	if i := strings.Index(msg, workQueryErrorPrefix+" "); i >= 0 {
+		rest := msg[i+len(workQueryErrorPrefix)+1:]
+		if quoted, qerr := strconv.QuotedPrefix(rest); qerr == nil {
+			msg = msg[:i] + strings.TrimPrefix(rest[len(quoted):], ": ")
+		}
+	}
+	if line, _, found := strings.Cut(msg, "\n"); found {
+		msg = strings.TrimSpace(line)
+	}
+	if len(msg) <= hookStoreFailureSummaryMax {
+		return msg
+	}
+	end := hookStoreFailureSummaryMax
+	for end > 0 && !utf8.RuneStart(msg[end]) {
+		end--
+	}
+	return msg[:end] + "…"
+}
+
+// hookStoreFailureNote receives a secondary store's failed read that the
+// answer did not stop on: work was served from another store, or the store's
+// rig runtime is down (errHookRigRuntimeUnavailable).
+type hookStoreFailureNote func(*hookStoreReadError)
+
+// hookSecondaryStoreFailure is bestStoreWithWork's error when no store had work
+// and only secondary stores failed: "no work" could not be established. It is
+// a distinct type so the caller reports it as a failed query without treating
+// it as the agent's own store failing (hookStoreFailureReport), and so the
+// store-unavailable classification reads each store's whole failure rather
+// than the bounded message (classifyWorkQueryStoreUnavailable).
+type hookSecondaryStoreFailure struct {
+	failures []*hookStoreReadError
+}
+
+func (e *hookSecondaryStoreFailure) Error() string {
+	msgs := make([]string, len(e.failures))
+	for i, failure := range e.failures {
+		msgs[i] = failure.Error()
+	}
+	return strings.Join(msgs, "; ")
+}
+
+func (e *hookSecondaryStoreFailure) Unwrap() []error {
+	errs := make([]error, len(e.failures))
+	for i, failure := range e.failures {
+		errs[i] = failure
+	}
+	return errs
+}
+
+// hookStoreFailureReport reports the failed reads of one hook invocation. The
+// claim loop reads its stores more than once (paced retries, the claim-time
+// re-validation, a reselection after a lost race), and one unreadable store is
+// one fact, so each store is reported once per invocation.
+//
+// A failed query is recorded through emit, the work-query-failure event: the
+// agent's own store's failure as itself, and a fan-out that failed on
+// secondary stores (hookSecondaryStoreFailure) as one event per failed store,
+// naming it (classifyWorkQueryFailure). A secondary failure the answer did not
+// stop on (work served from another store, or a rig whose managed Dolt runtime
+// is not running) is not a failed query: it is a line on stderr.
+type hookStoreFailureReport struct {
+	label   string
+	stderr  io.Writer
+	emit    func(command string, err error)
+	logged  map[string]bool
+	emitted map[string]bool
+}
+
+func newHookStoreFailureReport(label string, stderr io.Writer, emit func(command string, err error)) *hookStoreFailureReport {
+	return &hookStoreFailureReport{
+		label:   label,
+		stderr:  stderr,
+		emit:    emit,
+		logged:  map[string]bool{},
+		emitted: map[string]bool{},
+	}
+}
+
+// note is the hookStoreFailureNote bestStoreWithWork calls for a store whose
+// failed read the answer did not stop on.
+func (r *hookStoreFailureReport) note(failure *hookStoreReadError) {
+	if r.logged[failure.dir] {
+		return
+	}
+	r.logged[failure.dir] = true
+	consequence := "serving work from the stores that answered"
+	if errors.Is(failure.err, errHookRigRuntimeUnavailable) {
+		consequence = "answering without that store"
+	}
+	fmt.Fprintf(r.stderr, "%s: %v; %s\n", r.label, failure, consequence) //nolint:errcheck // best-effort stderr
+}
+
+// failed records a work query that failed (err is the query's error, nil when
+// it did not fail).
+func (r *hookStoreFailureReport) failed(command string, err error) {
+	if err == nil || r.emit == nil {
+		return
+	}
+	var secondary *hookSecondaryStoreFailure
+	if !errors.As(err, &secondary) {
+		r.emit(command, err)
+		return
+	}
+	for _, failure := range secondary.failures {
+		if r.emitted[failure.dir] {
+			continue
+		}
+		r.emitted[failure.dir] = true
+		r.emit(command, failure)
+	}
 }
 
 // hookRankedCandidate is one store's best candidate together with its RAW
@@ -704,10 +993,11 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // (The narrow window between this re-validation and the bd update --claim is
 // still handled by the claim itself skipping rows it cannot take.)
 //
-// A re-validation error on the selected store is surfaced only when that store
-// is the primary (own) store; a federated store erroring at claim time is
-// best-effort and falls through to re-selection, mirroring bestStoreWithWork's
-// emit-on-timeout contract so a flaky rig store can't wedge the claim.
+// A re-validation error on the selected store is returned as itself only when
+// that store is the primary (own) store. A secondary store erroring at claim
+// time falls through to re-selection, which reads every store again under
+// bestStoreWithWork's rules: work in a store that answers is taken, and with no
+// work anywhere that store's failed read is the answer.
 //
 // # One leg means nothing to fall back TO, so there is nothing to re-validate
 //
@@ -720,7 +1010,9 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // mc's topology that read is the more expensive half of the claim.
 //
 // discovered is the output selection already read from this store, moments ago.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner) (string, hookStore, error) {
+//
+// noted is forwarded to bestStoreWithWork for its failed-secondary reports.
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	if len(stores) == 1 {
 		return discovered, selected, nil
 	}
@@ -729,13 +1021,13 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err
 		}
-		return bestStoreWithWork(command, stores, primary, run)
+		return bestStoreWithWork(command, stores, primary, run, noted...)
 	}
 	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
 	if workQueryHasReadyWork(ready) {
 		return selectedOut, selected, nil
 	}
-	return bestStoreWithWork(command, stores, primary, run)
+	return bestStoreWithWork(command, stores, primary, run, noted...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs

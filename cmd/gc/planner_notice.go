@@ -43,11 +43,20 @@ package main
 // reaching the next incarnation.
 //
 // The drain reminder is a planner notice too, though its audience is a row
-// in state=draining, which the lane's content gate (I7, session.ContentGate)
-// holds all other content from: the gate admits the drain reminder's notice
+// in drain (state=draining, or v2's stop request at its generation), which
+// the lane's content gate (I7, session.ContentGate) holds all other content
+// from: the gate admits the drain reminder's notice
 // (session.GateContentDrainNotice, laneDrainNoticeClass) and nothing else. A
 // row the gate holds the notice from for another reason is nudged directly
 // (deliverDrainReminder).
+//
+// A conversation an operator holds (its content_hold cell,
+// session.ContentHeldInfo) holds every notice, the drain reminder's included
+// (SESSION-RUNTIME-027), so the backstops and the drain reminder do not
+// remind it by either route: a backstop that would act on it spends no
+// attempt and takes no terminal action (runNudgeBackstop), and a due drain
+// reminder spends no attempt (drainReminderContentHeld), until the hold
+// clears.
 
 import (
 	"errors"
@@ -481,11 +490,7 @@ func plannerNoticeTallyKey(conv string, n plannerNotice, action ...string) strin
 // executesMessages reports whether the host is running and latched message
 // in [ops] authoritative, so planner notices go to its lane.
 func (h *conversationLaneHost) executesMessages() bool {
-	if !slices.Contains(h.kinds, string(opjournal.KindMessage)) {
-		return false
-	}
-	state, _ := h.stateReason()
-	return state == laneHostStateRunning
+	return slices.Contains(h.runningKinds(), string(opjournal.KindMessage))
 }
 
 // noticeStore is the host's op store, opened over its sessions store.
@@ -504,14 +509,7 @@ func (h *conversationLaneHost) noticeNow() time.Time { return h.clk.Now() }
 // lane then delivers it. A protocol-mode session is nudged directly, as
 // before, even where this host's executor serves it from its turns.
 func (h *conversationLaneHost) servesNotice(st *opjournal.Store, sessName string, view opjournal.ConversationView) (bool, error) {
-	if laneTypesLive(h.env.SessionProvider(), sessName) {
-		return true, nil
-	}
-	row, _, found, err := st.Runtime(view.ID)
-	if err != nil {
-		return false, fmt.Errorf("reading conversation %s's runtime row: %w", view.ID, err)
-	}
-	return found && hostedElsewhere(row.Host, view.Generation), nil
+	return laneServesSession(h.env.SessionProvider(), st, sessName, view)
 }
 
 // noticeFailed implements plannerNoticeLane.

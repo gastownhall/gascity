@@ -96,7 +96,6 @@ func TestTargetKeys(t *testing.T) {
 	// A key at the limit is one DeriveID accepts.
 	for _, fn := range []func() (string, error){
 		func() (string, error) { return InterruptKey(1, strings.Repeat("t", maxClientKeyLen-len("stop:1:"))) },
-		func() (string, error) { return RespondKey(1, strings.Repeat("r", maxClientKeyLen-len("respond:1:"))) },
 	} {
 		k, err := fn()
 		if err != nil {
@@ -109,19 +108,13 @@ func TestTargetKeys(t *testing.T) {
 	if k, err := InterruptKey(7, "run-9:2"); err != nil || k != "stop:7:run-9:2" {
 		t.Errorf("InterruptKey(7, run-9:2) = %q, %v", k, err)
 	}
-	if k, err := RespondKey(7, "req-1"); err != nil || k != "respond:7:req-1" {
-		t.Errorf("RespondKey(7, req-1) = %q, %v", k, err)
-	}
 	for _, c := range []struct {
 		name string
 		fn   func() (string, error)
 	}{
 		{"interrupt gen 0", func() (string, error) { return InterruptKey(0, "t") }},
 		{"interrupt no turn", func() (string, error) { return InterruptKey(1, "") }},
-		{"respond gen -1", func() (string, error) { return RespondKey(-1, "r") }},
-		{"respond no request", func() (string, error) { return RespondKey(1, "") }},
 		{"interrupt key too long", func() (string, error) { return InterruptKey(1, strings.Repeat("t", maxClientKeyLen-len("stop:1:")+1)) }},
-		{"respond key too long", func() (string, error) { return RespondKey(1, strings.Repeat("r", maxClientKeyLen-len("respond:1:")+1)) }},
 	} {
 		if _, err := c.fn(); !errors.Is(err, ErrInvalidRequest) {
 			t.Errorf("%s: err = %v, want ErrInvalidRequest", c.name, err)
@@ -167,6 +160,42 @@ func TestPinnedIDGoldenVectors(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("PinnedID(%q, %q, %q, %q) = %s, want %s", c.prefix, c.family, c.tag, c.fields, got, c.want)
+		}
+	}
+}
+
+// IsPinnedID matches every id the pinned schemes mint, and no other bead id
+// shape: a store's sequence or hash id, a child id, or a pinned id with its
+// hash cut, widened or uppercased.
+func TestIsPinnedID(t *testing.T) {
+	op, err := DeriveID("gc", "gc-1", "operator", "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact, err := FactID("my-city", Fact{Kind: FactTurnStarted, Conversation: "gc-1", Generation: 1, Turn: "turn-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := RuntimeRowID("gc", "gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := PinnedID("gc", "ev", "gascity/event-fact/v1", "gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{op, fact, rt, ev} {
+		if !IsPinnedID(id) {
+			t.Errorf("IsPinnedID(%q) = false, want true", id)
+		}
+	}
+	hash := strings.TrimPrefix(op, "gc-op-")
+	for _, id := range []string{
+		"", "gc-12", "ga-j0aune", "gc-a3f8e.1", "gc-op-" + hash[:25], "gc-op-" + hash + "a",
+		"gc-op-" + strings.ToUpper(hash), "-op-" + hash, "gc-" + hash, "gc-1op-" + hash,
+	} {
+		if IsPinnedID(id) {
+			t.Errorf("IsPinnedID(%q) = true, want false", id)
 		}
 	}
 }

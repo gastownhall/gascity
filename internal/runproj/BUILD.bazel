@@ -51,6 +51,7 @@ go_test(
         "detail_nodeshape_test.go",
         "detail_order_fixes_test.go",
         "detail_parity_test.go",
+        "detail_post_terminal_test.go",
         "detail_scope_test.go",
         "detail_sessionlink_retired_test.go",
         "detail_sessionlink_test.go",

@@ -57,7 +57,8 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 		legacyKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyStatus] == string(StatusSubmitted)
 		laneScanKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyExecutor] == string(ExecutorLane) && q.Metadata[keyStatus] != ""
 		openLaneKeyed := q.Label == "" && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
-		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed {
+		interruptsKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 1 && q.Metadata[keyKind] == string(KindInterrupt) && q.Limit > 0
+		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed && !interruptsKeyed {
 			t.Errorf("unkeyed list %+v from %v", q, op.Caller)
 		}
 		for _, req := range beads.NativeListPlan(op.Query) {
@@ -306,6 +307,36 @@ func TestProposeKeyReuse(t *testing.T) {
 	}
 }
 
+// A close takes an optional payload (the API's close?delete=true carries
+// {"delete":true}) and the digest covers it: under one key, a close with the
+// payload and one without are different requests, each direction
+// ErrKeyReuse, nothing written.
+func TestProposeCloseOptionalPayload(t *testing.T) {
+	h := newHarness(t)
+	plain := h.propose(t, lifecycleReq(KindClose, "c1"))
+	deleting := lifecycleReq(KindClose, "c2")
+	deleting.Payload = `{"delete":true}`
+	withPayload := h.propose(t, deleting)
+	if plain.Payload != "" || withPayload.Payload != deleting.Payload || plain.PayloadDigest == withPayload.PayloadDigest {
+		t.Fatalf("plain close %q digest %s, deleting close %q digest %s; want the payload kept and the digests apart",
+			plain.Payload, plain.PayloadDigest, withPayload.Payload, withPayload.PayloadDigest)
+	}
+	revs := map[string]int64{plain.ID: h.revision(t, plain.ID), withPayload.ID: h.revision(t, withPayload.ID)}
+	flipped := lifecycleReq(KindClose, "c1")
+	flipped.Payload = deleting.Payload
+	if _, _, err := h.store.Propose(flipped); !errors.Is(err, ErrKeyReuse) {
+		t.Fatalf("Propose(c1 with the payload) = %v, want ErrKeyReuse", err)
+	}
+	if _, _, err := h.store.Propose(lifecycleReq(KindClose, "c2")); !errors.Is(err, ErrKeyReuse) {
+		t.Fatalf("Propose(c2 without the payload) = %v, want ErrKeyReuse", err)
+	}
+	for id, rev := range revs {
+		if h.revision(t, id) != rev {
+			t.Fatalf("key reuse wrote op %s", id)
+		}
+	}
+}
+
 func TestProposePayloadCap(t *testing.T) {
 	h := newHarness(t)
 	if _, _, err := h.store.Propose(msgReq("max", strings.Repeat("a", MaxInlinePayload))); err != nil {
@@ -317,6 +348,34 @@ func TestProposePayloadCap(t *testing.T) {
 	}
 	if h.countOps(beadstest.OpCreate) != creates {
 		t.Fatal("an oversized payload reached the store")
+	}
+}
+
+// TestValidatePayload pins the exported payload check's verdicts: it refuses
+// what Propose refuses of a payload whatever the op's conversation, a payload
+// over the cap as ErrPayloadTooLarge, one a kind cannot carry as
+// ErrInvalidRequest, and an unknown kind as ErrUnknownKind. It is
+// validatePayload, the check Propose applies, so the two cannot drift.
+func TestValidatePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		kind    Kind
+		payload string
+		want    error
+	}{
+		{"message", KindMessage, "hello", nil},
+		{"message at the cap", KindMessage, strings.Repeat("a", MaxInlinePayload), nil},
+		{"message over the cap", KindMessage, strings.Repeat("a", MaxInlinePayload+1), ErrPayloadTooLarge},
+		{"message not UTF-8", KindMessage, "bad \xff text", ErrInvalidRequest},
+		{"message empty", KindMessage, "", ErrInvalidRequest},
+		{"wake without payload", KindWake, "", nil},
+		{"wake with payload", KindWake, "x", ErrInvalidRequest},
+		{"unknown kind", "teleport", "x", ErrUnknownKind},
+	} {
+		err := ValidatePayload(tc.kind, tc.payload)
+		if (tc.want == nil) != (err == nil) || tc.want != nil && !errors.Is(err, tc.want) {
+			t.Errorf("%s: ValidatePayload = %v, want %v", tc.name, err, tc.want)
+		}
 	}
 }
 
@@ -384,7 +443,7 @@ func TestProposeEveryKindWithDefaults(t *testing.T) {
 			Scope: Scope{Kind: ScopeSession, Generation: 3, Turn: "t1"},
 		},
 		{
-			Conversation: "gc-1", Kind: KindRespond, ClientKey: "respond:3:r1", Payload: "allow", Producer: Producer{Principal: "p", Actor: "operator"},
+			Conversation: "gc-1", Kind: KindRespond, ClientKey: "r1", Payload: `{"action":"approve"}`, Producer: Producer{Principal: "p", Actor: "operator"},
 			Scope: Scope{Kind: ScopeSession, Generation: 3, Interaction: "r1"},
 		},
 	}
