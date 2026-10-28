@@ -119,14 +119,18 @@ type Baseline struct {
 	Expires         string   `toml:"expires"`
 }
 
+// On the native Windows port (branch windows-port) the baselines are rebased on
+// the port's own census: the untagged rows fell because Unix-only tests carry a
+// //go:build unix constraint, and the all-source rows grew with the port's
+// Windows platform tests.
 var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   701,
-			BaselineFiles:   202,
+			BaselineCalls:   744,
+			BaselineFiles:   230,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -138,8 +142,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   488,
-			BaselineFiles:   177,
+			BaselineCalls:   530,
+			BaselineFiles:   201,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,8 +170,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   473,
-			BaselineFiles:   134,
+			BaselineCalls:   230,
+			BaselineFiles:   98,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -179,8 +183,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   318,
-			BaselineFiles:   121,
+			BaselineCalls:   279,
+			BaselineFiles:   116,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -218,8 +222,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   59,
-			BaselineFiles:   24,
+			BaselineCalls:   55,
+			BaselineFiles:   23,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
 			OwnerBead:       "ga-cp3hwi",
@@ -257,8 +261,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   98,
-			BaselineFiles:   38,
+			BaselineCalls:   85,
+			BaselineFiles:   34,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
@@ -270,8 +274,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListenConfig,
-			BaselineCalls:   1,
-			BaselineFiles:   1,
+			BaselineCalls:   0,
+			BaselineFiles:   0,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
 			OwnerBead:       "ga-cp3hwi",
@@ -309,8 +313,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   9,
-			BaselineFiles:   4,
+			BaselineCalls:   7,
+			BaselineFiles:   3,
 			ReportedCalls:   7,
 			ReportedFiles:   3,
 			OwnerBead:       "ga-cp3hwi",
@@ -532,8 +536,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   454,
-			BaselineFiles:   127,
+			BaselineCalls:   211,
+			BaselineFiles:   91,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -545,8 +549,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   318,
-			BaselineFiles:   121,
+			BaselineCalls:   279,
+			BaselineFiles:   116,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",
@@ -584,8 +588,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   58,
-			BaselineFiles:   24,
+			BaselineCalls:   54,
+			BaselineFiles:   23,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
 			OwnerBead:       "ga-cp3hwi",
@@ -623,8 +627,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   96,
-			BaselineFiles:   37,
+			BaselineCalls:   83,
+			BaselineFiles:   33,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
@@ -636,8 +640,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListenConfig,
-			BaselineCalls:   1,
-			BaselineFiles:   1,
+			BaselineCalls:   0,
+			BaselineFiles:   0,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
 			OwnerBead:       "ga-cp3hwi",
@@ -675,8 +679,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   3,
-			BaselineFiles:   2,
+			BaselineCalls:   1,
+			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
 			OwnerBead:       "ga-cp3hwi",

@@ -53,7 +53,7 @@ func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout 
 	switch {
 	case err == nil:
 		return idleWaitReached
-	case herdrErrorCode(err) == "timeout":
+	case herdrVerdictCode(err) == "timeout":
 		return idleWaitTimeout
 	case p.c.targetHasNoNamedAgent(ctx, herdrAgentName(name), err):
 		return idleWaitNoAgent

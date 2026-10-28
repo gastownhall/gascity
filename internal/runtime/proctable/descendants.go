@@ -10,6 +10,11 @@ type ProcessRecord struct {
 	StartTime string // opaque host-local process-start identity
 	Name      string // basename of the process's command
 	SessionID string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)
+	// SessionIDUnknown marks a process that was seen but whose environment
+	// could not be read, so an empty SessionID says nothing about whether it
+	// carries one. Only a snapshot returned with ErrScanIncomplete sets it;
+	// Unix snapshots report an unreadable environment as absent.
+	SessionIDUnknown bool
 }
 
 // SnapshotProcesses returns one host-wide process snapshot. Each record
@@ -18,6 +23,11 @@ type ProcessRecord struct {
 // process table with no GC_SESSION_ID filtering and no liveScanGuard: it powers
 // read-only liveness checks and identity-fenced teardown, not the orphan sweep
 // that guard protects against.
+//
+// When some processes could be seen but not inspected, the full set of records
+// is returned together with an error matching ErrScanIncomplete, and the
+// records that could not be inspected are marked SessionIDUnknown. Any other
+// error means there is no snapshot.
 func SnapshotProcesses() ([]ProcessRecord, error) {
 	return snapshotProcesses()
 }
@@ -34,7 +44,7 @@ func DescendantAlive(records []ProcessRecord, roots []int, names []string) bool 
 	}
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
-		want[n] = true
+		want[processNameKey(n)] = true
 	}
 	byPID := make(map[int]ProcessRecord, len(records))
 	children := make(map[int][]int, len(records))
@@ -53,7 +63,7 @@ func DescendantAlive(records []ProcessRecord, roots []int, names []string) bool 
 			continue
 		}
 		visited[pid] = true
-		if r, ok := byPID[pid]; ok && want[r.Name] {
+		if r, ok := byPID[pid]; ok && want[processNameKey(r.Name)] {
 			return true
 		}
 		stack = append(stack, children[pid]...)

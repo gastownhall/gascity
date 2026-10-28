@@ -25,6 +25,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/events",
+        "//internal/platform/livefile",
         "//internal/runproj",
         "@com_github_shirou_gopsutil_v4//host",
         "@com_github_shirou_gopsutil_v4//load",
@@ -53,6 +54,7 @@ go_test(
         "rundetail_stream_test.go",
         "rundetailtailer_test.go",
         "runtailer_test.go",
+        "samplers_bd_unix_test.go",
         "samplers_test.go",
         "testenv_import_test.go",
         "wire_contract_test.go",

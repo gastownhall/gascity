@@ -330,6 +330,14 @@ used primarily in tests (`GC_EVENTS=fake` for in-memory,
 The default FileRecorder stores events at `.gc/events.jsonl` relative to
 the city directory. The file is created automatically on first write.
 
+Writers serialize on a lock file beside the log, `.gc/events.jsonl.lock`,
+which they create on first write and never remove; rotation replaces the
+log but not the lock file. Recording therefore needs write access to the
+lock file, and to `.gc/` while the lock file does not exist yet, as well as
+to the log. Without it every append fails: `Record` logs the error to
+stderr and drops the event. The `events-log` check of `gc doctor` reports
+either problem.
+
 ### Storage Format
 
 Events are stored as newline-delimited JSON (JSONL / NDJSON). Each line

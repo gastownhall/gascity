@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
@@ -221,6 +222,21 @@ func (g *doltLeakGuardedTestingM) runWith(
 	reapLeaks func([]DoltProcInfo),
 	graceInitialInterval, graceMaxElapsedTime time.Duration,
 ) int {
+	// A platform that cannot enumerate processes cannot produce a finding, and
+	// must not present that silence as a clean sweep. Announce the gap, then run
+	// the parts that need no process table: the symptom-based directory sweep
+	// still removes stray store dirs.
+	if !doltLeakDetectionAvailable() {
+		fmt.Fprintln(os.Stderr, "cmd/gc test dolt leak guard: dolt process enumeration is unavailable on this platform; leak detection is OFF for this run") //nolint:errcheck
+		sweepOrphanDirs()
+		stopSignalHandler := g.installSignalHandler()
+		defer stopSignalHandler()
+		code := runTests()
+		g.cleanupTemporaryPaths()
+		reapRegistered()
+		return code
+	}
+
 	_ = sweepStale("startup")
 	sweepOrphanDirs()
 	stopSignalHandler := g.installSignalHandler()
@@ -319,10 +335,7 @@ func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 			_ = g.reapDoltProcessesUnderRoot("signal")
 			g.cleanupTemporaryPaths()
 			signal.Stop(signals)
-			if s, ok := sig.(syscall.Signal); ok {
-				signal.Reset(s)
-				_ = syscall.Kill(os.Getpid(), s)
-			}
+			reraiseTestSignal(sig)
 		case <-done:
 		}
 	}()
@@ -555,12 +568,11 @@ func reapDoltLeakPIDs(pids []int) []error {
 }
 
 // processStillAlive reports whether pid is still present in the process
-// table, probing via signal 0 (delivers no actual signal; ESRCH means the
-// pid is already gone). Mirrors the ESRCH handling killFn callers already
-// use elsewhere in this file.
+// table. A process that exists but cannot be inspected counts as alive, so
+// an observation failure never invents an exit the reaper would then stop
+// waiting for.
 func processStillAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || !errors.Is(err, syscall.ESRCH)
+	return pidutil.Alive(pid)
 }
 
 // reapDoltLeakPIDsWithKillerAndWaiter is the fully injectable form of the
@@ -851,32 +863,5 @@ func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
 			continue
 		}
 		stopManagedDoltTestPID(t, p.PID)
-	}
-}
-
-func stopManagedDoltTestPID(t *testing.T, pid int) {
-	t.Helper()
-	if pid <= 0 || !managedStopPIDAlive(pid) {
-		return
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-		t.Fatalf("signal dolt test pid %d with SIGTERM: %v", pid, err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !managedStopPIDAlive(pid) {
-		return
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		t.Fatalf("signal dolt test pid %d with SIGKILL: %v", pid, err)
-	}
-	deadline = time.Now().Add(time.Second)
-	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if managedStopPIDAlive(pid) {
-		t.Fatalf("dolt test pid %d still alive after SIGKILL", pid)
 	}
 }

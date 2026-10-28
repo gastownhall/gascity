@@ -269,6 +269,7 @@ type SessionSpec struct {
 	Env          map[string]string
 	Resume       sessionpkg.ProviderResume
 	Hints        runtime.Config
+	LaunchHints  LaunchHintsFunc // see ResolvedRuntime.LaunchHints
 	Metadata     map[string]string
 }
 

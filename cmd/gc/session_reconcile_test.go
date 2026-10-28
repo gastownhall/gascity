@@ -993,6 +993,8 @@ func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	workQuery := platformCommand(`sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+		`if ($env:BEADS_DOLT_PASSWORD -ceq 'rig-secret') { '[{"id":"DM-1"}]' }`)
 	cfg := &config.City{
 		Rigs: []config.Rig{{
 			Name: "demo",
@@ -1001,7 +1003,7 @@ func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
 		Agents: []config.Agent{{
 			Name:      "worker",
 			Dir:       "demo",
-			WorkQuery: `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+			WorkQuery: workQuery,
 		}},
 	}
 

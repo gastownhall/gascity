@@ -948,6 +948,10 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
+	if !controllerStateStoreUpdateAllowed(cs) {
+		return
+	}
+
 	// The beads CAS gate is boot-latched: a reload that would change it only
 	// records a pending-restart notice, it does not flip the process mid-run.
 	cs.noteRolloutDrift(cfg)
@@ -978,11 +982,20 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 	}
+	if !controllerStateStoreUpdateAllowed(cs) {
+		closeUnpublishedBeadStoreHandles(cityStore, stores)
+		return
+	}
 
 	// Swap under short critical section.
-	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
+	var closeRequests []beadStoreCloseRequest
 	cs.mu.Lock()
+	if !controllerStateStoreUpdateAllowed(cs) {
+		cs.mu.Unlock()
+		closeUnpublishedBeadStoreHandles(cityStore, stores)
+		return
+	}
 	cs.cfg = cfg
 	if rawCfg != nil {
 		cs.rawCfg = rawCfg
@@ -992,30 +1005,64 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
 	if cityStore != nil {
-		oldCityStore = cs.cityBeadStore
+		oldCityStore := cs.cityBeadStore
 		cs.cityBeadStore = cityStore
 		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
+		if oldCityStore != nil && oldCityStore != cityStore {
+			closeRequests = append(closeRequests, newBeadStoreCloseRequest(cs, "city bead store", oldCityStore))
+		}
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
 	}
+	closeRequests = append(closeRequests, replacedBeadStoreCloseRequests(cs, oldRigStores, stores)...)
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
-	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
-		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+	afterControllerStateStoreSwapForTest()
+	for _, request := range closeRequests {
+		request.schedule()
 	}
-	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
 }
 
 func scheduleCloseBeadStoreHandle(label string, store beads.Store) {
+	scheduleCloseBeadStoreHandleForState(nil, label, store)
+}
+
+func (cs *controllerState) scheduleCloseBeadStoreHandle(label string, store beads.Store) {
+	scheduleCloseBeadStoreHandleForState(cs, label, store)
+}
+
+type beadStoreCloseRequest struct {
+	label           string
+	store           beads.Store
+	untrackRetiring func()
+}
+
+func newBeadStoreCloseRequest(cs *controllerState, label string, store beads.Store) beadStoreCloseRequest {
 	if store == nil {
+		return beadStoreCloseRequest{}
+	}
+	return beadStoreCloseRequest{
+		label:           label,
+		store:           store,
+		untrackRetiring: trackRetiringBeadStoreHandle(cs, store),
+	}
+}
+
+func (r beadStoreCloseRequest) schedule() {
+	if r.store == nil {
 		return
 	}
+	untrackRetiring := r.untrackRetiring
+	if untrackRetiring == nil {
+		untrackRetiring = func() {}
+	}
 	closeFn := func() {
-		if err := closeBeadStoreHandle(store); err != nil {
-			log.Printf("api: close previous %s: %v", label, err)
+		defer untrackRetiring()
+		if err := closeBeadStoreHandle(r.store); err != nil {
+			log.Printf("api: close previous %s: %v", r.label, err)
 		}
 	}
 	if controllerStateStoreCloseDelay <= 0 {
@@ -1023,6 +1070,10 @@ func scheduleCloseBeadStoreHandle(label string, store beads.Store) {
 		return
 	}
 	time.AfterFunc(controllerStateStoreCloseDelay, closeFn)
+}
+
+func scheduleCloseBeadStoreHandleForState(cs *controllerState, label string, store beads.Store) {
+	newBeadStoreCloseRequest(cs, label, store).schedule()
 }
 
 func closeBeadStoreHandle(store beads.Store) error {
@@ -1044,9 +1095,20 @@ func closeBeadStoreHandle(store beads.Store) error {
 }
 
 func scheduleCloseReplacedBeadStoreHandles(oldStores, newStores map[string]beads.Store) {
-	if len(oldStores) == 0 {
-		return
+	(*controllerState)(nil).scheduleCloseReplacedBeadStoreHandles(oldStores, newStores)
+}
+
+func (cs *controllerState) scheduleCloseReplacedBeadStoreHandles(oldStores, newStores map[string]beads.Store) {
+	for _, request := range replacedBeadStoreCloseRequests(cs, oldStores, newStores) {
+		request.schedule()
 	}
+}
+
+func replacedBeadStoreCloseRequests(cs *controllerState, oldStores, newStores map[string]beads.Store) []beadStoreCloseRequest {
+	if len(oldStores) == 0 {
+		return nil
+	}
+	requests := make([]beadStoreCloseRequest, 0, len(oldStores))
 	newKeys := make(map[uintptr]struct{}, len(newStores))
 	for _, store := range newStores {
 		if key, ok := storePointerKey(store); ok {
@@ -1064,7 +1126,30 @@ func scheduleCloseReplacedBeadStoreHandles(oldStores, newStores map[string]beads
 			}
 			closed[key] = struct{}{}
 		}
-		scheduleCloseBeadStoreHandle(fmt.Sprintf("rig bead store %q", name), store)
+		requests = append(requests, newBeadStoreCloseRequest(cs, fmt.Sprintf("rig bead store %q", name), store))
+	}
+	return requests
+}
+
+func closeUnpublishedBeadStoreHandles(cityStore beads.Store, stores map[string]beads.Store) {
+	closed := map[uintptr]struct{}{}
+	closeOne := func(label string, store beads.Store) {
+		if store == nil {
+			return
+		}
+		if key, ok := storePointerKey(store); ok {
+			if _, seen := closed[key]; seen {
+				return
+			}
+			closed[key] = struct{}{}
+		}
+		if err := closeBeadStoreHandle(store); err != nil {
+			log.Printf("api: close unpublished %s: %v", label, err)
+		}
+	}
+	closeOne("city bead store", cityStore)
+	for name, store := range stores {
+		closeOne(fmt.Sprintf("rig bead store %q", name), store)
 	}
 }
 
@@ -1458,6 +1543,18 @@ func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
 		return nil
 	}
 	return cs.maintenanceLoop
+}
+
+// ApplyStartupPrompt implements api.State: it returns hints with the startup
+// prompt of the session described by info delivered for a launch that resumes it.
+// The controller renders the prompt and applies the same delivery plan the
+// reconciler launches with, so an API-resumed session cannot diverge from it.
+func (cs *controllerState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
+	cfg := cs.Config()
+	if cfg == nil {
+		return hints, nil
+	}
+	return startupPromptCity{path: cs.CityPath(), cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, hints)
 }
 
 // Config returns the current city config snapshot.

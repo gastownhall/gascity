@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 // hookStore is one store the hook work_query runs against: a working dir and
 // the rig/city-scoped subprocess env that points bd at that store.
 type hookStore struct {
-	dir string
-	env []string
+	dir      string
+	env      []string
+	storeRef string
 	// command overrides the shared work query for this store, and is empty on
 	// every store production builds: one command is run against each leg in
 	// turn. It was set by scopeFederatedHookStores when that pinned the
@@ -104,8 +106,12 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // this leg's workspace. This function is the seam that pins it
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
-func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
-	stores := []hookStore{{dir: workDir, env: queryEnv}}
+func hookWorkQueryStores(cityPath, cityName string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
+	stores := []hookStore{{
+		dir:      workDir,
+		env:      queryEnv,
+		storeRef: primaryHookStoreRef(cityPath, cityName, cfg, a, agentForQuery, workDir, queryEnv),
+	}}
 	if agentIsCrossStoreEligible(a) {
 		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
 	}
@@ -119,7 +125,7 @@ func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, age
 	// A rig-backed agent's own env above is ALSO rig-scoped, so without this no
 	// entry reaches the CITY store and root-only beads assigned to the agent
 	// stay invisible. Best-effort tertiary; see appendCityHookStore.
-	return appendCityHookStore(stores, cityPath, cfg, a, identityOverrides)
+	return appendCityHookStore(stores, cityPath, cityName, cfg, a, identityOverrides)
 }
 
 // hookIdentityEnvKeys are the identity overrides that must stay constant across
@@ -183,8 +189,9 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 		}
 	}
 	return append(stores, hookStore{
-		dir: agentCommandDir(cityPath, &view, cfg.Rigs),
-		env: mergeRuntimeEnv(os.Environ(), rigEnv),
+		dir:      agentCommandDir(cityPath, &view, cfg.Rigs),
+		env:      mergeRuntimeEnv(os.Environ(), rigEnv),
+		storeRef: "rig:" + rigName,
 	})
 }
 
@@ -201,7 +208,7 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 // returns stores unchanged when the city env cannot be built, and the city
 // entry is appended LAST so the rig store keeps bestStoreWithWork's
 // emit-on-timeout contract as the primary entry.
-func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
+func appendCityHookStore(stores []hookStore, cityPath, cityName string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
 	if cfg == nil || a == nil {
 		return stores
 	}
@@ -217,9 +224,37 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 		}
 	}
 	return append(stores, hookStore{
-		dir: cityPath,
-		env: mergeRuntimeEnv(os.Environ(), cityEnv),
+		dir:      cityPath,
+		env:      mergeRuntimeEnv(os.Environ(), cityEnv),
+		storeRef: "city:" + hookStoreCityName(cityPath, cityName),
 	})
+}
+
+func primaryHookStoreRef(cityPath, cityName string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, env []string) string {
+	if rig := rigScopedHookRig(cfg, agentForQuery); rig != "" {
+		return "rig:" + rig
+	}
+	if rigRoot := hookClaimEnvValue(env, "GC_RIG_ROOT"); rigRoot != "" {
+		if ref := workflowStoreRefForDir(rigRoot, cityPath, hookStoreCityName(cityPath, cityName), cfg); ref != "" {
+			return ref
+		}
+	}
+	if ref := workflowStoreRefForDir(workDir, cityPath, hookStoreCityName(cityPath, cityName), cfg); ref != "" {
+		return ref
+	}
+	return "city:" + hookStoreCityName(cityPath, cityName)
+}
+
+func hookStoreCityName(cityPath, cityName string) string {
+	cityName = strings.TrimSpace(cityName)
+	if cityName != "" {
+		return cityName
+	}
+	base := strings.TrimSpace(filepath.Base(filepath.Clean(cityPath)))
+	if base != "" {
+		return base
+	}
+	return "city"
 }
 
 // rigScopedHookRig returns the rig whose store a rig-scoped agent must ALSO

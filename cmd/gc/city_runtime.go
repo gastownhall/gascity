@@ -525,6 +525,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		lastProviderName = v
 	}
+	if lastProviderName == "" {
+		lastProviderName = sessionProviderRuntimeDefault
+	}
 
 	cityRoot := cr.cityPath
 	if cityRoot == "" && cr.tomlPath != "" {
@@ -2095,6 +2098,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	pendingProviderName := *lastProviderName
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
+	}
+	if newProviderName == "" {
+		newProviderName = sessionProviderRuntimeDefault
 	}
 	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
 		newSp, spErr := newSessionProviderForCityByName(nextCfg, newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)

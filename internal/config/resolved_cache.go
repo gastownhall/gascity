@@ -147,6 +147,9 @@ func deepCopyResolvedProvider(r ResolvedProvider) ResolvedProvider {
 	if r.ProcessNames != nil {
 		dup.ProcessNames = append([]string(nil), r.ProcessNames...)
 	}
+	if r.NotReadyMarkers != nil {
+		dup.NotReadyMarkers = append([]string(nil), r.NotReadyMarkers...)
+	}
 	if r.PrintArgs != nil {
 		dup.PrintArgs = append([]string(nil), r.PrintArgs...)
 	}

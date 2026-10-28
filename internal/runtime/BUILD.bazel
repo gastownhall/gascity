@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "runtime",
     srcs = [
+        "acl_windows.go",
         "beacon.go",
         "carrier.go",
         "dialog.go",
@@ -10,20 +11,34 @@ go_library(
         "fake.go",
         "fingerprint.go",
         "fingerprint_partition.go",
+        "gccommand_other.go",
+        "gccommand_windows.go",
         "import_trust.go",
         "liveness.go",
         "mcp.go",
         "privatedir.go",
+        "privatedir_windows.go",
         "probe.go",
         "process_control.go",
+        "process_control_windows.go",
         "protocol.go",
         "provider_core.go",
         "redact.go",
+        "redact_unix.go",
+        "redact_windows.go",
         "runtime.go",
         "seam_adapter.go",
         "session_events.go",
         "setupcommand.go",
+        "shellcommand.go",
+        "shellcommand_unix.go",
+        "shellcommand_windows.go",
+        "shellunavailable_other.go",
+        "shellunavailable_windows.go",
         "staging.go",
+        "staging_tracked.go",
+        "staging_tracked_other.go",
+        "staging_tracked_windows.go",
         "startup_hints.go",
         "worker.go",
     ],
@@ -35,6 +50,7 @@ go_library(
 go_test(
     name = "runtime_test",
     srcs = [
+        "acl_windows_test.go",
         "beacon_test.go",
         "carrier_test.go",
         "dialog_model_switch_test.go",
@@ -49,21 +65,36 @@ go_test(
         "fingerprint_golden_test.go",
         "fingerprint_partition_test.go",
         "fingerprint_test.go",
+        "gccommand_windows_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",
         "liveness_test.go",
         "privatedir_test.go",
+        "privatedir_windows_test.go",
         "probe_test.go",
         "provider_core_test.go",
         "redact_test.go",
+        "redact_windows_test.go",
         "runtime_test.go",
         "seam_adapter_test.go",
         "session_events_contract_test.go",
+        "setupcommand_refusal_windows_test.go",
         "setupcommand_test.go",
+        "setupcommand_windows_test.go",
+        "shellcommand_gcalias_windows_test.go",
+        "shellcommand_windows_test.go",
+        "shellfixture_unix_test.go",
+        "shellfixture_windows_test.go",
+        "shellquote_arg_test.go",
+        "shellquote_arg_unix_test.go",
+        "shellunavailable_parser_windows_test.go",
+        "shellunavailable_windows_test.go",
         "staging_hash_test.go",
         "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
         "staging_test.go",
+        "staging_tracked_windows_test.go",
+        "staging_windows_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
@@ -74,7 +105,57 @@ go_test(
     deps = [
         "//internal/runtime/runtimetest",
         "//internal/testenv",
-    ],
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@com_github_burntsushi_toml//:toml",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 filegroup(

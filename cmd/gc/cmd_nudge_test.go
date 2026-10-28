@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -2757,6 +2758,333 @@ func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(
 	}
 }
 
+// TestTryDeliverQueuedNudgesByPollerDefersWhileTheAgentIsBlocked covers a
+// target that refuses input because it waits on an interactive prompt of its
+// own (runtime.ErrAgentBlocked). Such a block lasts until someone answers it,
+// often longer than every retry failedQueuedNudge allows, so the item is held
+// back without counting an attempt: it must survive more refusals than
+// defaultQueuedNudgeMaxAttempts and be delivered once the block clears.
+func TestTryDeliverQueuedNudgesByPollerDefersWhileTheAgentIsBlocked(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	resetCLIFactoryRecorders(t)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "read your new mail", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: agent_blocked: waiting for the user", runtime.ErrAgentBlocked)}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	for refusal := 1; refusal <= defaultQueuedNudgeMaxAttempts+2; refusal++ {
+		before := time.Now()
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+		if delivered {
+			t.Fatalf("refusal %d: delivered = true into a blocked agent", refusal)
+		}
+		if !errors.Is(err, runtime.ErrAgentBlocked) {
+			t.Fatalf("refusal %d: err = %v, want it to report runtime.ErrAgentBlocked", refusal, err)
+		}
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil {
+			t.Fatalf("LoadState: %v", err)
+		}
+		if len(state.Dead) != 0 || len(state.InFlight) != 0 || len(state.Pending) != 1 {
+			t.Fatalf("refusal %d: pending=%d inFlight=%d dead=%d, want the item pending", refusal, len(state.Pending), len(state.InFlight), len(state.Dead))
+		}
+		item := state.Pending[0]
+		if item.Attempts != 0 {
+			t.Fatalf("refusal %d: attempts = %d, want 0: a blocked agent is not a failed delivery", refusal, item.Attempts)
+		}
+		if earliest := before.Add(defaultQueuedNudgeBlockedRetryDelay); item.DeliverAfter.Before(earliest) {
+			t.Fatalf("refusal %d: deliver_after = %s, want no earlier than %s", refusal, item.DeliverAfter, earliest)
+		}
+		if item.LastError != "" {
+			t.Fatalf("refusal %d: last_error = %q, want it left alone so a later expiry still reads as expired", refusal, item.LastError)
+		}
+		// Let the hold-back elapse instead of sleeping through it.
+		if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+			state.Pending[0].DeliverAfter = time.Now().Add(-time.Second).UTC()
+			return nil
+		}); err != nil {
+			t.Fatalf("rewinding deliver_after: %v", err)
+		}
+	}
+
+	delete(fake.NudgeErrors, info.SessionName)
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller after the block cleared: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false after the block cleared, want true")
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue not drained: pending=%d inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// startBlockedNudgeTarget starts a fake session for agent "worker" that refuses
+// every nudge as runtime.ErrAgentBlocked, and returns the queue target for it
+// with an observation idle long enough to deliver to. Queue maintenance opens
+// the returned in-memory store as the nudge front door.
+func startBlockedNudgeTarget(t *testing.T) (string, beads.Store, *runtime.Fake, nudgeTarget, worker.LiveObservation) {
+	t.Helper()
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	resetCLIFactoryRecorders(t)
+	store := beads.NewMemStore()
+	previousOpen := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		return beads.NudgesStore{Store: store}, nil
+	}
+	t.Cleanup(func() { openOwnedNudgeBeadStore = previousOpen })
+
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-time.Hour)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: agent_blocked: waiting for the user", runtime.ErrAgentBlocked)}
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	return dir, store, fake, target, worker.LiveObservation{Running: true, LastActivity: &idleSince}
+}
+
+func queuedNudgeByID(t *testing.T, items []queuedNudge, id string) queuedNudge {
+	t.Helper()
+	for _, item := range items {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("queued nudge %s not found in %#v", id, items)
+	return queuedNudge{}
+}
+
+// TestClaimDueQueuedNudgesExpiresAnItemTheBudgetedPruneSkipped covers the claim
+// itself enforcing the TTL. The prune passes before it stop at
+// nudgeEnqueueMaintenanceBudget, measured from a now taken before the queue
+// lock and the store open, so on a loaded host they can stop before reaching an
+// item past its TTL. The claim must not hand that item to delivery: it is
+// dead-lettered as expired, and the live item beside it is still claimed.
+func TestClaimDueQueuedNudgesExpiresAnItemTheBudgetedPruneSkipped(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+
+	// staleNow+nudgeEnqueueMaintenanceBudget is already behind the real clock,
+	// so every maintenance pass stops before its first item.
+	staleNow := time.Now().Add(-10 * time.Second)
+	expired := newQueuedNudge("worker", "past its TTL", staleNow.Add(-defaultQueuedNudgeTTL-time.Second))
+	live := newQueuedNudge("worker", "still live", staleNow.Add(-time.Minute))
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		state.Pending = []queuedNudge{expired, live}
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding queue: %v", err)
+	}
+
+	claimed, err := claimDueQueuedNudgesMatching(dir, staleNow, func(item queuedNudge) bool { return item.Agent == "worker" })
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != live.ID {
+		t.Fatalf("claimed = %#v, want only the live item %s", claimed, live.ID)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 || len(state.InFlight) != 1 || len(state.Dead) != 1 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want the expired item dead and the live one in flight", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	if dead := state.Dead[0]; dead.ID != expired.ID || dead.LastError != "expired" || dead.Attempts != 0 {
+		t.Fatalf("dead = %#v, want %s dead-lettered as expired with no attempt counted", dead, expired.ID)
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerExpiresABlockedItemInsteadOfHoldingIt
+// covers an item that is live when claimed and past its TTL by the time its
+// blocked target refuses it. Holding it back would keep it queued past the TTL,
+// and the maintenance passes that would expire it stop at their budget, which a
+// slow store open spends before they start. The hold-back must dead-letter it
+// as expired, so it never reaches the runtime again, even once the block clears.
+func TestTryDeliverQueuedNudgesByPollerExpiresABlockedItemInsteadOfHoldingIt(t *testing.T) {
+	dir, store, fake, target, obs := startBlockedNudgeTarget(t)
+	synctest.Test(t, func(t *testing.T) {
+		openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+			time.Sleep(nudgeEnqueueMaintenanceBudget + time.Second)
+			return beads.NudgesStore{Store: store}, nil
+		}
+		// Live at the claim; expired once the claim's slow store open has run.
+		item := newQueuedNudge("worker", "read your new mail", time.Now().Add(nudgeEnqueueMaintenanceBudget-defaultQueuedNudgeTTL))
+		if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+			state.Pending = []queuedNudge{item}
+			return nil
+		}); err != nil {
+			t.Fatalf("seeding queue: %v", err)
+		}
+
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 0, obs)
+		if delivered || !errors.Is(err, runtime.ErrAgentBlocked) {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller = (%v, %v), want a blocked refusal", delivered, err)
+		}
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil {
+			t.Fatalf("LoadState: %v", err)
+		}
+		if len(state.Pending) != 0 || len(state.InFlight) != 0 || len(state.Dead) != 1 {
+			t.Fatalf("pending=%d inFlight=%d dead=%d, want the expired item dead-lettered, not held back", len(state.Pending), len(state.InFlight), len(state.Dead))
+		}
+		if dead := state.Dead[0]; dead.LastError != "expired" || dead.Attempts != 0 {
+			t.Fatalf("dead = %#v, want it dead-lettered as expired with no attempt counted", dead)
+		}
+
+		delete(fake.NudgeErrors, target.sessionName)
+		if delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 0, obs); delivered || err != nil {
+			t.Fatalf("after the block cleared: tryDeliverQueuedNudgesByPoller = (%v, %v), want nothing to deliver", delivered, err)
+		}
+		if calls := fake.CountCalls("Nudge", target.sessionName); calls != 1 {
+			t.Fatalf("runtime nudged %d times, want only the one refusal before the item expired", calls)
+		}
+	})
+}
+
+// TestDeferQueuedNudgeClaimsHoldsAClaimWhoseLeaseExpired covers a refusal
+// handled after the item's claim lease ran out, as a slow delivery or store can
+// make it. Lease recovery, in the defer's own pass or an earlier one, returns
+// the item to pending as due at once; the hold-back must still apply, or the
+// blocked target is asked again on the very next pass.
+func TestDeferQueuedNudgeClaimsHoldsAClaimWhoseLeaseExpired(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+	stillClaimed := newQueuedNudge("worker", "refused after its lease ran out", now.Add(-time.Hour))
+	stillClaimed.ClaimedAt = now.Add(-defaultQueuedNudgeClaimTTL - time.Minute).UTC()
+	stillClaimed.LeaseUntil = now.Add(-time.Minute).UTC()
+	// The state an earlier pass's lease recovery leaves behind.
+	recovered := newQueuedNudge("worker", "returned to pending by lease recovery", now.Add(-time.Hour))
+	recovered.DeliverAfter = now.Add(-time.Second).UTC()
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		state.InFlight = []queuedNudge{stillClaimed}
+		state.Pending = []queuedNudge{recovered}
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding queue: %v", err)
+	}
+
+	holdUntil := now.Add(defaultQueuedNudgeBlockedRetryDelay)
+	if err := deferQueuedNudgeClaims(dir, []string{stillClaimed.ID, recovered.ID}, holdUntil, nil); err != nil {
+		t.Fatalf("deferQueuedNudgeClaims: %v", err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 2 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want both items pending", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	for _, want := range []queuedNudge{stillClaimed, recovered} {
+		got := queuedNudgeByID(t, state.Pending, want.ID)
+		if got.DeliverAfter.Before(holdUntil) || got.Attempts != 0 || !got.ExpiresAt.Equal(want.ExpiresAt) || !got.LeaseUntil.IsZero() {
+			t.Fatalf("pending = %#v, want it unclaimed and held until %s with its attempts and expiry unchanged", got, holdUntil)
+		}
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerHoldsTheBlockedTargetsWholeBacklog covers
+// items queued for a blocked target at different times. Holding back only the
+// batch just refused leaves each item on its own cycle: N held items cost N
+// runtime calls per cycle and land as N separate turns once the block clears.
+// The refusal holds every pending item the target would claim to the same
+// time instead, and leaves another agent's items alone.
+func TestTryDeliverQueuedNudgesByPollerHoldsTheBlockedTargetsWholeBacklog(t *testing.T) {
+	dir, store, fake, target, obs := startBlockedNudgeTarget(t)
+	now := time.Now()
+	heldEarlier := newQueuedNudge("worker", "held by an earlier refusal", now.Add(-time.Minute))
+	heldEarlier.DeliverAfter = now.Add(10 * time.Second).UTC()
+	arrived := newQueuedNudge("worker", "arrived since", now.Add(-time.Second))
+	other := newQueuedNudge("other", "for another agent", now.Add(-time.Second))
+	other.DeliverAfter = now.Add(10 * time.Second).UTC()
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		state.Pending = []queuedNudge{heldEarlier, arrived, other}
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding queue: %v", err)
+	}
+
+	before := time.Now()
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 0, obs)
+	if delivered || !errors.Is(err, runtime.ErrAgentBlocked) {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller = (%v, %v), want a blocked refusal", delivered, err)
+	}
+	if calls := fake.CountCalls("Nudge", target.sessionName); calls != 1 {
+		t.Fatalf("runtime nudged %d times, want 1", calls)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 3 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want all three items pending", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	gotArrived := queuedNudgeByID(t, state.Pending, arrived.ID)
+	gotEarlier := queuedNudgeByID(t, state.Pending, heldEarlier.ID)
+	if gotArrived.DeliverAfter.Before(before.Add(defaultQueuedNudgeBlockedRetryDelay)) {
+		t.Fatalf("refused item due %s, want it held for %s", gotArrived.DeliverAfter, defaultQueuedNudgeBlockedRetryDelay)
+	}
+	if !gotEarlier.DeliverAfter.Equal(gotArrived.DeliverAfter) {
+		t.Fatalf("earlier held item due %s, refused item due %s; want the target's whole backlog held to the same time", gotEarlier.DeliverAfter, gotArrived.DeliverAfter)
+	}
+	if gotEarlier.Attempts != 0 || !gotEarlier.ExpiresAt.Equal(heldEarlier.ExpiresAt) {
+		t.Fatalf("earlier held item = %#v, want its attempts and expiry unchanged", gotEarlier)
+	}
+	if gotOther := queuedNudgeByID(t, state.Pending, other.ID); !gotOther.DeliverAfter.Equal(other.DeliverAfter) {
+		t.Fatalf("other agent's item due %s, want it left at %s", gotOther.DeliverAfter, other.DeliverAfter)
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -4505,7 +4833,7 @@ func waitForPollerCmdline(t *testing.T, pid int, cityPath, sessionName, agentNam
 	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if pidutil.AliveWithCmdline(pid, matches) {
+		if matched, err := pidutil.AliveWithCmdline(pid, matches); err == nil && matched {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -6196,4 +6524,29 @@ func TestResolveNudgePollInterval(t *testing.T) {
 			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
 		}
 	})
+}
+
+// TestEnsureNudgePollerRefusesToReExecuteATestBinary pins the containment this
+// package's own test run depends on.
+//
+// ensureNudgePoller starts a poller by re-executing os.Executable(), which
+// under `go test` is the test binary itself. A Go test binary ignores the
+// poller argv and runs its whole suite instead, reaching this spawn path again
+// and spawning again from there, with no -test.timeout to bound any of it.
+// That fan-out leaked 203 processes and wedged a developer machine.
+//
+// This spawn path had no test-binary guard at all; the sibling path in
+// internal/session had one that only recognized the Unix <pkg>.test name.
+func TestEnsureNudgePollerRefusesToReExecuteATestBinary(t *testing.T) {
+	cityPath := t.TempDir()
+	const sessionName = "s-gc-1"
+	const agentName = "agent"
+
+	err := ensureNudgePoller(cityPath, agentName, sessionName)
+	if err == nil || !strings.Contains(err.Error(), "Go test binary") {
+		t.Fatalf("ensureNudgePoller error = %v, want Go test binary refusal", err)
+	}
+	if _, statErr := os.Stat(nudgePollerPIDPath(cityPath, sessionName, agentName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("poller pid file stat error = %v, want not exist", statErr)
+	}
 }

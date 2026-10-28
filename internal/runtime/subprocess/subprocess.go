@@ -33,6 +33,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -44,16 +46,26 @@ type Provider struct {
 	procs    map[string]*sessionConn // in-process tracking
 	workDirs map[string]string       // session name → workDir (for CopyTo)
 	ops      providerOps
+	// stopping holds, for each name a Stop is taking down a held tree for, a
+	// channel closed once that Stop has finished. Start and Stop wait on it,
+	// so no replacement starts, and no second Stop reports success, while the
+	// first is still confirming the tree gone.
+	stopping map[string]chan struct{}
 }
 
 type providerOps struct {
-	start func(*exec.Cmd) error
+	// start launches cmd as the owner of its process tree and returns the
+	// group identity captured at spawn.
+	start func(*exec.Cmd) (int, error)
 }
 
 const (
-	socketPathLimit       = 100
+	// socketPathLimit is the endpoint-pathname budget, owned by localsocket
+	// because the ceiling it is derived from is a platform fact rather than a
+	// provider one. A private copy per package is how this provider and the
+	// cmd/gc endpoints drifted apart in the first place.
+	socketPathLimit       = localsocket.PathLimit
 	fallbackSocketDirName = "gascity-subprocess"
-	shortSocketTempRoot   = "/tmp"
 	nativeSocketPathLimit = len(syscall.RawSockaddrUnix{}.Path) - 1
 )
 
@@ -62,6 +74,12 @@ type sessionConn struct {
 	cmd      *exec.Cmd
 	done     chan struct{} // closed when process exits
 	listener net.Listener  // unix socket listener
+
+	// pgid is the process-group identity captured when cmd was spawned.
+	// Recording it beats looking it up later: the lookup stops answering once
+	// the group leader is reaped, which is exactly when surviving descendants
+	// still need to be reached.
+	pgid int
 }
 
 // Compile-time check.
@@ -105,8 +123,14 @@ func newProvider(dir string) *Provider {
 		procs:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		ops: providerOps{
-			start: (*exec.Cmd).Start,
+			start: func(cmd *exec.Cmd) (int, error) {
+				// Sessions outlive the CLI invocation that started them and
+				// are stopped through the control socket, so releasing
+				// ownership must not take them down.
+				return processgroup.StartCommand(cmd, processgroup.SurviveRelease)
+			},
 		},
+		stopping: make(map[string]chan struct{}),
 	}
 }
 
@@ -118,11 +142,21 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	euid := os.Geteuid()
+	if err := p.awaitStopLocked(name); err != nil {
+		return err
+	}
 
 	// Check in-memory tracking first.
 	if existing, ok := p.procs[name]; ok {
 		if existing.alive() {
 			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+		}
+		// The leader has exited, but a tree still held has members that
+		// outlived it; a replacement must not start beside them.
+		if processgroup.HoldsTree(existing.cmd) {
+			if err := terminateSessionConn(existing); err != nil {
+				return fmt.Errorf("stopping what the previous session %q left running: %w", name, err)
+			}
 		}
 		delete(p.procs, name)
 	}
@@ -145,13 +179,15 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
 
-	command := cfg.Command
-	if command == "" {
-		command = "sh"
+	if reason := runtime.ShellCommandUnavailable(cfg.Command); reason != "" {
+		clearWorkDir()
+		return fmt.Errorf("session %q command refused: %s", name, reason)
 	}
-
-	cmd := exec.Command("sh", "-c", command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd, err := runtime.ShellSessionCommand(cfg.Command)
+	if err != nil {
+		clearWorkDir()
+		return fmt.Errorf("preparing command for %q: %w", name, err)
+	}
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}
@@ -196,7 +232,8 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		clearWorkDir()
 		return fmt.Errorf("preparing control socket for %q: %w", name, err)
 	}
-	if err := p.ops.start(cmd); err != nil {
+	pgid, err := p.ops.start(cmd)
+	if err != nil {
 		_ = nullFile.Close()
 		clearWorkDir()
 		return fmt.Errorf("starting session %q: %w", name, err)
@@ -205,10 +242,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	// Create control socket for cross-process discovery.
 	done := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, done, socketDir, euid)
+	lis, err := p.startControlSocket(name, cmd, pgid, done, socketDir, euid)
 	if err != nil {
-		// Socket creation failed — kill the process and bail.
-		_ = cmd.Process.Kill()
+		// Socket creation failed — reap the owned tree and bail.
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		_ = cmd.Wait()
 		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
@@ -216,7 +253,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
 		lis.Close() //nolint:errcheck
 		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		_ = cmd.Process.Kill()
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		_ = cmd.Wait()
 		clearWorkDir()
 		return fmt.Errorf("storing metadata for %q: %w", name, err)
@@ -230,9 +267,14 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
 		p.clearSessionMeta(name)
 		close(done)
+		// The leader exiting is not the tree exiting. Ownership ends here only
+		// if nothing is left; otherwise it is kept, because Stop can still
+		// arrive through p.procs and the owned tree is the only way to reach
+		// helpers the agent left running.
+		_ = processgroup.ReleaseCommandIfEmpty(cmd)
 	}()
 
-	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
+	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis, pgid: pgid}
 	return nil
 }
 
@@ -252,22 +294,91 @@ func envWithoutKey(env []string, key string) []string {
 func (p *Provider) Stop(name string) error {
 	euid := os.Geteuid()
 	p.mu.Lock()
+	if err := p.awaitStopLocked(name); err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	sc, ok := p.procs[name]
+	var stopped chan struct{}
 	if ok {
 		delete(p.procs, name)
+		// A held tree can outlive its leader, and with it the control socket
+		// that would otherwise keep a replacement out, so the name stays
+		// reserved until the tree is confirmed gone.
+		if processgroup.HoldsTree(sc.cmd) {
+			stopped = make(chan struct{})
+			p.stopping[name] = stopped
+		}
 	}
 	p.mu.Unlock()
 
 	// Try in-memory process first.
 	if ok {
-		if !sc.alive() {
-			return nil
+		if testHookBeforeStopTeardown != nil {
+			testHookBeforeStopTeardown(name)
 		}
-		return terminateSessionConn(sc)
+		err := terminateTracked(sc)
+		p.mu.Lock()
+		// Keep the session reachable while its tree is still held, so a
+		// retry acts on the same tree rather than finding nothing.
+		if err != nil && processgroup.HoldsTree(sc.cmd) {
+			if _, replaced := p.procs[name]; !replaced {
+				p.procs[name] = sc
+			}
+		}
+		if stopped != nil {
+			delete(p.stopping, name)
+			close(stopped)
+		}
+		p.mu.Unlock()
+		return err
 	}
 
 	// Fall back to socket (cross-process case: gc stop after gc start).
 	return p.stopBySocketAt(name, euid)
+}
+
+// testHookBeforeStopTeardown, when set, is called by Stop once it has taken a
+// tracked session, before tearing it down.
+var testHookBeforeStopTeardown func(name string)
+
+// stopWaitTimeout bounds how long Start or Stop waits for a Stop of the same
+// session already in progress: a cooperative grace, then a forced
+// termination and its confirmation.
+const stopWaitTimeout = 3*runtime.ManagedProcessStopGrace + 10*time.Second
+
+// awaitStopLocked waits for a Stop of name already in progress to finish,
+// releasing p.mu while it waits. p.mu must be held, and is held on return.
+func (p *Provider) awaitStopLocked(name string) error {
+	deadline := time.Now().Add(stopWaitTimeout)
+	for {
+		stopped, stopping := p.stopping[name]
+		if !stopping {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("session %q is still being stopped after %s", name, stopWaitTimeout)
+		}
+		p.mu.Unlock()
+		timer := time.NewTimer(remaining)
+		select {
+		case <-stopped:
+		case <-timer.C:
+		}
+		timer.Stop()
+		p.mu.Lock()
+	}
+}
+
+// terminateTracked stops a session this provider started. A leader that has
+// exited leaves nothing to stop unless its tree is still held, which means
+// members outlived it.
+func terminateTracked(sc *sessionConn) error {
+	if !sc.alive() && !processgroup.HoldsTree(sc.cmd) {
+		return nil
+	}
+	return terminateSessionConn(sc)
 }
 
 // Interrupt sends SIGINT to the named session's process.
@@ -278,7 +389,7 @@ func (p *Provider) Interrupt(name string) error {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 	if ok {
-		return runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+		return processgroup.InterruptCommand(sc.cmd, sc.pgid, processgroup.Options{})
 	}
 
 	// Fall back to socket (cross-process case). A missing socket is the same
@@ -355,7 +466,7 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	if r.PID <= 1 {
 		return fmt.Errorf("subprocess: invalid PID %d for session %s", r.PID, r.SessionID)
 	}
-	if err := proctable.KillByPID(r.PID); err != nil {
+	if err := proctable.KillRuntime(r); err != nil {
 		return fmt.Errorf("subprocess: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
 	}
 	return nil
@@ -578,8 +689,16 @@ func (p *Provider) fallbackLeaf() string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// privateFallbackRoot is the owner-only root holding hashed fallback socket
+// directories for one user.
+//
+// Which directory can hold a short endpoint pathname is a platform question,
+// so localsocket owns the root. This used to join the literal "/tmp", which is
+// not a temporary directory on Windows: filepath.Join turns it into a
+// drive-relative \tmp on whatever volume the process happens to be running
+// from, outside every runtime directory Gas City creates and protects.
 func privateFallbackRoot(euid int) string {
-	return filepath.Join(shortSocketTempRoot, fmt.Sprintf("%s-%d", fallbackSocketDirName, euid))
+	return localsocket.FallbackDir(privateFallbackNamespace(euid))
 }
 
 func (p *Provider) privateFallbackDir(euid int) string {
@@ -591,27 +710,7 @@ func (p *Provider) isPrivateFallbackDir(dir string, euid int) bool {
 }
 
 func validatePrivateSocketDir(path string, euid int) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("private socket directory %q is not a directory", path)
-	}
-	if got := info.Mode().Perm(); got != 0o700 {
-		return fmt.Errorf("private socket directory %q has mode %04o, want 0700", path, got)
-	}
-	if special := info.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky); special != 0 {
-		return fmt.Errorf("private socket directory %q has special mode bits %v", path, special)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("private socket directory %q has unsupported ownership metadata", path)
-	}
-	if got, want := stat.Uid, uint32(euid); got != want {
-		return fmt.Errorf("private socket directory %q is owned by uid %d, want %d", path, got, want)
-	}
-	return nil
+	return validatePrivateSocketDirPlatform(path, euid)
 }
 
 func ensurePrivateSocketDir(path string, euid int) error {
@@ -688,11 +787,13 @@ func (p *Provider) socketNameForEntry(dir, key string) string {
 
 // startControlSocket creates a unix socket for the session and starts
 // a goroutine to handle commands. The socket handler supports:
-//   - "stop" — SIGTERM then SIGKILL to the whole session process group; replies "ok"
-//   - "interrupt" — SIGINT to the whole session process group; replies "ok"
+//   - "stop" — cooperative stop, then force-reap of the owned tree; replies
+//     "ok" on confirmed teardown and "err: <reason>" otherwise
+//   - "interrupt" — interrupt the whole session process group; replies "ok" or
+//     "err: <reason>"
 //   - "ping" — replies "ok"
 //   - "pid" — replies with the PID (diagnostics)
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, dir string, euid int) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, pgid int, done <-chan struct{}, dir string, euid int) (net.Listener, error) {
 	if err := p.ensureSocketDir(dir, euid); err != nil {
 		return nil, err
 	}
@@ -716,27 +817,37 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return // listener closed
 			}
-			go handleSessionConn(conn, cmd, done)
+			go handleSessionConn(conn, cmd, pgid, done)
 		}
 	}()
 	return lis, nil
 }
 
 // handleSessionConn reads a command from the connection and acts on the process.
-func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
+//
+// A failed or unsupported operation answers "err: <reason>" rather than "ok".
+// The caller is a remote process deciding whether the session is gone; telling
+// it the stop succeeded when the tree is still running hands it a false clear,
+// and it has no other way to find out.
+func handleSessionConn(conn net.Conn, cmd *exec.Cmd, pgid int, done <-chan struct{}) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if !scanner.Scan() {
 		return
 	}
+	reply := func(err error) {
+		if err != nil {
+			fmt.Fprintf(conn, "err: %v\n", err) //nolint:errcheck
+			return
+		}
+		conn.Write([]byte("ok\n")) //nolint:errcheck
+	}
 	switch scanner.Text() {
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply(processgroup.TerminateManagedCommand(cmd, pgid, done, runtime.ManagedProcessStopGrace, processgroup.Options{}))
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply(processgroup.InterruptCommand(cmd, pgid, processgroup.Options{}))
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "pid":
@@ -838,17 +949,12 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 	return nil
 }
 
-func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, os.ErrNotExist) ||
-		errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.ECONNREFUSED)
-}
-
 // --- In-memory process helpers ---
 
-// terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked process.
+// terminateSessionConn requests a cooperative stop and, after the grace period,
+// force-reaps the owned process tree.
 func terminateSessionConn(sc *sessionConn) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	return processgroup.TerminateManagedCommand(sc.cmd, sc.pgid, sc.done, runtime.ManagedProcessStopGrace, processgroup.Options{})
 }
 
 // Capabilities reports subprocess provider capabilities. The subprocess

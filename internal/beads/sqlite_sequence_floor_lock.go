@@ -3,14 +3,15 @@ package beads
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // persistSQLiteSequenceFloorAtLeast serializes the final floor re-read and
-// atomic replacement across processes. The lock target is the directory holding
-// the store, which satisfies three constraints at once that no file in it can.
+// atomic replacement across processes. Unix locks the directory holding the
+// store. Windows maps that directory identity to a stable lock file in a
+// per-user lock root because LockFileEx cannot lock directory handles.
 //
 // graph.seqfloor is replaced by rename, so it cannot carry its own lock: two
 // processes would end up holding locks on different inodes. A sibling lock file
@@ -28,23 +29,23 @@ import (
 // store's open connection holds an flock on the database and a blocking LOCK_EX
 // here deadlocked against it permanently (gas-bsj).
 //
-// The directory is left. It always exists, its inode is stable across the
-// rename, SQLite never flocks it on either platform, and locking it creates
-// nothing for the census to see. The cost is granularity: this flock is the
-// store directory's single lock, owned by the sequence floor. Anything else
-// needing to serialize on this directory must coordinate through here rather
-// than take its own flock on the same inode.
+// On Unix the directory is left. It always exists, its inode is stable across
+// the rename, SQLite never flocks it, and locking it creates nothing for the
+// census to see. Windows uses the same canonical directory identity but stores
+// the lock file outside the censused namespace. The cost is granularity: this
+// is the store directory's single lock, owned by the sequence floor. Anything
+// else needing to serialize on this directory must coordinate through here.
 func persistSQLiteSequenceFloorAtLeast(floorPath string, requested int64) (persisted int64, returnErr error) {
-	lock, err := os.Open(filepath.Dir(floorPath))
+	lock, lockLabel, err := filelock.OpenDirectoryLock(filepath.Dir(floorPath))
 	if err != nil {
 		return 0, fmt.Errorf("opening sequence-floor lock directory: %w", err)
 	}
 	observeSQLiteSequenceFloorBoundary("sequence-floor-lock-open")
-	locked := false
+	var heldLock *filelock.Lock
 	defer func() {
-		if locked {
+		if heldLock != nil {
 			observeSQLiteSequenceFloorBoundary("sequence-floor-lock-release-before")
-			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+			if err := heldLock.Release(); err != nil {
 				returnErr = errors.Join(returnErr, fmt.Errorf("unlocking SQLite sequence floor: %w", err))
 			} else {
 				observeSQLiteSequenceFloorBoundary("sequence-floor-lock-release-after")
@@ -57,10 +58,10 @@ func persistSQLiteSequenceFloorAtLeast(floorPath string, requested int64) (persi
 			observeSQLiteSequenceFloorBoundary("sequence-floor-lock-close-after")
 		}
 	}()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	heldLock, err = filelock.Acquire(lock, filelock.Options{Mode: filelock.Exclusive, Label: lockLabel})
+	if err != nil {
 		return 0, fmt.Errorf("locking SQLite sequence floor: %w", err)
 	}
-	locked = true
 	observeSQLiteSequenceFloorBoundary("sequence-floor-lock-held")
 
 	current, err := readSQLiteSequenceFloor(floorPath)

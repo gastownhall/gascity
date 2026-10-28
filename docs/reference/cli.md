@@ -2067,6 +2067,10 @@ This protects provider hook callbacks from wedged data-plane commands. The
 child process is the current gc executable, and &lt;gc args...&gt; are passed to it
 verbatim.
 
+On timeout the child is killed and its output is discarded, except output the
+child sealed as complete before the deadline (nudge drain seals the nudges it
+is about to acknowledge), which is still forwarded.
+
 ```
 gc hook run -- <gc args...> [flags]
 ```

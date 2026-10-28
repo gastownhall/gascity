@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -34,7 +33,7 @@ func pingNudgeWakeSocket(cityPath string) {
 		return
 	}
 	path := nudgequeue.WakeSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
+	conn, err := localsocket.Dial(path, pingNudgeWakeSocketDialTimeout)
 	if err != nil {
 		return
 	}
@@ -50,27 +49,15 @@ func pingNudgeWakeSocket(cityPath string) {
 // back to patrol-interval dispatching.
 func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
 	path := nudgequeue.WakeSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
-	}
-	// A stale socket from a prior supervisor crash blocks Listen with
-	// "address already in use". Removing it is safe because flock-based
-	// queue access protects state; the socket carries no data of its own.
-	_ = os.Remove(path)
-	lis, err := net.Listen("unix", path)
+	// The wake socket carries a single signal byte with no payload and no
+	// authentication, so reaching it is itself the capability: a co-local
+	// user who could connect would be able to force dispatch ticks. Asking
+	// for owner-only protection narrows the socket on Unix and, on Windows,
+	// makes the runtime directory it is bound in owner-only instead, because
+	// mode bits are not an access boundary there.
+	lis, err := localsocket.Listen(path, localsocket.Options{DirMode: 0o755, SocketMode: 0o600})
 	if err != nil {
 		return nil, fmt.Errorf("listening on nudge wake socket: %w", err)
-	}
-	// TOCTOU: there is a narrow window between Listen and Chmod where
-	// the socket exists at the umask-default permissions and a co-local
-	// user could connect. Worst case is a spurious dispatch tick — the
-	// socket carries a single signal byte with no payload or auth — so
-	// this is acceptable for now. A future hardening pass could set
-	// umask before Listen, or use platform-specific abstract namespace
-	// sockets where supported.
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = lis.Close()
-		return nil, fmt.Errorf("chmod nudge wake socket: %w", err)
 	}
 	go func() {
 		<-ctx.Done()
@@ -229,7 +216,8 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			continue
 		}
 		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
-		if err != nil && firstErr == nil {
+		blocked := errors.Is(err, runtime.ErrAgentBlocked)
+		if err != nil && !blocked && firstErr == nil {
 			firstErr = err
 		}
 		if ok {
@@ -242,10 +230,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		// claimable (already claimed by a concurrent drain path). Either way
 		// this is the class of skip ra-oudpha finding-3 could not otherwise
 		// distinguish from "not matched" or "not running" without a trace.
-		reason := "not-delivered"
-		if err != nil {
-			reason = "not-delivered-error"
-		}
+		reason := queuedNudgeSkipReason(err)
 		skipCounts[reason]++
 		detail := ""
 		if err != nil {
@@ -257,6 +242,22 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// queuedNudgeSkipReason names, for the dispatch skip counters, why a delivery
+// pass that reached a live, running target delivered nothing. err is what
+// tryDeliverQueuedNudgesByPoller returned. "agent-blocked" is a target that
+// refused input while waiting on an interactive prompt; its nudges are held
+// back, not failed.
+func queuedNudgeSkipReason(err error) string {
+	switch {
+	case errors.Is(err, runtime.ErrAgentBlocked):
+		return "agent-blocked"
+	case err != nil:
+		return "not-delivered-error"
+	default:
+		return "not-delivered"
+	}
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

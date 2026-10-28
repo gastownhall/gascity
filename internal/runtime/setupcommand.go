@@ -21,9 +21,12 @@ const (
 )
 
 // RunSetupCommand executes one session lifecycle shell command (pre_start,
-// session_setup, session_setup_script, session_live) host-side — "in gc's
-// process via sh -c", per the Config field contracts — with a per-command
-// timeout. The command's working directory is env["GC_DIR"] when set; env is
+// session_setup, session_setup_script, session_live) host-side — in gc's
+// process, through the platform's command interpreter ([ShellCommandContext]:
+// `sh -c` on Unix, PowerShell on Windows) — with a per-command timeout. A
+// command the platform refuses ([ShellCommandUnavailable]) starts nothing.
+// Nothing else about the contract is platform-dependent: the command's working
+// directory is env["GC_DIR"] when set; env is
 // appended to the inherited process environment (last wins). On failure, a
 // bounded tail of the command's stdout/stderr is folded into the returned
 // error so operators can see why a setup command failed without hunting for
@@ -46,9 +49,15 @@ const (
 // fired. Provider-specific behavior is also not covered here: tmux's
 // GC_TMUX_SOCKET injection and herdr's GC_DIR-exists-else-cityRoot fallback.
 func RunSetupCommand(ctx context.Context, command string, env map[string]string, timeout time.Duration) error {
+	if reason := ShellCommandUnavailable(command); reason != "" {
+		return fmt.Errorf("setup command refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", command)
+	c, err := ShellCommandContext(ctx, command)
+	if err != nil {
+		return err
+	}
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}

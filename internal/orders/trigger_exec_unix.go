@@ -38,3 +38,15 @@ func prepareConditionCommand(cmd *exec.Cmd, cleanupTimeout time.Duration) func()
 	}
 	return cleanup
 }
+
+// startConditionCommand starts a condition check. prepareConditionCommand has
+// already made it a process-group leader, and the group is what its cleanup
+// terminates.
+func startConditionCommand(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
+
+// releaseConditionCommand ends the launcher's hold on a finished check's
+// tree. A Unix process group is addressed by its ID, so there is nothing to
+// release.
+func releaseConditionCommand(*exec.Cmd) {}

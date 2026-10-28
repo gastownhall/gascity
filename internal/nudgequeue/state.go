@@ -9,18 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 )
-
-// wakeSocketPathLimit caps the canonical socket path length below the
-// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
-// the controllerSocketPathLimit pattern in cmd/gc/controller.go.
-const wakeSocketPathLimit = 100
 
 // Reference links a queued nudge back to the object that produced it.
 type Reference struct {
@@ -141,24 +137,11 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 	}
 	defer lockFile.Close() //nolint:errcheck
 
-	deadline := clk.Now().Add(waitTimeout)
-	for {
-		lockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if lockErr == nil {
-			break
-		}
-		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
-			return fmt.Errorf("locking nudge queue: %w", lockErr)
-		}
-		if !clk.Now().Before(deadline) {
-			return fmt.Errorf("locking nudge queue: timed out waiting %s for lock", waitTimeout)
-		}
-		// Deliberately real time while the deadline above is evaluated
-		// against clk: a caller passing a non-advancing clock.Fake against a
-		// held lock would poll here forever, never reaching its deadline.
-		time.Sleep(nudgeQueueLockPollInterval)
+	lock, err := acquireNudgeQueueLock(lockFile, waitTimeout, clk)
+	if err != nil {
+		return err
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 
 	state, err := LoadState(cityPath)
 	if err != nil {
@@ -175,6 +158,30 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 		return fmt.Errorf("write nudge queue: %w", err)
 	}
 	return nil
+}
+
+func acquireNudgeQueueLock(lockFile *os.File, waitTimeout time.Duration, clk clock.Clock) (*filelock.Lock, error) {
+	deadline := clk.Now().Add(waitTimeout)
+	for {
+		lock, lockErr := filelock.Acquire(lockFile, filelock.Options{
+			Mode:        filelock.Exclusive,
+			NonBlocking: true,
+			Label:       lockFile.Name(),
+		})
+		if lockErr == nil {
+			return lock, nil
+		}
+		if !errors.Is(lockErr, filelock.ErrBusy) {
+			return nil, fmt.Errorf("locking nudge queue: %w", lockErr)
+		}
+		if !clk.Now().Before(deadline) {
+			return nil, fmt.Errorf("locking nudge queue: timed out waiting %s for lock", waitTimeout)
+		}
+		// Deliberately real time while the deadline above is evaluated
+		// against clk: a caller passing a non-advancing clock.Fake against a
+		// held lock would poll here forever, never reaching its deadline.
+		time.Sleep(nudgeQueueLockPollInterval)
+	}
 }
 
 // LoadState reads the persisted queue state from disk.
@@ -213,12 +220,12 @@ func LockPath(cityPath string) string {
 // "supervisor".
 //
 // Preserves the legacy `<city>/.gc/runtime/nudges/wake.sock` location for
-// short city paths but falls back to a deterministic short temp-path
-// when the legacy pathname is too close to the platform sockaddr_un
-// limit. Mirrors the controllerSocketPath pattern in cmd/gc/controller.go.
+// short city paths but falls back to a deterministic short path when the
+// legacy pathname is too close to the platform's endpoint limit. Mirrors the
+// controllerSocketPath pattern in cmd/gc/controller.go.
 func WakeSocketPath(cityPath string) string {
 	legacy := citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
-	if len(legacy) <= wakeSocketPathLimit {
+	if len(legacy) <= localsocket.PathLimit {
 		return legacy
 	}
 	canonical, err := filepath.Abs(cityPath)
@@ -227,5 +234,5 @@ func WakeSocketPath(cityPath string) string {
 	}
 	canonical = filepath.Clean(canonical)
 	sum := sha256.Sum256([]byte(canonical))
-	return filepath.Join("/tmp", "gascity-nudge", fmt.Sprintf("%x.sock", sum[:16]))
+	return filepath.Join(localsocket.FallbackDir("gascity-nudge"), fmt.Sprintf("%x.sock", sum[:16]))
 }

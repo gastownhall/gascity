@@ -1938,11 +1938,10 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		Message: to,
 		Payload: mailEventPayload(&m),
 	})
-	if !jsonOut {
-		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
-	}
 
-	// Nudge recipient if requested and recipient is not human.
+	// Nudge recipient if requested and recipient is not human. This runs
+	// before the confirmation line: a caller that takes that line as "done"
+	// and stops the process must not cut off the requested turn.
 	notified := false
 	if nudgeFn != nil && to != "human" {
 		if err := nudgeFn(to, m.ID); err != nil {
@@ -1955,6 +1954,7 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		summary := summarizeMailMessage(m)
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
 	}
+	fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -2009,9 +2009,6 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 			Payload: mailEventPayload(&m),
 		})
 		sent = append(sent, summarizeMailMessage(m))
-		if !jsonOut {
-			fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
-		}
 
 		if nudgeFn != nil {
 			if err := nudgeFn(to, m.ID); err != nil {
@@ -2019,6 +2016,9 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 			} else {
 				notified = true
 			}
+		}
+		if !jsonOut {
+			fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 		}
 	}
 	if jsonOut {
@@ -2343,10 +2343,8 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 		Message: reply.To,
 		Payload: mailEventPayload(&reply),
 	})
-	if !jsonOut {
-		fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s\n", id, reply.ID, reply.To) //nolint:errcheck // best-effort stdout
-	}
 
+	// Before the confirmation line, for the reason doMailSendJSON gives.
 	notified := false
 	if nudgeFn != nil && reply.To != "human" {
 		if err := nudgeFn(reply.To, reply.ID); err != nil {
@@ -2359,6 +2357,7 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 		summary := summarizeMailMessage(reply)
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
 	}
+	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s\n", id, reply.ID, reply.To) //nolint:errcheck // best-effort stdout
 	return 0
 }
 

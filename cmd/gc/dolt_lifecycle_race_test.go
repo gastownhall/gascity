@@ -1,3 +1,10 @@
+//go:build unix
+
+// Every case drives managed dolt's lock/SIGKILL race through a shell shim
+// that ignores SIGTERM, and asserts on signal-delivery outcomes. Managed dolt
+// is gated off on Windows, and the signal semantics under test do not exist
+// there.
+
 package main
 
 import (
@@ -292,7 +299,11 @@ func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) 
 	// Owned: cwd is the managed data dir, so the ownership inspection
 	// (processCWDMatches) attributes it to our server.
 	owned := startSigtermIgnoringProcess(t, dataDir)
-	if !managedDoltProcessControllable(owned, layout) {
+	ownedControllable, err := managedDoltProcessControllable(owned, layout)
+	if err != nil {
+		t.Fatalf("ownership inspection for pid %d: %v", owned, err)
+	}
+	if !ownedControllable {
 		t.Fatalf("owned managed dolt process pid %d reported not controllable; a genuine forced stop would be skipped", owned)
 	}
 
@@ -301,7 +312,11 @@ func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) 
 	// kill must skip it.
 	unownedDir := t.TempDir()
 	unowned := startSigtermIgnoringProcess(t, unownedDir)
-	if managedDoltProcessControllable(unowned, layout) {
+	unownedControllable, err := managedDoltProcessControllable(unowned, layout)
+	if err != nil {
+		t.Fatalf("ownership inspection for pid %d: %v", unowned, err)
+	}
+	if unownedControllable {
 		t.Fatalf("unrelated process pid %d (cwd %s) reported controllable; forced stop would SIGKILL a reused PID", unowned, unownedDir)
 	}
 }

@@ -3,20 +3,32 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 const (
 	processArgsPSTimeout = 10 * time.Second
 	lsofCommandTimeout   = 2 * time.Second
 )
+
+// errManagedDoltIdentityUnavailable reports that a managed Dolt process's
+// ownership could not be established.
+//
+// It is distinct from "this process is not ours". Ownership gates destructive
+// work — killing a PID, clearing the recorded runtime state, declaring a data
+// directory released — and for each of those, "not ours" and "cannot tell" have
+// opposite safe outcomes. Collapsing the second into the first is what lets a
+// stop report success while the server keeps running.
+var errManagedDoltIdentityUnavailable = errors.New("managed dolt process identity unavailable")
 
 type managedDoltProcessInspection struct {
 	ManagedPID              int
@@ -26,25 +38,38 @@ type managedDoltProcessInspection struct {
 	PortHolderPID           int
 	PortHolderOwned         bool
 	PortHolderDeletedInodes bool
+
+	// OwnershipErr is non-nil when a live PID was found but its ownership
+	// could not be decided. The Owned booleans are then meaningless and must
+	// not be read as "not owned".
+	OwnershipErr error
 }
 
 func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspection, error) {
+	if err := managedDoltNativeIdentitySupported(); err != nil {
+		return managedDoltProcessInspection{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltProcessInspection{}, err
 	}
-	return inspectManagedDoltProcessWithLayout(layout, port, true), nil
+	info := inspectManagedDoltProcessWithLayout(layout, port, true)
+	return info, info.OwnershipErr
 }
 
 func inspectManagedDoltProcessWithLayout(layout managedDoltRuntimeLayout, port string, removeStalePIDFile bool) managedDoltProcessInspection {
 	info := managedDoltProcessInspection{}
 	info.ManagedPID, info.ManagedSource = findManagedDoltPIDWithOptions(layout, port, removeStalePIDFile)
 	if info.ManagedPID > 0 {
-		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
+		var err error
+		info.ManagedOwned, info.ManagedDeletedInodes, err = inspectManagedDoltOwnership(info.ManagedPID, layout)
+		info.OwnershipErr = errors.Join(info.OwnershipErr, err)
 	}
 	info.PortHolderPID = findPortHolderPID(port)
 	if info.PortHolderPID > 0 {
-		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
+		var err error
+		info.PortHolderOwned, info.PortHolderDeletedInodes, err = inspectManagedDoltOwnership(info.PortHolderPID, layout)
+		info.OwnershipErr = errors.Join(info.OwnershipErr, err)
 	}
 	return info
 }
@@ -352,15 +377,15 @@ func lsofOutputWithTimeout(timeout time.Duration, args ...string) ([]byte, error
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "lsof", args...)
 	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
+		// Force-kill the whole group, matching the immediate SIGKILL this
+		// cancel has always sent: the deadline has passed and a probe holding
+		// the output pipes open would otherwise outlive it.
+		return processgroup.KillCommandGroup(cmd, 0, processgroup.Options{})
 	}
 	out, err := cmd.Output()
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -521,47 +546,65 @@ func psLinePID(line string) int {
 	return pid
 }
 
-func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool) {
+func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool, error) {
 	if pid <= 0 {
-		return false, false
+		return false, false, nil
 	}
 
 	stateDir := strings.TrimSpace(loadDoltRuntimeStateDataDir(layout.StateFile))
 	if stateDir != "" && !samePath(stateDir, layout.DataDir) {
-		return false, processHasDeletedDataInodes(pid, layout.DataDir)
+		return false, processHasDeletedDataInodes(pid, layout.DataDir), nil
 	}
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		owned := managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
+		owned, err := managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
 		deleted := processHasDeletedDataInodes(pid, layout.DataDir)
+		if err != nil {
+			return false, deleted, err
+		}
 		if owned || deleted || !pidAlive(pid) || time.Now().After(deadline) {
-			return owned, deleted
+			return owned, deleted, nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 }
 
-func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayout, stateDir string) bool {
+// managedDoltProcessOwnedWithStateDir reports whether pid is this city's
+// managed Dolt server.
+//
+// A non-nil error means the process's arguments could not be read, so ownership
+// is undecided. It is returned rather than folded into a false so a caller
+// about to kill the process, or about to erase the record of it, can tell the
+// two apart.
+func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayout, stateDir string) (bool, error) {
 	if pid <= 0 {
-		return false
+		return false, nil
 	}
 	if stateDir != "" && !samePath(stateDir, layout.DataDir) {
-		return false
+		return false, nil
 	}
 
-	procArgs, _ := processArgs(pid)
+	procArgs, err := processArgs(pid)
+	if err != nil {
+		// A process that exited between the liveness check and this read is
+		// simply gone, and reporting it as not-owned is correct.
+		if !pidAlive(pid) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: reading arguments of live pid %d: %w", errManagedDoltIdentityUnavailable, pid, err)
+	}
 	switch {
 	case containsProcessConfig(procArgs, layout.ConfigFile):
-		return true
+		return true, nil
 	case hasOtherProcessConfig(procArgs):
-		return false
+		return false, nil
 	case processDataDirMatches(procArgs, layout.DataDir):
-		return true
+		return true, nil
 	case processCWDMatches(pid, layout.DataDir):
-		return true
+		return true, nil
 	default:
-		return false
+		return false, nil
 	}
 }
 
@@ -607,15 +650,15 @@ func processArgsFromPS(pid int, timeout time.Duration) (string, error) {
 
 	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=")
 	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
+		// Force-kill the whole group, matching the immediate SIGKILL this
+		// cancel has always sent: the deadline has passed and a probe holding
+		// the output pipes open would otherwise outlive it.
+		return processgroup.KillCommandGroup(cmd, 0, processgroup.Options{})
 	}
 	out, err := cmd.Output()
 	if ctx.Err() != nil {

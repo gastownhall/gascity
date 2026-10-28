@@ -94,6 +94,12 @@ type ProviderSpec struct {
 	ReadyDelayMs int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
 	// ReadyPromptPrefix is the string prefix that indicates the provider is ready for input.
 	ReadyPromptPrefix string `toml:"ready_prompt_prefix,omitempty"`
+	// NotReadyMarkers lists text the provider prints when it discards a
+	// submitted prompt because it is not ready for input yet, although its
+	// input prompt is already showing (Copilot prints "Managed account policy
+	// is still loading" until its policy loads). A runtime that sees one
+	// appear after delivering the startup prompt delivers the prompt again.
+	NotReadyMarkers []string `toml:"not_ready_markers,omitempty"`
 	// ProcessNames lists process names to look for when checking if the provider is running.
 	ProcessNames []string `toml:"process_names,omitempty"`
 	// EmitsPermissionWarning is tri-state: nil = inherit, &true = enable,
@@ -236,6 +242,7 @@ type ResolvedProvider struct {
 	PromptFlag             string
 	ReadyDelayMs           int
 	ReadyPromptPrefix      string
+	NotReadyMarkers        []string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
 	AcceptStartupDialogs   *bool
@@ -486,6 +493,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PromptFlag:             spec.PromptFlag,
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
+		NotReadyMarkers:        cloneStrings(spec.NotReadyMarkers),
 		ProcessNames:           cloneStrings(spec.ProcessNames),
 		EmitsPermissionWarning: boolPtr(spec.EmitsPermissionWarning),
 		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),

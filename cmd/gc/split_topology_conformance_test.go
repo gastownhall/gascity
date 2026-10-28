@@ -808,7 +808,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	// workspace, and there are exactly as many as the city has work scopes —
 	// relocating graph adds none, in either direction.
 	hookAgent := &config.Agent{Name: splitEnvPoolAgent}
-	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
+	fanout := hookWorkQueryStores(e.cityPath, loadedCityName(e.cfg, e.cityPath), e.cfg, hookAgent,
 		hookAgent.QualifiedName(),
 		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
 		mergeRuntimeEnv(nil, hookEnv), hookEnv)

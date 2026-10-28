@@ -17,6 +17,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 const agentScriptActionTimeout = 5 * time.Minute
@@ -712,16 +715,25 @@ func envKeySegment(value string) string {
 	return strings.Trim(b.String(), "_")
 }
 
+// runShellCommand runs a shell action through the platform's command
+// interpreter (runtime.ShellCommandContext: `sh -c` on Unix, PowerShell on
+// Windows). A command the platform refuses (runtime.ShellCommandUnavailable)
+// starts nothing.
 func (e agentScriptExecutor) runShellCommand(command string, env []string) error {
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return fmt.Errorf("shell action refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), agentScriptActionTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return fmt.Errorf("shell action failed: %w", err)
+	}
 	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
 	cmd.Env = workQueryEnvForDir(env, "")
 	cmd.Stdout = e.stdout
 	cmd.Stderr = e.stderr
-	if err := cmd.Run(); err != nil {
+	if err := runProviderOpCommand(cmd); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("shell action timed out after %s", agentScriptActionTimeout)
 		}
@@ -746,6 +758,9 @@ func runAgentScriptCommandInStore(stdout, stderr io.Writer, dir string, env []st
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	if env != nil {
 		cmd.Env = workQueryEnvForDir(env, dir)

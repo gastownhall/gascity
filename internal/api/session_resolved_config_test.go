@@ -38,6 +38,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 		Command:                "/bin/echo",
 		ReadyPromptPrefix:      "stub-ready>",
 		ReadyDelayMs:           250,
+		NotReadyMarkers:        []string{"stub-not-ready"},
 		ProcessNames:           []string{"echo"},
 		EmitsPermissionWarning: true,
 		Env:                    env,
@@ -79,6 +80,9 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 	if got, want := cfg.Runtime.Hints.ReadyPromptPrefix, "stub-ready>"; got != want {
 		t.Fatalf("Runtime.Hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Runtime.Hints.NotReadyMarkers, ","), "stub-not-ready"; got != want {
+		t.Fatalf("Runtime.Hints.NotReadyMarkers = %q, want %q", got, want)
 	}
 	if len(cfg.Runtime.Hints.MCPServers) != 1 {
 		t.Fatalf("Runtime.Hints.MCPServers len = %d, want 1", len(cfg.Runtime.Hints.MCPServers))

@@ -26,6 +26,8 @@ go_library(
         "legacy_workspace_warnings.go",
         "named_sessions.go",
         "namepool.go",
+        "openoption_other.go",
+        "openoption_windows.go",
         "options.go",
         "pack.go",
         "pack_fetch.go",
@@ -61,6 +63,8 @@ go_library(
         "validate_semantics.go",
         "webhook.go",
         "workquery.go",
+        "workquery_generated_other.go",
+        "workquery_generated_windows.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/config",
     visibility = ["//:__subpackages__"],
@@ -82,6 +86,7 @@ go_library(
         "@com_github_burntsushi_toml//:toml",
     ] + select({
         "@rules_go//go/platform:windows": [
+            "//internal/genshell",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
@@ -101,6 +106,7 @@ go_test(
         "compose_beads_test.go",
         "compose_storage_test.go",
         "compose_test.go",
+        "config_jq_windows_test.go",
         "config_test.go",
         "context_advisory_test.go",
         "diagnostic_locations_test.go",
@@ -111,6 +117,8 @@ go_test(
         "events_rotation_test.go",
         "extmsg_config_test.go",
         "field_sync_test.go",
+        "generated_jq_required_other_test.go",
+        "generated_jq_required_windows_test.go",
         "github_pr_monitor_test.go",
         "home_fallback_test.go",
         "implicit_agent_patch_repro_test.go",
@@ -125,6 +133,7 @@ go_test(
         "maintenance_test.go",
         "migration_guide_overlay_test.go",
         "namepool_test.go",
+        "openoption_windows_test.go",
         "options_test.go",
         "order_discovery_test.go",
         "pack_agent_defaults_test.go",
@@ -155,6 +164,8 @@ go_test(
         "session_model_phase0_spec_test.go",
         "session_setup_path_test.go",
         "session_sleep_test.go",
+        "shell_capture_other_test.go",
+        "shell_capture_windows_test.go",
         "site_binding_agent_suspend_test.go",
         "site_binding_durability_test.go",
         "site_binding_rewrite_test.go",
@@ -175,6 +186,7 @@ go_test(
         "workquery_ephemeral_inprogress_hold_test.go",
         "workquery_ephemeral_scan_reuse_test.go",
         "workquery_federation_test.go",
+        "workquery_generated_windows_test.go",
         "workquery_graph_anchor_test.go",
         "workquery_hold_label_test.go",
         "workquery_inprogress_blocked_test.go",
@@ -209,7 +221,13 @@ go_test(
         "//internal/shellquote",
         "//internal/testenv",
         "@com_github_burntsushi_toml//:toml",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/genshell",
+            "//internal/genshell/genshelltest",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

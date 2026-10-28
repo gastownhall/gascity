@@ -5,11 +5,17 @@ go_library(
     srcs = [
         "cutover.go",
         "seams.go",
+        "socketdir_unix.go",
+        "socketdir_windows.go",
+        "socketerr_unix.go",
+        "socketerr_windows.go",
         "subprocess.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/subprocess",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/platform/localsocket",
+        "//internal/processgroup",
         "//internal/runtime",
         "//internal/runtime/proctable",
     ],
@@ -19,8 +25,14 @@ go_test(
     name = "subprocess_test",
     srcs = [
         "meta_privacy_test.go",
+        "refusal_windows_test.go",
         "seams_test.go",
+        "shellfixture_unix_test.go",
+        "shellfixture_windows_test.go",
+        "socketdir_unix_test.go",
+        "subprocess_private_unix_test.go",
         "subprocess_test.go",
+        "subprocess_windows_test.go",
         "testenv_import_test.go",
     ],
     embed = [":subprocess"],
@@ -28,7 +40,14 @@ go_test(
         "//internal/runtime",
         "//internal/testenv",
         "//internal/testutil",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/platform/localsocket",
+            "//internal/processgroup",
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

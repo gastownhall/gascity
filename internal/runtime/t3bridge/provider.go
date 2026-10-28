@@ -2132,6 +2132,10 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 	watcher, err := recorder.Watch(ctx, afterSeq)
+	// The watcher reads the log by path, so the recorder is not needed past
+	// this point; holding it for the session's lifetime would keep an append
+	// handle on the city's event log open for nothing.
+	_ = recorder.Close()
 	if err != nil {
 		return
 	}

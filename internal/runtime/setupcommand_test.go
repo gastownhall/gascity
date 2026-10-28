@@ -54,23 +54,43 @@ func TestCommandOutputTail(t *testing.T) {
 // command runs in env["GC_DIR"] when set, so relative paths in a setup
 // command resolve against the session directory.
 func TestRunSetupCommandUsesGCDIRAsWorkingDirectory(t *testing.T) {
-	tmpDir := t.TempDir()
+	assertSetupCommandRunsIn(t, t.TempDir())
+}
 
-	if err := RunSetupCommand(context.Background(), "pwd > out.txt", map[string]string{
-		"GC_DIR": tmpDir,
+// TestRunSetupCommandWorkingDirectoryWithSpaces pins the rig-directory-with-
+// spaces case. The working directory reaches the interpreter through process
+// creation rather than through the command line, and this is the regression
+// that catches a future change routing it the other way — on Windows a space
+// in a command line is an argument boundary.
+func TestRunSetupCommandWorkingDirectoryWithSpaces(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "rig dir with spaces")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("creating %q: %v", dir, err)
+	}
+	assertSetupCommandRunsIn(t, dir)
+}
+
+// assertSetupCommandRunsIn runs a command that records its own working
+// directory into a relatively named file, and fails unless both the file and
+// its contents say the command ran in dir.
+func assertSetupCommandRunsIn(t *testing.T, dir string) {
+	t.Helper()
+
+	if err := RunSetupCommand(context.Background(), fixturePrintCwdToFile, map[string]string{
+		"GC_DIR": dir,
 	}, 5*time.Second); err != nil {
 		t.Fatalf("RunSetupCommand: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(tmpDir, "out.txt"))
+	data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
 	if err != nil {
 		t.Fatalf("out.txt not created in GC_DIR: %v", err)
 	}
 	// t.TempDir can hand back a symlinked path (macOS /var -> /private/var);
-	// pwd reports the resolved one, so compare resolved forms.
-	wantDir, err := filepath.EvalSymlinks(tmpDir)
+	// the command reports the resolved one, so compare resolved forms.
+	wantDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", tmpDir, err)
+		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
 	}
 	gotDir, err := filepath.EvalSymlinks(strings.TrimSpace(string(data)))
 	if err != nil {
@@ -84,7 +104,7 @@ func TestRunSetupCommandUsesGCDIRAsWorkingDirectory(t *testing.T) {
 // TestRunSetupCommandAppendsEnvOverlay pins that env entries reach the
 // command on top of the inherited process environment.
 func TestRunSetupCommandAppendsEnvOverlay(t *testing.T) {
-	if err := RunSetupCommand(context.Background(), `[ "$GC_TEST_KEY" = v ]`, map[string]string{
+	if err := RunSetupCommand(context.Background(), fixtureRequireEnv("GC_TEST_KEY", "v"), map[string]string{
 		"GC_TEST_KEY": "v",
 	}, 5*time.Second); err != nil {
 		t.Fatalf("env overlay not visible to command: %v", err)
@@ -95,7 +115,7 @@ func TestRunSetupCommandAppendsEnvOverlay(t *testing.T) {
 // of both streams is folded into the failure so operators see why a setup
 // command failed without hunting for logs.
 func TestRunSetupCommandIncludesStreamDetailsOnFailure(t *testing.T) {
-	err := RunSetupCommand(context.Background(), "echo out; echo err >&2; exit 3", nil, 5*time.Second)
+	err := RunSetupCommand(context.Background(), fixtureBothStreamsExit3, nil, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -114,7 +134,7 @@ func TestRunSetupCommandIncludesStreamDetailsOnFailure(t *testing.T) {
 // exceeding its per-command timeout reports an error callers can match with
 // errors.Is(err, context.DeadlineExceeded).
 func TestRunSetupCommandTimeoutMatchesDeadlineExceeded(t *testing.T) {
-	err := RunSetupCommand(context.Background(), "sleep 5", nil, 100*time.Millisecond)
+	err := RunSetupCommand(context.Background(), fixtureSleepPastTimeout, nil, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -131,7 +151,7 @@ func TestRunSetupCommandTimeoutMatchesDeadlineExceeded(t *testing.T) {
 // pipes.
 func TestRunSetupCommandBackgroundChildSucceedsBounded(t *testing.T) {
 	start := time.Now()
-	err := RunSetupCommand(context.Background(), "sleep 30 & exit 0", nil, 30*time.Second)
+	err := RunSetupCommand(context.Background(), fixtureBackgroundChildExit0, nil, 30*time.Second)
 	elapsed := time.Since(start)
 	if elapsed >= 10*time.Second {
 		t.Fatalf("RunSetupCommand blocked %v on a background child holding stdio", elapsed)

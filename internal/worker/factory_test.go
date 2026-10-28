@@ -317,6 +317,126 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	}
 }
 
+// A resolver can leave launch-only work to LaunchHints (the CLI and API render
+// the agent's startup prompt there). The handle runs it only when it hands
+// hints to an operation that can start the runtime, so read-only use of a
+// handle (state, peek, interrupt) costs nothing for it, and the launch gets its
+// result on top of the resolved hints and session env.
+func TestFactorySessionByIDRunsLaunchHintsOnlyForLaunches(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
+
+	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", WorkDir: t.TempDir(), Provider: "stub"})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	launches := 0
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		ResolveSessionRuntime: func(sessionpkg.Info, string, map[string]string) (*ResolvedRuntime, error) {
+			return &ResolvedRuntime{
+				Command:    "/bin/echo",
+				WorkDir:    t.TempDir(),
+				Provider:   "stub",
+				Hints:      runtime.Config{ReadyPromptPrefix: "stub-ready>"},
+				SessionEnv: map[string]string{"STUB_ENV": "present"},
+				LaunchHints: func(hints runtime.Config) (runtime.Config, error) {
+					launches++
+					hints.Nudge = "startup prompt"
+					return hints, nil
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("SessionByID(%q): %v", info.ID, err)
+	}
+	if _, err := handle.State(context.Background()); err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if launches != 0 {
+		t.Fatalf("building a handle and reading its state ran LaunchHints %d times, want 0", launches)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if launches != 1 {
+		t.Fatalf("Start ran LaunchHints %d times, want 1", launches)
+	}
+	start := sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatal("LastStartConfig() = nil")
+	}
+	if start.Nudge != "startup prompt" {
+		t.Errorf("start Nudge = %q, want what LaunchHints returned", start.Nudge)
+	}
+	if start.ReadyPromptPrefix != "stub-ready>" || start.Env["STUB_ENV"] != "present" {
+		t.Errorf("start lost the resolved hints or session env: ReadyPromptPrefix=%q Env=%v", start.ReadyPromptPrefix, start.Env)
+	}
+	if _, err := handle.Peek(context.Background(), 10); err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if err := handle.Interrupt(context.Background(), InterruptRequest{}); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if launches != 1 {
+		t.Fatalf("read-only operations on a running handle ran LaunchHints; total %d, want 1", launches)
+	}
+}
+
+// A LaunchHints failure (a startup prompt that cannot be delivered) fails the
+// launch that needed it, before anything starts, and leaves read-only use of
+// the handle working.
+func TestFactorySessionByIDLaunchHintsErrorFailsOnlyTheLaunch(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
+
+	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", WorkDir: t.TempDir(), Provider: "stub"})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	wantErr := errors.New("startup prompt cannot be delivered")
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		ResolveSessionRuntime: func(sessionpkg.Info, string, map[string]string) (*ResolvedRuntime, error) {
+			return &ResolvedRuntime{
+				Command:  "/bin/echo",
+				WorkDir:  t.TempDir(),
+				Provider: "stub",
+				LaunchHints: func(runtime.Config) (runtime.Config, error) {
+					return runtime.Config{}, wantErr
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("SessionByID(%q): %v", info.ID, err)
+	}
+	if _, err := handle.State(context.Background()); err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if err := handle.Start(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Start error = %v, want %v", err, wantErr)
+	}
+	if start := sp.LastStartConfig(info.SessionName); start != nil {
+		t.Fatalf("Start launched the runtime despite the LaunchHints failure: %+v", start)
+	}
+}
+
 func TestFactoryTransportResolverReceivesProviderForLegacyProviderSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

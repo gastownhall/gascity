@@ -1992,12 +1992,12 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 98 || debt.BaselineFiles != 38 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 98/38, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 85 || debt.BaselineFiles != 34 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 85/34, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 96 || smallDebt.BaselineFiles != 37 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 96/37", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 83 || smallDebt.BaselineFiles != 33 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 83/33", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
@@ -2031,8 +2031,8 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceNetListenConfig)
-		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
-			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
+		if row.BaselineCalls != 0 || row.BaselineFiles != 0 {
+			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 0/0", row.BaselineCalls, row.BaselineFiles)
 		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
 			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
@@ -2072,12 +2072,12 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceTmux)
-	if debt.BaselineCalls != 9 || debt.BaselineFiles != 4 {
-		t.Fatalf("tmux source baseline = %d/%d, want 9/4", debt.BaselineCalls, debt.BaselineFiles)
+	if debt.BaselineCalls != 7 || debt.BaselineFiles != 3 {
+		t.Fatalf("tmux source baseline = %d/%d, want 7/3", debt.BaselineCalls, debt.BaselineFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceTmux)
-	if smallDebt.BaselineCalls != 3 || smallDebt.BaselineFiles != 2 {
-		t.Fatalf("tmux Small baseline = %d/%d, want 3/2", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 1 || smallDebt.BaselineFiles != 1 {
+		t.Fatalf("tmux Small baseline = %d/%d, want 1/1", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-tmux" {

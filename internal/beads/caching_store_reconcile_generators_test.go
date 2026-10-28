@@ -108,12 +108,13 @@ func recencyValue(cell string) (time.Time, bool) {
 func buildGuardState(spec guardCellSpec) (storeState, snapshotInputs, string) {
 	const startSeq = uint64(100)
 	st := storeState{
-		beads:       map[string]Bead{},
-		deps:        map[string][]Dep{},
-		dirty:       map[string]struct{}{},
-		beadSeq:     map[string]uint64{},
-		localBeadAt: map[string]time.Time{},
-		deletedSeq:  map[string]uint64{},
+		beads:        map[string]Bead{},
+		deps:         map[string][]Dep{},
+		dirty:        map[string]struct{}{},
+		beadSeq:      map[string]uint64{},
+		localBeadAt:  map[string]time.Time{},
+		readCloseSeq: map[string]uint64{},
+		deletedSeq:   map[string]uint64{},
 	}
 	in := snapshotInputs{
 		freshByID:    map[string]Bead{},
@@ -212,7 +213,7 @@ func genMarginalStates() []mergeFixture {
 	base := func() (storeState, snapshotInputs) {
 		return storeState{
 				beads: map[string]Bead{}, deps: map[string][]Dep{}, dirty: map[string]struct{}{},
-				beadSeq: map[string]uint64{}, localBeadAt: map[string]time.Time{}, deletedSeq: map[string]uint64{},
+				beadSeq: map[string]uint64{}, localBeadAt: map[string]time.Time{}, readCloseSeq: map[string]uint64{}, deletedSeq: map[string]uint64{},
 				mutationSeq: q,
 			},
 			snapshotInputs{freshByID: map[string]Bead{}, depMap: map[string][]Dep{}, useFreshDeps: true, startSeq: q, now: fxNow}
@@ -359,7 +360,7 @@ func genRandomState(rng *rand.Rand, idx int) mergeFixture {
 	mutated := rng.Intn(2) == 0
 	st := storeState{
 		beads: map[string]Bead{}, deps: map[string][]Dep{}, dirty: map[string]struct{}{},
-		beadSeq: map[string]uint64{}, localBeadAt: map[string]time.Time{}, deletedSeq: map[string]uint64{},
+		beadSeq: map[string]uint64{}, localBeadAt: map[string]time.Time{}, readCloseSeq: map[string]uint64{}, deletedSeq: map[string]uint64{},
 		backingIsBd: rng.Intn(2) == 0,
 	}
 	in := snapshotInputs{

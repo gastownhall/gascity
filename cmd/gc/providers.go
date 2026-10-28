@@ -70,6 +70,9 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 	if ctx.providerName == "" {
 		ctx.providerName = cfg.Session.Provider
 	}
+	if ctx.providerName == "" {
+		ctx.providerName = sessionProviderRuntimeDefault
+	}
 	return ctx
 }
 
@@ -1033,15 +1036,14 @@ func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder
 //
 // The file-backed branch deliberately bypasses newFileEventsRecorder's rotation
 // options: the controller already holds one long-lived rotating recorder on
-// <city>/.gc/events.jsonl (cmd_start.go), and a city must keep exactly one.
-// FileRecorder.rotateLocked is close + rename + reopen on its own handle, so a
-// second rotating writer leaves the first appending into a rotating-* file that
-// gets gzipped away. events.WithMaxSize(0) makes this a secondary writer that
-// never rotates, and events.WithoutStartupSweep keeps it from racing the
-// long-lived recorder mid-rotation — a concurrent sweep can double-gzip the
-// same in-flight rotating-* file through a shared .tmp path. Neither option
-// makes the open free: NewFileRecorder reads the log directory either way, to
-// continue the sequence past the archives.
+// <city>/.gc/events.jsonl (cmd_start.go), and a city must keep exactly one
+// rotation owner. events.WithMaxSize(0) makes this a secondary writer that
+// never rotates; when the owner rotates the log, this recorder reopens the new
+// active log before its next append. events.WithoutStartupSweep keeps it from
+// racing the long-lived recorder mid-rotation — a concurrent sweep can
+// double-gzip the same in-flight rotating-* file through a shared .tmp path.
+// Neither option makes the open free: NewFileRecorder reads the log directory
+// either way, to continue the sequence past the archives.
 //
 // The exec:/fake/fail branches carry no file handle at all, so they stay on the
 // shared newEventsProviderForNameWithConfig resolution.

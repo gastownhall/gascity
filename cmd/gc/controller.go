@@ -30,6 +30,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -73,7 +75,6 @@ func (e controllerCommandError) Is(target error) bool {
 }
 
 const (
-	controllerSocketPathLimit        = 100
 	controllerIdentityCommand        = "identify"
 	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
 )
@@ -105,18 +106,18 @@ type sessionCircuitResetReply struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// controllerSocketPath returns the Unix socket path for controller commands.
+// controllerSocketPath returns the local endpoint path for controller commands.
 // It uses the canonical .gc/controller.sock location for short city paths,
-// but falls back to a deterministic short temp-path when that pathname is too
-// close to the platform Unix-socket length limit.
+// but falls back to a deterministic short path when that pathname is too
+// close to the platform's endpoint length limit.
 func controllerSocketPath(cityPath string) string {
 	canonicalCityPath := normalizePathForCompare(cityPath)
 	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
-	if len(canonicalLegacy) <= controllerSocketPathLimit {
+	if len(canonicalLegacy) <= localsocket.PathLimit {
 		return canonicalLegacy
 	}
 	sum := sha256.Sum256([]byte(canonicalCityPath))
-	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
+	return filepath.Join(localsocket.FallbackDir("gascity-controller"), fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 // acquireControllerLock takes an exclusive flock on .gc/controller.lock.
@@ -128,7 +129,7 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening controller lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck // closing after flock failure
 		return nil, errControllerAlreadyRunning
 	}
@@ -154,12 +155,11 @@ func startControllerSocket(
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
 	}
 	sockPath := controllerSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
-		return nil, fmt.Errorf("creating controller socket dir: %w", err)
-	}
-	// Remove stale socket from a previous crash.
-	os.Remove(sockPath) //nolint:errcheck // stale socket cleanup
-	lis, err := net.Listen("unix", sockPath)
+	// The controller socket lives inside the city's own .gc directory, which
+	// the city owns and this call does not re-own: MkdirAll's mode applies
+	// only when .gc has to be created. Reachability of the socket therefore
+	// follows the city directory on every platform.
+	lis, err := localsocket.Listen(sockPath, localsocket.Options{DirMode: 0o700, SocketMode: 0o600})
 	if err != nil {
 		return nil, fmt.Errorf("listening on controller socket: %w", err)
 	}
@@ -547,7 +547,7 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 
 func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
 	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
+	conn, err := localsocket.Dial(sockPath, dialTimeout)
 	if err != nil {
 		return nil, controllerCommandError{
 			op:          "connecting to controller",

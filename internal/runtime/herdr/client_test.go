@@ -29,10 +29,15 @@ import (
 // pure-XDG resolution on macOS too is unverified here — the empirical
 // check above was run on Linux only — so the tests skip rather than assert
 // an unconfirmed cross-platform contract.
+//
+// Windows is the exception for the first test: herdr there was measured to
+// honor XDG_CONFIG_HOME ahead of everything else, and herdrConfigDir
+// reproduces that. Its fallbacks differ from Linux, so the second test stays
+// Linux-only; TestHerdrConfigDirReproducesHerdrsResolution pins them.
 
 func skipUnlessXDGPlatform(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME on %s; herdr's own resolution on this platform is unverified (see ga-nqlb8q)", runtime.GOOS)
 	}
 }
@@ -56,6 +61,9 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
 	skipUnlessXDGPlatform(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("herdr on Windows uses a set-but-empty XDG_CONFIG_HOME as given, and reads HOME only when APPDATA and USERPROFILE are unset; TestHerdrConfigDirReproducesHerdrsResolution pins that")
+	}
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)

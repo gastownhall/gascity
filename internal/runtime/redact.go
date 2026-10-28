@@ -46,6 +46,9 @@ const substitutionFloor = 8
 // widen argv routing, so a pack that set PATH or HOME as session env would
 // start passing it as a process argument — a silent behavior change on a
 // question this file exists to answer conservatively.
+//
+// Windows adds its own standard environment to the set and matches names
+// without regard to case; see redactionInertEnvKey.
 var envRedactionInert = map[string]bool{
 	"HOME":    true,
 	"LOGNAME": true,
@@ -61,11 +64,12 @@ var envRedactionInert = map[string]bool{
 // redactableEnvValue reports whether this key/value pair should be scrubbed out
 // of rendered text. Argv-safe values stay legible because they are already
 // readable in /proc/<pid>/cmdline, so hiding them costs diagnostics and buys
-// nothing; [envRedactionInert] names stay legible because hiding them costs the
-// whole message. Everything else is assumed to carry credential material — the
-// underlying predicate is an allow list, so an unrecognized name is a secret.
+// nothing; redaction-inert names ([envRedactionInert]) stay legible because
+// hiding them costs the whole message. Everything else is assumed to carry
+// credential material — the underlying predicate is an allow list, so an
+// unrecognized name is a secret.
 func redactableEnvValue(key, value string) bool {
-	return ArgvSecretEnvValue(key, value) && !envRedactionInert[key]
+	return ArgvSecretEnvValue(key, value) && !redactionInertEnvKey(key)
 }
 
 // SecretEnvValues returns the values of env that must not appear in rendered

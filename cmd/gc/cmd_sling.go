@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"math/rand"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -181,14 +181,23 @@ type slingDeps = sling.SlingDeps
 // SlingRunner is an alias for sling.SlingRunner.
 type SlingRunner = sling.SlingRunner
 
-// shellSlingRunner runs a command via sh -c and returns stdout.
+// shellSlingRunner runs a command through the platform's command interpreter
+// (runtime.ShellCommandContext: `sh -c` on Unix, PowerShell on Windows) and
+// returns stdout. A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing.
 // Times out after 30 seconds. If dir is non-empty, the command runs in
 // that directory (needed for rig-scoped beads whose .beads/ lives there).
 // Extra env vars are appended to the process environment.
 func shellSlingRunner(dir, command string, env map[string]string) (string, error) {
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("sling query refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return "", fmt.Errorf("running %q: %w", command, err)
+	}
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -754,6 +763,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			if err := sling.CheckSlingQueryBeadID(req.BeadID); err != nil {
+				return err
 			}
 			slingCmd, _ := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs)
 			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
@@ -1654,7 +1666,7 @@ func reloadControllerConfig(cityPath string) error {
 // block for minutes even though the wake was already queued.
 func pokeSupervisor() error {
 	sockPath := supervisorSocketPath()
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := localsocket.Dial(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor: %w", err)
 	}

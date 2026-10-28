@@ -63,7 +63,7 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 
 func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (string, bool, error) {
 	return func(scope string) (string, bool, error) {
-		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+		target, ok, err := preflightProbeTarget(cityPath, scope)
 		if err != nil || !ok {
 			return "", false, err
 		}
@@ -90,4 +90,18 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 		}
 		return readDatabaseProjectID(ctx, db)
 	}
+}
+
+// preflightProbeTarget returns the Dolt endpoint the identity check reads a
+// scope's project_id from: the scope's canonical target or, where the platform
+// supplies one, the server bd runs for a provider-owned direct scope
+// (providerOwnedDirectProbeTarget). ok is false when there is no endpoint to
+// probe.
+func preflightProbeTarget(cityPath, scope string) (contract.DoltConnectionTarget, bool, error) {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+	if err != nil || ok {
+		return target, ok, err
+	}
+	target, ok = providerOwnedDirectProbeTarget(cityPath, scope)
+	return target, ok, nil
 }

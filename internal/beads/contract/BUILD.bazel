@@ -13,6 +13,7 @@ go_library(
         "mode.go",
         "preflight.go",
         "preflight_checker.go",
+        "provider_owned_server_windows.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/contract",
     visibility = ["//:__subpackages__"],
@@ -60,6 +61,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/fsys",
+        "//internal/platform/livefile",
         "//internal/testenv",
     ],
 )

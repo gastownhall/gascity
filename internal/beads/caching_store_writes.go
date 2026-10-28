@@ -90,6 +90,9 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 			}
 			c.tombstoneLocked(id, seq)
 			c.clearDependentReadyProjectionsLocked(id)
+			if notifyClosed {
+				c.fenceReportedCloseAtSeqLocked(id, seq)
+			}
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -122,8 +125,14 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	}
 	fresh = applyUpdateOptsToBead(fresh, opts)
 
+	var notifications []cacheNotification
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
+	if opts.Status != nil && *opts.Status == "closed" {
+		notifications = []cacheNotification{{eventType: "bead.updated", bead: cloneBead(fresh)}}
+	} else {
+		notifications = c.updatedThenMaybeClosedNotificationsLocked(id, fresh, seq)
+	}
 	c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 		depsMode:   depsFromFields,
 		seqMode:    seqKeep,
@@ -136,7 +145,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChanges(notifications)
 	return nil
 }
 
@@ -153,17 +162,17 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	}
 
 	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after release-if-current")
-	var updated Bead
+	var notifications []cacheNotification
 	notify := false
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
 	if refreshed {
+		notifications = c.updatedThenMaybeClosedNotificationsLocked(id, fresh, seq)
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 			depsMode:   depsFromFields,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
 		setBeadStatus(&b, "open")
@@ -175,7 +184,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 			clearDirty: false,
 		})
 		c.markDirtyLocked(id)
-		updated = cloneBead(b)
+		notifications = []cacheNotification{{eventType: "bead.updated", bead: cloneBead(b)}}
 		notify = true
 	} else {
 		c.markDirtyLocked(id)
@@ -185,7 +194,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if notify {
-		c.notifyChange("bead.updated", updated)
+		c.notifyChanges(notifications)
 	}
 	return true, nil
 }
@@ -199,6 +208,11 @@ func (c *CachingStore) Close(id string) error {
 	if c.closeAlreadyMatchesCached(id) {
 		return nil
 	}
+	settleLocalClose := c.beginLocalClose(id)
+	localEmitted := false
+	defer func() {
+		c.notifyChanges(settleLocalClose(localEmitted))
+	}()
 	if err := c.backing.Close(id); err != nil {
 		return err
 	}
@@ -224,7 +238,7 @@ func (c *CachingStore) Close(id string) error {
 	}
 
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, closed, time.Now(), absorbOpts{
 			depsMode:   depsKeepCached,
@@ -246,10 +260,14 @@ func (c *CachingStore) Close(id string) error {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 	}
+	if found {
+		c.fenceReportedCloseAtSeqLocked(id, seq)
+	}
 	c.mu.Unlock()
 
 	if found {
 		c.notifyChange("bead.closed", closed)
+		localEmitted = true
 	}
 	return nil
 }
@@ -331,7 +349,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
 	c.mu.Lock()
-	c.noteLocalMutationLocked(ids...)
+	seq := c.noteLocalMutationLocked(ids...)
 	if refreshErr != nil {
 		c.recordProblemLocked("close-all refresh", refreshErr)
 	}
@@ -353,6 +371,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 				eventType: "bead.closed",
 				bead:      cloneBead(item.bead),
 			})
+			c.fenceReportedCloseAtSeqLocked(item.id, seq)
 		}
 	}
 	c.markFreshLocked(time.Now())
@@ -381,17 +400,17 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	}
 
 	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after metadata")
-	var updated Bead
+	var notifications []cacheNotification
 	notify := false
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
 	if refreshed {
+		notifications = c.updatedThenMaybeClosedNotificationsLocked(id, fresh, seq)
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 			depsMode:   depsFromFields,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
@@ -403,7 +422,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		updated = cloneBead(b)
+		notifications = []cacheNotification{{eventType: "bead.updated", bead: cloneBead(b)}}
 		notify = true
 	} else {
 		c.markDirtyLocked(id)
@@ -412,7 +431,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if notify {
-		c.notifyChange("bead.updated", updated)
+		c.notifyChanges(notifications)
 	}
 	return nil
 }
@@ -443,17 +462,17 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	}
 
 	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after metadata batch")
-	var updated Bead
+	var notifications []cacheNotification
 	notify := false
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
 	if refreshed {
+		notifications = c.updatedThenMaybeClosedNotificationsLocked(id, fresh, seq)
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 			depsMode:   depsFromFields,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
@@ -467,7 +486,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		updated = cloneBead(b)
+		notifications = []cacheNotification{{eventType: "bead.updated", bead: cloneBead(b)}}
 		notify = true
 	} else {
 		c.markDirtyLocked(id)
@@ -476,7 +495,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if notify {
-		c.notifyChange("bead.updated", updated)
+		c.notifyChanges(notifications)
 	}
 	return nil
 }
@@ -526,6 +545,11 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
+	settleLocalCloses := c.beginLocalCloseStore()
+	var emittedClosed map[string]bool
+	defer func() {
+		c.notifyChanges(settleLocalCloses(emittedClosed))
+	}()
 	tx := newCachingStoreTx()
 	if err := c.backing.Tx(commitMsg, func(backingTx Tx) error {
 		tx.backing = backingTx
@@ -533,7 +557,7 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 	}); err != nil {
 		return err
 	}
-	c.refreshTxTouchedBeads(tx.ids, tx.closed)
+	emittedClosed = c.refreshTxTouchedBeads(tx.ids, tx.closed)
 	return nil
 }
 
@@ -613,9 +637,9 @@ type txTouchedBead struct {
 	err    error
 }
 
-func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]struct{}) {
+func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]struct{}) map[string]bool {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 
 	refreshed := make([]txTouchedBead, 0, len(ids))
@@ -634,9 +658,10 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
+	emittedClosed := make(map[string]bool)
 	now := time.Now()
 	c.mu.Lock()
-	c.noteLocalMutationLocked(ids...)
+	seq := c.noteLocalMutationLocked(ids...)
 	if refreshErr != nil {
 		c.recordProblemLocked("tx refresh", refreshErr)
 	}
@@ -656,13 +681,17 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			if statusChanged {
 				c.clearDependentReadyProjectionsLocked(item.id)
 			}
-			eventType := "bead.updated"
-			if fresh.Status == "closed" {
-				eventType = "bead.closed"
-			}
-			if !hadPrevious || beadChanged(previous, fresh, false) || fresh.Status == "closed" {
+			switch {
+			case fresh.Status == "closed":
 				notifications = append(notifications, cacheNotification{
-					eventType: eventType,
+					eventType: "bead.closed",
+					bead:      cloneBead(fresh),
+				})
+				c.fenceReportedCloseAtSeqLocked(item.id, seq)
+				emittedClosed[item.id] = true
+			case fresh.Status != "closed" && (!hadPrevious || beadChanged(previous, fresh, false)):
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.updated",
 					bead:      cloneBead(fresh),
 				})
 			}
@@ -681,6 +710,8 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 					eventType: "bead.closed",
 					bead:      cloneBead(b),
 				})
+				c.fenceReportedCloseAtSeqLocked(item.id, seq)
+				emittedClosed[item.id] = true
 			}
 			continue
 		}
@@ -693,6 +724,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 	c.mu.Unlock()
 
 	c.notifyChanges(notifications)
+	return emittedClosed
 }
 
 // updateMatchesCached returns true when every non-nil field in opts already
@@ -864,8 +896,9 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 	fresh, deps, refreshed := c.refreshBeadWithDepsAfterWrite(issueID, "refresh bead after dependency add")
 	c.mu.Lock()
-	c.noteLocalMutationLocked(issueID)
+	seq := c.noteLocalMutationLocked(issueID)
 	if refreshed {
+		notifications := c.updatedThenMaybeClosedNotificationsLocked(issueID, fresh, seq)
 		c.absorbFreshLocked(issueID, fresh, time.Now(), absorbOpts{
 			depsMode:   depsExplicit,
 			deps:       deps,
@@ -876,7 +909,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 		c.mu.Unlock()
-		c.notifyChange("bead.updated", fresh)
+		c.notifyChanges(notifications)
 		return nil
 	}
 	if !c.depsComplete {
@@ -918,8 +951,9 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 
 	fresh, deps, refreshed := c.refreshBeadWithDepsAfterWrite(issueID, "refresh bead after dependency remove")
 	c.mu.Lock()
-	c.noteLocalMutationLocked(issueID)
+	seq := c.noteLocalMutationLocked(issueID)
 	if refreshed {
+		notifications := c.updatedThenMaybeClosedNotificationsLocked(issueID, fresh, seq)
 		c.absorbFreshLocked(issueID, fresh, time.Now(), absorbOpts{
 			depsMode:   depsExplicit,
 			deps:       deps,
@@ -930,7 +964,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 		c.mu.Unlock()
-		c.notifyChange("bead.updated", fresh)
+		c.notifyChanges(notifications)
 		return nil
 	}
 	if !c.depsComplete {

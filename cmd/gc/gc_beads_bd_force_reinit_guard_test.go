@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -40,10 +42,6 @@ const (
 // the destructive guess this guard exists to stop.
 func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 	t.Parallel()
-
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
@@ -122,10 +120,6 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 // would reject must never get that far.
 func TestBdRuntimeBdTableCountRejectsUnsafeDatabaseNames(t *testing.T) {
 	t.Parallel()
-
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")

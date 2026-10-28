@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 	"github.com/gastownhall/gascity/internal/runproj"
 )
 
@@ -246,7 +247,7 @@ type tailState struct {
 }
 
 // captureTailCursor snapshots the active log's byte size and identity from a
-// SINGLE os.Stat so the resume offset and the rotation-detection identity always
+// SINGLE livefile.Stat so the resume offset and rotation-detection identity always
 // describe the same file. Splitting them across two stats (a size stat then an
 // identity stat) let a rotation land between the two and pair the old file's
 // larger offset with the fresh file's identity; the first foldNext then saw no
@@ -256,7 +257,7 @@ type tailState struct {
 // rotation before it yields a consistent size+identity for the new active file.
 func captureTailCursor(path string) *tailState {
 	st := &tailState{}
-	if info, err := os.Stat(path); err == nil {
+	if info, err := livefile.Stat(path); err == nil {
 		st.offset = info.Size()
 		st.activeInfo = info
 	}
@@ -380,7 +381,7 @@ var readTailEvents = events.ReadFrom
 // sequence, then re-tails the fresh active file from the top; the seq filter
 // drops the overlap the catch-up already folded.
 func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
-	info, statErr := os.Stat(t.eventsPath)
+	info, statErr := livefile.Stat(t.eventsPath)
 	if statErr != nil && st.activeInfo != nil {
 		// Once an active file has existed, an unavailable path can be the
 		// rename/recreate seam of a rotation. ReadFrom intentionally treats
@@ -443,7 +444,7 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		return
 	}
 	if statErr == nil {
-		verifiedInfo, verifyErr := os.Stat(t.eventsPath)
+		verifiedInfo, verifyErr := livefile.Stat(t.eventsPath)
 		if verifyErr != nil {
 			t.markIncrementalReadFailure(&st.tailReadFailed, "active-log verification", verifyErr)
 			return

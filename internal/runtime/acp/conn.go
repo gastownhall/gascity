@@ -26,6 +26,12 @@ type sessionConn struct {
 	cancel   context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
 	listener net.Listener       // control socket for cross-process ops
 
+	// pgid is the process-group identity captured when cmd was spawned. It is
+	// recorded rather than looked up on demand because the lookup stops
+	// answering once the group leader is reaped, which is precisely when
+	// surviving descendants still need to be reached.
+	pgid int
+
 	mu             sync.Mutex
 	sessionID      string
 	activePromptID int64 // non-zero when a prompt response is pending

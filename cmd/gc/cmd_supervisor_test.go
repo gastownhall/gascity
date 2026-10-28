@@ -29,7 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -86,48 +86,6 @@ func stubSupervisorSystemctlUserAvailable(t *testing.T, available bool) {
 	t.Cleanup(func() {
 		supervisorSystemctlUserAvailable = old
 	})
-}
-
-func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName string) workspaceServiceSentinel {
-	t.Helper()
-	processgrouptest.RequireRealProcessSignals(t)
-
-	stateRoot := filepath.Join(cityPath, ".gc", "services", serviceName)
-	socketPath := filepath.Join(t.TempDir(), serviceName+".sock")
-	cmd := exec.Command("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done")
-	cmd.Env = append(os.Environ(),
-		"GC_HOME="+gcHome,
-		"GC_CITY_PATH="+cityPath,
-		"GC_SERVICE_NAME="+serviceName,
-		"GC_SERVICE_STATE_ROOT="+stateRoot,
-		"GC_SERVICE_SOCKET="+socketPath,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start workspace-service sentinel %q: %v", serviceName, err)
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		t.Fatalf("Getpgid(%d): %v", cmd.Process.Pid, err)
-	}
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		if processGroupAlive(pgid) {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-		select {
-		case <-waitCh:
-		case <-time.After(time.Second):
-			t.Logf("workspace-service sentinel pgid %d did not exit before cleanup timeout", pgid)
-		}
-	})
-	if !processGroupAlive(pgid) {
-		t.Fatalf("workspace-service sentinel pgid %d is not alive", pgid)
-	}
-	return workspaceServiceSentinel{pgid: pgid}
 }
 
 func writeSupervisorProcEnv(t *testing.T, procRoot string, pid int, env map[string]string) {
@@ -338,20 +296,20 @@ func TestSupervisorSocketPathForDirLongDirFallsBackToHashedTempPath(t *testing.T
 	base := shortTempDir(t, "gc-supervisor-long-")
 
 	longDir := filepath.Join(base, "segment")
-	for len(filepath.Join(longDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+	for len(filepath.Join(longDir, "supervisor.sock")) <= localsocket.PathLimit {
 		longDir = filepath.Join(longDir, "segment")
 	}
 	otherLongDir := filepath.Join(base, "other-segment")
-	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= localsocket.PathLimit {
 		otherLongDir = filepath.Join(otherLongDir, "segment")
 	}
 
 	got := supervisorSocketPathForDir(longDir)
-	if dir := filepath.Dir(got); dir != filepath.Join("/tmp", "gascity-supervisor") {
+	if dir := filepath.Dir(got); dir != localsocket.FallbackDir("gascity-supervisor") {
 		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want under /tmp/gascity-supervisor", longDir, got)
 	}
-	if len(got) > supervisorSocketPathLimit {
-		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), supervisorSocketPathLimit, got)
+	if len(got) > localsocket.PathLimit {
+		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), localsocket.PathLimit, got)
 	}
 
 	if again := supervisorSocketPathForDir(longDir); again != got {
@@ -1687,206 +1645,6 @@ func TestInstallSupervisorSystemdWarmRefreshFallsBackToKillWhenGracefulSignalDoe
 	}
 }
 
-func TestInstallSupervisorSystemdWarmRefreshStopsWorkspaceServicesBeforeStart(t *testing.T) {
-	processgrouptest.RequireRealProcessSignals(t)
-
-	if goruntime.GOOS != "linux" {
-		t.Skip("systemd path only applies on linux")
-	}
-	homeDir := t.TempDir()
-	gcHome := filepath.Join(t.TempDir(), "gc-home")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GC_HOME", gcHome)
-
-	data := &supervisorServiceData{
-		GCPath:        "/tmp/gc-new",
-		LogPath:       "/tmp/gc-home/supervisor.log",
-		GCHome:        gcHome,
-		XDGRuntimeDir: "/tmp/gc-run",
-		Path:          "/usr/local/bin:/usr/bin:/bin",
-	}
-	path := supervisorSystemdServicePath()
-	unitName := supervisorSystemdServiceName()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("old unit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cityPath := filepath.Join(t.TempDir(), "city")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
-		t.Fatalf("Register(%q): %v", cityPath, err)
-	}
-	stateRoot := filepath.Join(cityPath, ".gc", "services", "bridge")
-	socketPath := filepath.Join(t.TempDir(), "bridge.sock")
-	cmd := exec.Command("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done")
-	cmd.Env = append(os.Environ(),
-		"GC_HOME="+gcHome,
-		"GC_CITY_PATH="+cityPath,
-		"GC_SERVICE_NAME=bridge",
-		"GC_SERVICE_STATE_ROOT="+stateRoot,
-		"GC_SERVICE_SOCKET="+socketPath,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start workspace-service sentinel: %v", err)
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		t.Fatalf("Getpgid(%d): %v", cmd.Process.Pid, err)
-	}
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		if processGroupAlive(pgid) {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-		select {
-		case <-waitCh:
-		case <-time.After(time.Second):
-			t.Logf("workspace-service sentinel pgid %d did not exit before cleanup timeout", pgid)
-		}
-	})
-	if !processGroupAlive(pgid) {
-		t.Fatalf("workspace-service sentinel pgid %d is not alive before warm refresh", pgid)
-	}
-	scope, err := supervisorWorkspaceServiceCleanupScopeFromRegistry(gcHome)
-	if err != nil {
-		t.Fatalf("supervisorWorkspaceServiceCleanupScopeFromRegistry: %v", err)
-	}
-	procs, err := findSupervisorWorkspaceServiceProcesses(scope)
-	if err != nil {
-		t.Fatalf("findSupervisorWorkspaceServiceProcesses: %v", err)
-	}
-	if !slices.ContainsFunc(procs, func(proc supervisorWorkspaceServiceProcess) bool { return proc.pgid == pgid }) {
-		t.Fatalf("workspace-service discovery procs = %#v, want pgid %d", procs, pgid)
-	}
-
-	oldRun := supervisorSystemctlRun
-	oldActive := supervisorSystemctlActive
-	var (
-		calls              []string
-		startBeforeCleanup bool
-	)
-	supervisorSystemctlRun = func(args ...string) error {
-		call := strings.Join(args, " ")
-		calls = append(calls, call)
-		if call == "--user start "+unitName && processGroupAlive(pgid) {
-			startBeforeCleanup = true
-		}
-		return nil
-	}
-	supervisorSystemctlActive = func(service string) bool {
-		if service != unitName {
-			return false
-		}
-		for _, call := range calls {
-			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
-				return false
-			}
-		}
-		return true
-	}
-	stubSupervisorRunningPreserveSignalReady(t, true)
-	t.Cleanup(func() {
-		supervisorSystemctlRun = oldRun
-		supervisorSystemctlActive = oldActive
-	})
-
-	var stdout, stderr bytes.Buffer
-	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
-		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
-	}
-	if startBeforeCleanup {
-		t.Fatalf("systemctl start ran before workspace-service pgid %d was stopped; calls=%v", pgid, calls)
-	}
-	if err := waitForProcessGroupExit(pgid, time.Second); err != nil {
-		t.Fatalf("workspace-service cleanup: %v", err)
-	}
-}
-
-func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("systemd path only applies on linux")
-	}
-	homeDir := t.TempDir()
-	gcHome := filepath.Join(t.TempDir(), "gc-home")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GC_HOME", gcHome)
-
-	registeredCity := filepath.Join(t.TempDir(), "registered-city")
-	unregisteredCity := filepath.Join(t.TempDir(), "unregistered-city")
-	if err := os.MkdirAll(registeredCity, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(unregisteredCity, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(registeredCity, "registered-city"); err != nil {
-		t.Fatalf("Register(%q): %v", registeredCity, err)
-	}
-
-	data := &supervisorServiceData{
-		GCPath:        "/tmp/gc-new",
-		LogPath:       "/tmp/gc-home/supervisor.log",
-		GCHome:        gcHome,
-		XDGRuntimeDir: "/tmp/gc-run",
-		Path:          "/usr/local/bin:/usr/bin:/bin",
-	}
-	path := supervisorSystemdServicePath()
-	unitName := supervisorSystemdServiceName()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("old unit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	registered := startWorkspaceServiceSentinel(t, gcHome, registeredCity, "bridge")
-	unregistered := startWorkspaceServiceSentinel(t, gcHome, unregisteredCity, "other-bridge")
-
-	oldRun := supervisorSystemctlRun
-	oldActive := supervisorSystemctlActive
-	var calls []string
-	supervisorSystemctlRun = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
-		return nil
-	}
-	supervisorSystemctlActive = func(service string) bool {
-		if service != unitName {
-			return false
-		}
-		for _, call := range calls {
-			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
-				return false
-			}
-		}
-		return true
-	}
-	stubSupervisorRunningPreserveSignalReady(t, true)
-	t.Cleanup(func() {
-		supervisorSystemctlRun = oldRun
-		supervisorSystemctlActive = oldActive
-	})
-
-	var stdout, stderr bytes.Buffer
-	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
-		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
-	}
-	if err := waitForProcessGroupExit(registered.pgid, time.Second); err != nil {
-		t.Fatalf("registered workspace-service cleanup: %v", err)
-	}
-	if !processGroupAlive(unregistered.pgid) {
-		t.Fatalf("unregistered workspace-service pgid %d was stopped by warm-refresh cleanup", unregistered.pgid)
-	}
-}
-
 func TestCleanupSupervisorWorkspaceServicesForSupervisorStartSkipsMissingProc(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
@@ -2081,12 +1839,6 @@ func TestTerminateProcessGroupTreatsESRCHAsAlreadyStopped(t *testing.T) {
 
 	if err := terminateProcessGroup(999999, time.Millisecond); err != nil {
 		t.Fatalf("terminateProcessGroup ESRCH = %v, want nil", err)
-	}
-}
-
-func TestTerminateProcessGroupRefusesCurrentProcessGroup(t *testing.T) {
-	if err := terminateProcessGroup(syscall.Getpgrp(), time.Millisecond); err == nil {
-		t.Fatal("terminateProcessGroup current process group error = nil, want refusal")
 	}
 }
 
@@ -7400,61 +7152,6 @@ func TestSupervisorLogsTeeDisabledWarning(t *testing.T) {
 	}
 }
 
-// TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs confirms the
-// guard that prevents double-writes when stdout/stderr are already the
-// supervisor log file, even when the fd carries a cosmetic /dev/stdout name.
-func TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "supervisor.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("open log: %v", err)
-	}
-	defer logFile.Close() //nolint:errcheck
-
-	// A duped fd with a cosmetic name models os.Stdout/os.Stderr after a
-	// service manager or parent process already redirected fd 1/2 to the log.
-	dupFD, err := syscall.Dup(int(logFile.Fd()))
-	if err != nil {
-		t.Fatalf("dup log fd: %v", err)
-	}
-	redirectedStdout := os.NewFile(uintptr(dupFD), "/dev/stdout")
-	if redirectedStdout == nil {
-		t.Fatal("os.NewFile returned nil for duplicated log fd")
-	}
-	defer redirectedStdout.Close() //nolint:errcheck
-	if shouldTeeSupervisorLog(redirectedStdout, logFile) {
-		t.Errorf("redirected stdout fd: shouldTeeSupervisorLog should return false")
-	}
-	if shouldTeeSupervisorLog(&switchableWriter{target: redirectedStdout}, logFile) {
-		t.Errorf("switchable writer wrapping redirected stdout fd: shouldTeeSupervisorLog should return false")
-	}
-
-	// Different file = terminal/container output. Must tee.
-	otherPath := filepath.Join(dir, "other.log")
-	otherFile, err := os.Create(otherPath)
-	if err != nil {
-		t.Fatalf("create other: %v", err)
-	}
-	defer otherFile.Close() //nolint:errcheck
-	if !shouldTeeSupervisorLog(otherFile, logFile) {
-		t.Errorf("different file: shouldTeeSupervisorLog should return true")
-	}
-
-	// Non-file writer (a buffer simulating a journal pipe). Must tee.
-	if !shouldTeeSupervisorLog(&bytes.Buffer{}, logFile) {
-		t.Errorf("non-file writer: shouldTeeSupervisorLog should return true")
-	}
-
-	// Nil safety.
-	if shouldTeeSupervisorLog(nil, logFile) {
-		t.Errorf("nil writer: shouldTeeSupervisorLog should return false")
-	}
-	if shouldTeeSupervisorLog(otherFile, nil) {
-		t.Errorf("nil logFile: shouldTeeSupervisorLog should return false")
-	}
-}
-
 const ephemeralPortThresholdForTest = 32768
 
 func freeEphemeralLoopbackPort(t *testing.T) int {
@@ -7500,7 +7197,7 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
-	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// localsocket.PathLimit and the fallback triggers, so Go's own
 	// cleanup will not reap it.
 	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
@@ -7532,7 +7229,7 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
-	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// localsocket.PathLimit and the fallback triggers, so Go's own
 	// cleanup will not reap it.
 	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {

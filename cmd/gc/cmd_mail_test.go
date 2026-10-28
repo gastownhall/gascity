@@ -3318,6 +3318,65 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 	}
 }
 
+// TestMailNotifyRequestsTheTurnBeforeReportingTheSend pins the order a --notify
+// send reports in. Callers that wrap gc in a timeout read the confirmation line
+// as "done" and may stop the process right after it. Printed before the nudge
+// was queued, that left mail on record with no turn requested for it, so the
+// recipient only saw it whenever something else woke it.
+func TestMailNotifyRequestsTheTurnBeforeReportingTheSend(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(mp mail.Provider, nf nudgeFunc, stdout, stderr *bytes.Buffer) int
+	}{
+		{
+			name: "send",
+			run: func(mp mail.Provider, nf nudgeFunc, stdout, stderr *bytes.Buffer) int {
+				return doMailSend(mp, events.Discard, map[string]bool{"human": true, "mayor": true}, "human", []string{"mayor", "wake up"}, nf, stdout, stderr)
+			},
+		},
+		{
+			name: "send --all",
+			run: func(mp mail.Provider, nf nudgeFunc, stdout, stderr *bytes.Buffer) int {
+				return doMailSendAllJSON(mp, events.Discard, map[string]bool{"human": true, "mayor": true}, "human", []string{"wake up"}, nf, false, stdout, stderr)
+			},
+		},
+		{
+			name: "reply",
+			run: func(mp mail.Provider, nf nudgeFunc, stdout, stderr *bytes.Buffer) int {
+				original, err := mp.Send("mayor", "worker", "Hello", "first")
+				if err != nil {
+					t.Fatalf("seeding the message to reply to: %v", err)
+				}
+				return doMailReply(mp, events.Discard, original.ID, "worker", "RE: Hello", "reply body", nf, stdout, stderr)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mp := beadmail.New(beads.NewMemStore())
+			var stdout, stderr bytes.Buffer
+			var printedBeforeNudge string
+			calls := 0
+			nf := func(_, _ string) error {
+				calls++
+				printedBeforeNudge = stdout.String()
+				return nil
+			}
+			if code := tc.run(mp, nf, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if calls != 1 {
+				t.Fatalf("nudgeFn calls = %d, want 1", calls)
+			}
+			if printedBeforeNudge != "" {
+				t.Errorf("stdout before the nudge was requested = %q, want nothing yet", printedBeforeNudge)
+			}
+			if !strings.Contains(strings.ToLower(stdout.String()), "sent message") {
+				t.Errorf("stdout = %q, want the send confirmation after the nudge", stdout.String())
+			}
+		})
+	}
+}
+
 func TestMailSendNotifyToHuman(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

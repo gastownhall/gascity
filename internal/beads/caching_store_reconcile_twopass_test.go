@@ -24,6 +24,7 @@ func extractStoreState(c *CachingStore) storeState {
 		dirty:        cloneDirty(c.dirty),
 		beadSeq:      cloneU64Map(c.beadSeq),
 		localBeadAt:  cloneTimeMap(c.localBeadAt),
+		readCloseSeq: cloneU64Map(c.readCloseSeq),
 		deletedSeq:   cloneU64Map(c.deletedSeq),
 		mutationSeq:  c.mutationSeq,
 		backingIsBd:  isBd,

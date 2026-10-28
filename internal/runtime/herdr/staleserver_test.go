@@ -4,8 +4,18 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// skipOnWindowsPipes skips a socket-inode regression where herdr has no socket
+// inode: on Windows it serves a named pipe and leaves a pointer file at the path.
+func skipOnWindowsPipes(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("herdr serves a named pipe on Windows, never a socket inode; TestServerAliveFollowsThePipeNotThePointerFile covers liveness there")
+	}
+}
 
 // shortHome points socketPath()'s config-dir resolution at a short, isolated
 // temp dir via $XDG_CONFIG_HOME — the env var os.UserConfigDir() consults
@@ -30,6 +40,7 @@ func shortHome(t *testing.T) {
 // check), so the very next op (`herdr agent list`) hit ECONNREFUSED, the tmux→herdr
 // swap aborted, and pool polecats hung in start-pending / agent_not_found.
 func TestServerAliveRejectsStaleSocket(t *testing.T) {
+	skipOnWindowsPipes(t)
 	shortHome(t)
 
 	c := newClient("staletest", "")
@@ -73,6 +84,7 @@ func TestServerAliveRejectsStaleSocket(t *testing.T) {
 // A live server must read as alive (guards against the fix over-correcting into
 // "always restart").
 func TestServerAliveDetectsLiveServer(t *testing.T) {
+	skipOnWindowsPipes(t)
 	shortHome(t)
 
 	c := newClient("livetest", "")

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -133,10 +134,15 @@ func (p *Provider) SupportsTransport(transport string) bool {
 
 // Start spawns an ACP agent process, performs the JSON-RPC handshake, and
 // optionally sends the initial nudge. Returns an error if a session with
-// that name already exists or the handshake fails.
+// that name already exists, the handshake fails, or the initial nudge cannot
+// be delivered; a start that fails after spawning the agent stops it.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	promptSuffix, err := commandLinePromptSuffix(cfg.PromptSuffix)
+	if err != nil {
+		return fmt.Errorf("session %q: %w", name, err)
 	}
 	lock, err := p.lockLifecycle(name, true)
 	if err != nil {
@@ -161,6 +167,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		if existing.alive() {
 			p.mu.Unlock()
 			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+		}
+		// The leader has exited, but a tree still held has members that
+		// outlived it; a replacement must not start beside them.
+		if processgroup.HoldsTree(existing.cmd) {
+			if err := terminateProcess(existing, p.cfg.stopGrace()); err != nil {
+				p.mu.Unlock()
+				return fmt.Errorf("stopping what the previous session %q left running: %w", name, err)
+			}
 		}
 		delete(p.conns, name)
 	}
@@ -219,20 +233,27 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	command := cfg.Command
-	if cfg.PromptSuffix != "" {
+	if promptSuffix != "" {
 		if cfg.PromptFlag != "" {
-			command = command + " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+			command = command + " " + cfg.PromptFlag + " " + promptSuffix
 		} else {
-			command = command + " " + cfg.PromptSuffix
+			command = command + " " + promptSuffix
 		}
 	}
 	if command == "" {
 		clearSentinel()
 		return fmt.Errorf("acp provider requires a command")
 	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		clearSentinel()
+		return fmt.Errorf("session %q command refused: %s", name, reason)
+	}
 
-	cmd := exec.Command("sh", "-c", command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd, err := runtime.ShellSessionCommand(command)
+	if err != nil {
+		clearSentinel()
+		return fmt.Errorf("preparing command for %q: %w", name, err)
+	}
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}
@@ -292,7 +313,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		stderrR.Close() //nolint:errcheck
 	}()
 
-	if err := cmd.Start(); err != nil {
+	// Start the agent as the owner of its own process tree and keep the group
+	// identity this spawn established. Every failure path below reaps that
+	// tree, and resolving the group later is not equivalent: the monitor
+	// goroutine's cmd.Wait can reap the leader first, after which a lookup
+	// answers "no such group" while descendants are still running.
+	pgid, err := processgroup.StartCommand(cmd, processgroup.SurviveRelease)
+	if err != nil {
 		stderrW.Close() //nolint:errcheck
 		clearSentinel()
 		return fmt.Errorf("starting session %q: %w", name, err)
@@ -302,15 +329,16 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Create control socket for cross-process discovery.
 	processDone := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, processDone)
+	lis, err := p.startControlSocket(name, cmd, pgid, processDone)
 	if err != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		_ = cmd.Wait()
 		clearSentinel()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
+	sc.pgid = pgid
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -337,6 +365,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// provider can bind a replacement as soon as Close makes it disappear.
 		lis.Close() //nolint:errcheck
 		close(processDone)
+		// The leader exiting is not the tree exiting. Ownership ends here only
+		// if nothing is left; otherwise it is kept, because a stop or a
+		// failed-start cleanup can still arrive, and the owned tree is the
+		// only way to reach helpers the agent left running.
+		_ = processgroup.ReleaseCommandIfEmpty(cmd)
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -371,7 +404,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		<-sc.done
 		clearSentinel()
 		// Include stderr tail in the error for diagnostics.
@@ -386,7 +419,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// and clean up — the caller of Stop expects the session to be gone.
 	if err := hsCtx.Err(); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
@@ -398,7 +431,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	seed := time.Now()
 	if err := p.publishActivity(name, seed); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
@@ -413,7 +446,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	)
 	if err := sc.installActivityPublisher(publisher, seed); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("starting activity publication for %q: %w", name, err)
@@ -425,7 +458,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.conns[name] != sentinel || hsCtx.Err() != nil {
 		p.mu.Unlock()
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
@@ -437,10 +470,55 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	releaseStartup()
 
 	// Keep delivery bound to this incarnation if Stop and a retry interleave.
+	// A startup prompt the agent never received fails the start rather than
+	// leaving a session that silently lacks it; every such error precedes the
+	// prompt's delivery, so the caller's retry delivers it exactly once.
 	if cfg.Nudge != "" {
-		_ = p.nudgeConn(name, sc, runtime.TextContent(cfg.Nudge))
+		if err := p.nudgeConn(name, sc, runtime.TextContent(cfg.Nudge)); err != nil {
+			err = fmt.Errorf("delivering the startup prompt to %q: %w", name, err)
+			if stopErr := p.abandonStartup(name, sc); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("stopping %q after the failed delivery: %w", name, stopErr))
+			}
+			return err
+		}
 	}
 
+	return nil
+}
+
+// abandonStartup ends sc, the connection Start committed for name, when Start
+// cannot complete it. It acts on sc alone: when a concurrent Stop has already
+// taken sc, that Stop owns its teardown and a replacement may own name.
+func (p *Provider) abandonStartup(name string, sc *sessionConn) error {
+	lock, err := p.lockLifecycle(name, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() //nolint:errcheck
+
+	p.mu.Lock()
+	if p.conns[name] != sc {
+		p.mu.Unlock()
+		return nil
+	}
+	delete(p.conns, name)
+	delete(p.workDirs, name)
+	p.mu.Unlock()
+
+	_ = sc.stdin.Close()
+	if err := terminateProcess(sc, p.cfg.stopGrace()); err != nil && !runtime.IsSessionGone(err) {
+		// As in Stop: keep a tree that is still held reachable, so a retry
+		// acts on the same tree rather than finding nothing.
+		if processgroup.HoldsTree(sc.cmd) {
+			p.mu.Lock()
+			if _, replaced := p.conns[name]; !replaced {
+				p.conns[name] = sc
+			}
+			p.mu.Unlock()
+		}
+		return err
+	}
+	p.cleanupMeta(name)
 	return nil
 }
 
@@ -548,6 +626,22 @@ func (p *Provider) Stop(name string) error {
 		// bookkeeping — skipping cleanupMeta and process teardown keeps the
 		// replacement's identity sidecars — so IsRunning stops short-circuiting
 		// on the dead conn and falls through to the socket probe.
+		//
+		// A tree this provider still holds is not the replacement's, though:
+		// its members outlived the old leader, and they are stopped first.
+		if processgroup.HoldsTree(sc.cmd) {
+			p.mu.Unlock()
+			if err := terminateProcess(sc, p.cfg.stopGrace()); err != nil {
+				return err
+			}
+			p.mu.Lock()
+			if p.conns[name] == sc {
+				delete(p.conns, name)
+			}
+			delete(p.workDirs, name)
+			p.mu.Unlock()
+			return nil
+		}
 		delete(p.conns, name)
 		delete(p.workDirs, name)
 		p.mu.Unlock()
@@ -560,7 +654,9 @@ func (p *Provider) Stop(name string) error {
 	p.mu.Unlock()
 
 	if ok {
-		if !sc.alive() {
+		// A leader that has exited leaves nothing to stop unless its tree is
+		// still held, which means members outlived it.
+		if !sc.alive() && !processgroup.HoldsTree(sc.cmd) {
 			p.cleanupMeta(name)
 			return nil
 		}
@@ -569,6 +665,15 @@ func (p *Provider) Stop(name string) error {
 		if err == nil || runtime.IsSessionGone(err) {
 			p.cleanupMeta(name)
 			return nil
+		}
+		// Keep the session reachable while its tree is still held, so a retry
+		// acts on the same tree rather than finding nothing.
+		if processgroup.HoldsTree(sc.cmd) {
+			p.mu.Lock()
+			if _, replaced := p.conns[name]; !replaced {
+				p.conns[name] = sc
+			}
+			p.mu.Unlock()
 		}
 		return err
 	}
@@ -593,7 +698,7 @@ func (p *Provider) Interrupt(name string) error {
 		if sc.cmd == nil {
 			return nil
 		}
-		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
+		return processgroup.InterruptCommand(sc.cmd, sc.pgid, processgroup.Options{})
 	}
 
 	// Fall back to socket (cross-process case).
@@ -974,7 +1079,7 @@ func (p *Provider) socketNameForEntry(key string) string {
 }
 
 // startControlSocket creates a unix socket for cross-process commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, pgid int, done <-chan struct{}) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
@@ -993,28 +1098,39 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done, p.cfg.stopGrace())
+			go handleControlConn(conn, cmd, pgid, done, p.cfg.stopGrace())
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-// A "stop" escalates from SIGTERM to SIGKILL after stopGrace.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration) {
+// A "stop" requests a cooperative shutdown and force-reaps the owned tree after
+// stopGrace.
+//
+// A failed or unsupported operation answers "err: <reason>" rather than "ok".
+// The caller is a remote process deciding whether the session is gone; telling
+// it the stop succeeded when the tree is still running hands it a false clear,
+// and it has no other way to find out.
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, pgid int, done <-chan struct{}, stopGrace time.Duration) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if !scanner.Scan() {
 		return
 	}
+	reply := func(err error) {
+		if err != nil {
+			fmt.Fprintf(conn, "err: %v\n", err) //nolint:errcheck
+			return
+		}
+		conn.Write([]byte("ok\n")) //nolint:errcheck
+	}
 	switch scanner.Text() {
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply(processgroup.TerminateManagedCommand(cmd, pgid, done, stopGrace, processgroup.Options{}))
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply(processgroup.InterruptCommand(cmd, pgid, processgroup.Options{}))
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "pid":
@@ -1125,8 +1241,8 @@ func isPipeWriteError(err error) bool {
 	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
 }
 
-// terminateProcess sends SIGTERM then, after grace, SIGKILL to a tracked
-// process group.
+// terminateProcess requests a cooperative stop and, after grace, force-reaps the
+// owned process tree.
 func terminateProcess(sc *sessionConn, grace time.Duration) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, grace)
+	return processgroup.TerminateManagedCommand(sc.cmd, sc.pgid, sc.done, grace, processgroup.Options{})
 }

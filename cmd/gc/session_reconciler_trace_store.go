@@ -13,11 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 const (
@@ -294,7 +294,7 @@ func syncTraceAncestors(dir, stop string) error {
 }
 
 func syncDir(path string) error {
-	f, err := os.Open(path)
+	f, err := filelock.OpenDirectoryForSync(path)
 	if err != nil {
 		return err
 	}
@@ -483,11 +483,10 @@ func (s *SessionReconcilerTraceStore) quarantine(path string, cause error) error
 }
 
 func (s *SessionReconcilerTraceStore) isLowSpace() (bool, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(s.rootDir, &st); err != nil {
+	free, err := traceAvailableBytes(s.rootDir)
+	if err != nil {
 		return false, err
 	}
-	free := st.Bavail * uint64(st.Bsize)
 	if s.lowSpace {
 		return free < sessionReconcilerTraceLowSpaceExitFree, nil
 	}

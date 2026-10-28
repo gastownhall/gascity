@@ -2,11 +2,11 @@ package main
 
 import (
 	"fmt"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -45,15 +45,25 @@ const testOrphanSweepMinAge = time.Hour
 const testOrphanSweepFreeSentinelMinAge = 2 * time.Minute
 
 // holdAliveSentinel creates <dir>/.gc-test-alive.lock and takes an exclusive
-// flock on it. The caller must keep the returned file referenced for as long
-// as the dir must stay protected: the runtime finalizes unreachable os.Files,
-// which closes the descriptor and releases the lock.
+// kernel lock on it. The caller must keep the returned file referenced for as
+// long as the dir must stay protected: the runtime finalizes unreachable
+// os.Files, which closes the descriptor and releases the lock.
+//
+// Closing the file is the release path on both platforms, so the lock handle
+// is deliberately not returned: flock is released when the last descriptor for
+// the open file closes, and a Windows byte-range lock is released with its
+// handle.
 func holdAliveSentinel(dir string) (*os.File, error) {
-	f, err := os.OpenFile(filepath.Join(dir, testAliveSentinelName), os.O_CREATE|os.O_RDWR, 0o644)
+	path := filepath.Join(dir, testAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening alive sentinel in %q: %w", dir, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	}); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("locking alive sentinel in %q: %w", dir, err)
 	}
@@ -62,9 +72,10 @@ func holdAliveSentinel(dir string) (*os.File, error) {
 
 // aliveSentinelHeld probes <dir>'s alive sentinel. exists reports whether the
 // sentinel file is present; held reports whether some process still holds its
-// flock. Probe failures are reported as held so the sweep stays conservative.
+// lock. Probe failures are reported as held so the sweep stays conservative.
 func aliveSentinelHeld(dir string) (exists, held bool) {
-	f, err := os.OpenFile(filepath.Join(dir, testAliveSentinelName), os.O_RDWR, 0)
+	path := filepath.Join(dir, testAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false
@@ -72,10 +83,15 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 		return true, true
 	}
 	defer f.Close() //nolint:errcheck
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		return true, true
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = lock.Release()
 	return true, false
 }
 

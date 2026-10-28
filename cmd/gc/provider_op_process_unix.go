@@ -32,3 +32,10 @@ func prepareProviderOpCommand(cmd *exec.Cmd) {
 		return nil
 	}
 }
+
+// runProviderOpCommand runs cmd in its own process group, which its context
+// ending kills whole (prepareProviderOpCommand).
+func runProviderOpCommand(cmd *exec.Cmd) error {
+	prepareProviderOpCommand(cmd)
+	return cmd.Run()
+}

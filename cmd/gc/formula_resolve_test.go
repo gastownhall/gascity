@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -14,6 +16,48 @@ func writeFormulaFile(t *testing.T, dir, name, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertFormulaEntryMatchesSource(t *testing.T, entryPath, sourcePath string) {
+	t.Helper()
+	fi, err := os.Lstat(entryPath)
+	if err != nil {
+		t.Fatalf("%s: %v", filepath.Base(entryPath), err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		dest, err := os.Readlink(entryPath)
+		if err != nil {
+			t.Fatalf("%s: readlink: %v", filepath.Base(entryPath), err)
+		}
+		if dest != sourcePath {
+			t.Fatalf("%s: link target = %q, want %q", filepath.Base(entryPath), dest, sourcePath)
+		}
+		return
+	}
+	if runtime.GOOS != "windows" {
+		t.Fatalf("%s: not a symlink", filepath.Base(entryPath))
+	}
+	got, err := os.ReadFile(entryPath)
+	if err != nil {
+		t.Fatalf("%s: read copy: %v", filepath.Base(entryPath), err)
+	}
+	want, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("%s: read source: %v", filepath.Base(entryPath), err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s: copy content = %q, want %q", filepath.Base(entryPath), got, want)
+	}
+}
+
+func createSymlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink privilege unavailable: %v", err)
+		}
+		t.Fatalf("create symlink: %v", err)
 	}
 }
 
@@ -45,23 +89,8 @@ func TestResolveFormulas_SingleLayer(t *testing.T) {
 	}
 	for _, c := range cases {
 		linkPath := filepath.Join(symlinkDir, c.linkName)
-		fi, err := os.Lstat(linkPath)
-		if err != nil {
-			t.Errorf("%s: %v", c.linkName, err)
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("%s: not a symlink", c.linkName)
-		}
-		dest, err := os.Readlink(linkPath)
-		if err != nil {
-			t.Errorf("%s: readlink: %v", c.linkName, err)
-			continue
-		}
 		want := filepath.Join(layer, c.srcName)
-		if dest != want {
-			t.Errorf("%s: link target = %q, want %q", c.linkName, dest, want)
-		}
+		assertFormulaEntryMatchesSource(t, linkPath, want)
 	}
 }
 
@@ -85,31 +114,13 @@ func TestResolveFormulas_Shadow(t *testing.T) {
 	symlinkDir := filepath.Join(target, ".beads", "formulas")
 
 	// mol-a should point to layer2 (higher priority shadow), via canonical link name.
-	dest, err := os.Readlink(filepath.Join(symlinkDir, "mol-a.toml"))
-	if err != nil {
-		t.Fatalf("mol-a readlink: %v", err)
-	}
-	if dest != filepath.Join(layer2, "mol-a.formula.toml") {
-		t.Errorf("mol-a target = %q, want layer2 version", dest)
-	}
+	assertFormulaEntryMatchesSource(t, filepath.Join(symlinkDir, "mol-a.toml"), filepath.Join(layer2, "mol-a.formula.toml"))
 
 	// mol-b should point to layer1 (only source).
-	dest, err = os.Readlink(filepath.Join(symlinkDir, "mol-b.toml"))
-	if err != nil {
-		t.Fatalf("mol-b readlink: %v", err)
-	}
-	if dest != filepath.Join(layer1, "mol-b.formula.toml") {
-		t.Errorf("mol-b target = %q, want layer1 version", dest)
-	}
+	assertFormulaEntryMatchesSource(t, filepath.Join(symlinkDir, "mol-b.toml"), filepath.Join(layer1, "mol-b.formula.toml"))
 
 	// mol-c should point to layer2 (only source).
-	dest, err = os.Readlink(filepath.Join(symlinkDir, "mol-c.toml"))
-	if err != nil {
-		t.Fatalf("mol-c readlink: %v", err)
-	}
-	if dest != filepath.Join(layer2, "mol-c.formula.toml") {
-		t.Errorf("mol-c target = %q, want layer2 version", dest)
-	}
+	assertFormulaEntryMatchesSource(t, filepath.Join(symlinkDir, "mol-c.toml"), filepath.Join(layer2, "mol-c.formula.toml"))
 }
 
 // TestResolveFormulas_MixedLayerPrefersCanonical verifies that within a single
@@ -130,13 +141,7 @@ func TestResolveFormulas_MixedLayerPrefersCanonical(t *testing.T) {
 
 	symlinkDir := filepath.Join(target, ".beads", "formulas")
 	for _, linkName := range []string{"mol-a.toml", "mol-a.formula.toml"} {
-		dest, err := os.Readlink(filepath.Join(symlinkDir, linkName))
-		if err != nil {
-			t.Fatalf("%s readlink: %v", linkName, err)
-		}
-		if dest != filepath.Join(layer, "mol-a.toml") {
-			t.Errorf("%s target = %q, want canonical source", linkName, dest)
-		}
+		assertFormulaEntryMatchesSource(t, filepath.Join(symlinkDir, linkName), filepath.Join(layer, "mol-a.toml"))
 	}
 }
 
@@ -159,13 +164,7 @@ func TestResolveFormulas_HigherLayerLegacyWinsOverLowerCanonical(t *testing.T) {
 	}
 
 	for _, linkName := range []string{"mol-a.toml", "mol-a.formula.toml"} {
-		dest, err := os.Readlink(filepath.Join(target, ".beads", "formulas", linkName))
-		if err != nil {
-			t.Fatalf("%s readlink: %v", linkName, err)
-		}
-		if dest != filepath.Join(layer2, "mol-a.formula.toml") {
-			t.Errorf("%s target = %q, want layer2 legacy source", linkName, dest)
-		}
+		assertFormulaEntryMatchesSource(t, filepath.Join(target, ".beads", "formulas", linkName), filepath.Join(layer2, "mol-a.formula.toml"))
 	}
 }
 
@@ -186,13 +185,7 @@ func TestResolveFormulas_Idempotent(t *testing.T) {
 	}
 
 	for _, linkName := range []string{"mol-a.toml", "mol-a.formula.toml"} {
-		dest, err := os.Readlink(filepath.Join(target, ".beads", "formulas", linkName))
-		if err != nil {
-			t.Fatalf("%s readlink: %v", linkName, err)
-		}
-		if dest != filepath.Join(layer, "mol-a.formula.toml") {
-			t.Errorf("%s target = %q, want %q", linkName, dest, filepath.Join(layer, "mol-a.formula.toml"))
-		}
+		assertFormulaEntryMatchesSource(t, filepath.Join(target, ".beads", "formulas", linkName), filepath.Join(layer, "mol-a.formula.toml"))
 	}
 }
 
@@ -246,22 +239,14 @@ func TestResolveFormulas_LegacySymlinkCompatibility(t *testing.T) {
 
 	// Simulate a stale legacy compatibility link from a prior run.
 	stale := filepath.Join(symlinkDir, "mol-a.formula.toml")
-	if err := os.Symlink(filepath.Join(layer, "mol-a.toml"), stale); err != nil {
-		t.Fatalf("create stale symlink: %v", err)
-	}
+	createSymlinkOrSkip(t, filepath.Join(layer, "mol-a.toml"), stale)
 
 	if err := ResolveFormulas(target, []string{layer}); err != nil {
 		t.Fatalf("ResolveFormulas: %v", err)
 	}
 
 	for _, linkName := range []string{"mol-a.toml", "mol-a.formula.toml"} {
-		dest, err := os.Readlink(filepath.Join(symlinkDir, linkName))
-		if err != nil {
-			t.Fatalf("%s readlink: %v", linkName, err)
-		}
-		if dest != filepath.Join(layer, "mol-a.toml") {
-			t.Errorf("%s target = %q, want %q", linkName, dest, filepath.Join(layer, "mol-a.toml"))
-		}
+		assertFormulaEntryMatchesSource(t, filepath.Join(symlinkDir, linkName), filepath.Join(layer, "mol-a.toml"))
 	}
 }
 
@@ -312,6 +297,25 @@ func TestResolveFormulas_EmptyLayers(t *testing.T) {
 	}
 }
 
+func TestResolveFormulas_NoWinnersCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	layer := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(layer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "city")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ResolveFormulas(target, []string{layer}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("zero-winner resolve created .beads: %v", err)
+	}
+}
+
 func TestResolveFormulas_MissingLayerDir(t *testing.T) {
 	dir := t.TempDir()
 	layer := filepath.Join(dir, "formulas")
@@ -354,7 +358,14 @@ func TestResolveFormulas_NonFormulaFilesIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Errorf("got %d entries, want 2 (canonical + legacy compatibility links)", len(entries))
+	entryCount := 0
+	for _, entry := range entries {
+		if runtime.GOOS == "windows" && (entry.Name() == ".gc-managed-formulas.json" || entry.Name() == ".gc-managed-formulas.lock") {
+			continue
+		}
+		entryCount++
+	}
+	if entryCount != 2 {
+		t.Errorf("got %d entries, want 2 (canonical + legacy compatibility entries)", entryCount)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 )
 
 const (
@@ -55,7 +57,7 @@ func (r controllerStopResult) failClosedError() error {
 
 type controllerStopClient struct {
 	stat         func(string) (os.FileInfo, error)
-	dial         func(network, address string, timeout time.Duration) (net.Conn, error)
+	dial         func(address string, timeout time.Duration) (net.Conn, error)
 	dialTimeout  time.Duration
 	writeTimeout time.Duration
 	readTimeout  time.Duration
@@ -64,7 +66,7 @@ type controllerStopClient struct {
 func sendControllerStop(cityPath string, force bool) controllerStopResult {
 	return controllerStopClient{
 		stat:         os.Stat,
-		dial:         net.DialTimeout,
+		dial:         localsocket.Dial,
 		dialTimeout:  controllerStopDialTimeout,
 		writeTimeout: controllerStopWriteTimeout,
 		readTimeout:  controllerStopReadTimeout,
@@ -81,7 +83,7 @@ func (c controllerStopClient) stop(cityPath string, force bool) controllerStopRe
 		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "stating socket before dial", errors.New("socket stat returned no identity"))
 	}
 
-	conn, err := c.dial("unix", socketPath, c.dialTimeout)
+	conn, err := c.dial(socketPath, c.dialTimeout)
 	if err != nil {
 		return classifiedControllerStopResult(controllerStopDefinitePreEntryUnavailable, "dialing socket", err)
 	}

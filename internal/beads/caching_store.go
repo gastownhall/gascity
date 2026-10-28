@@ -36,6 +36,11 @@ type CachingStore struct {
 	dirty               map[string]struct{}
 	beadSeq             map[string]uint64
 	localBeadAt         map[string]time.Time
+	localCloseInFlight  map[string]int
+	localCloseStoreRefs int
+	localCloseStash     map[string][]cacheNotification
+	readCloseSeq        map[string]uint64
+	inFlightReadSeq     map[uint64]int
 	deletedSeq          map[string]uint64
 	state               cacheState
 	lastFreshAt         time.Time
@@ -324,6 +329,10 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		dirty:               make(map[string]struct{}),
 		beadSeq:             make(map[string]uint64),
 		localBeadAt:         make(map[string]time.Time),
+		localCloseInFlight:  make(map[string]int),
+		localCloseStash:     make(map[string][]cacheNotification),
+		readCloseSeq:        make(map[string]uint64),
+		inFlightReadSeq:     make(map[uint64]int),
 		deletedSeq:          make(map[string]uint64),
 		readyProjectionLost: make(map[string]struct{}),
 		problemLog:          make(map[string]cacheProblemLogState),
@@ -487,6 +496,9 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	c.advanceObservationLocked()
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
+	if bead.Status != "closed" {
+		c.clearReadCloseSeqIfUnblockedLocked(id)
+	}
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -514,6 +526,204 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	case seqClearBeadSeqOnly:
 		delete(c.beadSeq, id)
 	}
+}
+
+func (c *CachingStore) closedAbsorbNotificationLocked(id string, fresh Bead) (cacheNotification, bool, bool) {
+	if !reportClosedAbsorbOutsideReconcile() || fresh.Status != "closed" {
+		return cacheNotification{}, false, false
+	}
+	cached, ok := c.beads[id]
+	if !ok || cached.Status == "closed" {
+		return cacheNotification{}, false, false
+	}
+	closed := cloneBead(fresh)
+	if closed.ID == "" {
+		closed.ID = id
+	}
+	setBeadStatus(&closed, "closed")
+	notification := cacheNotification{eventType: "bead.closed", bead: closed}
+	if c.localCloseActiveLocked(id) {
+		c.stashCloseNotificationLocked(id, notification)
+		return cacheNotification{}, false, true
+	}
+	return notification, true, true
+}
+
+func (c *CachingStore) closedEvictNotificationLocked(id string) (cacheNotification, bool, bool) {
+	if !reportClosedAbsorbOutsideReconcile() {
+		return cacheNotification{}, false, false
+	}
+	cached, ok := c.beads[id]
+	if !ok || cached.Status == "closed" {
+		return cacheNotification{}, false, false
+	}
+	closed := cloneBead(cached)
+	setBeadStatus(&closed, "closed")
+	notification := cacheNotification{eventType: "bead.closed", bead: closed}
+	if c.localCloseActiveLocked(id) {
+		c.stashCloseNotificationLocked(id, notification)
+		return cacheNotification{}, false, true
+	}
+	return notification, true, true
+}
+
+func (c *CachingStore) updatedThenMaybeClosedNotificationsLocked(id string, fresh Bead, closeSeq uint64) []cacheNotification {
+	notifications := []cacheNotification{{eventType: "bead.updated", bead: cloneBead(fresh)}}
+	if notification, ok, observedClose := c.closedAbsorbNotificationLocked(id, fresh); observedClose {
+		if ok {
+			notifications = append(notifications, notification)
+		}
+		c.fenceReportedCloseAtSeqLocked(id, closeSeq)
+	}
+	return notifications
+}
+
+func (c *CachingStore) fenceReportedCloseLocked(id string) {
+	if reportClosedAbsorbOutsideReconcile() {
+		c.advanceObservationLocked()
+		c.mutationSeq++
+		c.fenceReportedCloseAtSeqLocked(id, c.mutationSeq)
+	}
+}
+
+func (c *CachingStore) fenceReportedCloseAtSeqLocked(id string, seq uint64) {
+	if reportClosedAbsorbOutsideReconcile() && seq != 0 {
+		if c.readCloseSeq == nil {
+			c.readCloseSeq = make(map[string]uint64)
+		}
+		c.readCloseSeq[id] = seq
+	}
+}
+
+func (c *CachingStore) readCloseFenceBlocksFreshLocked(id string, fresh Bead, startSeq uint64) bool {
+	if !reportClosedAbsorbOutsideReconcile() || fresh.Status == "closed" {
+		return false
+	}
+	return c.readCloseSeq[id] > startSeq
+}
+
+func (c *CachingStore) beginSnapshotReadSeq() (uint64, func()) {
+	c.mu.Lock()
+	startSeq := c.mutationSeq
+	if reportClosedAbsorbOutsideReconcile() {
+		if c.inFlightReadSeq == nil {
+			c.inFlightReadSeq = make(map[uint64]int)
+		}
+		c.inFlightReadSeq[startSeq]++
+	}
+	c.mu.Unlock()
+	return startSeq, func() {
+		c.finishSnapshotReadSeq(startSeq)
+	}
+}
+
+func (c *CachingStore) finishSnapshotReadSeq(startSeq uint64) {
+	if !reportClosedAbsorbOutsideReconcile() {
+		return
+	}
+	c.mu.Lock()
+	if refs := c.inFlightReadSeq[startSeq]; refs <= 1 {
+		delete(c.inFlightReadSeq, startSeq)
+	} else {
+		c.inFlightReadSeq[startSeq] = refs - 1
+	}
+	c.mu.Unlock()
+}
+
+func (c *CachingStore) olderSnapshotReadInFlightLocked(seq uint64) bool {
+	if !reportClosedAbsorbOutsideReconcile() || seq == 0 {
+		return false
+	}
+	for startSeq, refs := range c.inFlightReadSeq {
+		if refs > 0 && startSeq < seq {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *CachingStore) clearReadCloseSeqIfUnblockedLocked(id string) {
+	if seq := c.readCloseSeq[id]; seq != 0 && !c.olderSnapshotReadInFlightLocked(seq) {
+		delete(c.readCloseSeq, id)
+	}
+}
+
+func (c *CachingStore) evictReadMissingLocked(id string) {
+	readCloseSeq := c.readCloseSeq[id]
+	c.evictLocked(id)
+	if readCloseSeq != 0 {
+		if c.readCloseSeq == nil {
+			c.readCloseSeq = make(map[string]uint64)
+		}
+		c.readCloseSeq[id] = readCloseSeq
+	}
+}
+
+func (c *CachingStore) localCloseActiveLocked(id string) bool {
+	return c.localCloseInFlight[id] > 0 || c.localCloseStoreRefs > 0
+}
+
+func (c *CachingStore) stashCloseNotificationLocked(id string, notification cacheNotification) {
+	c.localCloseStash[id] = append(c.localCloseStash[id], notification)
+}
+
+func (c *CachingStore) cachedClosedLocked(id string) bool {
+	cached, ok := c.beads[id]
+	return ok && cached.Status == "closed"
+}
+
+func (c *CachingStore) beginLocalClose(id string) func(bool) []cacheNotification {
+	if id == "" || !reportClosedAbsorbOutsideReconcile() {
+		return func(bool) []cacheNotification { return nil }
+	}
+	c.mu.Lock()
+	c.localCloseInFlight[id]++
+	c.mu.Unlock()
+	return func(localEmitted bool) []cacheNotification {
+		c.mu.Lock()
+		if c.localCloseInFlight[id] <= 1 {
+			delete(c.localCloseInFlight, id)
+		} else {
+			c.localCloseInFlight[id]--
+		}
+		notifications := c.settleCloseStashLocked(id, localEmitted)
+		c.mu.Unlock()
+		return notifications
+	}
+}
+
+func (c *CachingStore) beginLocalCloseStore() func(map[string]bool) []cacheNotification {
+	if !reportClosedAbsorbOutsideReconcile() {
+		return func(map[string]bool) []cacheNotification { return nil }
+	}
+	c.mu.Lock()
+	c.localCloseStoreRefs++
+	c.mu.Unlock()
+	return func(localEmitted map[string]bool) []cacheNotification {
+		c.mu.Lock()
+		if c.localCloseStoreRefs > 0 {
+			c.localCloseStoreRefs--
+		}
+		var notifications []cacheNotification
+		for id := range c.localCloseStash {
+			notifications = append(notifications, c.settleCloseStashLocked(id, localEmitted[id])...)
+		}
+		c.mu.Unlock()
+		return notifications
+	}
+}
+
+func (c *CachingStore) settleCloseStashLocked(id string, localEmitted bool) []cacheNotification {
+	if localEmitted {
+		delete(c.localCloseStash, id)
+		return nil
+	}
+	if c.localCloseActiveLocked(id) {
+		return nil
+	}
+	notifications := append([]cacheNotification(nil), c.localCloseStash[id]...)
+	delete(c.localCloseStash, id)
+	return notifications
 }
 
 // absorbReadyProjectionLocked decides what happens to a row's is_blocked
@@ -662,6 +872,7 @@ func (c *CachingStore) evictLocked(id string) {
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
 	delete(c.readyProjectionLost, id)
+	c.clearReadCloseSeqIfUnblockedLocked(id)
 }
 
 // tombstoneLocked evicts id and installs a deletion fence at seq. seq must be a
@@ -728,6 +939,12 @@ func (c *CachingStore) cacheServableLocked() bool {
 // survived the bounded retry. No backing I/O happens under c.mu (I7).
 func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
 	suppressed := make(map[string]struct{})
+	var readStartSeq uint64
+	finishRead := func() {}
+	if reportClosedAbsorbOutsideReconcile() {
+		readStartSeq, finishRead = c.beginSnapshotReadSeq()
+		defer finishRead()
+	}
 	for pass := 0; pass < 2; pass++ {
 		c.mu.RLock()
 		if !gate() {
@@ -735,6 +952,13 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			return errDirtyOverlayFallback
 		}
 		startSeq := c.mutationSeq
+		if pass == 0 {
+			if reportClosedAbsorbOutsideReconcile() {
+				startSeq = readStartSeq
+			} else {
+				readStartSeq = startSeq
+			}
+		}
 		todo := c.dirtyToRefreshLocked(suppressed)
 		if len(todo) == 0 {
 			// Cache is clean, or every remaining dirty row is a confirmed
@@ -766,11 +990,15 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 		}
 		now := time.Now()
 		absorbed := 0
+		notifications := make([]cacheNotification, 0)
 		for _, f := range fetched {
 			// Fence discipline (I3): never overwrite a mutation that landed
 			// after the snapshot. A skipped-but-still-dirty row is caught by
 			// the re-check below and handled by the retry-or-fallback.
 			if c.deletedSeq[f.id] > startSeq || c.beadSeq[f.id] > startSeq {
+				continue
+			}
+			if c.readCloseFenceBlocksFreshLocked(f.id, f.bead, readStartSeq) {
 				continue
 			}
 			opts := absorbOpts{
@@ -785,7 +1013,14 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 				opts.depsMode = depsExplicit
 				opts.deps = f.deps
 			}
+			notification, notify, observedClose := c.closedAbsorbNotificationLocked(f.id, f.bead)
+			if notify {
+				notifications = append(notifications, notification)
+			}
 			c.absorbFreshLocked(f.id, f.bead, now, opts)
+			if observedClose {
+				c.fenceReportedCloseLocked(f.id)
+			}
 			absorbed++
 		}
 		if absorbed > 0 {
@@ -795,13 +1030,16 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 		if len(c.dirtyToRefreshLocked(suppressed)) == 0 {
 			if c.retrySuppressedChurnLocked(suppressed, startSeq) {
 				c.mu.Unlock()
+				c.notifyChanges(notifications)
 				continue
 			}
 			collect(suppressed)
 			c.mu.Unlock()
+			c.notifyChanges(notifications)
 			return nil
 		}
 		c.mu.Unlock()
+		c.notifyChanges(notifications)
 	}
 	return errDirtyOverlayFallback
 }

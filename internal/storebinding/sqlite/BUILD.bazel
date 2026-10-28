@@ -92,6 +92,7 @@ go_test(
         "sqlite_fence_acquirer_compile_test.go",
         "sqlite_fence_process_linux_test.go",
         "sqlite_fence_release_linux_test.go",
+        "sqlite_header_test.go",
         "sqlite_readonly_fence_linux_test.go",
         "sqlite_sequence_floor_test.go",
         "sqlite_snapshot_file_test.go",

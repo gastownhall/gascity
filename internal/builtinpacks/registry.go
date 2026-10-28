@@ -592,8 +592,21 @@ func validatePackFiles(pack Pack, dst string) error {
 		if err != nil {
 			return fmt.Errorf("checking bundled pack cache %q file %s: %w", pack.Name, rel, err)
 		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != want.perm.Perm() {
-			return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected %s", pack.Name, rel, info.Mode().Perm(), want.perm.Perm())
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected a regular file", pack.Name, rel, info.Mode())
+		}
+		// Which permission bits a comparison can be made against is a platform
+		// question, so the comparison is platform-split and the manifest is not.
+		// A manifest mode is derived from the file's own name by
+		// MaterializedFileMode, never from the embed.FS entry, so every bundled
+		// file is owner-writable (0644, or 0755 for a script) on every platform
+		// and the extractor has nothing platform-specific to apply on the write
+		// side.
+		if err := checkMaterializedFileMode(info.Mode(), want.perm); err != nil {
+			return fmt.Errorf("bundled pack cache %q file %s %w", pack.Name, rel, err)
+		}
+		if err := checkMaterializedFileAccess(target); err != nil {
+			return fmt.Errorf("bundled pack cache %q file %s: %w", pack.Name, rel, err)
 		}
 		fmt.Fprintf(&sig, "%s:%d:%d;", rel, info.Size(), info.ModTime().UnixNano())
 	}

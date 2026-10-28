@@ -3,6 +3,11 @@ version = 2
 # Every field below is pinned by resourcecensus.bootstrapPolicy. Changing this
 # manifest alone fails; an intentional policy change updates the Go policy,
 # this file, and the generated TESTING.md table under council review.
+#
+# Native Windows port (branch windows-port, 2026-10-05): the baselines below are
+# rebased on the port's own census. The untagged rows fell because the port gave
+# Unix-only tests a //go:build unix constraint, which moves them out of the
+# untagged scope; the all-source rows grew with the port's Windows platform tests.
 
 # These broad rows retain the audit's point-in-time source needles. They do
 # not classify tests. The AST baselines below ignore comments and strings;
@@ -10,8 +15,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 701
-baseline_files = 202
+baseline_calls = 744
+baseline_files = 230
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,8 +28,8 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 488
-baseline_files = 177
+baseline_calls = 530
+baseline_files = 201
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -51,8 +56,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 473
-baseline_files = 134
+baseline_calls = 230
+baseline_files = 98
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,8 +69,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 318
-baseline_files = 121
+baseline_calls = 279
+baseline_files = 116
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -103,8 +108,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 59
-baseline_files = 24
+baseline_calls = 55
+baseline_files = 23
 reported_calls = 78
 reported_files = 27
 owner_bead = "ga-cp3hwi"
@@ -142,8 +147,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 98
-baseline_files = 38
+baseline_calls = 85
+baseline_files = 34
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"
@@ -155,8 +160,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "net_listen_config"
-baseline_calls = 1
-baseline_files = 1
+baseline_calls = 0
+baseline_files = 0
 reported_calls = 1
 reported_files = 1
 owner_bead = "ga-cp3hwi"
@@ -194,8 +199,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 9
-baseline_files = 4
+baseline_calls = 7
+baseline_files = 3
 reported_calls = 7
 reported_files = 3
 owner_bead = "ga-cp3hwi"
@@ -421,8 +426,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 454
-baseline_files = 127
+baseline_calls = 211
+baseline_files = 91
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -434,8 +439,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 318
-baseline_files = 121
+baseline_calls = 279
+baseline_files = 116
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
@@ -473,8 +478,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 58
-baseline_files = 24
+baseline_calls = 54
+baseline_files = 23
 reported_calls = 75
 reported_files = 25
 owner_bead = "ga-cp3hwi"
@@ -512,8 +517,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 37
+baseline_calls = 83
+baseline_files = 33
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"
@@ -525,8 +530,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen_config"
-baseline_calls = 1
-baseline_files = 1
+baseline_calls = 0
+baseline_files = 0
 reported_calls = 1
 reported_files = 1
 owner_bead = "ga-cp3hwi"
@@ -564,8 +569,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 3
-baseline_files = 2
+baseline_calls = 1
+baseline_files = 1
 reported_calls = 1
 reported_files = 1
 owner_bead = "ga-cp3hwi"

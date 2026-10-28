@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TriggerResult holds the outcome of a trigger check.
@@ -308,7 +309,13 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
+	if reason := runtime.ShellCommandUnavailable(a.Check); reason != "" {
+		return TriggerResult{Due: false, Reason: "check command refused: " + reason}
+	}
+	cmd, err := runtime.ShellCommandContext(ctx, a.Check)
+	if err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
+	}
 	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
 	cmd.WaitDelay = conditionCheckPostCancelWaitDelay
 	cmd.Stdout = io.Discard
@@ -317,7 +324,12 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 		cmd.Dir = opts.ConditionDir
 	}
 	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
-	if err := cmd.Run(); err != nil {
+	err = startConditionCommand(cmd)
+	if err == nil {
+		defer releaseConditionCommand(cmd)
+		err = cmd.Wait()
+	}
+	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)
 			if cleanupErr := cleanupCommand(); cleanupErr != nil {
@@ -336,9 +348,9 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 		// also covers processes we killed and processes something else killed.
 		// Both predicates are load-bearing and neither subsumes the other:
 		// ctx.Err() == nil rules out our own cancel/deadline (on Windows a
-		// canceled check is Kill()ed and reports a clean-looking exit 1), and
-		// Exited() rules out a signal death we did not cause (OOM killer,
-		// external SIGKILL), where ExitCode() is a meaningless -1.
+		// canceled check's tree is terminated and reports a clean-looking
+		// exit 1), and Exited() rules out a signal death we did not cause
+		// (OOM killer, external SIGKILL), where ExitCode() is a meaningless -1.
 		var exitErr *exec.ExitError
 		if ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.Exited() {
 			return TriggerResult{Due: false, Reason: fmt.Sprintf("condition: not met (exit %d)", exitErr.ExitCode())}

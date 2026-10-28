@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // ReadFilteredContext is ReadFiltered but aborts the archive scan as soon as
@@ -61,7 +63,7 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 		}
 	}
 
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if len(result) == 0 {

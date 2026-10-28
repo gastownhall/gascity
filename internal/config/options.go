@@ -17,6 +17,9 @@ func ValidateOptionsSchema(schema []ProviderOption) error {
 			continue
 		}
 		if _, ok := OptionFlagArgs(opt, opt.Default); !ok {
+			if unfitOpenOptionValue(opt, opt.Default) {
+				return fmt.Errorf("option %q: default %q is refused: %s", opt.Key, opt.Default, openOptionValueRule)
+			}
 			return fmt.Errorf("option %q: default %q is not a valid choice", opt.Key, opt.Default)
 		}
 	}
@@ -33,6 +36,9 @@ func ValidateOptionDefaults(schema []ProviderOption, defaults map[string]string)
 			return fmt.Errorf("option_defaults key %q is not in the options schema", key)
 		}
 		if _, ok := OptionFlagArgs(*opt, value); !ok {
+			if unfitOpenOptionValue(*opt, value) {
+				return fmt.Errorf("option_defaults key %q: value %q is refused: %s", key, value, openOptionValueRule)
+			}
 			return fmt.Errorf("option_defaults key %q: value %q is not a valid choice", key, value)
 		}
 	}
@@ -84,7 +90,7 @@ func ResolveOptions(schema []ProviderOption, options map[string]string, effectiv
 			return nil, nil, fmt.Errorf("%w: %s", ErrUnknownOption, key)
 		}
 		if _, ok := OptionFlagArgs(*opt, value); !ok {
-			return nil, nil, fmt.Errorf("invalid value for %s: %s", key, value)
+			return nil, nil, invalidOptionValueError(*opt, key, value)
 		}
 	}
 
@@ -129,7 +135,7 @@ func ResolveExplicitOptions(schema []ProviderOption, overrides map[string]string
 			return nil, fmt.Errorf("%w: %s", ErrUnknownOption, key)
 		}
 		if _, ok := OptionFlagArgs(*opt, value); !ok {
-			return nil, fmt.Errorf("invalid value for %s: %s", key, value)
+			return nil, invalidOptionValueError(*opt, key, value)
 		}
 	}
 
@@ -744,7 +750,8 @@ func IsOpenOption(opt ProviderOption) bool {
 // shape (including forms that are not a plain "--flag value", such as an
 // alias that expands to a different id or codex's -c assignment). A value
 // with no matching choice resolves only when the option is open, by
-// rendering FlagTemplate.
+// rendering FlagTemplate, and only when the value fits the platform's command
+// line (openOptionValueFits).
 //
 // The second return is false when the value cannot be honored at all. Callers
 // must never treat that as success: omitting the flag silently unpins the
@@ -755,10 +762,26 @@ func OptionFlagArgs(opt ProviderOption, value string) ([]string, bool) {
 	if choice := findChoice(opt.Choices, value); choice != nil {
 		return cloneStrings(choice.FlagArgs), true
 	}
-	if value == "" || !IsOpenOption(opt) {
+	if value == "" || !IsOpenOption(opt) || !openOptionValueFits(value) {
 		return nil, false
 	}
 	return renderFlagTemplate(opt.FlagTemplate, value), true
+}
+
+// unfitOpenOptionValue reports whether OptionFlagArgs refuses value only
+// because it does not fit the platform's command line (openOptionValueFits):
+// the option is open and would otherwise render it.
+func unfitOpenOptionValue(opt ProviderOption, value string) bool {
+	return value != "" && IsOpenOption(opt) && findChoice(opt.Choices, value) == nil && !openOptionValueFits(value)
+}
+
+// invalidOptionValueError reports a value OptionFlagArgs refuses for key,
+// naming the platform rule when that rule is the reason.
+func invalidOptionValueError(opt ProviderOption, key, value string) error {
+	if unfitOpenOptionValue(opt, value) {
+		return fmt.Errorf("invalid value for %s: %s: %s", key, value, openOptionValueRule)
+	}
+	return fmt.Errorf("invalid value for %s: %s", key, value)
 }
 
 // renderFlagTemplate substitutes value for every OptionValuePlaceholder token.
@@ -787,6 +810,9 @@ func findChoice(choices []OptionChoice, value string) *OptionChoice {
 const (
 	UnhonoredPinUnknownOption = "unknown_option"
 	UnhonoredPinUnknownValue  = "unknown_value"
+	// UnhonoredPinUnsafeOnPlatform marks an open option value refused only
+	// because it does not fit the platform's command line.
+	UnhonoredPinUnsafeOnPlatform = "unsafe_on_platform"
 )
 
 // UnhonoredOptionPin is an EffectiveDefaults entry that cannot be turned into
@@ -817,10 +843,14 @@ func (rp *ResolvedProvider) UnhonoredOptionPins() []UnhonoredOptionPin {
 		if _, ok := OptionFlagArgs(opt, value); ok {
 			continue
 		}
+		reason := UnhonoredPinUnknownValue
+		if unfitOpenOptionValue(opt, value) {
+			reason = UnhonoredPinUnsafeOnPlatform
+		}
 		pins = append(pins, UnhonoredOptionPin{
 			Key:    opt.Key,
 			Value:  value,
-			Reason: UnhonoredPinUnknownValue,
+			Reason: reason,
 			Valid:  nonEmptyChoiceValues(opt),
 		})
 	}
@@ -856,6 +886,8 @@ func FormatUnhonoredOptionPin(agentName, providerName string, pin UnhonoredOptio
 	switch pin.Reason {
 	case UnhonoredPinUnknownOption:
 		return fmt.Sprintf("WARNING: agent %q: option_defaults %s=%q is not in the %q provider schema; flag omitted", agent, pin.Key, pin.Value, provider)
+	case UnhonoredPinUnsafeOnPlatform:
+		return fmt.Sprintf("WARNING: agent %q: option_defaults %s=%q is refused for provider %q: %s; flag omitted", agent, pin.Key, pin.Value, provider, openOptionValueRule)
 	default:
 		valid := strings.Join(pin.Valid, ", ")
 		if valid == "" {

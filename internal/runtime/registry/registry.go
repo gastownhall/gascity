@@ -148,11 +148,37 @@ func (r *Registry) Clone() *Registry {
 }
 
 // Has reports whether an exact selection name is registered.
+//
+// A false result does not mean New would fail: a name can still match a
+// registered prefix, or reach the fallback. Callers asking "would this
+// selection resolve to a real provider" want [Registry.Resolves].
 func (r *Registry) Has(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	_, ok := r.exact[name]
 	return ok
+}
+
+// Resolves reports whether name matches a registered exact name or prefix,
+// that is, whether New would build a provider for it rather than falling
+// through to the fallback.
+//
+// This mirrors lookup's matching, minus the fallback, so a caller can tell a
+// selection the registry genuinely knows from one it would silently resolve to
+// the fallback provider. Prefix registrations such as "exec:" and "ssh:" are
+// real providers, so testing exact membership alone misclassifies them.
+func (r *Registry) Resolves(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.exact[name]; ok {
+		return true
+	}
+	for prefix := range r.prefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Names returns the registered exact selection names, sorted.

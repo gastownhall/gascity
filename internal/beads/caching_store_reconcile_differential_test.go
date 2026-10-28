@@ -51,6 +51,7 @@ type storeState struct {
 	dirty        map[string]struct{}
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
+	readCloseSeq map[string]uint64
 	deletedSeq   map[string]uint64
 	mutationSeq  uint64
 	backingIsBd  bool
@@ -81,6 +82,7 @@ type mergeEndState struct {
 	dirty        map[string]struct{}
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
+	readCloseSeq map[string]uint64
 	deletedSeq   map[string]uint64
 	// readyLost is the set of rows whose is_blocked verdict the merge dropped
 	// without preserving, so readiness declines for them unless their own edges
@@ -172,6 +174,7 @@ func cloneStoreState(st storeState) storeState {
 		dirty:        cloneDirty(st.dirty),
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
+		readCloseSeq: cloneU64Map(st.readCloseSeq),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
 		mutationSeq:  st.mutationSeq,
 		backingIsBd:  st.backingIsBd,
@@ -242,6 +245,7 @@ func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 		dirty:        cloneDirty(st.dirty),
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
+		readCloseSeq: cloneU64Map(st.readCloseSeq),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
 		mutationSeq:  st.mutationSeq,
 		state:        cacheLive,
@@ -270,6 +274,9 @@ func ensureMaps(c *CachingStore) {
 	if c.localBeadAt == nil {
 		c.localBeadAt = make(map[string]time.Time)
 	}
+	if c.readCloseSeq == nil {
+		c.readCloseSeq = make(map[string]uint64)
+	}
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
 	}
@@ -292,6 +299,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		dirty:                cloneDirty(c.dirty),
 		beadSeq:              cloneU64Map(c.beadSeq),
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
+		readCloseSeq:         cloneU64Map(c.readCloseSeq),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
 		readyLost:            cloneDirty(c.readyProjectionLost),
 		state:                c.state,

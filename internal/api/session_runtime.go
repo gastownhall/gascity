@@ -125,6 +125,7 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -169,6 +170,7 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -524,12 +526,20 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		}
 	}
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	// This resolver builds the launch hints for every API resume, so the startup
+	// prompt must be delivered through them: without a payload and the delivered
+	// marker, the SessionStart hook is the only carrier and the provider
+	// truncates a large prompt (ga-4k4zfk). It also runs for every single-session
+	// request, reads included, so rendering the prompt is left to the launch.
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
 		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
+		LaunchHints: func(hints runtime.Config) (runtime.Config, error) {
+			return s.state.ApplyStartupPrompt(info, resolved, transport, hints)
+		},
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),

@@ -27,6 +27,15 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/events",
     visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/platform/filelock",
+        "//internal/platform/livefile",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
@@ -51,6 +60,7 @@ go_test(
         "rotation_auto_test.go",
         "rotation_force_test.go",
         "rotation_reader_test.go",
+        "rotation_secondary_writer_test.go",
         "rotation_superseded_test.go",
         "rotation_test.go",
         "rotation_watcher_test.go",
@@ -61,6 +71,7 @@ go_test(
     embed = [":events"],
     deps = [
         "//internal/events/eventstest",
+        "//internal/platform/filelock",
         "//internal/testenv",
     ],
 )

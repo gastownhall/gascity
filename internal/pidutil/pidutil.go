@@ -3,14 +3,11 @@ package pidutil
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -60,20 +57,7 @@ func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	if err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
-	}
-	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
-	data, err := os.ReadFile(statPath)
-	if err != nil {
-		return !psReportsZombie(pid)
-	}
-	state, ok := procStatState(string(data))
-	if ok && state == "Z" {
-		return false
-	}
-	return true
+	return platformAlive(pid)
 }
 
 // procStatState returns field 3 (state) from a Linux /proc/<pid>/stat row.
@@ -122,9 +106,9 @@ func StartTime(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("pidutil: invalid PID %d", pid)
 	}
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	data, err := readProcFile(pid, "stat")
 	if err != nil {
-		return psStartTime(pid)
+		return platformStartTime(pid)
 	}
 	stat := string(data)
 	rparen := strings.LastIndexByte(stat, ')')
@@ -176,20 +160,29 @@ func AliveWithStartTime(pid int, startTime string) bool {
 // check, and the caller skipped work it should have done. Cmdline is portable
 // now, so the platform branch is gone.
 //
-// An unreadable argv yields false — never a match. Callers treat "not my
-// process" as "do the work", which is the recoverable direction.
-func AliveWithCmdline(pid int, match func([]string) bool) bool {
+// The three answers are distinct and callers must keep them distinct:
+//
+//   - (false, nil) — the PID is gone, or it is live and definitely not a match.
+//   - (true, nil) — the PID is live and matches.
+//   - (false, err) — the PID is LIVE but its identity could not be read, so
+//     whether it matches is unknown.
+//
+// The third case used to collapse into the first. That is the direction that
+// loses: a caller holding a pidfile reads "no matching process" and starts a
+// replacement singleton over a PID that may still be running. Returning the
+// error lets the singleton gates refuse instead.
+func AliveWithCmdline(pid int, match func([]string) bool) (bool, error) {
 	if !Alive(pid) {
-		return false
+		return false, nil
 	}
 	if match == nil {
-		return false
+		return false, nil
 	}
 	argv, err := Cmdline(pid)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("pidutil: identifying live PID %d: %w", pid, err)
 	}
-	return match(argv)
+	return match(argv), nil
 }
 
 // ArgvContainsSequence reports whether argv contains seq contiguously.
@@ -237,7 +230,7 @@ func ArgvHasFlagValue(argv []string, flag, value string) bool {
 // otherwise falls back to ps. It returns an error when no mechanism can read
 // the process record.
 func Cmdline(pid int) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	data, err := readProcFile(pid, "cmdline")
 	if err != nil {
 		return platformCmdline(pid)
 	}
@@ -276,8 +269,7 @@ func NormalizeArgv(argv []string) []string {
 // no pids — distinguishable from "cannot answer" only because the task
 // directory itself was readable.
 func procChildPIDs(parent int) ([]int, bool) {
-	taskDir := filepath.Join("/proc", strconv.Itoa(parent), "task")
-	threads, err := os.ReadDir(taskDir)
+	threads, err := readProcDir(parent, "task")
 	if err != nil {
 		return nil, false
 	}
@@ -288,7 +280,7 @@ func procChildPIDs(parent int) ([]int, bool) {
 	)
 	seen := make(map[int]bool)
 	for _, thread := range threads {
-		data, err := os.ReadFile(filepath.Join(taskDir, thread.Name(), "children"))
+		data, err := readProcFile(parent, "task", thread.Name(), "children")
 		if err != nil {
 			continue
 		}
@@ -326,7 +318,10 @@ func ChildPIDs(parent int) ([]int, error) {
 	if children, ok := procChildPIDs(parent); ok {
 		return children, nil
 	}
+	return platformChildPIDs(parent)
+}
 
+func psChildPIDs(parent int) ([]int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), psTimeout())
 	defer cancel()
 

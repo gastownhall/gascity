@@ -1,5 +1,7 @@
 package proctable
 
+import "github.com/gastownhall/gascity/internal/runtime"
+
 // ManagedDoltScopeWatchdogVerb is the argv[1] re-exec marker of gc's managed
 // Dolt scope watchdog (cmd/gc/dolt_scope_watchdog.go).
 const ManagedDoltScopeWatchdogVerb = "__gc-managed-dolt-scope-watchdog"
@@ -30,20 +32,16 @@ func IsCityInfrastructureArgv(argv []string) bool {
 }
 
 // IsCityInfrastructureRoot reads pid's argv and reports whether it is city
-// infrastructure per IsCityInfrastructureArgv.
-//
-// It is a kill-path fence, NOT part of the scanner: the scanner still reports
-// such a process as a root (so its children are not promoted to roots in its
-// place), and the callers that would terminate a scanned root — the orphan
-// sweep and a session's pre-start orphan kill — consult this first and leave
-// it alone. An unreadable argv reports false, which keeps those callers'
-// pre-fence behavior. Under `go test` without an injected procfs root it
-// reports false rather than read the host's live process table.
+// infrastructure per IsCityInfrastructureArgv. An unreadable argv reports
+// false. It reads whatever process holds pid now; a caller acting on a scan
+// result uses RootIsCityInfrastructure, which reads the process the scan saw.
+// Under `go test` without an injected procfs root it reports false rather than
+// read the host's live process table.
 func IsCityInfrastructureRoot(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	if err := liveScanGuard(); err != nil {
+	if err := hostScanGuard(); err != nil {
 		return false
 	}
 	argv, err := rootArgv(pid)
@@ -53,6 +51,32 @@ func IsCityInfrastructureRoot(pid int) bool {
 	return IsCityInfrastructureArgv(argv)
 }
 
+// RootIsCityInfrastructure reports whether a root the scan found is city
+// infrastructure per IsCityInfrastructureArgv.
+//
+// It is a kill-path fence, NOT part of the scanner: the scanner still reports
+// such a process as a root (so its children are not promoted to roots in its
+// place), and the callers that would terminate a scanned root — the orphan
+// sweep and a session's pre-start orphan kill — consult this first and leave
+// it alone.
+//
+// On Windows the command line is read through a handle checked against
+// live.StartIdentity, and a root that is still running but cannot be read is an
+// error rather than a verdict: terminating it would rest on a command line
+// nobody read. A root that is gone, or whose PID now belongs to another
+// process, is not infrastructure; KillRuntime fences on the same identity and
+// leaves that PID alone. Elsewhere it reports exactly what
+// IsCityInfrastructureRoot(live.PID) reports, and never an error.
+func RootIsCityInfrastructure(live runtime.LiveRuntime) (bool, error) {
+	if live.PID <= 0 {
+		return false, nil
+	}
+	if err := hostScanGuard(); err != nil {
+		return false, nil
+	}
+	return rootIsCityInfrastructure(live)
+}
+
 // RootStartIdentity returns pid's start-time token as the scanner would read
 // it, or "" when it cannot be read. Callers use it to tell a recycled pid from
 // the same process, e.g. to report a fenced root once rather than every sweep.
@@ -60,7 +84,7 @@ func RootStartIdentity(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
-	if err := liveScanGuard(); err != nil {
+	if err := hostScanGuard(); err != nil {
 		return ""
 	}
 	return rootStartIdentity(pid)

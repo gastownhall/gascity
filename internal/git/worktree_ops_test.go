@@ -1,11 +1,81 @@
 package git
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+const fakeGitEnvLog = "GASCITY_FAKE_GIT_ENV_LOG"
+
+func init() {
+	base := strings.ToLower(filepath.Base(os.Args[0]))
+	if base != "git" && base != "git.exe" {
+		return
+	}
+	logPath := os.Getenv(fakeGitEnvLog)
+	if logPath == "" {
+		os.Exit(0)
+	}
+	var b strings.Builder
+	b.WriteString("argv=")
+	b.WriteString(strings.Join(os.Args[1:], " "))
+	b.WriteString("\n")
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GIT_LFS_SKIP_SMUDGE=") {
+			b.WriteString(entry)
+			b.WriteString("\n")
+		}
+	}
+	if err := os.WriteFile(logPath, []byte(b.String()), 0o600); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func fakeGitOnPath(t *testing.T) string {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	name := "git"
+	if filepath.Ext(self) == ".exe" {
+		name = "git.exe"
+	}
+	fake := filepath.Join(dir, name)
+	if err := os.Link(self, fake); err != nil {
+		copyTestExecutable(t, self, fake)
+	}
+	t.Cleanup(func() { _ = os.Remove(fake) })
+	logPath := filepath.Join(t.TempDir(), "git-env.log")
+	t.Setenv(fakeGitEnvLog, logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func copyTestExecutable(t *testing.T, from, to string) {
+	t.Helper()
+	src, err := os.Open(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close() //nolint:errcheck
+	dst, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close() //nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestBranchExists(t *testing.T) {
 	dir := initTestRepo(t)
@@ -116,6 +186,36 @@ func TestWorktreeAddExistingBranch(t *testing.T) {
 	}
 	if branch != "feature-y" {
 		t.Errorf("worktree branch = %q, want feature-y", branch)
+	}
+}
+
+func TestWorktreeAddDefaultDoesNotSkipLFSSmudge(t *testing.T) {
+	logPath := fakeGitOnPath(t)
+	g := New(t.TempDir())
+	if err := g.WorktreeAddNewBranch(filepath.Join(t.TempDir(), "wt"), "feature-default", "main"); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log: %v", err)
+	}
+	if strings.Contains(string(data), "GIT_LFS_SKIP_SMUDGE=") {
+		t.Fatalf("default worktree add set GIT_LFS_SKIP_SMUDGE:\n%s", data)
+	}
+}
+
+func TestWorktreeAddOptionSkipsLFSSmudge(t *testing.T) {
+	logPath := fakeGitOnPath(t)
+	g := New(t.TempDir())
+	if err := g.WorktreeAddNewBranchWithOptions(filepath.Join(t.TempDir(), "wt"), "feature-lfs", "main", WorktreeAddOptions{SkipLFSSmudge: true}); err != nil {
+		t.Fatalf("WorktreeAddNewBranchWithOptions: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log: %v", err)
+	}
+	if !strings.Contains(string(data), "GIT_LFS_SKIP_SMUDGE=1") {
+		t.Fatalf("option-scoped worktree add did not set GIT_LFS_SKIP_SMUDGE:\n%s", data)
 	}
 }
 

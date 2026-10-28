@@ -1,5 +1,5 @@
-// Package execenv centralizes environment filtering and log redaction for
-// subprocess boundaries.
+// Package execenv centralizes environment filtering, log redaction and the
+// Windows batch-file argument check for subprocess boundaries.
 package execenv
 
 import (
@@ -46,6 +46,21 @@ func usageMetricsDisableKeyEqual(key, goos string) bool {
 		return strings.EqualFold(key, UsageMetricsDisableEnv)
 	}
 	return key == UsageMetricsDisableEnv
+}
+
+// IsExecRequestKey reports whether key names a GC_*_INFO variable, the
+// channel a gc exec helper's request travels on, comparing it as the platform
+// compares environment names: case-insensitively on Windows. A helper must not
+// inherit another helper's request under any spelling it would read.
+func IsExecRequestKey(key string) bool {
+	return isExecRequestKeyForGOOS(key, runtime.GOOS)
+}
+
+func isExecRequestKeyForGOOS(key, goos string) bool {
+	if goos == "windows" {
+		key = strings.ToUpper(key)
+	}
+	return strings.HasPrefix(key, "GC_") && strings.HasSuffix(key, "_INFO")
 }
 
 // IsSensitiveKey reports whether an environment key is likely to contain a

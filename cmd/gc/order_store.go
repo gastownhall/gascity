@@ -464,7 +464,11 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 		return holderPID == state.PID
 	}
 	layout := managedDoltOrderRuntimeLayoutForDataDir(cityPath, dataDir)
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: decline to adopt. This gate only grants trust.
+		return false
+	}
 	return owned && !deleted
 }
 
@@ -529,7 +533,11 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: decline to adopt. This gate only grants trust.
+		return false
+	}
 	if deleted {
 		return false
 	}

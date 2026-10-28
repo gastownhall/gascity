@@ -8,12 +8,16 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/exec",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/beads"],
+    deps = [
+        "//internal/beads",
+        "//internal/execenv",
+    ],
 )
 
 go_test(
     name = "exec_test",
     srcs = [
+        "batchfile_windows_test.go",
         "br_script_test.go",
         "exec_test.go",
         "idprefix_test.go",

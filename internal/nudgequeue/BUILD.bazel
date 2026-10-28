@@ -14,6 +14,8 @@ go_library(
         "//internal/citylayout",
         "//internal/clock",
         "//internal/fsys",
+        "//internal/platform/filelock",
+        "//internal/platform/localsocket",
     ],
 )
 
@@ -30,6 +32,7 @@ go_test(
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/clock",
+        "//internal/platform/filelock",
         "//internal/testenv",
     ],
 )

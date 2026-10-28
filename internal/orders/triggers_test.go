@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -164,7 +165,7 @@ func TestCheckTriggerCronAlreadyRunThisMinute(t *testing.T) {
 }
 
 func TestCheckTriggerCondition(t *testing.T) {
-	a := Order{Name: "check", Trigger: "condition", Check: "true"}
+	a := Order{Name: "check", Trigger: "condition", Check: "exit 0"}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTrigger(a, now, neverRan, nil, nil)
 	if !result.Due {
@@ -177,10 +178,15 @@ func TestCheckTriggerConditionUsesOptions(t *testing.T) {
 	if realDir, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = realDir
 	}
+	check := `test "$GC_CITY_PATH" = "$EXPECT_CITY" && test "$(pwd -P)" = "$(cd "$EXPECT_CITY" && pwd -P)"`
+	if goruntime.GOOS == "windows" {
+		// A check is PowerShell source on Windows (runtime.ShellCommandContext).
+		check = `if ($env:GC_CITY_PATH -eq $env:EXPECT_CITY -and (Get-Location).ProviderPath -eq (Resolve-Path -LiteralPath $env:EXPECT_CITY).ProviderPath) { exit 0 }; exit 1`
+	}
 	a := Order{
 		Name:    "check",
 		Trigger: "condition",
-		Check:   `test "$GC_CITY_PATH" = "$EXPECT_CITY" && test "$(pwd -P)" = "$(cd "$EXPECT_CITY" && pwd -P)"`,
+		Check:   check,
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{

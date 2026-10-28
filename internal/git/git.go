@@ -495,10 +495,14 @@ func (g *Git) run(args ...string) (string, error) {
 
 // runCtx executes a git command with a context for cancellation/timeout.
 func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
+	return g.runCtxExtraEnv(ctx, nil, args...)
+}
+
+func (g *Git) runCtxExtraEnv(ctx context.Context, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	// Build clean env: inherit everything except git-specific vars.
-	cmd.Env = sanitizeGitEnv(os.Environ())
+	cmd.Env = append(sanitizeGitEnv(os.Environ()), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)

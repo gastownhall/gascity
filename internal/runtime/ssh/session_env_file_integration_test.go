@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package ssh
 
@@ -17,9 +17,6 @@ import (
 // pins both halves of the contract: non-zero exit, and no half-written
 // credential left on the box.
 func TestStagingScriptFailsClosedOnAShortWrite(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh")
-	}
 	envBody := "K='v'\nexport K\n"
 	script, err := stagingScript(envBody, "")
 	if err != nil {
@@ -56,9 +53,6 @@ func TestStagingScriptFailsClosedOnAShortWrite(t *testing.T) {
 // and checks the artifacts it is supposed to leave behind: a 0700 directory
 // holding 0600 files whose bytes match what we asked for.
 func TestStagingScriptRunsAgainstARealShell(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh")
-	}
 	envBody := shellEnvFile(map[string]string{"K": "a'b\"c$d#e\nf"})
 	tmuxBody := tmuxCommandLine([]string{"new-session", "-d", "-e", "K=a'b"}) + "\n"
 	script, err := stagingScript(envBody, tmuxBody)
@@ -115,9 +109,6 @@ func TestStagingScriptRunsAgainstARealShell(t *testing.T) {
 // between mktemp and its cleanup leaves a secret-bearing directory on the box
 // with nothing to remove it, so the next staging run collects it.
 func TestStagingScriptSweepsStaleDirectories(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh")
-	}
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("no find")
 	}

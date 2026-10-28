@@ -105,6 +105,9 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.IsRunning(name) {
 		return runtime.ErrSessionExists
 	}
+	if err := startCommandRefusal(cfg); err != nil {
+		return fmt.Errorf("herdr: start %q: %w", name, err)
+	}
 	// Step 0: stage the working directory, then run pre_start host-side,
 	// mirroring the other host-side providers (tmux stageStartFiles +
 	// doStartSession Step 0, subprocess/acp StageSessionWorkDir): stage
@@ -214,15 +217,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 			_ = p.c.tabClose(ctx, tabID)
 		}
 	case spec.Raw != "":
-		// exec through the shell so the pane's root process becomes the
-		// command: when it exits the pane (and tab) close, preserving the
-		// tmux contract that a session ends with its command. The typed
-		// command executes only after the fresh pane's shell finishes
-		// initializing, so wait (bounded) for the launch to actually land —
-		// otherwise callers probing right after Start see a bare shell.
-		if err = p.c.paneRunCommand(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
-			p.waitPaneLaunched(ctx, paneID, spec.Raw)
-		}
+		err = p.launchRaw(ctx, paneID, spec.Raw)
 	default:
 		// Empty command: the pane's own shell is the session.
 	}
@@ -295,7 +290,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
 		// last resort.
 		if startupText != "" {
-			if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
+			if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText, cfg.NotReadyMarkers, cfg.ReadyPromptPrefix); err != nil {
 				p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
 			}
 		}
@@ -460,10 +455,16 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 }
 
 // runSetupCommand executes one setup command under the provider's setupTimeout,
-// mirroring tmux's tmuxStartOps.runSetupCommand: `sh -c <cmd>`, cwd from GC_DIR
-// (the workDir a pre_start may itself be creating — so it is intentionally read
-// from env rather than cfg.WorkDir), process env plus cfg.Env.
+// mirroring tmux's tmuxStartOps.runSetupCommand: the platform's command
+// interpreter (runtime.ShellCommandContext: `sh -c <cmd>` on Unix, PowerShell
+// on Windows), cwd from GC_DIR (the workDir a pre_start may itself be
+// creating — so it is intentionally read from env rather than cfg.WorkDir),
+// process env plus cfg.Env. A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing.
 func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string) error {
+	if reason := runtime.ShellCommandUnavailable(cmd); reason != "" {
+		return fmt.Errorf("setup command refused: %s", reason)
+	}
 	timeout := p.setupTimeout
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
@@ -484,7 +485,10 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 		runCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
+	c, err := runtime.ShellCommandContext(runCtx, cmd)
+	if err != nil {
+		return err
+	}
 	// cwd from GC_DIR when it exists; otherwise fall back to the city root —
 	// the same not-yet-created-workDir fallback effectiveWorkDir applies to the
 	// agent itself. A pool session's worktree is often created concurrently with
@@ -546,20 +550,6 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	return nil
 }
 
-// Stop closes the agent's pane and clears its metadata sidecar. Idempotent.
-// The pane resolves through the sidecar binding when the name is gone — the
-// earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
-// closePane never issued ⇒ panes piled up across witness sleep cycles.
-func (p *Provider) Stop(name string) error {
-	ctx := context.Background()
-	pid, err := p.paneID(ctx, name)
-	if err == nil && pid != "" {
-		_ = p.c.closePane(ctx, pid)
-	}
-	_ = p.clearMeta(name)
-	return nil
-}
-
 // Interrupt sends a soft ctrl+c to the agent (herdr exposes no signal API).
 func (p *Provider) Interrupt(name string) error {
 	ctx := context.Background()
@@ -583,13 +573,6 @@ func (p *Provider) IsRunning(name string) bool {
 
 // IsAttached reports false: herdr 0.7.1 exposes no clean attach-state query.
 func (p *Provider) IsAttached(_ string) bool { return false }
-
-// Attach runs `herdr agent attach`, blocking until the user detaches.
-func (p *Provider) Attach(name string) error {
-	cmd := exec.Command(p.c.bin, "--session", p.c.session, "agent", "attach", herdrAgentName(name))
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run() // blocks until the user detaches
-}
 
 // ProcessAlive reports whether the agent's pane has a live foreground process,
 // optionally requiring one of processNames to be present.
@@ -631,7 +614,7 @@ func (p *Provider) processAliveByPane(ctx context.Context, name, paneID string, 
 	}
 	for _, pr := range fg {
 		for _, want := range processNames {
-			if pr.Name == want {
+			if proctable.ProcessNameKey(pr.Name) == proctable.ProcessNameKey(want) {
 				return true
 			}
 		}
@@ -657,7 +640,7 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 			probe, perr := p.probePane(ctx, holderPane)
 			return perr == nil && probe.Exists && probe.Busy
 		},
-		closePane:  func(holderPane string) error { return p.c.closePane(ctx, holderPane) },
+		closePane:  func(holderPane string) error { return p.closeSessionPane(ctx, name, holderPane) },
 		retryStart: func() (agentInfo, error) { return p.c.startAgentKind(ctx, hn, kind, paneID, args) },
 	})
 }
@@ -690,34 +673,13 @@ func (p *Provider) waitPaneShellReady(ctx context.Context, paneID string) {
 	}
 }
 
-// rawLaunchWait bounds how long Start's raw path waits for the typed
-// `exec /bin/sh -c …` to actually execute in the fresh pane. The typed launch
-// runs only after the pane's shell finishes initializing (rc files can take
-// seconds and spawn their own foreground children, so pane busyness alone
-// cannot confirm the launch). The bound only bites on a wedged shell, after
-// which Start proceeds best-effort (the reconciler tolerates a slow launch).
+// rawLaunchWait bounds how long Start's raw path waits for the typed launch to
+// actually execute in the fresh pane. The typed launch runs only after the
+// pane's shell finishes initializing (rc files can take seconds and spawn their
+// own foreground children, so pane busyness alone cannot confirm the launch).
+// The bound only bites on a wedged shell, after which Start proceeds
+// best-effort (the reconciler tolerates a slow launch).
 const rawLaunchWait = 15 * time.Second
-
-// waitPaneLaunched polls the pane until the launched `/bin/sh -c <raw>` shows
-// up in its foreground (exec preserves argv), the pane is gone (the command
-// already ran and exited), or the bound elapses. Best-effort by design.
-func (p *Provider) waitPaneLaunched(ctx context.Context, paneID, raw string) {
-	deadline := time.Now().Add(rawLaunchWait)
-	for time.Now().Before(deadline) {
-		shellPID, fg, err := p.c.processInfo(ctx, paneID)
-		switch {
-		case err != nil && (strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found")):
-			return // pane already gone: the command ran and exited
-		case err == nil && shellPID != 0 && (paneRunsCommand(fg, raw) || paneRootReplaced(shellPID, fg)):
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-}
 
 // processTreeAlive is the descendant-walk fallback for ProcessAlive: it takes
 // a host-wide process snapshot and checks whether any process reachable from
@@ -728,11 +690,18 @@ func (p *Provider) waitPaneLaunched(ctx context.Context, paneID, raw string) {
 // since process env (unlike ppid) survives reparenting. Purely additive: it
 // never narrows the shell/foreground-rooted match, so a genuinely-dead agent
 // still reports false.
+//
+// A snapshot that could not inspect every process still answers: a match is a
+// match, and names and parentage do not need inspection. What it cannot do is
+// rule out a process whose environment went unread, which may carry sessionID;
+// while one of those could lead to a wanted name, the agent is not reported
+// dead.
 var snapshotProcesses = proctable.SnapshotProcesses
 
 func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID string) bool {
 	records, err := snapshotProcesses()
-	if err != nil || len(records) == 0 {
+	partial := errors.Is(err, proctable.ErrScanIncomplete)
+	if (err != nil && !partial) || len(records) == 0 {
 		return false
 	}
 	roots := make([]int, 0, len(fg)+1)
@@ -749,7 +718,19 @@ func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID 
 			}
 		}
 	}
-	return proctable.DescendantAlive(records, roots, processNames)
+	if proctable.DescendantAlive(records, roots, processNames) {
+		return true
+	}
+	if !partial || sessionID == "" {
+		return false
+	}
+	var unread []int
+	for _, r := range records {
+		if r.SessionIDUnknown {
+			unread = append(unread, r.PID)
+		}
+	}
+	return proctable.DescendantAlive(records, unread, processNames)
 }
 
 // ObserveLiveness reports session presence (Running) and agent-process
@@ -861,7 +842,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	agents, err := p.c.listAgents(ctx)
 	if err != nil {
-		return nil, err
+		return nil, listRunningFailure(err)
 	}
 	seen := make(map[string]bool)   // gc names already listed
 	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions

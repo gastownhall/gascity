@@ -716,6 +716,9 @@ func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name stri
 		explainProviderField(w, "ready_delay_ms", fmt.Sprintf("%d", r.ReadyDelayMs), r.Provenance.FieldLayer["ready_delay_ms"])
 	}
 	explainProviderField(w, "ready_prompt_prefix", r.ReadyPromptPrefix, r.Provenance.FieldLayer["ready_prompt_prefix"])
+	if len(r.NotReadyMarkers) > 0 {
+		explainProviderField(w, "not_ready_markers", strings.Join(r.NotReadyMarkers, ","), r.Provenance.FieldLayer["not_ready_markers"])
+	}
 	if len(r.ProcessNames) > 0 {
 		explainProviderField(w, "process_names", strings.Join(r.ProcessNames, ","), r.Provenance.FieldLayer["process_names"])
 	}
@@ -825,6 +828,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"prompt_flag":              r.PromptFlag,
 			"ready_delay_ms":           r.ReadyDelayMs,
 			"ready_prompt_prefix":      r.ReadyPromptPrefix,
+			"not_ready_markers":        r.NotReadyMarkers,
 			"process_names":            r.ProcessNames,
 			"resume_command":           r.ResumeCommand,
 			"resume_flag":              r.ResumeFlag,

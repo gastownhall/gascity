@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "sling",
     srcs = [
+        "beadid_other.go",
+        "beadid_windows.go",
         "cycle.go",
         "sling.go",
         "sling_attachment.go",
@@ -25,7 +27,6 @@ go_library(
         "//internal/molecule",
         "//internal/pathutil",
         "//internal/runtime",
-        "//internal/shellquote",
         "//internal/sourceworkflow",
         "//internal/telemetry",
         "//internal/workdir",
@@ -35,6 +36,7 @@ go_library(
 go_test(
     name = "sling_test",
     srcs = [
+        "beadid_windows_test.go",
         "cycle_test.go",
         "sling_attached_hint_test.go",
         "sling_attachment_test.go",

@@ -24,6 +24,16 @@ func IsPreserveExistingWarning(line string) bool {
 // copies the file to dst, creating parent directories as needed. When dst
 // already exists as a directory, the source basename is preserved under dst.
 func CopyFileOrDir(src, dst string, stderr io.Writer) error {
+	return copyFileOrDir(src, dst, "", false, stderr)
+}
+
+// CopyFileOrDirWithRel copies src into dst, applying platform adaptation using
+// relPath as the destination-relative file path or directory prefix.
+func CopyFileOrDirWithRel(src, dst, relPath string, stderr io.Writer) error {
+	return copyFileOrDir(src, dst, relPath, true, stderr)
+}
+
+func copyFileOrDir(src, dst, relPath string, adaptSingleFile bool, stderr io.Writer) error {
 	info, err := os.Stat(src)
 	if os.IsNotExist(err) {
 		return nil
@@ -32,12 +42,77 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 		return fmt.Errorf("overlay: stat %q: %w", src, err)
 	}
 	if info.IsDir() {
+		if adaptSingleFile && platformAdaptsDirectoryCopies() {
+			return copyDirWithDestRel(src, dst, filepath.Clean(relPath), stderr)
+		}
 		return CopyDir(src, dst, stderr)
 	}
 	if dstInfo, err := os.Stat(dst); err == nil && dstInfo.IsDir() {
 		dst = filepath.Join(dst, filepath.Base(src))
 	}
+	if adaptSingleFile {
+		return copyFileForPlatform(src, dst, relPath)
+	}
 	return copyFile(src, dst)
+}
+
+func copyDirWithDestRel(srcDir, dstDir, dstRelPrefix string, stderr io.Writer) error {
+	info, err := os.Stat(srcDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("overlay: stat %q: %w", srcDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("overlay: %q is not a directory", srcDir)
+	}
+	return copyDirWithDestRelRecursive(srcDir, dstDir, "", dstRelPrefix, stderr)
+}
+
+func copyDirWithDestRelRecursive(srcBase, dstBase, rel, dstRelPrefix string, stderr io.Writer) error {
+	srcPath := srcBase
+	if rel != "" {
+		srcPath = filepath.Join(srcBase, rel)
+	}
+
+	entries, err := os.ReadDir(srcPath)
+	if err != nil {
+		return fmt.Errorf("overlay: reading %q: %w", srcPath, err)
+	}
+
+	for _, entry := range entries {
+		entryRel := entry.Name()
+		if rel != "" {
+			entryRel = filepath.Join(rel, entry.Name())
+		}
+
+		if skipRuntimeMirror(entryRel) {
+			continue
+		}
+
+		if entry.IsDir() {
+			dstSubDir := filepath.Join(dstBase, entryRel)
+			if err := os.MkdirAll(dstSubDir, 0o755); err != nil {
+				fmt.Fprintf(stderr, "overlay: mkdir %q: %v\n", dstSubDir, err) //nolint:errcheck
+				continue
+			}
+			if err := copyDirWithDestRelRecursive(srcBase, dstBase, entryRel, dstRelPrefix, stderr); err != nil {
+				fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
+			}
+			continue
+		}
+		src := filepath.Join(srcBase, entryRel)
+		dst := filepath.Join(dstBase, entryRel)
+		adaptRel := entryRel
+		if dstRelPrefix != "." && dstRelPrefix != "" {
+			adaptRel = filepath.Join(dstRelPrefix, entryRel)
+		}
+		if err := copyOrMergeFileWithAdaptRel(src, dst, adaptRel, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+			fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
+		}
+	}
+	return nil
 }
 
 // CopyDir recursively copies all files from srcDir into dstDir.
@@ -125,15 +200,17 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
 		if preserveExisting != nil && preserveExisting(entryRel) {
-			if _, err := os.Stat(dst); err == nil {
-				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
-				continue
-			} else if !os.IsNotExist(err) {
+			preserve, err := shouldPreserveExistingOverlayFile(src, dst, entryRel)
+			if err != nil {
 				fmt.Fprintf(stderr, "overlay: stat %q: %v\n", dst, err) //nolint:errcheck
 				continue
 			}
+			if preserve {
+				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
+				continue
+			}
 		}
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+		if err := copyOrMergeFile(src, dst, entryRel, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
 			fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 		}
 	}
@@ -198,7 +275,7 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+		if err := copyOrMergeFile(src, dst, entryRel, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
 			return err
 		}
 	}
@@ -352,7 +429,7 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 		// Kiro's AGENTS.md is a workspace-root instruction fallback. Once any
 		// workspace, pack, or earlier overlay has provided it, later Kiro
 		// overlays preserve that file instead of replacing instructions.
-		return filepath.Clean(relPath) == "AGENTS.md"
+		return platformPreserveExistingPath(filepath.Clean(relPath))
 	}
 }
 
@@ -361,9 +438,13 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 // hook entries in the result are normalized into wrapped form, both when
 // merging and when creating the file fresh. Falls back to plain copy on any
 // merge error.
-func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
+func copyOrMergeFile(src, dst, relPath string, merge, wrapBareHooks bool) error {
+	return copyOrMergeFileWithAdaptRel(src, dst, relPath, merge, wrapBareHooks)
+}
+
+func copyOrMergeFileWithAdaptRel(src, dst, adaptRelPath string, merge, wrapBareHooks bool) error {
 	if !merge {
-		return copyFile(src, dst)
+		return copyFileForPlatform(src, dst, adaptRelPath)
 	}
 	// Only merge if destination already exists.
 	dstInfo, dstErr := os.Stat(dst)
@@ -371,16 +452,17 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 		// Destination doesn't exist or can't be stat'd — canonicalize (and
 		// normalize hook shape for wrap-style files) the source before
 		// creating it.
-		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
+		return createCanonicalSettingsFile(src, dst, adaptRelPath, wrapBareHooks)
 	}
 	dstData, err := os.ReadFile(dst)
 	if err != nil {
-		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
+		return createCanonicalSettingsFile(src, dst, adaptRelPath, wrapBareHooks)
 	}
 	srcData, err := os.ReadFile(src)
 	if err != nil {
-		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
+		return createCanonicalSettingsFile(src, dst, adaptRelPath, wrapBareHooks)
 	}
+	srcData = AdaptSettingsForPlatform(adaptRelPath, srcData)
 	var opts []MergeOption
 	if wrapBareHooks {
 		opts = append(opts, WithWrapBareHooks())
@@ -388,7 +470,7 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	merged, err := MergeSettingsJSON(dstData, srcData, opts...)
 	if err != nil {
 		// Merge failed — fall back to overwrite.
-		return copyFile(src, dst)
+		return copyFileForPlatform(src, dst, adaptRelPath)
 	}
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -402,22 +484,23 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 // wrap-style files (wrapBareHooks) it also normalizes bare hook entries into
 // wrapped form by merging the source over an empty object. Falls back to a
 // plain canonical copy if the source can't be read or isn't a JSON object.
-func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
+func createCanonicalSettingsFile(src, dst, relPath string, wrapBareHooks bool) error {
 	if !wrapBareHooks {
-		return copyCanonicalJSONFile(src, dst)
+		return copyCanonicalJSONFile(src, dst, relPath)
 	}
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst)
+		return copyCanonicalJSONFile(src, dst, relPath)
 	}
+	data = AdaptSettingsForPlatform(relPath, data)
 	out, err := MergeSettingsJSON([]byte("{}"), data, WithWrapBareHooks())
 	if err != nil {
 		// Source isn't a mergeable JSON object — fall back to canonical copy.
-		return copyCanonicalJSONFile(src, dst)
+		return copyCanonicalJSONFile(src, dst, relPath)
 	}
 	info, err := os.Stat(src)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst)
+		return copyCanonicalJSONFile(src, dst, relPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
@@ -425,14 +508,14 @@ func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
 	return os.WriteFile(dst, out, info.Mode().Perm())
 }
 
-func copyCanonicalJSONFile(src, dst string) error {
+func copyCanonicalJSONFile(src, dst, relPath string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return copyFile(src, dst)
 	}
-	canonical, err := CanonicalJSON(data)
+	canonical, err := CanonicalJSON(AdaptSettingsForPlatform(relPath, data))
 	if err != nil {
-		return copyFile(src, dst)
+		return copyFileForPlatform(src, dst, relPath)
 	}
 	info, err := os.Stat(src)
 	if err != nil {
@@ -442,6 +525,61 @@ func copyCanonicalJSONFile(src, dst string) error {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
 	return os.WriteFile(dst, canonical, info.Mode().Perm()|0o200)
+}
+
+func shouldPreserveExistingOverlayFile(src, dst, relPath string) (bool, error) {
+	if !platformAdaptsPath(relPath) {
+		if _, err := os.Stat(dst); err == nil {
+			return true, nil
+		} else if os.IsNotExist(err) {
+			return false, nil
+		} else {
+			return false, err
+		}
+	}
+	existing, err := os.ReadFile(dst)
+	if err == nil {
+		raw, readErr := os.ReadFile(src)
+		if readErr == nil {
+			adapted := AdaptSettingsForPlatform(relPath, raw)
+			if string(adapted) != string(raw) && !preservePlatformManagedFile(relPath, existing, raw, adapted) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		return true, nil
+	} else if os.IsNotExist(statErr) {
+		return false, nil
+	} else {
+		return false, statErr
+	}
+}
+
+func copyFileForPlatform(src, dst, relPath string) error {
+	if !platformAdaptsPath(relPath) {
+		return copyFile(src, dst)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return copyFile(src, dst)
+	}
+	return writeAdaptedFile(src, dst, AdaptSettingsForPlatform(relPath, data))
+}
+
+func writeAdaptedFile(src, dst string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("creating parent for %q: %w", dst, err)
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat %q: %w", src, err)
+	}
+	return os.WriteFile(dst, data, info.Mode().Perm()|0o200)
 }
 
 // copyFile copies a single file preserving permissions.

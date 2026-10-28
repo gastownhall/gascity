@@ -290,9 +290,16 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 func (c *CachingStore) runReconciliation() {
 	start := time.Now()
 
-	c.mu.RLock()
-	startSeq := c.mutationSeq
-	c.mu.RUnlock()
+	var startSeq uint64
+	finishRead := func() {}
+	if reportClosedAbsorbOutsideReconcile() {
+		startSeq, finishRead = c.beginSnapshotReadSeq()
+		defer finishRead()
+	} else {
+		c.mu.RLock()
+		startSeq = c.mutationSeq
+		c.mu.RUnlock()
+	}
 
 	bdStart := time.Now()
 	fresh, err := c.backing.List(cacheFullScanQuery())
@@ -526,12 +533,13 @@ func (c *CachingStore) mergeSnapshotLocked(
 			cachedDeps:    cachedDeps,
 			hasCachedDeps: hasCachedDeps,
 			deletedAtSeq:  c.deletedSeq[id],
-			beadAtSeq:     c.beadSeq[id],
+			beadAtSeq:     c.reconcileBeadSeqLocked(id),
 			startSeq:      startSeq,
 			localAt:       c.localBeadAt[id],
 			now:           now,
 			skipLabels:    true,
 		})
+		c.clearReconciledReadCloseSeqLocked(id, startSeq)
 		if d.degradeDepsComplete {
 			nextDepsComplete = false
 		}
@@ -577,12 +585,13 @@ func (c *CachingStore) mergeSnapshotLocked(
 			cachedExists: true,
 			cached:       cached,
 			deletedAtSeq: c.deletedSeq[id],
-			beadAtSeq:    c.beadSeq[id],
+			beadAtSeq:    c.reconcileBeadSeqLocked(id),
 			startSeq:     startSeq,
 			localAt:      c.localBeadAt[id],
 			now:          now,
 			skipLabels:   true,
 		})
+		c.clearReconciledReadCloseSeqLocked(id, startSeq)
 		if d.action != mergeEvict {
 			continue
 		}
@@ -610,12 +619,13 @@ func (c *CachingStore) mergeSnapshotLocked(
 			freshExists:  false,
 			cachedExists: false,
 			deletedAtSeq: c.deletedSeq[id],
-			beadAtSeq:    c.beadSeq[id],
+			beadAtSeq:    c.reconcileBeadSeqLocked(id),
 			startSeq:     startSeq,
 			localAt:      c.localBeadAt[id],
 			now:          now,
 			skipLabels:   true,
 		})
+		c.clearReconciledReadCloseSeqLocked(id, startSeq)
 		if d.action != mergeGCFences {
 			continue
 		}
@@ -623,6 +633,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		delete(c.dirty, id)
 		delete(c.beadSeq, id)
 		delete(c.localBeadAt, id)
+		c.clearReadCloseSeqIfUnblockedLocked(id)
 		delete(c.deps, id)
 	}
 
@@ -666,6 +677,9 @@ func (c *CachingStore) orphanFenceIDsLocked(freshByID map[string]Bead) []string 
 	for id := range c.localBeadAt {
 		add(id)
 	}
+	for id := range c.readCloseSeq {
+		add(id)
+	}
 	for id := range c.deps {
 		add(id)
 	}
@@ -674,6 +688,20 @@ func (c *CachingStore) orphanFenceIDsLocked(freshByID map[string]Bead) []string 
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+func (c *CachingStore) reconcileBeadSeqLocked(id string) uint64 {
+	seq := c.beadSeq[id]
+	if closeSeq := c.readCloseSeq[id]; closeSeq > seq {
+		return closeSeq
+	}
+	return seq
+}
+
+func (c *CachingStore) clearReconciledReadCloseSeqLocked(id string, startSeq uint64) {
+	if seq := c.readCloseSeq[id]; seq != 0 && startSeq >= seq && !c.olderSnapshotReadInFlightLocked(seq) {
+		delete(c.readCloseSeq, id)
+	}
 }
 
 // promoteLiveLocked marks the cache live after a clean full-scan

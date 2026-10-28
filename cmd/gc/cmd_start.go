@@ -164,6 +164,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			fmt.Fprintf(stderr, "on_death %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
+		reported := false
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
@@ -172,6 +173,15 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 				continue
 			}
 			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
+			if a.OnDeathIsGenerated() {
+				if reason := generatedHookUnavailable(cmd); reason != "" {
+					if stderr != nil && !reported {
+						fmt.Fprintf(stderr, "on_death %s: not run: %s\n", a.QualifiedName(), reason) //nolint:errcheck // best-effort stderr
+					}
+					reported = true
+					continue
+				}
+			}
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
 			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
@@ -599,6 +609,9 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
+	if w := startBdBatchFileWarning(cityPath); w != "" {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	startStdout := stdout
 	if jsonOut {
 		startStdout = io.Discard
@@ -784,6 +797,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	ensureInitArtifacts(cityPath, stderr, "gc start")
+	if w := startBdBatchFileWarning(cityPath); w != "" {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.

@@ -29,6 +29,8 @@ const (
 	metaBoundPane      = "GC_HERDR_PANE_ID"
 	metaBoundTab       = "GC_HERDR_TAB_ID"
 	metaBoundWorkspace = "GC_HERDR_WORKSPACE_ID"
+	metaBoundShellPID  = "GC_HERDR_SHELL_PID"
+	metaBoundShellID   = "GC_HERDR_SHELL_START_IDENTITY"
 	metaBoundMode      = "GC_HERDR_LAUNCH_MODE"
 	// metaBoundName holds the exact session name (sidecar directories use the
 	// sanitized form, which is lossy), so ListRunning can enumerate bound
@@ -139,14 +141,18 @@ func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) 
 // by Start after the agent (fresh or adopted) is up; Stop's clearMeta
 // removes it.
 func (p *Provider) bindPlacement(name string, info agentInfo, mode string) error {
-	for key, val := range map[string]string{
+	values := map[string]string{
 		metaBoundPane:      info.PaneID,
 		metaBoundTab:       info.TabID,
 		metaBoundWorkspace: info.WorkspaceID,
 		metaBoundMode:      mode,
 		metaBoundName:      name,
 		metaBoundAt:        strconv.FormatInt(time.Now().Unix(), 10),
-	} {
+	}
+	for key, val := range p.boundPaneIdentity(context.Background(), info.PaneID) {
+		values[key] = val
+	}
+	for key, val := range values {
 		if val == "" {
 			continue
 		}
@@ -163,32 +169,54 @@ func (p *Provider) clearPaneBinding(name string) {
 	_ = p.RemoveMeta(name, metaBoundPane)
 	_ = p.RemoveMeta(name, metaBoundTab)
 	_ = p.RemoveMeta(name, metaBoundWorkspace)
+	p.clearPaneBindingPlatform(name)
 	_ = p.RemoveMeta(name, metaBoundMode)
 	_ = p.RemoveMeta(name, metaBoundName)
 	_ = p.RemoveMeta(name, metaBoundAt)
 }
 
-// boundSessionNames enumerates the session names with a live-looking sidecar
-// binding (a stored name and pane id), for ListRunning to merge with herdr's
-// registry — which never sees raw shell sessions.
-func (p *Provider) boundSessionNames() []string {
+type boundSession struct {
+	name string
+	pane string
+	tab  string
+}
+
+// boundSessions enumerates sessions with a live-looking sidecar binding, for
+// ListRunning and registry-name resolution to merge with herdr's registry —
+// which never sees raw shell sessions and can also auto-name a bound pane by
+// detected agent kind.
+func (p *Provider) boundSessions() []boundSession {
 	entries, err := os.ReadDir(p.metaDir)
 	if err != nil {
 		return nil
 	}
-	var names []string
+	var sessions []boundSession
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		name, err := readMetaFile(filepath.Join(p.metaDir, e.Name(), sanitize(metaBoundName)))
+		dir := filepath.Join(p.metaDir, e.Name())
+		name, err := readMetaFile(filepath.Join(dir, sanitize(metaBoundName)))
 		if err != nil || name == "" {
 			continue
 		}
-		if pane, err := readMetaFile(filepath.Join(p.metaDir, e.Name(), sanitize(metaBoundPane))); err != nil || pane == "" {
+		pane, err := readMetaFile(filepath.Join(dir, sanitize(metaBoundPane)))
+		if err != nil || pane == "" {
 			continue
 		}
-		names = append(names, name)
+		tab, _ := readMetaFile(filepath.Join(dir, sanitize(metaBoundTab)))
+		sessions = append(sessions, boundSession{name: name, pane: pane, tab: tab})
+	}
+	return sessions
+}
+
+// boundSessionNames preserves the older enumeration shape for callers that
+// only need the gc session names.
+func (p *Provider) boundSessionNames() []string {
+	sessions := p.boundSessions()
+	names := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		names = append(names, s.name)
 	}
 	return names
 }
@@ -216,7 +244,7 @@ func (p *Provider) probePane(ctx context.Context, paneID string) (paneProbe, err
 		}
 		return paneProbe{}, err
 	}
-	return paneProbeFrom(shellPID, fg), nil
+	return p.shellProbe(shellPID, fg)
 }
 
 // interactiveShells are the interactive shells a fresh pane idles in; a pane

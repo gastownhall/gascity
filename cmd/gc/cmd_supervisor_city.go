@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"golang.org/x/term"
 )
@@ -486,7 +487,7 @@ func reloadSupervisorNoWait() error {
 	if sockPath == "" {
 		return errors.New("supervisor is not running; start it with 'gc supervisor start'")
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := localsocket.Dial(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor reload socket: %w", err)
 	}

@@ -64,7 +64,7 @@ const FingerprintVersion = "v6"
 // AcceptStartupDialogs, MouseOn, SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
-// ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
+// ReadyDelayMs, NotReadyMarkers, ProcessNames, EmitsPermissionWarning.
 //
 // The hash is a hex-encoded SHA-256 prefixed with FingerprintVersion. Same
 // config always produces the same hash regardless of map iteration order.

@@ -23,7 +23,11 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+	hints, err := h.runtimeHints()
+	if err != nil {
+		return err
+	}
+	err = h.manager.Start(ctx, id, startCommand, hints)
 	return err
 }
 
@@ -48,7 +52,9 @@ func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, 
 	}
 	startHints := hints
 	if strings.TrimSpace(startHints.Command) == "" {
-		startHints = h.runtimeHints()
+		if startHints, err = h.runtimeHints(); err != nil {
+			return err
+		}
 	}
 	err = h.manager.StartRuntimeOnly(ctx, id, command, startHints)
 	return err
@@ -68,7 +74,11 @@ func (h *SessionHandle) Attach(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	err = h.manager.Attach(ctx, id, resumeCommand, h.runtimeHints())
+	hints, err := h.runtimeHints()
+	if err != nil {
+		return err
+	}
+	err = h.manager.Attach(ctx, id, resumeCommand, hints)
 	return err
 }
 
@@ -310,7 +320,11 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
-	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	hints, err := h.runtimeHints()
+	if err != nil {
+		return MessageResult{}, err
+	}
+	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, hints, submitIntent(req.Delivery))
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -364,7 +378,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		hints, err := h.runtimeHints()
+		if err != nil {
+			return NudgeResult{}, err
+		}
+		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, hints); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}
@@ -378,7 +396,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		hints, err := h.runtimeHints()
+		if err != nil {
+			return NudgeResult{}, err
+		}
+		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, hints); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}
@@ -392,7 +414,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
+		hints, err := h.runtimeHints()
+		if err != nil {
+			return NudgeResult{}, err
+		}
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, hints)
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -439,6 +465,10 @@ func (h *SessionHandle) createDeferredLocked() (sessionpkg.Info, error) {
 }
 
 func (h *SessionHandle) createStartedLocked(ctx context.Context) (sessionpkg.Info, error) {
+	hints, err := h.launchHints()
+	if err != nil {
+		return sessionpkg.Info{}, err
+	}
 	info, err := h.manager.CreateSession(ctx, sessionpkg.CreateOptions{
 		Alias:        h.session.Alias,
 		ExplicitName: h.session.ExplicitName,
@@ -450,7 +480,7 @@ func (h *SessionHandle) createStartedLocked(ctx context.Context) (sessionpkg.Inf
 		Transport:    h.session.Transport,
 		Env:          cloneStringMap(h.session.Env),
 		Resume:       h.session.Resume,
-		Hints:        cloneRuntimeConfig(h.session.Hints),
+		Hints:        hints,
 		ExtraMeta:    cloneStringMap(h.session.Metadata),
 	})
 	if err != nil {
@@ -553,10 +583,23 @@ func (h *SessionHandle) historyProvider(info sessionpkg.Info) string {
 	return h.session.Provider
 }
 
-func (h *SessionHandle) runtimeHints() runtime.Config {
-	cfg := cloneRuntimeConfig(h.session.Hints)
+func (h *SessionHandle) runtimeHints() (runtime.Config, error) {
+	cfg, err := h.launchHints()
+	if err != nil {
+		return runtime.Config{}, err
+	}
 	cfg.Env = mergeStringMaps(cfg.Env, h.session.Env)
-	return cfg
+	return cfg, nil
+}
+
+// launchHints returns a copy of the session's hints completed for a launch by
+// its LaunchHints, when it has one.
+func (h *SessionHandle) launchHints() (runtime.Config, error) {
+	cfg := cloneRuntimeConfig(h.session.Hints)
+	if h.session.LaunchHints == nil {
+		return cfg, nil
+	}
+	return h.session.LaunchHints(cfg)
 }
 
 func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {

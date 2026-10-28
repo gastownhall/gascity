@@ -38,3 +38,24 @@ func TestDefaultRecoveryHooksSurfaceFailures(t *testing.T) {
 		}
 	}
 }
+
+// TestRecoveryHooksReportWhetherTheyAreGenerated pins OnDeathIsGenerated and
+// OnBootIsGenerated to the resolver behind EffectiveOnDeath and
+// EffectiveOnBoot: generated exactly when the agent sets no override.
+func TestRecoveryHooksReportWhetherTheyAreGenerated(t *testing.T) {
+	generated := &Agent{Name: "worker"}
+	if !generated.OnDeathIsGenerated() || !generated.OnBootIsGenerated() {
+		t.Fatal("an agent with no on_death or on_boot reports an override")
+	}
+	if generated.EffectiveOnDeath() != buildOnDeath(generated, QueryTopology{}) || generated.EffectiveOnBoot() != buildOnBoot(generated, QueryTopology{}) {
+		t.Fatal("an agent with no override does not resolve to the generated hooks")
+	}
+
+	custom := &Agent{Name: "worker", OnDeath: "Write-Output death", OnBoot: "Write-Output boot"}
+	if custom.OnDeathIsGenerated() || custom.OnBootIsGenerated() {
+		t.Fatal("an agent with overrides reports generated hooks")
+	}
+	if custom.EffectiveOnDeath() != custom.OnDeath || custom.EffectiveOnBoot() != custom.OnBoot {
+		t.Fatal("overrides do not resolve verbatim")
+	}
+}

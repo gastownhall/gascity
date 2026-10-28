@@ -17,7 +17,17 @@ type ResolvedRuntime struct {
 	SessionEnv map[string]string
 	Resume     sessionpkg.ProviderResume
 	Hints      runtime.Config
+	// LaunchHints, when set, completes Hints for a launch. A handle runs it
+	// only when it hands hints to an operation that can start the runtime
+	// (start, attach, create-started, message, nudge), so a resolver can keep
+	// launch-only work, such as rendering the startup prompt, off read-only use
+	// of the handle (state, peek, transcript, kill). An error fails that
+	// operation before anything starts.
+	LaunchHints LaunchHintsFunc
 }
+
+// LaunchHintsFunc completes resolved runtime hints for one launch.
+type LaunchHintsFunc func(runtime.Config) (runtime.Config, error)
 
 // ResolvedSessionConfig describes a new session-backed worker handle whose
 // runtime inputs have already been resolved by the caller.
@@ -98,6 +108,7 @@ func SessionSpecForResolvedRuntime(cfg ResolvedSessionConfig) (SessionSpec, erro
 		Env:          cfg.Runtime.SessionEnv,
 		Resume:       cfg.Runtime.Resume,
 		Hints:        cfg.Runtime.Hints,
+		LaunchHints:  cfg.Runtime.LaunchHints,
 		Metadata:     cfg.Metadata,
 	}, nil
 }
@@ -121,6 +132,7 @@ func applyResolvedRuntimeToSessionSpec(spec *SessionSpec, runtime *ResolvedRunti
 	spec.Env = normalized.SessionEnv
 	spec.Resume = normalized.Resume
 	spec.Hints = normalized.Hints
+	spec.LaunchHints = normalized.LaunchHints
 	if strings.TrimSpace(spec.Hints.WorkDir) == "" {
 		spec.Hints.WorkDir = strings.TrimSpace(spec.WorkDir)
 	}

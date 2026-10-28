@@ -25,6 +25,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
+// rootIsCityInfrastructure classifies a scanned root before the pre-start
+// orphan kill. It is a variable so tests can supply a classification the host
+// does not produce under `go test`.
+var rootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+
 // State represents the runtime state of a chat session.
 type State string
 
@@ -713,23 +718,63 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
-// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
-// the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
+// a non-nil error when an orphan could not be confirmed dead, so callers gating
+// a Start can refuse rather than race a survivor for the same work.
+//
+// A scan error is also fatal to the gate, and joined with any termination
+// failures rather than logged. The roots the scan did surface are still killed
+// first — a partial result is worth acting on — but an incomplete scan cannot
+// establish the one fact this gate exists to establish. Logging it and
+// returning nil said "failing closed" while doing the opposite: every guarded
+// Start proceeded on a scan that never ran.
+//
+// On Windows the gate also refuses while a session a more elevated gc started
+// in this city could still be running, since the scan here cannot read it, and
+// records a start made from above medium integrity for the same reason. Both
+// apply to every provider, whether or not it can scan the process table: the
+// elevation fence is about the city, and nothing here tells where a provider
+// runs its processes, so no provider is exempt from it.
+//
+// Where terminating a root can leave a descendant the termination could not
+// reach (proctable.RescanAfterTermination), that descendant still carries the
+// session's identity and is reported as a root by any scan made after it lost
+// its parent. The gate scans again until a pass terminates nothing, and
+// refuses if the orphans keep coming after maxOrphanPasses.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
+	if err := checkElevatedSessions(m.cityPath); err != nil {
+		return err
+	}
 	scanner, ok := m.sp.(runtime.ProcessTableScanner)
 	if !ok || sessionID == "" {
-		return nil
-	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
+		return recordElevatedSessionStart(m.cityPath)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	for pass := 1; ; pass++ {
+		terminated, err := m.killOrphanPass(scanner, sessionID, cityPath)
+		if err != nil {
+			return err
+		}
+		if terminated == 0 || !proctable.RescanAfterTermination {
+			break
+		}
+		if pass == maxOrphanPasses {
+			return fmt.Errorf("orphaned runtimes for %s were still appearing after %d passes of termination", sessionID, maxOrphanPasses)
+		}
+	}
+	return recordElevatedSessionStart(m.cityPath)
+}
+
+// maxOrphanPasses bounds how many scans the pre-start gate makes for orphans
+// its own terminations surfaced.
+const maxOrphanPasses = 3
+
+// killOrphanPass scans once for sessionID's untracked roots in cityPath and
+// terminates each, reporting how many it terminated.
+func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, sessionID, cityPath string) (int, error) {
+	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
 	var termErrs []error
+	terminated := 0
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -741,20 +786,37 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		// that merely inherited it: a managed Dolt scope watchdog or bd's
 		// db-proxy-child started from this session's shell. Terminating it
 		// signals its process group and takes the city's Dolt server down
-		// (#6316), so a same-session restart must never reach it.
-		if proctable.IsCityInfrastructureRoot(live.PID) {
+		// (#6316), so a same-session restart must never reach it. A root that
+		// cannot be classified is neither spared nor terminated, and the start
+		// is refused: the survivor may be this session's runtime.
+		infrastructure, err := rootIsCityInfrastructure(live)
+		if err != nil {
+			log.Printf("session: leaving process-table root for %s pid=%d running: %v", sessionID, live.PID, err)
+			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			continue
+		}
+		if infrastructure {
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			continue
 		}
+		terminated++
 	}
 	if len(termErrs) > 0 {
-		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+		unconfirmed := fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+		if scanErr != nil {
+			return terminated, errors.Join(unconfirmed, fmt.Errorf("scanning for orphaned runtimes for %s: %w", sessionID, scanErr))
+		}
+		return terminated, unconfirmed
 	}
-	return nil
+	if scanErr != nil {
+		return terminated, fmt.Errorf("scanning for orphaned runtimes for %s: %w", sessionID, scanErr)
+	}
+	return terminated, nil
 }
 
 func (m *Manager) now() time.Time {

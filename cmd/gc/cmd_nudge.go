@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -30,6 +29,8 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -44,6 +45,13 @@ const (
 	defaultQueuedNudgeRetryDelay    = 15 * time.Second
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
+
+	// defaultQueuedNudgeBlockedRetryDelay is how long a queued nudge is held
+	// back after its target refused it while waiting on an interactive prompt
+	// (runtime.ErrAgentBlocked). No attempt is counted, so this sets only how
+	// soon after the prompt is answered the nudge lands and how often the
+	// runtime is asked meanwhile; defaultQueuedNudgeTTL still bounds the item.
+	defaultQueuedNudgeBlockedRetryDelay = 30 * time.Second
 
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
@@ -806,12 +814,25 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// provider-formatted payload carries all; this is the one place the
 		// combined context is written.
 		emittedHookContext = true
-		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+wispExtra)
-	} else {
-		_, writeErr = io.WriteString(stdout, out)
+	}
+	// Under gc hook run, frame the output in seals: the wrapper drops a frame
+	// a failed write left open, and forwards a closed one even if its
+	// deadline fires after the ack below.
+	writeErr = sealHookRunOutput(stdout)
+	if writeErr == nil {
+		if inject {
+			writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+wispExtra)
+		} else {
+			_, writeErr = io.WriteString(stdout, out)
+		}
+	}
+	if writeErr == nil {
+		writeErr = sealHookRunOutput(stdout)
 	}
 	if writeErr != nil {
-		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(items), writeErr, time.Now())
+		// The write failed, not the nudges: return them to pending for the
+		// next drain instead of counting a failed delivery attempt.
+		_ = releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		if inject {
 			return 0
 		}
@@ -1035,7 +1056,8 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			continue
 		}
 		delivered, pollErr := nudgePollDeliverQueued(target, store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
-		if pollErr != nil {
+		blocked := errors.Is(pollErr, runtime.ErrAgentBlocked)
+		if pollErr != nil && !blocked {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
 		if delivered {
@@ -1051,13 +1073,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		// counting it would turn this into a tick counter and take the queue
 		// flock every interval. See #5317. Re-checked fresh (not reusing the
 		// pre-observe hasDue above) because the delivery attempt just run can
-		// itself have consumed the only due item.
-		if nudgePollTargetHasDueWork(target, time.Now()) {
-			skipReason := "not-delivered"
-			if pollErr != nil {
-				skipReason = "not-delivered-error"
-			}
-			if recErr := recordNudgeDispatchSkips(target.cityPath, map[string]int64{skipReason: 1}); recErr != nil {
+		// itself have consumed the only due item. A blocked target had due work
+		// by definition; holding it back is what made it not due.
+		if blocked || nudgePollTargetHasDueWork(target, time.Now()) {
+			if recErr := recordNudgeDispatchSkips(target.cityPath, map[string]int64{queuedNudgeSkipReason(pollErr): 1}); recErr != nil {
 				fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
 			}
 		}
@@ -1854,6 +1873,24 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			}
 			return false, bookkeepErr
 		}
+		if errors.Is(err, runtime.ErrAgentBlocked) {
+			// The agent waits on an interactive prompt of its own, and typing
+			// into it would answer that prompt. The block lasts until someone
+			// answers, often longer than failedQueuedNudge's retries, so hold
+			// the items back without counting an attempt. The rest of the
+			// target's backlog is held to the same time, so the target is asked
+			// once per hold and the backlog lands as one turn when it clears.
+			// The error is returned so callers can count the skip; a
+			// bookkeeping failure outranks it.
+			holdUntil := time.Now().Add(defaultQueuedNudgeBlockedRetryDelay)
+			if recErr := deferQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items), holdUntil, queuedNudgeTargetMatcher(target.cityPath, target)); recErr != nil {
+				return false, errors.Join(bookkeepErr, recErr)
+			}
+			if bookkeepErr != nil {
+				return false, bookkeepErr
+			}
+			return false, fmt.Errorf("holding back %d queued nudge(s) for %s: %w", len(items), target.agentKey(), err)
+		}
 		if errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
 			// The submit Enter was delivered and the composer drained; only the
 			// busy-indicator OBSERVATION timed out. Delivery is proven, so this
@@ -2152,18 +2189,30 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, agentName)
 	return withNudgePollerPIDLock(pidPath, func() error {
-		if running, _ := existingPollerPID(pidPath, cityPath, sessionName, agentName); running {
+		running, err := existingPollerPID(pidPath, cityPath, sessionName, agentName)
+		if err != nil {
+			// The recorded PID is live but could not be identified. Starting a
+			// replacement here would overwrite the pidfile and leave two
+			// pollers delivering the same nudges, and nothing downstream can
+			// undo that. Refuse instead: the caller retries, and a PID that has
+			// genuinely exited reads as not-running on the next pass.
+			return fmt.Errorf("checking for an existing nudge poller: %w", err)
+		}
+		if running {
 			return nil
 		}
 		exe, err := os.Executable()
 		if err != nil {
 			return err
 		}
+		if nudgepoller.IsGoTestExecutable(exe) {
+			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
+		}
 		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		processgroup.StartCommandInNewGroup(cmd)
 		disableProductMetricsForChild(cmd)
 		if err := cmd.Start(); err != nil {
 			return err
@@ -2452,6 +2501,13 @@ func nudgeQueueHasWork(state *nudgeQueueState) bool {
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	return claimDueQueuedNudgesMatching(cityPath, now, queuedNudgeTargetMatcher(cityPath, target))
+}
+
+// queuedNudgeTargetMatcher returns the predicate selecting the queued items
+// target may claim. The live-session census the fence check needs is taken at
+// most once per matcher, and only if an item needs it.
+func queuedNudgeTargetMatcher(cityPath string, target nudgeTarget) func(queuedNudge) bool {
 	var (
 		liveOnce sync.Once
 		liveIDs  map[string]struct{}
@@ -2462,9 +2518,9 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 		})
 		return liveIDs
 	}
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
+	return func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item, liveSessions)
-	})
+	}
 }
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
@@ -2487,6 +2543,13 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		for _, item := range state.Pending {
 			if !match(item) {
 				pending = append(pending, item)
+				continue
+			}
+			if queuedNudgeExpired(item, now) {
+				// The prune above stops at its budget, which a slow lock or
+				// store open can spend before it starts, so it may not have
+				// reached this item. A claim is the last stop before delivery.
+				expireQueuedNudge(state, front, item, now)
 				continue
 			}
 			if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
@@ -2874,6 +2937,16 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 }
 
 func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
+	return deferQueuedNudgeClaims(cityPath, ids, time.Time{}, nil)
+}
+
+// deferQueuedNudgeClaims returns the claimed items ids to pending without
+// counting a delivery attempt, due no earlier than deliverAfter, and holds every
+// pending item alsoHold selects (nil selects none) to the same time. A zero
+// deliverAfter leaves due times as they were, so the items are retried on the
+// next pass. An item past its TTL is dead-lettered as expired instead of held:
+// the prune passes stop at their budget, so they may not have expired it first.
+func deferQueuedNudgeClaims(cityPath string, ids []string, deliverAfter time.Time, alsoHold func(queuedNudge) bool) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -2896,7 +2969,6 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		var released []queuedNudge
 		inFlight := state.InFlight[:0]
 		for _, item := range state.InFlight {
 			if !want[item.ID] {
@@ -2905,10 +2977,27 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 			}
 			item.ClaimedAt = time.Time{}
 			item.LeaseUntil = time.Time{}
-			released = append(released, item)
+			state.Pending = append(state.Pending, item)
 		}
 		state.InFlight = inFlight
-		state.Pending = append(state.Pending, released...)
+		// A claim whose lease ran out is already back in pending, made due at
+		// once by lease recovery; it is held all the same.
+		pending := state.Pending[:0]
+		for _, item := range state.Pending {
+			if !want[item.ID] && (alsoHold == nil || !alsoHold(item)) {
+				pending = append(pending, item)
+				continue
+			}
+			if queuedNudgeExpired(item, now) {
+				expireQueuedNudge(state, front, item, now)
+				continue
+			}
+			if deliverAfter.After(item.DeliverAfter) {
+				item.DeliverAfter = deliverAfter.UTC()
+			}
+			pending = append(pending, item)
+		}
+		state.Pending = pending
 		sortQueuedNudges(state)
 		return nil
 	})
@@ -3027,7 +3116,7 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 		item.DeadAt = now.UTC()
 		return item, true
 	}
-	if item.Attempts >= defaultQueuedNudgeMaxAttempts || (!item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)) {
+	if item.Attempts >= defaultQueuedNudgeMaxAttempts || queuedNudgeExpired(item, now) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}
@@ -3171,15 +3260,8 @@ func pruneExpiredQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue
 			filtered = append(filtered, state.Pending[i:]...)
 			break
 		}
-		if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
-			item.DeadAt = now.UTC()
-			if item.LastError == "" {
-				item.LastError = "expired"
-			}
-			state.Dead = append(state.Dead, item)
-			// Best-effort: remove expired item from pending even if bead update fails.
-			// A failed bead update here would trap the item in pending forever.
-			_ = front.Terminalize(item, "expired", item.LastError, "", now)
+		if queuedNudgeExpired(item, now) {
+			expireQueuedNudge(state, front, item, now)
 			continue
 		}
 		filtered = append(filtered, item)
@@ -3187,6 +3269,23 @@ func pruneExpiredQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue
 	state.Pending = filtered
 	sortQueuedNudges(state)
 	return nil
+}
+
+// queuedNudgeExpired reports whether item has outlived its TTL at now.
+func queuedNudgeExpired(item queuedNudge, now time.Time) bool {
+	return !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)
+}
+
+// expireQueuedNudge dead-letters item as expired. Stamping its backing bead is
+// best-effort: a failed stamp must not keep the item queued past its TTL, and
+// pruneDeadQueuedNudges repairs the bead on a later pass.
+func expireQueuedNudge(state *nudgeQueueState, front *nudgequeue.Store, item queuedNudge, now time.Time) {
+	item.DeadAt = now.UTC()
+	if item.LastError == "" {
+		item.LastError = "expired"
+	}
+	state.Dead = append(state.Dead, item)
+	_ = front.Terminalize(item, "expired", item.LastError, "", now)
 }
 
 func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
@@ -3200,14 +3299,8 @@ func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgeq
 			filtered = append(filtered, state.InFlight[i:]...)
 			break
 		}
-		if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
-			item.DeadAt = now.UTC()
-			if item.LastError == "" {
-				item.LastError = "expired"
-			}
-			state.Dead = append(state.Dead, item)
-			// Best-effort: remove expired item from in-flight even if bead update fails.
-			_ = front.Terminalize(item, "expired", item.LastError, "", now)
+		if queuedNudgeExpired(item, now) {
+			expireQueuedNudge(state, front, item, now)
 			continue
 		}
 		if item.LeaseUntil.IsZero() || !item.LeaseUntil.After(now) {
@@ -3406,7 +3499,15 @@ func acquireNudgePollerLease(cityPath, sessionName, agentName string) (func(), e
 		case err == nil && strings.TrimSpace(string(current)) == strings.TrimSpace(string(pid)):
 			return nil
 		case err == nil:
-			if running, _ := existingPollerPID(pidPath, cityPath, sessionName, agentName); running {
+			running, err := existingPollerPID(pidPath, cityPath, sessionName, agentName)
+			if err != nil {
+				// The recorded PID is live but could not be identified, so
+				// whether it is already this key's poller is unknown. Taking
+				// the lease here would overwrite the pidfile and run a second
+				// singleton alongside the first. Refuse instead.
+				return fmt.Errorf("checking for an existing nudge poller: %w", err)
+			}
+			if running {
 				return errNudgePollerRunning
 			}
 		case !errors.Is(err, os.ErrNotExist):
@@ -3420,6 +3521,13 @@ func acquireNudgePollerLease(cityPath, sessionName, agentName string) (func(), e
 	return release, nil
 }
 
+// existingPollerPID reports whether the recorded PID is still this session's
+// nudge poller.
+//
+// A non-nil error means the PID is LIVE but its identity could not be read, so
+// whether it is the poller is unknown. That is deliberately distinct from
+// (false, nil): the caller must not create a second singleton on the strength
+// of a check that did not run.
 func existingPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -3439,10 +3547,7 @@ func existingPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, 
 	if cityPath == "" || sessionName == "" || agentName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
-		return true, nil
-	}
-	return false, nil
+	return pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName))
 }
 
 func writeNudgePollerPID(pidPath string, pid int) error {
@@ -3463,9 +3568,10 @@ func withNudgePollerPIDLock(pidPath string, fn func() error) error {
 		return fmt.Errorf("opening nudge poller lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		return fmt.Errorf("locking nudge poller: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return fn()
 }

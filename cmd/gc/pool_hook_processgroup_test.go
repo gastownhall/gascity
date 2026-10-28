@@ -1,3 +1,9 @@
+//go:build unix
+
+// A hook timeout must reap the whole process group, which is addressed by
+// negative PID. Windows confines a hook's tree in a Job Object instead, which
+// TestHookTimeoutReapsTheHooksTreeOnWindows pins.
+
 package main
 
 import (

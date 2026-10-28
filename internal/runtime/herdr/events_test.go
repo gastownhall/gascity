@@ -16,8 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-func goroutineCount() int { return goruntime.NumGoroutine() }
-
 // fakeHerdrServer speaks the herdr socket API's event slice: one request per
 // connection; `agent.list` answers and closes; `events.subscribe` acks and
 // then holds the connection open as an NDJSON event stream the test drives.
@@ -72,7 +70,13 @@ func newFakeHerdrServer(t *testing.T) (*fakeHerdrServer, string) {
 }
 
 func (f *fakeHerdrServer) listen(sock string) {
-	ln, err := net.Listen("unix", sock)
+	var ln net.Listener
+	var err error
+	if goruntime.GOOS == "windows" {
+		ln, err = listenHerdrEndpoint(sock)
+	} else {
+		ln, err = net.Listen("unix", sock)
+	}
 	if err != nil {
 		f.t.Fatal(err)
 	}

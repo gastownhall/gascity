@@ -4,23 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -69,12 +73,17 @@ func holdControllerLock(t *testing.T, cityDir string) {
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("flock: %v", err)
+		t.Fatalf("lock controller lock file: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		_ = f.Close()
 	})
 }
@@ -2584,6 +2593,153 @@ func TestEventsLogCheck_Missing(t *testing.T) {
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
 	}
+}
+
+// TestEventsLogCheckAgreesWithRecorderOnLockFile covers the lock file every
+// event writer opens beside the log, creating it if missing. Doctor must
+// warn exactly when a writer cannot record, without creating the lock file
+// itself and without mistaking a writer that holds it for a fault.
+func TestEventsLogCheckAgreesWithRecorderOnLockFile(t *testing.T) {
+	type city struct{ root, dir, log, lock string }
+	tests := []struct {
+		name          string
+		unixOnly      bool
+		permissions   bool
+		lockFileFirst bool
+		setup         func(t *testing.T, c city)
+		run           func(t *testing.T, c city) *CheckResult
+		wantWarning   bool
+	}{
+		{
+			name:        "unwritable directory before the lock file exists",
+			unixOnly:    true,
+			permissions: true,
+			setup:       func(t *testing.T, c city) { chmodForTest(t, c.dir, 0o555, 0o755) },
+			wantWarning: true,
+		},
+		{
+			name:          "read-only lock file",
+			permissions:   true,
+			lockFileFirst: true,
+			setup:         func(t *testing.T, c city) { chmodForTest(t, c.lock, 0o400, 0o600) },
+			wantWarning:   true,
+		},
+		{
+			name:          "unwritable directory after the lock file exists",
+			unixOnly:      true,
+			permissions:   true,
+			lockFileFirst: true,
+			setup:         func(t *testing.T, c city) { chmodForTest(t, c.dir, 0o555, 0o755) },
+		},
+		{
+			name:          "lock held by another writer",
+			lockFileFirst: true,
+			run: func(t *testing.T, c city) *CheckResult {
+				f, err := os.OpenFile(c.log, os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close() //nolint:errcheck // test cleanup
+				lock, err := filelock.AcquireAdvisoryFile(f, c.log, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: c.log})
+				if err != nil {
+					t.Fatalf("holding the writers' lock: %v", err)
+				}
+				defer lock.Release() //nolint:errcheck // test cleanup
+				done := make(chan *CheckResult, 1)
+				go func() { done <- (&EventsLogCheck{}).Run(&CheckContext{CityPath: c.root}) }()
+				select {
+				case r := <-done:
+					return r
+				case <-time.After(10 * time.Second):
+					t.Fatal("doctor waited for the writers' lock")
+					return nil
+				}
+			},
+		},
+		{
+			name: "no lock file yet",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.unixOnly && goruntime.GOOS == "windows" {
+				t.Skip("a read-only directory does not stop file creation on Windows")
+			}
+			if tt.permissions && os.Geteuid() == 0 {
+				t.Skip("running as root: permission bits do not deny access")
+			}
+			c := city{root: t.TempDir()}
+			c.dir = filepath.Join(c.root, ".gc")
+			c.log = filepath.Join(c.dir, "events.jsonl")
+			c.lock = c.log + ".lock"
+			rec, err := events.NewFileRecorder(c.log, io.Discard, events.WithoutStartupSweep())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { rec.Close() }) //nolint:errcheck // test cleanup
+			if tt.lockFileFirst {
+				if err := rec.RecordAck(events.Event{Type: events.BeadCreated, Subject: "first"}); err != nil {
+					t.Fatalf("first RecordAck: %v", err)
+				}
+			}
+			if _, err := os.Stat(c.lock); tt.lockFileFirst != (err == nil) {
+				t.Fatalf("lock file present = %v before the check, want %v (stat: %v)", err == nil, tt.lockFileFirst, err)
+			}
+			if tt.setup != nil {
+				tt.setup(t, c)
+			}
+			before := dirNamesForTest(t, c.dir)
+
+			run := tt.run
+			if run == nil {
+				run = func(_ *testing.T, c city) *CheckResult {
+					return (&EventsLogCheck{}).Run(&CheckContext{CityPath: c.root})
+				}
+			}
+			r := run(t, c)
+
+			if after := dirNamesForTest(t, c.dir); !slices.Equal(after, before) {
+				t.Errorf("doctor changed %s: entries %q, want %q", c.dir, after, before)
+			}
+			appendErr := rec.RecordAck(events.Event{Type: events.BeadCreated, Subject: "test"})
+			if tt.wantWarning {
+				if appendErr == nil {
+					t.Fatal("the scenario did not stop the recorder")
+				}
+				if r.Status != StatusWarning || !strings.Contains(r.Message, "events.jsonl.lock") {
+					t.Errorf("doctor = %v %q, want a warning naming events.jsonl.lock; RecordAck: %v", r.Status, r.Message, appendErr)
+				}
+				return
+			}
+			if appendErr != nil {
+				t.Fatalf("RecordAck: %v", appendErr)
+			}
+			if r.Status != StatusOK {
+				t.Errorf("doctor = %v %q, want OK", r.Status, r.Message)
+			}
+		})
+	}
+}
+
+func chmodForTest(t *testing.T, path string, mode, restore os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(path, restore) }) //nolint:errcheck // test cleanup
+}
+
+func dirNamesForTest(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // --- ControllerCheck ---

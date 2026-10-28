@@ -36,6 +36,30 @@ func TestCachingStoreReadyContextRejectsIncompleteDependencyProjection(t *testin
 	}
 }
 
+func TestUpdateStatusCloseNotificationsMatchUnix(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "src"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		got = append(got, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := cache.Update(bead.ID, UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	cache.runReconciliation()
+	want := []string{"bead.updated:" + bead.ID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events=%v want %v", got, want)
+	}
+}
+
 func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	t.Parallel()
 

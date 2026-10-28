@@ -44,13 +44,22 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 	if !ok {
 		return Bead{}, ErrConditionalWriteUnsupported
 	}
+	settleLocalClose := h.cache.beginLocalClose(id)
+	localEmitted := false
+	defer func() {
+		h.cache.notifyChanges(settleLocalClose(localEmitted))
+	}()
 	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
 	if err != nil {
 		h.cache.applyConditionalWriteFailure(id, err)
 		return Bead{}, err
 	}
-	h.cache.evictForConditionalWrite(id)
+	seq := h.cache.evictForConditionalWrite(id)
+	h.cache.mu.Lock()
+	h.cache.fenceReportedCloseAtSeqLocked(id, seq)
+	h.cache.mu.Unlock()
 	h.cache.notifyChange("bead.closed", closed)
+	localEmitted = true
 	return closed, nil
 }
 
@@ -182,12 +191,17 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	settleLocalClose := c.beginLocalClose(id)
+	localEmitted := false
+	defer func() {
+		c.notifyChanges(settleLocalClose(localEmitted))
+	}()
 	if err := writer.CloseIfMatch(id, expectedRevision); err != nil {
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
 	fresh, err := c.backing.Get(id)
-	c.evictForConditionalWrite(id)
+	seq := c.evictForConditionalWrite(id)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
 			c.recordProblem("refresh bead after conditional close", fmt.Errorf("%s: %w", id, err))
@@ -197,7 +211,11 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	// The close is proven committed; forcing the status onto the event
 	// payload states that fact without installing anything in the cache.
 	setBeadStatus(&fresh, "closed")
+	c.mu.Lock()
+	c.fenceReportedCloseAtSeqLocked(id, seq)
+	c.mu.Unlock()
 	c.notifyChange("bead.closed", fresh)
+	localEmitted = true
 	return nil
 }
 
@@ -299,9 +317,9 @@ func (c *CachingStore) applyConditionalWriteFailure(id string, err error) {
 // stale state, so do not "simplify" the dirty-set away. deletedSeq is never
 // stamped here: the bead still exists, and deletedSeq short-circuits Get to
 // ErrNotFound without ever consulting the backing.
-func (c *CachingStore) evictForConditionalWrite(id string) {
+func (c *CachingStore) evictForConditionalWrite(id string) uint64 {
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
+	seq := c.noteLocalMutationLocked(id)
 	delete(c.beads, id)
 	delete(c.deps, id)
 	c.dirty[id] = struct{}{}
@@ -309,4 +327,5 @@ func (c *CachingStore) evictForConditionalWrite(id string) {
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
+	return seq
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -275,6 +276,59 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
 		t.Fatalf("queue not drained: pending=%d inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestDispatchAllQueuedNudgesCountsABlockedAgentAsItsOwnSkip covers the
+// supervisor tick against a session that refuses input while it waits on an
+// interactive prompt of its own. The refusal is expected, not a dispatcher
+// failure, so the tick returns no error, and it is counted under its own skip
+// reason so `gc nudge status` tells a blocked session apart from a busy one.
+func TestDispatchAllQueuedNudgesCountsABlockedAgentAsItsOwnSkip(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	resetCLIFactoryRecorders(t)
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	fake.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: agent_blocked: waiting for the user", runtime.ErrAgentBlocked)}
+
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "read your new mail", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(store.Store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, store.Store, fake, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v, want nil: a blocked agent is not a dispatcher error", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0", delivered)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := state.DispatchSkips["agent-blocked"]; got != 1 {
+		t.Fatalf("dispatch_skips = %#v, want agent-blocked=1", state.DispatchSkips)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].Attempts != 0 {
+		t.Fatalf("pending = %#v, want the item held back with no attempt counted", state.Pending)
 	}
 }
 

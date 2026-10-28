@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -154,9 +156,6 @@ func (e journalRecoveryEnv) run(t *testing.T, harness string, extraEnv ...string
 }
 
 func TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 
 	root := repoRootForLint(t)
 	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
@@ -306,9 +305,6 @@ func prodRepoState(backupDir string) string {
 }
 
 func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 	env := setupJournalRecoveryEnv(t)
 	if err := os.WriteFile(filepath.Join(env.backupDir, "manifest"), []byte("backup"), 0o644); err != nil {
 		t.Fatalf("seed backup content: %v", err)
@@ -342,9 +338,6 @@ func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
 }
 
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 	tests := []struct {
 		name      string
 		repoState func(env journalRecoveryEnv) string
@@ -385,9 +378,6 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 }
 
 func TestJournalRecoveryMovesStoreBackWhenRestoreFails(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 	env := setupJournalRecoveryEnv(t)
 	if err := os.WriteFile(filepath.Join(env.backupDir, "manifest"), []byte("backup"), 0o644); err != nil {
 		t.Fatalf("seed backup content: %v", err)
@@ -407,9 +397,6 @@ func TestJournalRecoveryMovesStoreBackWhenRestoreFails(t *testing.T) {
 }
 
 func TestJournalRecoveryReportsWhenNoCorruptionConfirmed(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 	env := setupJournalRecoveryEnv(t)
 	env.addDatabase(t, "healthy", false, "")
 
@@ -430,9 +417,6 @@ func TestJournalRecoveryReportsWhenNoCorruptionConfirmed(t *testing.T) {
 // by hiding jq from `command -v`; otherwise the host jq path is exercised.
 func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 	root := repoRootForLint(t)
 	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
 	if err != nil {

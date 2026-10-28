@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // expectedIdentityBody is the exact byte sequence WriteProjectIdentity must
@@ -26,21 +26,20 @@ func expectedIdentityBody(id string) string {
 		"id = \"" + id + "\"\n"
 }
 
-// inodeOf returns the inode number for path on unix-like systems. The
-// project does not target Windows (all production unix variants expose
-// *syscall.Stat_t through FileInfo.Sys), matching the existing pattern in
-// cmd/gc/beads_provider_lifecycle_test.go.
-func inodeOf(t *testing.T, path string) uint64 {
+// fileIdentityOf returns path's os.FileInfo for use with [os.SameFile], which
+// answers "is this the same file object" portably: it compares device and
+// inode on Unix and the volume serial number plus file index on Windows.
+// Comparing those identities is what these tests actually need — a rewrite in
+// place keeps the identity, while an atomic temp+rename replaces it.
+// [livefile.Stat] captures the identity now; os.Stat on Windows would defer it
+// to the SameFile call, so a before/after pair would both name the current file.
+func fileIdentityOf(t *testing.T, path string) os.FileInfo {
 	t.Helper()
-	info, err := os.Stat(path)
+	info, err := livefile.Stat(path)
 	if err != nil {
 		t.Fatalf("Stat(%s): %v", path, err)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("Stat(%s) did not expose syscall.Stat_t", path)
-	}
-	return stat.Ino
+	return info
 }
 
 // writeIdentity writes body to <scope>/.beads/identity.toml after creating
@@ -361,13 +360,13 @@ func TestProjectIdentity(t *testing.T) {
 			t.Fatalf("first WriteProjectIdentity: %v", err)
 		}
 		path := ProjectIdentityPath(scope)
-		before := inodeOf(t, path)
+		before := fileIdentityOf(t, path)
 		if err := WriteProjectIdentity(fs, scope, id); err != nil {
 			t.Fatalf("second WriteProjectIdentity: %v", err)
 		}
-		after := inodeOf(t, path)
-		if before != after {
-			t.Fatalf("inode changed across idempotent write: before=%d after=%d", before, after)
+		after := fileIdentityOf(t, path)
+		if !os.SameFile(before, after) {
+			t.Fatalf("file identity changed across idempotent write: before=%v after=%v", before.Sys(), after.Sys())
 		}
 	})
 
@@ -377,13 +376,13 @@ func TestProjectIdentity(t *testing.T) {
 			t.Fatalf("first WriteProjectIdentity: %v", err)
 		}
 		path := ProjectIdentityPath(scope)
-		before := inodeOf(t, path)
+		before := fileIdentityOf(t, path)
 		if err := WriteProjectIdentity(fs, scope, "gc-local-write-b3-new"); err != nil {
 			t.Fatalf("second WriteProjectIdentity: %v", err)
 		}
-		after := inodeOf(t, path)
-		if before == after {
-			t.Fatalf("inode unchanged after overwrite with different id: inode=%d (atomic temp+rename should produce a new inode)", before)
+		after := fileIdentityOf(t, path)
+		if os.SameFile(before, after) {
+			t.Fatalf("file identity unchanged after overwrite with different id: %v (atomic temp+rename should produce a new file object)", before.Sys())
 		}
 	})
 

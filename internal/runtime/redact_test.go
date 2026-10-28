@@ -295,7 +295,7 @@ func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", inherited)
 
 	err := RunSetupCommand(context.Background(),
-		`echo "session=$GH_TOKEN" >&2; echo "inherited=$ANTHROPIC_AUTH_TOKEN"; exit 3`,
+		fixtureEchoEnvSecretsExit3,
 		map[string]string{"GH_TOKEN": sentinel}, 10*time.Second)
 	if err == nil {
 		t.Fatal("a setup command exiting 3 must fail")

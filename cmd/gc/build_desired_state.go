@@ -817,6 +817,18 @@ func buildDesiredStateWithSessionBeadsAt(
 			"beads":   len(assignedWorkBeads),
 			"partial": storePartial,
 		})
+		if !storePartial {
+			assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned = refreshDrainAckedOrExitedClaimedWorkForDemand(
+				cfg,
+				sp,
+				assignedWorkBeads,
+				assignedWorkStores,
+				assignedWorkStoreRefs,
+				readyAssigned,
+				sessionBeads,
+				stderr,
+			)
+		}
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -6444,7 +6456,9 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// ON THE RECONCILE TICK. Staging them too leaves two writers with
 	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
 	// The runtime task-worktree staging path keeps staging them — it is their
-	// sole writer.
+	// sole writer. So is session-start staging for a hook file hooks.Install
+	// does not write: tickOverlaySkip stages those on the tick too, where the
+	// platform needs it (overlay_tick_skip_windows.go).
 	//
 	// "Sole writer" is scoped to the tick on purpose. For a persistent
 	// (non-task) agent the home dir is also the session workDir, and
@@ -6465,13 +6479,19 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// below: it carries the per-pass write-tracking that keeps a path this pass
 	// itself wrote overridable by a later overlay layer (last-writer-wins).
 	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
+	stage := runtime.StageProviderOverlayDirSkippingMergeable
+	if skip := tickOverlaySkip(installHooks, bp.providers); skip != nil {
+		stage = func(srcDir, dstDir string, providers []string, warnings io.Writer, opts ...runtime.StageOption) error {
+			return runtime.StageProviderOverlayDirWithSkip(srcDir, dstDir, providers, skip, warnings, opts...)
+		}
+	}
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := stage(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := stage(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

@@ -16,6 +16,9 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Version identifies the exec contract. It is echoed to the credential command
@@ -204,16 +207,25 @@ func (s *CredentialSource) mintLocked(ctx context.Context) (string, error) {
 	return s.token, nil
 }
 
-// runCredentialCommand runs command via "sh -c" with the request JSON in
-// GC_EXEC_INFO (env only — never argv, so the request is not visible in `ps`).
-// Inherited GC_*_INFO variables are stripped so a nested exec cannot read a
-// stale request. cmd.Output captures stderr into the returned error on failure.
+// runCredentialCommand runs command through the platform's command interpreter
+// (runtime.ShellCommandContext: "sh -c" on Unix, PowerShell on Windows) with
+// the request JSON in GC_EXEC_INFO (env only — never argv, so the request is
+// not visible in `ps`). A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing. Inherited GC_*_INFO
+// variables are stripped so a nested exec cannot read a stale request.
+// cmd.Output captures stderr into the returned error on failure.
 func runCredentialCommand(ctx context.Context, command string, info ExecInfo) (ExecResult, error) {
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return ExecResult{}, fmt.Errorf("clientauth: credential command refused: %s", reason)
+	}
 	payload, err := json.Marshal(info)
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("clientauth: encoding exec info: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("clientauth: running credential command: %w", err)
+	}
 	cmd.Env = append(strippedEnv(), ExecInfoEnv+"="+string(payload))
 	out, err := cmd.Output()
 	if err != nil {
@@ -234,7 +246,7 @@ func strippedEnv() []string {
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
 		key, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(key, "GC_") && strings.HasSuffix(key, "_INFO") {
+		if execenv.IsExecRequestKey(key) {
 			continue
 		}
 		out = append(out, kv)

@@ -86,6 +86,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 	comparedStore := map[string]bool{
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
+		"readCloseSeq":        true,
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
@@ -102,6 +103,17 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
+		// The local-close fields settle reader-side close notifications while
+		// this process is inside a local close path. Reconciliation neither
+		// consults nor mutates them; duplicate/lost-notification windows are
+		// tested at the notification sites.
+		"localCloseInFlight":  true,
+		"localCloseStoreRefs": true,
+		"localCloseStash":     true,
+		// inFlightReadSeq only guards whether a read-close fence can be
+		// collected while an older snapshot read is still merging. Reconcile
+		// consults it but never owns the read lifetime it records.
+		"inFlightReadSeq": true,
 		// readyProjectionDegraded is a one-way capability latch about the
 		// BACKING STORE, set by applyReadyProjection before the seam runs and
 		// never touched by mergeSnapshotLocked. It routes readiness reads to the

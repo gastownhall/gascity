@@ -1200,18 +1200,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		agentCfg.PromptSuffix = ""
-		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
-		if agentCfg.Env != nil {
-			delete(agentCfg.Env, startupPromptDeliveredEnv)
-		}
-		if strings.TrimSpace(tp.Prompt) != "" {
-			if agentCfg.Env == nil {
-				agentCfg.Env = map[string]string{}
-			}
-			agentCfg.Env[startupPromptDeliveredEnv] = "1"
-		}
+		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
 	}
 	// Initial message: append to prompt on first start only, reusing the
 	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
@@ -1219,7 +1208,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
 	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+		if (tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none") || initialMessageRidesStartupPrompt(tp.IsACP) {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
 			existing := ""
@@ -1694,14 +1683,31 @@ func runPreparedStartCandidate(
 			err = fmt.Errorf("observing session %q after start collision: %w", item.candidate.name(), sessionExistsObservationErr)
 		}
 	}
-	// Stale session key detection: if the session was started
-	// with a resume flag but dies immediately, the session key
-	// likely references a conversation that no longer exists
-	// (e.g., "No conversation found"). Report as a failure so
-	// recordWakeFailure clears the key for the next attempt.
-	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
+	// Post-start liveness: a session that dies right after Start returns is
+	// reported as dying during startup, so the start fails instead of counting
+	// as a success. Two kinds of start need it. A session resumed with a
+	// session key: if it dies immediately, the key likely references a
+	// conversation that no longer exists (e.g., "No conversation found"), and
+	// recordWakeFailure clears the key for the next attempt. And every start
+	// whose startup prompt rides the agent's first ACP session/prompt (an ACP
+	// session on Windows; see initialMessageRidesStartupPrompt), with or
+	// without an initial message in that prompt: an agent that exits after
+	// session/new leaves the command wrapper that launched it alive past Start,
+	// so the prompt write succeeds into the pipe and the prompt would be lost
+	// behind a successful start. The failure is visible. A pending create (such
+	// as an API-created session) is closed as failed-create, and its initial
+	// message is not sent again; any other gated start records a wake failure,
+	// and its next attempt sends the startup prompt again. Each gated start
+	// reports its outcome staleKeyDetectDelay later. The window runs on ctx
+	// rather than startCtx so that a Start which used most of startupTimeout
+	// still gets the whole window; the in-flight lease allows startupTimeout +
+	// staleKeyDetectDelay for that. A Start that overran startupTimeout skips
+	// the check: it is a startup timeout whether or not the session lived, and
+	// a pending create stays open for the next attempt.
+	if startedFresh && err == nil && startCtxErr == nil && strings.TrimSpace(item.candidate.info.ID) != "" &&
+		(item.candidate.info.SessionKey != "" || (item.cfg.Nudge != "" && initialMessageRidesStartupPrompt(item.candidate.tp.IsACP))) {
 		postStartBegin := time.Now()
-		if stabilityWaiter(startCtx, item.candidate.name()) {
+		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {

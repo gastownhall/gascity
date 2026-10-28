@@ -11,6 +11,7 @@ type StartupHints struct {
 	Lifecycle              runtime.Lifecycle
 	ReadyPromptPrefix      string
 	ReadyDelayMs           int
+	NotReadyMarkers        []string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
 	AcceptStartupDialogs   *bool
@@ -66,6 +67,7 @@ func (h StartupHints) ToRuntimeConfig() runtime.Config {
 		Lifecycle:              h.Lifecycle,
 		ReadyPromptPrefix:      h.ReadyPromptPrefix,
 		ReadyDelayMs:           h.ReadyDelayMs,
+		NotReadyMarkers:        h.NotReadyMarkers,
 		ProcessNames:           h.ProcessNames,
 		EmitsPermissionWarning: h.EmitsPermissionWarning,
 		AcceptStartupDialogs:   h.AcceptStartupDialogs,

@@ -20,9 +20,16 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	if query.Live || query.ParentID != "" {
-		c.mu.RLock()
-		startSeq := c.mutationSeq
-		c.mu.RUnlock()
+		var startSeq uint64
+		finishRead := func() {}
+		if reportClosedAbsorbOutsideReconcile() {
+			startSeq, finishRead = c.beginSnapshotReadSeq()
+			defer finishRead()
+		} else {
+			c.mu.RLock()
+			startSeq = c.mutationSeq
+			c.mu.RUnlock()
+		}
 		items, err := c.backing.List(query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, items)
@@ -332,6 +339,11 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		len(refreshedLiveMissing) == 0 && len(removedLiveMissing) == 0 {
 		return items
 	}
+	notifications := make([]cacheNotification, 0)
+	defer func() {
+		c.notifyChanges(notifications)
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -362,11 +374,25 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		if c.readCloseFenceBlocksFreshLocked(item.ID, item, startSeq) {
+			current, ok := c.beads[item.ID]
+			if ok && query.Matches(current) {
+				refreshed = append(refreshed, cloneBead(current))
+			}
+			continue
+		}
+		notification, notify, observedClose := c.closedAbsorbNotificationLocked(item.ID, item)
+		if notify {
+			notifications = append(notifications, notification)
+		}
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
 			clearDirty: true,
 		})
+		if observedClose {
+			c.fenceReportedCloseLocked(item.ID)
+		}
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
@@ -378,11 +404,21 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
+		if c.readCloseFenceBlocksFreshLocked(id, bead, startSeq) {
+			continue
+		}
+		notification, notify, observedClose := c.closedAbsorbNotificationLocked(id, bead)
+		if notify {
+			notifications = append(notifications, notification)
+		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
 			clearDirty: true,
 		})
+		if observedClose {
+			c.fenceReportedCloseLocked(id)
+		}
 	}
 	for id := range removedParents {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -391,7 +427,14 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		c.evictLocked(id)
+		notification, notify, observedClose := c.closedEvictNotificationLocked(id)
+		if notify {
+			notifications = append(notifications, notification)
+		}
+		c.evictReadMissingLocked(id)
+		if observedClose {
+			c.fenceReportedCloseLocked(id)
+		}
 	}
 	for id, bead := range refreshedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -400,11 +443,21 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
+		if c.readCloseFenceBlocksFreshLocked(id, bead, startSeq) {
+			continue
+		}
+		notification, notify, observedClose := c.closedAbsorbNotificationLocked(id, bead)
+		if notify {
+			notifications = append(notifications, notification)
+		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
 			clearDirty: true,
 		})
+		if observedClose {
+			c.fenceReportedCloseLocked(id)
+		}
 	}
 	for id := range removedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
@@ -413,7 +466,14 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		c.evictLocked(id)
+		notification, notify, observedClose := c.closedEvictNotificationLocked(id)
+		if notify {
+			notifications = append(notifications, notification)
+		}
+		c.evictReadMissingLocked(id)
+		if observedClose {
+			c.fenceReportedCloseLocked(id)
+		}
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
@@ -504,8 +564,16 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	}
 	if c.state == cacheLive || c.state == cachePartial {
 		if _, ok := c.dirty[id]; ok {
-			startSeq := c.mutationSeq
-			c.mu.RUnlock()
+			var startSeq uint64
+			finishRead := func() {}
+			if reportClosedAbsorbOutsideReconcile() {
+				c.mu.RUnlock()
+				startSeq, finishRead = c.beginSnapshotReadSeq()
+				defer finishRead()
+			} else {
+				startSeq = c.mutationSeq
+				c.mu.RUnlock()
+			}
 			fresh, err := c.backing.Get(id)
 			if err != nil {
 				return Bead{}, err
@@ -531,14 +599,29 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
 			}
+			if c.readCloseFenceBlocksFreshLocked(id, fresh, startSeq) {
+				if current, ok := c.beads[id]; ok {
+					c.mu.Unlock()
+					return cloneBead(current), nil
+				}
+				c.mu.Unlock()
+				return Bead{}, ErrNotFound
+			}
+			notification, notifyClosed, observedClose := c.closedAbsorbNotificationLocked(id, fresh)
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 				depsMode:   depsFromFields,
 				seqMode:    seqClearBeadSeqOnly,
 				clearDirty: true,
 			})
+			if observedClose {
+				c.fenceReportedCloseLocked(id)
+			}
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
+			if notifyClosed {
+				c.notifyChange(notification.eventType, notification.bead)
+			}
 			return fresh, nil
 		}
 		if b, ok := c.beads[id]; ok {

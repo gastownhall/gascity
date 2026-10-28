@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -104,6 +105,9 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, s.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec beads %s: %w", args[0], err)
+	}
 	// WaitDelay ensures Go forcibly closes I/O pipes after the context
 	// expires, even if grandchild processes still hold them open.
 	cmd.WaitDelay = 2 * time.Second

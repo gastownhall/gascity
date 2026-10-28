@@ -834,7 +834,7 @@ func TestResolveTemplateBeaconOnlyKeepsPrimeInstruction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	if !strings.Contains(tp.Prompt, "Run `gc prime`") {
+	if !strings.Contains(tp.Prompt, "Run `"+runtime.GCCommandName+" prime`") {
 		t.Fatalf("beacon-only prompt must keep the gc prime instruction: %q", tp.Prompt)
 	}
 }

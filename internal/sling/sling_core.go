@@ -747,6 +747,10 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			return result, fmt.Errorf("%w", err)
 		}
 	} else {
+		if err := CheckSlingQueryBeadID(beadID); err != nil {
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+			return result, err
+		}
 		slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 		if slingWarn != "" {
 			depsTracef(deps, "sling-core: %s", slingWarn)
@@ -2039,11 +2043,15 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 		} else {
-			slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), child.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
-			if slingWarn != "" {
-				depsTracef(deps, "sling-core: %s", slingWarn)
+			err := CheckSlingQueryBeadID(child.ID)
+			if err == nil {
+				slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), child.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
+				if slingWarn != "" {
+					depsTracef(deps, "sling-core: %s", slingWarn)
+				}
+				_, err = deps.Runner(rigDir, slingCmd, childEnv)
 			}
-			if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
+			if err != nil {
 				childResult.Failed = true
 				childResult.FailReason = err.Error()
 				batchResult.Children = append(batchResult.Children, childResult)

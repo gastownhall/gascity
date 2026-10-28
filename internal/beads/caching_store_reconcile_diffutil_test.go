@@ -19,6 +19,7 @@ func diffEndStates(want, got mergeEndState) string {
 	diffStructSet(&b, "dirty", want.dirty, got.dirty)
 	diffU64Map(&b, "beadSeq", want.beadSeq, got.beadSeq)
 	diffTimeMap(&b, "localBeadAt", want.localBeadAt, got.localBeadAt)
+	diffU64Map(&b, "readCloseSeq", want.readCloseSeq, got.readCloseSeq)
 	diffU64Map(&b, "deletedSeq", want.deletedSeq, got.deletedSeq)
 	diffStructSet(&b, "readyLost", want.readyLost, got.readyLost)
 	if want.depsComplete != got.depsComplete {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -119,6 +120,7 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -666,6 +668,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -678,12 +681,21 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
 	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
+	// Deliver the startup prompt the way the reconciler's resume does: this
+	// resolver builds runtime.Config directly, so without it a resumed launch
+	// leaves the SessionStart hook as the only carrier of the prompt (ga-4k4zfk).
+	// Rendering it reads templates and can spawn git, and this resolver runs for
+	// every handle, reads included, so it is left to the launch.
+	promptCity := startupPromptCity{path: cityPath, cfg: cfg, stderr: os.Stderr}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
 		Provider:   resolvedWorkerRuntimeProviderLabel(resolved, transport, info),
 		SessionEnv: sessionEnv,
 		Hints:      runtimeHints,
+		LaunchHints: func(hints runtime.Config) (runtime.Config, error) {
+			return promptCity.applyTo(info, resolved, transport, hints)
+		},
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyGCString(resolved.ResumeStyle, info.ResumeStyle),

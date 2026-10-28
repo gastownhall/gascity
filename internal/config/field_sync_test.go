@@ -490,6 +490,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"DisplayName":            "identity/display field, not patched",
 		"PathCheck":              "internal PATH override, not patched",
 		"ReadyPromptPrefix":      "internal ready detection, not patched",
+		"NotReadyMarkers":        "internal ready detection, not patched",
 		"ProcessNames":           "reference list, not currently patched",
 		"EmitsPermissionWarning": "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",
 		"SupportsACP":            "tri-state *bool; merged via MergeProviderOverBuiltin, not ProviderPatch",

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -3563,10 +3564,14 @@ func TestShellExecRunnerKillsProcessGroupAfterWaitDelay(t *testing.T) {
 
 func TestShellExecRunnerReturnsPartialOutputOnTimeout(t *testing.T) {
 	workDir := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	timeout := 100 * time.Millisecond
+	if goruntime.GOOS == "windows" {
+		timeout = 5 * time.Second // PowerShell takes most of a second to start
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	output, err := shellExecRunner(ctx, "while :; do printf .; sleep 0.01; done", workDir, nil)
+	output, err := shellExecRunner(ctx, platformCommand("while :; do printf .; sleep 0.01; done", "while ($true) { [Console]::Out.Write('.'); Start-Sleep -Milliseconds 10 }"), workDir, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
 	}
@@ -7492,11 +7497,19 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "scoped-marker"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	check := fmt.Sprintf(
-		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$(pwd -P)" = "$(cd '%s' && pwd -P)" && test -f scoped-marker`,
-		cityDir,
-		cityDir,
-		cityDir,
+	check := platformCommand(
+		fmt.Sprintf(
+			`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$(pwd -P)" = "$(cd '%s' && pwd -P)" && test -f scoped-marker`,
+			cityDir,
+			cityDir,
+			cityDir,
+		),
+		fmt.Sprintf(
+			`if ($env:GC_CITY_PATH -eq %s -and $env:GC_STORE_ROOT -eq %s -and $env:GC_STORE_SCOPE -eq 'city' -and (Get-Location).ProviderPath -eq (Resolve-Path -LiteralPath %s).ProviderPath -and (Test-Path -LiteralPath 'scoped-marker' -PathType Leaf)) { exit 0 }; exit 1`,
+			psLiteral(cityDir),
+			psLiteral(cityDir),
+			psLiteral(cityDir),
+		),
 	)
 	ran := make(chan struct{}, 1)
 	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
@@ -7651,7 +7664,7 @@ func TestBuildOrderDispatcherCityPackLayers(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
-exec = "scripts/beads-health.sh"
+exec = "scripts/beads-health"
 trigger = "cooldown"
 interval = "30s"
 `)
@@ -7662,7 +7675,7 @@ interval = "30s"
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(topoOrderDir, "wasteland-poll.toml"), `[order]
-exec = "scripts/wasteland-poll.sh"
+exec = "scripts/wasteland-poll"
 trigger = "cooldown"
 interval = "2m"
 `)
@@ -7713,7 +7726,7 @@ func TestBuildOrderDispatcherCityPackWithOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
-exec = "scripts/beads-health.sh"
+exec = "scripts/beads-health"
 trigger = "cooldown"
 interval = "30s"
 `)
@@ -7723,7 +7736,7 @@ interval = "30s"
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(topoOrderDir, "wasteland-poll.toml"), `[order]
-exec = "scripts/wasteland-poll.sh"
+exec = "scripts/wasteland-poll"
 trigger = "cooldown"
 interval = "2m"
 `)
@@ -7785,7 +7798,7 @@ func TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, sysOrdersDir+"/beads-health.toml", `[order]
-exec = "scripts/beads-health.sh"
+exec = "scripts/beads-health"
 trigger = "cooldown"
 interval = "30s"
 `)
@@ -7799,7 +7812,7 @@ interval = "30s"
 		t.Fatal(err)
 	}
 	writeFile(t, topoOrdersDir+"/wasteland-poll.toml", `[order]
-exec = "scripts/wasteland-poll.sh"
+exec = "scripts/wasteland-poll"
 trigger = "cooldown"
 interval = "2m"
 `)
@@ -7853,7 +7866,7 @@ func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 		}
 	}
 	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
-exec = "scripts/beads-health.sh"
+exec = "scripts/beads-health"
 trigger = "cooldown"
 interval = "30s"
 `)

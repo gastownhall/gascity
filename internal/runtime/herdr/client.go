@@ -22,27 +22,31 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
 // response envelope ({"id":…,"result":…} | {"id":…,"error":{code,message}}).
 type client struct {
-	session     string                                                   // herdr named session (shared per city)
-	bin         string                                                   // herdr binary (default "herdr")
-	cityRoot    string                                                   // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
-	settleDelay time.Duration                                            // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
-	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
-	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
-	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
+	session        string                                                   // herdr named session (shared per city)
+	bin            string                                                   // herdr binary (default "herdr")
+	cityRoot       string                                                   // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
+	settleDelay    time.Duration                                            // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
+	rejectDelay    time.Duration                                            // pause before re-prompting a startup turn the agent rejected as not ready (startupNotReadyRetryDelay; shortened by tests against a fake herdr)
+	notReadyBudget time.Duration                                            // longest re-prompting of a turn rejected as not ready runs from the first submit (startupNotReadyBudget; shortened by tests against a fake herdr)
+	serverMu       sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
+	sockPath       string                                                   // test override for socketPath (unit tests point it at a fake server)
+	dialUnix       func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
 }
 
 func newClient(session, cityRoot string) *client {
-	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay, dialUnix: dialUnix}
+	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay, rejectDelay: startupNotReadyRetryDelay, notReadyBudget: startupNotReadyBudget, dialUnix: dialUnix}
 }
 
 type herdrError struct {
@@ -246,9 +250,19 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 // find. declared comes from whoever built the argv; see redaction.go.
 func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
-	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	cmd := exec.CommandContext(ctx, c.bin, full...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		safe, _ := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: %w", safe, err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, declared)
+		if cerr := ctx.Err(); cerr != nil {
+			// exec killed herdr when ctx ended, and a killed process's exit
+			// status says nothing about why.
+			return nil, fmt.Errorf("herdr %v: %w", safe, cerr)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			return nil, fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
@@ -359,7 +373,7 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 	if err := json.Unmarshal(res, &wrap); err != nil {
 		return nil, fmt.Errorf("herdr agent list: decode: %w", err)
 	}
-	return wrap.Agents, nil
+	return filterAgentInfos(wrap.Agents), nil
 }
 
 // paneRead → `herdr pane read <paneID> --source <source> [--lines n]`
@@ -390,9 +404,18 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
-	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	cmd := exec.CommandContext(ctx, c.bin, full...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		safe, _ := redactedArgv(args, nil)
+		return "", fmt.Errorf("herdr %v: %w", safe, err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, nil)
+		if cerr := ctx.Err(); cerr != nil {
+			// See run: a ctx that ended killed herdr.
+			return "", fmt.Errorf("herdr %v: %w", safe, cerr)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			return "", fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
@@ -486,10 +509,21 @@ func (c *client) paneRunCommand(ctx context.Context, paneID, command string) err
 // TUI that is reliable; a FIRST turn into a freshly-booted TUI must go
 // through deliverStartupTurn, which opts into herdr's submission
 // confirmation.
+//
+// herdr refuses the prompt with agent_blocked while the agent waits on an
+// interactive prompt of its own (a question to the user, a permission dialog).
+// That comes back as [runtime.ErrAgentBlocked], with herdr's error still in the
+// chain, so a caller holding the nudge can keep it until the prompt is answered.
+// The code is read with herdrAnswerCode on every platform: herdr reports it
+// either in the stdout envelope or, on a non-zero exit, as a stderr that is
+// nothing but the envelope, and the nudge text can write neither.
 func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 	err := c.agentPrompt(ctx, paneID, text)
 	if err == nil {
 		return nil
+	}
+	if herdrAnswerCode(err) == "agent_blocked" {
+		return fmt.Errorf("%w: %w", runtime.ErrAgentBlocked, err)
 	}
 	if !c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return err
@@ -535,6 +569,38 @@ func normalizeAgentState(status string) string {
 // time out as if it had never submitted.
 var startupConfirmStates = []string{"working", "done", "blocked"}
 
+// Bounds on re-prompting a startup turn the agent rejected as not ready (see
+// runtime.Config.NotReadyMarkers). How long an agent stays not ready is the
+// provider's business (Copilot loading its managed-account policy has taken
+// 30-60s and more), so re-prompting is bounded by time, not a count: see
+// notReadyGiveUp. startupNotReadyReserve is what it leaves of Start's ctx. It
+// covers the last attempt (herdr's fixed 5000ms observed-state-change window
+// plus the pane reads) and lets Start return before its ctx expires: the
+// reconciler records a Start that returns after its deadline as a failed
+// start, even though the session is live. A last attempt that stalls into the
+// Enter recovery instead is bounded by startupDeadlineMargin, as every
+// confirming wait is. startupNotReadyBudget bounds a ctx without a deadline.
+const (
+	startupNotReadyRetryDelay = 5 * time.Second
+	startupNotReadyReserve    = 20 * time.Second
+	startupNotReadyBudget     = 150 * time.Second
+)
+
+// startupDeadlineMargin is what the startup delivery leaves of Start's ctx for
+// the work after its last herdr wait: the screen and state reads that act on
+// it, and recording an unconfirmed turn on the sidecar. Every confirming wait
+// the delivery starts is capped to end this long before the deadline
+// (startupTimeoutMS), because the reconciler records a Start that returns
+// after its deadline as a failed start, even though the session is live.
+const startupDeadlineMargin = 2 * time.Second
+
+// herdrStateChangeWindowMS is herdr's fixed window for a submitted prompt to
+// show a working or blocked state (`agent prompt --wait`; otherwise
+// agent_prompt_stalled). It is the shortest confirming wait the startup
+// delivery runs: a prompt bound at or under it would report a stall as a
+// plain timeout, and a shorter recovery wait could miss a submit that took.
+const herdrStateChangeWindowMS = 5000
+
 // deliverStartupTurn delivers an agent's FIRST turn with submission
 // confirmation, unlike deliverNudge's fire-and-forget prompt. A freshly
 // spawned TUI boots through a shell→TUI handoff during which the submit CR
@@ -556,10 +622,21 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 //     readiness wait cannot rule that out — the live city measured 0 idle /
 //     8 timeout / 2 error over 20h — so the state is read directly
 //     (`agent get`) and the Enter is withheld unless herdr says idle.
-//     Recovery is then a single explicit Enter plus a confirming wait; never
-//     a re-prompt, which would double the text.
+//     Recovery is then an explicit Enter plus a confirming wait, retried
+//     while herdr still reports idle where the platform allows
+//     (startupEnterRecoveryAttempts); never a re-prompt, which would double
+//     the text. The one exception is a turn the agent rejected as not ready
+//     (notReadyMarkers, see rejectedAsNotReady): it consumed the text and
+//     left the box empty, so an Enter submits nothing and the turn is
+//     prompted again instead, until the agent takes it or notReadyGiveUp
+//     passes. The rejection is looked for at the stall and again after each
+//     recovery Enter that does not confirm: a turn typed before the agent's
+//     TUI was up is only submitted, and rejected, by one of those Enters.
+//     A marker the text itself quotes is ignored (markersNotQuotedBy), and so
+//     is any marker while the agent's input box, read off its composer line
+//     (readyPromptPrefix), still holds text.
 //   - timeout — reachable only after that state-change gate passed, because
-//     startupPromptConfirmTimeoutMS exceeds the 5000ms window (a shorter
+//     the prompt's bound always exceeds herdrStateChangeWindowMS (a shorter
 //     bound would surface the stall as a timeout and collapse the
 //     distinction). So the submit demonstrably landed and only the settle
 //     into a confirming state ran past the bound. The box is not idle: the
@@ -567,50 +644,323 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 //     Enter would answer the dialog rather than do nothing. No keystroke —
 //     report it unconfirmed and let the caller record the strand.
 //
+// Every confirming wait is bounded by Start's ctx as well (startupTimeoutMS),
+// so the delivery ends startupDeadlineMargin before the deadline. When that
+// leaves less than herdr's state-change window, there is no time to confirm a
+// submit: the turn is sent without --wait and reported unconfirmed, and the
+// Enter recovery withholds its Enter.
+//
 // Unregistered panes (raw shells) keep the best-effort paste+settle+Enter
 // path. A non-nil error means the turn could not be confirmed submitted.
-func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
-	args := []string{"agent", "prompt", paneID, text, "--wait"}
-	for _, s := range startupConfirmStates {
-		args = append(args, "--until", s)
+func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string, notReadyMarkers []string, readyPromptPrefix string) error {
+	notReadyMarkers = markersNotQuotedBy(notReadyMarkers, text)
+	first := time.Now()
+	giveUp := c.notReadyGiveUp(ctx, first)
+	for attempt := 1; ; attempt++ {
+		timeoutMS := startupTimeoutMS(ctx, startupPromptConfirmTimeoutMS)
+		if timeoutMS <= herdrStateChangeWindowMS {
+			if err := c.deliverNudge(ctx, paneID, text); err != nil {
+				return fmt.Errorf("startup turn not sent (%w): %w", startupTimeShort(timeoutMS), err)
+			}
+			return fmt.Errorf("startup turn sent without confirmation: %w", startupTimeShort(timeoutMS))
+		}
+		args := []string{"agent", "prompt", paneID, text, "--wait"}
+		for _, s := range startupConfirmStates {
+			args = append(args, "--until", s)
+		}
+		args = append(args, "--timeout", strconv.Itoa(timeoutMS))
+		before, berr := c.countNotReadyMarkers(ctx, paneID, notReadyMarkers)
+		_, err := c.run(ctx, args...)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Fprintf(os.Stderr, "herdr: startup turn on pane %s taken on attempt %d, %s after the first submit\n", //nolint:errcheck // best-effort diagnostic
+					paneID, attempt, time.Since(first).Round(time.Second))
+			}
+			return nil
+		}
+		if c.targetHasNoNamedAgent(ctx, paneID, err) {
+			return c.pasteAndSubmit(ctx, paneID, text)
+		}
+		switch herdrVerdictCode(err) {
+		case "timeout":
+			return fmt.Errorf("startup submit landed but never reached %v within %dms: %w",
+				startupConfirmStates, timeoutMS, err)
+		case "agent_prompt_stalled":
+			marker, rejected, nerr := c.rejectedAsNotReady(ctx, paneID, notReadyMarkers, readyPromptPrefix, before, berr)
+			if nerr != nil {
+				err = fmt.Errorf("%w (checking for a not-ready rejection: %w)", err, nerr)
+			}
+			if !rejected {
+				recovered, rerr := c.recoverStalledStartup(ctx, paneID, err, func() (string, error) {
+					m, ok, cerr := c.rejectedAsNotReady(ctx, paneID, notReadyMarkers, readyPromptPrefix, before, berr)
+					if !ok {
+						return "", cerr
+					}
+					return m, nil
+				})
+				if recovered == "" {
+					return rerr
+				}
+				marker = recovered
+			}
+			if !time.Now().Add(c.rejectDelay).Before(giveUp) {
+				return fmt.Errorf("startup turn rejected as not ready (%q on screen) on all %d attempts over %s: %w",
+					marker, attempt, time.Since(first).Round(time.Second), err)
+			}
+			fmt.Fprintf(os.Stderr, "herdr: startup turn on pane %s rejected as not ready (%q on screen) on attempt %d, %s after the first submit; prompting again\n", //nolint:errcheck // best-effort diagnostic
+				paneID, marker, attempt, time.Since(first).Round(time.Second))
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("startup turn rejected as not ready (%q on screen), retry abandoned: %w", marker, ctx.Err())
+			case <-time.After(c.rejectDelay):
+			}
+			continue
+		}
+		return err
 	}
-	args = append(args, "--timeout", strconv.Itoa(startupPromptConfirmTimeoutMS))
-	_, err := c.run(ctx, args...)
-	if err == nil {
+}
+
+// notReadyGiveUp returns when deliverStartupTurn stops re-prompting a turn
+// rejected as not ready: notReadyBudget after first, the first submit, or
+// startupNotReadyReserve before ctx's deadline when that is sooner.
+func (c *client) notReadyGiveUp(ctx context.Context, first time.Time) time.Time {
+	giveUp := first.Add(c.notReadyBudget)
+	if deadline, ok := ctx.Deadline(); ok {
+		if reserved := deadline.Add(-startupNotReadyReserve); reserved.Before(giveUp) {
+			giveUp = reserved
+		}
+	}
+	return giveUp
+}
+
+// startupTimeoutMS bounds a confirming herdr wait of ms by Start's ctx: ms, or
+// the milliseconds left until startupDeadlineMargin before ctx's deadline when
+// that is sooner. It is not positive once that point has passed.
+func startupTimeoutMS(ctx context.Context, ms int) int {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ms
+	}
+	return min(ms, int(time.Until(deadline.Add(-startupDeadlineMargin)).Milliseconds()))
+}
+
+// startupTimeShort says why the startup delivery cannot confirm a step:
+// leftMS, what startupTimeoutMS leaves, is under herdr's state-change window.
+func startupTimeShort(leftMS int) error {
+	return fmt.Errorf("only %s of Start's ctx is left before its %s deadline margin, under herdr's %dms confirmation window",
+		time.Duration(max(leftMS, 0))*time.Millisecond, startupDeadlineMargin, herdrStateChangeWindowMS)
+}
+
+// foldSpace folds every whitespace run in s to one space, so text the TUI
+// wrapped across lines compares equal to its source.
+func foldSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// markersNotQuotedBy returns the markers that text does not itself contain. A
+// marker the submitted turn quotes cannot tell a rejection from a swallowed
+// CR: when the CR is swallowed the typed text stays on screen in the input box
+// and raises that marker's count on its own. Dropping such a marker leaves
+// that stall to the Enter recovery, which is right for a swallowed CR.
+func markersNotQuotedBy(markers []string, text string) []string {
+	if len(markers) == 0 {
 		return nil
 	}
-	if c.targetHasNoNamedAgent(ctx, paneID, err) {
-		return c.pasteAndSubmit(ctx, paneID, text)
+	folded := foldSpace(text)
+	var usable []string
+	for _, m := range markers {
+		if !strings.Contains(folded, foldSpace(m)) {
+			usable = append(usable, m)
+		}
 	}
-	switch herdrErrorCode(err) {
-	case "timeout":
-		return fmt.Errorf("startup submit landed but never reached %v within %dms: %w",
-			startupConfirmStates, startupPromptConfirmTimeoutMS, err)
-	case "agent_prompt_stalled":
+	return usable
+}
+
+// countNotReadyMarkers counts each of markers on the pane's visible screen,
+// with whitespace runs folded to one space on both sides so a marker the TUI
+// wrapped across lines still counts. It reads nothing when there are no
+// markers.
+func (c *client) countNotReadyMarkers(ctx context.Context, paneID string, markers []string) ([]int, error) {
+	if len(markers) == 0 {
+		return nil, nil
+	}
+	screen, err := c.paneRead(ctx, paneID, "visible", 0)
+	if err != nil {
+		return nil, err
+	}
+	return countMarkers(screen, markers), nil
+}
+
+// countMarkers is countNotReadyMarkers on a screen already read.
+func countMarkers(screen string, markers []string) []int {
+	screen = foldSpace(screen)
+	counts := make([]int, len(markers))
+	for i, m := range markers {
+		if m = foldSpace(m); m != "" {
+			counts[i] = strings.Count(screen, m)
+		}
+	}
+	return counts
+}
+
+// composerHoldsText reports whether the agent's input box holds text, as screen
+// shows it. The box is the last line that starts with readyPromptPrefix (the
+// live composer, drawn below the transcript, whose echoes of past turns start
+// with the prompt too), and it holds text when anything follows the prompt.
+// observed is false when no line starts with the prompt, or there is no
+// prompt. NBSP is read as a space, as the tmux provider's composer reader does.
+func composerHoldsText(screen, readyPromptPrefix string) (holds, observed bool) {
+	prompt := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	bare := strings.TrimSpace(prompt)
+	if bare == "" {
+		return false, false
+	}
+	for _, line := range strings.Split(screen, "\n") {
+		line = strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		if rest, ok := strings.CutPrefix(line, prompt); ok {
+			holds, observed = strings.TrimSpace(rest) != "", true
+		} else if line == bare {
+			holds, observed = false, true
+		}
+	}
+	return holds, observed
+}
+
+// rejectedAsNotReady reports whether the agent discarded the startup turn it
+// was just sent because it was not ready for input, returning the marker that
+// says so. An agent that does this consumes the text, prints a marker and
+// stays idle, which herdr reports as agent_prompt_stalled just like a
+// swallowed CR; the difference is that its input box is empty. Three things
+// establish that: a marker that is on screen more times than it was before
+// the submit (a marker already there says nothing about this submit, whose
+// text may still be in the box), an input box that does not hold text
+// (composerHoldsText; a marker the TUI drew for another reason, such as a
+// resumed conversation's history, can rise while the turn still sits in the
+// box, and a re-prompt would type it twice), and herdr reporting the agent
+// idle (a re-prompt into any other state would be typed into whatever the
+// agent is showing). A box the screen does not show is not held against the
+// marker: the rejection it would miss strands the agent with no instructions.
+// before and berr are countNotReadyMarkers' result from before the submit;
+// without a baseline nothing is established, and berr is returned.
+func (c *client) rejectedAsNotReady(ctx context.Context, paneID string, markers []string, readyPromptPrefix string, before []int, berr error) (string, bool, error) {
+	if len(markers) == 0 {
+		return "", false, nil
+	}
+	if berr != nil {
+		return "", false, fmt.Errorf("reading the screen before the submit: %w", berr)
+	}
+	screen, err := c.paneRead(ctx, paneID, "visible", 0)
+	if err != nil {
+		return "", false, fmt.Errorf("reading the screen after the submit: %w", err)
+	}
+	after := countMarkers(screen, markers)
+	marker := ""
+	for i := range markers {
+		if after[i] > before[i] {
+			marker = markers[i]
+			break
+		}
+	}
+	if marker == "" {
+		return "", false, nil
+	}
+	if holds, _ := composerHoldsText(screen, readyPromptPrefix); holds {
+		return "", false, nil
+	}
+	cur, ok, err := c.getAgent(ctx, paneID)
+	if err != nil {
+		return marker, false, fmt.Errorf("reading the agent state to qualify a re-prompt: %w", err)
+	}
+	return marker, ok && cur.AgentStatus == agentStateIdle, nil
+}
+
+// recoverStalledStartup recovers a first turn herdr reported stalled: an
+// explicit Enter on an agent herdr reports idle, then a confirming wait of
+// startupEnterRecoveryWaitMS. When that wait runs out, the recovery is tried
+// again, up to startupEnterRecoveryAttempts in all. Each retry is qualified
+// like the first Enter, by the state herdr reports, and a state that confirms
+// the submit ends the recovery without another keystroke. At the first check,
+// before any recovery Enter, only startupFirstCheckConfirmStates end it.
+//
+// After each wait that runs out, rejected reports a not-ready marker the agent
+// has printed since the first submit (see rejectedAsNotReady). A turn typed
+// before the agent's TUI was up stalls with nothing on screen yet; the TUI
+// reads it when it comes up, and a recovery Enter can submit it while the agent
+// is still not ready, which consumes it. The box is empty from then on, so the
+// recovery stops pressing Enter and returns that marker for the caller to
+// prompt the turn again. Otherwise the marker is "" and the error is nil once
+// the submit is confirmed.
+//
+// Each Enter is sent only when its confirming wait can run herdr's state-change
+// window and still end startupDeadlineMargin before Start's deadline, and the
+// wait is capped to that (startupTimeoutMS). Otherwise the recovery stops there,
+// unconfirmed: a wait that outlives the ctx is killed, and Start returns too late.
+func (c *client) recoverStalledStartup(ctx context.Context, paneID string, stalled error, rejected func() (string, error)) (string, error) {
+	var werr, rerr error
+	for attempt := 0; attempt < startupEnterRecoveryAttempts; attempt++ {
 		cur, ok, gerr := c.getAgent(ctx, paneID)
 		switch {
 		case gerr != nil:
-			return fmt.Errorf("startup submit not confirmed (%w) and reading the agent state to qualify recovery failed: %w", err, gerr)
+			return "", fmt.Errorf("startup submit not confirmed (%w) and reading the agent state to qualify recovery failed: %w", stalled, gerr)
 		case !ok:
-			return fmt.Errorf("startup submit not confirmed (%w) and the agent went away before recovery could be qualified", err)
+			return "", fmt.Errorf("startup submit not confirmed (%w) and the agent went away before recovery could be qualified", stalled)
+		case isStartupConfirmState(cur.AgentStatus) && (attempt > 0 || confirmsAtFirstRecoveryCheck(cur.AgentStatus)):
+			return "", nil
 		case cur.AgentStatus != agentStateIdle:
-			return fmt.Errorf("startup submit not confirmed (%w) and recovery Enter withheld: agent is %q, not %q — the keystroke would land in that state, not on an empty input box",
-				err, cur.AgentStatus, agentStateIdle)
+			return "", fmt.Errorf("startup submit not confirmed (%w) and recovery Enter withheld: agent is %q, not %q — the keystroke would land in that state, not on an empty input box",
+				stalled, cur.AgentStatus, agentStateIdle)
+		}
+		waitMS := startupTimeoutMS(ctx, startupEnterRecoveryWaitMS)
+		if waitMS < herdrStateChangeWindowMS {
+			werr = fmt.Errorf("recovery Enter %d of %d withheld: %w", attempt+1, startupEnterRecoveryAttempts, startupTimeShort(waitMS))
+			break
 		}
 		if kerr := c.sendKeys(ctx, paneID, "Enter"); kerr != nil {
-			return fmt.Errorf("startup submit not confirmed (%w) and recovery Enter failed: %w", err, kerr)
+			return "", fmt.Errorf("startup submit not confirmed (%w) and recovery Enter failed: %w", stalled, kerr)
 		}
 		wait := []string{"agent", "wait", paneID}
 		for _, s := range startupConfirmStates {
 			wait = append(wait, "--until", s)
 		}
-		wait = append(wait, "--timeout", strconv.Itoa(startupStallRecoveryTimeoutMS))
-		if _, werr := c.run(ctx, wait...); werr != nil {
-			return fmt.Errorf("startup submit not confirmed after Enter recovery (%w): %w", err, werr)
+		wait = append(wait, "--timeout", strconv.Itoa(waitMS))
+		if _, werr = c.run(ctx, wait...); werr == nil {
+			return "", nil
 		}
-		return nil
+		if herdrVerdictCode(werr) != "timeout" {
+			break
+		}
+		var marker string
+		if marker, rerr = rejected(); marker != "" {
+			return marker, nil
+		}
 	}
-	return err
+	if rerr != nil {
+		return "", fmt.Errorf("startup submit not confirmed after Enter recovery (%w): %w (checking for a not-ready rejection: %w)", stalled, werr, rerr)
+	}
+	return "", fmt.Errorf("startup submit not confirmed after Enter recovery (%w): %w", stalled, werr)
+}
+
+// confirmsAtFirstRecoveryCheck reports whether status is one of
+// startupFirstCheckConfirmStates.
+func confirmsAtFirstRecoveryCheck(status string) bool {
+	status = normalizeAgentState(status)
+	for _, s := range startupFirstCheckConfirmStates {
+		if status == s {
+			return true
+		}
+	}
+	return false
+}
+
+// isStartupConfirmState reports whether status is one of startupConfirmStates.
+func isStartupConfirmState(status string) bool {
+	status = normalizeAgentState(status)
+	for _, s := range startupConfirmStates {
+		if status == s {
+			return true
+		}
+	}
+	return false
 }
 
 // pasteAndSubmit is the unregistered-pane delivery: paste, settle, submit.
@@ -922,15 +1272,20 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // against a perfectly healthy server ("did not become ready"), and every
 // retry launches a redundant herdr server contending for the same pane
 // ("agent_pane_busy") — ga-nqlb8q.
+//
+// herdrConfigDir supplies the directory. herdr on Windows resolves it by other
+// rules, which the Windows herdrConfigDir reproduces, and serves the path as a
+// named pipe rather than a socket (herdrPipeName); herdrJoin builds the path as
+// herdr does on each platform, which on Windows means without cleaning it.
 func (c *client) socketPath() string {
 	if c.sockPath != "" {
 		return c.sockPath
 	}
-	configDir, _ := os.UserConfigDir()
+	configDir := herdrConfigDir()
 	if c.session == "" || c.session == "default" {
-		return filepath.Join(configDir, "herdr", "herdr.sock")
+		return herdrJoin(configDir, "herdr", "herdr.sock")
 	}
-	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
+	return herdrJoin(configDir, "herdr", "sessions", c.session, "herdr.sock")
 }
 
 // serverAlive reports whether the session-server is actually accepting
@@ -938,31 +1293,53 @@ func (c *client) socketPath() string {
 // that exits uncleanly leaves its socket inode behind — and herdr's own
 // `session stop` can't remove it, since that too needs a live server to reach —
 // so the stale socket answers connects with ECONNREFUSED. Presence != liveness;
-// dial to find out for real.
+// dial to find out for real. The dial is c.dialUnix, the connect the event
+// stream uses, so alive means reachable by that same connect.
 func (c *client) serverAlive() bool {
-	conn, err := net.DialTimeout("unix", c.socketPath(), 500*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
+	alive, _ := c.probeServer()
+	return alive
 }
 
-// removeStaleSocket unlinks the socket inode when it exists but nothing live is
-// listening, so a freshly launched server can bind. Guard with serverAlive
-// first — only call once liveness has already returned false.
-func (c *client) removeStaleSocket() {
-	if fi, err := os.Stat(c.socketPath()); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(c.socketPath())
+// probeServer is serverAlive that also reports a connect which reached
+// something at the socket path and refused it (errEndpointRefused): the
+// endpoint is held by something that is not this user's herdr, which no server
+// started now could take from it.
+func (c *client) probeServer() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	conn, err := c.dialUnix(ctx, c.socketPath())
+	if err != nil {
+		if errors.Is(err, errEndpointRefused) {
+			return false, err
+		}
+		return false, nil
 	}
+	_ = conn.Close()
+	return true, nil
 }
+
+// errEndpointRefused marks a connect that reached something at herdr's socket
+// path and refused it, because this user's herdr could not be what serves it.
+var errEndpointRefused = errors.New("refused herdr's endpoint")
+
+// endpointRefusal marks its error as errEndpointRefused, keeping its message.
+type endpointRefusal struct{ error }
+
+func (endpointRefusal) Is(target error) bool { return target == errEndpointRefused }
+
+func (r endpointRefusal) Unwrap() error { return r.error }
 
 // startServer launches the headless herdr server for this session (detached)
 // and waits for it to accept connections. Idempotent — no-op if already live.
+// An endpoint the connect refuses fails it at once, launched or not.
 func (c *client) startServer() error {
 	c.serverMu.Lock()
 	defer c.serverMu.Unlock()
-	if c.serverAlive() {
+	alive, err := c.probeServer()
+	if err != nil {
+		return fmt.Errorf("herdr server for session %q: %w", c.session, err)
+	}
+	if alive {
 		return nil
 	}
 	// A prior server may have died leaving a stale socket inode; serverAlive
@@ -988,7 +1365,11 @@ func (c *client) startServer() error {
 	}
 	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
 	for i := 0; i < 40; i++ {
-		if c.serverAlive() {
+		alive, err := c.probeServer()
+		if err != nil {
+			return fmt.Errorf("herdr server for session %q: %w", c.session, err)
+		}
+		if alive {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)

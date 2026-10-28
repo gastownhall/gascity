@@ -392,6 +392,7 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	set("prompt_flag", spec.PromptFlag)
 	setInt("ready_delay_ms", spec.ReadyDelayMs)
 	set("ready_prompt_prefix", spec.ReadyPromptPrefix)
+	setSlice("not_ready_markers", spec.NotReadyMarkers)
 	setSlice("process_names", spec.ProcessNames)
 	set("path_check", spec.PathCheck)
 	setBool("supports_acp", spec.SupportsACP)
