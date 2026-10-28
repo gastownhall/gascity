@@ -1478,6 +1478,21 @@ func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 	}
 }
 
+// TestGcBeadsBdScriptNeverPassesPasswordInArgv guards issue #8376 against
+// re-introduction: the shipped gc-beads-bd.sh never puts a --password flag on a
+// command line, where any local user can read it through ps.
+func TestGcBeadsBdScriptNeverPassesPasswordInArgv(t *testing.T) {
+	embedded, err := bdpack.PackFS.ReadFile("assets/scripts/gc-beads-bd.sh")
+	if err != nil {
+		t.Fatalf("read embedded gc-beads-bd.sh: %v", err)
+	}
+	for i, line := range strings.Split(string(embedded), "\n") {
+		if strings.Contains(line, "--password") {
+			t.Errorf("gc-beads-bd.sh:%d passes the Dolt password in argv; set DOLT_CLI_PASSWORD on the dolt call instead: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
 func TestGcBeadsBdHealthNoUserDatabaseWarnsAndContinues(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
