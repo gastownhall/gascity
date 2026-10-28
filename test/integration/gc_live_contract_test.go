@@ -274,7 +274,8 @@ description = "Read and complete {{issue}}."
 		"vars":       map[string]string{"issue": rootBead.ID},
 	}, http.StatusOK)
 	exerciseLiveContractFormulasAndWorkflows(t, baseURL, validator, cityBase, formulaName, targetAgent, rigName, rootBead.ID, runID)
-	exerciseLiveContractOrders(t, baseURL, validator, cityBase, rigName, rootBead.ID, runID)
+	orderScopedName := exerciseLiveContractOrders(t, baseURL, validator, bin, env, cityDir, cityBase, rigName, runID)
+	conversation := exerciseLiveContractExtmsg(t, baseURL, validator, cityBase, sessionID, runID)
 
 	lifecycleBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Lifecycle fixture created by TestGCLiveContract_BeadsAndEvents",
@@ -434,7 +435,7 @@ description = "Read and complete {{issue}}."
 		Rig      string `json:"rig"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/mail", map[string]string{
 		"rig":     rigName,
-		"from":    "real-world-app-contract",
+		"from":    "human",
 		"to":      sessionID,
 		"subject": "real-world app contract mail " + runID,
 		"body":    "Exercise the typed mail API contract.",
@@ -509,7 +510,12 @@ description = "Read and complete {{issue}}."
 	if cityEvents.Total == 0 {
 		t.Fatalf("GET %s/events?limit=50 returned no events", cityBase)
 	}
-	runLiveContractReadSweep(t, baseURL, validator, specBytes, cityName, rigName)
+	runLiveContractReadSweep(t, baseURL, validator, specBytes, cityName, liveContractFixtures{
+		rigName:         rigName,
+		sessionID:       sessionID,
+		conversation:    conversation,
+		orderScopedName: orderScopedName,
+	})
 
 	for _, id := range []string{idempotentBead.ID, lifecycleBead.ID, siblingBead.ID, childBead.ID, rootBead.ID} {
 		liveContractJSON[struct {
@@ -630,7 +636,24 @@ var liveContractRequiredOperations = []liveContractRequiredOperation{
 type liveContractReadProbe struct {
 	pathTemplate string
 	path         string
-	skipReason   string
+}
+
+// liveContractFixtures names the records the read sweep's identity-bearing
+// GETs address. Each is created through the surface that owns it before the
+// sweep runs, so the probe answers 200 about something that exists.
+type liveContractFixtures struct {
+	rigName         string
+	sessionID       string
+	conversation    url.Values
+	orderScopedName string
+}
+
+// liveContractUncoveredReadPaths are GETs the sweep does not probe because the
+// live city cannot be given what they need. Each entry names the open bead
+// that owns closing the gap; an endpoint absent from this map has to answer
+// 200 or the sweep fails.
+var liveContractUncoveredReadPaths = map[string]string{
+	"/v0/city/{cityName}/maintenance/status": "ga-gc85sm2",
 }
 
 type contractRig struct {
@@ -944,36 +967,85 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *a
 	}](t, baseURL, v, http.MethodDelete, cityBase+"/convoy/"+url.PathEscape(convoy.ID), nil, http.StatusOK)
 }
 
-func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, rigName, rootBeadID, runID string) {
+// exerciseLiveContractOrders drives the order surface against an order run the
+// real dispatch path recorded, and returns that order's scoped name. The run
+// record and the order file live until the test ends, so the read sweep can
+// address them.
+func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spec, bin string, env []string, cityDir, cityBase, rigName, runID string) string {
 	t.Helper()
-	scopedName := "real-world-app-contract-" + runID + ":rig:" + rigName
-	orderRun := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
-		"description": "Order history fixture created by TestGCLiveContract_BeadsAndEvents",
-		"labels":      []string{"order-run:" + scopedName, "real-world-app-contract"},
-		"metadata": map[string]string{
-			"convergence.gate_stdout": "hello from live contract",
-		},
-		"rig":   rigName,
-		"title": "real-world app contract order history " + runID,
-		"type":  "task",
-	}, http.StatusCreated)
-	defer liveContractJSON[struct {
-		Status string `json:"status"`
-	}](t, baseURL, v, http.MethodDelete, cityBase+"/bead/"+url.PathEscape(orderRun.ID), nil, http.StatusOK)
+	orderName := "real-world-app-contract-" + runID
+	forgedScopedName := orderName + ":rig:" + rigName
+	// The generic bead API never makes an order run record: only order dispatch
+	// does. A POST naming one is refused at its label, and nothing is written.
+	refused := liveContractRequest(t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "Forged order run refused by the generic bead API",
+		"labels":      []string{"order-run:" + forgedScopedName, "real-world-app-contract"},
+		"rig":         rigName,
+		"title":       "real-world app contract forged order run " + runID,
+		"type":        "task",
+	}, http.StatusUnprocessableEntity)
+	if !strings.Contains(string(refused), "body.labels[0]") {
+		t.Fatalf("forged order run refusal = %s, want it located at body.labels[0]", string(refused))
+	}
 
-	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders", nil, http.StatusOK)
-	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/check", nil, http.StatusOK)
-	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/feed?scope_kind=rig&scope_ref="+url.QueryEscape(rigName)+"&limit=25", nil, http.StatusOK)
+	// A city-level exec order on a cron trigger that never comes due: `gc order
+	// run` records its run with a tracking bead through the order front door,
+	// the way the dispatcher does. (A manual-trigger exec order records
+	// nothing, so it would leave no history to read.)
+	ordersDir := filepath.Join(cityDir, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatalf("mkdir orders dir: %v", err)
+	}
+	orderFile := filepath.Join(ordersDir, orderName+".toml")
+	orderBody := "[order]\n" +
+		"description = \"Order run fixture for TestGCLiveContract_BeadsAndEvents\"\n" +
+		"trigger = \"cron\"\n" +
+		"schedule = \"0 0 1 1 *\"\n" +
+		"exec = \"echo hello from live contract\"\n"
+	if err := os.WriteFile(orderFile, []byte(orderBody), 0o644); err != nil {
+		t.Fatalf("write order fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(orderFile); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove order fixture %s: %v", orderFile, err)
+		}
+	})
+	if out, err := runCommand(cityDir, env, 60*time.Second, bin, "order", "run", orderName); err != nil {
+		t.Fatalf("gc order run %s: %v\n%s", orderName, err, out)
+	}
+
+	scopedName := orderName
+	historyPath := cityBase + "/orders/history?scoped_name=" + url.QueryEscape(scopedName) + "&limit=20"
 	history := liveContractJSON[struct {
 		Entries []struct {
 			BeadID    string `json:"bead_id"`
 			StoreRef  string `json:"store_ref"`
 			HasOutput bool   `json:"has_output"`
 		} `json:"entries"`
-	}](t, baseURL, v, http.MethodGet, cityBase+"/orders/history?scoped_name="+url.QueryEscape(scopedName)+"&limit=20", nil, http.StatusOK)
-	if len(history.Entries) == 0 || history.Entries[0].BeadID != orderRun.ID {
-		t.Fatalf("order history = %+v, want entry for %q", history, orderRun.ID)
+	}](t, baseURL, v, http.MethodGet, historyPath, nil, http.StatusOK)
+	if len(history.Entries) != 1 || history.Entries[0].BeadID == "" {
+		t.Fatalf("order history after gc order run = %+v, want exactly one run record for %q", history, scopedName)
 	}
+	if history.Entries[0].HasOutput {
+		t.Fatalf("order history after gc order run = %+v, want has_output false before any output is attached", history)
+	}
+	orderRunID := history.Entries[0].BeadID
+	t.Cleanup(func() {
+		if out, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "delete", "--force", orderRunID); err != nil {
+			t.Errorf("delete order run record %s: %v\n%s", orderRunID, err, out)
+		}
+	})
+
+	// Dispatch records the run, not the exec's stdout; the history detail
+	// serves a captured output, which an operator attaches with bd.
+	if out, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "update", orderRunID,
+		"--set-metadata", "convergence.gate_stdout=hello from live contract"); err != nil {
+		t.Fatalf("attach output to order run %s: %v\n%s", orderRunID, err, out)
+	}
+
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders", nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/check", nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/orders/feed?scope_kind=rig&scope_ref="+url.QueryEscape(rigName)+"&limit=25", nil, http.StatusOK)
 	detailPath := cityBase + "/order/history/" + url.PathEscape(history.Entries[0].BeadID)
 	if history.Entries[0].StoreRef != "" {
 		detailPath += "?store_ref=" + url.QueryEscape(history.Entries[0].StoreRef)
@@ -982,9 +1054,65 @@ func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spe
 		BeadID string `json:"bead_id"`
 		Output string `json:"output"`
 	}](t, baseURL, v, http.MethodGet, detailPath, nil, http.StatusOK)
-	if detail.BeadID != orderRun.ID || !strings.Contains(detail.Output, "hello from live contract") {
-		t.Fatalf("order history detail = %+v, want output for %q", detail, orderRun.ID)
+	if detail.BeadID != orderRunID || !strings.Contains(detail.Output, "hello from live contract") {
+		t.Fatalf("order history detail = %+v, want output for %q", detail, orderRunID)
 	}
+	return scopedName
+}
+
+// exerciseLiveContractExtmsg binds the session to a conversation group through
+// the extmsg surface and reads the group, binding and transcript back. It
+// returns the conversation reference as query parameters for the read sweep.
+func exerciseLiveContractExtmsg(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, sessionID, runID string) url.Values {
+	t.Helper()
+	conversation := map[string]string{
+		"scope_id":        "real-world-app-contract",
+		"provider":        "contract-provider",
+		"account_id":      "contract-account",
+		"conversation_id": "conversation-" + runID,
+		"kind":            "room",
+	}
+	group := liveContractJSON[struct {
+		ID string `json:"ID"`
+	}](t, baseURL, v, http.MethodPost, cityBase+"/extmsg/groups", map[string]any{
+		"root_conversation": conversation,
+		"default_handle":    "contract",
+	}, http.StatusCreated)
+	if group.ID == "" {
+		t.Fatal("POST extmsg/groups returned a group with no id")
+	}
+	binding := liveContractJSON[struct {
+		SessionID string `json:"SessionID"`
+	}](t, baseURL, v, http.MethodPost, cityBase+"/extmsg/bind", map[string]any{
+		"conversation": conversation,
+		"session_id":   sessionID,
+	}, http.StatusOK)
+	if binding.SessionID != sessionID {
+		t.Fatalf("POST extmsg/bind session_id = %q, want %q", binding.SessionID, sessionID)
+	}
+
+	query := url.Values{}
+	for key, value := range conversation {
+		query.Set(key, value)
+	}
+	found := liveContractJSON[struct {
+		ID string `json:"ID"`
+	}](t, baseURL, v, http.MethodGet, cityBase+"/extmsg/groups?"+query.Encode(), nil, http.StatusOK)
+	if found.ID != group.ID {
+		t.Fatalf("GET extmsg/groups id = %q, want the ensured group %q", found.ID, group.ID)
+	}
+	bindings := liveContractJSON[struct {
+		Items []struct {
+			SessionID string `json:"SessionID"`
+		} `json:"items"`
+	}](t, baseURL, v, http.MethodGet, cityBase+"/extmsg/bindings?session_id="+url.QueryEscape(sessionID), nil, http.StatusOK)
+	if len(bindings.Items) != 1 || bindings.Items[0].SessionID != sessionID {
+		t.Fatalf("GET extmsg/bindings = %+v, want the one binding for session %q", bindings, sessionID)
+	}
+	liveContractJSON[struct {
+		Items []map[string]any `json:"items"`
+	}](t, baseURL, v, http.MethodGet, cityBase+"/extmsg/transcript?"+query.Encode(), nil, http.StatusOK)
+	return query
 }
 
 func formulaListContains(items []struct {
@@ -1373,23 +1501,20 @@ func assertLiveContractCityAbsent(t *testing.T, baseURL string, v *apicontract.S
 	}
 }
 
-func runLiveContractReadSweep(t *testing.T, baseURL string, v *apicontract.Spec, specBytes []byte, cityName, rigName string) {
+func runLiveContractReadSweep(t *testing.T, baseURL string, v *apicontract.Spec, specBytes []byte, cityName string, fx liveContractFixtures) {
 	t.Helper()
-	probes := collectLiveContractReadProbes(t, specBytes, cityName, rigName)
+	probes := collectLiveContractReadProbes(t, specBytes, cityName, fx)
 	if len(probes) == 0 {
 		t.Fatal("OpenAPI read sweep found no GET probes")
 	}
 	for _, probe := range probes {
 		t.Run("GET "+probe.pathTemplate, func(t *testing.T) {
-			if probe.skipReason != "" {
-				t.Skip(probe.skipReason)
-			}
 			liveContractRequest(t, baseURL, v, http.MethodGet, probe.path, nil, http.StatusOK)
 		})
 	}
 }
 
-func collectLiveContractReadProbes(t *testing.T, specBytes []byte, cityName, rigName string) []liveContractReadProbe {
+func collectLiveContractReadProbes(t *testing.T, specBytes []byte, cityName string, fx liveContractFixtures) []liveContractReadProbe {
 	t.Helper()
 	var spec struct {
 		Paths map[string]map[string]json.RawMessage `json:"paths"`
@@ -1406,12 +1531,14 @@ func collectLiveContractReadProbes(t *testing.T, specBytes []byte, cityName, rig
 		if strings.Contains(pathTemplate, "/stream") || hasLiveContractUnboundPathParams(pathTemplate) {
 			continue
 		}
+		if _, ok := liveContractUncoveredReadPaths[pathTemplate]; ok {
+			continue
+		}
 		path := strings.ReplaceAll(pathTemplate, "{cityName}", url.PathEscape(cityName))
-		path = appendLiveContractDefaultQuery(path, pathTemplate, rigName)
+		path = appendLiveContractDefaultQuery(path, pathTemplate, fx)
 		probes = append(probes, liveContractReadProbe{
 			pathTemplate: pathTemplate,
 			path:         path,
-			skipReason:   liveContractProbeSkipReason(pathTemplate),
 		})
 	}
 	return probes
@@ -1426,16 +1553,25 @@ func hasLiveContractUnboundPathParams(pathTemplate string) bool {
 	return false
 }
 
-func appendLiveContractDefaultQuery(path, pathTemplate, rigName string) string {
+func appendLiveContractDefaultQuery(path, pathTemplate string, fx liveContractFixtures) string {
 	query := url.Values{}
 	switch {
 	case strings.HasSuffix(pathTemplate, "/formulas") || strings.HasSuffix(pathTemplate, "/formulas/feed"):
 		query.Set("scope_kind", "rig")
-		query.Set("scope_ref", rigName)
+		query.Set("scope_ref", fx.rigName)
 	case strings.HasSuffix(pathTemplate, "/orders/feed"):
 		query.Set("limit", "25")
 		query.Set("scope_kind", "rig")
-		query.Set("scope_ref", rigName)
+		query.Set("scope_ref", fx.rigName)
+	case strings.HasSuffix(pathTemplate, "/orders/history"):
+		query.Set("scoped_name", fx.orderScopedName)
+		query.Set("limit", "20")
+	case strings.HasSuffix(pathTemplate, "/extmsg/bindings"):
+		query.Set("session_id", fx.sessionID)
+	case strings.HasSuffix(pathTemplate, "/work/active-step"):
+		query.Set("assignee", fx.sessionID)
+	case strings.HasSuffix(pathTemplate, "/extmsg/groups"), strings.HasSuffix(pathTemplate, "/extmsg/transcript"):
+		query = fx.conversation
 	case strings.HasSuffix(pathTemplate, "/readiness") || strings.HasSuffix(pathTemplate, "/provider-readiness"):
 		query.Set("fresh", "false")
 	case strings.HasSuffix(pathTemplate, "/beads"):
@@ -1449,18 +1585,34 @@ func appendLiveContractDefaultQuery(path, pathTemplate, rigName string) string {
 	return path + "?" + query.Encode()
 }
 
-func liveContractProbeSkipReason(pathTemplate string) string {
-	switch {
-	case strings.HasSuffix(pathTemplate, "/extmsg/bindings"),
-		strings.HasSuffix(pathTemplate, "/extmsg/groups"),
-		strings.HasSuffix(pathTemplate, "/extmsg/transcript"):
-		return "requires a real session/conversation identity"
-	case strings.HasSuffix(pathTemplate, "/orders/history"):
-		return "requires a scoped order name fixture"
-	case strings.Contains(pathTemplate, "/maintenance"):
-		return "requires [maintenance.dolt] enabled=true in city.toml"
-	default:
-		return ""
+// TestLiveContractReadProbes_ActiveStepCarriesAssignee pins the read sweep's
+// query construction for GET /work/active-step: the route requires at least
+// one assignee, so the probe must carry the fixture session identity,
+// URL-encoded, and the route must stay in the sweep (ga-ze0aym0, ga-od4rcxy).
+func TestLiveContractReadProbes_ActiveStepCarriesAssignee(t *testing.T) {
+	const pathTemplate = "/v0/city/{cityName}/work/active-step"
+	specBytes := []byte(`{"paths":{"` + pathTemplate + `":{"get":{}}}}`)
+	// An identity with characters that need escaping proves the value is
+	// encoded rather than spliced into the query verbatim.
+	fx := liveContractFixtures{sessionID: "sess id&x=1+2"}
+
+	probes := collectLiveContractReadProbes(t, specBytes, "live-city", fx)
+	if len(probes) != 1 || probes[0].pathTemplate != pathTemplate {
+		t.Fatalf("probes = %+v, want exactly the %s route kept in the read sweep", probes, pathTemplate)
+	}
+	u, err := url.Parse(probes[0].path)
+	if err != nil {
+		t.Fatalf("parse probe path %q: %v", probes[0].path, err)
+	}
+	if want := "/v0/city/live-city/work/active-step"; u.Path != want {
+		t.Fatalf("probe path = %q, want %q", u.Path, want)
+	}
+	if got := u.Query()["assignee"]; len(got) != 1 || got[0] != fx.sessionID {
+		t.Fatalf("assignee query = %q (raw %q), want exactly [%q]", got, u.RawQuery, fx.sessionID)
+	}
+	wantRaw := url.Values{"assignee": {fx.sessionID}}.Encode()
+	if u.RawQuery != wantRaw {
+		t.Fatalf("raw query = %q, want URL-encoded %q", u.RawQuery, wantRaw)
 	}
 }
 

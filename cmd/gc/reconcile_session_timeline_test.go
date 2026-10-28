@@ -197,7 +197,7 @@ func (w *legacyWorld) twin(t *testing.T) twin {
 	for _, rig := range slices.Sorted(maps.Keys(w.rigs)) {
 		stores = append(stores, w.rigs[rig])
 	}
-	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
+	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c; w.trackers(c) }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
 }
 
 // twin is copy B's view; it writes the backings, and a reload publishes a
@@ -563,6 +563,12 @@ type goldenRuling struct{ fixture, ruling, digest string }
 // may only be a fixture's first entry.
 const timelineGoldenBaseline = "O7 baseline: legacy at 72115d84b4 (TL)"
 
+// timelineFingerprintV7 admits the v7 fingerprint bump in legacy's outcomes
+// (owner ruling 2026-10-18, mc-vg1pe): each section moved by the stored hash
+// prefix and core_hash_breakdown's version alone; the breakdown still hashes
+// every FingerprintExtra key.
+const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves the stored hash prefix only (owner ruling 2026-10-18; also mc-lmixa)"
+
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
 // "§12.2 row N" (timelineSection122), and a legacy behavior change a
@@ -579,20 +585,39 @@ var (
 // new digest; the last entry per fixture is the one in force.
 var timelineGoldenRulings = []goldenRuling{
 	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
+	{"a cutover finds v5 hashes on a live seat", timelineFingerprintV7, "06e19a483895"},
 	{"a live drift on a seat", timelineGoldenBaseline, "e4f04b540c00"},
+	{"a live drift on a seat", timelineFingerprintV7, "7d171c9a7762"},
+	{"an idle named session past its idle_timeout is stopped", timelineGoldenBaseline, "67930e13ed18"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineGoldenBaseline, "adade3317639"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineFingerprintV7, "04fb358751a7"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
+	{"a crash 29s after wake", timelineFingerprintV7, "1575b096e5cc"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
+	{"a crash 5m0s after wake", timelineFingerprintV7, "1923589a14c4"},
+	{"a manual conversation crashes 29s after wake", timelineGoldenBaseline, "5d9d5e446127"},
+	{"a manual conversation crashes 31s after wake", timelineGoldenBaseline, "3fa7f34371d2"},
+	{"a manual conversation crashes 29s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the wake failure (#7470)", "4f3610da3b6f"},
+	{"a manual conversation crashes 29s after wake", timelineFingerprintV7, "39a7521eb515"},
+	{"a manual conversation crashes 31s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the churn (#7470)", "b82abd57b861"},
+	{"a manual conversation crashes 31s after wake", timelineFingerprintV7, "2724ce744ac4"},
 	{"a live quarantined row 29s after wake", timelineGoldenBaseline, "f559e3fcf255"},
 	{"a live quarantined row 31s after wake", timelineGoldenBaseline, "25811fbce399"},
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
+	{"a managed suspend drains, then wake", timelineFingerprintV7, "da6d33776ea5"},
+	{"a manual create read between its two writes", timelineGoldenBaseline, "8c2d0f4552c4"},
+	{"a manual create read between its two writes", timelineFingerprintV7, "544ff5662fa5"},
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
+	{"a provider swap stops the runtime", timelineFingerprintV7, "86d87ce7afad"},
 	{"a quarantine, then a kill fence, expires", timelineGoldenBaseline, "e6f3872c765e"},
+	{"a quarantine, then a kill fence, expires", timelineFingerprintV7, "965f02c87800"},
 	{"a reload turns idle sleep on for a detached row", timelineGoldenBaseline, "787037012e13"},
 	{"a waiter sleeps", timelineGoldenBaseline, "6b615dd20429"},
 	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "064ac1bc84b8"},
+	{"a waiter sleeps", timelineFingerprintV7, "45ab826dd96e"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
 	{"an unwanted row of a suspended agent", timelineGoldenBaseline, "90405aa55ba7"},
@@ -600,11 +625,15 @@ var timelineGoldenRulings = []goldenRuling{
 	{"an unwanted row woken by a clock two minutes ahead", timelineGoldenBaseline, "7863a5af3820"},
 	{"attach, then detach, then idle", timelineGoldenBaseline, "a8a76fb85cf8"},
 	{"drift deferrals through time", timelineGoldenBaseline, "b7bf2d092994"},
+	{"drift deferrals through time", timelineFingerprintV7, "0a780490c9ee"},
 	{"idle, then sleep, then the next pass", timelineGoldenBaseline, "df4154567a92"},
+	{"idle, then sleep, then the next pass", timelineFingerprintV7, "2cf94220b36f"},
 	{"kill a seat holding a dep-blocked claim", timelineGoldenBaseline, "44f501ec9412"},
 	{"kill a seat holding a ready claim", timelineGoldenBaseline, "a6a3283ef592"},
+	{"kill a seat holding a ready claim", timelineFingerprintV7, "56f71e57af9a"},
 	{"suspend, then wake", timelineGoldenBaseline, "14a789f280e4"},
 	{"suspend, then wake", "fix #7417 (mc-esqo7)", "ff88e0c7b075"},
+	{"suspend, then wake", timelineFingerprintV7, "fc327803a54e"},
 }
 
 func goldenDigest(section string) string {
@@ -791,7 +820,29 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline())
+	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline(), idleTimeoutTimeline())
+}
+
+// manualCreateTimeline is staging J45 through time (v5.9r; SESS-065): a
+// manual create the passes read between its two writes, the row (with the
+// keys Manager.CreateSession writes first) and then its session_name.
+// Undesired for want of a name, it is kept, not rolled back, and once its
+// name lands both copies wake it.
+func manualCreateTimeline() []timelineFixture {
+	one := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents[0].MaxActiveSessions, cfg.Agents[0].MinActiveSessions = intPtr(1), intPtr(0)
+		return cfg
+	}
+	row := sessionRow("gc-1", "template", "worker", "agent_name", "worker", "alias", "worker", "state", "start-pending",
+		"session_origin", "manual", "command", "true", "generation", "1", "continuation_epoch", "1", "instance_token", "tok-gc-1",
+		"pending_create_claim", "true", "pending_create_started_at", tlAt(0))
+	f := tlFixture("a manual create read between its two writes", one,
+		[]parityRow{row}, nil, nil,
+		[]parityStep{{Name: "its session_name lands", Advance: 2 * time.Second, Op: func(tw twin) { tw.set("gc-1", "session_name", "s-gc-1") }}},
+		nil, map[string]map[string]string{"its session_name lands": tlMerged(tlPol("gc-1"), tlRestarted())})
+	f.Setup = func(tw twin) { tw.set("gc-1", "work_dir", tw.city) }
+	return []timelineFixture{f}
 }
 
 func tlAt(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
@@ -949,15 +1000,34 @@ func stabilityTimeline() []timelineFixture {
 		return b
 	}
 	standing := tlMerged(tlPol("gc-1"), tlIdent())
+	crash := func(tw twin) { tw.runtime("gc-1", func(simRuntime) *simRuntime { return nil }) }
 	// crashAfter is a crash d after the wake of a row with prior wake
 	// failures and churn: inside the 30s stability threshold legacy counts a
 	// wake failure and restarts; past it a death before the productivity
 	// threshold is churn.
 	crashAfter := func(d time.Duration, crashed map[string]string) timelineFixture {
-		crash := func(tw twin) { tw.runtime("gc-1", func(simRuntime) *simRuntime { return nil }) }
 		return tlFixture(fmt.Sprintf("a crash %s after wake", d), stable,
 			[]parityRow{row("wake_attempts", "2", "churn_count", "2")}, tlClaim("in_progress", "worker"), []simRuntime{tlLive("gc-1")},
 			[]parityStep{{Name: "crash", At: d, Op: crash, Ticks: 6}}, standing, map[string]map[string]string{"crash": crashed})
+	}
+	// manualCrashAfter is a committed manual conversation (#7470), a manual
+	// session of the worker template kept awake as manual with no work,
+	// crashing d after its wake at its last wake failure and churn, so the
+	// accrual quarantines it: its key and hash survive the wake failure and
+	// the churn in both copies. Its hashes are the previous fingerprint
+	// version's, which both copies rebaseline in place (SESS-551) rather
+	// than drain as drift. Its restart would be keyed, a stale-key wait the
+	// twin's clock never reaches, so the fixture stops at the quarantine.
+	manualCrashAfter := func(d time.Duration) timelineFixture {
+		manual := sessionRow("gc-1", "template", "worker", "agent_name", "worker", "alias", "worker", "state", "awake",
+			"session_origin", "manual", "command", "true", "generation", "1", "continuation_epoch", "1", "instance_token", "tok-gc-1",
+			"session_name", "s-gc-1", "last_woke_at", tlAt(0), "session_key", "conversation-1", "wake_attempts", "4", "churn_count", "2",
+			"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}")
+		f := tlFixture(fmt.Sprintf("a manual conversation crashes %s after wake", d), stable,
+			[]parityRow{manual}, nil, []simRuntime{tlLive("gc-1")},
+			[]parityStep{{Name: "crash", At: d, Op: crash, Ticks: 6}}, tlPol("gc-1"), nil)
+		f.Setup = func(tw twin) { tw.set("gc-1", "work_dir", tw.city) }
+		return f
 	}
 	// quarantinedAt is a live, quarantined row ticked through to d after its
 	// wake, then seen a tick past it: past the 30s stability threshold both
@@ -978,6 +1048,8 @@ func stabilityTimeline() []timelineFixture {
 		crashAfter(29*time.Second, tlRestarted()),
 		crashAfter(31*time.Second, nil),
 		crashAfter(5*time.Minute, tlRestarted()),
+		manualCrashAfter(29 * time.Second),
+		manualCrashAfter(31 * time.Second),
 		quarantinedAt(29*time.Second, map[string]map[string]string{
 			"seed": drained, "alive": drained, "settled": tlMerged(drained, lagged),
 		}),
@@ -1377,4 +1449,49 @@ func operatorTimeline() []timelineFixture {
 			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}
+}
+
+// idleTimeoutTimeline is A15's idle timeout (C7a-1): a live named
+// on-demand session idle past its idle_timeout by the activity clock is
+// stopped through the stop verb with the idle finalize; one holding
+// assigned work defers until its streak is exhausted.
+func idleTimeoutTimeline() []timelineFixture {
+	chatIdling := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true", IdleTimeout: "5m"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
+	chatName := agent.SessionNameFor("test-city", "chat", tlCity().Workspace.SessionTemplate)
+	named := chatRow("gc-c", "1", "state", "awake", "session_name", chatName, "instance_token", "tok-gc-c", "last_woke_at", tlAt(-time.Minute), "alias", "chat", "configured_named_mode", "on_demand")
+	named.Title = "Display gc-c"
+	active := func(tw twin) { tw.sp.SetActivity(chatName, tw.now) }
+	stopped := tlFixture("an idle named session past its idle_timeout is stopped", chatIdling,
+		[]parityRow{named}, nil, []simRuntime{tlLive("gc-c")},
+		[]parityStep{
+			{Name: "active", Op: active},
+			{Name: "idle past idle_timeout", Advance: 6 * time.Minute},
+		}, tlPol("gc-c"), nil)
+	stopped.Behaviors = []string{"GUAR-036", "SESS-574", "SESS-576"}
+	// rewoken is legacy's same-tick re-wake of the exhausted row, which v2
+	// starts a pass later.
+	rewoken := map[string]string{
+		"row:gc-c:*rewake": "idle-rewake-lag", "provider:Start " + chatName: "idle-rewake-lag", "event:session.woke chat null": "idle-rewake-lag",
+		"runtime:" + chatName:             "idle-rewake-lag",
+		"provider:RemoveMeta " + chatName: "§12.2#38 start-meta-clears",
+	}
+	busy := tlFixture("an idle named session holding assigned work defers until its streak is exhausted", chatIdling,
+		[]parityRow{named}, tlClaim("in_progress", chatName), []simRuntime{tlLive("gc-c")},
+		[]parityStep{
+			{Name: "active", Op: active},
+			{Name: "idle past idle_timeout", Advance: 6 * time.Minute, Ticks: 6},
+		}, tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*a7": "§12.2#51 a7-lag"}), map[string]map[string]string{"idle past idle_timeout": rewoken})
+	busy.Setup = func(tw twin) { // the claim's work dir, which legacy's tick stamps on a named session's work
+		st, _ := tw.row("gw-1")
+		if err := st.SetMetadata("gw-1", "gc.work_dir", tw.city); err != nil {
+			tw.t.Fatal(err)
+		}
+	}
+	busy.Behaviors = []string{"SESS-574", "SESS-575", "SESS-577"}
+	return []timelineFixture{stopped, busy}
 }

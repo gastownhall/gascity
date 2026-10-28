@@ -207,6 +207,23 @@ func newNotification(method string) JSONRPCMessage {
 	}
 }
 
+// methodSessionCancel is the ACP notification that cancels a session's
+// in-flight prompt turn.
+const methodSessionCancel = "session/cancel"
+
+// SessionCancelParams is the params object of a session/cancel notification.
+type SessionCancelParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+// newSessionCancelNotification creates a "session/cancel" notification for
+// the given ACP session.
+func newSessionCancelNotification(sessionID string) JSONRPCMessage {
+	msg := newNotification(methodSessionCancel)
+	msg.Params, _ = json.Marshal(SessionCancelParams{SessionID: sessionID})
+	return msg
+}
+
 // newInitializeRequest creates an "initialize" request.
 func newInitializeRequest() (JSONRPCMessage, int64) {
 	return newRequest("initialize", InitializeParams{

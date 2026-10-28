@@ -52,9 +52,9 @@ var ErrInputClearSkipped = errors.New("input box left alone: a client may be att
 var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
 
 // ErrInteractionResponseInvalid reports that a response to a pending
-// interaction cannot be applied: it names no outstanding request, or its
-// action is unknown or not offered by the interaction. The interaction stays
-// pending so the caller can answer again.
+// interaction cannot be applied: its action is unknown or not offered by the
+// interaction. The interaction stays pending so the caller can answer again.
+// A response naming no outstanding request is ErrInteractionGone instead.
 var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
 
 // ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
@@ -62,6 +62,11 @@ var ErrInteractionResponseInvalid = errors.New("interaction response is invalid"
 // approval a client has not answered yet. Delivery layers translate it into
 // their own refusal (session.ErrPendingInteraction).
 var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
+
+// ErrInterruptNotSettled reports that Interrupt asked the session to stop its
+// current turn but the turn had not ended when the provider's settle bound
+// ran out. The session is left running; ending it is an explicit Stop.
+var ErrInterruptNotSettled = errors.New("interrupt did not settle the session's turn")
 
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
@@ -116,6 +121,31 @@ var ErrSessionNotFound = errors.New("session not found")
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
+// ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
+// session but the provider could not confirm it took: the message may have
+// been delivered, or may still sit unsubmitted in the session's input.
+// Callers that retry may count it as a failed attempt; callers that must not
+// deliver twice treat the nudge as possibly delivered. Providers wrap their
+// own unconfirmed submits with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
+
+// ErrNudgeNotSent reports that a nudge failed before any of its input
+// reached the session: nothing was delivered, so a retry cannot deliver the
+// message twice. Providers wrap their own pre-send failures with this
+// sentinel so callers can dispatch with errors.Is.
+var ErrNudgeNotSent = errors.New("nudge not sent")
+
+// ErrSessionBusy reports that a nudge was deferred, not delivered: the session
+// was running a turn that the provider's submit keys would have interrupted,
+// either when the provider's wait for idle ran out (nothing was typed) or
+// for the whole submit window after the message was typed (the submit was
+// never sent, and the provider cleared the typed message). No submit reached
+// the session and nothing the nudge typed is left in its input. Callers must
+// treat it as "try later": keep a queued nudge queued and do not count the
+// attempt against a delivery cap.
+var ErrSessionBusy = errors.New("nudge deferred: session is busy")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
@@ -160,6 +190,72 @@ var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
 // (exec get-meta/set-meta answered exit 2). A token read that returns it is
 // "absent by construction", never "unverifiable".
 var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
+
+// ErrMetadataNotMirrored reports that SetMeta or RemoveMeta changed the stored
+// value, which is in force, but the runtime could not reflect the change onto
+// its own view of the session (a UI projection). A caller that needs only the
+// value in force may treat the change as done and report the error as a
+// warning.
+var ErrMetadataNotMirrored = errors.New("session metadata changed but not mirrored by the runtime")
+
+// MetadataNotMirroredError is the error a runtime returns when SetMeta or
+// RemoveMeta changed the stored value but could not reflect the change onto its
+// own view of the session. It matches [ErrMetadataNotMirrored] and unwraps to
+// Cause, so errors.Is still finds the reason (for example
+// [ErrRuntimeUnavailable]).
+type MetadataNotMirroredError struct {
+	Session string
+	Key     string
+	Cause   error
+}
+
+// Error implements error.
+func (e *MetadataNotMirroredError) Error() string {
+	msg := fmt.Sprintf("%s: %s for %q", ErrMetadataNotMirrored, e.Key, e.Session)
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+
+// Is reports whether target is [ErrMetadataNotMirrored].
+func (e *MetadataNotMirroredError) Is(target error) bool {
+	return target == ErrMetadataNotMirrored
+}
+
+// Unwrap returns the reason the change could not be mirrored.
+func (e *MetadataNotMirroredError) Unwrap() error {
+	return e.Cause
+}
+
+// OnlyMetadataNotMirrored reports whether err consists solely of mirror
+// failures: every value landed, and only the runtime's own view of it lags.
+// It descends errors.Join and single-error wraps. A [MetadataNotMirroredError]
+// anywhere on that path settles its branch regardless of its cause, and so
+// does [ErrMetadataNotMirrored] itself. Any other multi-error wrap must consist
+// solely of mirror failures in every member.
+func OnlyMetadataNotMirrored(err error) bool {
+	switch e := err.(type) { //nolint:errorlint // walks the error tree by hand: every member of a join must be a mirror failure, which errors.Is cannot express
+	case nil:
+		return false
+	case *MetadataNotMirroredError:
+		return true
+	case interface{ Unwrap() []error }:
+		members := e.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !OnlyMetadataNotMirrored(member) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return OnlyMetadataNotMirrored(e.Unwrap())
+	}
+	return err == ErrMetadataNotMirrored //nolint:errorlint // a leaf of the hand walk above; errors.Is would re-descend what the walk already split
+}
 
 // ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
 // list-running answered exit 2). It is never a complete empty list.
@@ -229,6 +325,10 @@ func wrapsJoin(err error) bool {
 func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
+	}
+	if errors.Is(err, ErrFenceMismatch) {
+		// A miss names a session, whose name may hold the phrases below.
+		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "session not found") ||
@@ -384,7 +484,17 @@ type Provider interface {
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
 	// the named session. Best-effort: returns nil if the session doesn't
-	// exist. Used for graceful shutdown before Stop.
+	// exist and the provider can safely treat that as a no-op. Providers
+	// that interrupt through a runtime they observe rather than own return
+	// [ErrSessionNotFound] when it shows no live session and
+	// [ErrRuntimeUnavailable] when they cannot read it, so callers do not
+	// mistake a no-op for an interrupt. Used for graceful shutdown before
+	// Stop. A provider with a protocol-level cancel may instead wait a
+	// bounded time for the interrupted turn to end and return
+	// [ErrInterruptNotSettled] if it does not. That wait blocks the caller
+	// for up to the provider's whole bound (ACP: cancel_timeout plus two 1s
+	// SIGINT waits, 12s by default), and any lock the caller holds across
+	// the call is held that long too.
 	Interrupt(name string) error
 
 	// IsRunning reports whether the named provider runtime exists. It does not
@@ -526,6 +636,11 @@ type PendingInteraction struct {
 
 // InteractionResponse is the client's answer to a pending interaction.
 type InteractionResponse struct {
+	// RequestID names the request the answer is for. A provider answers only
+	// that request and refuses the response when another one is pending, so
+	// a caller answering one raising sets it (the conversation lane always
+	// does: request ids may repeat, and an answer must not reach a prompt it
+	// was not meant for). Empty answers whatever is pending.
 	RequestID string            `json:"request_id,omitempty"`
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`
@@ -545,6 +660,11 @@ type InteractionProvider interface {
 // Implementations must treat timeout as a hard upper bound and return
 // promptly once it expires. Callers may launch WaitForIdle asynchronously and
 // rely on timeout-bounded completion for cleanup.
+//
+// A wait that times out without one reading that showed the session busy
+// (every read failed, or none was definitive) returns an error wrapping
+// [ErrWaitUnobserved] beside its own timeout error; a wait that saw the
+// session busy at least once returns the timeout alone.
 type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
@@ -593,6 +713,42 @@ type IdleSnapshotProvider interface {
 // message. It is not evidence of a running turn; callers fall back to the
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
+
+// ErrWaitUnobserved reports that an idle or interrupt-boundary wait
+// ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
+// without one reading that showed the session busy: every read failed, or
+// none was definitive (a pane showing neither its prompt nor a busy
+// indicator, a rollout whose turn activity cannot be told). It is wrapped
+// beside the wait's own timeout error, never returned alone. Such a timeout is
+// no evidence that a turn still runs, so a caller deciding whether to restart
+// a session must not read it as one.
+var ErrWaitUnobserved = errors.New("wait observed no busy session")
+
+// TurnRunningProvider is an optional extension for runtimes that can tell, in
+// one look, whether a session's agent is running a turn now, read the way the
+// runtime's own nudge reads it before it types into the session. It is
+// narrower than [IdleSnapshotProvider]'s busy reading, which counts an
+// active-processing indicator anywhere in what it captured: where the runtime
+// can place a provider family's turn status on the live screen it reads it
+// there alone (tmux, for Codex: the rows right above the live composer), so
+// a busy row an earlier turn left in the scrollback is not a running turn.
+//
+// running=false with a nil err says no turn is running now. A non-nil err
+// means the look could not be made; the caller must not take the session as
+// idle. Composites do not implement it: it is read on the session's routed
+// leaf ([TurnRunningFor]).
+type TurnRunningProvider interface {
+	TurnRunning(name string) (running bool, err error)
+}
+
+// TurnRunningFor returns the [TurnRunningProvider] of the backend serving
+// session name, the leaf [ResolveBackend] names, and false when that backend
+// takes no such reading.
+func TurnRunningFor(p Provider, name string) (TurnRunningProvider, bool) {
+	leaf, _, _ := ResolveBackend(p, name)
+	tr, ok := leaf.(TurnRunningProvider)
+	return tr, ok
+}
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
@@ -692,6 +848,11 @@ type InventoryEntry struct {
 	// batch. LastActivity is meaningless unless ActivityKnown.
 	ActivityKnown bool
 	LastActivity  time.Time
+	// RestartRequested reports the session's restart marker
+	// (GC_RESTART_REQUESTED, which `gc runtime request-restart` and
+	// `gc handoff` set) as the batched read sees it. On tmux it is the
+	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
+	RestartRequested bool
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -758,9 +919,80 @@ type InputClearProvider interface {
 //
 // Codex CLI emits a durable "<turn_aborted>" marker when an in-flight turn has
 // actually been canceled. Waiting for that marker avoids racing a replacement
-// prompt into a session that still intends to finish the interrupted turn.
+// prompt into a session that still intends to finish the interrupted turn. A
+// session that was running no turn records nothing, and its boundary is
+// already reached.
+//
+// A wait that times out without one reading that showed a turn running
+// returns an error wrapping [ErrWaitUnobserved] beside its timeout error, as
+// [IdleWaitProvider] does.
 type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
+}
+
+// TurnInterruptMode describes how a runtime cancels a session's in-flight
+// agent turn.
+type TurnInterruptMode string
+
+const (
+	// TurnInterruptKeystroke means the caller treats the runtime as driving
+	// the agent's terminal: it picks the keys the agent provider understands,
+	// sends them through [Provider.SendKeys], and uses [Provider.Interrupt] as
+	// Ctrl-C. It is the mode assumed for a runtime that does not implement
+	// [TurnInterruptCapabilityProvider]; such a runtime may still drop keys
+	// (subprocess and ACP do), which this mode cannot express.
+	TurnInterruptKeystroke TurnInterruptMode = "keystroke"
+	// TurnInterruptProtocol means the runtime drives turns through a protocol:
+	// [Provider.Interrupt] cancels the in-flight turn for every agent provider,
+	// and [Provider.SendKeys] delivers nothing.
+	TurnInterruptProtocol TurnInterruptMode = "protocol"
+	// TurnInterruptUnsupported means neither keys nor a protocol interrupt
+	// reach the session's turn: the runtime cannot interrupt it.
+	TurnInterruptUnsupported TurnInterruptMode = "unsupported"
+)
+
+// TurnInterruptCapabilityProvider is an optional extension for runtimes that
+// report how they cancel the in-flight turn of the routed backend of a
+// specific session. Without it a runtime is taken to be
+// [TurnInterruptKeystroke].
+type TurnInterruptCapabilityProvider interface {
+	TurnInterruptMode(name string) TurnInterruptMode
+}
+
+// TurnInterruptModeFor reports how p cancels the in-flight turn of session
+// name: the mode p reports, or [TurnInterruptKeystroke] when p does not
+// implement [TurnInterruptCapabilityProvider] or reports no mode or a mode
+// this build does not know.
+func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
+	tp, ok := p.(TurnInterruptCapabilityProvider)
+	if !ok {
+		return TurnInterruptKeystroke
+	}
+	switch mode := tp.TurnInterruptMode(name); mode {
+	case TurnInterruptProtocol, TurnInterruptUnsupported:
+		return mode
+	default:
+		return TurnInterruptKeystroke
+	}
+}
+
+// BackgroundWorkStopper is an optional extension for runtimes that can stop
+// work a provider keeps running after its turn was interrupted. A session's
+// explicit stop (session.Manager.StopTurn) calls it once the interrupt
+// boundary is reached; an interrupt that delivers a replacement message does
+// not, so a replacement turn leaves earlier work alone.
+//
+// Codex CLI runs a turn's commands in background terminals that outlive the
+// interrupted turn. tmux stops them with Codex's /stop, which closes ALL of
+// the session's background terminals, including ones earlier turns started:
+// stopping a session stops its work. Claude Code keeps a command the model
+// ran in the background running the same way; tmux stops ALL of its
+// background shells from Claude's background-task view. StopBackgroundWork returns
+// [ErrInteractionUnsupported] for sessions it has no such work to stop for.
+// Work it could not stop is logged rather than returned, because the turn is
+// already stopped; only the caller's context ending is an error.
+type BackgroundWorkStopper interface {
+	StopBackgroundWork(ctx context.Context, name string) error
 }
 
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
@@ -869,8 +1101,9 @@ type LiveRuntime struct {
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying
-	// GC_SESSION_ID equal to id. If id is empty, it returns all live agent root
-	// processes with any GC_SESSION_ID set.
+	// GC_SESSION_ID equal to id. If id is empty, it returns the orphan sweep's
+	// candidates: live agent roots with any GC_SESSION_ID set that were
+	// reparented to init or the user subreaper (proctable.OrphanCandidate).
 	//
 	// Best-effort implementations may return both partial results and a non-nil
 	// error; callers should proceed with any returned results.
@@ -1152,10 +1385,10 @@ type Config struct {
 	// transported into the session environment.
 	CopyFiles []CopyEntry
 
-	// FingerprintExtra carries additional config data that should
-	// participate in fingerprint comparison but isn't part of the session
-	// startup command (e.g. pool config). Nil means no
-	// extra data — the fingerprint covers only Command + Env.
+	// FingerprintExtra carries additional config data that isn't part of
+	// the session startup command (pool sizing, skill and MCP hashes, ...).
+	// Each key has a ChangePolicy (FingerprintExtraChangePolicy); only
+	// Restart keys participate in fingerprint comparison.
 	FingerprintExtra map[string]string
 
 	// PromptSuffix is the shell-quoted prompt text appended to Command

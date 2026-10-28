@@ -16,8 +16,8 @@ import (
 // leaf (C7b2-2 review; the reviewer's repros).
 
 // driftOn decides a drifted row, named or ordinary, with a full or a
-// launch-only drift, on admittedBeginOn's leaf.
-func driftOn(t *testing.T, named, launchOnly bool) (*effectPass, intent, beads.Store, *fenceLeaf) {
+// launch-only drift, on admittedBeginOn's leaf, the row carrying extra.
+func driftOn(t *testing.T, named, launchOnly bool, extra ...string) (*effectPass, intent, beads.Store, *fenceLeaf) {
 	t.Helper()
 	withoutA7(t)
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
@@ -30,6 +30,7 @@ func driftOn(t *testing.T, named, launchOnly bool) (*effectPass, intent, beads.S
 	if launchOnly {
 		meta = append(meta, "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", runtime.FingerprintVersion+":old-launch")
 	}
+	meta = append(meta, extra...)
 	p, it, store, leaf := admittedBeginOn(t, meta, func(e *selectionEntry) { e.InDesired, e.Desired = true, desireKeep }, func(w *World) {
 		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}}
 		for _, row := range w.Census.Rows { // every row resolves (the store seeds one beside the drifted row)
@@ -55,13 +56,19 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		named, fails  bool
+		killed        bool
 		stops         int
 		state, drains string
+		refused       string
 	}{
 		{name: "ordinary, landed"},
 		{name: "named, landed", named: true},
 		{name: "named, failed: the restart", named: true, fails: true, stops: 1, state: "start-pending"},
 		{name: "ordinary, failed: the drain", fails: true, drains: drainConfigDrift},
+		// CONTRACT v5.10e (mc-i7efm): an operator's kill landing while the
+		// relaunch runs makes the row A2's; the fallback re-decides the
+		// fresh row and begins no drain.
+		{name: "ordinary, failed, killed meanwhile: no drain", fails: true, killed: true, refused: causeRedecided, state: "asleep"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, it, store, leaf := driftOn(t, tc.named, true)
@@ -71,11 +78,24 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 			if tc.fails {
 				leaf.RelaunchErrors = map[string]error{"s-gc-1": errors.New("box gone")}
 			}
+			if tc.killed {
+				p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+					if at == seamAfterCall && leaf.CountCalls("Relaunch", "s-gc-1") == 1 {
+						p.seam = nil
+						if _, err := session.WriteKillFence(store, it.Key.ID, gatherNow); err != nil {
+							t.Error(err)
+						}
+					}
+					return nil
+				}
+			}
 			s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 			got, _ := store.Get(it.Key.ID)
 			stale := got.Metadata["started_config_hash"] == runtime.FingerprintVersion+":stale"
 			switch {
-			case s.Outcome != settledLanded || leaf.CountCalls("Relaunch", "s-gc-1") != 1 || stops(leaf) != tc.stops:
+			case tc.refused != "" && (s.Outcome != settledRefused || s.Cause != tc.refused):
+				t.Fatalf("settled %+v, want refused %q", s, tc.refused)
+			case tc.refused == "" && s.Outcome != settledLanded, leaf.CountCalls("Relaunch", "s-gc-1") != 1, stops(leaf) != tc.stops:
 				t.Fatalf("settled %+v, relaunches %d, stops %d; want landed, one relaunch, %d stops", s, leaf.CountCalls("Relaunch", "s-gc-1"), stops(leaf), tc.stops)
 			case !tc.fails && stale:
 				t.Fatalf("row %v: want the relaunch baseline", got.Metadata)
@@ -144,6 +164,23 @@ func TestDriftRestartStopIsFenced(t *testing.T) {
 	}
 }
 
+// Kills a drift restart that resets the row over a runtime its own section
+// reads (STALE-READ E1): one back under the name after the confirmed stop
+// refuses runtime-present, and the row is not reset to start-pending.
+func TestDriftRestartRestsOnItsOwnRead(t *testing.T) {
+	p, it, store, leaf := driftOn(t, true, false)
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterCall && section == driftLeaseAt { // the stop Call's section
+			startRuntime(t, leaf.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": it.Key.ID, "GC_INSTANCE_TOKEN": "tok-3"})
+		}
+		return nil
+	}
+	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || s.Cause != causeRuntimePresent || got.Metadata["state"] == "start-pending" {
+		t.Fatalf("a runtime back after the stop: settled %+v, state %q; want refused %q, no reset", s, got.Metadata["state"], causeRuntimePresent)
+	}
+}
+
 // Kills a relaunch that skips the re-decide or the L3 re-read before
 // Relaunch (C8.7): a runtime gone between the deferral and the relaunch refuses as re-decided; an
 // attach that lands after the relaunch section's reads holds the Relaunch,
@@ -169,6 +206,52 @@ func TestRelaunchRedecidesAndRereadsAttach(t *testing.T) {
 	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || leaf.CountCalls("Relaunch", "s-gc-1")+stops(leaf) != 0 || got.Metadata["drain_intent_reason"] != "" {
 		t.Fatalf("attached before Relaunch: settled %+v, relaunches %d, stops %d, stop request %q; want refused, nothing done", s, leaf.CountCalls("Relaunch", "s-gc-1"), stops(leaf), got.Metadata["drain_intent_reason"])
+	}
+}
+
+// Kills a relaunch that decides L3, L4 and L5 only before the lease record
+// (v5.9g; STALE-READ 7.2): a pending interaction, an attach, or (on an
+// ordinary seat) work that lands after the deferral's reads is read again
+// by the relaunch section under the record, and refuses the Relaunch. A
+// pending interaction under legacy's exemption (a wait hold) does not, as
+// the deferral reads it.
+func TestRelaunchRefusesWhatItsSectionReadsUnderTheRecord(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		land  func(store beads.Store, id string, leaf *fenceLeaf)
+		cause string
+	}{
+		{"a pending interaction", func(_ beads.Store, _ string, leaf *fenceLeaf) { approval(leaf) }, causeDriftDeferred + "pending"},
+		{"an attach", func(_ beads.Store, _ string, leaf *fenceLeaf) { leaf.SetAttached("s-gc-1", true) }, causeDriftDeferred + fenceAttached},
+		{"work", func(store beads.Store, id string, _ *fenceLeaf) { assignWork(t, store, id) }, causeDriftDeferred + fenceHasWork},
+	} {
+		p, it, store, leaf := driftOn(t, false, true)
+		if it.Kind != intentDriftRelaunch {
+			t.Fatalf("%s: decided %+v, want the relaunch", c.name, it)
+		}
+		p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+			if s == seamAfterReads && section == 0 {
+				c.land(store, it.Key.ID, leaf)
+			}
+			return nil
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		if s.Outcome != settledRefused || s.Cause != c.cause || leaf.CountCalls("Relaunch", "s-gc-1") != 0 {
+			t.Errorf("%s after the deferral's reads: settled %+v, relaunches %d; want refused %q, none", c.name, s, leaf.CountCalls("Relaunch", "s-gc-1"), c.cause)
+		}
+	}
+	p, it, _, leaf := driftOn(t, false, true, "wait_hold", "true")
+	if it.Kind != intentDriftRelaunch {
+		t.Fatalf("wait-held: decided %+v, want the relaunch", it)
+	}
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterReads && section == 0 {
+			approval(leaf)
+		}
+		return nil
+	}
+	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Outcome != settledLanded || leaf.CountCalls("Relaunch", "s-gc-1") != 1 {
+		t.Errorf("a pending interaction under a wait hold: settled %+v, relaunches %d; want the relaunch, as the deferral exempts it", s, leaf.CountCalls("Relaunch", "s-gc-1"))
 	}
 }
 

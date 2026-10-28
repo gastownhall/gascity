@@ -110,7 +110,7 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
-			if err := pokeControlDispatch(cityPath); err != nil {
+			if err := pokeControlDispatch(cityPath); err != nil && !noteWorkerSitePoke(stderr, "gc convoy poke", err) {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
@@ -120,7 +120,13 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// pokeControlDispatch asks the controller to run its control dispatcher now,
+// falling back to an ordinary poke. On a worker site it returns
+// errWorkerSiteNoController without trying either.
 func pokeControlDispatch(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	if _, err := sendControllerCommand(cityPath, "control-dispatcher"); err == nil {
 		return nil
 	}
@@ -2735,6 +2741,13 @@ func assertWorkflowDeleteLeavesNothingStranded(store beads.Store, id string, als
 // see — an open descendant recorded outside the collected set — not a
 // replacement for the per-bead guard.
 func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []string) error {
+	return assertWorkflowDeleteSetLeavesNothingStrandedFor(store, ids, ids)
+}
+
+// assertWorkflowDeleteSetLeavesNothingStrandedFor is the set-level guard for a
+// delete of ids that asks only about check, a subset of ids the caller could
+// not already rule out as owners of gc.root_bead_id members.
+func assertWorkflowDeleteSetLeavesNothingStrandedFor(store beads.Store, ids, check []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -2744,7 +2757,7 @@ func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []strin
 	}
 	skip := workflowDeleteSkip(deleting)
 	reader := beads.HandlesFor(store).Live
-	for _, id := range ids {
+	for _, id := range check {
 		members, err := reader.List(beads.ListQuery{
 			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: id},
 			TierMode: beads.TierBoth,
@@ -2804,6 +2817,15 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	}
 	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
 		return err
+	}
+	return deleteWorkflowBeadsBatchGuarded(store, ids)
+}
+
+// deleteWorkflowBeadsBatchGuarded is deleteWorkflowBeadsBatch for a caller
+// that already ran the set-level strand guard.
+func deleteWorkflowBeadsBatchGuarded(store beads.Store, ids []string) error {
+	if len(ids) == 0 {
+		return nil
 	}
 	if cd, ok := store.(beads.BatchDeleter); ok {
 		// A policy/capability wrapper advertises BatchDeleter to forward it, but

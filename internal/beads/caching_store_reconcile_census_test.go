@@ -90,10 +90,18 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"writeAt":             true, // compared as mergeEndState.writeAtIDs
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
 		"retainedAt":          true, // compared as mergeEndState.retainedIDs
+		"announcedCloses":     true, // compared as mergeEndState.announcedCloseIDs
+		"silentCloses":        true, // compared as mergeEndState.silentCloseIDs
 		"fenceFloor":          true, // compared; only a pruned retention raises it
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
+		// announcedClosesPruneNext is set by the merge's prune and compared as
+		// mergeEndState.announcedPruneNext.
+		"announcedClosesPruneNext": true,
+		// announcedClosesPrunedAt is set by the merge's prune to the pass
+		// clock and compared as mergeEndState.announcedPrunedAt.
+		"announcedClosesPrunedAt": true,
 	}
 	excludedStore := map[string]bool{
 		// observationRevision is a process-local publication fence, orthogonal to
@@ -137,6 +145,12 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// cached one, which the IncludeClosed=false scan does not do. Its
 		// exactly-once behavior is pinned by caching_store_close_event_test.go.
 		"unannouncedCloses": true, "hasUnannouncedCloses": true,
+		// unannouncedUpdates is the update-shaped twin: an announcement queue
+		// that only read refetches (announceRead) fill. The seam never queues
+		// into it; it can only drop an entry, when it installs a different row
+		// (announced by the merge's own diff) or evicts the row. Its behavior
+		// is pinned by caching_store_read_announce_test.go.
+		"unannouncedUpdates": true, "hasUnannouncedUpdates": true,
 		// closeIntents counts closing writes in flight between their backing
 		// write and their announcement claim; only those writers touch it, and
 		// the seam reads it only through trackCloseTransitionLocked's queueing
@@ -145,6 +159,15 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// ownEmits records what onChange emitted, to recognize its echoes in
 		// applyEvent; the merge neither reads nor writes it.
 		"ownEmitMu": true, "ownEmits": true, "ownEmitsSweptAt": true,
+		// reconcileRequested and reconcileKick schedule the reconcile loop
+		// (RequestReconcile); the merge neither reads nor writes them.
+		"reconcileRequested": true, "reconcileKick": true,
+		// localWrites counts local writes in flight for a yielding
+		// RefreshRowReport; only the writers and that refresh touch it.
+		"localWrites": true,
+		// lastScanAt is set by Prime and PrimeActive, never by the merge
+		// seam; it dates the backstop only until the first reconcile.
+		"lastScanAt": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -158,6 +181,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
+		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }

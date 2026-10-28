@@ -16,7 +16,7 @@ func contractMailFamily(t *testing.T, h *contractHarness) {
 	box := h.createAgentSession(t, "contract mailbox").SessionName
 	h.mailbox = box
 	sent, err := c.SendMailWithResponse(ctx, city, &genclient.SendMailParams{XGCRequest: contractCSRF},
-		genclient.SendMailJSONRequestBody{To: box, From: ptr("api-contract"), Subject: "contract hello", Body: ptr("first")})
+		genclient.SendMailJSONRequestBody{To: box, From: ptr("human"), Subject: "contract hello", Body: ptr("first")})
 	expectStatus(t, "send mail", sent, err, http.StatusCreated)
 	msg := mustJSON(t, "send mail", sent.JSON201, sent)
 	if msg.Read || msg.Subject != "contract hello" {

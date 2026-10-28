@@ -237,7 +237,49 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	exp.writeAtIDs = keySet(exp.writeSeq)
 	exp.deletedSeq = expectedDeletedSeq(st, in, exp)
 	exp.retainedIDs = expectedRetainedIDs(in, exp)
+	exp.announcedCloseIDs = expectedAnnouncedCloseIDs(st, in, exp)
+	// The merge prunes the record after its last announcement, which sets the
+	// next prune threshold to twice what the prune kept. The frozen branches
+	// predate the record, so the reference end state cannot supply it.
+	exp.announcedPruneNext = 2 * len(exp.announcedCloseIDs)
+	exp.announcedPrunedAt = in.now
+	exp.silentCloseIDs = expectedSilentCloseIDs(st, exp)
 	return exp
+}
+
+// expectedSilentCloseIDs is every row the merge leaves closed that the cache
+// did not hold before it: the merge installs a closed row over no cached row
+// without announcing its close. No seeded state carries a mark, and the
+// merge's prune drops the mark of every row it does not hold closed. The
+// frozen branches predate the record, so the reference end state cannot
+// supply it.
+func expectedSilentCloseIDs(st storeState, exp mergeEndState) map[string]struct{} {
+	out := map[string]struct{}{}
+	for id, b := range exp.beads {
+		if _, before := st.beads[id]; !before && b.Status == "closed" {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
+// expectedAnnouncedCloseIDs is every row the cache held open that the
+// snapshot omits, that the merge evicted, and whose close the scan confirmed:
+// the closes a refresh must not announce again. No seeded state carries a
+// record, and each one is stamped with the pass clock, so the prune keeps
+// them all. The frozen branches predate the record, so the reference end
+// state cannot supply it.
+func expectedAnnouncedCloseIDs(st storeState, in snapshotInputs, exp mergeEndState) map[string]struct{} {
+	out := map[string]struct{}{}
+	for id, cached := range st.beads {
+		_, fresh := in.freshByID[id]
+		_, held := exp.beads[id]
+		_, confirmed := in.confirmedClosed[id]
+		if cached.Status != "closed" && !fresh && !held && confirmed {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // expectedWriteSeq re-derives the write-revision map from the input. The merge

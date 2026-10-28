@@ -145,7 +145,7 @@ func (d Disposition) render() string {
 func TestDispositionTableGolden(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("# The disposition table (ARCH-RESTRUCTURE-2 R7): event by actor, from seed -> result.\n")
-	b.WriteString("# Regenerate: go test ./internal/session -run TestDispositionTableGolden -update-golden\n")
+	b.WriteString("# Regenerate: GC_TEST_REPO_ROOT=\"$PWD\" bazel run //internal/session:session_test -- -test.run='^TestDispositionTableGolden$' -update-golden\n")
 	for _, e := range dispEvents() {
 		fmt.Fprintf(&b, "\n%s by %s", e.ev.Kind, actorNames[e.by])
 		if !e.ev.Until.IsZero() {
@@ -420,6 +420,35 @@ func TestDispositionOperatorDormant(t *testing.T) {
 	} {
 		if got := DecodeDisposition(c.meta).OperatorDormant(dispT0); got != c.dormant {
 			t.Errorf("%v: OperatorDormant = %v, want %v", c.meta, got, c.dormant)
+		}
+	}
+}
+
+// TestDispositionRefusesPreWake (CONTRACT v5.9u): an operator's suspend
+// refuses the controller's PreWake and A17's heartbeat respawn; a soft
+// suspend (the stop and rig-restart sweeps') refuses neither. A live timer
+// refuses the PreWake alone; a wait and an unreadable timer refuse neither.
+func TestDispositionRefusesPreWake(t *testing.T) {
+	future := dispT0.Add(time.Hour).Format(time.RFC3339)
+	for _, c := range []struct {
+		meta             map[string]string
+		preWake, respawn bool
+	}{
+		{map[string]string{}, false, false},
+		{map[string]string{"state": string(StateSuspended), "suspended_at": future}, false, false},
+		{map[string]string{"state": string(StateSuspended), "sleep_intent": string(SleepReasonUserHold), "held_until": future}, true, true},
+		{map[string]string{"sleep_intent": string(SleepReasonUserHold)}, true, true},
+		{map[string]string{"held_until": future}, true, false},
+		{map[string]string{"quarantined_until": future}, true, true},
+		{map[string]string{"wait_hold": "true"}, false, false},
+		{map[string]string{"held_until": "soon"}, false, false},
+	} {
+		d := DecodeDisposition(c.meta)
+		if got := d.RefusesPreWake(dispT0); got != c.preWake {
+			t.Errorf("%v: RefusesPreWake = %v, want %v", c.meta, got, c.preWake)
+		}
+		if got := d.RefusesHeartbeatRespawn(dispT0); got != c.respawn {
+			t.Errorf("%v: RefusesHeartbeatRespawn = %v, want %v", c.meta, got, c.respawn)
 		}
 	}
 }

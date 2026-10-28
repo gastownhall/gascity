@@ -21,6 +21,12 @@
 > reach the same upstream commit by two routes, and gc links the same beads it
 > shells out to.
 >
+> **Floor raised — 2026-10-17.** `BD_PREV_VERSION` moved from v1.0.4 to v1.3.0,
+> the first tested bd release with the `--if-assignee`/`--if-status`
+> conditional-release flags (beads#5008; bd v1.2.2 re-released v1.1.2 without
+> them). The matrix floor cell is now `@bd_bin_v1_3_0`, `bdMinVersion` is 1.3.0,
+> and BdStore's raw-SQL `ReleaseIfCurrent` fallback was deleted with it.
+>
 > The **mechanism** this doc specifies is unchanged and was followed by both
 > bumps: the corpus re-vendor rides in the same PR as the pin move.
 

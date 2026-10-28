@@ -15,13 +15,14 @@ var responseCacheTTL = 2 * time.Second
 
 // timeBucketResponseCacheTTL bounds how long a built body is reused by the
 // endpoints that key their response-cache entry on a TIME bucket rather than
-// the event sequence: /status (gascity#3186), /formulas/feed, and bounded
-// all=true /beads reads (#3208). The shared index-keyed cache misses on every
-// poll of a busy city — the sequence advances each tick — so O(store-size)
-// bodies were rebuilt per request. These are coarse views where a few seconds
-// of staleness is acceptable (responses report X-GC-Cache-Age-S where a
-// CachingStore backs them); strict-freshness callers (blocking ?index=&wait=
-// requests) bypass the time cache at each handler.
+// the event sequence: /status (gascity#3186), /formulas/feed, bounded
+// all=true /beads reads (#3208), and the agent list (#7149). The shared
+// index-keyed cache misses on every poll of a busy city — the sequence
+// advances each tick — so O(store-size) bodies were rebuilt per request.
+// These are coarse views where a few seconds of staleness is acceptable
+// (responses report X-GC-Cache-Age-S where a CachingStore backs them);
+// strict-freshness callers (blocking ?index=&wait= requests) bypass the time
+// cache at each handler.
 var timeBucketResponseCacheTTL = 2 * time.Second
 
 // responseCacheTimeBucket returns a monotonically increasing generation that
@@ -183,6 +184,14 @@ func (s *Server) cachedResponse(key string, index uint64) (any, bool) {
 // cachedResponseAs. The map is capped at responseCacheMaxEntries with
 // TTL-based eviction on insert.
 func (s *Server) storeResponse(key string, index uint64, v any) {
+	s.storeResponseUnless(key, index, v, nil)
+}
+
+// storeResponseUnless is storeResponse that leaves the entry already cached
+// under key in place, and drops v, when keep reports true for that entry.
+// keep runs under the cache mutex, so no other store lands between its check
+// and the write; it must not block.
+func (s *Server) storeResponseUnless(key string, index uint64, v any, keep func(cached responseCacheEntry) bool) {
 	if key == "" {
 		return
 	}
@@ -191,8 +200,12 @@ func (s *Server) storeResponse(key string, index uint64, v any) {
 	if s.responseCacheEntries == nil {
 		s.responseCacheEntries = make(map[string]responseCacheEntry)
 	}
+	cached, exists := s.responseCacheEntries[key]
+	if exists && keep != nil && keep(cached) {
+		return
+	}
 	now := time.Now()
-	if _, exists := s.responseCacheEntries[key]; !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
+	if !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
 		s.evictResponseCache(now)
 	}
 	s.responseCacheEntries[key] = responseCacheEntry{
@@ -313,6 +326,16 @@ func (s *Server) endResponseRefresh(key string) {
 	s.responseCacheMu.Lock()
 	defer s.responseCacheMu.Unlock()
 	delete(s.responseRefreshing, key)
+}
+
+// indexedResponse pairs a cached body with the event index captured before
+// the body was built. A cache hit or an Idempotency-Key replay must report
+// that index, not the current head: X-GC-Index tells a client where to resume
+// or block, and a head newer than the body would skip the changes the body
+// lacks.
+type indexedResponse[T any] struct {
+	Index uint64 `json:"index"`
+	Body  T      `json:"body"`
 }
 
 // cachedResponseAs is a generic helper: retrieve the cached value and

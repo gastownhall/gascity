@@ -44,6 +44,9 @@ type Provider struct {
 	procs    map[string]*sessionConn // in-process tracking
 	workDirs map[string]string       // session name → workDir (for CopyTo)
 	ops      providerOps
+	// fenceChecked is a test seam run between a fenced operation's check and
+	// its signal.
+	fenceChecked func(name string)
 }
 
 type providerOps struct {
@@ -65,6 +68,7 @@ type sessionConn struct {
 	done     chan struct{} // closed when process exits
 	reaped   chan struct{} // closed once reap has finished, after done
 	token    string        // the GC_INSTANCE_TOKEN this incarnation seeded
+	fence    string        // the input-fence digest of this incarnation ("" when its env names none)
 	listener net.Listener  // unix socket listener
 }
 
@@ -222,6 +226,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	// Create control socket for cross-process discovery.
 	sc := &sessionConn{cmd: cmd, done: make(chan struct{}), reaped: make(chan struct{}), token: cfg.Env["GC_INSTANCE_TOKEN"]}
+	if f, ok := runtime.InputFenceFromEnv(cfg.Env); ok {
+		sc.fence = f.Digest()
+	}
 	lis, err := p.startControlSocket(name, sc, socketDir, euid)
 	if err != nil {
 		// Socket creation failed — kill the process and bail.

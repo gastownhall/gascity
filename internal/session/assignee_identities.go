@@ -1,6 +1,9 @@
 package session
 
 import (
+	"errors"
+	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -48,6 +51,112 @@ func AssigneeIdentities(i Info) []string {
 		}
 	}
 	return identities
+}
+
+// recordLookupKeys are the session-bead metadata keys HasRecordAnsweringTo
+// looks an identity up under: the AssigneeIdentities sources that can hold a
+// qualified "<rig>/<name>" identity. A bead ID never contains "/", and the
+// session_name syntax (sessionNamePattern) admits none either.
+var recordLookupKeys = []string{"alias", NamedSessionIdentityMetadata, aliasHistoryMetadataKey}
+
+// anyShapeRecordLookupKeys extends recordLookupKeys with session_name: the
+// AssigneeIdentities source that cannot hold "/" but holds every runtime name a
+// session claims under.
+var anyShapeRecordLookupKeys = append([]string{"session_name"}, recordLookupKeys...)
+
+// HasRecordAnsweringTo reports whether a session bead in store, open or closed,
+// answers to identity under its alias, its configured named identity, or its
+// alias history. Each key is one exact-metadata listing, and the lookup writes
+// nothing: an empty-type session bead counts without being repaired. What a
+// listing costs is the backend's. On SQLite (an indexed metadata lookup) and in
+// memory it follows the records that match, not the size of the session
+// ledger, but bd/Dolt filters metadata without an index, so there each listing
+// scans the whole store (about 0.6s measured on an 11.3k-bead store).
+//
+// alias_history is stored comma-joined, so the exact match finds a prior alias
+// only when it is the record's sole history entry. False therefore means no
+// record was found, not that none exists.
+//
+// A hard listing error ends the lookup and returns false with the error: the
+// answer is unknown. The rows a partial result returns still count, so true is
+// reliable even when the first partial-result error comes back with it. The
+// listings are Live reads, so a CachingStore returns a backing failure as the
+// hard error it is, not as a partial result over its cached open rows.
+func HasRecordAnsweringTo(store beads.Store, identity string) (bool, error) {
+	id, err := recordAnsweringTo(store, strings.TrimSpace(identity), recordLookupKeys)
+	return id != "", err
+}
+
+// RecordAnsweringTo returns the ID of a session bead in store, open or closed,
+// that answers to identity under any AssigneeIdentities source, or "" when none
+// was found. It is HasRecordAnsweringTo for callers that meet claims of every
+// shape (the core orphan-sweep order through `gc agent is-foreign`): for an
+// identity containing "/" it issues exactly HasRecordAnsweringTo's lookups,
+// since a bead ID and a session_name never contain "/". For any other identity
+// it first reads the bead whose ID is the identity (an unaliased pool or
+// ephemeral session claims under its bead ID, AssigneeIdentifier), then looks
+// the identity up under session_name, alias, configured named identity and
+// alias history. Error semantics match HasRecordAnsweringTo; a non-NotFound
+// Get error is a hard error.
+func RecordAnsweringTo(store beads.Store, identity string) (string, error) {
+	identity = strings.TrimSpace(identity)
+	if store == nil || identity == "" {
+		return "", nil
+	}
+	if strings.Contains(identity, "/") {
+		return recordAnsweringTo(store, identity, recordLookupKeys)
+	}
+	if couldBeBeadID(identity) {
+		b, err := store.Get(identity)
+		switch {
+		case err == nil:
+			if IsSessionBeadOrRepairable(b) && slices.Contains(AssigneeIdentities(infoFromPersistedBead(b)), identity) {
+				return b.ID, nil
+			}
+		case errors.Is(err, beads.ErrNotFound):
+		default:
+			return "", fmt.Errorf("reading session bead %q: %w", identity, err)
+		}
+	}
+	return recordAnsweringTo(store, identity, anyShapeRecordLookupKeys)
+}
+
+// couldBeBeadID reports whether identity is worth a Get by ID: bead IDs carry
+// no whitespace, and a leading "-" would read as a flag to a CLI-backed store.
+func couldBeBeadID(identity string) bool {
+	return !strings.HasPrefix(identity, "-") && !strings.ContainsAny(identity, " \t\r\n")
+}
+
+// recordAnsweringTo is the listing loop behind HasRecordAnsweringTo and
+// RecordAnsweringTo: one Live, closed-inclusive exact-metadata listing per key,
+// returning the first session record whose own identities include identity.
+func recordAnsweringTo(store beads.Store, identity string, keys []string) (string, error) {
+	if store == nil || identity == "" {
+		return "", nil
+	}
+	var partial error
+	for _, key := range keys {
+		rows, err := store.List(beads.ListQuery{
+			Metadata:      map[string]string{key: identity},
+			IncludeClosed: true,
+			Live:          true,
+		})
+		if err != nil {
+			err = fmt.Errorf("listing session beads by %s: %w", key, err)
+			if !beads.IsPartialResult(err) {
+				return "", err
+			}
+			if partial == nil {
+				partial = err
+			}
+		}
+		for _, b := range rows {
+			if IsSessionBeadOrRepairable(b) && slices.Contains(AssigneeIdentities(infoFromPersistedBead(b)), identity) {
+				return b.ID, partial
+			}
+		}
+	}
+	return "", partial
 }
 
 // isPoolManagedIdentity reports whether i carries one of the reconciler's

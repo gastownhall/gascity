@@ -298,9 +298,9 @@ func TestRootsPinned(t *testing.T) {
 	check(t, "a root removed", messages(t, pinned, "", "func decide() int { return 1 }\n"), "pinned v2purity root example.com/p.decide is not marked //gc:pure")
 }
 
-// Kills the C9 gate dropped: once the cutover constant is true a live
-// exemption fails, a dead one does not, and before cutover neither does;
-// a missing constant fails.
+// Kills the C9 gate dropped or widened: once the cutover constant is true a
+// live exemption fails, an accepted one (v5.10t) and a dead one do not, and
+// before cutover none does; a missing constant fails.
 func TestCutoverGate(t *testing.T) {
 	src := "//gc:pure\nfunc decide() int { return helper() }\n\nfunc helper() int { return Now() }\n"
 	for _, c := range []struct {
@@ -308,6 +308,7 @@ func TestCutoverGate(t *testing.T) {
 	}{
 		{"live at cutover", "const effectsReal = true\n\n", "live", "effectsReal is true, but 1 v2purity exemptions are live"},
 		{"dead at cutover", "const effectsReal = true\n\n", "dead", ""},
+		{"accepted at cutover", "const effectsReal = true\n\n", "accepted", ""},
 		{"live before cutover", "const effectsReal = false\n\n", "live", ""},
 		{"no cutover constant", "", "live", "v2purity cutover constant effectsReal is not a bool constant"},
 		{"a cutover that is not a bool", "const effectsReal = 1\n\n", "live", "is not a bool constant"},
@@ -325,9 +326,26 @@ func TestCutoverGate(t *testing.T) {
 	}
 }
 
+// Kills accepted entries that let a new live exemption past the gate
+// (v5.10t): beside an accepted entry, a new live one still fails the
+// cutover, naming only itself.
+func TestCutoverGateAcceptedDoesNotCoverNewLive(t *testing.T) {
+	src := "//gc:pure\nfunc decide() int { return helper() + other() }\n\nfunc helper() int { return Now() }\n\nfunc other() int { return Now() }\n"
+	k := cfg
+	k.Cutover = "effectsReal"
+	k.Exempt = map[string]v2purity.Exemption{
+		pkg + ".helper": {Class: "accepted", Bead: "b", Reason: "accepted at cutover"},
+		pkg + ".other":  {Class: "live", Bead: "b2", Reason: "new"},
+	}
+	check(t, "a new live beside an accepted", messages(t, k, "", "const effectsReal = true\n\n"+src), "effectsReal is true, but 1 v2purity exemptions are live: "+pkg+".other")
+	k.Exempt[pkg+".other"] = v2purity.Exemption{Class: "accepted", Bead: "b2", Reason: "accepted at cutover"}
+	check(t, "both accepted", messages(t, k, "", "const effectsReal = true\n\n"+src), "")
+}
+
 // baselineNames is the reviewed baseline: Default.Exempt may only drop
-// names from it, and only its live names may be live (the coordinator's
-// ruling). Adding a name, or making one live, means raising it in review.
+// names from it, and only its accepted names may be accepted at cutover
+// (CONTRACT v5.10t). Adding a name, or making one live or accepted, means
+// raising it in review.
 var baselineNames = map[string]string{
 	"(*github.com/gastownhall/gascity/cmd/gc.SessionReconcilerTraceCycle).RecordDecision":   "dead",
 	"(*github.com/gastownhall/gascity/cmd/gc.controlDispatcherRouteRepair).write":           "dead",
@@ -335,23 +353,23 @@ var baselineNames = map[string]string{
 	"github.com/gastownhall/gascity/cmd/gc.recordDeferredNonExpandingPoolAliasConflictInfo": "dead",
 	"github.com/gastownhall/gascity/cmd/gc.workerSessionTargetLastActivityWithConfig":       "dead",
 	"github.com/gastownhall/gascity/cmd/gc.verifyPoolTriggerWorktree":                       "dead",
-	"(*github.com/gastownhall/gascity/cmd/gc.sessionBeadSnapshot).OpenInfos":                "live",
-	"(*github.com/gastownhall/gascity/cmd/gc.sessionBeadSnapshot).LoadError":                "live",
-	"(*github.com/gastownhall/gascity/cmd/gc.sessionBeadSnapshot).FindInfoByID":             "live",
-	"github.com/gastownhall/gascity/cmd/gc.applyTemplateOverridesToConfigInfo":              "live",
-	"github.com/gastownhall/gascity/cmd/gc.templateParamsToConfigWithDelivery":              "live",
-	"github.com/gastownhall/gascity/cmd/gc.recordNewDemandCapTrace":                         "live",
-	"github.com/gastownhall/gascity/cmd/gc.reserveNestedCapFloors":                          "live",
-	"github.com/gastownhall/gascity/internal/session.ProjectLifecycle":                      "live",
-	"(*github.com/gastownhall/gascity/internal/poolplan.CreateBudget).TryClaim":             "live",
-	"(*github.com/gastownhall/gascity/internal/poolplan.CreateBudget).ConfigureFairShare":   "live",
-	"(*github.com/gastownhall/gascity/internal/config.DaemonConfig).PatrolIntervalDuration": "live",
-	"github.com/gastownhall/gascity/internal/config.NamedSessionRuntimeName":                "live",
-	"github.com/gastownhall/gascity/internal/session.FindNamedSessionSpec":                  "live",
-	"github.com/gastownhall/gascity/internal/workdir.SessionQualifiedName":                  "live",
-	"github.com/gastownhall/gascity/internal/workdir.ConfiguredRigName":                     "live",
-	"github.com/gastownhall/gascity/internal/workdir.ResolveTmuxAlias":                      "live",
-	"github.com/gastownhall/gascity/internal/workdir.ResolveWorkDirPathStrict":              "live",
+	"(*github.com/gastownhall/gascity/cmd/gc.sessionBeadSnapshot).OpenInfos":                "accepted",
+	"(*github.com/gastownhall/gascity/cmd/gc.sessionBeadSnapshot).LoadError":                "accepted",
+	"(*github.com/gastownhall/gascity/cmd/gc.sessionBeadSnapshot).FindInfoByID":             "accepted",
+	"github.com/gastownhall/gascity/cmd/gc.applyTemplateOverridesToConfigInfo":              "accepted",
+	"github.com/gastownhall/gascity/cmd/gc.templateParamsToConfigWithDelivery":              "accepted",
+	"github.com/gastownhall/gascity/cmd/gc.recordNewDemandCapTrace":                         "accepted",
+	"github.com/gastownhall/gascity/cmd/gc.reserveNestedCapFloors":                          "accepted",
+	"github.com/gastownhall/gascity/internal/session.ProjectLifecycle":                      "accepted",
+	"(*github.com/gastownhall/gascity/internal/poolplan.CreateBudget).TryClaim":             "accepted",
+	"(*github.com/gastownhall/gascity/internal/poolplan.CreateBudget).ConfigureFairShare":   "accepted",
+	"(*github.com/gastownhall/gascity/internal/config.DaemonConfig).PatrolIntervalDuration": "accepted",
+	"github.com/gastownhall/gascity/internal/config.NamedSessionRuntimeName":                "accepted",
+	"github.com/gastownhall/gascity/internal/session.FindNamedSessionSpec":                  "accepted",
+	"github.com/gastownhall/gascity/internal/workdir.SessionQualifiedName":                  "accepted",
+	"github.com/gastownhall/gascity/internal/workdir.ConfiguredRigName":                     "accepted",
+	"github.com/gastownhall/gascity/internal/workdir.ResolveTmuxAlias":                      "accepted",
+	"github.com/gastownhall/gascity/internal/workdir.ResolveWorkDirPathStrict":              "accepted",
 	"github.com/gastownhall/gascity/cmd/gc.resolveConfiguredWorkDirPath":                    "dead",
 }
 
@@ -361,10 +379,12 @@ func TestDefaultBaselineOnlyShrinks(t *testing.T) {
 		switch {
 		case !ok:
 			t.Errorf("%s: not in the reviewed baseline; the baseline only shrinks", name)
-		case e.Class == "live" && class != "live":
-			t.Errorf("%s: live, but reviewed %s", name, class)
+		case e.Class == "live":
+			t.Errorf("%s: live at cutover; only the reviewed accepted entries may stay reachable (v5.10t)", name)
+		case e.Class == "accepted" && class != "accepted":
+			t.Errorf("%s: accepted at cutover, but reviewed %s", name, class)
 		}
-		if e.Class != "live" && e.Class != "dead" || e.Bead == "" || e.Reason == "" || e.Class == "dead" && (!strings.Contains(e.Reason, ".go:") || len(e.Via) == 0) {
+		if e.Class != "accepted" && e.Class != "dead" || e.Bead == "" || e.Reason == "" || e.Class == "dead" && (!strings.Contains(e.Reason, ".go:") || len(e.Via) == 0) {
 			t.Errorf("%s: malformed %+v", name, e)
 		}
 	}

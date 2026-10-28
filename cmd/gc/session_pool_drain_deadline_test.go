@@ -1115,6 +1115,13 @@ func TestReconcileSessionBeads_DrainingSeatsBelongToTheStopPendingHandler(t *tes
 	})
 
 	t.Run("immortal_runtime_is_never_closed_over", func(t *testing.T) {
+		// Its queued stops never confirm the runtime dead, so each runs to
+		// the confirm-dead bound; a short one keeps the test (and its
+		// cleanup's wait for them) brief. Bound at queue time, so restored
+		// once the cleanup has waited them out.
+		oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+		drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 200*time.Millisecond, 10*time.Millisecond
+		t.Cleanup(func() { drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = oldTimeout, oldPoll })
 		env := poolSeatEnv(t)
 		seat := newDrainingSeat(t, env)
 		env.sp.StopLeavesRunning = map[string]bool{poolSeatName: true}

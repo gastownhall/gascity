@@ -6,6 +6,15 @@ the machinery beneath the **Pack** primitive and the universal activation
 mechanism (capabilities activate from section presence — no capability
 flags). Architecture: `engdocs/architecture/config.md`.
 
+## Workflow topology is not fresh worker demand
+
+Pool demand counts, controller demand, and hook claims must all exclude
+expanded workflow roots, scopes, and specs even when they retain a route.
+Keep never-expanded root-only workflows executable for compatibility, and
+keep already-owned workflow anchors available for continuation. Update the
+shell count and Go predicates together; otherwise an unclaimable latch can
+continually wake replacement workers.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

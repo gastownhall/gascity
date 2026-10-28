@@ -1,18 +1,25 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // The drain signal's tests (CONTRACT v5 D1, D2, F4; C6b1).
@@ -65,7 +72,7 @@ func TestSignalPerReasonAuthorization(t *testing.T) {
 		{"idle, still asleep", intentBegunAt(drainIdle, time.Minute), sleep, intentSignalFresh},
 		{"idle under Keep", intentBegunAt(drainIdle, time.Minute), keep, ""},
 		{"orphaned under Keep", intentBegunAt(drainOrphaned, time.Minute), keep, ""},
-		{"idle-respawn, C6d's row", intentBegunAt(idleRespawnDrainReason, time.Minute), sleep, ""},
+		{"idle-respawn, no longer eligible (C6d)", intentBegunAt(idleRespawnDrainReason, time.Minute), sleep, intentDrainVoid},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		if it.Kind != c.signal || (c.signal == "" && it.Reason != decideStopActive) {
@@ -442,7 +449,7 @@ func (h *attachRaceSP) Start(ctx context.Context, name string, cfg runtime.Confi
 	return err
 }
 
-// attachRaceStore runs beforeClear once, before the first metadata batch
+// attachRaceStore runs beforeClear once, before the first metadata write
 // that clears the stop request's controller half (the operator's confirm).
 type attachRaceStore struct {
 	*beads.MemStore
@@ -450,12 +457,23 @@ type attachRaceStore struct {
 }
 
 func (s *attachRaceStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.race(kvs)
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// UpdateIfMatch is the start's confirm fenced on its incarnation
+// (session.Store.ConfirmIncarnation).
+func (s *attachRaceStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	s.race(opts.Metadata)
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *attachRaceStore) race(kvs map[string]string) {
 	if _, ok := kvs[session.DrainIntentReasonKey]; ok && s.beforeClear != nil {
 		f := s.beforeClear
 		s.beforeClear = nil
 		f()
 	}
-	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
 // TestSignalNeverStrandsAnOperatorStart (#7638, mc-ted51; review probes
@@ -542,5 +560,707 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	if _, active := activeStop(censusRowOf(t, got)); active || !sp.Fake.IsRunning("s-gc-1") {
 		t.Fatalf("row %v: want the runtime started and the request begun before the lease cleared", got.Metadata)
+	}
+}
+
+// onFloor makes the entry a member of its template's min_active_sessions
+// floor (the allocator's floor set) and a Wake entry.
+func onFloor(e *selectionEntry) { e.Desired, e.Floor = desireWake, &floorView{Rank: 0, MinActive: 1} }
+
+// floorWith is onFloor with the allocation wanting d of the row.
+func floorWith(d desire) func(*selectionEntry) {
+	return func(e *selectionEntry) { onFloor(e); e.Desired = d }
+}
+
+// TestFloorAckCancels (DRAIN-010, PAR-FLOORACK; sc-j27j0d). Kills a floor
+// member's own idle ack stopping it, only for the floor to recreate it: a
+// bare ack on a live floor member cancels (its half voided, nothing
+// signaled), and on a dead one A11 proposes nothing and A18 starts it; an
+// ack off the floor, or one a drain the controller began explains, signals;
+// an ack older than its runtime is void first.
+func TestFloorAckCancels(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		entry  func(*selectionEntry)
+		reason string
+	}{
+		{"a bare ack on a floor member", ackMeta("3"), onFloor, decideFloorAckCancel},
+		{"a bare ack off the floor", ackMeta("3"), awakeWanted, decideDrainSignal},
+		{"an ack a controller drain explains, on the floor", append(ackMeta("3"), intentBegunAt(drainConfigDrift, time.Minute)...), onFloor, decideDrainSignal + drainConfigDrift},
+		{"an ack without a time, on the floor", []string{session.DrainAckIncarnationKey, "3"}, onFloor, decideAckVoid},
+		// Legacy cancels whatever the allocation wants of a floor member (M8).
+		{"a bare ack on a Keep floor member", ackMeta("3"), floorWith(desireKeep), decideFloorAckCancel},
+		{"a bare ack on a Sleep floor member", ackMeta("3"), floorWith(desireSleep), decideFloorAckCancel},
+		{"a bare ack on a Drain floor member", ackMeta("3"), floorWith(desireDrain), decideFloorAckCancel},
+		// An operator's `gc runtime drain` explains the ack (legacy's GC_DRAIN).
+		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "3"), onFloor, decideDrainSignal + drainOperator},
+		{"an ack beside an operator's drain of an older generation, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "2"), onFloor, decideFloorAckCancel},
+	} {
+		it, _ := decideDrain(t, c.meta, c.entry)
+		switch {
+		case it.Kind != intentSignalAck || it.Reason != c.reason:
+			t.Errorf("%s: %s %q, want the ack's %q", c.name, it.Kind, it.Reason, c.reason)
+		case c.reason == decideFloorAckCancel && (it.Patch["state"] != "" || it.Patch[session.DrainAckIncarnationKey] != "" || it.Patch[session.DrainAckAtKey] != "" || len(it.Patch) != 2):
+			t.Errorf("%s: patch %v, want the ack half voided alone", c.name, it.Patch)
+		}
+	}
+	// A dead floor seat's ack proposes nothing of A11's (§12.2 row 66): A18's
+	// recycle restarts the seat in place with the ack on the row, so its
+	// death is a drain's and the PreWake clears the request.
+	if it, _ := decideDrain(t, ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }); it.Kind != intentStart || it.Patch[session.DrainAckIncarnationKey] != "" && it.Patch[session.DrainAckIncarnationKey] != "3" {
+		t.Errorf("a bare ack on a dead floor member: %s %q patch %v, want A18's start, the ack left to its PreWake", it.Kind, it.Reason, it.Patch)
+	}
+}
+
+// TestFloorAckCancelKeepsTheSeatWarm (DRAIN-010, through runTx). Kills a
+// cancel that stops or marks the seat: the effect lands the ack half's
+// void on the fresh row, which is not stop-pending, and leaves the runtime
+// running; off the floor the same ack signals.
+func TestFloorAckCancelKeepsTheSeatWarm(t *testing.T) {
+	for _, floor := range []bool{true, false} {
+		entry := awakeWanted
+		if floor {
+			entry = onFloor
+		}
+		p, it, store, leaf := admittedBeginOn(t, ackMeta("3"), entry)
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, err := store.Get(it.Key.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := censusRowOf(t, got)
+		_, active := activeStop(row)
+		switch {
+		case s.Outcome != settledLanded:
+			t.Errorf("floor %t: settlement %+v, want landed", floor, s)
+		case floor && (active || isDrainAckStopPendingInfo(row.Info) || got.Metadata[session.DrainAckIncarnationKey] != "" || !leaf.IsRunning("s-gc-1")):
+			t.Errorf("floor: row %v (request active %v), running %v; want the ack canceled, the seat warm", got.Metadata, active, leaf.IsRunning("s-gc-1"))
+		case !floor && !isDrainAckStopPendingInfo(row.Info):
+			t.Errorf("off the floor: row %v, want the signal", got.Metadata)
+		case floor && (s.Facts.Transition == nil || s.Facts.Transition.Reason != "min-floor" || s.Facts.Transition.Transition != "cancel"):
+			t.Errorf("floor: transition %+v, want legacy's min-floor cancel", s.Facts.Transition)
+		case !floor && s.Facts.Transition != nil:
+			t.Errorf("off the floor: transition %+v, want none", s.Facts.Transition)
+		}
+	}
+}
+
+// signalWorkCases are the reasons whose signal reads L5 (v5.10a B), each with
+// its entry and kind.
+var signalWorkCases = []struct {
+	reason string
+	entry  func(*selectionEntry)
+	kind   string
+}{
+	{reasonNoWake, func(e *selectionEntry) { e.Desired = desireSleep }, intentSignalFresh},
+	{drainOrphaned, undesired(drainOrphaned), intentSignal},
+}
+
+// claimAfterPass is `gc hook --claim` landing after the pass's demand read:
+// a work bead in progress, assigned to the row, stamped on it.
+func claimAfterPass(t *testing.T) func(beads.Store, intent) {
+	return func(store beads.Store, it intent) {
+		t.Helper()
+		w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "in_progress", Assignee: it.Key.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadata(it.Key.ID, beadmeta.CurrentClaimBeadIDMetadataKey, w.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestSignalReReadsWorkLive (v5.10a B, DRAIN-005). Kills a no-wake-reason or
+// orphaned signal that trusts the pass's demand read: a claim landing after
+// the pass refuses has-work and writes nothing, so A4 never sees a signaled
+// request; with no work the signal lands.
+func TestSignalReReadsWorkLive(t *testing.T) {
+	for _, c := range signalWorkCases {
+		s, got := runSignal(t, intentBegunAt(c.reason, time.Minute), c.entry, c.kind, claimAfterPass(t))
+		row := censusRowOf(t, got)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(row.Info) {
+			t.Fatalf("%s, claimed after the pass: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+		if req, ok := activeStop(row); !ok || req.Phase != stopRequested {
+			t.Fatalf("%s: activeStop after the refusal = %+v, %v; want still requested (A4 takes no stop)", c.reason, req, ok)
+		}
+		if s, got := runSignal(t, intentBegunAt(c.reason, time.Minute), c.entry, c.kind, nil); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, no work: %+v, want the signal landed", c.reason, s)
+		}
+	}
+}
+
+// TestNoWakeSignalCountsOnlyAwakeWork (v5.10a B: DRAIN-005's awake work).
+// Kills a signal L5 that counts open work the seat cannot be served
+// (blocked), which legacy's read and A19's lens (workKeepsNoWakeRow) both
+// ignore, so the request would stand refused forever: the signal lands.
+func TestNoWakeSignalCountsOnlyAwakeWork(t *testing.T) {
+	blocked := func(store beads.Store, it intent) {
+		blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "open", Assignee: it.Key.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(w.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, got := runSignal(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry, intentSignalFresh, blocked)
+	if s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("blocked open work only: %+v, want the signal landed", s)
+	}
+}
+
+// TestNoWakeSignalReadsWorkAfterAttach (v5.10a B: L5 last, after L3 and
+// L4; staging J47). Kills a no-wake-reason signal that reads L5 before its
+// fresh L3 or L4: a claim landing while either is read refuses has-work.
+func TestNoWakeSignalReadsWorkAfterAttach(t *testing.T) {
+	for _, leg := range []string{"L3", "L4"} {
+		p, it, store, leaf := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		if it.Kind != intentSignalFresh {
+			t.Fatalf("decided %+v, want the fresh signal", it)
+		}
+		var once sync.Once
+		claim := func(string) { // claimed, not yet stamped on the row: only L5 can see it
+			once.Do(func() {
+				if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "in_progress", Assignee: it.Key.ID}); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+		if leg == "L3" {
+			leaf.OnAttachRead = claim
+		} else {
+			leaf.OnPendingRead = claim
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("claimed during the %s read: %+v, want refused %q and no signal", leg, s, causeHasWork)
+		}
+	}
+}
+
+// staleReadyLeg is a caching work leg whose cached ready set (Ready) is
+// stale while its backing (Backing) and live lists see the store.
+type staleReadyLeg struct {
+	beads.Store
+	stale beads.Store
+}
+
+func (l staleReadyLeg) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) { return l.stale.Ready(q...) }
+func (l staleReadyLeg) Backing() beads.Store                              { return l.Store }
+
+// TestSignalReadsReadyWorkLive (v5.10b-1). Kills a signal L5 whose ready-open
+// half reads a cached ready set through the effect's read-only wrappers: an
+// open bead assigned after the pass, visible only live, refuses has-work.
+// The leg is synthetic (a stale Ready, a live Backing): CachingStore.Ready
+// with a query already reads its backing, so this pins the belt-and-braces
+// peel, not a production gap.
+func TestSignalReadsReadyWorkLive(t *testing.T) {
+	for _, c := range signalWorkCases {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(c.reason, time.Minute), c.entry)
+		if it.Kind != c.kind {
+			t.Fatalf("%s: decided %+v, want %s", c.reason, it, c.kind)
+		}
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, staleReadyLeg{Store: store, stale: beads.NewMemStore()}, nil).readOnly()
+		if _, err := store.Create(beads.Bead{Title: "slung", Type: "task", Status: "open", Assignee: it.Key.ID}); err != nil {
+			t.Fatal(err)
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, open work assigned after the pass: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+	}
+}
+
+// TestSignalWorkReadErrorCountsAsWork (v5.10a B, F1 L5). Kills a signal that
+// reads a failed work read as no work: it refuses has-work.
+func TestSignalWorkReadErrorCountsAsWork(t *testing.T) {
+	for _, c := range signalWorkCases {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(c.reason, time.Minute), c.entry)
+		if it.Kind != c.kind {
+			t.Fatalf("%s: decided %+v, want %s", c.reason, it, c.kind)
+		}
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, failingReads{store}, nil)
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, work read failed: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+	}
+}
+
+// TestSignalIdleAndAckReadNoWork (v5.10a B: idle unchanged; D2's ack row).
+// Kills an L5 read on an idle signal or an ack's: a claim after the pass
+// leaves both to land, and neither kind's needs read L5; nor does A4's stop
+// of a signaled no-wake-reason or orphaned request.
+func TestSignalIdleAndAckReadNoWork(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	if s, got := runSignal(t, intentBegunAt(drainIdle, time.Minute), sleep, intentSignalFresh, claimAfterPass(t)); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("idle, claimed after the pass: %+v, want the signal landed", s)
+	}
+	ack := append(intentBegunAt(drainOrphaned, time.Minute), session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(time.Second))
+	if s, got := runSignal(t, ack, undesired(drainOrphaned), intentSignalAck, claimAfterPass(t)); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("an orphaned drain's ack, claimed after the pass: %+v, want the signal landed", s)
+	}
+	for _, it := range []intent{
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + drainIdle},
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + idleRespawnDrainReason},
+		{Kind: intentSignalAck, Reason: decideDrainSignal + drainOrphaned},
+		{Kind: intentSignalAck, Reason: decideDrainSignal + reasonNoWake},
+		{Kind: intentSignal, Reason: decideDrainSignal + drainSuspended},
+		{Kind: intentStop, Reason: decideDrainSignal + drainOrphaned},
+		{Kind: intentStop, Reason: decideDrainSignal + reasonNoWake},
+	} {
+		if n := effectSpecs[it.Kind].needsOf(&World{}, it); n.Legs&legWork != 0 {
+			t.Errorf("%s %s reads L5: %+v", it.Kind, it.Reason, n)
+		}
+	}
+	for _, c := range signalWorkCases {
+		it := intent{Kind: c.kind, Reason: decideDrainSignal + c.reason}
+		if n := effectSpecs[it.Kind].needsOf(&World{}, it); n.Legs&legWork == 0 {
+			t.Errorf("%s %s reads no L5: %+v", it.Kind, it.Reason, n)
+		}
+	}
+}
+
+// TestOrphanedSignalConsultsTheLiveClaimVeto (v5.10a B, DRAIN-005's veto).
+// Kills an orphaned signal that skips the live-claim veto: a pool seat's
+// stamped claim on a bead its assignee spelling hides from the assigned-work
+// read refuses has-work; a claim the bead no longer holds, or a seat the veto
+// does not cover (not pool-managed), lands.
+func TestOrphanedSignalConsultsTheLiveClaimVeto(t *testing.T) {
+	pool := append(intentBegunAt(drainOrphaned, time.Minute), "pool_managed", "true")
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		status string
+		want   string
+	}{
+		{"pool seat, claim held", pool, "in_progress", causeHasWork},
+		{"pool seat, claim closed", pool, "closed", ""},
+		{"not pool-managed, claim held", intentBegunAt(drainOrphaned, time.Minute), "in_progress", ""},
+	} {
+		p, it, _, _ := admittedBeginOn(t, c.meta, undesired(drainOrphaned), claimStampedAtPass(t, nil, c.status))
+		if it.Kind != intentSignal {
+			t.Fatalf("%s: decided %+v, want the signal", c.name, it)
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		if s.Cause != c.want || (c.want == "") != (s.Outcome == settledLanded) {
+			t.Errorf("%s: %+v, want cause %q", c.name, s, c.want)
+		}
+	}
+}
+
+// claimStampedAtPass stamps a claim on the pass's row before the pass reads
+// it, as `gc hook --claim` does (the work bead in progress under an assignee
+// the awake read does not match, then current_claim_bead_id on the row), so
+// the pass and the effect see the same stamp and only the live-claim veto
+// can find the claim. The bead lives in work, or the sessions store when
+// work is nil; closed closes it after the stamp.
+func claimStampedAtPass(t *testing.T, work beads.Store, status string) func(*World) {
+	return func(w *World) {
+		t.Helper()
+		store := cmp.Or[beads.Store](work, w.SessionsStore)
+		b, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "in_progress", Assignee: "worker-elsewhere"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status == "closed" {
+			if err := store.Close(b.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for k := range w.Census.Rows {
+			if err := w.SessionsStore.SetMetadata(k.ID, beadmeta.CurrentClaimBeadIDMetadataKey, b.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, w.SessionsStore))
+	}
+}
+
+// TestSignalRefusesAClaimStampedAfterItsWorkRead (v5.10b-2; #7771 review).
+// Kills a signal that lands over a `gc hook --claim` whose stamp reaches the
+// row after L5 and before the CAS's row read: the stamp moved since the pass
+// refuses has-work, for both reasons.
+func TestSignalRefusesAClaimStampedAfterItsWorkRead(t *testing.T) {
+	for _, c := range signalWorkCases {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(c.reason, time.Minute), c.entry)
+		var once sync.Once
+		p.seam = func(_ context.Context, s txSeam, _ intent, _, _ int) error {
+			if s == seamAfterReads {
+				once.Do(func() { claimAfterPass(t)(store, it) })
+			}
+			return nil
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, claim stamped after L5: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+	}
+}
+
+// TestOrphanedSignalVetoNeverOverwritesAFailedRead (#7771 review). Kills a
+// veto whose clean answer replaces a failed awake read: a pool seat with no
+// claim stamped, whose work read fails, refuses has-work.
+func TestOrphanedSignalVetoNeverOverwritesAFailedRead(t *testing.T) {
+	pool := append(intentBegunAt(drainOrphaned, time.Minute), "pool_managed", "true")
+	p, it, store, _ := admittedBeginOn(t, pool, undesired(drainOrphaned))
+	if it.Kind != intentSignal {
+		t.Fatalf("decided %+v, want the signal", it)
+	}
+	p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, failingReads{store}, nil)
+	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	got, _ := store.Get(it.Key.ID)
+	if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("pool seat, work read failed, no stamp: %+v, want refused %q", s, causeHasWork)
+	}
+}
+
+// TestOrphanedSignalVetoHonoursSuspension (#7771 review; legacy's
+// liveClaimVetoApplies). Kills a veto that ignores the pass's suspension
+// state: a pool seat's veto-only claim refuses has-work, but not once the
+// city is suspended (operator intent), when the signal lands.
+func TestOrphanedSignalVetoHonoursSuspension(t *testing.T) {
+	pool := append(intentBegunAt(drainOrphaned, time.Minute), "pool_managed", "true")
+	yes := true
+	for _, c := range []struct {
+		name string
+		st   suspensionstate.State
+		want string
+	}{
+		{"city suspended", suspensionstate.State{City: suspensionstate.Override{Suspended: &yes}}, ""},
+		{"not suspended", suspensionstate.State{}, causeHasWork},
+	} {
+		st := c.st
+		p, it, _, _ := admittedBeginOn(t, pool, undesired(drainOrphaned), claimStampedAtPass(t, nil, "in_progress"), func(w *World) { w.Suspension = st })
+		if it.Kind != intentSignal {
+			t.Fatalf("%s: decided %+v, want the signal", c.name, it)
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		if s.Cause != c.want || (c.want == "") != (s.Outcome == settledLanded) {
+			t.Errorf("%s: %+v, want cause %q", c.name, s, c.want)
+		}
+	}
+}
+
+// TestOrphanedSignalVetoOnASplitCity (#7771 review). Kills a veto that reads
+// the row from the work store: on a city whose work store is not its
+// sessions store, a pool seat with no claim lands, and one whose stamped
+// claim lives in the work store refuses has-work.
+func TestOrphanedSignalVetoOnASplitCity(t *testing.T) {
+	pool := append(intentBegunAt(drainOrphaned, time.Minute), "pool_managed", "true")
+	for _, c := range []struct {
+		name  string
+		stamp bool
+		want  string
+	}{
+		{"no claim", false, ""},
+		{"claim held in the work store", true, causeHasWork},
+	} {
+		work := beads.NewMemStoreFrom(500, nil, nil)
+		split := func(w *World) { w.WorkLegs = testWorkLegs(w.CityPath, w.Env.Cfg, work, nil) }
+		hooks := []func(*World){split}
+		if c.stamp {
+			hooks = append(hooks, claimStampedAtPass(t, work, "in_progress"))
+		}
+		p, it, _, _ := admittedBeginOn(t, pool, undesired(drainOrphaned), hooks...)
+		if it.Kind != intentSignal {
+			t.Fatalf("%s: decided %+v, want the signal", c.name, it)
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		if s.Cause != c.want || (c.want == "") != (s.Outcome == settledLanded) {
+			t.Errorf("%s: %+v, want cause %q", c.name, s, c.want)
+		}
+	}
+}
+
+// liveHandleStore answers Get from its own store and its Live handle from
+// live, as a caching store does.
+type liveHandleStore struct {
+	beads.Store
+	live beads.Store
+}
+
+func (s liveHandleStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{Live: beads.HandlesFor(s.live).Live}
+}
+
+// TestLiveBeadReadPeelsTheEffectWrappers (v5.10a B; the veto reads live).
+// Kills a live read through a v2 effect's read-only store that falls back to
+// the cache: the read reaches the wrapped store's Live handle.
+func TestLiveBeadReadPeelsTheEffectWrappers(t *testing.T) {
+	live := beads.NewMemStore()
+	b, err := live.Create(beads.Bead{Title: "claimed", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := liveHandleStore{Store: beads.NewMemStore(), live: live}
+	for name, wrapped := range map[string]beads.Store{
+		"SessionStore":            beads.SessionStore{Store: cached},
+		"WorkStore":               beads.WorkStore{Store: cached},
+		"readOnlyStore":           readOnlyStore{cached},
+		"blindWriteRefusingStore": blindWriteRefusingStore{inner: cached},
+		"all":                     readOnlyStore{blindWriteRefusingStore{inner: beads.WorkStore{Store: beads.SessionStore{Store: cached}}}},
+	} {
+		if got, err := liveBeadRead(wrapped, b.ID); err != nil || got.ID != b.ID {
+			t.Errorf("liveBeadRead through %s = %+v, %v; want the live bead %s", name, got, err, b.ID)
+		}
+	}
+}
+
+// pairedReadyLeg counts the backing lists and ready reads, and holds each
+// ready read until a second is in flight with it, so ready reads made one
+// after another never return (the fence's own bound then expires).
+type pairedReadyLeg struct {
+	beads.Store
+	lists, readies *atomic.Int64
+	mu             *sync.Mutex
+	waiting        *int
+	pair, stop     chan struct{}
+}
+
+func (l pairedReadyLeg) List(q beads.ListQuery) ([]beads.Bead, error) {
+	l.lists.Add(1)
+	return l.Store.List(q)
+}
+
+func (l pairedReadyLeg) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	l.readies.Add(1)
+	l.mu.Lock()
+	if *l.waiting++; *l.waiting == 2 {
+		close(l.pair)
+	}
+	l.mu.Unlock()
+	select {
+	case <-l.pair:
+	case <-l.stop: // the test ended
+	}
+	return l.Store.Ready(q...)
+}
+
+// TestSignalL5ReadsOnceThenReadyAtOnce (mc-m4fgc; the #7771 review's
+// finding 2). Kills L5's serial chain, which on a slow work store (bd over a
+// remote database; staging's bd CLI work store measured 0.3-0.7s a call on
+// idle lanes) outran the 5s fence bound, refusing has-work forever for a
+// seat holding only non-ready work: a seat holding one blocked open bead
+// lists only its one concurrent seat read (as many lists as a seat with no
+// work), then makes its two ready reads (one assignee, both tiers) at once,
+// and the signal lands. Ready work refuses.
+func TestSignalL5ReadsOnceThenReadyAtOnce(t *testing.T) {
+	run := func(t *testing.T, seed func(beads.Store, string)) (settlement, int64, int64) {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		seed(store, it.Key.ID)
+		var lists, readies atomic.Int64
+		waiting := 0
+		leg := pairedReadyLeg{Store: store, lists: &lists, readies: &readies, mu: &sync.Mutex{}, waiting: &waiting, pair: make(chan struct{}), stop: make(chan struct{})}
+		t.Cleanup(func() { close(leg.stop) })
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, leg, nil).readOnly()
+		return runTx(context.Background(), p, it, effectSpecs[it.Kind], nil), lists.Load(), readies.Load()
+	}
+	open := func(blocked bool) func(beads.Store, string) {
+		return func(store beads.Store, seat string) {
+			blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: seat})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if blocked {
+				if err := store.DepAdd(w.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	_, seatLists, _ := run(t, func(beads.Store, string) {})
+	s, lists, readies := run(t, open(true))
+	if s.Outcome != settledLanded || lists != seatLists || readies != 2 {
+		t.Errorf("blocked work only: settlement %+v, %d lists (a seat read is %d), %d ready reads; want the signal landed, one seat read, two ready reads at once", s, lists, seatLists, readies)
+	}
+	if s, _, _ := run(t, open(false)); s.Cause != causeHasWork {
+		t.Errorf("ready work: settlement %+v, want refused %s", s, causeHasWork)
+	}
+}
+
+// faultyReadyLeg fails or panics every ready read, and fails every list of
+// listFails.
+type faultyReadyLeg struct {
+	beads.Store
+	panics    bool
+	listFails string
+}
+
+func (l faultyReadyLeg) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if l.listFails != "" && q.Status == l.listFails {
+		return nil, errors.New("list failed")
+	}
+	return l.Store.List(q)
+}
+
+func (l faultyReadyLeg) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	if l.panics {
+		panic("ready read")
+	}
+	return nil, errors.New("ready read failed")
+}
+
+// TestSignalL5ReadyFaultCountsAsWork (mc-m4fgc): the seat read fails
+// closed: a ready read that errs or panics over the seat's open row counts
+// as work, and so does a failed in-progress or open list with no open row
+// read. Kills a fault dropped by the fan-out, and a failed list taken as
+// no work.
+func TestSignalL5ReadyFaultCountsAsWork(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: it.Key.ID}); err != nil {
+			t.Fatal(err)
+		}
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, faultyReadyLeg{Store: store, panics: panics}, nil).readOnly()
+		if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
+			t.Errorf("panics %t: settlement %+v, want refused %s", panics, s, causeHasWork)
+		}
+	}
+	for _, status := range []string{"in_progress", "open"} {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, faultyReadyLeg{Store: store, listFails: status}, nil).readOnly()
+		if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
+			t.Errorf("the %s list failed: settlement %+v, want refused %s", status, s, causeHasWork)
+		}
+	}
+}
+
+// TestSignalL5ReadsReadyWisps (mc-m4fgc): ready work on the wisp tier holds
+// the seat too, as legacy's per-tier probe reads it. Kills the fan-out
+// reading the issues tier alone.
+func TestSignalL5ReadsReadyWisps(t *testing.T) {
+	p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+	if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: it.Key.ID, Ephemeral: true}); err != nil {
+		t.Fatal(err)
+	}
+	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
+		t.Errorf("ready wisp: settlement %+v, want refused %s", s, causeHasWork)
+	}
+}
+
+// TestSeatAwakeReadyAcrossLegsAndIdentities (mc-m4fgc; the #7815 review).
+// Kills a seat read whose ready fan-out probes only its first (leg,
+// assignee) pair, or de-duplicates pairs by assignee alone, either of which
+// would stop a seat mid-work: ready work on another leg, under another of
+// the seat's identities, or a wisp there, beside a blocked open row that
+// alone holds nothing, keeps the seat, on the seat's read and the tick's.
+func TestSeatAwakeReadyAcrossLegsAndIdentities(t *testing.T) {
+	type place struct {
+		rig      bool
+		identity string // "id" or "name"
+		wisp     bool
+	}
+	for _, c := range []struct {
+		name    string
+		blocked place
+		ready   *place
+		want    bool
+	}{
+		{"blocked only", place{identity: "id"}, nil, false},
+		{"ready on the rig leg", place{identity: "id"}, &place{rig: true, identity: "id"}, true},
+		{"ready under session_name", place{identity: "id"}, &place{identity: "name"}, true},
+		{"ready wisp under session_name on the rig leg", place{identity: "id"}, &place{rig: true, identity: "name", wisp: true}, true},
+		{"ready on a leg with no other row", place{rig: true, identity: "id"}, &place{identity: "name"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents:    []config.Agent{{Name: "auditor", Scope: "city"}},
+			}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			rigs := map[string]beads.Store{"riga": rigStore}
+			sess := beads.Bead{ID: "session-1", Type: sessionBeadType, Status: "open", Metadata: map[string]string{"template": "auditor", "session_name": "auditor-session"}}
+			info := sessiontest.SeedBead(t, sess)
+			assignee := func(p place) string {
+				if p.identity == "name" {
+					return "auditor-session"
+				}
+				return sess.ID
+			}
+			storeOf := func(p place) beads.Store {
+				if p.rig {
+					return rigStore
+				}
+				return cityStore
+			}
+			bs := storeOf(c.blocked)
+			blocker, err := bs.Create(beads.Bead{Title: "blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err := bs.Create(beads.Bead{Title: "blocked", Type: "task", Assignee: assignee(c.blocked)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bs.DepAdd(w.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			if c.ready != nil {
+				if _, err := storeOf(*c.ready).Create(beads.Bead{Title: "ready", Type: "task", Assignee: assignee(*c.ready), Ephemeral: c.ready.wisp}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			legs := testWorkLegs(cityPath, cfg, cityStore, rigs)
+			seat := seatWorkFor(legs, releaseScope(info, cfg))
+			got, err := sessionHasAwakeAssignedWorkForReachableStore(seat, info)
+			if err != nil || got != c.want {
+				t.Fatalf("seat read = %v (%v), want %v", got, err, c.want)
+			}
+			if tick, err := sessionHasAwakeAssignedWorkForReachableStore(newSeatWork(legs), info); err != nil || tick != c.want {
+				t.Fatalf("tick read = %v (%v), want %v, as the seat read", tick, err, c.want)
+			}
+		})
+	}
+}
+
+// TestAckPredatesRuntimeForeignExemption (v5.10k-2; mc-j43o4, the #7797 r3
+// review's R5 and R6). Kills the Foreign exemption widened: another row's
+// runtime under the name is no replacement of this row's, so a newer
+// creation time voids no ack, but only when both presence reads saw one
+// object (Same; R5: an identity read across a replaced object proves
+// nothing of the runtime now there), and only for a Foreign identity (R6:
+// the row's own runtime of another incarnation, StaleSelf or NewerSelf, is a
+// replacement, so an ack older than it is void).
+func TestAckPredatesRuntimeForeignExemption(t *testing.T) {
+	ackAt := gatherNow.Add(-time.Minute).Truncate(time.Second)
+	after := strconv.FormatInt(ackAt.Add(time.Second).Unix(), 10)
+	row := session.Info{ID: "gc-1", Generation: "3", InstanceToken: "tok-3"}
+	for _, c := range []struct {
+		name  string
+		ident runtimeIdentity
+		same  bool
+		void  bool
+	}{
+		{"another row's runtime, one object", runtimeIdentity{Known: true, SessionID: "gc-9", Epoch: "1", Token: "tok-9"}, true, false},
+		{"another row's runtime, replaced mid-read (R5)", runtimeIdentity{Known: true, SessionID: "gc-9", Epoch: "1", Token: "tok-9"}, false, true},
+		{"its own older incarnation (R6)", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "tok-2"}, true, true},
+		{"its own newer incarnation (R6)", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "4", Token: "tok-4"}, true, true},
+		{"its own current runtime", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok-3"}, true, true},
+	} {
+		live := runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: after}
+		r := &rowFacts{row: censusRow{Info: row}, fresh: &txRuntime{Class: rtAlive, Live: live, Again: live, Identity: c.ident, Same: c.same}}
+		if got := r.ackPredatesRuntime(ackAt); got != c.void {
+			t.Errorf("%s: ack predates the runtime %t, want %t", c.name, got, c.void)
+		}
 	}
 }

@@ -310,15 +310,19 @@ var legacyActions = map[string]legacyAction{
 	"reconciler.session.close_failed_create/closed":        {"close", "A21"},
 	"reconciler.drain.timeout/complete":                    {"stop", "§12.2/1"},
 	"reconciler.drain.timeout/retry":                       {"stop", "§12.2/1"},
-	"reconciler.drain.cancel/cancel_min_floor":             {"drain-cancel", "§12.2/14"},
+	"reconciler.drain.cancel/cancel_min_floor":             {"drain-cancel", "A11"},
 	"reconciler.session.reset_stalled/failed":              {"stop", "§12.2/14"},
 	"reconciler.session.terminal_provider_error/unhealthy": {"zombie", "A12"},
 	"reconciler.session.idle_timeout/stop/max_session_age": {"stop", "§12.1/PAR-AGE"},
 }
 
-// v2Class is an intent kind's action class. A create is a bring-up, as
-// legacy's start candidate covers the row it materializes.
-func v2Class(kind string) string {
+// v2Class is an intent's action class. A create is a bring-up, as legacy's
+// start candidate covers the row it materializes; A11's floor cancel
+// (DRAIN-010) is a drain cancel, not a destructive signal.
+func v2Class(kind, reason string) string {
+	if kind == intentSignalAck && reason == decideFloorAckCancel {
+		return "drain-cancel"
+	}
 	switch kind {
 	case intentStart, intentCreate:
 		return "start"
@@ -418,7 +422,7 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 			if it.CreatePlan.Named != nil {
 				tmpl = it.CreatePlan.Named.Template
 			}
-			c := cell(tmpl, v2Class(it.Kind))
+			c := cell(tmpl, v2Class(it.Kind, it.Reason))
 			c.v2++
 			c.intents = append(c.intents, strings.TrimSuffix(it.Kind+"/"+it.Reason+"/"+it.Cause, "/"))
 		}
@@ -502,6 +506,10 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		}
 	}
 	switch {
+	case d.Class == "drain-cancel" && d.V2 == 0 && allRecords(d.Records, "/cancel_min_floor/"):
+		// Legacy's min-floor cancel answers an agent's ack, which the export
+		// carries on no row, so the replay's A11 has none to cancel.
+		return "harness gap", "no exported row ack"
 	case d.Class == "start" && d.V2 == 0 && demandDriven(d.Template, info):
 		// A start rests on demand, and the export carries no work beads: the
 		// replay feeds every leg empty demand, so AL1 wants no seat legacy
@@ -515,6 +523,11 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		return "unknown-never-destroys", ""
 	}
 	return "unexplained", ""
+}
+
+// allRecords reports records all naming an outcome (part, "/outcome/").
+func allRecords(records []string, part string) bool {
+	return len(records) > 0 && !slices.ContainsFunc(records, func(r string) bool { return !strings.Contains(r+"/", part) })
 }
 
 // demandDriven reports a template whose rows are pool seats, none a named
@@ -613,7 +626,7 @@ func TestReplaySampleMatchesExpectedDivergences(t *testing.T) {
 func TestReplayFamilies(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "r1"}
 	info := map[string]session.Info{"r1": {Template: "t", PoolManaged: true}, "n1": {Template: "n", ConfiguredNamedSession: true}}
-	built := map[string]bool{"A18": true, "A20": true, "A21": true}
+	built := map[string]bool{"A11": true, "A18": true, "A20": true, "A21": true}
 	for _, tc := range []struct {
 		name, arm, class, record, reason string
 		v2, heals                        int
@@ -627,6 +640,8 @@ func TestReplayFamilies(t *testing.T) {
 		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, 0, "v5 §12.2", "1"},
 		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, 0, "deferred arm", "A17"},
 		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, 0, "harness gap", "no exported demand"},
+		{"a floor cancel with no exported row ack", "A11", "drain-cancel", "reconciler.drain.cancel/cancel_min_floor/min_floor_idle_worker", "", 0, 0, "harness gap", "no exported row ack"},
+		{"a floor cancel beside another cancel", "A11", "drain-cancel", "reconciler.drain.cancel/cancel_min_floor/min_floor_idle_worker,x/cancel/idle", "", 0, 0, "unexplained", ""},
 		{"a named session's start", "A18", "start", "x/start_candidate/wake", "", 0, 0, "unexplained", ""},
 		{"INC-003", "A20", "drain", "x/drain/orphaned", decideWakeGrace, 0, 0, "INC-003", ""},
 		{"woken lately, not held for the grace", "A20", "drain", "x/drain/orphaned", decideDrainWorkKept, 0, 0, "unexplained", ""},
@@ -641,5 +656,16 @@ func TestReplayFamilies(t *testing.T) {
 		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info, tc.heals); f != tc.family || i != tc.item {
 			t.Errorf("%s: family %q item %q, want %q %q", tc.name, f, i, tc.family, tc.item)
 		}
+	}
+}
+
+// TestV2ClassOfTheFloorCancel: A11's floor cancel is a drain cancel, which
+// legacy's cancel_min_floor matches, never a destructive signal.
+func TestV2ClassOfTheFloorCancel(t *testing.T) {
+	if got := v2Class(intentSignalAck, decideFloorAckCancel); got != "drain-cancel" || replayDestructive[got] {
+		t.Errorf("the floor cancel classes %q, want drain-cancel", got)
+	}
+	if got := v2Class(intentSignalAck, decideDrainSignal+drainIdle); got != "signal" {
+		t.Errorf("an ack signal classes %q, want signal", got)
 	}
 }

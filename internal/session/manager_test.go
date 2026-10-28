@@ -469,7 +469,7 @@ func TestCreateSkipsUntrackedRuntimeFromOtherCityBeforeStart(t *testing.T) {
 			IsTracked: false,
 		}},
 	}
-	mgr := newTestManager(t, store, sp, WithCityPath("/tmp/this-city"))
+	mgr := newTestManager(t, store, sp) // a city of its own, not /tmp/other-city
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -645,7 +645,7 @@ func TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead(t *testing.T) 
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -688,7 +688,7 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
@@ -808,7 +808,9 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 // cleanup's error.
 func orphanCleanupPrecedes(lines []string, before int, idExpr string) bool {
 	needle := "m.killExistingOrphans(ctx, " + idExpr + ")"
-	const window = 10
+	// The start's incarnation mint (and its env) sits between the orphan
+	// kill and the Start (I-MINT), so the window spans it.
+	const window = 24
 	seen := 0
 	for i := before - 1; i >= 0 && seen < window; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -4256,6 +4258,11 @@ func TestSendClosedSessionReturnsErrSessionClosed(t *testing.T) {
 	}
 }
 
+// A Start's own failure is reported, not taken for a duplicate start, even
+// while the provider reads the name running: here a pane whose agent died (a
+// zombie), which a start replaces rather than converges on. (A runtime up
+// with its agent alive is converged on before any Start: I-MINT.) The
+// failed start withdraws its mint.
 func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	base := runtime.NewFake()
 	sp := &startOverrideProvider{Fake: base}
@@ -4272,11 +4279,17 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	if err := sp.Fake.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
+	base.Zombies[info.SessionName] = true
 	sp.startErr = errors.New("out of memory")
+	before, _ := store.Get(info.ID)
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp", ProcessNames: []string{"claude"}})
 	if err == nil || !strings.Contains(err.Error(), "out of memory") {
 		t.Fatalf("Send error = %v, want underlying non-duplicate start failure", err)
+	}
+	after, _ := store.Get(info.ID)
+	if after.Metadata["generation"] != before.Metadata["generation"] || after.Metadata["instance_token"] != before.Metadata["instance_token"] {
+		t.Fatalf("row after the failed start = gen %s token %s, want its incarnation (gen %s) kept", after.Metadata["generation"], after.Metadata["instance_token"], before.Metadata["generation"])
 	}
 }
 
@@ -4971,7 +4984,7 @@ func TestKill_AwakeState(t *testing.T) {
 
 func TestKill_StoppedState_NotRunning(t *testing.T) {
 	store := beads.NewMemStore()
-	sp := runtime.NewFake()
+	sp := runtime.FullFake{Fake: runtime.NewFake()}
 	mgr := newTestManager(t, store, sp)
 
 	b, err := store.Create(beads.Bead{
@@ -5282,7 +5295,7 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
-	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "ephemeral"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5344,7 +5357,7 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
-	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "ephemeral"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5594,9 +5607,9 @@ func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
 // Issue #1655 — a session created without resume capability
 // (ProviderResume{} on Create → empty resume_flag in bead metadata)
 // must still be able to recover from a stale session_key. The
-// named-always case in the issue body is one instance of this shape;
-// the invariant is general — any session whose start command was
-// never resume-capable should clear a stale key and start fresh
+// original report also named always-on conversations, which now retain
+// their identity. Recyclable workers whose start command was
+// never resume-capable may clear a stale key and start fresh
 // rather than bail. Previously retryFreshStartAfterStaleKey refused
 // the retry because stripResumeFlag is a no-op when resume_flag is
 // empty, and the function misclassified that as a strip failure.
@@ -5609,9 +5622,9 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 
 	// Create a session without resume capability — ProviderResume{}
 	// yields an empty resume_flag in bead metadata. The same shape
-	// arises for any configured-named-always session whose start
-	// command lacks a --resume-style flag.
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "fakecmd --follow worker", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	// arises for recyclable workers whose start command lacks
+	// a --resume-style flag. Committed conversations are tested separately.
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "fakecmd --follow worker", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "ephemeral"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5936,6 +5949,120 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 			}
 			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
 				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	workDir := t.TempDir()
+	resume := ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	latestPath := filepath.Join(slugDir, "latest.jsonl")
+	if err := os.WriteFile(latestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(latest): %v", err)
+	}
+
+	path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified: %v", err)
+	}
+	if path != "" || lookup != TranscriptAbsent {
+		t.Fatalf("new keyed session read another conversation: path=%q classification=%v; want absent", path, lookup)
+	}
+
+	keyPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	if err := os.WriteFile(keyPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(key): %v", err)
+	}
+	path, lookup, err = mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified(after write): %v", err)
+	}
+	if path != keyPath || lookup != TranscriptFound {
+		t.Fatalf("path=%q classification=%v, want exact keyed transcript", path, lookup)
+	}
+}
+
+// A start commits the new continuation epoch, and on a fresh wake clears
+// session_key, before it writes the key a session-id-flag provider launches
+// under. In that window the newest work-dir transcript is the conversation the
+// start replaces, so the lookup withholds it, as absent even beside another
+// session in the work directory. Outside a start, or for a provider without a
+// session-id flag, the work-dir fallback still serves it, and another session
+// in the work directory makes it ambiguous.
+func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) {
+	keyed := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	keyless := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag"}
+	cases := []struct {
+		name    string
+		resume  ProviderResume
+		state   State
+		sibling bool
+		want    TranscriptLookup
+	}{
+		{name: "keyed start before its key is minted", resume: keyed, state: StateCreating, want: TranscriptAbsent},
+		{name: "keyed start beside another session in its work dir", resume: keyed, state: StateCreating, sibling: true, want: TranscriptAbsent},
+		{name: "keyed session asleep with its key cleared", resume: keyed, state: StateAsleep, want: TranscriptFound},
+		{name: "keyed session asleep beside another session in its work dir", resume: keyed, state: StateAsleep, sibling: true, want: TranscriptAmbiguous},
+		{name: "start of a provider without a session-id flag", resume: keyless, state: StateCreating, want: TranscriptFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			mgr := newTestManager(t, store, runtime.NewFake())
+			workDir := t.TempDir()
+			opts := CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: tc.resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}
+			info, err := mgr.CreateSession(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if tc.sibling {
+				if _, err := mgr.CreateSession(context.Background(), opts); err != nil {
+					t.Fatalf("Create(sibling): %v", err)
+				}
+			}
+			if err := store.SetMetadataBatch(info.ID, map[string]string{"session_key": "", "state": string(tc.state)}); err != nil {
+				t.Fatalf("SetMetadataBatch: %v", err)
+			}
+
+			searchBase := t.TempDir()
+			slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+			if err := os.MkdirAll(slugDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			previousPath := filepath.Join(slugDir, "previous.jsonl")
+			if err := os.WriteFile(previousPath, []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(previous): %v", err)
+			}
+
+			path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+			if err != nil {
+				t.Fatalf("TranscriptPathClassified: %v", err)
+			}
+			wantPath := ""
+			if tc.want == TranscriptFound {
+				wantPath = previousPath
+			}
+			if path != wantPath || lookup != tc.want {
+				t.Fatalf("path=%q classification=%v, want %q/%v", path, lookup, wantPath, tc.want)
 			}
 		})
 	}

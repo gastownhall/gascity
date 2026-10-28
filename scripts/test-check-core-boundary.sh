@@ -50,6 +50,35 @@ run_check() {
     printf '%s\x1e%s' "$ec" "$out"
 }
 
+# output_contains <haystack> <needle>: 0 if <haystack> contains the literal
+# <needle>. A pure-bash match: no pipe, so no SIGPIPE under pipefail.
+output_contains() {
+    [[ "$1" == *"$2"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Harness self-test: output_contains must report a match even when the
+# needle is followed by many more lines than a pipe buffer holds. A
+# `printf | grep -q` matcher under `set -o pipefail` fails here: grep -q
+# exits on the first match, printf takes SIGPIPE writing the remainder, and
+# the pipeline reports failure despite the match (ga-ef27jq).
+# ---------------------------------------------------------------------------
+test_output_contains_survives_early_match() {
+    local big
+    big="BLOCKED (b): early match
+$(seq 1 200000)"
+    if output_contains "$big" 'BLOCKED (b)'; then
+        record_pass "output_contains matches before a large trailing output"
+    else
+        record_fail "output_contains matches before a large trailing output" "match reported as miss"
+    fi
+    if ! output_contains "$big" 'BLOCKED (c)'; then
+        record_pass "output_contains reports a genuine miss"
+    else
+        record_fail "output_contains reports a genuine miss" "miss reported as match"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Test 1: an UNTRACKED in-tree cache directory carrying a third-party org_
 # hit must NOT trip check (b). This is the exact bug: a project-local
@@ -94,7 +123,7 @@ EOF
     git -C "$repo" commit -qm "add tracked violation"
     result="$(run_check "$repo")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "tracked org_ token in core .go still blocks (b)"
     else
         record_fail "tracked org_ token in core .go still blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -179,7 +208,7 @@ func resolveOrgID() string { return "" }
 EOF
     result="$(run_check "$dir")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED'; then
         record_pass "non-git directory fails closed"
     else
         record_fail "non-git directory fails closed" "exit=$ec, expected nonzero with BLOCKED
@@ -208,7 +237,7 @@ EOF
     git -C "$repo" commit -qm "add tracked violation under a path with a space"
     result="$(run_check "$repo")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "tracked path containing whitespace still blocks (b)"
     else
         record_fail "tracked path containing whitespace still blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -293,7 +322,7 @@ EOF
     ln -s "$src/tenant.go" "$dir/internal/tenant/tenant.go"
     result="$(run_check "$dir" --declared-tree)"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "declared tree follows symlinked sources and blocks (b)"
     else
         record_fail "declared tree follows symlinked sources and blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -328,7 +357,7 @@ test_declared_tree_without_go_files_fails_closed() {
     dir="$(new_tree)"
     result="$(run_check "$dir" --declared-tree)"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED'; then
         record_pass "declared tree without .go files fails closed"
     else
         record_fail "declared tree without .go files fails closed" "exit=$ec, expected nonzero with BLOCKED
@@ -337,6 +366,7 @@ $out"
     rm -rf "$dir"
 }
 
+test_output_contains_survives_early_match
 test_untracked_cache_dir_ignored
 test_tracked_org_token_still_blocked
 test_tracked_vendor_and_testdata_still_excluded

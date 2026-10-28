@@ -3567,6 +3567,52 @@ title = "Step A (updated)"
 	}
 }
 
+// An extends-based formula resolves to a new merged Formula. It must keep the
+// child file's ContentHash alongside the child's Source: gc.formula_source and
+// gc.formula_hash are stamped from that pair, and the historical check-trust
+// lookup re-hashes the gc.formula_source file to verify gc.formula_hash.
+func TestResolve_ExtendsPreservesChildContentHash(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := []byte(`formula = "hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+`)
+	childContent := []byte(`formula = "hash-child"
+extends = ["hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+needs = ["build"]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "hash-base.toml"), parentContent, 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	childPath := filepath.Join(dir, "hash-child.toml")
+	if err := os.WriteFile(childPath, childContent, 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(dir)
+	child, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	resolved, err := p.Resolve(child)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if resolved.Source != childPath {
+		t.Fatalf("resolved.Source = %q, want child path %q", resolved.Source, childPath)
+	}
+	if want := ContentHash(childContent); resolved.ContentHash != want {
+		t.Fatalf("resolved.ContentHash = %q, want child file hash %q", resolved.ContentHash, want)
+	}
+}
+
 func TestParse_InMemory_NoContentHash(t *testing.T) {
 	p := NewParser()
 	f, err := p.Parse([]byte(`{"formula":"mol-inmem","steps":[]}`))

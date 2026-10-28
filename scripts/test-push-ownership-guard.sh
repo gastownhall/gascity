@@ -1155,6 +1155,8 @@ install_guard_hook() {
     # make target, never a real bazel run on a machine that has bazel.
     cp "$REPO_ROOT/.githooks/lib/push-suite.sh" "$repo/.githooks/lib/push-suite.sh"
     chmod +x "$repo/.githooks/lib/push-suite.sh"
+    # push-suite.sh sources the shared runtime probe at startup.
+    cp "$REPO_ROOT/.githooks/lib/local-runtime.sh" "$repo/.githooks/lib/local-runtime.sh"
     printf 'test-fast-parallel:\n\t@true\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }

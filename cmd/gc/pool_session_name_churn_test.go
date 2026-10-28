@@ -144,7 +144,7 @@ func TestPoolSessionCreate_TeardownFailureHoldsTheSlot(t *testing.T) {
 	// The backend recovers: the level-triggered rollback retries the teardown,
 	// the row closes, and only then may the slot mint a successor.
 	delete(sp.StopErrors, first.SessionNameMetadata)
-	if !releaseBeadScopedPoolRuntime(first, sp, io.Discard) {
+	if !releaseRowOwnedRuntime(first, sp, io.Discard, nil, nil) {
 		t.Fatal("teardown still refused after the backend recovered")
 	}
 	rollbackPendingCreate(first, sessionFrontDoor(store), now, io.Discard)
@@ -184,8 +184,8 @@ func TestPoolSessionCreate_AutoProviderFailedKillHoldsTheSlot(t *testing.T) {
 	if err := sp.Stop(name); err == nil || runtime.IsSessionGone(err) {
 		t.Fatalf("auto Stop = %v (gone=%v), want a failure that is not gone", err, runtime.IsSessionGone(err))
 	}
-	if releaseBeadScopedPoolRuntime(info, sp, io.Discard) {
-		t.Fatal("releaseBeadScopedPoolRuntime reported the runtime released although the default backend's kill failed")
+	if releaseRowOwnedRuntime(info, sp, io.Discard, nil, nil) {
+		t.Fatal("releaseRowOwnedRuntime reported the runtime released although the default backend's kill failed")
 	}
 	commitStartFailure(startResult{
 		prepared: preparedStart{candidate: startCandidate{
@@ -208,7 +208,7 @@ func TestPoolSessionCreate_AutoProviderFailedKillHoldsTheSlot(t *testing.T) {
 
 	// The kill recovers: the teardown is confirmed and the rollback may close.
 	delete(defaultSP.StopErrors, name)
-	if !releaseBeadScopedPoolRuntime(info, sp, io.Discard) {
+	if !releaseRowOwnedRuntime(info, sp, io.Discard, nil, nil) {
 		t.Fatal("teardown still refused after the default backend recovered")
 	}
 	if defaultSP.IsRunning(name) {

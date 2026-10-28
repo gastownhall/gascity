@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -131,6 +134,136 @@ func TestBeadPolicyStoreDepListBatchAgreesWithDepList(t *testing.T) {
 	}
 }
 
+// The policy wrapper must not hide the batched children read either: without
+// it molecule.ListSubtree reads one `bd list --parent` plus one `bd query` per
+// member of the run it walks.
+func TestBeadPolicyStoreForwardsTheBatchedChildrenRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wrapped beads.Store
+	}{
+		{"policy store", wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})},
+		{"policy graph store", wrapStoreWithBeadPolicies(mustOpenSQLiteStoreForCapabilityTest(t), &config.City{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := tc.wrapped.(beads.ChildrenBatchLister); !ok {
+				t.Fatalf("%T does not advertise ChildrenOfAny; a subtree walk through it reads one parent per round trip", tc.wrapped)
+			}
+		})
+	}
+}
+
+// childrenTierSpy records the options each forwarded ChildrenOfAny carries
+// and answers with rows and err.
+type childrenTierSpy struct {
+	beads.Store
+	opts [][]beads.QueryOpt
+	rows []beads.Bead
+	err  error
+}
+
+func (s *childrenTierSpy) ChildrenOfAny(_ []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.opts = append(s.opts, opts)
+	return s.rows, s.err
+}
+
+// TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier pins that the forwarded
+// batch asks for the tier the policy layer's own Children reads: a default
+// (issues-tier) read widens to both tiers, as Children's List does, and the
+// other options pass through.
+func TestBeadPolicyStoreChildrenOfAnyReadsAtThePolicyTier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []beads.QueryOpt
+		want beads.TierMode
+	}{
+		{"default tier widens to both", nil, beads.TierBoth},
+		{"both tiers stay both", []beads.QueryOpt{beads.WithBothTiers}, beads.TierBoth},
+		{"wisps tier stays wisps", []beads.QueryOpt{beads.WithEphemeral}, beads.TierWisps},
+		{"other options pass through", []beads.QueryOpt{beads.IncludeClosed}, beads.TierBoth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &childrenTierSpy{Store: beads.NewMemStore()}
+			wrapped := wrapStoreWithBeadPolicies(spy, &config.City{})
+			if _, err := beads.ChildrenOfAny(wrapped, []string{"gc-1"}, tc.opts...); err != nil {
+				t.Fatalf("ChildrenOfAny: %v", err)
+			}
+			if len(spy.opts) != 1 {
+				t.Fatalf("the wrapped batch was asked %d times, want once", len(spy.opts))
+			}
+			if got := beads.TierModeFromOpts(spy.opts[0]); got != tc.want {
+				t.Errorf("forwarded tier = %v, want %v (options %v)", got, tc.want, spy.opts[0])
+			}
+			if beads.HasOpt(tc.opts, beads.IncludeClosed) && !beads.HasOpt(spy.opts[0], beads.IncludeClosed) {
+				t.Errorf("forwarded options %v dropped IncludeClosed", spy.opts[0])
+			}
+		})
+	}
+}
+
+// TestBeadPolicyStoreChildrenOfAnyAgreesWithItsChildren is the correctness
+// control over the production stack (policy over cache over bd): the batch
+// answers what the wrapper's own Children answers per parent, ephemeral
+// children included, and a wrapped store without the batch is read through
+// that Children.
+func TestBeadPolicyStoreChildrenOfAnyAgreesWithItsChildren(t *testing.T) {
+	fake := beadstest.NewFakeBd()
+	seed := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		seeded, err := fake.Seed(b)
+		if err != nil {
+			t.Fatalf("seed %q: %v", b.Title, err)
+		}
+		return seeded
+	}
+	var parents []string
+	for range 3 {
+		p := seed(beads.Bead{Title: "parent"})
+		parents = append(parents, p.ID)
+		seed(beads.Bead{Title: "durable child", ParentID: p.ID})
+		seed(beads.Bead{Title: "wisp child", ParentID: p.ID, Ephemeral: true})
+	}
+	stack := wrapWithCachingStore(context.Background(), wrapStoreWithBeadPolicies(fake.NewBdStore(), &config.City{}), nil, false)
+
+	ids := func(bs []beads.Bead) []string {
+		out := make([]string, 0, len(bs))
+		for _, b := range bs {
+			out = append(out, b.ID)
+		}
+		slices.Sort(out)
+		return out
+	}
+	var perParent []beads.Bead
+	for _, p := range parents {
+		children, err := stack.Children(p, beads.IncludeClosed)
+		if err != nil {
+			t.Fatalf("Children(%s): %v", p, err)
+		}
+		perParent = append(perParent, children...)
+	}
+	if len(perParent) != 6 {
+		t.Fatalf("the policy layer's Children returned %d rows, want 6 (durable and ephemeral children)", len(perParent))
+	}
+	batched, err := beads.ChildrenOfAny(stack, parents)
+	if err != nil {
+		t.Fatalf("ChildrenOfAny: %v", err)
+	}
+	if got, want := ids(batched), ids(perParent); !slices.Equal(got, want) {
+		t.Fatalf("batched children = %v, want the policy layer's per-parent Children %v", got, want)
+	}
+
+	mem := beads.NewMemStore()
+	p, _ := mem.Create(beads.Bead{Title: "parent"})
+	child, _ := mem.Create(beads.Bead{Title: "wisp child", ParentID: p.ID, Ephemeral: true})
+	fallback, err := beads.ChildrenOfAny(wrapStoreWithBeadPolicies(mem, &config.City{}), []string{p.ID})
+	if err != nil {
+		t.Fatalf("ChildrenOfAny without a wrapped batch: %v", err)
+	}
+	if got := ids(fallback); !slices.Equal(got, []string{child.ID}) {
+		t.Fatalf("children without a wrapped batch = %v, want the policy layer's Children answer [%s]", got, child.ID)
+	}
+}
+
 // storeWithoutBatchedDepRead hides a leaf store's batch capability, standing in
 // for a backing engine that never had one. Embedding the INTERFACE is what hides
 // it: Go promotes only the interface's own methods, which is the same mechanism
@@ -147,4 +280,59 @@ func mustOpenSQLiteStoreForCapabilityTest(t *testing.T) beads.Store {
 	}
 
 	return store
+}
+
+// The policy wrapper opts in to guarded-batch discovery through
+// GuardedBatcherHandle, so beads.GuardedBatcherFor resolves through it to the
+// backing store's batcher. Both wrapper shapes are covered, plus the
+// production sandwich with the cache on top, and a batch applied through the
+// resolved batcher lands where the wrapper reads.
+func TestBeadPolicyStoreResolvesTheBackingGuardedBatcher(t *testing.T) {
+	cachedLeaf := beads.NewMemStore()
+	for _, tc := range []struct {
+		name    string
+		wrapped beads.Store
+	}{
+		{"policy store", wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})},
+		{"policy graph store", wrapStoreWithBeadPolicies(mustOpenSQLiteStoreForCapabilityTest(t), &config.City{})},
+		{"policy store over a cache", wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(cachedLeaf, nil), &config.City{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batcher, ok := beads.GuardedBatcherFor(tc.wrapped)
+			if !ok {
+				t.Fatalf("GuardedBatcherFor(%T) = false over a store that applies guarded batches", tc.wrapped)
+			}
+			seed, err := tc.wrapped.Create(beads.Bead{Title: "seed"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			pinned := seed.ID + "-pinned"
+			res, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+				{Create: &beads.Bead{ID: pinned, Title: "pinned"}},
+				{Update: &beads.GuardedUpdate{ID: seed.ID, ExpectedRevision: &seed.Revision, Opts: beads.UpdateOpts{Metadata: map[string]string{"k": "v"}}}},
+			}})
+			if err != nil {
+				t.Fatalf("ApplyGuarded: %v", err)
+			}
+			got, err := tc.wrapped.Get(seed.ID)
+			if err != nil {
+				t.Fatalf("Get through the wrapper: %v", err)
+			}
+			if got.Metadata["k"] != "v" || got.Revision != res.Revisions[seed.ID] {
+				t.Fatalf("wrapper reads metadata %v revision %d, want k=v at revision %d", got.Metadata, got.Revision, res.Revisions[seed.ID])
+			}
+			if _, err := tc.wrapped.Get(pinned); err != nil {
+				t.Fatalf("Get(%s) through the wrapper: %v", pinned, err)
+			}
+		})
+	}
+}
+
+// A policy wrapper over a store that cannot apply guarded batches reports no
+// capability, rather than resolving to a batcher that always refuses.
+func TestBeadPolicyStoreReportsNoGuardedBatcherOverAnIncapableBacking(t *testing.T) {
+	wrapped := wrapStoreWithBeadPolicies(storeWithoutBatchedDepRead{Store: beads.NewMemStore()}, &config.City{})
+	if batcher, ok := beads.GuardedBatcherFor(wrapped); ok {
+		t.Fatalf("GuardedBatcherFor = (%T, true) over a backing with no guarded batches", batcher)
+	}
 }

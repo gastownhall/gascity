@@ -68,13 +68,13 @@ func TestGatherWorkLegsReadTheCityWorkStore(t *testing.T) {
 		t.Fatal("gather's WorkLegs do not take the city work store as the work leg")
 	}
 	row := w.Census.Canonical()[0].Info
-	if got := newEffectPass(&w, &allocDecision{}).readWork(row, intentClose); got.Free || got.Err != nil {
+	if got := newEffectPass(&w, &allocDecision{}).readWork(row, intent{Kind: intentClose}); got.Free || got.Err != nil {
 		t.Fatalf("L5 = %+v; want the work store's claim to hold the row", got)
 	}
 
 	f.env.WorkStore = nil
 	w = f.gather(t)
-	if got := newEffectPass(&w, &allocDecision{}).readWork(row, intentClose); got.Free || !errors.Is(got.Err, errNoReadStore) {
+	if got := newEffectPass(&w, &allocDecision{}).readWork(row, intent{Kind: intentClose}); got.Free || !errors.Is(got.Err, errNoReadStore) {
 		t.Fatalf("L5 without a work store = %+v; want unknown", got)
 	}
 }

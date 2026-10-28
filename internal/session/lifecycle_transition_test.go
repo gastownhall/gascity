@@ -71,6 +71,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				FreshWake:         true,
 			}),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"instance_token":             "token-4",
 				"continuation_epoch":         "5",
 				"continuation_reset_pending": "",
@@ -96,6 +98,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "continuation reset wake",
 			patch: ContinuationResetWakePatch(now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateStartPending),
 				"state_reason":               "continuation-reset",
 				"pending_create_claim":       "true",
@@ -165,6 +169,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "acknowledge drain fresh mode",
 			patch: AcknowledgeDrainPatch(now, true),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      "drained",
 				"state_reason":               "",
 				"last_woke_at":               "",
@@ -186,6 +192,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "complete drain fresh mode",
 			patch: CompleteDrainPatch(now, "idle", true),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateAsleep),
 				"state_reason":               "",
 				"sleep_reason":               "idle",
@@ -208,6 +216,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "restart request",
 			patch: RestartRequestPatch("new-session-key", resetNow),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -227,6 +237,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "restart request without rotated key",
 			patch: RestartRequestPatch("", resetNow),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -245,6 +257,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "config drift reset to creating",
 			patch: ConfigDriftResetPatch(StateCreating, "new-session-key", now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateCreating),
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -265,6 +279,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "config drift reset to asleep",
 			patch: ConfigDriftResetPatch(StateAsleep, "new-session-key", now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateAsleep),
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -285,6 +301,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "config drift reset to asleep without rotated key",
 			patch: ConfigDriftResetPatch(StateAsleep, "", now),
 			want: MetadataPatch{
+				"resume_failures":            "",
+				"resume_launch":              "",
 				"state":                      string(StateAsleep),
 				"started_config_hash":        "",
 				"started_live_hash":          "",

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -58,6 +61,12 @@ func TestZombieClassifiesTheRowsOwnDeadRuntime(t *testing.T) {
 			}
 			if s.Facts.Classified == nil || s.Facts.Classified.Key != k.it.Key || s.Facts.Classified.Token != c.classed {
 				t.Fatalf("classified %+v, want %s", s.Facts.Classified, c.classed)
+			}
+			if s.Facts.Noted != nil {
+				// A dead runtime is present: only an absence on every hop is
+				// noted gone (v5.10g), so its Running and ProcessAlive No stay
+				// the inventory's, read through a present name.
+				t.Fatalf("noted %+v over a present dead runtime, want nothing noted", s.Facts.Noted)
 			}
 			if k.meta("sleep_reason") != "" {
 				t.Fatalf("sleep_reason %q, want nothing written", k.meta("sleep_reason"))
@@ -163,6 +172,13 @@ func TestZombieRefusals(t *testing.T) {
 	if s := k.runKind(); s.Cause != causeLivenessUnknown || s.Facts.Classified != nil || crashFacts(s) != 0 {
 		t.Fatalf("object replaced: settlement %+v, want refused liveness-unknown, unrecorded", s)
 	}
+	// A probe that errs reads unknown: refused, so the backoff paces A12
+	// (mc-nxpo8), not settled under the read's empty token.
+	k, _ = zombieKit(t, true, "gc-1", "tok", "panic: boom")
+	k.mutate(func(r *simRuntime) { r.probeErr = true })
+	if s := k.runKind(); s.Cause != causeLivenessUnknown || s.Facts.Classified != nil || crashFacts(s) != 0 {
+		t.Fatalf("probe error: settlement %+v, want refused liveness-unknown, unrecorded", s)
+	}
 }
 
 // Kills A12 firing on a wanted row (the start's recycle), on a row A21
@@ -187,7 +203,7 @@ func TestArmZombie(t *testing.T) {
 		liveness   rowLiveness
 		desired    desire
 		info       func(*session.Info)
-		classified map[rowKey]string
+		classified map[rowKey]classifiedRuntime
 		want       bool
 	}{
 		{"dead, drained: A21 closes it unclassified", livenessDead, desireDrain, nil, nil, false},
@@ -199,8 +215,8 @@ func TestArmZombie(t *testing.T) {
 		{"dead, wanted awake", livenessDead, desireWake, nil, nil, false},
 		{"alive", livenessAlive, desireSleep, nil, nil, false},
 		{"gone", livenessGone, desireSleep, nil, nil, false},
-		{"classified", livenessDead, desireSleep, nil, map[rowKey]string{k.it.Key: "gc-1/tok"}, false},
-		{"classified, another token", livenessDead, desireSleep, nil, map[rowKey]string{k.it.Key: "gc-1/old"}, true},
+		{"classified", livenessDead, desireSleep, nil, map[rowKey]classifiedRuntime{k.it.Key: {Token: "gc-1/tok"}}, false},
+		{"classified, another token", livenessDead, desireSleep, nil, map[rowKey]classifiedRuntime{k.it.Key: {Token: "gc-1/old"}}, true},
 	} {
 		w := *k.p.World
 		w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: c.liveness, Identity: id}}
@@ -235,13 +251,13 @@ func TestPlannerForgetsARecoveredClassification(t *testing.T) {
 		liveness rowLiveness
 		kept     bool
 	}{{livenessDead, true}, {livenessAlive, false}, {livenessGone, false}} {
-		p := &planner{classified: map[rowKey]string{key: "gc-1/tok"}}
+		p := &planner{classified: map[rowKey]classifiedRuntime{key: {Token: "gc-1/tok"}}}
 		got := p.classifiedOf(k.p.World.Census, map[rowKey]rowObservation{key: {Liveness: c.liveness}})
 		if _, ok := got[key]; ok != c.kept {
 			t.Fatalf("%v: classified %v, want kept %v", c.liveness, got, c.kept)
 		}
 	}
-	p := &planner{classified: map[rowKey]string{{ID: "gone-row"}: "x/y"}}
+	p := &planner{classified: map[rowKey]classifiedRuntime{{ID: "gone-row"}: {Token: "x/y"}}}
 	if got := p.classifiedOf(k.p.World.Census, nil); len(got) != 0 {
 		t.Fatalf("classified %v, want a row out of the census forgotten", got)
 	}
@@ -285,7 +301,7 @@ func TestClassifiedDeadIsNotGone(t *testing.T) {
 	id := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}
 	w := *k.p.World
 	w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: livenessDead, Identity: id}}
-	w.Classified = map[rowKey]string{k.it.Key: deadToken(id)}
+	w.Classified = map[rowKey]classifiedRuntime{k.it.Key: {Token: deadToken(id)}}
 	r := &rowFacts{w: &w, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessDead, Desired: desireSleep}}
 	if r.freshGone() || !r.freshGoneOrClassified() {
 		t.Fatalf("freshGone %v freshGoneOrClassified %v, want false and true", r.freshGone(), r.freshGoneOrClassified())
@@ -303,8 +319,192 @@ func TestStopOnAClassifiedZombieIsNoFinalize(t *testing.T) {
 	c := newHealCase(t, livenessDead, desireSleep, "state", string(session.StateDraining), "state_reason", session.DrainAckStopPendingReason)
 	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
-	c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
 	if it := c.decide(); it.Kind != intentStop || it.Finalize {
 		t.Fatalf("decideRow = (%q, %q, finalize %v), want the stop with no finalize", it.Kind, it.Reason, it.Finalize)
+	}
+}
+
+// Kills a dead runtime the start's recycle classified that is never healed
+// once its row turns Sleep (the #7650 review's regression; CONTRACT A6,
+// v5.9m): the active Sleep row goes to A12, which adopts the recycle's
+// classification without a peek, records its remembered crash once and the
+// pair as its own; A6 then heals it.
+func TestA12AdoptsTheRecyclesClassification(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	crash := &events.Event{Type: events.SessionCrashed, Subject: "worker", Message: "panic: boom"}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Key: c.k, Token: deadToken(id), Crash: crash, Recycle: true}}
+	if it := c.decide(); it.Kind != intentZombie {
+		t.Fatalf("recycle-classified: decideRow = (%q, %q), want A12's", it.Kind, it.Reason)
+	}
+	got := crashMetrics(t)
+	rt := &txRuntime{Class: rtZombie, Same: true, Identity: id}
+	known := c.w.Classified[c.k]
+	step := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: rt, Now: gatherNow}, deadPeek{read: true, known: &known}, nil)
+	adopted := step.Facts.Classified
+	if len(step.Facts.Events) != 1 || adopted == nil || adopted.Recycle || adopted.Crash != nil || !adopted.classifies(id) || len(step.Write) != 0 {
+		t.Fatalf("step %+v, want the remembered crash once and the pair re-recorded as A12's", step)
+	}
+	if _, err := recordZombieCrash(context.Background(), txCaps{}, step.Pass.(zombieCrash)); err != nil || len(*got) != 1 {
+		t.Fatalf("crash metrics %v (%v), want one", *got, err)
+	}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *adopted}
+	if it := c.decide(); it.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("A12's: decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
+	}
+}
+
+// Kills the crash-name fallback naming the identity, or nothing, for a row
+// whose template the pass no longer resolves (mc-q64l4): the crash's
+// subject is the row's identity and its payload the row's template, as
+// legacy's preserved-template read gives them.
+func TestZombieCrashNamesAnUnresolvedRowsTemplate(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireDrain, "state", "active", "template", "chat", "configured_named_session", "true", "configured_named_identity", "other-chat")
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	v := txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtZombie, Same: true, Identity: id}, Now: gatherNow}
+	step := zombieStep(v, deadPeek{read: true, content: "panic: boom"}, nil)
+	if len(step.Facts.Events) != 1 {
+		t.Fatalf("step %+v, want one crash", step)
+	}
+	e := step.Facts.Events[0]
+	var payload map[string]any
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if e.Subject != "other-chat" || payload["template"] != "chat" {
+		t.Fatalf("crash subject %q template %v, want the identity other-chat and the template chat", e.Subject, payload["template"])
+	}
+}
+
+// TestZombieOverAGoneRuntimeNotesItGone (mc-98agx, v5.10g): A12 decided on
+// an inventory that still lists the dead runtime finds it gone on every hop;
+// the settlement notes the name gone at the read's issue time, so the next
+// pass reads the row gone (unlistedSincePass) and A12, which wants a dead
+// row, is not proposed again. A runtime gone records no pair. Kills: an
+// absent read left unnoted.
+func TestZombieOverAGoneRuntimeNotesItGone(t *testing.T) {
+	k, _ := zombieKit(t, true, "gc-1", "tok", "panic: boom")
+	k.mutate(nil)
+	s := k.runKind()
+	if n := s.Facts.Noted; n == nil || !n.Gone || n.Name != "s-gc-1" || n.At.IsZero() || crashFacts(s) != 0 || len(k.sp.kills) != 0 {
+		t.Fatalf("settlement %+v (noted %+v), want the name noted gone, nothing else", s, s.Facts.Noted)
+	}
+	c := newHealCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "runtime-missing")
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessGone}}
+	if it := c.decide(); it.Kind == intentZombie {
+		t.Fatalf("decideRow = (%q, %q) over a row read gone, want no A12", it.Kind, it.Reason)
+	}
+}
+
+// TestZombieOnABoolOnlyLeafIsNotProposedAgain (mc-nxpo8): on a leaf that
+// reports a dead agent to the inventory but cannot read fresh (t3bridge's
+// shape: ObserveLivenessWithError without ObserveLivenessSince), A12's read
+// is unsupported and proves nothing, so the effect classifies the
+// decision's pair and the next decision over the same dead read proposes
+// nothing; before, it settled under the read's empty token and A12 ran
+// every pass. Kills: an unsupported read settled under its own token.
+func TestZombieOnABoolOnlyLeafIsNotProposedAgain(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", "asleep", "sleep_reason", "runtime-missing")
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	if it := c.decide(); it.Kind != intentZombie {
+		t.Fatalf("decideRow = (%q, %q), want A12 on the dead read", it.Kind, it.Reason)
+	}
+	leaf, fake := fakeProfile(runtime.ProfileT3Bridge)
+	name := c.w.Census.Rows[c.k].Info.SessionName
+	startRuntime(t, fake, name, map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"})
+	rt, cause := readRuntime(context.Background(), leaf, nil, name, gatherNow, time.Now)
+	if cause != "" || rt.Class != rtUnsupported {
+		t.Fatalf("read (%+v, %q), want unsupported", rt, cause)
+	}
+	step := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: rt, Now: gatherNow}, deadPeek{}, nil)
+	got := step.Facts.Classified
+	if !step.Done || got == nil || !got.classifies(id) || len(step.Write) != 0 {
+		t.Fatalf("step %+v, want Done with the decision's pair classified and nothing written", step)
+	}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *got}
+	if it := c.decide(); it.Kind == intentZombie {
+		t.Fatalf("decideRow = (%q, %q) again on the same dead read, want A12 settled", it.Kind, it.Reason)
+	}
+}
+
+// TestAbsenceNoteRules (CONTRACT v5.10g; the #7799 review's n1, n2, n4) pins
+// the transaction's absence note: it is stamped at the absent read's issue
+// time, not at settlement (n4); a start whose Call launched notes nothing,
+// though the effect ends before its next read (n1); and a later read that
+// finds a runtime under the name clears it (n2).
+func TestAbsenceNoteRules(t *testing.T) {
+	t.Run("stamped at the read", func(t *testing.T) {
+		k, _ := zombieKit(t, true, "gc-1", "tok", "")
+		k.mutate(nil)
+		clk := k.p.Clock.(*fakePlannerClock)
+		read := clk.Now()
+		k.on(seamAfterReads, func() { clk.Advance(time.Minute) })
+		s := k.runKind()
+		if n := s.Facts.Noted; n == nil || !n.Gone || !n.At.Equal(read) {
+			t.Fatalf("noted %+v, want gone at the read's issue time %v (now %v)", n, read, clk.Now())
+		}
+	})
+	t.Run("a launch clears it", func(t *testing.T) {
+		k, _ := launchKit(t, "asleep", "wake_attempts", "1")
+		k.on(seamAfterCall, func() {})                                                        // the prepare's Call
+		k.on(seamAfterCall, func() { k.fail = map[txSeam]error{seamAfterCall: errInjected} }) // the launch's: the effect ends there
+		s := k.runKind()
+		if len(k.starts()) != 1 {
+			t.Fatalf("starts %d, want the launch to run (settlement %+v)", len(k.starts()), s)
+		}
+		if n := s.Facts.Noted; n != nil && n.Gone {
+			t.Fatalf("noted %+v after the effect launched a runtime, want no absence", n)
+		}
+	})
+	t.Run("a later read that finds a runtime clears it", func(t *testing.T) {
+		k, _ := launchKit(t, "asleep", "wake_attempts", "1")
+		k.on(seamAfterReads, func() { k.runtimeAs("gc-9", "theirs", nil) }) // after the verb's absent read
+		s := k.runKind()
+		if len(k.starts()) != 0 {
+			t.Fatalf("starts %d, want none over the runtime that appeared (settlement %+v)", len(k.starts()), s)
+		}
+		if n := s.Facts.Noted; n != nil && n.Gone {
+			t.Fatalf("noted %+v over a runtime a later read found, want no absence", n)
+		}
+	})
+}
+
+// TestAliveNoteFromAnyEffect (CONTRACT O4's other half, v5.10g; the #7799
+// review's note). Kills alive notes from starts alone, and an alive note a
+// stop leaves behind: any effect whose fresh read finds the row's runtime
+// alive and Current notes it alive at the read, to clear only (a gone note
+// over a runtime that came back clears at the next effect read, not the next
+// inventory; TestEffectAliveNoteOnlyClearsAGoneNote);
+// another row's runtime notes nothing; a stop that stopped the runtime
+// notes no alive.
+func TestAliveNoteFromAnyEffect(t *testing.T) {
+	k, _ := zombieKit(t, true, "gc-1", "tok", "")
+	k.mutate(func(r *simRuntime) { r.zombie = false })
+	read := k.p.Clock.Now()
+	if n := k.runKind().Facts.Noted; n == nil || n.Gone || !n.Clears || n.Name != "s-gc-1" || !n.At.Equal(read) {
+		t.Fatalf("noted %+v over the row's own runtime alive, want it noted alive (clearing only) at %v", n, read)
+	}
+	k, _ = zombieKit(t, true, "gc-9", "theirs", "")
+	k.mutate(func(r *simRuntime) { r.zombie = false })
+	if n := k.runKind().Facts.Noted; n != nil {
+		t.Fatalf("noted %+v over another row's runtime, want nothing", n)
+	}
+	// The effect ends right after its stop Call, before any later read.
+	s, _, leaf := stopRun(t, killedMeta, killedWoken, func(p *effectPass, _ *fenceLeaf, _ beads.Store, _ string) {
+		p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+			if at == seamAfterCall {
+				return errInjected
+			}
+			return nil
+		}
+	})
+	if stops(leaf) == 0 {
+		t.Fatalf("settlement %+v: premise, the dormant stop stopped nothing", s)
+	}
+	if n := s.Facts.Noted; n != nil && !n.Gone {
+		t.Fatalf("noted %+v after the stop, want no alive note", n)
 	}
 }

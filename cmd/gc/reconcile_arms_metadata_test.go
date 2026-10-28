@@ -96,6 +96,46 @@ func TestDesiredRowIdentity(t *testing.T) {
 	}
 }
 
+// Kills an identity refresh that drops legacy's guard on a client's provider
+// chat: a manual row of the provider's implicit agent gets no agent_name,
+// which would resolve it as an agent session; a manual row of a configured
+// agent and a pool seat of the implicit agent still get theirs.
+func TestDesiredRowIdentityClientProviderChat(t *testing.T) {
+	cfg := identityCity()
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "claude", Provider: "claude", Implicit: true}, config.Agent{Name: "helper", StartCommand: "true"})
+	for _, tc := range []struct {
+		name string
+		tp   TemplateParams
+		info session.Info
+		want string
+	}{
+		{
+			name: "a client's provider chat",
+			tp:   TemplateParams{TemplateName: "claude", InstanceName: "my-chat", Alias: "my-chat", ManualSession: true},
+			info: session.Info{Template: "claude", SessionOrigin: "manual", Alias: "my-chat"},
+		},
+		{
+			name: "a manual session of a configured agent",
+			tp:   TemplateParams{TemplateName: "helper", InstanceName: "my-chat", Alias: "my-chat", ManualSession: true},
+			info: session.Info{Template: "helper", SessionOrigin: "manual", Alias: "my-chat"},
+			want: "my-chat",
+		},
+		{
+			name: "a pool seat of the implicit agent",
+			tp:   TemplateParams{TemplateName: "claude", InstanceName: "claude-2", PoolSlot: 2},
+			info: session.Info{Template: "claude", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2"},
+			want: "claude-2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := desiredRowIdentity(cfg, tc.tp, tc.info, rowRefreshKeys{"continuation_epoch": "1"})
+			if got, ok := id.Guarded["agent_name"]; got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("guarded %v, want agent_name %q", id.Guarded, tc.want)
+			}
+		})
+	}
+}
+
 // Kills an alias write without its history, conflict clear, rebaseline or
 // guarded keys, a conflict recorded every pass, and a guarded key written
 // past a conflict (SESS-717/718): a free alias writes all of them; a
@@ -250,6 +290,37 @@ func TestDesiredRowLaunchRefresh(t *testing.T) {
 		_, plain := id.Meta["work_dir"]
 		if guarded != tc.guard || plain || (guarded || plain) != tc.writes {
 			t.Fatalf("a legacy identity %s with work_dir %q: guarded %v plain %v, want guarded %v", tc.state, tc.raw, guarded, plain, tc.guard)
+		}
+	}
+}
+
+// Kills a key minted under a running provider process (gastownhall/gascity
+// #5439): a keyless row whose state may hold a live process ("", active,
+// awake, creating, draining) gets no key, so the id its SessionStart hook
+// reports is not dropped by the set-once capture; a row with none still gets
+// one.
+func TestDesiredRowIdentitySkipsKeyMintOnLiveRow(t *testing.T) {
+	cfg := identityCity()
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
+	raw := rowRefreshKeys{"continuation_epoch": "1", "session_id_flag": "--session-id"}
+	for _, tc := range []struct {
+		state string
+		mint  bool
+	}{
+		{"", false},
+		{"active", false},
+		{"awake", false},
+		{"creating", false},
+		{"draining", false},
+		{"asleep", true}, // a row with no process is minted, as at base
+		{"start-pending", true},
+		{"suspended", true},
+		{"drained", true},
+		{"quarantined", true},
+	} {
+		seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: tc.state}
+		if id := desiredRowIdentity(cfg, tp, seat, raw); id.NeedsKey != tc.mint {
+			t.Errorf("a keyless row in state %q: NeedsKey %v, want %v", tc.state, id.NeedsKey, tc.mint)
 		}
 	}
 }

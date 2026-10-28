@@ -23,7 +23,8 @@ import (
 // name as its first argument, following the Git credential helper pattern.
 //
 // Exit codes: 0 = success, 1 = error (stderr has message), 2 = unknown
-// operation (treated as success for forward compatibility).
+// operation (treated as success for forward compatibility, except from ops
+// that cannot be unknown; see [classifyExecExit]).
 type Provider struct {
 	script       string
 	timeout      time.Duration
@@ -71,8 +72,8 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 // on success.
 //
 // Exit code 2 is treated as success (unknown operation — forward compatible)
-// on every op but is-attached; see [classifyExecExit]. Any other non-zero exit
-// code returns an error wrapping stderr.
+// on every op but start, provision, and is-attached; see [classifyExecExit].
+// Any other non-zero exit code returns an error wrapping stderr.
 func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...string) (string, error) {
 	return p.runWithContext(context.Background(), dur, stdinData, args...)
 }
@@ -169,15 +170,17 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 // classifyExecExit maps an adapter op's exit code and message onto the
 // provider's contract. base is the formatted adapter error. Exit code 2 is an
 // unknown operation treated as success (forward compatible, nil error),
-// except from is-attached: that op runs only for a pack that declared
-// report-attachment, and a declared op cannot be unknown, so its exit 2 is a
-// failure that [Provider.IsAttachedWithError] reports as "could not tell". A
-// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
-// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
-// ([runtime.CapacityError]); everything else is base unchanged.
+// except from ops that cannot be unknown, where it is an ordinary failure:
+// start (a pack that cannot start is not a provider), provision (it runs only
+// for a pack that declared proc.provision), and is-attached (it runs only for
+// a pack that declared report-attachment; [Provider.IsAttachedWithError]
+// reports its failure as "could not tell"). A start-op name collision maps to
+// [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail] is an
+// endpoint capacity refusal ([runtime.CapacityError]); everything else is base
+// unchanged.
 func classifyExecExit(op string, code int, msg string, base error) error {
 	switch {
-	case code == 2 && op != "is-attached":
+	case code == 2 && !exitTwoIsFailure(op):
 		return nil
 	case op == "start" && isStartCollision(msg):
 		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
@@ -185,6 +188,17 @@ func classifyExecExit(op string, code int, msg string, base error) error {
 		return &runtime.CapacityError{ExitCode: code, Source: runtime.CapacitySourceExitStatus, Err: base}
 	default:
 		return base
+	}
+}
+
+// exitTwoIsFailure reports whether op cannot be an unknown operation, so an
+// exit 2 from it is a failure rather than the forward-compatible no-op.
+func exitTwoIsFailure(op string) bool {
+	switch op {
+	case "start", "provision", "is-attached":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -229,7 +243,23 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
+	var saved savedPaneFence
+	if !occupancyKnown || occupiedBefore {
+		saved = p.clearInputFence(ctx, name)
+	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
+		if startFailureKeepsBox(err, foreignBox) {
+			// The live session keeps its box, so it keeps its fence too.
+			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
+		}
+		return p.cleanupAfterStartFailure(name, err, foreignBox)
+	}
+	if err := p.publishInputFence(ctx, name, cfg); err != nil {
+		if startFailureKeepsBox(err, foreignBox) {
+			// The box was up before the attempt and stays: its pane, unless
+			// the start op replaced its process, keeps the fence it held.
+			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
+		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
 	p.publishReadyPrompt(ctx, name, cfg)
@@ -270,13 +300,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop deliberately runs on its own background context (see run), so cleanup
 // still happens when the caller's context is the thing that died.
 func (p *Provider) cleanupAfterStartFailure(name string, startErr error, foreignBox bool) error {
-	if foreignBox || errors.Is(startErr, runtime.ErrSessionExists) {
+	if startFailureKeepsBox(startErr, foreignBox) {
 		return startErr
 	}
 	if stopErr := p.Stop(name); stopErr != nil {
 		return errors.Join(startErr, fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr))
 	}
 	return startErr
+}
+
+// startFailureKeepsBox reports whether a failed start leaves the box in
+// place because it belongs to a live session (cleanupAfterStartFailure).
+func startFailureKeepsBox(startErr error, foreignBox bool) bool {
+	return foreignBox || errors.Is(startErr, runtime.ErrSessionExists)
 }
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
@@ -329,6 +365,10 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else {
 		argv = []string{"tmux", "new-session", "-d", "-s", execTmuxSession, command}
 	}
+	// The agent pane's fence changes in the same tmux command list that
+	// launches the agent, so no input fenced for another incarnation is
+	// let through between them.
+	argv = append(argv, p.launchFenceArgs(name, cfg)...)
 	if _, code, err := p.Exec(ctx, name, argv); err != nil {
 		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
 	} else if code != 0 {
@@ -583,11 +623,29 @@ func formatStartupWatchError(stderr string, err error) error {
 // auto-accepted — which is the safe asymmetry: the common startup case is
 // gated, and the rare mid-session re-surface (resume/reattach) never
 // auto-trusts an unverified import.
+//
+// Under a ctx input fence, a pack that cannot fence refuses before any peek
+// or key (runtime.RefuseUnfenceableCtx); one that can runs the whole call as
+// one fenced operation of the carrier guard: the fence is proven before the
+// first peek, every dialog key is guarded on that proof, and a miss after a
+// key reached the pane is partial.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
-	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
-		func(lines int) (string, error) { return p.Peek(name, lines) },
-		func(keys ...string) error { return p.SendKeys(name, keys...) },
-	)
+	if err := runtime.RefuseUnfenceableCtx(ctx, p, name); err != nil {
+		return err
+	}
+	peek := func(lines int) (string, error) { return p.Peek(name, lines) }
+	f, ok := runtime.InputFenceFrom(ctx)
+	if !ok {
+		return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout, peek,
+			func(keys ...string) error { return p.SendKeys(name, keys...) })
+	}
+	c, err := p.fencedCarrier(name)
+	if err != nil {
+		return err
+	}
+	return p.fencedResult(name, c.FencedKeys(ctx, name, f, func(sendKeys func(keys ...string) error) error {
+		return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout, peek, sendKeys)
+	}))
 }
 
 // Stop destroys the named session: script stop <name>

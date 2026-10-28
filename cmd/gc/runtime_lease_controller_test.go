@@ -303,11 +303,11 @@ func TestTickPoolRuntimeReleaseTakesTheFlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if releaseBeadScopedPoolRuntimeLeased(city, info, sp, io.Discard) || !sp.IsRunning("worker-gc-7") {
+	if releaseRowOwnedRuntimeLeased(city, nil, info, sp, io.Discard, nil) || !sp.IsRunning("worker-gc-7") {
 		t.Fatal("the tick released a pool runtime under another holder's flock")
 	}
 	held.Release()
-	if !releaseBeadScopedPoolRuntimeLeased(city, info, sp, io.Discard) || sp.IsRunning("worker-gc-7") {
+	if !releaseRowOwnedRuntimeLeased(city, nil, info, sp, io.Discard, nil) || sp.IsRunning("worker-gc-7") {
 		t.Fatal("the tick did not release a free pool runtime")
 	}
 }

@@ -165,7 +165,7 @@ func TestCityRuntimeReloadDefersWhilePackConfigWriteInFlight(t *testing.T) {
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	previousLifecycle := cityRuntimeStartBeadsLifecycle
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error { return nil }
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil }
 	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = previousLifecycle })
 
 	lastProviderName := "fake"

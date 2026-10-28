@@ -253,9 +253,10 @@ func TestNativeDoltStoreGetReadsRevisionNotTheEmbeddedRowVersion(t *testing.T) {
 	}
 }
 
-// A list row publishes no token at all. ABSENT is not 0: a caller that acts on a
-// row it listed must re-read the detail view for the token first.
-func TestNativeDoltStoreListRowsCarryNoRevision(t *testing.T) {
+// A list row carries its RowVersion, the token the detail view publishes for
+// it, so a conditional write fenced on a listed row compares against the row's
+// real revision (mc-3c8h5). Kills beadFromNativeIssueRow clearing it.
+func TestNativeDoltStoreListRowsCarryTheRowRevision(t *testing.T) {
 	storage := &nativeDoltReaderSpy{
 		list: func(context.Context, issueops.ListRequest) (issueops.IssuePage, error) {
 			return issueops.IssuePage{Items: []*issueops.IssueWithCounts{{
@@ -275,8 +276,8 @@ func TestNativeDoltStoreListRowsCarryNoRevision(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("List len = %d, want 1", len(got))
 	}
-	if got[0].Revision != 0 {
-		t.Fatalf("Revision = %d off a list row, want 0 — the page publishes no token and a stamped one would be a fabricated fence", got[0].Revision)
+	if got[0].Revision != 77 {
+		t.Fatalf("Revision = %d off a list row, want the row's RowVersion 77", got[0].Revision)
 	}
 }
 

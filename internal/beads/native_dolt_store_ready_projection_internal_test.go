@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -26,6 +27,42 @@ type nativeBlockedColumnStorage struct {
 	mu         sync.Mutex
 	batchCalls int
 	batchedIDs int
+	lookups    [][]string
+	// lookupErr, when set, fails every exact-id listing: the work-outcome
+	// veto's blocker read breaking while the projection reads keep answering.
+	lookupErr error
+}
+
+// SearchIssues records every exact-id listing, the door filterReadyByWorkOutcome
+// reads blocker outcomes through, and fails it with lookupErr when that is set.
+// The listings that prime and reconcile a cache name no ids and are neither
+// recorded nor failed.
+func (s *nativeBlockedColumnStorage) SearchIssues(ctx context.Context, query string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+	if len(filter.IDs) > 0 {
+		s.mu.Lock()
+		s.lookups = append(s.lookups, append([]string(nil), filter.IDs...))
+		err := s.lookupErr
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.nativeDoltMemStorage.SearchIssues(ctx, query, filter)
+}
+
+// failLookups makes every later exact-id listing fail with err, or answer
+// again when err is nil.
+func (s *nativeBlockedColumnStorage) failLookups(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lookupErr = err
+}
+
+// blockerLookups returns the ids each exact-id listing named, in call order.
+func (s *nativeBlockedColumnStorage) blockerLookups() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]string(nil), s.lookups...)
 }
 
 // IsBlocked mirrors the stored column for one id.
@@ -307,6 +344,142 @@ func TestNativeReadyProjectionIsOneBatchedReadPerCycle(t *testing.T) {
 	}
 	if batched != len(ids) {
 		t.Fatalf("IsBlockedBatch received %d ids, want %d: the batch must cover the whole active set", batched, len(ids))
+	}
+	// xstore's blocker is outside the snapshot, but the column already holds
+	// xstore back, so there is no false verdict for a work outcome to veto.
+	if lookups := storage.blockerLookups(); len(lookups) != 0 {
+		t.Fatalf("prime looked up blockers %v, want none: only a row the column calls unblocked can be vetoed", lookups)
+	}
+}
+
+// TestCachedReadyOverNativeBackingHonorsAnEvictedBlockersWorkOutcome pins the
+// one gate bd's is_blocked column does not carry. The column counts every
+// closed blocker as satisfied, so a close recorded with gc.work_outcome=blocked
+// leaves its dependent unblocked there, and the backing's own Ready holds the
+// dependent back through filterReadyByWorkOutcome. The cache's own work-outcome
+// check can consult only a blocker it still holds, and a reconcile lists the
+// active set, so the first pass after the close evicts the blocker. Unless the
+// projection carries the veto itself, every cached handle, ReadyPreferCache
+// among them, then offers the dependent for the life of the cache. The evicting
+// reconcile runs first with that blocker lookup failing, so the dependent must
+// stay held on the verdict the cache already had until a healthy cycle vetoes
+// it again.
+//
+//	blocker   (closed, work_outcome=blocked) <-- blocks    -- dependent  held back
+//	passed    (closed step, outcome=pass)    <-- blocks    -- advanced   ready
+//	plain     (closed)                       <-- blocks    -- released   ready
+//	unrelated (open)                         <-- waits-for -- gated      ready
+//
+// passed carries the exemption ReadinessWorkOutcome grants a step that passed
+// and plain is an ordinary close, so the veto must leave both dependents ready.
+// gated is bd's opened gate: an unblocked verdict over an edge whose target the
+// snapshot holds, which the cache's own check already covers, so it must not
+// cost a blocker lookup.
+func TestCachedReadyOverNativeBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T) {
+	storage := &nativeBlockedColumnStorage{nativeDoltMemStorage: newNativeDoltMemStorage(), blocked: map[string]bool{}}
+	native := newNativeDoltStoreForTest(storage)
+
+	ids := map[string]string{}
+	for _, title := range []string{"blocker", "dependent", "passed", "advanced", "plain", "released", "unrelated", "gated"} {
+		b, err := native.Create(Bead{Type: "task", Status: "open", Title: title})
+		if err != nil {
+			t.Fatalf("Create %s: %v", title, err)
+		}
+		ids[title] = b.ID
+	}
+	for _, edge := range []struct{ from, kind, to string }{
+		{"dependent", "blocks", "blocker"},
+		{"advanced", "blocks", "passed"},
+		{"released", "blocks", "plain"},
+		{"gated", "waits-for", "unrelated"},
+	} {
+		if err := storage.store.DepAdd(ids[edge.from], ids[edge.to], edge.kind); err != nil {
+			t.Fatalf("DepAdd %s %s %s: %v", edge.from, edge.kind, edge.to, err)
+		}
+	}
+	held := []string{ids["dependent"], ids["advanced"], ids["released"]}
+	for _, id := range held {
+		storage.blocked[id] = true
+	}
+	cache := NewCachingStoreForTest(native, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if lookups := storage.blockerLookups(); len(lookups) != 0 {
+		t.Fatalf("prime looked up blockers %v, want none: every edge of an unblocked row ends inside the snapshot", lookups)
+	}
+
+	// The closes land behind the cache, as another writer's do, and the column
+	// follows bd: every close satisfies its dependents' blocks edge.
+	if _, err := storage.store.CloseAll([]string{ids["blocker"]}, map[string]string{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("Close(blocker): %v", err)
+	}
+	if _, err := storage.store.CloseAll([]string{ids["passed"]}, map[string]string{
+		beadmeta.StepRefMetadataKey:     "review",
+		beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("Close(passed): %v", err)
+	}
+	if err := storage.store.Close(ids["plain"]); err != nil {
+		t.Fatalf("Close(plain): %v", err)
+	}
+	for _, id := range held {
+		storage.blocked[id] = false
+	}
+	want := nativeLiveReady(t, native, ids["advanced"], ids["released"], ids["unrelated"], ids["gated"])
+	stage := newReadyInvariantStage(t, cache, want)
+
+	// The evicting reconcile's blocker lookup fails, so the cycle loses the
+	// column and the dependent must stay held on the verdict the cache already
+	// had.
+	storage.failLookups(errors.New("blocker lookup refused"))
+	cache.ReconcileForTest()
+	storage.failLookups(nil)
+	cache.mu.RLock()
+	_, resident := cache.beads[ids["blocker"]]
+	cache.mu.RUnlock()
+	if resident {
+		t.Fatal("the reconcile kept the closed blocker, so this fixture is not measuring an evicted one")
+	}
+	stage.assertHeldThroughFailedVeto("after the reconcile whose blocker lookup failed", ids["dependent"])
+
+	before := len(storage.blockerLookups())
+	cache.ReconcileForTest()
+	reconciled := storage.blockerLookups()[before:]
+
+	got, err := cache.ReadyPreferCache(ReadyQuery{TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("ReadyPreferCache: %v", err)
+	}
+	if gotIDs := sortedIDs(got); !equalIDs(gotIDs, want) {
+		t.Errorf("ReadyPreferCache = %v, want the backing's %v", gotIDs, want)
+	}
+	stage.assertNeverExceedsBacking("after a healthy reconcile", map[string]string{
+		ids["dependent"]: "its blocker closed with gc.work_outcome=blocked, which the column counts as satisfied and filterReadyByWorkOutcome does not",
+	})
+	if blocked := cachedIsBlockedForTest(cache, ids["dependent"]); blocked == nil || !*blocked {
+		t.Errorf("cached is_blocked for dependent = %s, want true: the projection must carry the veto its evicted blocker can no longer give", ptrStr(blocked))
+	}
+	stage.assertStillAnswers("after a healthy reconcile")
+
+	// The cost: one batched lookup per cycle, naming only the blockers outside
+	// the snapshot. A live read would have run the backing's own veto, so the
+	// warm ReadyPreferCache above must have added none.
+	if len(reconciled) != 1 {
+		t.Fatalf("the reconcile looked up blockers %d times (%v), want once: the veto is one batched read per cycle", len(reconciled), reconciled)
+	}
+	looked := append([]string(nil), reconciled[0]...)
+	sort.Strings(looked)
+	outside := []string{ids["blocker"], ids["passed"], ids["plain"]}
+	sort.Strings(outside)
+	if !equalIDs(looked, outside) {
+		t.Fatalf("the reconcile looked up %v, want exactly the blockers outside the snapshot %v", looked, outside)
+	}
+	if since := storage.blockerLookups()[before:]; len(since) != len(reconciled) {
+		t.Fatalf("ReadyPreferCache looked up blockers %v: it read live, and a warm cache must answer from the snapshot", since[len(reconciled):])
 	}
 }
 

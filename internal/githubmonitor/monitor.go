@@ -54,6 +54,7 @@ type PullRequest struct {
 	Number           int     `json:"number"`
 	Title            string  `json:"title"`
 	URL              string  `json:"url"`
+	Author           string  `json:"author,omitempty"`
 	BaseRefName      string  `json:"base_ref_name"`
 	HeadRefName      string  `json:"head_ref_name"`
 	HeadSHA          string  `json:"head_sha"`
@@ -70,6 +71,7 @@ type Result struct {
 	Number           int      `json:"number"`
 	Title            string   `json:"title,omitempty"`
 	URL              string   `json:"url,omitempty"`
+	Author           string   `json:"author,omitempty"`
 	BaseRefName      string   `json:"base_ref_name"`
 	HeadRefName      string   `json:"head_ref_name,omitempty"`
 	HeadSHA          string   `json:"head_sha,omitempty"`
@@ -84,12 +86,32 @@ type Result struct {
 	Notify           []string `json:"notify,omitempty"`
 }
 
-// EvaluatePullRequests evaluates PR readiness for one configured monitor.
+// EvaluatePullRequests evaluates PR readiness for one configured monitor,
+// enforcing the monitor's configured author allow-list (if any).
 func EvaluatePullRequests(monitor config.GitHubPRMonitor, prs []PullRequest) []Result {
+	return EvaluatePullRequestsWithAllowedAuthors(monitor, prs, nil)
+}
+
+// EvaluatePullRequestsWithAllowedAuthors evaluates PR readiness for one
+// configured monitor, restricting to PRs whose author is allowed.
+//
+// The effective allow-list is the union of the monitor's configured authors and
+// extraAuthors (used to carry the `gc github pr backfill --author` flag). Author
+// enforcement is FAIL-CLOSED: when the effective allow-list is non-empty, a PR
+// is evaluated only when its author login matches an allowed value exactly and
+// case-sensitively. A PR whose author is unresolved/empty is skipped, and is
+// therefore never marked actionable and never mints a repair bead. When the
+// effective allow-list is empty, every PR is evaluated (historical behavior),
+// preserving backward compatibility.
+func EvaluatePullRequestsWithAllowedAuthors(monitor config.GitHubPRMonitor, prs []PullRequest, extraAuthors []string) []Result {
 	baseBranches := normalizedBranchSet(monitor.BaseBranches)
+	allowedAuthors := mergeAllowedAuthors(monitor.AllowedAuthorSet(), extraAuthors)
 	results := make([]Result, 0, len(prs))
 	for _, pr := range prs {
 		if len(baseBranches) > 0 && !baseBranches[strings.ToLower(strings.TrimSpace(pr.BaseRefName))] {
+			continue
+		}
+		if !authorAllowed(allowedAuthors, pr.Author) {
 			continue
 		}
 		failed, pending := classifyChecks(pr.Checks)
@@ -101,6 +123,7 @@ func EvaluatePullRequests(monitor config.GitHubPRMonitor, prs []PullRequest) []R
 			Number:           pr.Number,
 			Title:            pr.Title,
 			URL:              pr.URL,
+			Author:           strings.TrimSpace(pr.Author),
 			BaseRefName:      pr.BaseRefName,
 			HeadRefName:      pr.HeadRefName,
 			HeadSHA:          pr.HeadSHA,
@@ -116,6 +139,43 @@ func EvaluatePullRequests(monitor config.GitHubPRMonitor, prs []PullRequest) []R
 		})
 	}
 	return results
+}
+
+// mergeAllowedAuthors unions a monitor's configured author set with an extra
+// list of logins (from the --author flag). It returns nil when both are empty,
+// which callers interpret as "no author restriction".
+func mergeAllowedAuthors(configured map[string]bool, extra []string) map[string]bool {
+	if len(configured) == 0 && len(extra) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(configured)+len(extra))
+	for login := range configured {
+		set[login] = true
+	}
+	for _, login := range extra {
+		login = strings.TrimSpace(login)
+		if login != "" {
+			set[login] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// authorAllowed reports whether a PR by author may be acted on. When the
+// allow-list is empty there is no restriction. Otherwise the match is exact and
+// case-sensitive, and an empty/unresolved author is rejected (fail-closed).
+func authorAllowed(allowed map[string]bool, author string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	author = strings.TrimSpace(author)
+	if author == "" {
+		return false
+	}
+	return allowed[author]
 }
 
 func normalizedBranchSet(branches []string) map[string]bool {
@@ -250,12 +310,20 @@ type graphQLPullRequest struct {
 	Number           int                `json:"number"`
 	Title            string             `json:"title"`
 	URL              string             `json:"url"`
+	Author           *graphQLActor      `json:"author"`
 	IsDraft          bool               `json:"isDraft"`
 	MergeStateStatus string             `json:"mergeStateStatus"`
 	BaseRefName      string             `json:"baseRefName"`
 	HeadRefName      string             `json:"headRefName"`
 	HeadRefOID       string             `json:"headRefOid"`
 	Commits          graphQLCommitNodes `json:"commits"`
+}
+
+// graphQLActor is a GitHub Actor (e.g. the PR author). The whole object is null
+// when the account was deleted, in which case the login is unresolved and the
+// author fails closed against a configured allow-list.
+type graphQLActor struct {
+	Login string `json:"login"`
 }
 
 type graphQLCommitNodes struct {
@@ -320,6 +388,9 @@ func DecodePullRequestsPage(r io.Reader) ([]PullRequest, string, error) {
 			BaseRefName:      node.BaseRefName,
 			HeadRefName:      node.HeadRefName,
 			HeadSHA:          node.HeadRefOID,
+		}
+		if node.Author != nil {
+			pr.Author = strings.TrimSpace(node.Author.Login)
 		}
 		if len(node.Commits.Nodes) > 0 {
 			commit := node.Commits.Nodes[len(node.Commits.Nodes)-1].Commit

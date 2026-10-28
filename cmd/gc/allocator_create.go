@@ -139,7 +139,8 @@ func createPlanOf(id, template string, p poolSessionCreatePlan) createPlan {
 type createPass struct {
 	cfg *config.City
 	// sp answers transport capability checks; no effect probes it, except
-	// that a named AdoptLive stamps the adopted runtime's identity (LL5).
+	// that a named AdoptLive stamps the adopted runtime's identity (LL5) and
+	// a named reopen confirms its name free (nameConfirmedFree).
 	sp                runtime.Provider
 	store             beads.Store
 	rigStores         map[string]beads.Store
@@ -239,15 +240,16 @@ func (p *createProgress) afterWrite(ctx context.Context, rowID string) error {
 // Create effect stages. A no-write failure names the stage it failed in as
 // its refusal's cause (ineligible:create-refused:<cause>).
 const (
-	createStageStalePlan = "stale-plan" // the plan's template or identity left config
-	createStageWorktree  = "worktree"   // the plan's worktree evidence failed verification
-	createStagePrepare   = "prepare"    // transport, tmux alias, identifiers
-	createStageLock      = "lock"       // the city identifier locks
-	createStageFence     = "fence"      // the locked re-census and availability checks
-	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
-	createStagePanic     = "panic"      // a panic before the write
-	createStageResolve   = "resolve"    // a named create's read-only template resolution
-	createStageNoWriter  = "no-writer"  // a named reopen whose store resolves no conditional writer (v5 C2)
+	createStageStalePlan = "stale-plan"   // the plan's template or identity left config
+	createStageWorktree  = "worktree"     // the plan's worktree evidence failed verification
+	createStagePrepare   = "prepare"      // transport, tmux alias, identifiers
+	createStageLock      = "lock"         // the city identifier locks
+	createStageFence     = "fence"        // the locked re-census and availability checks
+	createStageFenceRead = "fence-read"   // a pool create's locked failure that proves no name taken
+	createStagePanic     = "panic"        // a panic before the write
+	createStageResolve   = "resolve"      // a named create's read-only template resolution
+	createStageNoWriter  = "no-writer"    // a named reopen whose store resolves no conditional writer (v5 C2)
+	createStageRedecided = causeRedecided // a named reopen whose fresh read finds a live runtime under the name
 )
 
 // createProgress is how far one effect got: the stage a no-write failure

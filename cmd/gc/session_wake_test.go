@@ -431,6 +431,8 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 			"primed_at":            "2026-03-08T11:00:00Z",
 			"priming_attempted_at": "2026-03-08T11:00:00Z",
 			"prompt_hash":          "abc123",
+			"resume_failures":      "2",
+			"resume_launch":        "true",
 		},
 	})
 	if err != nil {
@@ -699,7 +701,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -722,7 +724,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -751,7 +753,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -776,7 +778,7 @@ func verifiedStopTokenFixture(t *testing.T, readErr error) (beads.Store, *runtim
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1602,6 +1604,29 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	}
 	if got.Metadata["sleep_reason"] != "idle" {
 		t.Errorf("sleep_reason = %q, want idle", got.Metadata["sleep_reason"])
+	}
+}
+
+// TestCompleteDrain_KeepsALateQuarantinesReason (mc-slkxd): legacy's drain
+// completion over a quarantine that landed after the signal keeps its
+// reason while the quarantine is in force.
+func TestCompleteDrain_KeepsALateQuarantinesReason(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	until := now.Add(time.Hour).UTC().Format(time.RFC3339)
+	b, _ := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
+		Metadata: map[string]string{
+			"session_name": "test-session", "state": "awake", "sleep_reason": "quarantine", "quarantined_until": until,
+		},
+	})
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), &drainState{reason: "idle"}, clk)
+	got, _ := store.Get(b.ID)
+	if got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "quarantine" || got.Metadata["quarantined_until"] != until {
+		t.Fatalf("row %v, want asleep with the quarantine and its reason kept", got.Metadata)
 	}
 }
 

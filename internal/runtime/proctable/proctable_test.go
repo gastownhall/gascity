@@ -123,3 +123,19 @@ func TestSummarizeScanErrorKeepsWholeScanFailures(t *testing.T) {
 		t.Errorf("SummarizeScanError(nil) = %q, want \"\"", got)
 	}
 }
+
+// TestScanErrorShapeIgnoresCountsAndPIDs (mc-ygved): scans whose failures
+// differ only in counts and PIDs share a shape; a new kind, or a whole-scan
+// failure, changes it.
+func TestScanErrorShapeIgnoresCountsAndPIDs(t *testing.T) {
+	a := errors.Join(&EntryError{PID: 11, Err: errors.New("reading environ for pid 11: permission denied")})
+	b := errors.Join(&EntryError{PID: 13, Err: errors.New("reading environ for pid 13: permission denied")}, &EntryError{PID: 14, Err: errors.New("reading environ for pid 14: permission denied")})
+	c := errors.Join(b, &EntryError{PID: 15, Err: errors.New("reading owner for pid 15: no such device")})
+	d := errors.Join(b, errors.New("enumerating /proc: permission denied"))
+	if ScanErrorShape(a) != ScanErrorShape(b) {
+		t.Fatalf("shapes differ on counts and pids: %q vs %q", ScanErrorShape(a), ScanErrorShape(b))
+	}
+	if ScanErrorShape(b) == ScanErrorShape(c) || ScanErrorShape(b) == ScanErrorShape(d) {
+		t.Fatal("a new kind, or a whole-scan failure, left the shape unchanged")
+	}
+}

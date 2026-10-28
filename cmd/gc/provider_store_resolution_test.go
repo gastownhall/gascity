@@ -404,7 +404,7 @@ trigger = "manual"
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("poll", "", false, nil, &stdout, &stderr)
+	code := cmdOrderRun("poll", "", false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(exec) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -451,7 +451,7 @@ pool = "dog"
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("digest", "", false, nil, &stdout, &stderr)
+	code := cmdOrderRun("digest", "", false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(formula) = %d, want 0; stderr: %s", code, stderr.String())
 	}

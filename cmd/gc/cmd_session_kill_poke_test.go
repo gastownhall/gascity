@@ -149,7 +149,7 @@ func TestCmdSessionKillRefusesLiveSubagentsUnlessForced(t *testing.T) {
 	t.Cleanup(func() { liveSubagentsForKill = old })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionKillWithForce([]string{identity}, &stdout, &stderr, false, false); code != 1 {
+	if code := cmdSessionKillWithForce([]string{identity}, "", &stdout, &stderr, false, false); code != 1 {
 		t.Fatalf("cmdSessionKillWithForce() = %d, want refusal", code)
 	}
 	if !strings.Contains(stderr.String(), "helper") || !strings.Contains(stderr.String(), "--force") {
@@ -161,7 +161,7 @@ func TestCmdSessionKillRefusesLiveSubagentsUnlessForced(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionKillWithForce([]string{identity}, &stdout, &stderr, false, true); code != 0 {
+	if code := cmdSessionKillWithForce([]string{identity}, "", &stdout, &stderr, false, true); code != 0 {
 		t.Fatalf("forced cmdSessionKillWithForce() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if calls != 1 {

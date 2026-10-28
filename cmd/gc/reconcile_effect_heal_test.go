@@ -493,6 +493,9 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 		"corpse": func() *freshObserver {
 			return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}, env: own}
 		},
+		"ownerless": func() *freshObserver {
+			return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{}}
+		},
 		"read failed": func() *freshObserver {
 			return &freshObserver{Fake: runtime.NewFake(), err: runtime.ErrRuntimeUnavailable}
 		},
@@ -511,6 +514,8 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 		"creating":     func() *healCase { return newHealCase(t, livenessGone, desireNone, "state", "creating") },
 		"dead runtime": func() *healCase { return newHealCase(t, livenessGone, desireSleep, "state", "active") },
 		"asleep, own":  func() *healCase { return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle") },
+		"squatted":     func() *healCase { return squatterCase(t, foreignEnv, desireNone) },
+		"ownerless":    func() *healCase { return squatterCase(t, ownerlessEnv, desireNone) },
 	}
 	for rowName, row := range rows {
 		for rtName, sp := range runtimes {

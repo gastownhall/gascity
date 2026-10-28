@@ -31,8 +31,9 @@ import (
 // the ID of the message the nudge announces. messageID lets the queued nudge
 // carry a re-checkable reference, so delivery-time re-validation can withdraw
 // it if the message is read or gone by then (gastownhall/gascity#5321).
+// It returns the id of the op that records the notice, "" when none does.
 // Errors are non-fatal.
-type nudgeFunc func(recipient, messageID string) error
+type nudgeFunc func(recipient, messageID string) (opID string, err error)
 
 const (
 	mailInjectMaxMessages          = 3
@@ -80,7 +81,11 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
-	DryRun        bool                 `json:"dry_run,omitempty"`
+	// NotifyOpIDs are the ids of the operation-journal ops that record the
+	// recipients' new-mail notices, one per notified recipient whose notice
+	// was recorded (DES-O0API §8.4).
+	NotifyOpIDs []string `json:"notify_op_ids,omitempty"`
+	DryRun      bool     `json:"dry_run,omitempty"`
 }
 
 type mailMessageSummary struct {
@@ -116,11 +121,26 @@ func summarizeMailMessage(m mail.Message) mailMessageSummary {
 	}
 }
 
+// appendNotifyOp appends a notice's op id to ids, when an op recorded it.
+func appendNotifyOp(ids []string, opID string) []string {
+	if opID == "" {
+		return ids
+	}
+	return append(ids, opID)
+}
+
+// newMailNudgeFunc notifies a mail recipient from sender, passing the mail
+// message id as the notice's cause (sendMailNotify). Under require a notice
+// the op journal cannot record is refused before the recipient resolves, so
+// it materializes no configured named session's row.
 func newMailNudgeFunc(sender string) nudgeFunc {
-	return func(recipient, messageID string) error {
-		target, err := resolveNudgeTarget(recipient, io.Discard)
+	return func(recipient, messageID string) (string, error) {
+		target, err := resolveMessageOpTarget(recipient, mailNotifyOpRequest(mailNotifyText(sender), messageID), io.Discard)
+		if errors.Is(err, errMessageOpRefused) {
+			return "", mailNotifyRefusedError(messageID)
+		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		return sendMailNotify(target, sender, messageID)
 	}
@@ -531,6 +551,10 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation: the suspension
+	// check, the mail provider, the target resolution and every store open each
+	// loaded it again (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// --inject writes a <system-reminder> straight into a provider's system
 	// prompt. With no recipient argument the mailbox falls back through
 	// GC_SESSION_ID/GC_ALIAS/GC_AGENT to "human"
@@ -543,19 +567,30 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 		return 0
 	}
 	cityPath, cityPathErr := resolveCity()
+	configLoaded := false
 	if cityPathErr == nil {
-		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
+		cfg, err := loadCityConfig(cityPath, stderr)
+		if err == nil && citySuspended(cfg) {
 			if inject {
 				return 0
 			}
 			fmt.Fprintln(stderr, "gc mail check: city is suspended") //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		configLoaded = err == nil
 	}
 	if cityPathErr != nil {
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
 	c, reason := mailCheckAPIClient(cityPath)
+	// An injecting check reads the mailbox in process whatever the controller
+	// says (routeMailCheck), and any check without a controller does. Its config
+	// load above ran the builtin readiness pass the routing read needs, so
+	// resolve the routes alongside the mail provider's store open
+	// (prewarmCLIStorageRoutes).
+	if configLoaded && (inject || c == nil) {
+		defer prewarmCLIStorageRoutes(cityPath)()
+	}
 	return routeMailCheck(cityPath, args, inject, hookFormat, c, reason, stdout, stderr)
 }
 
@@ -1804,10 +1839,14 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 func newMailMarkReadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "mark-read <id>",
-		Short: "Mark a message as read",
-		Long:  `Mark a message as read without displaying it. The message will no longer appear in inbox results.`,
-		Args:  cobra.ArbitraryArgs,
+		Use:   "mark-read <id>...",
+		Short: "Mark one or more messages as read",
+		Long: `Mark one or more messages as read without displaying them. They will no
+longer appear in inbox results. When multiple IDs are passed (as separate
+arguments, or as one whitespace-separated argument such as an unsplit "$IDS"),
+each is marked in input order; a failure on one is reported and the rest are
+still marked.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
 			if jsonOut {
@@ -2141,16 +2180,18 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 
 	// Nudge recipient if requested and recipient is not human.
 	notified := false
+	var notifyOps []string
 	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to, m.ID); err != nil {
+		if opID, err := nudgeFn(to, m.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
+			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(m)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -2191,6 +2232,7 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 	}
 
 	var sent []mailMessageSummary
+	var notifyOps []string
 	notified := false
 	for _, to := range recipients {
 		m, err := mp.Send(sender, to, subject, body)
@@ -2211,15 +2253,16 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 
 		if nudgeFn != nil {
-			if err := nudgeFn(to, m.ID); err != nil {
+			if opID, err := nudgeFn(to, m.ID); err != nil {
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			} else {
 				notified = true
+				notifyOps = appendNotifyOp(notifyOps, opID)
 			}
 		}
 	}
 	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -2552,16 +2595,18 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 	}
 
 	notified := false
+	var notifyOps []string
 	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To, reply.ID); err != nil {
+		if opID, err := nudgeFn(reply.To, reply.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
+			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(reply)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -2586,28 +2631,46 @@ func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout
 }
 
 func doMailMarkReadJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
+	// Split like archive does: a shell can hand over "$IDS" as one argument,
+	// which used to be looked up as a single id and fail "not found".
+	ids := splitMessageIDArgs(args)
+	if len(ids) < 1 {
 		fmt.Fprintln(stderr, "gc mail mark-read: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
-	if err := mp.MarkRead(id); err != nil {
-		telemetry.RecordMailOp(context.Background(), "mark_read", err)
-		fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	exit := 0
+	marked := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if err := mp.MarkRead(id); err != nil {
+			telemetry.RecordMailOp(context.Background(), "mark_read", err)
+			if len(ids) > 1 {
+				fmt.Fprintf(stderr, "gc mail mark-read %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			exit = 1
+			continue
+		}
+		telemetry.RecordMailOp(context.Background(), "mark_read", nil)
+		rec.Record(events.Event{
+			Type:    events.MailMarkedRead,
+			Actor:   eventActor(),
+			Subject: id,
+			Payload: mailEventPayload(nil),
+		})
+		marked = append(marked, id)
+		if !jsonOut {
+			fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
+		}
 	}
-	telemetry.RecordMailOp(context.Background(), "mark_read", nil)
-	rec.Record(events.Event{
-		Type:    events.MailMarkedRead,
-		Actor:   eventActor(),
-		Subject: id,
-		Payload: mailEventPayload(nil),
-	})
-	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", ID: id, IDs: []string{id}, Count: intRef(1)})
+	if jsonOut && exit == 0 {
+		result := mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", IDs: marked, Count: intRef(len(marked))}
+		if len(marked) == 1 {
+			result.ID = marked[0]
+		}
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", result)
 	}
-	fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
-	return 0
+	return exit
 }
 
 // cmdMailMarkUnread marks a message as unread.

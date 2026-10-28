@@ -26,7 +26,7 @@ func splitSessionState(t *testing.T) (*fakeState, session.Info) {
 	relocated := beads.NewMemStore()
 	fs.sessionsBeadStore = relocated
 
-	mgr := session.NewManagerWithOptions(relocated, fs.sp)
+	mgr := session.NewManagerWithOptions(relocated, fs.sp, session.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
 		Title:    "Relocated",

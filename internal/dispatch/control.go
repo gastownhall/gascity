@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -51,7 +52,11 @@ type attemptEvaluation struct {
 // The two live implementations (retry, ralph) differ only in how they classify
 // a closed attempt, what extra metadata a pass carries, and how an exhausted
 // attempt is disposed. kind/subjectNoun/missingNoun carry the control-kind
-// trace and error wording (control kinds, not role names).
+// trace and error wording (control kinds, not role names). evaluate may
+// return ErrControlPending to defer the verdict while a precondition outside
+// the attempt itself settles (a still-running member of a closed ralph
+// iteration): the control re-enters evaluation and the attempt is neither
+// logged nor spent until a verdict lands.
 type controlAttemptStrategy struct {
 	kind        string // "retry" | "ralph" — trace text only
 	subjectNoun string // "attempt" | "iteration" — error/trace text
@@ -285,9 +290,39 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
 // runs the check script. An iteration that failed hard closes the control as a
-// hard failure without running the check; a GatePass closes the control;
-// anything else spawns the next iteration or exhausts.
+// hard failure without running the check; a GatePass closes the control; a
+// run without a verdict re-runs the check attempt-free while the
+// infrastructure budget lasts (spendCheckInfraRetry); anything else spawns the
+// next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
+	// The iteration boundary is a gate: no verdict — and no next iteration —
+	// until every member of this iteration has stopped. A closed body is not
+	// evidence the iteration finished: the abort path can close it while a
+	// claimed sibling is still running (the abort's skip set counts only
+	// unclaimed members), and a scope-check-exempt control settles it
+	// forcibly on every store. Block on each live member and defer the
+	// verdict; the member's close re-runs the control (gastownhall/gascity#2519).
+	live, err := ralphIterationLiveMembers(store, bead, iteration, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: reading live members of iteration %s: %w", bead.ID, iteration.ID, err)
+	}
+	if len(live) > 0 {
+		for _, member := range live {
+			if err := ensureBlockingDependencyWithRetry(store, bead.ID, member.ID); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return attemptEvaluation{}, ErrControlPending
+				}
+				return attemptEvaluation{}, fmt.Errorf("%s: blocking iteration drain on %s: %w", bead.ID, member.ID, err)
+			}
+		}
+		liveIDs := make([]string, 0, len(live))
+		for _, member := range live {
+			liveIDs = append(liveIDs, member.ID+":"+member.Status)
+		}
+		opts.tracef("ralph iteration-drain-pending bead=%s iteration=%s attempt=%d live=%s",
+			bead.ID, iteration.ID, iterationNum, strings.Join(liveIDs, ","))
+		return attemptEvaluation{}, ErrControlPending
+	}
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
 	// review.verdict) visible on the ralph bead for check scripts that read
@@ -315,6 +350,25 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
+	// A check that ran past its timeout, or read blind (exit 75 or a typed
+	// stderr marker), produced no verdict: re-run it on a later sweep against
+	// this same iteration, charged to the control's infrastructure budget
+	// instead of an attempt. Returning before the attempt log is written
+	// leaves the control untouched. A GateError is a failed start
+	// (formula-spec-v2 §3.1) and is graded like any failure, as is a blind
+	// read once the budget is spent: the outcome itself is left as the gate
+	// reported it.
+	infra := checkResult.Outcome == convergence.GateTimeout
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s",
+			bead.ID, iterationNum, reason, formatGateExitCode(checkResult.ExitCode))
+		infra = true
+	}
+	if infra {
+		if err := spendCheckInfraRetry(store, reloaded, checkResult.Outcome, iterationNum, opts); err != nil {
+			return attemptEvaluation{}, err
+		}
+	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
 	if checkResult.Outcome == convergence.GatePass {
 		eval.disposition = attemptPass
@@ -322,6 +376,49 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 		eval.disposition = attemptContinue
 	}
 	return eval, nil
+}
+
+// ralphIterationLiveMembers returns the work members of a ralph iteration
+// that are still running: the same selection a scope abort skips, keyed by
+// "not closed" instead of "open" so a claimed sibling counts, minus
+// controller machinery. Only the dispatcher closes a control, one per root at
+// a time, so an open control inside a closed iteration is mid-settlement and
+// completes on a later sweep; blocking the verdict on it would leave a
+// blocks edge no clean run mints (the abort settles within its cycle, but a
+// crash-restarted serve can evaluate the control in between) and end in a
+// different ledger than an uninterrupted one. Claimed work is the other side
+// of that line: only its worker closes it, and that is the #2519 boundary
+// this gate holds. A childless ralph's iteration is the work bead itself and
+// has no members. The candidate pool is the root view the control loop
+// already loaded, so the gate adds no store read; rootID mirrors
+// ralphIterationHardFailure for controls minted before gc.root_bead_id was
+// stamped.
+func ralphIterationLiveMembers(store beads.Store, control, iteration beads.Bead, opts ProcessOptions) ([]beads.Bead, error) {
+	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
+		return nil, nil
+	}
+	iterationRef := strings.TrimSpace(iteration.Metadata[beadmeta.StepRefMetadataKey])
+	if iterationRef == "" {
+		return nil, nil
+	}
+	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := rootViewMembers(store, rootID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("reading members of root %s: %w", rootID, err)
+	}
+	pending := scopeUnsettledMembers(iterationScopeMembers(all, rootID, iterationRef), all, "",
+		func(b beads.Bead) bool { return b.Status != "closed" })
+	live := make([]beads.Bead, 0, len(pending))
+	for _, member := range pending {
+		if !beadmeta.IsControlKind(member.Metadata[beadmeta.KindMetadataKey]) {
+			live = append(live, member)
+		}
+	}
+	slices.SortFunc(live, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	return live, nil
 }
 
 // ralphIterationHardFailure returns the bead whose hard failure ended a failed
@@ -382,6 +479,23 @@ func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) er
 		}
 	}
 	return store.DepAdd(issueID, dependsOnID, "blocks")
+}
+
+// ensureBlockingDependencyWithRetry is ensureBlockingDependency with one
+// immediate re-issue of the write after a transient store failure. The ralph
+// drain gate's edge is how the verdict is parked, and the member it blocks on
+// can close during the failure window (a dispatched worker finishing while
+// the store blips): the next sweep would then find nothing to wait on and
+// end the hold without the edge a clean run always minted, so a
+// crash-restarted serve and an uninterrupted one would end in different
+// ledgers. One retry closes the window with no loop; a failure that persists
+// returns to the caller's spawn-boundary classification unchanged.
+func ensureBlockingDependencyWithRetry(store beads.Store, issueID, dependsOnID string) error {
+	err := ensureBlockingDependency(store, issueID, dependsOnID)
+	if err == nil || !IsTransientControllerError(err) {
+		return err
+	}
+	return ensureBlockingDependency(store, issueID, dependsOnID)
 }
 
 func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
@@ -1082,6 +1196,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
+	var fanoutControls []formula.RecipeStep
+	fanoutControlByStep := make(map[string]string)
 	var nestedSeedSteps []formula.RecipeStep
 	var nestedSeedDeps []formula.RecipeDep
 
@@ -1200,6 +1316,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
 				fanoutSteps = append(fanoutSteps, fanoutStep)
 				fanoutDeps = append(fanoutDeps, fanoutDep)
+				fanoutControls = append(fanoutControls, fanoutStep)
+				fanoutControlByStep[childStep.ID] = fanoutStep.ID
 			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
@@ -1218,7 +1336,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		}
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	// Fanout convergence gates downstream work in the re-spawned attempt
+	// recipe exactly as it does at compile time: point every dep on an
+	// on_complete child at its <child>-fanout control before the scope-check
+	// pass, so a sibling that needs the child waits for the fanout children
+	// instead of racing them. The fanout controls themselves are appended
+	// after this rewrite and the scope-check pass, so their own
+	// fanout→source edge is never rewritten into a self-block.
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, fanoutControls, fanoutControlByStep)
+	applyAttemptRecipeScopeChecks(recipe, fanoutControlByStep)
 	recipe.Steps = append(recipe.Steps, fanoutSteps...)
 	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 	// Nested-control seed steps are appended after the outer scope-check pass so
@@ -1325,7 +1451,12 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // its subject step, and deps that waited on the subject are rewritten to
 // wait on the scope-check instead — except the one edge that would leave a
 // node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
-func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
+//
+// fanoutControlByStep maps an on_complete subject step ID to its minted
+// <subject>-fanout control. When present, the scope-check also blocks on that
+// fanout control so scope finalization waits for the spawned children, exactly
+// as the compile path's scopeCheckNeeds does.
+func applyAttemptRecipeScopeChecks(recipe *formula.Recipe, fanoutControlByStep map[string]string) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
 	}
@@ -1370,6 +1501,13 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 			DependsOnID: step.ID,
 			Type:        "blocks",
 		})
+		if fanoutID := fanoutControlByStep[step.ID]; fanoutID != "" {
+			controlDeps = append(controlDeps, formula.RecipeDep{
+				StepID:      controlID,
+				DependsOnID: fanoutID,
+				Type:        "blocks",
+			})
+		}
 	}
 
 	if len(controls) == 0 {
@@ -1794,16 +1932,26 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control
-// bead. It lists beads under the workflow root and, on empty result, walks the
-// control's blocks-dependencies; both feed latestAttemptFromCandidates, which
-// matches the durable gc.control_for lineage stamp (with a legacy ref-string
-// fallback for pre-S38 molecules) and returns the max gc.attempt.
+// bead from live reads; see findLatestAttemptInView.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	return findLatestAttemptInView(store, control, ProcessOptions{})
 }
 
-// findLatestAttemptInView is findLatestAttempt answered from the invocation's
-// root view (rootViewMembers) when opts carries one.
+// findLatestAttemptInView finds the most recent attempt/iteration child of a
+// control bead, reading the workflow root's members from the invocation's root
+// view (rootViewMembers) when opts carries one. Both candidate sources feed
+// latestAttemptFromCandidates, which matches the durable gc.control_for lineage
+// stamp (with a legacy ref-string fallback for pre-S38 molecules) and returns
+// the max gc.attempt.
+//
+// The root's members answer alone only for a root known to be open (the gate
+// root ProcessControl read). Otherwise their answer is unioned with the targets
+// of the control's dependency edges: once the root closes, molecule.Attach
+// roots each new attempt at the control, so only the control's blocks edge
+// reaches it. A dependency walk error is therefore returned, never answered
+// with the root's candidate: that candidate can be an attempt the walk would
+// have superseded, and acting on it retries the control on every pass without
+// ever evaluating the newer attempt.
 func findLatestAttemptInView(store beads.Store, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -1811,22 +1959,24 @@ func findLatestAttemptInView(store beads.Store, control beads.Bead, opts Process
 	}
 
 	all, err := rootViewMembers(store, rootID, opts)
+	rootLatest := beads.Bead{}
 	if err == nil {
-		latest := latestAttemptFromCandidates(control, all)
-		if latest.ID != "" {
-			return latest, nil
+		rootLatest = latestAttemptFromCandidates(control, all)
+		rootKnownOpen := opts.gateRoot != nil && opts.gateRoot.ID == rootID && opts.gateRoot.Status != "closed"
+		if rootKnownOpen && rootLatest.ID != "" {
+			return rootLatest, nil
 		}
 	}
 
-	latest, depErr := latestAttemptFromDependencies(store, control)
+	latest, depErr := latestAttemptFromDependencies(store, control, all)
 	if depErr != nil {
 		if err != nil {
 			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
 		}
 		return beads.Bead{}, depErr
 	}
-	if latest.ID != "" {
-		return latest, nil
+	if combined := latestAttemptFromCandidates(control, []beads.Bead{rootLatest, latest}); combined.ID != "" {
+		return combined, nil
 	}
 	if err != nil {
 		return beads.Bead{}, err
@@ -1834,20 +1984,46 @@ func findLatestAttemptInView(store beads.Store, control beads.Bead, opts Process
 	return beads.Bead{}, nil
 }
 
-func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads.Bead, error) {
+// latestAttemptFromDependencies selects the latest attempt among the targets of
+// the control's dependency edges, reusing the beads in known (the root's
+// members) instead of reading them again. A target that is an "external:"
+// reference or no longer exists is skipped: it cannot be an attempt, and
+// failing the walk on it would turn one dangling edge into an error on every
+// pass. Any other read error is returned.
+func latestAttemptFromDependencies(store beads.Store, control beads.Bead, known []beads.Bead) (beads.Bead, error) {
 	deps, err := store.DepList(control.ID, "down")
 	if err != nil {
-		return beads.Bead{}, err
+		return beads.Bead{}, fmt.Errorf("listing dependencies: %w", err)
+	}
+	knownByID := make(map[string]beads.Bead, len(known))
+	for _, b := range known {
+		knownByID[b.ID] = b
 	}
 	candidates := make([]beads.Bead, 0, len(deps))
 	for _, dep := range deps {
+		if isExternalDependencyRef(dep.DependsOnID) {
+			continue
+		}
+		if candidate, ok := knownByID[dep.DependsOnID]; ok {
+			candidates = append(candidates, candidate)
+			continue
+		}
 		candidate, err := store.Get(dep.DependsOnID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
 		if err != nil {
-			return beads.Bead{}, err
+			return beads.Bead{}, fmt.Errorf("reading dependency %s: %w", dep.DependsOnID, err)
 		}
 		candidates = append(candidates, candidate)
 	}
 	return latestAttemptFromCandidates(control, candidates), nil
+}
+
+// isExternalDependencyRef reports whether a dependency target is an
+// "external:" reference, which has no bead on its far end.
+func isExternalDependencyRef(id string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "external:")
 }
 
 // latestAttemptFromCandidates selects the control's latest attempt/iteration

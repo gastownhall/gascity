@@ -1,13 +1,16 @@
 package beads_test
 
 import (
+	"context"
 	"errors"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // Kills a backend write verb that skips the session-key hook: on every
@@ -172,5 +175,69 @@ func TestSessionWriteHookAloneSeesUpdates(t *testing.T) {
 		if len(writes) != 2 || writes[0]["k"] != "v" || writes[1]["k2"] != "v" || ids[0] != b.ID || ids[1] != b.ID {
 			t.Errorf("%s: write hook alone saw %v for rows %v, want each update once for %s", name, writes, ids, b.ID)
 		}
+	}
+}
+
+// Kills a guarded batch that skips the session hooks, or that reports a create
+// only once the batch passes its checks: on every backend that batches, a batch
+// reports each session create's seed and each session update's patch to both
+// hooks once, the write hook with the row's ID, and nothing for a work bead. A
+// create is reported at the verb's entry, as Create reports one before its
+// checks, so a batch the store then refuses has reported its creates too.
+func TestGuardedBatchReportsSessionKeys(t *testing.T) {
+	for name, open := range map[string]func(t *testing.T) beads.Store{
+		"MemStore": func(*testing.T) beads.Store { return beads.NewMemStore() },
+		"FileStore": func(t *testing.T) beads.Store {
+			s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+			mustDo(t, err)
+			return s
+		},
+		"SQLiteStore":     func(t *testing.T) beads.Store { return newSQLiteForConformance(t) },
+		"NativeDoltStore": func(*testing.T) beads.Store { return beads.NewNativeDoltStoreForGuardedBatchConformance() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := open(t)
+			gb, ok := beads.GuardedBatcherFor(s)
+			if !ok {
+				t.Fatalf("GuardedBatcherFor(%T) = false, want a guarded batcher", s)
+			}
+			session, err := s.Create(beads.Bead{Title: "s", Type: "session"})
+			mustDo(t, err)
+			// Pinned ids share the namespace the store mints under.
+			pin := session.ID[:strings.LastIndex(session.ID, "-")] + "-gbhook"
+			var keys []string
+			writes := map[string][]string{} // the write hook's reports, by row
+			beads.SetSessionKeyHook(func(key string) { keys = append(keys, key) })
+			defer beads.SetSessionKeyHook(nil)
+			beads.SetSessionWriteHook(func(id string, kvs map[string]string) {
+				writes[id] = append(writes[id], slices.Sorted(maps.Keys(kvs))...)
+			})
+			defer beads.SetSessionWriteHook(nil)
+			create := func(name, typ, key string) beads.GuardedItem {
+				return beads.GuardedItem{Create: &beads.Bead{ID: pin + name, Title: name, Type: typ, Metadata: map[string]string{key: "v"}}}
+			}
+			_, err = gb.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+				create("new", "session", "k_create"),
+				create("work", "task", "w_create"),
+				{Update: &beads.GuardedUpdate{ID: session.ID, Opts: beads.UpdateOpts{Metadata: map[string]string{"k_update": "v"}}}},
+			}})
+			mustDo(t, err)
+			title := "t"
+			_, err = gb.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+				create("refused", "session", "k_refused"),
+				{Update: &beads.GuardedUpdate{ID: pin + "missing", Opts: beads.UpdateOpts{Title: &title}}},
+			}})
+			if !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("ApplyGuarded over a missing row = %v, want ErrNotFound", err)
+			}
+			slices.Sort(keys)
+			if want := []string{"k_create", "k_refused", "k_update"}; !slices.Equal(keys, want) {
+				t.Errorf("key hook saw %v, want %v", keys, want)
+			}
+			want := map[string][]string{pin + "new": {"k_create"}, session.ID: {"k_update"}, pin + "refused": {"k_refused"}}
+			if !maps.EqualFunc(writes, want, slices.Equal[[]string]) {
+				t.Errorf("write hook saw %v, want %v", writes, want)
+			}
+		})
 	}
 }

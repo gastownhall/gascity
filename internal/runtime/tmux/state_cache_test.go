@@ -14,6 +14,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
+
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -883,7 +885,7 @@ func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.
 	if process.Args != "2.1.30 --print" {
 		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
 	}
-	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+	if !snapshot.processMatchesNames("102", proctable.ProcessNameSet([]string{"claude"})) {
 		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
 	}
 }
@@ -911,7 +913,7 @@ func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
 	if process.Args != "" {
 		t.Fatalf("Args = %q, want empty args", process.Args)
 	}
-	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+	if !snapshot.hasDescendantWithNames("101", proctable.ProcessNameSet([]string{"claude"}), 0) {
 		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
 	}
 }
@@ -1049,7 +1051,7 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 		{PID: "101", PPID: "100", Command: "claude", Args: "claude"},
 	})
 	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
-	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
+	if !pane.processAlive(proctable.ProcessNameSet([]string{"claude"}), snapshot) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
 }

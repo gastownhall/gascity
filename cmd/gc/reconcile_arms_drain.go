@@ -26,8 +26,9 @@ const (
 	decideStopResidue    = "drain-void:residue"
 	decideStopActive     = "stop-requested"
 	decideDrainSignal    = "drain-signal:"
-	decideAckVoid        = "drain-ack-void"       // C6a ruling 3
-	decideWakeGrace      = "undesired-wake-grace" // INC-003
+	decideAckVoid        = "drain-ack-void"             // C6a ruling 3
+	decideFloorAckCancel = "drain-ack-cancel:min-floor" // DRAIN-010, PAR-FLOORACK
+	decideWakeGrace      = "undesired-wake-grace"       // INC-003
 	decideDrainWorkKept  = "drain-kept:assigned-work"
 	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
 	decideIdleStopClear  = "idle-stop-pending-clear"    // SESS-616
@@ -37,6 +38,9 @@ const (
 const (
 	drainIdle        = string(session.SleepReasonIdle)
 	drainConfigDrift = "config-drift"
+	// drainOperator names the signal of an ack an operator's `gc runtime
+	// drain` explains (stopRequest.Operator).
+	drainOperator    = "operator-drain"
 	reasonIdleSleep  = "idle-sleep"
 	sleepIntentIdle  = "idle-stop-pending"
 	timerBlockerHold = "user_hold"
@@ -71,7 +75,10 @@ func drainPolicyOf(reason string) drainPolicy {
 	case executionStalledDrainReason:
 		return drainPolicy{authorized: func(*rowFacts, string) bool { return true }}
 	case idleRespawnDrainReason:
-		return drainPolicy{} // C6d: eligibility and its revalidation
+		// Eligible (C6d); not cancelable by the wake or assigned-work lenses
+		// (the pending lens still cancels it, DRAIN-022), and a request no
+		// longer eligible is voided (v5 D2), keeping its attempt.
+		return drainPolicy{authorized: func(r *rowFacts, _ string) bool { return respawnEligible(r) }}
 	}
 	return drainPolicy{authorized: func(r *rowFacts, reason string) bool { return strings.TrimSpace(r.row.Info.SleepIntent) == reason }}
 }
@@ -88,7 +95,20 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // DrainReason; for a Sleep entry the row's sleep intent, then idle, then
 // suspended (a configured named row of a suspended city), else
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
-// has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
+// has none. Legacy's live-claim veto is read at the orphaned signal (L5,
+// v5.10a B), not here.
+// drainableLiveness reports a runtime A20 may begin a drain over: alive, or
+// for a named Drain row a dead runtime, which A21 never closes
+// (deadRuntimeCloses excludes named rows; mc-q64l4)
+// and A12, ahead of A20, has classified by then. A held pool orphan's dead
+// runtime is no drain's: A21's orphan guard keeps its slot (§12.2 #27). Its orphan
+// drain then runs as legacy's, whose stop A4 runs on any liveness but gone
+// (D2, A4); a closable one is A21's.
+func (r *rowFacts) drainableLiveness() bool {
+	e := r.entry
+	return e.Liveness == livenessAlive || e.Liveness == livenessDead && e.Desired == desireDrain && isNamedSessionInfo(r.row.Info)
+}
+
 func drainReasonOf(r *rowFacts) string {
 	e, info := r.entry, r.row.Info
 	intent := strings.TrimSpace(info.SleepIntent)
@@ -186,14 +206,14 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 // assigned work, claimed or ready, or in-progress work the allocation does
 // not count awake because it is blocked, which legacy still counts.
 func workKeepsNoWakeRow(r *rowFacts) bool {
-	if r.entry.AssignedWork != nil {
-		return true
-	}
-	var cfg *config.City
-	if r.w.Env != nil {
-		cfg = r.w.Env.Cfg
-	}
-	ids := sessionAssignmentIdentifiersForConfigInfo(r.row.Info, cfg)
+	return r.entry.AssignedWork != nil || r.inProgressWorkAssigned(releaseScope(r.row.Info, worldCfg(r.w)))
+}
+
+// inProgressWorkAssigned reports in-progress work the pass's demand read
+// assigns to any of scope's identities of the row's session, blocked work
+// included.
+func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
+	ids := scope.scopeIDs()
 	for _, w := range r.w.Demand.AssignedWork {
 		if w.Status == "in_progress" && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
 			return true
@@ -214,6 +234,20 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // whose time is missing or unreadable is void at once (#7635 review
 // ruling): never stop a runtime that may have been replaced; the agent
 // can ack again.
+//
+// DRAIN-010 (PAR-FLOORACK, legacy's cancelSelfInitiatedDrainAckAtMinFloor):
+// a bare ack, one no request on the row explains, on a member of
+// its template's min_active_sessions floor (the allocator's floor set,
+// legacy's lowest-bead-id membership) is the agent's own idle ack, and
+// stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
+// its half voided, and the seat stays warm, whatever the allocation
+// wants of it (Keep, Sleep or Drain, as legacy cancels them). Unlike
+// legacy, which cancels only on a live runtime, a dead floor seat's ack
+// cancels too: A12 recycles the dead pane in place (mc-7is1r), where
+// legacy stops the seat and the floor recreates it. A request the row
+// carries outranks the floor: the
+// controller's own drains, and an operator's `gc runtime drain`
+// (stopRequest.Operator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
 	req, ok := activeStop(r.row)
 	if !ok || req.Phase != stopAcked {
@@ -223,7 +257,31 @@ func armAck(r *rowFacts) (intent, bool) {
 	if stale := r.ackPredatesRuntime(req.AckAt); stale || req.AckAt.IsZero() {
 		return intent{Kind: intentSignalAck, Reason: decideAckVoid, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
-	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
+	// The floor check stays after the stale-ack void: that check records
+	// the runtime rest the probing kind needs, so a cancel decided first
+	// would defer at admission (rests-missing). A floor seat's ack over a
+	// corpse no token attributes is signaled like any other, not canceled:
+	// its stop finalizes the row and the floor recreates the seat (CONTRACT
+	// v5.10w, §12.2 row 66). Liveness unknown here is that case, since A9
+	// holds every other unknown row (ackedOverCorpse). A cancel would void
+	// the ack and A9 would then hold the row over the corpse for good, and no
+	// restart in place can attribute the corpse.
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness != livenessUnknown {
+		if r.entry.Liveness == livenessDead {
+			// A dead floor seat proposes nothing (§12.2 row 66): A18's
+			// recycle restarts it in place with the ack still on the row, so
+			// its death is a drain's (nothing accrues), and the PreWake
+			// clears the stop request. A cancel first would void the ack and
+			// account a recent wake's death as a crash (mc-7is1r review).
+			return intent{}, false
+		}
+		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
+	}
+	reason := req.Reason
+	if reason == "" && req.Operator {
+		reason = drainOperator
+	}
+	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
 }
 
 // ackPredatesRuntime reports, on the effect's fresh read, a runtime object
@@ -232,11 +290,16 @@ func armAck(r *rowFacts) (intent, bool) {
 // read counts: a runtime replaced between them is newer still. The pass
 // reads no creation, so there it records the rest and reports false; so it
 // does on a backend that does not report one, and for an ack without a
-// time, which armAck voids itself.
+// time, which armAck voids itself. A Foreign object, another row's runtime,
+// is never this row's same-generation replacement (CONTRACT v5.10k-2): an
+// acked drain under a later squatter goes on to its finalize.
 func (r *rowFacts) ackPredatesRuntime(at time.Time) bool {
 	r.rests |= restRuntime
 	if r.fresh == nil || at.IsZero() {
 		return false
+	}
+	if r.fresh.Same && compareIdentity(r.row.Info, r.fresh.Identity) == identityForeign {
+		return false // another row's runtime is no replacement of this row's (v5.10k-2)
 	}
 	for _, l := range []runtime.Liveness{r.fresh.Live, r.fresh.Again} {
 		created, err := strconv.ParseInt(l.ObjectCreated, 10, 64)
@@ -302,8 +365,14 @@ func drainSignalGrace(w *World, reason string) time.Duration {
 // begins at once; an interactive one only with Full sleep capability, and
 // then probe asks its effect to prove the agent idle (WaitForIdle, with no
 // activity since). A row with no resolved policy never begins, as legacy's
-// zero policy. A legacy idle-stop-pending mark is the proof already.
+// zero policy. A legacy idle-stop-pending mark is the proof already. An
+// idle-respawn begin, whose eligibility requires Full capability, always
+// proves the agent idle (legacy's shouldBeginIdleDrainInfo has no mark
+// bypass).
 func idleProof(w *World, info session.Info, reason string) (allowed, probe bool) {
+	if reason == idleRespawnDrainReason {
+		return true, true
+	}
 	if reason != drainIdle || session.DispositionOfInfo(info).IdleStop {
 		return true, false
 	}
@@ -340,10 +409,13 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 	// too, and its fence writes the row asleep, which claims no live runtime.
 	// No other hold (a wait, a timer: OperatorDormant) stops a live runtime
 	// here.
-	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
+	if !r.drainableLiveness() || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
+	if respawnEligible(r) && idleRespawnAttemptAvailable(info, e.AssignedWork.BeadID) {
+		return r.idleRespawnBegin(basis)
+	}
 	if e.Desired == desireWake && session.DispositionOfInfo(info).IdleStop {
 		// The idle stop's end is the disposition's IdleStopEnd cell.
 		class := session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
@@ -381,4 +453,48 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		patch["sleep_policy_fingerprint"] = r.w.SleepPolicies[info.ID].Fingerprint
 	}
 	return intent{Kind: kind, Reason: decideDrainBegin + reason, Basis: basis, Patch: patch}, true
+}
+
+// respawnEligible is v5 D2's idle-respawn eligibility (SESS-614; legacy's
+// idleRespawnEligible with beginIdleRespawnDrainIfIdle's gates): a
+// pool-managed, unnamed row on an interactive Full-capability policy, awake
+// only for ready, unclaimed assigned work, detached past its sleep time. The
+// begin also requires the row alive (A20's), and the attempt budget is the
+// begin's alone (idleRespawnAttemptAvailable), so a begun drain stays
+// authorized. A row whose runtime died is A18's start, whose PreWake clears
+// the request.
+func respawnEligible(r *rowFacts) bool {
+	e, info := r.entry, r.row.Info
+	policy, ok := r.w.SleepPolicies[info.ID]
+	switch {
+	case e == nil || e.Desired != desireWake || e.Reason != reasonAssignedWork || len(e.WakeReasons) != 1 || e.WakeReasons[0] != WakeWork:
+		return false
+	case e.AssignedWork == nil || e.AssignedWork.Claimed || strings.TrimSpace(e.AssignedWork.BeadID) == "":
+		return false
+	case !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info):
+		return false
+	case !ok || policy.Duration <= 0 || policy.Class == config.SessionSleepNonInteractive || policy.Capability != runtime.SessionSleepCapabilityFull:
+		return false
+	}
+	detached, err := time.Parse(time.RFC3339, strings.TrimSpace(info.DetachedAt))
+	return err == nil && !detached.IsZero() && r.w.Now.Sub(detached) >= policy.Duration
+}
+
+// idleRespawnBegin is the idle-respawn drain's begin (C6d): the stop
+// request with the attempt for the assigned bead in one CAS, by the fresh
+// begin, which proves the agent idle (idleProof). A pending idle stop ends
+// in the same write (the IdleStopEnd cell), as legacy's begin does.
+func (r *rowFacts) idleRespawnBegin(basis rowBasis) (intent, bool) {
+	if !r.freshOwnAlive() {
+		return intent{}, false
+	}
+	info := r.row.Info
+	patch := stopBeginPatch(r.row, idleRespawnDrainReason, r.w.Now)
+	patch[idleRespawnAttemptsMetadataKey] = "1"
+	patch[idleRespawnBeadIDMetadataKey] = strings.TrimSpace(r.entry.AssignedWork.BeadID)
+	it := intent{Kind: drainKind(idleRespawnDrainReason, false), Reason: decideDrainBegin + idleRespawnDrainReason, Basis: basis, Patch: patch}
+	if session.DispositionOfInfo(info).IdleStop {
+		it.Class = session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
+	}
+	return it, true
 }

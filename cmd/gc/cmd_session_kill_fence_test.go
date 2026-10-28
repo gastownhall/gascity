@@ -28,6 +28,17 @@ type killHookProvider struct {
 	afterStop  func()
 }
 
+// ObserveLivenessWithError and ObserveLivenessSince read the fixture's Fake,
+// whose sessions map is the runtime: every read is fresh, as tmux's is, so
+// the kill can confirm a runtime gone (runtime.FreshReadable).
+func (p *killHookProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.FullFake{Fake: p.Provider.(*runtime.Fake)}.ObserveLivenessWithError(name, processNames)
+}
+
+func (p *killHookProvider) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
+	return p.ObserveLivenessWithError(name, processNames)
+}
+
 func (p *killHookProvider) Stop(name string) error {
 	if p.beforeStop != nil {
 		p.beforeStop()
@@ -404,15 +415,15 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	store := openConditionalKillFenceStore(t)
 	b := createKillFenceSessionBead(t, store)
 
-	fence, err := writeSessionKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
 	fenced := mustGetBead(t, store, b.ID)
-	if !fence.owns(fenced) {
+	if !fence.Owns(fenced) {
 		t.Fatalf("fence does not own the row it wrote: %#v", fenced.Metadata)
 	}
-	if err := fence.rollback(store); err != nil {
+	if err := fence.Rollback(store); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	restored := mustGetBead(t, store, b.ID)
@@ -425,15 +436,15 @@ func TestSessionKillFence_ConditionalStoreLifecycle(t *testing.T) {
 	if got := restored.Metadata["last_woke_at"]; got != "2026-09-01T10:00:00Z" {
 		t.Errorf("restored last_woke_at = %q, want the pre-kill value", got)
 	}
-	if err := fence.clear(store); !errors.Is(err, errSessionKillFenceSuperseded) {
-		t.Fatalf("clear after rollback = %v, want errSessionKillFenceSuperseded", err)
+	if err := fence.Clear(store); !errors.Is(err, sessionpkg.ErrKillFenceSuperseded) {
+		t.Fatalf("clear after rollback = %v, want sessionpkg.ErrKillFenceSuperseded", err)
 	}
 
-	fence, err = writeSessionKillFence(store, b.ID, time.Now().UTC())
+	fence, err = sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("second writeSessionKillFence: %v", err)
 	}
-	if err := fence.clear(store); err != nil {
+	if err := fence.Clear(store); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	cleared := mustGetBead(t, store, b.ID)
@@ -454,7 +465,7 @@ func TestApplySessionKillFencePatch_RedecidesAfterConcurrentWrite(t *testing.T) 
 	b := createKillFenceSessionBead(t, store)
 
 	var observedStates []string
-	err := applySessionKillFencePatch(store, b.ID, func(cur beads.Bead) (map[string]string, bool) {
+	err := sessionpkg.ApplyKillFencePatch(store, b.ID, func(cur beads.Bead) (map[string]string, bool) {
 		observedStates = append(observedStates, cur.Metadata["state"])
 		if len(observedStates) == 1 {
 			// A concurrent writer lands after this observation.
@@ -558,7 +569,7 @@ func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionSuspend = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	final := mustGetBead(t, store, bead.ID)
@@ -629,7 +640,7 @@ func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_intent": "user-hold", "held_until": held}); err != nil {
 		t.Fatal(err)
 	}
-	fence, err := writeSessionKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
@@ -640,7 +651,7 @@ func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"quarantined_until": q, "wait_hold": "true"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fence.rollback(store); err != nil {
+	if err := fence.Rollback(store); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	got := mustGetBead(t, store, b.ID)
@@ -657,14 +668,14 @@ func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
 func TestSessionKillFenceRollbackLeavesAKeyRewrittenSince(t *testing.T) {
 	store := openConditionalKillFenceStore(t)
 	b := createKillFenceSessionBead(t, store)
-	fence, err := writeSessionKillFence(store, b.ID, time.Now().UTC())
+	fence, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"last_woke_at": "2026-10-11T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fence.rollback(store); err != nil {
+	if err := fence.Rollback(store); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	if got := mustGetBead(t, store, b.ID).Metadata["last_woke_at"]; got != "2026-10-11T00:00:00Z" {
@@ -697,7 +708,7 @@ func TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged(t *testing.T) {
 	store := &batchHookStore{Store: mem, hook: func() {
 		_ = mem.SetMetadataBatch(b.ID, map[string]string{"suspended_at": "2026-10-11T00:00:00Z"})
 	}}
-	if _, err := writeSessionKillFence(store, b.ID, time.Now().UTC()); err != nil {
+	if _, err := sessionpkg.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("writeSessionKillFence: %v", err)
 	}
 	if got := mustGetBead(t, mem, b.ID).Metadata["suspended_at"]; got != "2026-10-11T00:00:00Z" {
@@ -733,11 +744,11 @@ func TestKillSleepPatchWritesTheFencesHoldKeys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fence, err := writeSessionKillFence(store, b.ID, now)
+		fence, err := sessionpkg.WriteKillFence(store, b.ID, now)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := classKeys(killSleepPatch(b.ID, meta, now)), classKeys(fence.wrote); !maps.Equal(got, want) {
+		if got, want := classKeys(sessionpkg.KillSleepPatch(b.ID, meta, now)), classKeys(fence.Wrote()); !maps.Equal(got, want) {
 			t.Errorf("%s: killSleepPatch writes hold keys %v, the fence %v", name, got, want)
 		}
 	}
@@ -752,7 +763,7 @@ func TestSessionKillFenceUnmintsLostAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := sessionpkg.OpenDispositionMints(id)
-	if _, err := writeSessionKillFence(casLoser{m}, id, time.Now()); err == nil {
+	if _, err := sessionpkg.WriteKillFence(casLoser{m}, id, time.Now()); err == nil {
 		t.Fatal("a kill fence under a CAS that always loses landed")
 	}
 	if n := sessionpkg.OpenDispositionMints(id) - before; n != 0 {

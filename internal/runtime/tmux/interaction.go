@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -28,6 +29,24 @@ func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
 // Respond delegates to the underlying Tmux instance.
 func (p *Provider) Respond(name string, response runtime.InteractionResponse) error {
 	return p.tm.Respond(name, response)
+}
+
+var _ runtime.FencedInteractionProvider = (*Provider)(nil)
+
+// ResponseFencing reports that tmux fences answers atomically, as it fences
+// input (InputFencing): the answer's keys run inside the pane guard.
+func (p *Provider) ResponseFencing(name string) runtime.InputFencing {
+	return p.InputFencing(name)
+}
+
+// RespondFenced answers as Respond does, with every key it sends (a
+// copy-mode exit, the answer) conditional on the agent pane's fence naming
+// fence's incarnation (DES-O1 §6.2). The captures before and after are
+// reads, not input, so a respawn between them sends nothing.
+func (p *Provider) RespondFenced(ctx context.Context, name string, fence runtime.InputFence, response runtime.InteractionResponse) error {
+	return p.fenced(ctx, name, fence, false, func(ctx context.Context) error {
+		return p.tm.respond(ctx, name, response)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -100,10 +119,37 @@ type parsedApproval struct {
 	Options  []approvalOption
 	// Command and Description are set for Bash prompts: the command with its
 	// newlines kept and pane wraps rejoined (boxedBashSubject says where that
-	// falls short) and Claude's one-line description of it.
+	// falls short) and Claude's one-line description of it. A Codex command
+	// keeps the rows Codex drew it on (codexRequestText).
 	Command     string
 	Description string
+	// Fingerprint, when set, stands in for Input in the request ID: a Codex
+	// overlay's text above its menu, from its title when gc reads one, with
+	// its line breaks kept and the rows Codex wrapped to the pane width
+	// rejoined (codexUnwrapRows), so the ID covers what Input leaves out.
+	Fingerprint string
+	// Unreadable, when set, says why the prompt's request cannot be read
+	// reliably from the pane; the prompt is answered only with deny.
+	Unreadable string
+	// Codex reports a Codex overlay, which is read again from a capture that
+	// comes with the pane's geometry (approvalInPane).
+	Codex bool
 }
+
+// paneCapture is a capture of a pane's screen and recent history, with the
+// pane's geometry when it was taken.
+type paneCapture struct {
+	text string
+	// width is the pane's width in columns, or 0 when unknown.
+	width int
+	// fromTop reports whether the capture starts at the top of the pane's
+	// history, so nothing above its first row is left to see.
+	fromTop bool
+}
+
+// errPaneGeometry reports that tmux did not print a pane's width and history
+// size, so its capture cannot be read against them.
+var errPaneGeometry = errors.New("unreadable pane geometry")
 
 // approvalOption is one numbered entry of the prompt's menu. Wrapped labels
 // are rejoined with single spaces.
@@ -112,13 +158,23 @@ type approvalOption struct {
 	Label  string
 }
 
-// parseApprovalPrompt parses the tmux pane text for a live Claude Code
-// approval prompt. It returns nil unless the pane ends with an approval
-// question followed only by a well-formed numbered menu (and the optional
-// "Esc to cancel" footer): a menu that has scrolled above the composer is
-// history, and conversational text is not a prompt.
+// parseApprovalPrompt parses pane text captured with no geometry; see
+// parseApprovalCapture.
 func parseApprovalPrompt(paneText string) *parsedApproval {
-	lines := strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")
+	return parseApprovalCapture(paneCapture{text: paneText})
+}
+
+// parseApprovalCapture parses a pane capture for a live Claude Code approval
+// prompt or Codex approval overlay (see parseCodexApprovalOverlay). It returns
+// nil unless the pane ends with an approval question followed only by a
+// well-formed numbered menu (and the optional "Esc to cancel" footer): a menu
+// that has scrolled above the composer is history, and conversational text is
+// not a prompt.
+func parseApprovalCapture(c paneCapture) *parsedApproval {
+	lines := strings.Split(strings.ReplaceAll(c.text, "\r", ""), "\n")
+	if approval := parseCodexApprovalOverlay(lines, c.width, c.fromTop); approval != nil {
+		return approval
+	}
 
 	end := len(lines)
 	for end > 0 {
@@ -463,22 +519,27 @@ func truncateApprovalInput(s string) string {
 }
 
 // approvalOptionKey returns the keystroke that selects the menu option for
-// action, chosen by label: "approve" is the option labeled "Yes", "deny" the
-// one labeled "No…", "approve_always" the "Yes, and don't ask again …" /
-// "Yes, and always allow …" option, and "approve_accept_edits" the option
-// that switches to accept-edits mode. Unless exactly one option matches, it
-// returns an error wrapping runtime.ErrInteractionActionUnavailable so the
-// caller sends nothing rather than guess.
+// action, chosen by label: "approve" is the option labeled "Yes" (Codex: "Yes,
+// proceed", "Yes, just this once" or "Yes, grant these permissions for this
+// turn"), "deny" the one labeled "No…", "approve_always" the option
+// isApproveAlwaysLabel accepts, and "approve_accept_edits" the option that
+// switches to accept-edits mode. Unless exactly one option matches, or when
+// the prompt is unreadable and action is not "deny", it returns an error
+// wrapping runtime.ErrInteractionActionUnavailable so the caller sends nothing
+// rather than guess.
 func approvalOptionKey(approval *parsedApproval, action string) (string, error) {
 	var match func(label string) bool
 	switch action {
 	case "approve":
-		match = func(label string) bool { return label == "yes" }
-	case "approve_always":
 		match = func(label string) bool {
-			return strings.HasPrefix(label, "yes, and don't ask again") ||
-				strings.HasPrefix(label, "yes, and always allow")
+			switch label {
+			case "yes", "yes, proceed", "yes, just this once", "yes, grant these permissions for this turn":
+				return true
+			}
+			return false
 		}
+	case "approve_always":
+		match = isApproveAlwaysLabel
 	case "approve_accept_edits":
 		match = func(label string) bool {
 			return strings.HasPrefix(label, "yes") &&
@@ -489,7 +550,10 @@ func approvalOptionKey(approval *parsedApproval, action string) (string, error) 
 			return label == "no" || strings.HasPrefix(label, "no,") || strings.HasPrefix(label, "no ")
 		}
 	default:
-		return "", fmt.Errorf("unknown action %q", action)
+		return "", fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, action)
+	}
+	if err := approvalDenyOnly(approval, action); err != nil {
+		return "", err
 	}
 
 	var found []approvalOption
@@ -511,6 +575,30 @@ func approvalOptionKey(approval *parsedApproval, action string) (string, error) 
 			runtime.ErrInteractionActionUnavailable, found[0].Number, action, strings.Join(labels, " | "))
 	}
 	return strconv.Itoa(found[0].Number), nil
+}
+
+// isApproveAlwaysLabel reports whether the normalized label names the option
+// that approves the request and stops asking about requests like it: "Yes, and
+// don't ask again …" / "Yes, and always allow …" (Codex: also "Yes, and allow
+// this host in the future" or "Yes, grant these permissions for this
+// session").
+func isApproveAlwaysLabel(label string) bool {
+	switch label {
+	case "yes, and allow this host in the future", "yes, grant these permissions for this session":
+		return true
+	}
+	return strings.HasPrefix(label, "yes, and don't ask again") ||
+		strings.HasPrefix(label, "yes, and always allow")
+}
+
+// approvalDenyOnly refuses every action but "deny" on an unreadable prompt,
+// with an error wrapping runtime.ErrInteractionActionUnavailable that says
+// why; it returns nil when the action may proceed.
+func approvalDenyOnly(approval *parsedApproval, action string) error {
+	if approval.Unreadable == "" || action == "deny" {
+		return nil
+	}
+	return fmt.Errorf("%w: %s, so it can only be denied", runtime.ErrInteractionActionUnavailable, approval.Unreadable)
 }
 
 func normalizeApprovalLabel(label string) string {
@@ -571,7 +659,11 @@ type approvalDedup struct {
 }
 
 func approvalHash(a *parsedApproval) string {
-	h := sha256.Sum256([]byte(a.ToolName + "\x00" + a.Input))
+	subject := a.Input
+	if a.Fingerprint != "" {
+		subject = a.Fingerprint
+	}
+	h := sha256.Sum256([]byte(a.ToolName + "\x00" + subject))
 	return fmt.Sprintf("%x", h[:8])
 }
 
@@ -596,10 +688,11 @@ func (d *approvalDedup) clear(session string) {
 // InteractionProvider implementation
 // ---------------------------------------------------------------------------
 
-// Pending checks the tmux pane for an active Claude Code approval prompt.
+// Pending checks the tmux pane for an active Claude Code approval prompt or
+// Codex approval overlay.
 // Returns nil with no error if no approval is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
-	paneText, err := t.CapturePane(name, 40)
+	approval, err := t.approvalInPane(name)
 	if err != nil {
 		// Pane might not exist (session not started yet or already stopped).
 		// Check for known "can't find" errors vs unexpected failures.
@@ -623,7 +716,6 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return nil, fmt.Errorf("capturing pane: %w", err)
 	}
 
-	approval := parseApprovalPrompt(paneText)
 	if approval == nil {
 		t.approvalDedup().clear(name)
 		return nil, nil
@@ -657,16 +749,21 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 }
 
 // approvalPromptText renders the one-line description a client shows for the
-// pending approval.
+// pending approval, saying why an unreadable one can only be denied.
 func approvalPromptText(approval *parsedApproval) string {
+	var text string
 	switch {
 	case approval.ToolName == "":
-		return approval.Question
+		text = approval.Question
 	case approval.Input == "":
-		return "Allow " + approval.ToolName + "?"
+		text = "Allow " + approval.ToolName + "?"
 	default:
-		return approval.ToolName + ": " + approval.Input
+		text = approval.ToolName + ": " + approval.Input
 	}
+	if approval.Unreadable != "" {
+		text += " (deny only: " + approval.Unreadable + ")"
+	}
+	return text
 }
 
 // approvalOptionLabels returns the menu labels in pane order.
@@ -687,19 +784,105 @@ func (t *Tmux) checkNoApprovalPrompt(name string) error {
 	return t.checkNoApprovalPromptIn(name, name)
 }
 
-// checkNoApprovalPromptIn is checkNoApprovalPrompt for session name's agent
-// pane target (a pane id in a multi-pane session).
+// checkNoApprovalPromptIn is checkNoApprovalPrompt for session name's
+// already-resolved agent pane target.
 func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
-	paneText, err := t.CapturePane(target, 40)
+	approval, err := t.approvalInPane(target)
 	if err != nil {
 		return err
 	}
-	approval := parseApprovalPrompt(paneText)
 	if approval == nil {
 		return nil
 	}
 	return fmt.Errorf("%w: session %q is waiting on a permission prompt (%s, request %s); answer it with respond (approve or deny) before sending text",
 		runtime.ErrPendingInteraction, name, approvalPromptText(approval), "tmux-"+approvalHash(approval))
+}
+
+// cancelClaudeApproval cancels a Claude permission prompt on session name's
+// agent pane with Escape, the key the prompt offers ("Esc to cancel"). Ctrl-C
+// does not dismiss the prompt, and stopping a turn must never pick one of its
+// numbered options. handled reports that Interrupt is done: a prompt was
+// canceled or the session is gone. A pane that cannot be read is not
+// handled: the error is returned for the caller to log, and the caller
+// interrupts with Ctrl-C as it did before it looked.
+func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled bool, err error) {
+	target, err := t.agentPaneTarget(name)
+	if err == nil {
+		var approval *parsedApproval
+		approval, err = t.approvalInPane(target)
+		if err == nil && (approval == nil || approval.Codex) {
+			return false, nil
+		}
+	}
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return true, absorbGone(ctx, err)
+		}
+		return false, fmt.Errorf("looking for a permission prompt: %w", err)
+	}
+	t.cancelCopyModeIfParked(ctx, target)
+	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return true, absorbGone(ctx, err)
+		}
+		return true, fmt.Errorf("canceling the permission prompt of %q: %w", name, err)
+	}
+	return true, nil
+}
+
+// approvalInPane returns the approval prompt target's agent pane shows, or
+// nil. A Codex overlay is read again from a capture that comes with the
+// pane's geometry, which says where Codex wrapped its rows and whether the
+// capture reaches the overlay's top (parseCodexApprovalOverlay).
+func (t *Tmux) approvalInPane(target string) (*parsedApproval, error) {
+	resolved, err := t.agentPaneTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	paneText, err := t.CapturePane(resolved, promptObservationLines)
+	if err != nil {
+		return nil, err
+	}
+	approval := parseApprovalPrompt(paneText)
+	if approval == nil || !approval.Codex {
+		return approval, nil
+	}
+	pane, err := t.capturePaneWithGeometry(resolved)
+	if err != nil {
+		return nil, err
+	}
+	return parseApprovalCapture(pane), nil
+}
+
+// capturePaneWithGeometry captures target's screen and the last
+// promptObservationLines rows of its history with the pane's width and
+// history size. tmux prints them in the same invocation, so they describe the
+// screen it captured.
+func (t *Tmux) capturePaneWithGeometry(target string) (paneCapture, error) {
+	out, err := t.run("display-message", "-p", "-t", target, "#{pane_width} #{history_size}", ";",
+		"capture-pane", "-p", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines))
+	if err != nil {
+		return paneCapture{}, err
+	}
+	geometry, text, _ := strings.Cut(out, "\n")
+	width, history, err := parsePaneGeometry(geometry)
+	if err != nil {
+		return paneCapture{}, err
+	}
+	return paneCapture{text: text, width: width, fromTop: history <= promptObservationLines}, nil
+}
+
+// parsePaneGeometry reads the "#{pane_width} #{history_size}" line tmux
+// prints ahead of a capture.
+func parsePaneGeometry(line string) (int, int, error) {
+	if fields := strings.Fields(line); len(fields) == 2 {
+		width, widthErr := strconv.Atoi(fields[0])
+		history, historyErr := strconv.Atoi(fields[1])
+		if widthErr == nil && historyErr == nil && width > 0 && history >= 0 {
+			return width, history, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("%w: %q", errPaneGeometry, line)
 }
 
 // Respond's verify polling; variables so tests can shrink them. Under load
@@ -712,25 +895,51 @@ var (
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
 // a pending tool approval, then verifies the prompt was consumed.
+//
+// The prompt is the agent's: every capture and the answer key go to its pane
+// (agentPaneTarget), resolved once for this response.
+//
+// A refusal sends nothing, and says why: a session that is gone wraps
+// runtime.ErrSessionNotFound, a pane that could not be read
+// runtime.ErrRuntimeUnavailable, an answer naming a request no longer shown
+// (another prompt, or none) runtime.ErrInteractionGone, and an action the
+// menu does not offer runtime.ErrInteractionActionUnavailable (or, for an
+// action no prompt offers, runtime.ErrInteractionResponseInvalid). An answer
+// naming no request when no prompt shows is a no-op.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
-	// Verify the expected approval is still present before sending keys.
-	paneText, err := t.CapturePane(name, 40)
-	if err != nil {
+	return t.respond(context.Background(), name, response)
+}
+
+// respond is Respond; its keys run under ctx, so inside a fenced operation
+// (Provider.RespondFenced) they go through the pane guard.
+func (t *Tmux) respond(ctx context.Context, name string, response runtime.InteractionResponse) error {
+	preVerify := func(err error) error {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrSessionNotFound, err)
 		}
-		return fmt.Errorf("pre-verify capture failed: %w", err)
+		return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
 	}
-	current := parseApprovalPrompt(paneText)
+	target, err := t.agentPaneTarget(name)
+	if err != nil {
+		return preVerify(err)
+	}
+	// Verify the expected approval is still present before sending keys.
+	current, err := t.approvalInPane(target)
+	if err != nil {
+		return preVerify(err)
+	}
 	if current == nil {
 		t.approvalDedup().clear(name)
-		return nil // prompt already gone
+		if response.RequestID != "" {
+			return fmt.Errorf("approval %s is gone: %w", response.RequestID, runtime.ErrInteractionGone)
+		}
+		return nil // prompt already gone, and the caller named none
 	}
 	// If caller specified a RequestID, verify it matches the current prompt.
 	if response.RequestID != "" {
 		currentID := "tmux-" + approvalHash(current)
 		if currentID != response.RequestID {
-			return fmt.Errorf("approval prompt changed: expected %s, got %s", response.RequestID, currentID)
+			return fmt.Errorf("approval prompt changed: expected %s, got %s: %w", response.RequestID, currentID, runtime.ErrInteractionGone)
 		}
 	}
 
@@ -742,12 +951,18 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),
 	// so the approval keystroke reaches the prompt instead of being swallowed
 	// by copy-mode.
-	t.cancelCopyModeIfParked(name)
+	t.cancelCopyModeIfParked(inputCtx(ctx), target)
 
-	// Send the keystroke once.
-	if _, err := t.run("send-keys", "-t", paneTarget(name), "-l", key); err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
+	// Send the keystroke once. key is one digit from 1 to 9
+	// (approvalOptionKey), which tmux types as given, so unlike caller text it
+	// needs no runtime.TmuxLiteralArgs encoding (RUNTIME-CONTRACT-011).
+	// A key that found no session or no server typed nothing.
+	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
+		case errors.Is(err, ErrNoServer):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return fmt.Errorf("send-keys failed: %w", err)
 	}
@@ -759,20 +974,32 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	for time.Now().Before(deadline) {
 		time.Sleep(respondVerifyInterval)
 
-		verifyText, verifyErr := t.CapturePane(name, 40)
-		if verifyErr != nil {
-			// Pane gone — session ended, treat as success.
-			t.approvalDedup().clear(name)
-			return nil
+		cleared, err := t.respondCleared(target, current)
+		if err != nil {
+			return err
 		}
-
-		// Success once the prompt we answered is gone, even if the next
-		// tool call has already raised a different one.
-		if next := parseApprovalPrompt(verifyText); next == nil || approvalHash(next) != approvalHash(current) {
+		if cleared {
 			t.approvalDedup().clear(name)
 			return nil
 		}
 	}
 
 	return fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout)
+}
+
+// respondCleared reports whether the approval Respond answered has left
+// target. A pane whose geometry tmux did not report cannot be read, so
+// whether the approval cleared is unknown: that is an error.
+func (t *Tmux) respondCleared(target string, answered *parsedApproval) (bool, error) {
+	next, err := t.approvalInPane(target)
+	switch {
+	case errors.Is(err, errPaneGeometry):
+		return false, fmt.Errorf("verifying the answer: %w", err)
+	case err != nil:
+		// Pane gone — session ended, treat as success.
+		return true, nil
+	}
+	// Success once the prompt we answered is gone, even if the next tool
+	// call has already raised a different one.
+	return next == nil || approvalHash(next) != approvalHash(answered), nil
 }

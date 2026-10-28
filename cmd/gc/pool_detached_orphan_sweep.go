@@ -176,10 +176,11 @@ func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRoute
 }
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
-// fully-detached handoff orphan: open, unassigned, no pool route (neither
-// gc.routed_to nor a legacy gc.run_target), no gc.kind, branch set (indicating
-// work was done and pushed), and a session back-reference — gc.session_id or
-// gc.session_name — from which the pool route can be recovered. This sweep's
+// fully-detached handoff orphan: open, unassigned, not on a dispatch hold, no
+// pool route (neither gc.routed_to nor a legacy gc.run_target), no gc.kind,
+// branch set (indicating work was done and pushed), and a session
+// back-reference — gc.session_id or gc.session_name — from which the pool route
+// can be recovered. This sweep's
 // novel domain is exactly work that carries *no* self-declared route: a bead
 // that still has gc.run_target is recovered earlier in the same tick by
 // restoreCarriedWorkRoutes from its own declared route, and any non-empty
@@ -191,6 +192,13 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	}
 	if strings.TrimSpace(b.Assignee) != "" {
 		return false // still assigned — releaseOrphanedPoolAssignments covers this path
+	}
+	if beadmeta.HasDispatchHold(b.Labels) {
+		// Parked, not detached: whoever parked it cleared the route because the
+		// next actor is not the pool that worked it. Restoring a route decides
+		// what to DO with the bead, which a hold answers (DispatchHoldLabels);
+		// once the hold lifts the bead is a candidate again.
+		return false
 	}
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 		return false // already has a pool route

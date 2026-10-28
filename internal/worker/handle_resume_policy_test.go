@@ -36,7 +36,7 @@ func TestNudgeToHeldSessionQueues(t *testing.T) {
 			}
 			// The session queues a sent nudge itself; a wait-idle nudge is
 			// left for the caller to queue.
-			want := NudgeQueuedHeld
+			want := NudgeQueued
 			if delivery == NudgeDeliveryWaitIdle {
 				want = NudgeUndeliveredHeld
 			}

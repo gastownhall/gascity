@@ -94,6 +94,9 @@ jobs:
             mail:
               - 'internal/mail/**'
               - 'contrib/mail-scripts/**'
+              - '.github/requirements/mcp-agent-mail.in'
+              - '.github/requirements/mcp-agent-mail.overrides.txt'
+              - '.github/requirements/mcp-agent-mail.txt'
             beads:
               - 'go.mod'
               - 'internal/beads/**'
@@ -254,7 +257,8 @@ jobs:
         env:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
 
-  # Runs when mail-related source paths change.
+  # Runs when mail-related source paths or the mcp_agent_mail requirements
+  # (the lock this job installs) change.
   mcp-mail:
     name: MCP mail conformance
     needs:

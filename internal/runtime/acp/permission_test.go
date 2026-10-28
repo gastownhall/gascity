@@ -26,7 +26,8 @@ import (
 // of the turn by writing private notifications to the agent's stdin:
 // _test/finish answers the prompt, _test/cancel sends $/cancel_request for
 // params.requestId, _test/ask sends one more permission request with id
-// params.id, _test/exit exits. $GC_PERM_OPTIONS (a JSON array) and
+// params.id, _test/exit exits. A session/cancel from gc answers the prompt
+// canceled. $GC_PERM_OPTIONS (a JSON array) and
 // $GC_PERM_TITLE ("-" omits the title) override the request contents. SIGINT
 // is ignored so Interrupt leaves the agent running.
 func fakeACPPermissionCommand(rawIDs ...string) string {
@@ -73,6 +74,8 @@ for line in sys.stdin:
                   "params": {"sessionId": "s1", "toolCall": tool, "options": options}})
     elif method == "_test/finish":
         send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+    elif method == "session/cancel":
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "` + acpStopReasonCancelled + `"}})
     elif method == "_test/cancel":
         send({"jsonrpc": "2.0", "method": "$/cancel_request",
               "params": {"requestId": msg["params"]["requestId"]}})
@@ -302,8 +305,8 @@ func TestPendingIdleSessionHasNothing(t *testing.T) {
 		t.Fatalf("Pending = %#v, %v; want nil, nil", pending, err)
 	}
 	err = f.p.Respond(f.name, runtime.InteractionResponse{RequestID: "acp-7", Action: "approve"})
-	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
-		t.Fatalf("Respond with nothing outstanding = %v, want ErrInteractionResponseInvalid", err)
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond with nothing outstanding = %v, want ErrInteractionGone", err)
 	}
 }
 
@@ -445,8 +448,8 @@ func TestPermissionRespondInvalidKeepsPending(t *testing.T) {
 		}
 	}
 	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: strings.TrimSuffix(pending.RequestID, "7") + "99", Action: "approve"})
-	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
-		t.Fatalf("Respond(mismatched id) = %v, want ErrInteractionResponseInvalid", err)
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond(mismatched id) = %v, want ErrInteractionGone", err)
 	}
 
 	still, err := f.p.Pending(f.name)
@@ -574,8 +577,8 @@ func TestPermissionStaleRequestIDRejectedAfterRestart(t *testing.T) {
 	}
 
 	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: stale.RequestID, Action: "approve"})
-	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
-		t.Fatalf("Respond(stale RequestID) = %v, want ErrInteractionResponseInvalid", err)
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond(stale RequestID) = %v, want ErrInteractionGone", err)
 	}
 	still, err := f.p.Pending(f.name)
 	if err != nil || still == nil || still.RequestID != fresh.RequestID {
@@ -685,7 +688,7 @@ func TestNudgeWaitingForIdleRechecksWhenTurnEnds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sc := newSessionConn(nil, nil, nil, 10, nil)
-			if !sc.setActivePrompt(1) {
+			if _, ok := sc.setActivePrompt(1); !ok {
 				t.Fatal("setActivePrompt on a live connection = false")
 			}
 			result := make(chan error, 1)

@@ -62,6 +62,19 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	if body.Bead != "" && body.AttachedBeadID != "" {
 		return nil, apierr.InvalidRequest.Msg("bead and attached_bead_id are mutually exclusive")
 	}
+	// A sling writes its bead (route, assignee, attached workflow): never a
+	// controller-owned row (architecture B). An unresolved id is sling's own
+	// missing-bead answer.
+	for _, ref := range []struct{ where, id string }{{"body.bead", body.Bead}, {"body.attached_bead_id", body.AttachedBeadID}} {
+		if ref.id == "" {
+			continue
+		}
+		if _, b, err := s.resolveBeadOwner(ref.id); err == nil {
+			if err := refuseOwned(ref.id, "slings", ref.where, b); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	workflowLaunchOptions := body.AttachedBeadID != "" ||
 		len(body.Vars) > 0 ||
@@ -129,6 +142,11 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		}
 		if status >= http.StatusInternalServerError {
 			return nil, apierr.Internal.Msg(message)
+		}
+		if code == "molecule_attached" {
+			// The bead already carries a live molecule another formula poured;
+			// attaching would double up on work in progress.
+			return nil, apierr.ConflictWrongState.Msg(message)
 		}
 		if code == "missing_bead" {
 			return nil, apierr.SlingMissingBead.Msg(message)

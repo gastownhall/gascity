@@ -4,8 +4,10 @@ go_library(
     name = "resourcecensus",
     srcs = [
         "census.go",
+        "counts.go",
         "hermetic.go",
         "medium.go",
+        "policy.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/testpolicy/resourcecensus",
     visibility = ["//:__subpackages__"],
@@ -19,6 +21,7 @@ go_test(
     name = "resourcecensus_test",
     srcs = [
         "census_test.go",
+        "counts_test.go",
         "hermetic_test.go",
         "medium_test.go",
         "testenv_import_test.go",
@@ -32,6 +35,7 @@ go_test(
         "//:go.mod",
         "//:repo_go_srcs",
         "//:repo_go_test_srcs",
+        "//test:test-resource-counts.toml",
         "//test:test-resources.toml",
     ],
     embed = [":resourcecensus"],

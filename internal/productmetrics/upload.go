@@ -284,6 +284,9 @@ func isClosedProductionTLSConfig(config *tls.Config) bool {
 	if config == nil {
 		return false
 	}
+	// Go 1.27 deprecates Rand ("should be left nil in production"); the
+	// policy still requires it nil, so the read stays.
+	//nolint:staticcheck // SA1019: checking that the deprecated Rand is unset.
 	return config.Rand == nil && config.Time == nil &&
 		config.Certificates == nil &&
 		config.GetCertificate == nil && config.GetClientCertificate == nil && config.GetConfigForClient == nil &&

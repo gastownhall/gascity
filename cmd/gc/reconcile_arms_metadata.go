@@ -38,7 +38,8 @@ type rowIdentity struct {
 	Alias, Owner string
 	ManagedPool  bool // a managed pool instance: a conflict clears a wrong alias
 	// NeedsKey: the provider takes a session id and the row has no
-	// session_key; the effect mints one (Key), set-once in its CAS (R1).
+	// session_key and no process that may be running; the effect mints one
+	// (Key), set-once in its CAS (R1).
 	NeedsKey bool
 	Key      string
 	// Type: the row is typeless, admitted by its gc:session label; the
@@ -161,7 +162,7 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, 
 	}
 	existing := strings.TrimSpace(info.AgentName)
 	legacyTemplate := agentName != "" && agentName != tp.TemplateName && (existing == tp.TemplateName || existing == targetBasename(tp.TemplateName))
-	if (existing == "" || legacyTemplate) && agentName != "" {
+	if (existing == "" || legacyTemplate) && agentName != "" && !clientProviderChat(origin, cfgAgent) {
 		id.Guarded["agent_name"] = agentName
 	}
 	if tp.WorkDir != "" { // a legacy identity's running session keeps its work_dir until it stops
@@ -190,7 +191,8 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, 
 		}
 	}
 	refreshLaunchKeys(id.Meta, tp, raw)
-	id.NeedsKey = raw["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != ""
+	id.NeedsKey = raw["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
+		!sessionStateMayBeRunning(info.MetadataState)
 	id.Type = info.Type == "" && session.IsSessionBeadOrRepairableInfo(info)
 	// SESS-719: a pool row's slot follows the allocation's (realize).
 	if cfgAgent != nil && cfgAgent.SupportsInstanceExpansion() && !cfgAgent.UsesCanonicalSingletonPoolIdentity() && !named && !tp.ManualSession &&

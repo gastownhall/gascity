@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -47,6 +49,8 @@ type gatherEnv struct {
 	RigStores  func() map[string]beads.Store
 	Recording  func() *externalReadsRecording // K1's latest; nil before the first
 	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
+	// WakeReads asks K1 for a pass; nil asks nothing.
+	WakeReads func()
 	// Nudges and WorkStore are the nudges-class and city work stores C8's
 	// steps write through. WorkStore is also the work leg of the pass's
 	// WorkLegs, which the live work read (L5) plans over.
@@ -80,8 +84,13 @@ type World struct {
 	Mislabelled map[rowKey]bool
 	Demand      demandView
 	ScaleCheck  *scaleCheckResult
-	Obs         *ObservationSnapshot
-	ObsMaxAge   time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment: the decide's
+	// pairing guard (claimHeldTemplates) reads both.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Patrol is the patrol interval, read once by gather, so the decide
 	// never reaches the config's environment-backed reader.
 	Patrol     time.Duration
@@ -94,6 +103,10 @@ type World struct {
 	Paused     bool            // starts paused for a provider swap (P7)
 	SoftReload *softReloadView // the open soft reload this pass read, for A8 (M2)
 	AliasOwed  map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
+	// Idle is A15's view of the pass, from planner memory (idleMemory):
+	// the defer streaks (SESS-575), the content clock's fires (ga-07mi8),
+	// and the rows' lifecycle settings.
+	Idle *idlePass
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -103,12 +116,16 @@ type World struct {
 	TransportRefused  map[string]string                     // by qualified name
 	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
+	// Suspension is the suspension state the pass read, for the live-claim
+	// veto's scope (liveClaimVetoApplies, the orphaned signal's L5).
+	Suspension suspensionstate.State
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
-	// Classified are the rows whose dead runtime a zombie classification
-	// completed, by its runtime token (A12): the planner's memory.
-	Classified map[rowKey]string
+	// Classified are the rows whose dead runtime a classification completed
+	// (A12, the start's recycle), by its runtime token: the planner's
+	// memory.
+	Classified map[rowKey]classifiedRuntime
 	// LegStores holds the sessions leg's store by its ref, which effects
 	// reach only as a fenced writer (newEffectPass). No other leg's store is
 	// here: a census-only row has no writer (AL1, armCensusOnly).
@@ -139,6 +156,49 @@ type World struct {
 	fresh *freshRow
 }
 
+// workClaim is one work assignment: the work bead, store-scoped, and the
+// assignee it names.
+type workClaim struct {
+	bead     storeScopedBeadKey
+	assignee string
+}
+
+// workClaimOf is d's i-th assigned work row's claim, or false when it names
+// no assignee.
+func workClaimOf(d demandView, i int) (workClaim, bool) {
+	assignee := strings.TrimSpace(d.AssignedWork[i].Assignee)
+	if assignee == "" {
+		return workClaim{}, false
+	}
+	ref := ""
+	if i < len(d.AssignedStoreRefs) {
+		ref = d.AssignedStoreRefs[i]
+	}
+	return workClaim{bead: storeScopedBeadKey{StoreRef: normalizeDemandStoreRef(ref), ID: d.AssignedWork[i].ID}, assignee: assignee}, true
+}
+
+// claimsSeenAt records, at now, the first sight of each of d's work
+// assignments the planner has not seen, forgets those d no longer holds,
+// and returns the pass's copy and whether any was new. An assignment is new
+// again when its assignee changes.
+func (p *planner) claimsSeenAt(d demandView, now time.Time) (map[workClaim]time.Time, bool) {
+	seen := make(map[workClaim]time.Time, len(d.AssignedWork))
+	fresh := false
+	for i := range d.AssignedWork {
+		c, ok := workClaimOf(d, i)
+		if !ok {
+			continue
+		}
+		at, known := p.claimsSeen[c]
+		if !known {
+			at, fresh = now, true
+		}
+		seen[c] = at
+	}
+	p.claimsSeen = seen
+	return maps.Clone(seen), fresh
+}
+
 // gather builds the pass's World at now. It first drains the settlements
 // posted since the pass began. It fails when no env is published, the
 // sessions cache is not primed, the sessions leg's census read fails hard
@@ -158,7 +218,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if e.Suspension != nil {
 		st = e.Suspension()
 	}
-	w.CitySuspended, w.SuspendedRigPaths = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st)
+	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
 	rec := e.Recording()
 	if e.Observations != nil {
 		w.Obs = e.Observations().Snapshot()
@@ -178,7 +238,9 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
-	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.Patrol = env.patrol()
+	w.ObsMaxAge = 2 * w.Patrol
+	w.ExecutionStalled = p.executionStalled(w.Census, w.Obs, now, w.ObsMaxAge)
 	w.AliasOwed = p.aliasOwedFor(w.Census)
 	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
@@ -210,10 +272,16 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Demand, err = gatherDemand(dg, newV2DemandReads(now, rec)); err != nil {
 		return World{}, err
 	}
-	w.ScaleCheck = rec.scaleCheck(now)
+	w.ScaleCheck, w.ScaleCheckStartedAt = rec.scaleCheckRun(now)
+	var newClaim bool
+	// Stamp first sights after the work read, not at the pass's start: a
+	// run that starts between the two may count a bead the read then shows
+	// claimed, and the claim must not predate that run.
+	w.ClaimsSeen, newClaim = p.claimsSeenAt(w.Demand, p.clock.Now())
+	if newClaim && len(w.Demand.CustomCheckTemplates) > 0 && e.WakeReads != nil {
+		e.WakeReads() // a custom count may predate the claim: a newer run ends its subtraction
+	}
 
-	w.Patrol = env.patrol()
-	w.ObsMaxAge = 2 * w.Patrol
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
 	w.Classified = p.classifiedOf(w.Census, w.Observed)
 	var guard *endpointCapacityGuard
@@ -231,7 +299,10 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	p.memo.refresh(e, env, now, rows, w.Mislabelled)
 	w.SleepPolicies, w.TransportRefused, w.Templates = p.memo.sleepPolicies(cfg, env, rows), p.memo.transport, p.memo.templates.Load()
 
-	laneFed := len(externalReadLegs(k1Env(e, env, w.SuspendedRigPaths, dg), io.Discard)) > 0
+	// The lane-fed check reuses the demand gather's probe stores: building
+	// the demand targets again here (k1Env) cost a whole second demand
+	// build each pass (Gate S fix 2).
+	laneFed := len(externalReadLegs(k1EnvWith(e, env, w.SuspendedRigPaths, dg, w.Demand.ProbeStores), io.Discard)) > 0
 	w.Boot.RecordingSeen = rec != nil || !laneFed
 	p.boot = w.Boot
 	return w, nil
@@ -292,12 +363,26 @@ func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) m
 // demand gather probes.
 func k1Env(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg demandGatherEnv) externalReadsEnv {
 	targets := buildDemandTargets(e.CityName, e.CityPath, env.Cfg, dg.CityStore, dg.RigStores, suspendedRigPaths, dg.OpenSessions, noProbeEnv, io.Discard)
+	return k1EnvWith(e, env, suspendedRigPaths, dg, demandProbeStores(targets))
+}
+
+// demandProbeStores are targets' default scale-check probe stores, named
+// and pool, in target order.
+// residency:allow — the demand targets' own resolved stores, projected:
+// buildDemandTargets resolved each through the residency plan, and this only
+// collects them, as k1Env always did inline.
+func demandProbeStores(targets demandTargets) []beads.Store {
 	var probes []beads.Store
-	for _, t := range append(targets.defaultScaleTargets, targets.defaultNamedScaleTargets...) {
+	for _, t := range append(slices.Clip(targets.defaultScaleTargets), targets.defaultNamedScaleTargets...) {
 		if t.store != nil {
 			probes = append(probes, t.store)
 		}
 	}
+	return probes
+}
+
+// k1EnvWith is k1Env over probe stores already built (demandView.ProbeStores).
+func k1EnvWith(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg demandGatherEnv, probes []beads.Store) externalReadsEnv {
 	return externalReadsEnv{
 		CityPath: e.CityPath, CityName: e.CityName, Cfg: env.Cfg, CityStore: dg.CityStore, RigStores: dg.RigStores,
 		SuspendedRigPaths: suspendedRigPaths, ProbeStores: probes, Sessions: dg.Sessions,

@@ -39,7 +39,8 @@ type effectReads struct {
 	legs WorkLegs
 	// city and rigs are the sessions store and the rig stores, read-only,
 	// which the start effect's prepare reads (template overrides, the task
-	// work dir, the claimed-work probe); the live work read uses legs.
+	// work dir, the claimed-work probe); the live work read uses legs, and
+	// the orphaned signal's live-claim veto reads the row from city.
 	city beads.Store
 	rigs map[string]beads.Store
 	// cityPath keys the city's identifier locks (A7's alias lock).
@@ -107,16 +108,17 @@ var effectSpecs = map[string]effectSpec{
 	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, sections: zombieSections},                                                                        // A12 (C5c2)
 	intentDrainBegin:      {class: capRowWrites, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                 // A20 (C6a2)
 	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                   // A20 (C6a2)
-	intentSignal:          {class: capRowWrites, bootGated: true, needs: needs{NameLock: true}, sections: signalSections},                                                                                  // A20's signal (C6b1)
-	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, sections: signalSections},                                                                                         // A20's signal (C6b1)
+	intentSignal:          {class: capRowWrites, bootGated: true, needs: needs{NameLock: true}, needsFor: signalNeeds, sections: signalSections},                                                           // A20's signal (C6b1); L5 for orphaned (v5.10a B)
+	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, needsFor: signalNeeds, caps: capReadStores, sections: signalSections},                                             // A20's signal (C6b1); L5 for no-wake-reason (v5.10a B)
 	intentSignalAck:       {class: capProbing, bootGated: true, needs: needs{Runtime: true}, sections: signalSections},                                                                                     // A11 (C6c2)
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections},                                                                                                                             // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections},                                                                                                                             // A19 (C6a)
-	intentStop:            {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, needsFor: stopNeeds, caps: capReadStores | capProviderStop, sections: stopSections},              // A4 (C6b2)
+	intentStop:            {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, needsFor: stopNeeds, caps: capReadStores | capProviderStop | capRelease, sections: stopSections}, // A4 (C6b2)
 	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround},   // A21 (C5c1)
-	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},            // A10 (C3)
+	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Lease: true}, needsFor: rollbackNeeds, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},  // A10 (C3); L5 for a Workless one (#2081)
 	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                                                                              // A7 (C7d): a row write, lease-free
 	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections},                                                           // A7 (C7d)
+	intentMarkerClear:     {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: markerClearSections},                                                            // A13's pinned skip (mc-nm6yt)
 	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                                               // A8 (C7c)
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                                               // A6
 	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                        // A6

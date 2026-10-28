@@ -140,6 +140,8 @@ type Formula struct {
 
 	// ContentHash is the SHA-256 hex digest of the raw formula file bytes.
 	// Set by ParseFile; empty for formulas parsed from in-memory bytes.
+	// Resolve keeps the child's hash for an extends-based formula, so it
+	// always identifies the Source file and does not cover the parents.
 	ContentHash string `json:"content_hash,omitempty"`
 
 	compilerRequirementSources []formulaCompilerConstraint
@@ -1102,6 +1104,143 @@ func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix stri
 	}
 }
 
+// sessionStepType, sessionStepLabel, startupHealthStepType,
+// convergenceStepType and opStepType are the marks of a controller-owned row
+// (a test pins the check against coordclass.ControllerOwned): a session row,
+// which only the session verbs mint, a startup-health episode, which only the
+// controller records, a convergence root, which only the convergence handler
+// creates, and an operation-journal row, which only the operation journal
+// writes.
+const (
+	sessionStepType       = "session"
+	sessionStepLabel      = "gc:session"
+	startupHealthStepType = "startup-health-episode"
+	convergenceStepType   = "convergence"
+	opStepType            = "op"
+)
+
+// sessionVerbs names the session verbs that create a session row.
+const sessionVerbs = "gc session new, POST /v0/city/{cityName}/sessions"
+
+// controllerOnlyType is why a step of type typ may not be compiled, or "":
+// compile copies a step's type onto its bead, so a formula would mint a
+// session row (mc-okw9n), a startup-health episode, which holds its session
+// down (mc-lp7zb), a convergence root or an operation-journal row
+// (architecture B).
+func controllerOnlyType(typ string) string {
+	switch t := strings.TrimSpace(typ); {
+	case strings.EqualFold(t, sessionStepType):
+		return "makes a session row, which only the session verbs create (" + sessionVerbs + ")"
+	case strings.EqualFold(t, startupHealthStepType):
+		return "makes a startup-health episode, which only the controller records"
+	case strings.EqualFold(t, convergenceStepType):
+		return "makes a convergence root, which only the convergence handler creates"
+	case strings.EqualFold(t, opStepType):
+		return "makes an operation-journal row, which only the operation journal writes"
+	case strings.EqualFold(t, messageStepType):
+		return "makes a mail message, which only the mail routes create (POST /v0/city/{cityName}/mail, gc mail)"
+	}
+	return ""
+}
+
+// The coordination rows' marks (coordclass.CoordinationOwned, mirrored as
+// the controller-owned marks are; a test pins the check against it).
+const (
+	messageStepType       = "message"
+	waitStepType          = "gate"
+	legacyWaitStepType    = "wait"
+	waitStepLabel         = "gc:wait"
+	nudgeStepLabel        = "gc:nudge"
+	nudgeQueueStepLabel   = "gc:nudge-queue"
+	orderTrackingLabel    = "order-tracking"
+	orderRunLabelPrefix   = "order-run:"
+	extmsgStepLabelPrefix = "gc:extmsg-"
+)
+
+// coordinationLabel is why a step's label l, on a step of type typ and
+// metadata meta, may not be compiled, or "": compile copies labels onto
+// the bead, so a formula would mint a coordination row its owner alone
+// writes, a wait that wakes its session, a nudge an agent is handed, an
+// order's run record that holds its cooldown and single-flight, or an
+// extmsg row (architecture B v2, the #7766 review).
+func coordinationLabel(l, typ string, meta map[string]string) string {
+	label := strings.ToLower(strings.TrimSpace(l))
+	t := strings.TrimSpace(typ)
+	switch {
+	case label == waitStepLabel:
+		return "marks a session wait, which only gc session wait and the controller's waits step create"
+	case (strings.EqualFold(t, waitStepType) || strings.EqualFold(t, legacyWaitStepType)) &&
+		strings.TrimSpace(meta["session_id"]) != "" && label == strings.ToLower("session:"+strings.TrimSpace(meta["session_id"])):
+		return "marks a session wait (a gate carrying its session_id), which only gc session wait and the controller's waits step create"
+	case label == nudgeStepLabel, label == nudgeQueueStepLabel:
+		return "marks a queued nudge, which only the nudge queue creates"
+	case label == orderTrackingLabel, strings.HasPrefix(label, orderRunLabelPrefix):
+		return "marks an order's run record, which only order dispatch creates"
+	case strings.HasPrefix(label, extmsgStepLabelPrefix):
+		return "marks an external-messaging row, which only the extmsg routes create"
+	}
+	return ""
+}
+
+// validateNoSessionSteps refuses a step that would make an owned row: one
+// typed session, startup-health-episode, convergence or message, tagged
+// gc:session, or tagged as a coordination row (coordinationLabel; mc-okw9n,
+// mc-lp7zb, architecture B):
+// compile copies a step's type, labels and metadata straight onto its bead,
+// so a formula would mint a session row with hand-written hold keys past
+// the session verbs, or an episode quarantining a session.
+func validateNoSessionSteps(steps []*Step, errs *[]string, prefix string) {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		if why := controllerOnlyType(step.Type); why != "" {
+			*errs = append(*errs, fmt.Sprintf("%s: type %q %s", stepPrefix, step.Type, why))
+		}
+		for _, l := range step.Labels {
+			if strings.EqualFold(strings.TrimSpace(l), sessionStepLabel) {
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (%s)", stepPrefix, l, sessionVerbs))
+			} else if why := coordinationLabel(l, step.Type, step.Metadata); why != "" {
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q %s", stepPrefix, l, why))
+			}
+		}
+		if step.Loop != nil {
+			validateNoSessionSteps(step.Loop.Body, errs, stepPrefix+".loop.body")
+		}
+		validateNoSessionSteps(step.Children, errs, stepPrefix+".children")
+	}
+}
+
+// validateNoSessionAdvice is validateNoSessionSteps over an aspect's advice
+// steps, which compile inserts with their own type.
+func validateNoSessionAdvice(rules []*AdviceRule, errs *[]string) {
+	for i, rule := range rules {
+		if rule == nil {
+			continue
+		}
+		prefix := fmt.Sprintf("advice[%d] (%s)", i, rule.Target)
+		check := func(where string, step *AdviceStep) {
+			if step == nil {
+				return
+			}
+			if why := controllerOnlyType(step.Type); why != "" {
+				*errs = append(*errs, fmt.Sprintf("%s.%s (%s): type %q %s", prefix, where, step.ID, step.Type, why))
+			}
+		}
+		check("before", rule.Before)
+		check("after", rule.After)
+		if rule.Around != nil {
+			for j, step := range rule.Around.Before {
+				check(fmt.Sprintf("around.before[%d]", j), step)
+			}
+			for j, step := range rule.Around.After {
+				check(fmt.Sprintf("around.after[%d]", j), step)
+			}
+		}
+	}
+}
+
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
@@ -1120,6 +1259,9 @@ func (f *Formula) Validate() error {
 	}
 	validateEngineMintedKindMetadata(f.Steps, &errs, "steps")
 	validateEngineMintedKindMetadata(f.Template, &errs, "template")
+	validateNoSessionSteps(f.Steps, &errs, "steps")
+	validateNoSessionSteps(f.Template, &errs, "template")
+	validateNoSessionAdvice(f.Advice, &errs)
 
 	if f.Type != "" && !f.Type.IsValid() {
 		errs = append(errs, fmt.Sprintf("type: invalid value %q (must be workflow, expansion, or aspect)", f.Type))

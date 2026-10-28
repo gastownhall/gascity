@@ -1,5 +1,5 @@
 # The disposition table (ARCH-RESTRUCTURE-2 R7): event by actor, from seed -> result.
-# Regenerate: go test ./internal/session -run TestDispositionTableGolden -update-golden
+# Regenerate: GC_TEST_REPO_ROOT="$PWD" bazel run //internal/session:session_test -- -test.run='^TestDispositionTableGolden$' -update-golden
 
 Suspend by operator
   none                          life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s

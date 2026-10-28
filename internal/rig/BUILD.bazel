@@ -35,6 +35,7 @@ go_test(
         "include_spec_test.go",
         "path_durability_test.go",
         "provision_branch_source_test.go",
+        "reserved_prefix_test.go",
         "rig_test.go",
         "rollback_beads_store_test.go",
         "rollback_provision_test.go",

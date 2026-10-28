@@ -1098,9 +1098,10 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			running, pidSource = true, "api"
 		}
 	}
-	// Unit ownership only makes sense when we have a real live PID to compare
-	// against the unit's MainPID (ga-9pjtoy) -- the service_manager/api
-	// fallback paths above confirm liveness without ever learning a PID.
+	// Unit ownership only makes sense when we have a real live PID to match
+	// against the unit's MainPID and its descendants (ga-9pjtoy) -- the
+	// service_manager/api fallback paths above confirm liveness without ever
+	// learning a PID.
 	var ownership supervisorUnitOwnershipStatus
 	if pid > 0 {
 		ownership = supervisorDetermineUnitOwnership(pid)
@@ -1150,9 +1151,12 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		case "owned":
 			fmt.Fprintf(stdout, "Owned by systemd unit %s\n", ownership.Unit) //nolint:errcheck
 		case "outside_unit":
-			if ownership.UnitActive {
+			switch {
+			case ownership.ProbeErr != nil:
+				fmt.Fprintf(stdout, "Warning: could not verify that systemd unit %s owns the supervisor: %v\n", ownership.Unit, ownership.ProbeErr) //nolint:errcheck
+			case ownership.UnitActive:
 				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is active but tracking a different process)\n", ownership.Unit) //nolint:errcheck
-			} else {
+			default:
 				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is installed but inactive)\n", ownership.Unit) //nolint:errcheck
 			}
 		}
@@ -2271,6 +2275,15 @@ func startOneCity(
 		})
 	}
 
+	// A worker site's city is the remote controller's: the supervisor builds
+	// no runtime for it, whichever city the supervisor itself was started in.
+	// Each attempt re-reads the descriptor, so removing a stray one clears it.
+	if err := refuseCityStartOnWorkerSite(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, name, "city_init_failed", err, stderr)
+		recordInitFailure(name, err.Error())
+		return
+	}
+
 	if err := ensureLegacyNamedPacksCached(path); err != nil {
 		emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
 		recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
@@ -2298,7 +2311,9 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	var reconcilerBoot strings.Builder
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
 		recordInitFailure(cityName, wiringErr.Error())
@@ -2436,6 +2451,13 @@ func startOneCity(
 		}))
 		return runtimeErr
 	}); err != nil {
+		// The recorder is this city's rotation owner: left open, its
+		// [events.mirror] copier would hold the mirror lock for the life of
+		// the supervisor, and every retry's copier would wait on it.
+		cityCancel()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
 		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 		recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 		return
@@ -2487,6 +2509,8 @@ func startOneCity(
 	_ = runPostPrepareStep("starting_bead_event_watcher", func() error {
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
+		cs.startOpSweep(cityCtx)
+		cs.startConversationLaneHost(cityCtx, wiring.mode)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
@@ -2524,6 +2548,9 @@ func startOneCity(
 	// where an early panic deletes a non-existent entry, leaving a
 	// zombie after the post-launch insertion.
 	alreadyRunning := publishManagedCity(cr, path, mc)
+	if !alreadyRunning {
+		forgetSupervisorReconcilerBoot(path)
+	}
 	if alreadyRunning {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -2691,8 +2718,8 @@ func startOneCity(
 				if err := shutdownBeadsProvider(p); err != nil {
 					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
 				}
-				// Close the file recorder (only on panic — normal exit
-				// leaves it for the external caller via mc.closer).
+				// Close the file recorder. A normal exit leaves it to the
+				// stop that removed the city (mc.closer), unless none did.
 				if cityFr != nil {
 					cityFr.Close() //nolint:errcheck
 				}
@@ -2726,6 +2753,7 @@ func startOneCity(
 			} else {
 				// Normal exit (context canceled) — reset panic counter
 				// and remove from map in a single critical section.
+				removed := false
 				cr.BatchUpdate(func(
 					cities map[string]*managedCity,
 					_ map[string]cityInitProgress,
@@ -2733,8 +2761,17 @@ func startOneCity(
 					panicHistory map[string]*panicRecord,
 				) {
 					delete(panicHistory, p)
-					deleteManagedCityIfCurrent(cities, p, mc)
+					removed = deleteManagedCityIfCurrent(cities, p, mc)
 				})
+				// A stop removes the city from the map before it cancels
+				// it, then closes the recorder via mc.closer. A city canceled
+				// in place (its controller socket's stop) removed itself
+				// just now, so no stop will: close the recorder here, outside
+				// the registry lock, or its [events.mirror] copier holds the
+				// mirror lock for the life of the supervisor.
+				if removed && cityFr != nil {
+					cityFr.Close() //nolint:errcheck
+				}
 			}
 			// Signal completion last — ensures all cleanup is done before
 			// waiters (shutdown/unregister paths) proceed.
@@ -2765,6 +2802,7 @@ func startOneCity(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+	warnBdInventoryAtControllerStart(path, cfg, rec)
 }
 
 func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {

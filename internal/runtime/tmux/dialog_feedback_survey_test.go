@@ -277,6 +277,9 @@ type staleSurveyScrollbackExecutor struct {
 
 func (s *staleSurveyScrollbackExecutor) execute(args []string) (string, error) {
 	s.calls = append(s.calls, slices.Clone(args))
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	if slices.Contains(args, "capture-pane") {
 		if slices.Contains(args, "-S") {
 			return feedbackSurveySessionFixture, nil
@@ -303,7 +306,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 			t.Fatalf("stale survey scrollback sent stray keys: %v", executor.calls)
 		}
 	}
-	wantCapture := []string{"-u", "capture-pane", "-p", "-t", "=agent-pane:"}
+	wantCapture := []string{"-u", "capture-pane", "-p", "-t", fakeAgentPane("agent-pane")}
 	if len(executor.calls) != 2 || !slices.Equal(executor.calls[1], wantCapture) {
 		t.Fatalf("calls = %v, want pane lookup then visible capture %v", executor.calls, wantCapture)
 	}

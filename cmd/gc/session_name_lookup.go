@@ -446,7 +446,7 @@ func createPoolSessionBeadWithIdentifiers(
 // generations, so what keeps a slot at ONE unconfirmed generation is that a
 // fresh row may not be minted while an OPEN pool row of the same template and
 // identity is still an unconfirmed create — pending-create, or failed-create
-// whose runtime teardown has not been confirmed (releaseBeadScopedPoolRuntime
+// whose runtime teardown has not been confirmed (releaseRowOwnedRuntime
 // holds such a row open). This is the guarantee #5372 got from the
 // identity-derived name collision (ga-vcjr9), keyed on the identity instead of
 // the runtime name. Identities compare in their tmux-safe encoding, the same

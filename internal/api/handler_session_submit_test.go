@@ -183,11 +183,111 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	}
 }
 
+// TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime kills a read
+// model that advertises "deliver now" for a runtime that cannot interrupt the
+// session's turn: GET /session/{id} and GET /sessions must agree with
+// Manager.SubmissionCapabilities, so a polling client never offers an intent
+// that would only fail asynchronously. pi keeps it: it replaces the turn by
+// restarting the runtime.
+func TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		mode     runtime.TurnInterruptMode
+		want     bool
+	}{
+		{provider: "codex", mode: runtime.TurnInterruptUnsupported, want: false},
+		{provider: "codex", mode: runtime.TurnInterruptProtocol, want: true},
+		{provider: "pi", mode: runtime.TurnInterruptUnsupported, want: true},
+	} {
+		t.Run(tc.provider+"/"+string(tc.mode), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.sp.TurnInterruptModeValue = tc.mode
+			h := newTestCityHandler(t, fs)
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("get status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var got sessionResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode get: %v", err)
+			}
+			if got.SubmissionCapabilities.SupportsInterruptNow != tc.want {
+				t.Fatalf("GET supports_interrupt_now = %v, want %v", got.SubmissionCapabilities.SupportsInterruptNow, tc.want)
+			}
+
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("list status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var list struct {
+				Items []sessionResponse `json:"items"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
+				t.Fatalf("decode list: %v", err)
+			}
+			var found bool
+			for _, item := range list.Items {
+				if item.ID != info.ID {
+					continue
+				}
+				found = true
+				if item.SubmissionCapabilities.SupportsInterruptNow != tc.want {
+					t.Fatalf("list supports_interrupt_now = %v, want %v", item.SubmissionCapabilities.SupportsInterruptNow, tc.want)
+				}
+			}
+			if !found {
+				t.Fatalf("list items = %+v, want session %s", list.Items, info.ID)
+			}
+		})
+	}
+}
+
+// TestSessionSubmitInterruptNowUnsupportedReportsTypedFailureCode kills an
+// async interrupt_now refusal that reaches the wire as the generic
+// submit_failed: a client must be able to tell "this runtime cannot
+// interrupt the turn" apart, as /stop's 501 turn_interrupt_unsupported does.
+func TestSessionSubmitInterruptNowUnsupportedReportsTypedFailureCode(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.sp.TurnInterruptModeValue = runtime.TurnInterruptUnsupported
+	h := newTestCityHandler(t, fs)
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"now","intent":"interrupt_now"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	failure := waitForRequestFailed(t, fs.eventProv, accepted.RequestID)
+	if failure.ErrorCode != "turn_interrupt_unsupported" {
+		t.Fatalf("error_code = %q, want turn_interrupt_unsupported (message %q)", failure.ErrorCode, failure.ErrorMessage)
+	}
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Interrupt" || call.Method == "SendKeys" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want nothing sent", fs.sp.Calls)
+		}
+	}
+}
+
 func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -219,6 +319,51 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	}
 	if sawInterrupt {
 		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", fs.sp.Calls)
+	}
+}
+
+// TestHandleSessionStopFollowsRuntimeTurnInterruptMode kills a /stop that
+// answers 200 having sent nothing: a runtime that interrupts turns by
+// protocol gets Interrupt (not a dropped Escape) for codex, and a runtime that
+// can interrupt neither way is refused with 501, not reported as stopped.
+func TestHandleSessionStopFollowsRuntimeTurnInterruptMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode          runtime.TurnInterruptMode
+		wantStatus    int
+		wantInterrupt bool
+	}{
+		{mode: runtime.TurnInterruptProtocol, wantStatus: http.StatusOK, wantInterrupt: true},
+		{mode: runtime.TurnInterruptUnsupported, wantStatus: http.StatusNotImplemented},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.sp.TurnInterruptModeValue = tc.mode
+			h := newTestCityHandler(t, fs)
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil))
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus != http.StatusOK && !strings.Contains(rec.Body.String(), "turn_interrupt_unsupported") {
+				t.Fatalf("stop body = %s, want a turn_interrupt_unsupported error", rec.Body.String())
+			}
+			var sawKeys, sawInterrupt bool
+			for _, call := range fs.sp.Calls {
+				sawKeys = sawKeys || call.Method == "SendKeys"
+				sawInterrupt = sawInterrupt || call.Method == "Interrupt" && call.Name == info.SessionName
+			}
+			if sawKeys || sawInterrupt != tc.wantInterrupt {
+				t.Fatalf("calls = %#v, want Interrupt=%v and no SendKeys", fs.sp.Calls, tc.wantInterrupt)
+			}
+		})
 	}
 }
 
@@ -536,5 +681,53 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 		!slices.Contains(fs.enqueuedKeys(), reconcilekey.Session(info.ID)) {
 		t.Fatalf("starts = %d, wake_request = %q, enqueued = %v; want the start left to the controller",
 			fs.sp.CountCalls("Start", info.SessionName)-startsBefore, b.Metadata["wake_request"], fs.enqueuedKeys())
+	}
+}
+
+// TestSessionReadsReportSteer kills a read model whose supports_steer
+// disagrees with Manager.SubmissionCapabilities: steer is the runtime's steer
+// mode combined with the session's provider family, so a protocol runtime
+// steers every family, a runtime that cannot steer steers none, and no family
+// takes a keystroke steer (Codex reads tmux's trailing Escape as cancel).
+func TestSessionReadsReportSteer(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		mode     runtime.SteerMode
+		want     bool
+	}{
+		{provider: "codex", mode: runtime.SteerProtocol, want: true},
+		{provider: "gemini", mode: runtime.SteerProtocol, want: true},
+		{provider: "codex", mode: runtime.SteerKeystroke, want: false},
+		{provider: "claude", mode: runtime.SteerKeystroke, want: false},
+		{provider: "codex", mode: runtime.SteerNone, want: false},
+	} {
+		t.Run(tc.provider+"/"+string(tc.mode), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.sp.SteerModeValue = tc.mode
+			h := newTestCityHandler(t, fs)
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			caps, err := mgr.SubmissionCapabilities(info.ID)
+			if err != nil || caps.SupportsSteer != tc.want {
+				t.Fatalf("Manager.SubmissionCapabilities = %+v, %v; want supports_steer %v", caps, err, tc.want)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("get status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var got sessionResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode get: %v", err)
+			}
+			if got.SubmissionCapabilities.SupportsSteer != tc.want {
+				t.Fatalf("GET supports_steer = %v, want %v", got.SubmissionCapabilities.SupportsSteer, tc.want)
+			}
+		})
 	}
 }

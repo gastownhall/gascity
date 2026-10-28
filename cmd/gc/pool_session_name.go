@@ -71,7 +71,7 @@ type releasedPoolAssignment struct {
 // createPoolSessionBeadWithIdentifiers and the sync lane in session_beads.go),
 // so a live runtime resolves straight back to its bead. Because a failed create
 // is retried under a NEW bead and therefore a new name, the ga-vcjr9 box leak
-// is closed by ordering rather than by name reuse: releaseBeadScopedPoolRuntime
+// is closed by ordering rather than by name reuse: releaseRowOwnedRuntime
 // tears the failed attempt's runtime down before its row may close, and
 // ensurePoolIdentityNotHeldByOpenRow refuses a successor while that row is open.
 func PoolSessionName(template, beadID string) string {
@@ -272,6 +272,8 @@ func releaseOrphanedPoolAssignments(
 	}
 
 	var released []releasedPoolAssignment
+	claimGate := newForeignClaimGate(cfg, sessionStore)
+	defer claimGate.log()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
@@ -306,6 +308,13 @@ func releaseOrphanedPoolAssignments(
 		// it was, so a bead skipped by a liveness gate never reaches it.
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if assignee == "" {
+			// OUTSIDE the foreign-claim gate by construction: an empty assignee
+			// carries no identity to test, so this arm shares the stated
+			// residual with bare session names (see the package comment in
+			// pool_orphan_foreign_identity.go). The damage class the gate
+			// exists for — writing away another city's CLAIM — cannot occur
+			// here, since there is no claim identity to strip; what this arm
+			// touches is unassigned in_progress routing state only.
 			if wb.Status != "in_progress" {
 				continue
 			}
@@ -319,12 +328,20 @@ func releaseOrphanedPoolAssignments(
 			// Ordered ahead of the store-listing probe below deliberately: both
 			// are pure skip-gates with no mutation, so the released set is
 			// identical either way, but this one answers from the in-memory
-			// openSessionInfos snapshot while the next one issues a live
+			// openSessionInfos snapshot while that probe issues a live
 			// per-assignee store listing.
 			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, assignee, template, workStoreRef, storeRefAware) {
 				continue
 			}
-			if memoizedLiveOpenSessionAssignmentExists(sessionStoreLiveAssignee, assignee, sessionStore.Store, assignee) {
+			// The liveness question, behind the foreign-claim gate:
+			// liveOpenSessionAssignmentExists answers from THIS city's stores
+			// only, so for an identity this city neither configures nor has a
+			// session record of, a missing session bead is unobservable rather
+			// than absent and the claim is protected instead of probed. The
+			// positive-evidence checks above can only ever SKIP a release, so
+			// running them first costs nothing and keeps the protected count
+			// reporting exactly the claims the gate saved.
+			if claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -437,7 +454,12 @@ func (l *deadAssigneeKeepLog) log(id, assignee, why string) bool {
 //
 // Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
 // including the live re-read in liveWorkAssignmentStillReleasable — the tick
-// snapshot names candidates but never by itself justifies a release.
+// snapshot names candidates but never by itself justifies a release. The one
+// exception is the foreign-claim gate, which this site does not consult: every
+// identifier it releases under is read off this city's own orphaned session
+// bead or derived from its roster for that bead, so it already carries the
+// provenance that gate looks for (see the package comment in
+// pool_orphan_foreign_identity.go).
 //
 // assignedWorkStores is the index-aligned snapshot of the legs the census read
 // assignedWorkBeads through, and it is how a binding-resident row is released at
@@ -675,17 +697,16 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 // release assignment and metadata in one UpdateIfMatch guarded by that
 // revision. Conflicts are left for a later tick's fresh snapshot.
 // Required-but-unavailable capability refuses the release. Otherwise,
-// including for snapshots listed from the native store (or a CachingStore over
-// it), which carry no revision, the legacy paths below apply:
+// including for snapshots at revision 0 whose live row is not (a store whose
+// lists carry no revision, such as BdStore), the legacy paths below apply:
 //
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee
 //     — the verb's contract) AND the bead carries no active continuation-group
 //     routing vector (see beadHasActiveContinuationGroup). On BdStore this
-//     currently rides raw `bd sql`; when bd grows a native conditional-release
-//     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
-//     verb, fall back to `bd sql` on unsupported) and this caller needs no
-//     change.
+//     runs bd's conditional-release verb (`bd update --if-assignee
+//     --if-status`); a bd without it answers ErrConditionalReleaseUnsupported
+//     and the release falls through to 2.
 //  2. Otherwise releasePoolAssignmentWithRecheck: status, assignee and the
 //     affinity metadata as one write fenced on the snapshot's (status,
 //     assignee), so a claim landing after the snapshot is never clobbered.

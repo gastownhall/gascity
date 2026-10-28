@@ -125,8 +125,9 @@ func TestManagerStartRunsUnderTheRuntimeLease(t *testing.T) {
 	if len(m.sp.starts) != 1 || m.sp.starts[0] == "" || !m.sp.watched[0] {
 		t.Fatalf("lease holders seen at Start = %q (watched %v), want one held, watched lease", m.sp.starts, m.sp.watched)
 	}
-	if meta := m.f.meta(t); meta[RuntimeLeaseHolderKey] != "" || meta[RuntimeLeaseEpochKey] != "1" {
-		t.Fatalf("record after Start = %v, want epoch 1 released", meta)
+	// The create's first start held epoch 1 (createStarted takes the lease).
+	if meta := m.f.meta(t); meta[RuntimeLeaseHolderKey] != "" || meta[RuntimeLeaseEpochKey] != "2" {
+		t.Fatalf("record after Start = %v, want epoch 2 released", meta)
 	}
 }
 
@@ -348,13 +349,13 @@ func TestLeasedClosesRefuseALostLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(info, rollbackClosePatch(), nil, stale); closed || err != nil {
+	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(context.Background(), info, rollbackClosePatch(), nil, stale); closed || err != nil {
 		t.Fatalf("rollback under a lost lease = %v, %v; want refused", closed, err)
 	}
 	if res, err := front.CommitClose(Decide(info, FactsLegacyClose), ClosePatch(leaseT0, "drained"), leaseT0, CommitUnder(stale)); res != CommitLeaseLost || err != nil {
 		t.Fatalf("close under a lost lease = %v, %v; want lease-lost", res, err)
 	}
-	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(info, rollbackClosePatch(), nil, taker); !closed || err != nil {
+	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(context.Background(), info, rollbackClosePatch(), nil, taker); !closed || err != nil {
 		t.Fatalf("rollback under the lease = %v, %v", closed, err)
 	}
 	if b, _ := store.Get(created.ID); b.Metadata[RuntimeLeaseHolderKey] != "" {
@@ -462,14 +463,14 @@ func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	if err := mgr.Start(context.Background(), Actor{Kind: ActorOperator}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("start without a city = %v, want ErrRuntimeLeaseNoCity", err)
 	}
-	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, cmd, hints); !errors.Is(err, ErrNoCallerLease) {
+	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, Incarnation{}, cmd, hints); !errors.Is(err, ErrNoCallerLease) {
 		t.Fatalf("runtime-only start without a lease = %v, want ErrNoCallerLease", err)
 	}
 	if m.sp.IsRunning(m.info.SessionName) {
 		t.Fatal("the refused runtime-only start started the runtime")
 	}
 	held := m.hold(t)
-	err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController, Lease: held}, m.info.ID, cmd, hints)
+	err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController, Lease: held}, m.info.ID, mintUnder(t, mgr, held, m.info.ID), cmd, hints)
 	held.Release()
 	if err != nil {
 		t.Fatalf("runtime-only start under its caller's lease: %v", err)

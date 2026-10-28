@@ -19,7 +19,9 @@ import (
 const processSnapshotTimeout = 10 * time.Second
 
 // ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
+// GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
+// with any GC_SESSION_ID reparented to launchd ([OrphanCandidate]), as on
+// Linux. Darwin reads one ps snapshot either way.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
@@ -28,7 +30,22 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return withStartIdentities(scanRecordsBySessionID(records, id)), nil
+	roots := scanRecordsBySessionID(records, id)
+	if id == "" {
+		roots = orphanCandidates(roots, 0)
+	}
+	return withStartIdentities(roots), nil
+}
+
+// orphanCandidates keeps the roots reparented to init or subreaperPID.
+func orphanCandidates(roots []runtime.LiveRuntime, subreaperPID int) []runtime.LiveRuntime {
+	out := roots[:0]
+	for _, r := range roots {
+		if OrphanCandidate(r.PPID, subreaperPID) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // withStartIdentities fills each root's StartIdentity and StartedAt from the

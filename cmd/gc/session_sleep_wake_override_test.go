@@ -73,6 +73,35 @@ func TestExplicitWakePendingInfo(t *testing.T) {
 	}
 }
 
+// TestExplicitWakePendingInfoMatchesSessionRule keeps the reconciler's
+// pending-explicit-wake rule in step with session.ExplicitWakeUnserved, the
+// rule RequestWakeUnlessHeld coalesces on: on every row that is not up
+// (active/awake counts as served, a clause only the reconciler applies) the
+// two agree. A drift would let a sender coalesce onto a wake the reconciler
+// already treats as served, and lose it.
+func TestExplicitWakePendingInfoMatchesSessionRule(t *testing.T) {
+	requests := []string{"", "explicit", " explicit ", "work", "pending-create"}
+	stamps := []string{"", "2026-09-22T20:00:00Z", " 2026-09-22T20:00:00Z ", "2026-09-22T22:00:00Z", " 2026-09-22T22:00:00Z ", "yesterday"}
+	states := []string{"", "asleep", "drained", "suspended", "creating", "active", "awake"}
+	for _, state := range states {
+		for _, request := range requests {
+			for _, requestedAt := range stamps {
+				for _, sleptAt := range stamps {
+					info := sessionpkg.Info{MetadataState: state, WakeRequest: request, WakeRequestedAt: requestedAt, SleptAt: sleptAt}
+					want := sessionpkg.ExplicitWakeUnserved(info)
+					if state == "active" || state == "awake" {
+						want = false
+					}
+					if got := explicitWakePendingInfo(info); got != want {
+						t.Fatalf("explicitWakePendingInfo(state=%q wake_request=%q wake_requested_at=%q slept_at=%q) = %v, want %v (session.ExplicitWakeUnserved and the active/awake clause)",
+							state, request, requestedAt, sleptAt, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestWaiterWithWorkWakesWhenItsWaitIsReady: a seat holding claimed work
 // runs `gc session wait --sleep` under an enabled interactive sleep policy;
 // the drain-ack completes it as a sleep (the assigned work), which keeps the

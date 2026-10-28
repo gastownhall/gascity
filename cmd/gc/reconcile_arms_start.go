@@ -3,6 +3,7 @@ package main
 import (
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -19,6 +20,9 @@ import (
 const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
+	decideStaleCreate       = "stale-create-exit"              // v5 S7: a pending create's StaleSelf runtime
+	decideRollbackHeld      = "rollback-held:occupant-corpse"  // v5.10i: a foreign corpse inside the lease
+	decideRollbackLive      = "rollback-held:live-incarnation" // #2081: another incarnation of this session runs
 	decideStart             = "start"
 	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
@@ -27,6 +31,7 @@ const (
 	decideStartQuarantine   = "start-held:quarantine"              // SESS-606
 	decideStartEpisode      = "start-held:startup-health"          // SESS-607, #46
 	decideStartProviderRed  = "start-held:provider-red"            // SESS-610, GUAR-034
+	decideStartHeld         = "start-held:hold"                    // v5.9u: a hold S1's PreWake refuses
 )
 
 // armAdopt is A10's adopt: an uncommitted intent (a creating row) whose own
@@ -46,23 +51,114 @@ func armAdopt(r *rowFacts) (intent, bool) {
 // armRollback is A10's rollback (v5 §4 A10, C3): a pending create the
 // allocation reads past its never-started deadline with nothing running
 // (its rollback candidate), undesired (a Drain row, C5b-2) with its runtime
-// gone or dead, or under a name another row's runtime holds. The effect reads
-// the runtime fresh and attributes it (C3, O2, C8.2(a)).
+// gone or dead, or under a name another row's runtime holds: alive or a
+// zombie, or a corpse once the lease lapsed (v5.10i). The effect reads the
+// runtime fresh and attributes it (C3, O2, C8.2(a)).
+//
+// Its StaleSelf exit (v5 S7): a pending create, which S4 never re-keys,
+// whose live runtime reads StaleSelf. At the row's generation it is the
+// row's own runtime: the effect stops it, then a configured named row the
+// allocation wants awake is kept for A18 to relaunch on the same bead
+// (Relaunch) and any other is rolled back. An older or newer epoch is
+// another incarnation of the row's session (#2081): the row holds under any
+// desire while that session has work in flight (sessionWorking), and once it
+// has none an older one is the exit's like any StaleSelf occupant
+// (Workless).
 func armRollback(r *rowFacts) (intent, bool) {
-	e := r.entry
-	if !r.row.Info.PendingCreateClaim || e == nil {
+	e, info := r.entry, r.row.Info
+	if !info.PendingCreateClaim || e == nil {
 		return intent{}, false
 	}
+	reason, relaunch, occupant := decideRollback, false, false
+	working := r.sessionWorking()
 	switch {
+	case working && e.Liveness == livenessAlive && liveIncarnation(info, r.w.Observed[r.k].Identity):
+		return intent{Reason: decideRollbackLive}, true // its work runs there: never stopped by the rollback
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
+	case e.Liveness == livenessOccupied && r.occupantCorpseInLease():
+		r.after(requeueUntil(r.w.Now, r.pendingCreateLeaseEnd())) // a pass when the lease lapses
+		return intent{Reason: decideRollbackHeld}, true           // the effect would find the occupant gone and the lease holding it (F1)
 	case e.Liveness == livenessOccupied:
+		occupant = true
+	case e.Liveness == livenessAlive && compareIdentity(info, r.w.Observed[r.k].Identity) == identityStaleSelf:
+		reason, occupant = decideStaleCreate, true
+		relaunch = ownRuntime(identityStaleSelf, info, r.w.Observed[r.k].Identity) && e.Desired == desireWake && r.configuredNamed()
 	default:
 		return intent{}, false
 	}
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRollback, Reason: decideRollback, Basis: basis}, true
+	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch, Occupant: occupant, Workless: !working}, true
+}
+
+// sessionWorking reports in-progress work assigned to the row's session,
+// the in-flight work of whichever incarnation of it runs (#2081), or a read
+// that cannot rule it out: a partial pass or a partial assigned-work read.
+// Ending the hold ends a live runtime, so the work is matched as a kill gate
+// matches it, under the seat's RefuseScope (O4, refuseScope), not its
+// ReleaseScope alone. The pass's demand read is cached, so this is only the
+// hold's pre-filter: a Workless rollback's effect reads the work again,
+// live, before it stops or closes over a live incarnation (rollbackNeeds). Open work is no incarnation's in
+// flight: one the row no longer names cannot claim it (gc hook --claim
+// refuses its token), and the rollback releases it to the session's next
+// incarnation.
+func (r *rowFacts) sessionWorking() bool {
+	return r.partial || r.w.Demand.StorePartial || r.inProgressWorkAssigned(refuseScope(r.row.Info, worldCfg(r.w)))
+}
+
+// occupantCorpseInLease reports a pending create whose name another
+// session's corpse holds, inside its lease (CONTRACT v5.10i): the rollback's
+// own read takes a corpse for an occupant that left (occupantStays), so
+// inside the lease it would refuse redecided each pass. The row holds until
+// the lease lapses, or the occupant lives again (alive or a zombie).
+func (r *rowFacts) occupantCorpseInLease() bool {
+	info := r.row.Info
+	if readRuntimeName(r.w.Obs, info.SessionName, r.w.Now, r.w.ObsMaxAge).state != nameCorpse {
+		return false
+	}
+	var cfg *config.City
+	if r.w.Env != nil {
+		cfg = r.w.Env.Cfg
+	}
+	return !pendingCreateAnchorAhead(info, r.w.Now) && pendingCreateSessionStillLeasedAt(info, cfg, r.w.Now)
+}
+
+// pendingCreateLeaseEnd is when the row's pending-create lease lapses, as
+// pendingCreateLeaseActive decides it: a started create's lease runs while
+// its start is in flight (last_woke_at plus the startup timeout and the
+// stale-key and settle allowances) or its attempt is fresh (the anchor,
+// pending_create_started_at or the row's creation, plus
+// staleCreatingStateTimeout), whichever ends later; a never-started one's
+// runs pendingCreateNeverStartedTimeout past its anchor.
+func (r *rowFacts) pendingCreateLeaseEnd() time.Time {
+	info := r.row.Info
+	anchor := info.CreatedAt
+	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
+		anchor = started
+	}
+	woke, ok := parseRFC3339Metadata(strings.TrimSpace(info.LastWokeAt))
+	if !ok {
+		return anchor.Add(pendingCreateNeverStartedTimeout).Add(time.Second) // expired only strictly after
+	}
+	startup := time.Minute
+	if r.w.Env != nil && r.w.Env.Cfg != nil && r.w.Env.Cfg.Session.StartupTimeoutDuration() > 0 {
+		startup = r.w.Env.Cfg.Session.StartupTimeoutDuration()
+	}
+	inFlight := woke.Add(startup + staleKeyDetectDelay + 5*time.Second)
+	if fresh := anchor.Add(staleCreatingStateTimeout); fresh.After(inFlight) {
+		return fresh
+	}
+	return inFlight
+}
+
+// configuredNamed reports a configured named row with its spec, which a
+// failed pending create keeps (S3, S7).
+func (r *rowFacts) configuredNamed() bool {
+	if r.w.Env == nil || r.w.Env.Cfg == nil {
+		return false
+	}
+	return configuredNamedSessionBeadHasSpecInfo(r.row.Info, r.w.Env.Cfg, config.EffectiveCityName(r.w.Env.Cfg, ""))
 }
 
 // armHeartbeatRespawn is A17 (SESS-602; v5.9i): a row the allocation does
@@ -105,7 +201,9 @@ func (r *rowFacts) restart() (intent, bool) {
 // startIntent is a bringUp for the row, ranked oldest wake first
 // (START-009), unless a gate holds it, in legacy's order: failed-create, a
 // quarantine, the startup-health episode's quarantine (#46), a red provider
-// (unknown health fails open). A timed hold asks for a pass at its end. The
+// (unknown health fails open), and any hold the PreWake would refuse
+// (preWakeRefuses, CONTRACT v5.9u), so no start is admitted only to be
+// refused `held` pass after pass. A timed hold asks for a pass at its end. The
 // endpoint breaker is admission's (the intent's Endpoint). A committed row
 // whose runtime is gone carries A6's dead-runtime patch, so a productive
 // death restarts in the same pass, as legacy's does; one that accrues a
@@ -118,12 +216,12 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	var class session.DispositionPatch
 	if committed(info) && r.gone() {
 		var accrued bool
-		if patch, class, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
+		if patch, class, accrued, _ = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
 		info, kept = foldInfo(foldInfo(info, patch), class.Fold()), foldClass(patch, class)
 		if r.asleepStranded() {
-			strandedPatch, strandedClass, _ := deadRuntimePatch(r, false)
+			strandedPatch, strandedClass, _, _ := deadRuntimePatch(r, false)
 			kept = foldClass(strandedPatch, strandedClass)
 		}
 	}
@@ -148,6 +246,9 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 		if healthy, present := r.w.ProviderHealth.check(p.Name); present && !healthy {
 			return intent{Reason: decideStartProviderRed}, true
 		}
+	}
+	if preWakeRefuses(session.DispositionOfInfo(info), reason, now) {
+		return intent{Reason: decideStartHeld}, true // A6's timer heals ask for a pass when a timed hold ends
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
@@ -185,9 +286,9 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal
 	default: // a stranded seat records its death alone and stays committed, so it is recorded once
-		if accrual, class, accrued := deadRuntimePatch(r, false); accrued {
+		if accrual, class, accrued, ev := deadRuntimePatch(r, false); accrued {
 			recorded := heal
-			recorded.Patch, recorded.Class = accrual, class
+			recorded.Patch, recorded.Class, recorded.Event = accrual, class, ev
 			it.Heal = &recorded
 		}
 	}

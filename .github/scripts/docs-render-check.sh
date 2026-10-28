@@ -54,15 +54,19 @@ extract_page_links() {
 # Alternative simpler extraction: just lines with the broken-links marker.
 parse_mint_broken_links() {
     local file="$1"
-    # mint outputs lines like: "  ✗  /path/to/page" or "  ✗  page-slug"
-    # or with indentation. Grab any token that looks like a link (starts with /).
-    grep -E '✗|broken|BROKEN|error|ERROR' "$file" 2>/dev/null \
+    # mint outputs lines like: "  ✗  /path/to/page", "  ⎿  /path/to/page"
+    # (mint 4.2) or with indentation. Grab any token that looks like a link
+    # (starts with /).
+    grep -E '✗|⎿|broken|BROKEN|error|ERROR' "$file" 2>/dev/null \
         | grep -oE '[/][^ )]+' \
         | grep -vE "$ASSET_EXTS" \
         | sort -u || true
 }
 
 # --- run_mint <docs-root> <output-file> → exit code -------------------------
+# Both trees are checked from their docs/ directory, where docs.json lives.
+# Running mint from the repository root makes it scan every Markdown file in
+# the repository, so the HEAD and BASE runs would see different trees.
 run_mint() {
     local root="$1"
     local out="$2"
@@ -81,7 +85,7 @@ BASE_TREE="$WORK_TMP/base-docs"
 
 # --- HEAD check --------------------------------------------------------------
 HEAD_EXIT=0
-run_mint "." "$HEAD_OUT" || HEAD_EXIT=$?
+run_mint "$DOCS_DIR" "$HEAD_OUT" || HEAD_EXIT=$?
 
 if [[ $HEAD_EXIT -eq 0 ]]; then
     echo "docs-render-check: no broken links in HEAD — PASS" >&2
@@ -101,7 +105,7 @@ fi
 mkdir -p "$BASE_TREE"
 if git archive "$BASE_REF" -- "$DOCS_DIR" 2>/dev/null | tar -x -C "$BASE_TREE"; then
     BASE_EXIT=0
-    run_mint "$BASE_TREE" "$BASE_OUT" || BASE_EXIT=$?
+    run_mint "$BASE_TREE/$DOCS_DIR" "$BASE_OUT" || BASE_EXIT=$?
     BASE_LINKS="$WORK_TMP/base-links.txt"
     parse_mint_broken_links "$BASE_OUT" | sort -u >"$BASE_LINKS"
     # Net-new = in HEAD but NOT in BASE.

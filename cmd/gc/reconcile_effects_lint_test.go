@@ -32,10 +32,12 @@ import (
 //   - the start-commit whose premise admits state=asleep (v5 S2);
 //   - the session.Store creates, wake, #46 episode save and wait-bead
 //     writers;
-//   - the runtime stops that skip the destructive fence (v5 O2).
+//   - the runtime stops that skip the destructive fence (v5 O2);
+//   - the operator's content hold writers and its batch item (OJ-19), which
+//     no effect or step writes.
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
-	"Sleep", "SetWaitHold", "RecordCurrentBead",
+	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CommitClose",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder",
@@ -46,6 +48,8 @@ var effectBannedMethods = []string{
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
+	"SetContentHold", "ContentHoldItem", "ClearContentHold",
+	"MintIncarnation", "ConfirmIncarnation", // the Manager's and legacy's mint: a v2 effect mints in its own CAS section
 	"NewStore", // session.NewStore: the raw session front door
 }
 
@@ -81,8 +85,16 @@ var effectLintAllowed = map[string][]string{
 // (fenceDestructive, stopFenced) or a SessionObjectKiller, and only the
 // start effect starts a runtime. Every verb takes the runtime name, so a
 // call with no arguments (a timer's Stop) is not one; a selector that is not
-// called (a field such as Start) is not one either.
-var effectProviderVerbs = []string{"Start", "Stop", "SetMeta", "Nudge", "Interrupt"}
+// called (a field such as Start) is not one either, nor is a package
+// function (session.KillPendingPatch). Any method named Kill* is one too
+// (effectProviderVerb; STALE-READ M4).
+var effectProviderVerbs = []string{"Start", "Stop", "SetMeta", "Nudge", "Interrupt", "KillCorpseObject", "KillZombieObject", "Relaunch", "ClearScrollback"}
+
+// effectProviderVerb reports whether a called method name is a provider
+// verb: one listed, or any Kill*.
+func effectProviderVerb(name string) bool {
+	return slices.Contains(effectProviderVerbs, name) || strings.HasPrefix(name, "Kill")
+}
 
 // effectProviderAllowed are the functions ("Recv.Name" for a method), in
 // effect and step files alike, whose body may call the verbs listed. The
@@ -92,6 +104,13 @@ var effectProviderVerbs = []string{"Start", "Stop", "SetMeta", "Nudge", "Interru
 var effectProviderAllowed = map[string][]string{
 	"startLaunch": {"Start"}, // the start effect's launch Call: the FreshOnly provider Start (C5a1)
 	"stopFenced":  {"Stop"},  // the fenced leaf's Stop, then C8.8
+	// The corpse and zombie kills: by exact session object (re-checked
+	// server-side) on the read's leaf, L3 re-read just before (v5 F2, D3).
+	"killCorpse":   {"KillCorpseObject", "KillZombieObject"},
+	"killDead":     {"KillCorpseObject", "KillZombieObject"},
+	"removeCorpse": {"KillCorpseObject"},
+	"relaunchCall": {"Relaunch"},        // under the lease record, L3 re-read just before (C8.7)
+	"stopCall":     {"ClearScrollback"}, // legacy's best-effort clear after a fenced idle stop proceeded
 }
 
 // effectTxOnly are the effect mechanics only the transaction
@@ -122,6 +141,15 @@ func lintEffectSource(t *testing.T, path string, src any) []string {
 	}
 	steps := strings.HasPrefix(filepath.Base(path), "reconcile_steps_")
 	tx := filepath.Base(path) == "reconcile_effect_tx.go"
+	imports := map[string]bool{} // the file's package names: a package function is no provider verb
+	for _, imp := range file.Imports {
+		name := strings.Trim(imp.Path.Value, `"`)
+		name = name[strings.LastIndex(name, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		imports[name] = true
+	}
 	var out []string
 	for _, decl := range file.Decls {
 		var allowed, verbs, mechanics []string
@@ -135,8 +163,8 @@ func lintEffectSource(t *testing.T, path string, src any) []string {
 			var name string
 			switch n := n.(type) {
 			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && len(n.Args) > 0 &&
-					slices.Contains(effectProviderVerbs, sel.Sel.Name) && !slices.Contains(verbs, sel.Sel.Name) {
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && len(n.Args) > 0 && !isPackageSelector(sel, imports) &&
+					effectProviderVerb(sel.Sel.Name) && !slices.Contains(verbs, sel.Sel.Name) {
 					out = append(out, fmt.Sprintf("%s: provider %s", fset.Position(n.Pos()), sel.Sel.Name))
 				}
 			case *ast.SelectorExpr:
@@ -160,6 +188,12 @@ func lintEffectSource(t *testing.T, path string, src any) []string {
 	return out
 }
 
+// isPackageSelector reports a selector on an imported package's name.
+func isPackageSelector(sel *ast.SelectorExpr, imports map[string]bool) bool {
+	id, ok := sel.X.(*ast.Ident)
+	return ok && imports[id.Name]
+}
+
 // funcDeclName is fn's name, "Recv.Name" for a method.
 func funcDeclName(fn *ast.FuncDecl) string {
 	if fn.Recv == nil || len(fn.Recv.List) == 0 {
@@ -175,11 +209,13 @@ func funcDeclName(fn *ast.FuncDecl) string {
 	return fn.Name.Name
 }
 
-// effectLintFiles are the files the lint covers.
+// effectLintFiles are the files the lint covers: the effects, the steps,
+// and the session fence, where the destructive calls live (stopFenced;
+// STALE-READ M4).
 func effectLintFiles(t *testing.T) []string {
 	t.Helper()
 	var files []string
-	for _, pattern := range []string{"reconcile_effect_*.go", "reconcile_steps_*.go"} {
+	for _, pattern := range []string{"reconcile_effect_*.go", "reconcile_steps_*.go", "reconcile_session_fence.go"} {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)
@@ -307,6 +343,16 @@ func TestEffectLintBansRawProviderCalls(t *testing.T) {
 			t.Errorf("%s: %d findings %q, want %d (each verb once outside the allowlist, and each verb an allowlisted function is not allowed)", path, len(got), got, want)
 		}
 	}
+	// STALE-READ M4: any Kill* method is a verb, a package's Kill* function
+	// is none, and the session fence, where the destructive calls live, is
+	// linted.
+	kills := "package main\n\nimport \"github.com/gastownhall/gascity/internal/session\"\n\nfunc seeded(sp provider) {\n\t_ = sp.KillTheNextThing(name)\n\t_ = session.KillPendingPatch(now)\n}\n"
+	if got := lintEffectSource(t, "reconcile_effect_seeded.go", kills); len(got) != 1 || !strings.HasSuffix(got[0], ": provider KillTheNextThing") {
+		t.Errorf("Kill* findings %q, want the method alone", got)
+	}
+	if !slices.Contains(effectLintFiles(t), "reconcile_session_fence.go") {
+		t.Error("the session fence is not linted")
+	}
 }
 
 // Kills an effect or step that assembles its own mechanics again (the
@@ -364,5 +410,8 @@ func TestSealedZeroValuesProveNothing(t *testing.T) {
 	}
 	if (completeCensus{}).Closed(rowKey{Leg: "sessions", ID: "gc-1"}) {
 		t.Error("zero census closed a row")
+	}
+	if (finalizeWork{}).free {
+		t.Error("zero finalizeWork proved the seat free")
 	}
 }

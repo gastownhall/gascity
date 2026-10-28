@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -152,6 +154,7 @@ var (
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
+	supervisorParentPID                                 = pidutil.ParentPID
 	supervisorGetpgid                                   = syscall.Getpgid
 	supervisorGetpgrp                                   = syscall.Getpgrp
 	supervisorKill                                      = syscall.Kill
@@ -622,6 +625,10 @@ StandardOutput=journal).`,
 var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
 }
@@ -668,6 +675,10 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 // starting — means: success for a caller that only needs one running, or the
 // operator-facing "already running" failure.
 func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -997,18 +1008,27 @@ func supervisorPreForkOwnershipWarning() string {
 // supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
 // gc's own systemd user unit, for `gc supervisor status` and the doctor
 // check. Status is one of:
-//   - "owned": the unit is installed and active, and its MainPID equals the
-//     live supervisor PID — systemd's Restart=always is protecting it.
-//   - "outside_unit": the unit is installed but does not own the live PID
-//     (inactive, or a MainPID mismatch) — the ga-s434i0 defect shape.
+//   - "owned": the unit is installed and active, and the live supervisor PID
+//     is its MainPID or a descendant of it (a wrapper such as sg can be
+//     MainPID with gc as its child) — systemd's Restart=always is protecting
+//     it.
+//   - "outside_unit": the unit is installed but the live PID is neither its
+//     MainPID nor a descendant of it: the unit is inactive, the supervisor was
+//     forked from a tmux pane, or its parent exited and it was reparented —
+//     the ga-s434i0 defect shape. Sitting in the unit's cgroup does not count,
+//     because KillMode=process leaves such processes behind in it.
 //   - "no_unit": no unit is installed; the supervisor is intentionally
 //     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
 //     `gc supervisor install`).
+//
+// ProbeErr is set when the live PID's ancestry could not be read, so an
+// "outside_unit" result is unverified rather than proven.
 type supervisorUnitOwnershipStatus struct {
 	Status     string
 	Unit       string
 	UnitActive bool
 	UnitPID    int
+	ProbeErr   error
 }
 
 func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus {
@@ -1023,10 +1043,42 @@ func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus
 	if !ok {
 		pid = 0
 	}
-	if ok && pid != 0 && pid == livePID {
+	owned, err := supervisorProcessDescendsFrom(livePID, pid)
+	if owned {
 		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
 	}
-	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid}
+	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: err}
+}
+
+// supervisorUnitAncestryMaxHops bounds the parent walk in
+// supervisorProcessDescendsFrom. A wrapper ExecStart puts gc one or two hops
+// below MainPID; the bound only guards against malformed /proc data.
+const supervisorUnitAncestryMaxHops = 8
+
+// supervisorProcessDescendsFrom reports whether pid is the ancestor itself or
+// descends from it within supervisorUnitAncestryMaxHops parent hops. A
+// process whose parent exited was reparented to init or to a subreaper such
+// as systemd --user, so it no longer descends from the MainPID that started
+// it. The walk stops at PID 1, and an ancestor of 1 or less never matches
+// because it cannot be a unit's MainPID. A failed parent read ends the walk
+// and is returned, because the answer is then unknown rather than false.
+func supervisorProcessDescendsFrom(pid, ancestor int) (bool, error) {
+	if pid <= 0 || ancestor <= 1 {
+		return false, nil
+	}
+	for hops := 0; ; hops++ {
+		if pid == ancestor {
+			return true, nil
+		}
+		if pid <= 1 || hops == supervisorUnitAncestryMaxHops {
+			return false, nil
+		}
+		parent, err := supervisorParentPID(pid)
+		if err != nil {
+			return false, fmt.Errorf("reading the parent of PID %d: %w", pid, err)
+		}
+		pid = parent
+	}
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
@@ -1234,6 +1286,57 @@ func supervisorSameBinary(a, b string) bool {
 		return os.SameFile(infoA, infoB)
 	}
 	return false
+}
+
+// supervisorInstallBinaryGuardResult classifies the gc binary an existing
+// service file references relative to the binary running the install.
+type supervisorInstallBinaryGuardResult int
+
+const (
+	// supervisorInstallBinaryAllowed: no binary recorded, or the same binary.
+	supervisorInstallBinaryAllowed supervisorInstallBinaryGuardResult = iota
+	// supervisorInstallBinaryDifferent: a different gc binary that still
+	// exists on disk; overwriting it requires --force.
+	supervisorInstallBinaryDifferent
+	// supervisorInstallBinaryMissing: a gc binary that no longer exists
+	// (uninstalled, unlinked, or upgraded away). The service manager can no
+	// longer start it, so the file is replaceable without --force.
+	supervisorInstallBinaryMissing
+)
+
+// supervisorInstallBinaryGuard classifies existingBinary, the gc path an
+// installed service file launches, against currentBinary. A dangling symlink
+// counts as missing because the service manager cannot exec it either.
+func supervisorInstallBinaryGuard(existingBinary, currentBinary string) supervisorInstallBinaryGuardResult {
+	if existingBinary == "" || supervisorSameBinary(existingBinary, currentBinary) {
+		return supervisorInstallBinaryAllowed
+	}
+	if _, err := os.Stat(existingBinary); errors.Is(err, fs.ErrNotExist) {
+		return supervisorInstallBinaryMissing
+	}
+	return supervisorInstallBinaryDifferent
+}
+
+// checkSupervisorInstallBinaryGuard applies supervisorInstallBinaryGuard for
+// a non-forced install of the service file at path (kind is "plist" or
+// "unit"). It reports false after explaining the refusal on stderr, and
+// notes on stdout when a file pointing at a removed binary is being replaced.
+func checkSupervisorInstallBinaryGuard(kind, path, existingBinary, currentBinary string, stdout, stderr io.Writer) bool {
+	switch supervisorInstallBinaryGuard(existingBinary, currentBinary) {
+	case supervisorInstallBinaryDifferent:
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"gc supervisor install: existing %s %q references binary %q but the current gc binary resolves to %q; "+
+				"refusing to overwrite a %s installed from a different binary. "+
+				"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
+				"To override, pass --force.\n",
+			kind, path, existingBinary, currentBinary, kind)
+		return false
+	case supervisorInstallBinaryMissing:
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
+			"gc supervisor install: existing %s %q references binary %q, which no longer exists; replacing it with %q.\n",
+			kind, path, existingBinary, currentBinary)
+	}
+	return true
 }
 
 func waitForSupervisorPID() int {
@@ -1482,6 +1585,10 @@ starts on login.`,
 }
 
 func doSupervisorInstall(stdout, stderr io.Writer) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -2387,16 +2494,9 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorLaunchdPlistGCPath(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing plist %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a plist installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
+	if hadCurrent && !supervisorInstallForce &&
+		!checkSupervisorInstallBinaryGuard("plist", path, supervisorLaunchdPlistGCPath(string(existing)), data.GCPath, stdout, stderr) {
+		return 1
 	}
 	if contentUnchanged && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -2530,16 +2630,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorSystemdExecStartBinary(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing unit %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a unit installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
+	if hadCurrent && !supervisorInstallForce &&
+		!checkSupervisorInstallBinaryGuard("unit", path, supervisorSystemdExecStartBinary(string(existing)), data.GCPath, stdout, stderr) {
+		return 1
 	}
 
 	// Bail out before we touch the unit file when there is no per-user

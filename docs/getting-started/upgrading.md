@@ -9,7 +9,7 @@ databases that the new `bd` may need to migrate. This page walks through an
 upgrade of a running city, using a city at `~/my-city` with one rig,
 `my-project`, at `~/my-project`.
 
-Gas City 1.5 requires Beads (`bd`) 1.3.1. The Homebrew `gascity` formula
+Gas City 1.5 requires Beads (`bd`) 1.3.1; Gas City 1.5.1 and later are tested with 1.3.2. The Homebrew `gascity` formula
 depends on `beads`, so `brew upgrade gascity` upgrades both.
 
 ## Check what you are upgrading from
@@ -24,7 +24,7 @@ been running:
 
 | Coming from | `bd` it ran | Beads schema step |
 |---|---|---|
-| Gas City 1.4.2 | 1.3.0 | None. Beads 1.3.1 keeps the 1.3.0 schema. |
+| Gas City 1.4.2 | 1.3.0 | None. Beads 1.3.1 and 1.3.2 keep the 1.3.0 schema. |
 | Gas City 1.4.1 or earlier | 1.2.2 or older | Run `migrate schema` once for the city and once for each rig (see [Migrate the Beads schema](#migrate-the-beads-schema)). |
 
 If you are not sure, run the migration step anyway. On a database that is
@@ -74,11 +74,11 @@ previous `gc` and `bd`.
 brew update
 brew upgrade gascity        # also upgrades beads
 gc version                  # 1.5.0 or newer
-bd version                  # 1.3.1
+bd version                  # 1.3.2
 ```
 
-With a direct download, install `bd` 1.3.1 from the
-[Beads release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1)
+With a direct download, install `bd` 1.3.2 from the
+[Beads release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2)
 as well as the new `gc`. Upgrade every `bd` that reaches these databases,
 including copies elsewhere on your `PATH` (`which -a bd`). An older `bd` cannot
 open a migrated database.

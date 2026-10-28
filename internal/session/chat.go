@@ -243,6 +243,25 @@ func freshStartCommandFromMetadata(metadata map[string]string, fallback string) 
 	return fallback
 }
 
+// startFailure labels a failed provider Start: "resuming session" when cmd
+// carries a resume shape (the bead's resume flag and key, a generated resume
+// flag with any key, or the bead's expanded resume_command), otherwise
+// "starting session". The shape tests are the exact no-op strips that
+// retryFreshStartAfterStaleKey relies on.
+func startFailure(cmd string, meta map[string]string, err error) error {
+	resumeFlag := meta["resume_flag"]
+	sessionKey := meta["session_key"]
+	resumed := stripResumeFlag(cmd, resumeFlag, sessionKey) != cmd ||
+		stripResumeFlagArg(cmd, resumeFlag, meta["resume_style"]) != cmd
+	if rc := meta["resume_command"]; !resumed && rc != "" && sessionKey != "" {
+		resumed = cmd == strings.ReplaceAll(rc, "{{.SessionKey}}", sessionKey)
+	}
+	if resumed {
+		return fmt.Errorf("resuming session: %w", err)
+	}
+	return fmt.Errorf("starting session: %w", err)
+}
+
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
 		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
@@ -272,6 +291,70 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	return nil
 }
 
+// retainsCommittedConversation reports whether a failed resume must keep the
+// conversation rather than start fresh: PreserveConversationOnRuntimeLoss
+// retains the row, and its conversation is committed (a provider key and the
+// configuration it started under). A first start whose key was only
+// preallocated, an always-named one included, has nothing to keep and takes
+// the stale-key recovery.
+func retainsCommittedConversation(info Info) bool {
+	return PreserveConversationOnRuntimeLoss(info) &&
+		strings.TrimSpace(info.SessionKey) != "" && strings.TrimSpace(info.StartedConfigHash) != ""
+}
+
+// exitedSessionPeekLines bounds the last pane output reported for a session
+// that started and then exited.
+const exitedSessionPeekLines = 80
+
+// exitedAfterStart is the startup death of a session that started and then
+// exited, with its last pane output redacted against env, the launch's
+// environment, as the runtime's own startup-failure capture is. A failed read
+// is reported, not wrapped: the session still exited, whatever the read ran
+// into.
+func (m *Manager) exitedAfterStart(sessName string, env map[string]string) error {
+	pane, err := m.sp.Peek(sessName, exitedSessionPeekLines)
+	pane = strings.TrimSpace(runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(env)))
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: session %q exited after it started; reading its last pane output: %s", runtime.ErrSessionDiedDuringStartup, sessName, err.Error())
+	case pane == "":
+		return fmt.Errorf("%w: session %q exited after it started", runtime.ErrSessionDiedDuringStartup, sessName)
+	}
+	return fmt.Errorf("%w: session %q exited after it started; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, sessName, pane)
+}
+
+// retainFailedResume keeps a committed conversation whose resume launch died,
+// because a dead runtime is not consent to reset it; the same policy fences
+// advisory healing. The error wraps the failed start's own error, its last pane
+// output included, so the caller can still tell a refused resume from any other
+// death, and names the explicit reset that starts the session fresh. startErr
+// is nil when the launch started and then exited; the pane is read before the
+// route is released, and env is the launch's environment it is redacted
+// against.
+func (m *Manager) retainFailedResume(id, sessName string, env map[string]string, startErr error, unroute func()) error {
+	if startErr == nil {
+		startErr = m.exitedAfterStart(sessName, env)
+	}
+	if unroute != nil {
+		unroute()
+	}
+	return fmt.Errorf("session %s: %w after failed resume; run `gc session reset %s` to start fresh: %w", id, ErrConversationRetained, id, startErr)
+}
+
+// retryFreshStartAfterStaleKey recovers a resume that died during startup by
+// relaunching the session fresh. startErr is the failed Start's error, nil
+// when the launch started and then exited. A Manager start's relaunch first
+// reads the runtime fresh under lease (leasedLiveness), before it clears the
+// key: a read that cannot answer refuses it, the key kept and nothing
+// minted, and a runtime up with its agent alive is the start's own launch,
+// which stands under inc with the key kept and nothing relaunched; a pane
+// whose agent died is relaunched over. The relaunch is a new process, so it
+// mints again under lease over inc, the failed start's incarnation, after
+// the orphan kill, and runs under the new one, which it leaves in inc once
+// the Start succeeds; a failed Start withdraws it. A nil inc relaunches under
+// the failed start's identity with no read: the legacy runtime-only start,
+// whose caller commits against the incarnation its PreWake minted, so a mint
+// under it would make its own commit stale (deleted with legacy at P6).
 func (m *Manager) retryFreshStartAfterStaleKey(
 	ctx context.Context,
 	id string,
@@ -279,8 +362,14 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	sessName,
 	resumeCommand string,
 	cfg runtime.Config,
+	startErr error,
 	unroute func(),
+	lease *RuntimeLease,
+	inc *Incarnation,
 ) (bool, error) {
+	if retainsCommittedConversation(infoFromPersistedBead(*b)) {
+		return false, m.retainFailedResume(id, sessName, cfg.Env, startErr, unroute)
+	}
 	// An empty session_key does not mean there is nothing to recover. The
 	// command can still carry a generated resume shape, because it was built
 	// while the key was present and the key was cleared before this start ran.
@@ -309,9 +398,10 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		freshCmd = stripSessionIDFlagArg(freshCmd, sessionIDFlag)
 	}
 	// An empty resume_flag means the command was never resume-capable
-	// (e.g. a named-always session whose start command carries no
-	// --resume-style flag). stripResumeFlag is intentionally a no-op in
-	// that case, and the command is already a valid fresh start.
+	// (e.g. a never-committed always-named session whose start command
+	// carries no --resume-style flag; a committed one is retained above).
+	// stripResumeFlag is intentionally a no-op in that case, and the command
+	// is already a valid fresh start.
 	//
 	// A non-empty resume_flag whose keyed strip was a no-op means the
 	// session_key embedded in resumeCommand diverged from the bead's
@@ -352,6 +442,22 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if sessionKey == "" && freshCmd == resumeCommand {
 		return false, nil
 	}
+	// Under the lease, a runtime up with its agent alive is the start's own
+	// launch, whose death its Start reported or a cached read took for gone:
+	// the start converges on it, as on one it finds up before its mint
+	// (ensureRunningOn), and like that converge reads no token (ga-9yerfq).
+	if inc != nil {
+		upAndAlive, err := m.leasedLiveness(id, sessName, cfg.ProcessNames)
+		if err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return false, fmt.Errorf("fresh start after stale key: %w", err)
+		}
+		if upAndAlive {
+			return true, nil
+		}
+	}
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
@@ -369,13 +475,116 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
+	// The relaunch keeps the failed start's continuation epoch and leaves the
+	// reset the clear just recorded to the next start, as it always has: only
+	// its generation and token are new. A relaunch that fails withdraws its
+	// mint, leaving the row on inc, unless its process may have survived
+	// (launchedUnder): then the row stays on the relaunch's, left in inc.
+	var next Incarnation
+	if inc != nil {
+		var err error
+		if next, err = m.mintStart(ctx, lease, inc.By, b, false); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return false, fmt.Errorf("fresh start after stale key: %w", err)
+		}
+		cfg.Env = mergeEnv(cfg.Env, next.Env())
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		switch {
+		case inc == nil:
+		case m.launchedUnder(sessName, cfg.ProcessNames, next):
+			*inc = next // the failed relaunch's process may run under it
+		default:
+			m.unmintStart(next, b)
+		}
 		if unroute != nil {
 			unroute()
 		}
 		return false, fmt.Errorf("fresh start after stale key: %w", err)
 	}
+	if inc != nil {
+		*inc = next
+	}
 	return true, nil
+}
+
+// mintStart mints the incarnation a Manager start of row b runs under, under
+// lease, with nothing beyond the identity keys; consumeReset also consumes
+// the continuation reset b records in the same CAS (the epoch bumped, the
+// marker cleared), as commitPendingContinuationReset does, when the mint's
+// read still records it. The start was decided on b, so a reset recorded
+// after b was read stays pending for the next start, and one consumed since
+// bumps nothing. What it wrote is folded onto b.
+func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKind, b *beads.Bead, consumeReset bool) (Incarnation, error) {
+	expect := infoFromPersistedBead(*b)
+	inc, err := m.PersistedStore().MintIncarnation(ctx, lease, MintRequest{
+		Expect: expect, By: by, Now: m.now(),
+		FreshContext: func(fresh Info) bool {
+			return consumeReset && strings.TrimSpace(fresh.ContinuationResetPending) != ""
+		},
+	})
+	if err != nil {
+		return Incarnation{}, err
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	maps.Copy(b.Metadata, inc.IdentityPatch())
+	return inc, nil
+}
+
+// unmintStart withdraws inc, a start's mint no process ran under
+// (unmintIncarnation), folds what it wrote back onto b when b is not nil, and
+// reports whether the withdrawal landed. One the row refused (it moved on)
+// or that failed is logged.
+func (m *Manager) unmintStart(inc Incarnation, b *beads.Bead) bool {
+	landed, err := m.PersistedStore().unmintIncarnation(inc)
+	switch {
+	case err != nil:
+		log.Printf("session: %s: withdrawing the unlaunched %s: %v", inc.ID, inc, err)
+	case !landed:
+		log.Printf("session: %s: not withdrawing the unlaunched %s: the row moved on", inc.ID, inc)
+	case b != nil:
+		maps.Copy(b.Metadata, inc.prior)
+	}
+	return err == nil && landed
+}
+
+// launchedUnder reports whether a failed start may have left a process
+// running under inc: the runtime under sessName carries inc's token, or the
+// read cannot say. A Start can fail after its launch (a readiness wait that
+// timed out) with a cleanup that could not kill what it launched (tmux's
+// is best-effort), so a mint is withdrawn only on positive evidence that no
+// process carries it: the runtime is gone, or carries another token. No
+// token is no evidence: t3bridge records none, tmux and subprocess have
+// none before they seed it, and k8s reads none when its exec fails. Then a
+// fresh read decides, as it decides a converge: a runtime up with its agent
+// (processNames) alive may carry the mint, and one that is down, or a pane
+// whose agent died, carries nothing. A mint no process carries is benign; a
+// live process its row no longer records is not.
+func (m *Manager) launchedUnder(sessName string, processNames []string, inc Incarnation) bool {
+	tok, err := runtime.MetaValue(m.sp.GetMeta(sessName, runtime.InstanceTokenEnv))
+	switch {
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return false
+	case err != nil:
+		return true
+	}
+	if tok = strings.TrimSpace(tok); tok != "" {
+		return tok == inc.token
+	}
+	live, err := m.freshLiveness(sessName, processNames)
+	return err != nil || (live.Running && live.Alive)
+}
+
+// startEnv is the runtime environment of a start of info's session under
+// inc: the session's context, with every identity key inc's. The context is
+// built without identity values: inc.Env() sets each of them at full width,
+// so its int64 generation and epoch never narrow to RuntimeEnv's int.
+func startEnv(info Info, inc Incarnation) map[string]string {
+	return mergeEnv(RuntimeEnvWithSessionContext(info, 0, 0, ""), inc.Env())
 }
 
 var (
@@ -390,6 +599,12 @@ var (
 	// ErrResumeRequired reports that the session cannot be resumed without an
 	// explicit resume command.
 	ErrResumeRequired = errors.New("session requires resume command")
+	// ErrConversationRetained reports that a resume of a committed
+	// conversation failed and the conversation was kept rather than replaced
+	// by a fresh start (SESSION-LIFE-MANUAL-LOSS). The error also carries the
+	// failed start's own error and names the explicit reset that starts the
+	// session fresh.
+	ErrConversationRetained = errors.New("retaining committed conversation")
 	// ErrNoPendingInteraction reports that a session has nothing awaiting
 	// user input or approval resolution.
 	ErrNoPendingInteraction = errors.New("session has no pending interaction")
@@ -413,46 +628,111 @@ var (
 	// session's runtime (a drain-ack stop pending). The caller should retry
 	// once the stop completes.
 	ErrSessionStopping = errors.New("session is stopping, retry")
+	// ErrTurnInterruptUnsupported reports that the session's runtime can
+	// neither deliver interrupt keys nor interrupt the turn by protocol
+	// (runtime.TurnInterruptUnsupported), so nothing was sent to stop it.
+	ErrTurnInterruptUnsupported = errors.New("session runtime cannot interrupt the running turn")
 )
 
+// ErrSessionMutationBusy reports that a context-aware acquire of a session's
+// mutation lock gave up while another holder still had it. fn never ran, so
+// the caller may retry the whole operation. The returned error also wraps the
+// context's own error.
+var ErrSessionMutationBusy = errors.New("session mutation lock busy")
+
+// sessionMutationLockEntry is one session's lock. sem is a channel of
+// capacity one, full while the lock is held, so a waiter can select against a
+// context; a sync.Mutex cannot be abandoned. refs counts holders and waiters
+// and is guarded by sessionMutationLocksMu.
 type sessionMutationLockEntry struct {
-	mu   sync.Mutex
+	sem  chan struct{}
 	refs int
 }
 
 var (
+	// sessionMutationLocksMu guards the sessionMutationLocks map and every
+	// entry's refs. It is bookkeeping only and is never held across a
+	// blocking operation.
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
 
 // WithSessionMutationLock serializes metadata mutations for one session bead.
+// It waits for the lock without bound; use WithSessionMutationLockContext to
+// bound the wait.
 func WithSessionMutationLock(id string, fn func() error) error {
 	return withSessionMutationLock(id, fn)
 }
 
-func withSessionMutationLock(id string, fn func() error) error {
-	lock := acquireSessionMutationLock(id)
+// WithSessionMutationLockContext is WithSessionMutationLock with a bounded
+// wait. It tries the lock first, so a free lock is acquired even when ctx is
+// already done; ctx bounds only the wait for a held lock, never fn. When ctx
+// ends while the lock is still held it returns an error wrapping both
+// ErrSessionMutationBusy and ctx.Err(), and fn has not run and never will.
+func WithSessionMutationLockContext(ctx context.Context, id string, fn func() error) error {
+	lock, err := acquireSessionMutationLockContext(ctx, id)
+	if err != nil {
+		return err
+	}
 	defer releaseSessionMutationLock(id, lock)
 	return fn()
 }
 
-func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
+func withSessionMutationLock(id string, fn func() error) error {
+	return WithSessionMutationLockContext(context.Background(), id, fn)
+}
+
+// tryWithSessionMutationLock runs fn under session id's mutation lock only
+// when the lock is free, and reports whether fn ran. It never waits: it takes
+// WithSessionMutationLockContext's try-first path with an already-done
+// context, so while another holder has the lock it returns (false, nil) and fn
+// does not run. An error fn returns itself is returned with ran true.
+func tryWithSessionMutationLock(id string, fn func() error) (bool, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ran := false
+	err := WithSessionMutationLockContext(ctx, id, func() error {
+		ran = true
+		return fn()
+	})
+	if !ran && errors.Is(err, ErrSessionMutationBusy) {
+		return false, nil
+	}
+	return ran, err
+}
+
+func acquireSessionMutationLockContext(ctx context.Context, id string) (*sessionMutationLockEntry, error) {
 	sessionMutationLocksMu.Lock()
 	lock := sessionMutationLocks[id]
 	if lock == nil {
-		lock = &sessionMutationLockEntry{}
+		lock = &sessionMutationLockEntry{sem: make(chan struct{}, 1)}
 		sessionMutationLocks[id] = lock
 	}
 	lock.refs++
 	sessionMutationLocksMu.Unlock()
 
-	lock.mu.Lock()
-	return lock
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	default:
+	}
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	case <-ctx.Done():
+		dropSessionMutationLockRef(id, lock)
+		return nil, fmt.Errorf("session %s: %w: %w", id, ErrSessionMutationBusy, ctx.Err())
+	}
 }
 
 func releaseSessionMutationLock(id string, lock *sessionMutationLockEntry) {
-	lock.mu.Unlock()
+	<-lock.sem
+	dropSessionMutationLockRef(id, lock)
+}
 
+// dropSessionMutationLockRef gives up one reference without touching sem and
+// deletes the entry when none remain.
+func dropSessionMutationLockRef(id string, lock *sessionMutationLockEntry) {
 	sessionMutationLocksMu.Lock()
 	lock.refs--
 	if lock.refs == 0 {
@@ -544,7 +824,9 @@ func drainAckStopPendingMetadata(meta map[string]string) bool {
 // ensureRunning starts or resumes session id's runtime for by, as by.Kind may
 // (queueFor). replacing is an interrupt's restart of the runtime it just
 // stopped: the hold was decided before that stop, so it is not re-read.
-func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+// startRefusal is ensureRunning's refusal of a row no actor may start or
+// deliver to now, read from b alone.
+func (m *Manager) startRefusal(by Actor, id string, b beads.Bead) error {
 	if err := by.CheckStarts(); err != nil {
 		return err
 	}
@@ -562,33 +844,33 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	if drainAckStopPendingMetadata(b.Metadata) {
 		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
 	}
+	return nil
+}
+
+func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+	return m.ensureRunningOn(ctx, by, id, b, sessName, resumeCommand, hints, replacing, m.sp.IsRunning(sessName))
+}
+
+// ensureRunningOn is ensureRunning with whether sessName's runtime runs
+// already read: the provider's IsRunning for ensureRunning, a fresh read for
+// a delivery (ensureDeliverable), so a corpse a stale cache still shows
+// running is not taken for a live runtime to type into (J26 C2, mc-ir8qp).
+func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing, running bool) error {
+	// A start never runs under a caller's input fence: the fence names the
+	// incarnation this start may replace (FI9).
+	ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
+	if err := m.startRefusal(by, id, b); err != nil {
+		return err
+	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
-	if !replacing && m.queueFor(b.Metadata, sessName, by) {
+	if !replacing && m.queueForRunning(b.Metadata, running, by) {
 		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
-		if b.Metadata["transport"] == "" && transportVerified {
-			m.persistTransport(id, b.Metadata["provider"], transport)
-		}
-		// An operator's resume of a live row the operator holds (a suspend
-		// whose drain has not stopped it yet) consumes the hold too, under the
-		// runtime lease (tried, not waited for: a busy lease is the
-		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
-		if consume, ok := liveUserHoldDecision(b, by); ok {
-			_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
-			if err != nil {
-				return err
-			}
-			defer release()
-			return m.consumeUserHold(consume, m.now(), nil)
-		}
-		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
-			return err
-		}
-		return nil
+	if State(b.Metadata["state"]) != StateSuspended && running {
+		return m.ensureLive(ctx, by, id, b, sessName, transport, transportVerified)
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
@@ -620,7 +902,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	fresh, err := m.PersistedStore().freshBead(id)
 	switch {
 	case err != nil:
-		err = fmt.Errorf("%w: reading session %s under its lease: %w", ErrStateSync, id, err)
+		err = fmt.Errorf("reading session %s under its lease: %w", id, err) // nothing started: no state sync to report
 	case KillPendingMetadata(fresh.Metadata["state"], fresh.Metadata["state_reason"], fresh.Metadata["sleep_reason"], fresh.Metadata["slept_at"], m.now()):
 		err = fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	case drainAckStopPendingMetadata(fresh.Metadata):
@@ -633,92 +915,116 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		return err
 	}
 	b = fresh
+	// Under the lease, a runtime that is up with its agent alive is the
+	// incarnation the row already records (or another start's that ran
+	// before this one took the lease): a start never mints over it. Whether
+	// it is up is a fresh read, never the provider's cache, which can read a
+	// live runtime gone (the tmux state cache's TTL and degraded mode), and
+	// a pane whose agent is dead is not alive: Start recycles it. The row,
+	// suspended (a managed suspend whose drain has not stopped it yet) or
+	// not, converges below without a mint or a Start, as a Start that found
+	// the runtime up always has: its binding recorded, an operator's hold
+	// consumed, the row confirmed unfenced. The converge takes that runtime
+	// for the row's incarnation without reading its token, so one running
+	// under an incarnation the row no longer records is confirmed too
+	// (ga-9yerfq).
+	// A read that cannot answer refuses the start (fail closed): nothing is
+	// minted over a runtime that may be live.
+	upAndAlive, err := m.leasedLiveness(id, sessName, hints.ProcessNames)
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
-	generation, err := strconv.Atoi(b.Metadata["generation"])
-	if err != nil || generation <= 0 {
-		generation = DefaultGeneration
-	}
-	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
-	if err != nil {
-		return err
-	}
-	instanceToken := b.Metadata["instance_token"]
-	if instanceToken == "" {
-		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["instance_token"] = instanceToken
-	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		infoFromPersistedBead(b),
-		generation,
-		continuationEpoch,
-		instanceToken,
-	))
-	if gcProvider := providerKind(b); gcProvider != "" {
-		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-	}
-	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
-	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// An operator's resume of a row the operator holds consumes the hold, but
-	// only once the runtime is up (resume_user_hold.go).
-	var consume Decided
-	consumes := false
-	if by.consumesHold() {
-		consume, consumes = userHoldDecision(b)
-	}
-	// Refuse to resume if a prior escaped process for this session could not be
-	// confirmed dead: a survivor would race this replacement for the same work
-	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
-	// exact "old process survives alongside its replacement" scenario. No
-	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
+	converged := upAndAlive
+	// inc is the start's incarnation, minted under the lease right before
+	// the Start and provisional until a process runs under it: a start that
+	// launches nothing withdraws it (unmintStart), so the row never records
+	// an incarnation no process carries. A failed start withdraws it only on
+	// evidence that no process survived under it (launchedUnder).
+	var inc *Incarnation
+	provisional := false
+	defer func() {
+		if provisional && !m.launchedUnder(sessName, hints.ProcessNames, *inc) {
+			m.unmintStart(*inc, nil)
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
-	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		// A capacity refusal is also a startup death, but the endpoint refused
-		// the launch: that says nothing about the resume key, so it falls
-		// through to the plain failure below instead of the stale-key recovery.
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
-			if retryErr != nil {
-				return retryErr
-			}
-			if !retried {
-				// The recovery declined: the command carries no resume shape to
-				// strip, so a relaunch would repeat this failure verbatim.
-				// Propagate the original start error rather than reporting a
-				// start that never happened.
-				if unroute != nil {
-					unroute()
-				}
-				return fmt.Errorf("resuming session: %w", err)
-			}
-			started = retried
-		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
-			// Another caller may have resumed the same session after we loaded the
-			// bead but before we reached Start. If the runtime is already up, treat
-			// the resume as converged and only persist active state below.
+	}()
+	if !converged {
+		// Refuse to resume if a prior escaped process for this session could
+		// not be confirmed dead: a survivor would race this replacement for
+		// the same work bead (duplicate bd close). This is the
+		// stable/reused-bead-ID path — the exact "old process survives
+		// alongside its replacement" scenario. No fresh-create to roll back,
+		// so unroute and propagate before Start.
+		if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
-	} else {
-		started = true
+		minted, err := m.mintStart(ctx, lease, by.Kind, &b, strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "")
+		if err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return err
+		}
+		inc, provisional = &minted, true
+		cfg = startConfig(cfg, b, minted)
+		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+			switch {
+			// A capacity refusal is also a startup death, but the endpoint
+			// refused the launch: that says nothing about the resume key, so
+			// it falls through to the plain failure below instead of the
+			// stale-key recovery.
+			case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
+				retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, inc)
+				if retryErr != nil {
+					return retryErr
+				}
+				if !retried {
+					// The recovery declined: the command carries no resume shape
+					// to strip, so a relaunch would repeat this failure
+					// verbatim. Propagate the original start error rather than
+					// reporting a start that never happened.
+					if unroute != nil {
+						unroute()
+					}
+					return startFailure(resumeCommand, b.Metadata, err)
+				}
+				started = retried
+			case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
+				// The runtime came up past the fresh read (a start that took
+				// no lease, or a resume of ours that returned before
+				// confirming it: the canceled stale-key wait below). The
+				// resume converged on it: the mint is withdrawn, and active
+				// state is persisted below with the binding of that runtime.
+				if !m.unmintStart(*inc, &b) {
+					provisional = false
+					// The route stays: the runtime it routes to is up.
+					return fmt.Errorf("%w: session %s converged on a runtime already up, but the row still records %s", ErrStateSync, id, *inc)
+				}
+				inc, provisional, converged = nil, false, true
+			default:
+				if unroute != nil {
+					unroute()
+				}
+				return startFailure(resumeCommand, b.Metadata, err)
+			}
+		} else {
+			started = true
+		}
+		if started {
+			provisional = false // a process runs under inc
+		}
 	}
 
 	// Stale session key detection: if we just started a session with a
@@ -730,15 +1036,16 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 			// Context canceled during stale-key sleep: the runtime session
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
-			// sees the suspended-state bead, attempts sp.Start, gets
-			// ErrSessionExists (IsRunning=true), and persists "active".
+			// sees the suspended-state bead, reads the runtime up, and
+			// persists "active" with the runtime's binding. The mint stands:
+			// the process launched carries it.
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc)
 			if err != nil {
 				return err
 			}
@@ -751,23 +1058,126 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
+	var binding MetadataPatch
+	if started || converged {
+		binding = m.startedRuntimeBindingPatch(sessName)
+	}
+	// An operator's resume of a row the operator holds consumes the hold, but
+	// only once the runtime is up (resume_user_hold.go). It decides on the row
+	// as this start read it under the lease, with the incarnation it minted
+	// last (a stale-key relaunch mints again) or, converged, the one the row
+	// records, so only another's start since refuses the consume.
+	var consume Decided
+	consumes := false
+	if by.consumesHold() {
+		consume, consumes = userHoldDecision(b)
+	}
 	if consumes {
-		var clears MetadataPatch
+		clears := MetadataPatch{}
 		if started {
 			clears = restartStopRequestClears(b.Metadata)
 		}
+		maps.Copy(clears, binding)
 		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
-		if started && !errors.Is(err, ErrStateSync) {
-			_ = m.sp.Stop(sessName)
-		}
-		return err
-	}
-	return nil
+	// A start confirms its own incarnation (fenced); a converged resume,
+	// which minted nothing, confirms the row as it is.
+	return m.confirmLiveSessionState(id, &b, started, binding, inc)
 }
 
-func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+// ensureLive is ensureRunningOn's tail for a row not suspended whose runtime
+// its caller read running before any lease: nothing starts and nothing is
+// minted. It records a verified transport, consumes the operator's hold of a
+// live row the operator holds (a suspend whose drain has not stopped it yet)
+// under the runtime lease (tried, not waited for: a busy lease is the
+// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable), and
+// confirms the row active.
+func (m *Manager) ensureLive(ctx context.Context, by Actor, id string, b beads.Bead, sessName, transport string, transportVerified bool) error {
+	if b.Metadata["transport"] == "" && transportVerified {
+		m.persistTransport(id, b.Metadata["provider"], transport)
+	}
+	if consume, ok := liveUserHoldDecision(b, by); ok {
+		_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return m.consumeUserHold(consume, m.now(), nil)
+	}
+	return m.confirmLiveSessionState(id, &b, false, nil, nil)
+}
+
+// startConfig is cfg for row b's start under inc: its identity env inc's,
+// the provider family, SSH keepalives and the work dir env.
+func startConfig(cfg runtime.Config, b beads.Bead, inc Incarnation) runtime.Config {
+	cfg.Env = mergeEnv(cfg.Env, startEnv(infoFromPersistedBead(b), inc))
+	if gcProvider := providerKind(b); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	}
+	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
+	return runtime.SyncWorkDirEnv(cfg)
+}
+
+// ensureDeliverable is ensureRunning for a delivery. Past ensureRunning's
+// refusals (a kill-fenced or stopping row still refuses), it decides on a
+// fresh read of an unsuspended row's runtime: a live pane whose agent is
+// dead, or a runtime the read cannot vouch for, is ErrAgentDead, so the
+// caller queues the text rather than type it into a pane it would be lost
+// with (mc-48az4, mc-wdjni). Whether the runtime runs is that read's too
+// (ensureRunningOn), never a caching provider's IsRunning. Start and
+// Attach keep ensureRunning's: an operator attaches to a crashed pane to read
+// it.
+func (m *Manager) ensureDeliverable(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.startRefusal(by, id, b); err != nil {
+		return err
+	}
+	if State(b.Metadata["state"]) == StateSuspended {
+		return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
+	}
+	live, err := m.freshLiveness(sessName, hints.ProcessNames)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %s: %w", ErrAgentDead, id, err)
+	case live.Running && !live.Alive:
+		return fmt.Errorf("%w: %s", ErrAgentDead, id)
+	}
+	// The fresh read, not the provider's cache, says whether the runtime
+	// runs: a corpse reads not running whether or not the read refreshed a
+	// caching provider (J26 C2, mc-ir8qp).
+	return m.ensureRunningOn(ctx, by, id, b, sessName, resumeCommand, hints, false, live.Running)
+}
+
+// freshLiveness reads sessName's runtime as of now, not from a provider's
+// cache: the tmux state cache can show a crashed agent alive for seconds,
+// and a crash never invalidates it (mc-48az4). Alive is by processNames;
+// with none (and none the runtime published) a running pane reads alive.
+func (m *Manager) freshLiveness(sessName string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessSince(m.sp, sessName, processNames, time.Now())
+}
+
+// leasedLiveness is the fresh read (freshLiveness) a start of row id decides
+// on under its lease: whether sessName's runtime is up with its agent alive.
+// A read that cannot answer is runtime.ErrRuntimeUnavailable, so the start
+// refuses (fail closed) rather than launch over a runtime that may be live.
+func (m *Manager) leasedLiveness(id, sessName string, processNames []string) (bool, error) {
+	live, err := m.freshLiveness(sessName, processNames)
+	if err != nil {
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			err = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
+		}
+		return false, fmt.Errorf("session %s: reading its runtime under the lease: %w", id, err)
+	}
+	return live.Running && live.Alive, nil
+}
+
+// liveAgent reports a fresh read of sessName that finds its pane up and its
+// agent alive, which a live-only send needs.
+func (m *Manager) liveAgent(sessName string, processNames []string) bool {
+	live, err := m.freshLiveness(sessName, processNames)
+	return err == nil && live.Running && live.Alive
+}
+
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	// It runs under its caller's lease (by.Lease) and takes none: without
 	// one it refuses rather than start outside the lease.
 	if by.Lease == nil {
@@ -775,6 +1185,13 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	if err := checkBorrowed(by.Lease, id, sessName); err != nil {
 		return err
+	}
+	// It starts under the incarnation its caller's PreWake minted, while the
+	// row still records it. A runtime already up starts nothing and is left
+	// to the caller's start commit, which refuses a row that no longer
+	// records inc (CommitStartedIfCurrentUnder).
+	if !inc.Valid() || inc.ID != id {
+		return fmt.Errorf("%w: session %q (%s)", ErrIncarnationNotMinted, id, inc)
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -785,36 +1202,23 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
+	if !inc.recordedBy(b.Metadata) {
+		return fmt.Errorf("%w: session %s no longer records %s", ErrMintSuperseded, id, inc)
+	}
+
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
-	generation, err := strconv.Atoi(b.Metadata["generation"])
-	if err != nil || generation <= 0 {
-		generation = DefaultGeneration
-	}
+	// A continuation reset recorded since the PreWake (the prepared start's
+	// stale-resume clear) is consumed here, as legacy always has.
 	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
 	if err != nil {
 		return err
 	}
-	instanceToken := b.Metadata["instance_token"]
-	if instanceToken == "" {
-		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["instance_token"] = instanceToken
-	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		infoFromPersistedBead(b),
-		generation,
-		continuationEpoch,
-		instanceToken,
-	))
+	inc = inc.withContinuationEpoch(continuationEpoch)
+	cfg.Env = mergeEnv(cfg.Env, startEnv(infoFromPersistedBead(b), inc))
 	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
@@ -838,7 +1242,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -848,7 +1252,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return startFailure(resumeCommand, b.Metadata, err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -857,7 +1261,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
 		started = true
@@ -870,7 +1274,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil); err != nil {
 				return err
 			}
 		}
@@ -878,7 +1282,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
+// confirmLiveSessionState marks the row of a session found or brought live as
+// active. extra rides the same write (the runtime binding of a start, or of a
+// resume that converged on a runtime already up). A start's confirm (inc, the
+// incarnation it minted) lands only while the row still records inc
+// (ConfirmIncarnation); a row that moved on is ErrStateSync wrapping
+// ErrMintSuperseded, and the runtime is left to its newer owner. A live row
+// found running, which minted nothing, is confirmed without a fence.
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch, inc *Incarnation) error {
 	if b == nil {
 		return nil
 	}
@@ -886,6 +1297,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool
 	if started {
 		maps.Copy(batch, restartStopRequestClears(b.Metadata))
 	}
+	maps.Copy(batch, extra)
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
@@ -895,11 +1307,17 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool
 		batch["pending_create_claim"] = ""
 		batch["pending_create_started_at"] = ""
 	}
-	if len(batch) == 0 {
+	if len(batch) == 0 && inc == nil {
 		return nil
 	}
-	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+	if inc == nil {
+		if err := m.store.SetMetadataBatch(id, batch); err != nil {
+			return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+		}
+	} else if landed, err := m.PersistedStore().ConfirmIncarnation(*inc, batch); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+	} else if !landed {
+		return fmt.Errorf("%w: session %s no longer records %s: %w", ErrStateSync, id, *inc, ErrMintSuperseded)
 	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
@@ -947,7 +1365,7 @@ func formatWaitIdleReminder(source, message string) string {
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
-	err := m.nudgeContent(sessName, content, immediate)
+	err := m.nudgeContent(ctx, sessName, content, immediate)
 	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
 		// The provider proved delivery and only missed the turn start, so
 		// this nudge is delivered: a caller that retried it would deliver
@@ -969,13 +1387,17 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 	return nil
 }
 
-func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) error {
-	if immediate {
-		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
-			return np.NudgeNow(sessName, content)
-		}
-	}
-	return m.sp.Nudge(sessName, content)
+// nudgeContent delivers content, passing the delivery key ctx carries (see
+// runtime.WithNudgeDeliveryKey) to a provider that deduplicates keyed
+// deliveries, immediate delivery included: such a provider's keyed send
+// starts the turn without an idle wait (runtime.NudgeWithReceipt). Only an
+// unkeyed immediate delivery, or one to a provider that keeps no keyed
+// deliveries, goes out through NudgeNow, which takes no key.
+//
+// Under an input fence in ctx (runtime.WithInputFence) the runtime delivers
+// only to the incarnation it names, or refuses.
+func (m *Manager) nudgeContent(ctx context.Context, sessName string, content []runtime.ContentBlock, immediate bool) error {
+	return runtime.NudgeWithContext(ctx, m.sp, sessName, content, immediate)
 }
 
 func normalizeWaitIdleNudgeSource(source string) string {
@@ -987,17 +1409,16 @@ func normalizeWaitIdleNudgeSource(source string) string {
 }
 
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); errors.Is(err, ErrAgentDead) {
+		return false, nil // not delivered: the caller queues it for the healed agent
+	} else if err != nil {
+		return false, err
+	}
 	if transportFromMetadata(b) == "acp" {
-		if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
-			return false, err
-		}
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
 			return false, err
 		}
 		return true, nil
-	}
-	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
-		return false, err
 	}
 	if providerKind(b) != "claude" {
 		return false, nil
@@ -1015,8 +1436,8 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	return true, nil
 }
 
-func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
-	if !m.sp.IsRunning(sessName) {
+func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string, processNames []string) (bool, error) {
+	if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
 		return false, nil
 	}
 	if transportFromMetadata(b) == "acp" {
@@ -1097,13 +1518,16 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 }
 
 // sendLocked delivers message, starting or resuming the runtime as by
-// allows; a row it may not resume gets the message queued (reports true).
-func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
-	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
-		if !errors.Is(err, ErrResumeHeld) {
+// allows; a row it may not resume, or whose agent is dead in a pane still
+// up, gets the message queued (reports true). So does a live session the
+// runtime would not type into because it is running a turn the submit keys
+// would interrupt (runtime.ErrSessionBusy): the queue delivers it later.
+func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool, queueSource string) (bool, error) {
+	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); err != nil {
+		if !errors.Is(err, ErrResumeHeld) && !errors.Is(err, ErrAgentDead) {
 			return false, err
 		}
-		return true, m.enqueueDeferredSubmitLocked(b, sessName, message)
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 	}
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
@@ -1113,6 +1537,9 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 		return false, err
 	}
 	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		if errors.Is(err, runtime.ErrSessionBusy) {
+			return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
+		}
 		return false, err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
@@ -1131,23 +1558,24 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 		if err != nil {
 			return err
 		}
-		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate)
+		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate, deferredNudgeSource)
 		outcome.Deferred = outcome.Queued
 		return err
 	})
 	return outcome, err
 }
 
-func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
+func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool, processNames []string) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		live, err := m.freshLiveness(sessName, processNames)
+		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
-			return nil
+			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
 		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err
@@ -1178,8 +1606,10 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // StartRuntimeOnly brings the runtime live for a bead-backed session without
 // mutating persisted lifecycle metadata. Legacy reconciler callers use this
 // bridge while they still own commit/rollback bookkeeping above the worker
-// boundary. It runs under by.Lease, the caller's.
-func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
+// boundary. It runs under by.Lease, the caller's, and under inc, the
+// incarnation the caller's PreWake minted under that lease
+// (MintIncarnation).
+func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, resumeCommand string, hints runtime.Config) error {
 	if err := m.checkStarter(by); err != nil {
 		return err
 	}
@@ -1188,7 +1618,7 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeComm
 		if err != nil {
 			return err
 		}
-		return m.ensureRunningRuntimeOnly(ctx, by, id, b, sessName, resumeCommand, hints)
+		return m.ensureRunningRuntimeOnly(ctx, by, id, inc, b, sessName, resumeCommand, hints)
 	})
 }
 
@@ -1206,15 +1636,19 @@ func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resu
 }
 
 // SendLiveOnly nudges the runtime only when the current session is already
-// running. It never resumes or restarts the session.
-func (m *Manager) SendLiveOnly(ctx context.Context, id, message string) (bool, error) {
-	return m.sendLiveOnly(ctx, id, message, false)
+// running with its agent alive (by processNames; none reads alive). It never
+// resumes or restarts the session. Under an input fence in ctx, a session it
+// finds not running, or with its agent exited, is a miss rather than
+// undelivered, and a liveness read that fails is runtime.ErrRuntimeUnavailable
+// (runtime.LivenessFenceMiss).
+func (m *Manager) SendLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
+	return m.sendLiveOnly(ctx, id, message, false, processNames)
 }
 
 // SendImmediateLiveOnly is like SendLiveOnly but uses the immediate nudge path
 // when the runtime supports it. It never resumes or restarts the session.
-func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string) (bool, error) {
-	return m.sendLiveOnly(ctx, id, message, true)
+func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
+	return m.sendLiveOnly(ctx, id, message, true, processNames)
 }
 
 // TryWaitIdleNudge delivers a best-effort session nudge at a provider-defined
@@ -1240,16 +1674,16 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, me
 }
 
 // TryWaitIdleNudgeLiveOnly delivers a best-effort nudge at a safe boundary
-// only when the runtime is already live. It never resumes or restarts the
-// session.
-func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (bool, error) {
+// only when the runtime is already live with its agent alive (by
+// processNames; none reads alive). It never resumes or restarts the session.
+func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string, processNames []string) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message)
+		delivered, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message, processNames)
 		return err
 	})
 	return delivered, err
@@ -1260,35 +1694,262 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // it waits for the session to return to an idle prompt before returning.
 // Claude Code puts a prompt interrupted before its first response chunk back
 // into its input box, so for Claude StopTurn also clears the input box when
-// the runtime can do a verified clear (see clearRestoredInputLocked).
+// the runtime can do a verified clear (see clearRestoredInputLocked). Codex
+// keeps running an interrupted turn's commands in background terminals, and
+// Claude a command the model ran in the background, so for both StopTurn also
+// has the runtime stop them once the interrupt boundary is reached and any
+// restored prompt is cleared (see stopBackgroundWorkLocked). That stops ALL
+// of the session's background work, including what earlier turns started: a
+// stop stops the session's work. An interrupt_now submit does not do this.
+// A runtime that interrupts turns by protocol (runtime.TurnInterruptProtocol)
+// gets its Interrupt for every provider and no keys. A runtime that can
+// interrupt neither way gets nothing sent and StopTurn returns
+// ErrTurnInterruptUnsupported. A wait after the interrupt that fails is an
+// error wrapping runtime.ErrTurnNotEnded: the interrupt was sent, and the
+// turn was not seen to settle. A stop that finds the runtime gone when it
+// comes to send sends nothing and waits for nothing.
 func (m *Manager) StopTurn(id string) error {
-	return withSessionMutationLock(id, func() error {
+	return m.StopTurnIf(context.Background(), id, nil)
+}
+
+// StopTurnIf is StopTurn with a check (X11 §5.2, SESSION-RUNTIME-023). Once
+// the stop has found a turn to interrupt, and before it sends anything,
+// still runs under the session mutation lock; an error from it is returned,
+// wrapped, and nothing is sent. Every stop, submit and respond of the session
+// in this process takes that lock, so none of them acts between the check
+// and the keys; a turn the agent starts on its own, or input from another
+// process, can still land in that window (the checked tier, X11 I3). still
+// runs under that lock, which is not reentrant: it must not take the
+// session mutation lock itself, or it waits forever. A stop that finds no
+// turn (a suspended row, a runtime that is not running) returns as StopTurn
+// does without calling still, as does one whose row, loaded under the lock,
+// is closed or will not load: the load's error, wrapped with ErrStopNotSent,
+// nothing sent. A nil still is StopTurn.
+//
+// ctx bounds the waits after the interrupt, and an input fence it carries
+// (runtime.WithInputFence) fences every key, as StopTurnFenced does. With a
+// check or a ctx deadline, ctx also bounds the wait for the session mutation
+// lock: a lock still held when ctx ends is an error wrapping
+// runtime.ErrRuntimeUnavailable and ErrSessionMutationBusy, nothing sent.
+// With a check, whether the runtime runs, before still and
+// again before the first key, is a fresh liveness read's, as under a fence,
+// never the provider's IsRunning, which the tmux state cache can answer
+// stale: a read that does not find the agent alive is no turn, and one that
+// cannot answer an error wrapping runtime.ErrRuntimeUnavailable, nothing
+// sent. A checked stop that finds the turn gone when it comes to send, after
+// still passed, sends nothing and returns an error wrapping
+// runtime.ErrSessionNotFound (or, under an input fence, the miss); a send
+// that fails after still passed wraps ErrInterruptOutcomeUnknown and
+// runtime.ErrRuntimeUnavailable: it is unknown whether the interrupt reached
+// the agent. A follow-up interrupt of the keystroke sequence (a soft-escape
+// family's Ctrl-C fallback) goes only once still passes again: it interrupts
+// whatever turn runs when it lands. A refusal then sends nothing more. One
+// saying the turn is no longer current (runtime.ErrTurnNotCurrent) has seen
+// the turn end, and the stop returns as when its waits pass; any other makes
+// it return an error wrapping runtime.ErrTurnNotEnded and none of the
+// refusal's sentinels, since the first key was sent.
+func (m *Manager) StopTurnIf(ctx context.Context, id string, still func() error) error {
+	_, err := m.StopTurnWith(ctx, id, StopTurnOptions{Still: still})
+	return err
+}
+
+// TurnInterruptSettle bounds the wait for an interrupted turn to end, from
+// the moment the interrupt was decided (DES-T3I D6).
+const TurnInterruptSettle = turnSettleTimeout
+
+// InterruptTurn interrupts session id's turn turnID by protocol and waits for
+// it to end (X11 §5.2, SESSION-RUNTIME-023): InterruptTurnOn the session's
+// runtime, under the session mutation lock, so no other stop, submit or
+// respond of the session in this process acts between the runtime's fence
+// read and the wait. ctx bounds the wait for that lock: a lock still held
+// when ctx ends is an error wrapping runtime.ErrRuntimeUnavailable, nothing
+// sent. Nothing is sent when it refuses: a runtime that cannot interrupt the
+// session's turn (runtime.TurnInterruptUnsupported) is
+// ErrTurnInterruptUnsupported, one with no turn fence
+// (runtime.TurnFenceProvider) runtime.ErrTurnIdentityUnsupported, and a
+// suspended row, which has no turn, a *runtime.TurnNotCurrentError. The row
+// is loaded under the lock, so a row that is closed by then, or will not
+// load, returns an error wrapping ErrStopNotSent and the load's error
+// (ErrSessionClosed for a closed one), nothing sent, as StopTurnWith's does.
+// Otherwise it returns what InterruptTurnOn returns.
+//
+// restart, when set, is a restart on failure, run as StopTurnWith runs
+// StopTurnOptions.Restart: an actor that may not start the runtime is
+// refused before anything else (ErrStopNotSent and the refusal), and a row
+// whose drain-ack stop is pending with ErrSessionStopping, nothing sent. On
+// a keystroke runtime (ACP, whose stop replaces the agent) it takes the
+// runtime lease under the lock before the dispatch (a lease it cannot take
+// is runtime.ErrRuntimeUnavailable, nothing sent), and when the interrupted
+// turn is not seen to end it stops the runtime and starts it again in its
+// place under that lease, reporting StopTurnReport.Restarted with a nil
+// error; a restart whose stop or start fails is the error StopTurnWith's
+// is, and a caller whose ctx ended by then, or a turn whose wait read
+// nothing (TurnEndUnreadError), gets no restart (restartWithheld). A
+// protocol runtime is never restarted, as its stop may leave it running: its
+// not-ended error is returned.
+func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart *StopTurnRestart) (runtime.TurnInterrupt, StopTurnReport, error) {
+	var report StopTurnReport
+	if restart != nil {
+		if err := m.checkStarter(restart.By); err != nil {
+			return runtime.TurnInterrupt{}, report, fmt.Errorf("interrupting turn %q of %s, restarting it on failure: %w: %w", turnID, id, ErrStopNotSent, err)
+		}
+	}
+	var ack runtime.TurnInterrupt
+	err := WithSessionMutationLockContext(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
-			return err
+			return fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, id, ErrStopNotSent, err)
 		}
-		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
-		interruptStartedAt := time.Now()
-		if err := m.stopTurnLocked(b, sessName); err != nil {
-			return err
+		if restart != nil && drainAckStopPendingMetadata(b.Metadata) {
+			// The row belongs to the controller's stop, as for StopTurnWith.
+			return fmt.Errorf("interrupting turn %q of %s, restarting it on failure: %w", turnID, id, ErrSessionStopping)
 		}
-		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName); err != nil {
-			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
+		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
+		if mode == runtime.TurnInterruptUnsupported {
+			return fmt.Errorf("interrupting turn %q of %s: %w", turnID, id, ErrTurnInterruptUnsupported)
 		}
-		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
-			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
+		tf, ok := m.sp.(runtime.TurnFenceProvider)
+		if !ok {
+			return fmt.Errorf("interrupting turn %q of %s: %w", turnID, id, runtime.ErrTurnIdentityUnsupported)
 		}
-		if running && restoresInterruptedInput(b) {
-			// The stop already succeeded. A draft that will not clear is
-			// logged, not returned: the next submit clears the input box
-			// again before it pastes.
-			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
-				log.Printf("session: stopped the turn of %q but %v", sessName, err)
+		if State(b.Metadata["state"]) == StateSuspended {
+			return &runtime.TurnNotCurrentError{Session: sessName, TurnID: turnID}
+		}
+		restarts := restart != nil && mode == runtime.TurnInterruptKeystroke
+		var by Actor
+		if restarts {
+			// The lease goes before the dispatch and to the restart, as
+			// StopTurnWith's does (D8D-5).
+			leased, release, err := m.leaseForRestartLocked(ctx, restart.By, id, sessName)
+			if err != nil {
+				return fmt.Errorf("interrupting turn %q of %s: taking the runtime lease for its restart on failure, nothing sent: %w: %w", turnID, id, runtime.ErrRuntimeUnavailable, err)
 			}
+			defer release()
+			by = leased
 		}
+		ack, err = InterruptTurnOn(ctx, tf, sessName, turnID)
+		if !restarts || !errors.Is(err, runtime.ErrTurnNotEnded) {
+			return err
+		}
+		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, err); err != nil {
+			return err
+		}
+		if err := m.restartAfterFailedInterruptLocked(ctx, by, id, b, sessName, restart); err != nil {
+			return err
+		}
+		report.Restarted = true
 		return nil
 	})
+	if errors.Is(err, ErrSessionMutationBusy) {
+		return ack, report, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, id, runtime.ErrRuntimeUnavailable, err)
+	}
+	return ack, report, err
 }
+
+// InterruptTurnOn interrupts sessName's turn turnID through tf and waits for
+// it to end: tf.InterruptTurn, its read and dispatch bounded at 10 s, then
+// tf.WaitTurnEnded, bounded at 15 s. It returns the runtime's
+// acknowledgement: Fenced false means the runtime interrupted whatever turn
+// ran when it handled the request (the checked tier, X11 I3). The error is:
+//   - nil: the runtime read turnID no longer in progress within the bound,
+//     a session it no longer hosts included (WaitTurnEnded's rule);
+//   - a *runtime.TurnNotCurrentError (runtime.ErrTurnNotCurrent): turnID was
+//     not in progress, or the runtime no longer hosts sessName (a bare
+//     runtime.ErrSessionNotFound from the read); nothing was sent;
+//   - runtime.ErrTurnIdentityUnsupported: a composite routes sessName to a
+//     backend without the fence; nothing was sent;
+//   - runtime.ErrTurnUnnamed: turnID is empty; nothing was sent;
+//   - an error wrapping runtime.ErrTurnNotEnded: sent, but not seen to end.
+//     It wraps no other sentinel: the wait's own error is in its text only,
+//     so ErrTurnNotEnded, "sent", is never misread as a refusal. A wait
+//     whose error wraps runtime.ErrRuntimeUnavailable read nothing (no read
+//     answered, or the runtime cannot answer the wait at all), so its error
+//     is a TurnEndUnreadError, which a restart on failure does not restart
+//     (Manager.InterruptTurn);
+//   - an error wrapping runtime.ErrRuntimeUnavailable and not
+//     ErrInterruptOutcomeUnknown: ctx ended before the dispatch, and nothing
+//     was sent;
+//   - an error wrapping ErrInterruptOutcomeUnknown and
+//     runtime.ErrRuntimeUnavailable: the read or the dispatch failed, and it
+//     is unknown whether the request reached the runtime, as
+//     TurnFenceProvider.InterruptTurn has every error outside the classes
+//     above. The runtime's own runtime.ErrRuntimeUnavailable is wrapped so,
+//     as is a runtime error in none of the classes above, a bare ctx error
+//     included. A runtime gone after a failed attempt (an error wrapping
+//     both runtime.ErrRuntimeUnavailable and runtime.ErrSessionNotFound) is
+//     unknown and only that: its not-found is in the text only, so a caller
+//     that tests not-found first never reads "maybe sent" as "nothing
+//     sent".
+func InterruptTurnOn(ctx context.Context, tf runtime.TurnFenceProvider, sessName, turnID string) (runtime.TurnInterrupt, error) {
+	if err := ctx.Err(); err != nil {
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: nothing sent: %w: %w", turnID, sessName, runtime.ErrRuntimeUnavailable, err)
+	}
+	ack, err := interruptTurn(ctx, tf, sessName, turnID)
+	switch {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, sessName, runtime.ErrTurnIdentityUnsupported, err)
+	case errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// Gone before any dispatch: no turn runs (SESSION-RUNTIME-020's
+		// rule). Gone after a failed attempt (both sentinels) may have
+		// reached the runtime: unknown, below.
+		return runtime.TurnInterrupt{}, &runtime.TurnNotCurrentError{Session: sessName, TurnID: turnID}
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w (%s)", turnID, sessName, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, err.Error())
+	case errors.Is(err, runtime.ErrTurnNotCurrent), errors.Is(err, runtime.ErrTurnUnnamed):
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w", turnID, sessName, err)
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// The runtime could not tell (an RPC whose answer never came, a
+		// re-read after a failed dispatch): unknown whether the request
+		// reached it.
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, sessName, ErrInterruptOutcomeUnknown, err)
+	case err != nil:
+		// The runtime's error names no class (an RPC that failed, a bare
+		// ctx error): unknown whether the request reached it.
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w: %w", turnID, sessName, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, err)
+	}
+	if _, err := tf.WaitTurnEnded(ctx, sessName, turnID, turnSettleTimeout); err != nil {
+		what := fmt.Sprintf("interrupted turn %q of %s", turnID, sessName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			// No read of the wait answered (WaitTurnEnded's rule): nothing
+			// showed the turn still running.
+			return ack, TurnEndUnreadError(what, err)
+		}
+		return ack, TurnNotEndedError(what, err)
+	}
+	return ack, nil
+}
+
+// TurnNotEndedError is the error of an interrupt that was sent but whose
+// turn was not seen to end: it wraps runtime.ErrTurnNotEnded and nothing
+// else, and carries cause, the last failure, in its text only, so a caller
+// matching sentinels never reads "sent" as a refusal or an unknown.
+func TurnNotEndedError(what string, cause error) error {
+	if cause == nil || cause.Error() == runtime.ErrTurnNotEnded.Error() {
+		return fmt.Errorf("%s: %w", what, runtime.ErrTurnNotEnded)
+	}
+	return fmt.Errorf("%s: %w (last: %s)", what, runtime.ErrTurnNotEnded, cause.Error())
+}
+
+// TurnEndUnreadError is TurnNotEndedError for an interrupted turn that
+// nothing showed still running either: no read of it answered after the
+// interrupt, and the stop's own waits passed or failed only for want of an
+// answer. Like TurnNotEndedError it wraps runtime.ErrTurnNotEnded and
+// nothing else, cause in its text only, so a caller matching sentinels still
+// reads it as sent and not seen to end. A restart on failure takes it as no
+// ground to restart (restartWithheld): whether the interrupt ended the turn
+// is unknown, and whatever runs now may be another turn, which a restart
+// would kill.
+func TurnEndUnreadError(what string, cause error) error {
+	return &turnEndUnreadError{err: TurnNotEndedError(what+", nothing showing it still running", cause)}
+}
+
+// turnEndUnreadError is TurnEndUnreadError's error.
+type turnEndUnreadError struct{ err error }
+
+func (e *turnEndUnreadError) Error() string { return e.err.Error() }
+
+// Unwrap is the TurnNotEndedError it carries.
+func (e *turnEndUnreadError) Unwrap() error { return e.err }
 
 // Pending returns the provider's current structured pending interaction, if
 // the provider supports that capability.
@@ -1328,6 +1989,28 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 
 // Respond resolves the current pending interaction for a session.
 func (m *Manager) Respond(id string, response runtime.InteractionResponse) error {
+	return m.respond(id, response, func(ip runtime.InteractionProvider, sessName string, response runtime.InteractionResponse) error {
+		return ip.Respond(sessName, response)
+	})
+}
+
+// RespondFenced answers as Respond does, only in the incarnation fence names
+// (SESSION-RUNTIME-024): the provider must fence answers to the session
+// (runtime.FencedInteractionProvider), else nothing is sent and the error is
+// runtime.ErrInputFenceUnsupported; a respawn between the check and the key
+// is a *runtime.FenceMismatchError. ctx bounds the provider's fenced answer,
+// not the session mutation lock.
+func (m *Manager) RespondFenced(ctx context.Context, id string, fence runtime.InputFence, response runtime.InteractionResponse) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	return m.respond(id, response, func(_ runtime.InteractionProvider, sessName string, response runtime.InteractionResponse) error {
+		return runtime.RespondFencedVia(ctx, m.sp, sessName, fence, response)
+	})
+}
+
+// respond is Respond with the provider's answer sent by send.
+func (m *Manager) respond(id string, response runtime.InteractionResponse, send func(runtime.InteractionProvider, string, runtime.InteractionResponse) error) error {
 	return withSessionMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
@@ -1364,9 +2047,12 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		// waits up to 10 s for Claude Code to redraw), and this session's
 		// mutation lock is held all that time, so sends, stops and other
 		// mutations of the session wait behind it.
-		if err := ip.Respond(sessName, response); err != nil {
+		if err := send(ip, sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
+			}
+			if errors.Is(err, runtime.ErrInteractionGone) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
 			}
 			if errors.Is(err, runtime.ErrInteractionActionUnavailable) {
 				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
@@ -1459,6 +2145,17 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	); path != "" {
 		return path, TranscriptFound, nil
 	}
+	// A provider with a session-id flag runs each new conversation under a new
+	// key. A creating row of such a provider without a key is a start whose
+	// conversation has no key yet, and the work-directory fallback cannot tell
+	// its transcript from the one that start replaces. Other sessions in the
+	// work directory leave nothing to disambiguate before that key exists, so
+	// the window is absent, not ambiguous.
+	if strings.TrimSpace(b.Metadata["session_key"]) == "" &&
+		strings.TrimSpace(b.Metadata["session_id_flag"]) != "" &&
+		State(strings.TrimSpace(b.Metadata["state"])) == StateCreating {
+		return "", TranscriptAbsent, nil
+	}
 
 	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
 	if err != nil {
@@ -1476,7 +2173,7 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
-	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
+	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil

@@ -24,9 +24,12 @@ import "github.com/gastownhall/gascity/internal/api/apierr"
 // is a passthrough: create() runs exactly once and nothing is cached.
 //
 // create() should perform all fallible work (validation, the store write) and
-// return the domain body value to cache. Callers wrap that value in their
-// response envelope after withIdempotency returns, so envelope fields derived
-// from live state (e.g. the X-GC-Index event sequence) stay fresh on replay.
+// return the value to cache. A replay serves that value exactly as the
+// original call returned it, so any envelope field that describes the state
+// the body was built from must be cached with it, never re-derived from live
+// state on replay. An X-GC-Index read from the live head would claim the old
+// body reflects every change up to now; endpoints that return X-GC-Index use
+// withIndexedIdempotency.
 //
 // idem is the owning cache: per-city handlers pass s.idem (the per-city cache
 // described above); supervisor-scope handlers (POST /v0/city, where no per-city
@@ -73,4 +76,18 @@ func withIdempotency[T any](idem *idempotencyCache, path, key string, body any, 
 	settled = true
 	idem.storeResponse(scopedKey, bodyHash, v)
 	return v, nil
+}
+
+// withIndexedIdempotency is withIdempotency for create endpoints that return
+// X-GC-Index. The caller captures index before create() reads or writes any
+// state; it is cached with the created body, so a replay returns the index the
+// body was built against rather than the current head.
+func withIndexedIdempotency[T any](idem *idempotencyCache, path, key string, body any, index uint64, create func() (T, error)) (indexedResponse[T], error) {
+	return withIdempotency(idem, path, key, body, func() (indexedResponse[T], error) {
+		v, err := create()
+		if err != nil {
+			return indexedResponse[T]{}, err
+		}
+		return indexedResponse[T]{Index: index, Body: v}, nil
+	})
 }

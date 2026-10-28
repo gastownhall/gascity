@@ -119,3 +119,28 @@ func TestOrderSkippedPayloadJSONAlwaysCarriesAScopesArray(t *testing.T) {
 		t.Fatalf("scopes must be a JSON array, got %s", raw)
 	}
 }
+
+func TestOrderInapplicableIsAKnownEventTypeWithATypedPayload(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(KnownEventTypes, OrderInapplicable) {
+		t.Fatalf("%q is missing from KnownEventTypes; the SSE projection would carry it untyped", OrderInapplicable)
+	}
+	want := OrderInapplicablePayload{
+		OrderName:       "dolt-health",
+		Scope:           "city",
+		Backend:         "http",
+		RequiresBackend: []string{"dolt"},
+	}
+	decoded, typed, err := DecodePayload(OrderInapplicable, OrderInapplicablePayloadJSON(want))
+	if err != nil || !typed {
+		t.Fatalf("DecodePayload: typed=%v err=%v", typed, err)
+	}
+	got, ok := decoded.(OrderInapplicablePayload)
+	if !ok {
+		t.Fatalf("DecodePayload returned %T, want OrderInapplicablePayload", decoded)
+	}
+	if got.OrderName != want.OrderName || got.Scope != want.Scope || got.Backend != want.Backend || !slices.Equal(got.RequiresBackend, want.RequiresBackend) {
+		t.Fatalf("round-trip = %+v, want %+v", got, want)
+	}
+}

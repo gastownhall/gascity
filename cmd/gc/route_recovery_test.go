@@ -386,6 +386,44 @@ func TestRouteRecoveryBackstopLegSkipsBlockedBead(t *testing.T) {
 	}
 }
 
+// TestRouteRecoveryBackstopLegSkipsHeldBead is the run_target twin of the
+// detached-orphan hold gate: open, unassigned work that carries gc.run_target
+// but sits on a canonical dispatch hold is parked, not lost, so the lane must
+// not re-stamp gc.routed_to onto it. An unheld sibling in the same scan is
+// still restored, so the assertion cannot pass because the scan saw nothing.
+func TestRouteRecoveryBackstopLegSkipsHeldBead(t *testing.T) {
+	const pool = "repo/pack.worker"
+	var rows []beads.Bead
+	for i, hold := range beadmeta.DispatchHoldLabels {
+		rows = append(rows, beads.Bead{
+			ID: "HELD-" + string(rune('a'+i)), Title: "parked", Type: "task", Status: "open",
+			Labels:   []string{hold},
+			Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+		})
+	}
+	rows = append(rows, beads.Bead{
+		ID: "FREE-1", Title: "lost route", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+	})
+	store := beads.NewMemStoreFrom(0, rows, nil)
+
+	restored, err := scanOneRouteRecoveryLeg(store)
+	if err != nil {
+		t.Fatalf("backstop leg scan: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1 (only the unheld bead)", restored)
+	}
+	if got := mustRoutedTo(t, store, "FREE-1"); got != pool {
+		t.Errorf("unheld bead gc.routed_to = %q, want %q", got, pool)
+	}
+	for _, row := range rows[:len(rows)-1] {
+		if got := mustRoutedTo(t, store, row.ID); got != "" {
+			t.Errorf("%s (%v) gc.routed_to = %q, want empty (held work stays unrouted)", row.ID, row.Labels, got)
+		}
+	}
+}
+
 // TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee pins the visibility half
 // of the tick's routed-demand narrowing (ga-l7jdg).
 //

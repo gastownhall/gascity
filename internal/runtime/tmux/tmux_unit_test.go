@@ -30,7 +30,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 	}
 
 	t.Run("tmux observes PID and dead state atomically", func(t *testing.T) {
-		executor := &fakeExecutor{out: "100\t0\n"}
+		executor := &fakeExecutor{out: "pane\t100\t0\n"}
 		tmux := NewTmux()
 		tmux.exec = executor
 		state, err := tmux.paneProcessState("session")
@@ -43,7 +43,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 		if len(executor.calls) != 1 {
 			t.Fatalf("tmux calls = %d, want one atomic observation", len(executor.calls))
 		}
-		want := []string{"-u", "display-message", "-t", "=session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
+		want := []string{"-u", "list-panes", "-s", "-t", "=session:", "-F", agentPaneMarkerFormat + "\t#{pane_pid}\t#{pane_dead}"}
 		if !slices.Equal(executor.calls[0], want) {
 			t.Fatalf("tmux args = %q, want atomic pid/dead format %q", executor.calls[0], want)
 		}
@@ -58,6 +58,18 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 				t.Errorf("parsePaneProcessState(%q) error = %v; malformed output must not claim target disappearance", output, err)
 			}
+		}
+	})
+
+	t.Run("dead pane with an empty PID (tmux 3.8) is dead, not malformed", func(t *testing.T) {
+		for _, output := range []string{"\t1", "1"} {
+			state, err := parsePaneProcessState(output, "session")
+			if err != nil || !state.Dead {
+				t.Errorf("parsePaneProcessState(%q) = %+v, %v; want Dead", output, state, err)
+			}
+		}
+		if state, err := parsePaneProcessState("0", "session"); err == nil {
+			t.Errorf("parsePaneProcessState(%q) = %+v, nil; an empty PID on a live pane must stay an error", "0", state)
 		}
 	})
 

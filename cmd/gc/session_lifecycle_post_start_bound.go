@@ -14,11 +14,14 @@ import (
 
 // postStartObservationBound is the longest runPreparedStartCandidate waits for
 // any one observation it makes after provider.Start has returned: the
-// ErrStateSync recovery, the ErrSessionExists collision check and the
-// post-stability liveness check. The call under the wait can hang on a wedged
+// ErrStateSync recovery, the ErrSessionExists collision check, the
+// post-stability liveness check and the pane read of a resume that check finds
+// dead (postStartDeathPane). The call under the wait can hang on a wedged
 // tmux subprocess or a stalled store and nothing cancels it, so on expiry the
-// wait is abandoned and the start defers as runtime-unavailable
-// (SESSION-RUNTIME-009) instead of holding its async start slot.
+// wait is abandoned instead of holding the async start slot. An abandoned
+// observation defers the start as runtime-unavailable (SESSION-RUNTIME-009);
+// an abandoned pane read reads empty, and the death the liveness check already
+// found still counts.
 const postStartObservationBound = 10 * time.Second
 
 // startFailureProbeBudget is the total time a failed start spends on the two

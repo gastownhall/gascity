@@ -45,6 +45,7 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 	if len(targets.defaultNamedScaleTargets) > 0 {
 		v.NamedDefault, v.Collected.NamedPartials, _ = defaultNamedSessionDemand(targets.defaultNamedScaleTargets, cfg, env.CityName, demandCache)
 	}
+	v.ProbeStores = demandProbeStores(targets) // the default probes K1's lane reads (Gate S fix 2)
 	v.RelocatedClaimRefs = assignedWorkRelocatedClaimRefs(env.CityPath, cfg, env.CityStore)
 	v.WakeClaimRefs = assignedWorkClaimRefs(env.CityPath, cfg, env.CityStore)
 	return v

@@ -103,7 +103,44 @@ func clearProcessLiveEnvForTests() {
 	}
 }
 
+// TestClearProcessLiveEnvForTestsUnsetsInheritedState runs the process-wide
+// scrub TestMain runs, so it must hand the process back every key the scrub
+// unset. It restored only the keys it had set: the scrub's os.Unsetenv of
+// GC_HOME outlived it, and a later test that resolves the supervisor home
+// panicked on a repeat run (-count>1) or a later shard order (ga-3sdi50).
 func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
+	before := make(map[string]*string)
+	for _, key := range liveEnvKeysForTests() {
+		if value, ok := os.LookupEnv(key); ok {
+			before[key] = &value
+		} else {
+			before[key] = nil
+		}
+	}
+
+	t.Run("scrub", func(t *testing.T) {
+		testClearProcessLiveEnvForTestsScrub(t)
+	})
+
+	for key, want := range before {
+		got, ok := os.LookupEnv(key)
+		switch {
+		case want == nil && ok:
+			t.Errorf("%s = %q after the scrub test, want unset as before", key, got)
+		case want != nil && (!ok || got != *want):
+			t.Errorf("%s = %q (set=%v) after the scrub test, want %q as before", key, got, ok, *want)
+		}
+	}
+}
+
+func testClearProcessLiveEnvForTestsScrub(t *testing.T) {
+	t.Helper()
+	// The scrub is process-wide: register every key it touches with
+	// t.Setenv, which restores each one, set or unset, when the test ends.
+	// The scrub below unsets them all anyway.
+	for _, key := range liveEnvKeysForTests() {
+		t.Setenv(key, os.Getenv(key))
+	}
 	cleared := []string{
 		"BEADS_ACTOR",
 		"BEADS_DIR",

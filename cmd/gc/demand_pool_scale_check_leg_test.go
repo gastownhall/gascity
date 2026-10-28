@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 )
 
 // The POOL-DEMAND half of reader agreement (#6019).
@@ -52,9 +53,9 @@ func claimableRoutedIDs(t *testing.T, e legAgreementEnv, target string) map[stri
 	if err != nil {
 		t.Fatalf("readyFederationLegsOverBinding: %v", err)
 	}
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + target},
+	rows, err := readywork.Read(legs, readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + target},
 	})
 	if err != nil {
 		t.Fatalf("gc ready over the claim legs: %v", err)

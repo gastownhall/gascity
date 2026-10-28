@@ -86,3 +86,17 @@ func TestScanRecordsBySessionIDReportsParentProviderInfrastructure(t *testing.T)
 		t.Error("attributed a launchd parent to provider infrastructure; that is the inherited-env orphan shape the fence exists to refuse")
 	}
 }
+
+// TestDarwinOrphanCandidatesKeepOnlyReparentedRoots (mc-ygved): the
+// empty-id scan keeps only roots reparented to launchd, as on Linux.
+func TestDarwinOrphanCandidatesKeepOnlyReparentedRoots(t *testing.T) {
+	records := map[int]psRecord{
+		100: {pid: 100, ppid: 1, command: "agent", env: map[string]string{"GC_SESSION_ID": "gc-orphan"}},
+		300: {pid: 300, ppid: 1, command: "bash"},
+		102: {pid: 102, ppid: 300, command: "agent", env: map[string]string{"GC_SESSION_ID": "gc-paned"}},
+	}
+	got := orphanCandidates(scanRecordsBySessionID(records, ""), 0)
+	if len(got) != 1 || got[0].SessionID != "gc-orphan" {
+		t.Fatalf("orphan candidates %+v, want gc-orphan only", got)
+	}
+}

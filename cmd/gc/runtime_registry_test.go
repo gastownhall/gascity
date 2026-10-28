@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -430,5 +431,19 @@ func TestRuntimeRegistryACPConfigCarriesStopGrace(t *testing.T) {
 	}
 	if def.HandshakeTimeout != 30*time.Second || def.NudgeBusyTimeout != 60*time.Second || def.OutputBufferLines != 1000 {
 		t.Errorf("default acp config = %+v, want 30s handshake, 60s nudge busy, 1000 buffer lines", def)
+	}
+}
+
+func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
+	got := acpProviderConfig(config.ACPSessionConfig{CancelTimeout: "2s"})
+	if got.CancelTimeout != 2*time.Second {
+		t.Errorf("acp CancelTimeout = %v, want 2s from [session.acp] cancel_timeout", got.CancelTimeout)
+	}
+	def := acpProviderConfig(config.ACPSessionConfig{})
+	if def.CancelTimeout != config.DefaultACPCancelTimeout {
+		t.Errorf("default acp CancelTimeout = %v, want config.DefaultACPCancelTimeout (%v)", def.CancelTimeout, config.DefaultACPCancelTimeout)
+	}
+	if config.DefaultACPCancelTimeout != sessionacp.DefaultCancelTimeout {
+		t.Errorf("config.DefaultACPCancelTimeout = %v, want sessionacp.DefaultCancelTimeout (%v): the documented default must match the provider's own", config.DefaultACPCancelTimeout, sessionacp.DefaultCancelTimeout)
 	}
 }

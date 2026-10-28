@@ -123,12 +123,16 @@ release.
 
 The legacy paths fence on the snapshot's status and assignee, not its
 revision, so they cannot tell a newer claim under a reused assignee name from
-the old one. Under `auto` and `require` they also release every snapshot that
-carries no revision. Release snapshots come from a `List`, and list rows from
-the native store (and from a CachingStore over it) carry none: only `Get`
-publishes a revision. On those stores the reused-assignee guarantee does not
-hold yet. Reassigning a retired session's work to its successor always uses
-the legacy fence.
+the old one. Release snapshots come from a `List`. List rows from the native
+store (and from a CachingStore over it) carry the row's revision, and a legacy
+row carries its real revision, 0. A snapshot at 0 is re-read live: still at 0,
+the release is fenced at 0 like any other revision; off 0, the snapshot's
+revision is unknown, and under `auto` and `require` the release falls to the
+legacy paths. A store whose list rows carry no revision (BdStore: `bd list
+--json` publishes none) lists every row at 0, so there every release of a row
+whose live revision is not 0 falls to the legacy paths, and the
+reused-assignee guarantee does not hold yet. Reassigning a retired session's
+work to its successor always uses the legacy fence.
 
 This guards the write, not the decision that an owner is dead. A session absent
 from one city's local session store may still be alive in another city. Shared

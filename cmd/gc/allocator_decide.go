@@ -58,8 +58,13 @@ type allocInputs struct {
 	// ScaleCheck is the external-reads lane's scale_check result at Now
 	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
 	ScaleCheck *scaleCheckResult
-	Obs        *ObservationSnapshot
-	ObsMaxAge  time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment (the pairing
+	// guard, claimHeldTemplates). A nil ClaimsSeen holds nothing.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).
@@ -113,6 +118,10 @@ type demandView struct {
 	// environment generation.
 	RelocatedClaimRefs []string
 	WakeClaimRefs      []string
+	// ProbeStores are the stores of the demand targets' default scale-check
+	// probes (demandProbeStores): K1's lane reads them, and gather's
+	// lane-fed check reuses them rather than build the targets again.
+	ProbeStores []beads.Store
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.
@@ -269,7 +278,9 @@ func (p *decidePass) finish() allocDecision {
 		p.suspended()
 		return p.decision()
 	}
-	p.classify(p.awake())
+	decisions := p.awake()
+	p.classify(decisions)
+	p.honorWakes(decisions)
 	p.floors()
 	p.bindings()
 	return p.decision()
@@ -465,6 +476,29 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // or its template retained), then an uncertain observation. In a suspended
 // city a pending create legacy still leases and a row with open assigned
 // work keep too.
+//
+// In a running city an undesired pending create keeps while legacy still
+// leases it (v5.9r as amended; SESS-065, SESS-596): legacy preserves such a
+// row before any drain or close (session_reconciler.go:2368), and its
+// MAINT-051 sweep skips a leased claim (city_runtime.go:3880), pool rows
+// included. A fresh create read between its two writes (the row, then its
+// session_name) is undesired for want of a name (staging J45), whether made
+// by `gc session new` or by the API (session_origin ephemeral). Only a row
+// holding pending_create_claim keeps, so the claim's lease bounds the keep:
+// the never-started deadline (S6), or a started create's in-flight and
+// attempt windows. A suspended agent ends it at once; a suspended rig does
+// not, as in legacy, whose lease reads only the agent. A lease anchor
+// (last_woke_at, pending_create_started_at) pendingCreateFutureSkew or more
+// in the future holds nothing, in a running or a suspended city, so a clock
+// stepped back cannot pin the row. Past its lease, A10 rolls the row back.
+// Legacy also leases rows that hold no claim; a running city does not keep
+// them. A claimless start-pending row has no deadline. A client's create
+// still starting its runtime (manualCreateStartInFlightAt) has one, its
+// CreatedAt plus the in-flight window, and legacy keeps it, so not keeping
+// it here is a gap (ga-j07r38). The suspended-city keep, failedCreateLeased
+// and occupantLeaseHolds honor it through pendingCreateSessionStillLeasedAt;
+// pendingCreateAnchorAhead does not read CreatedAt, so a CreatedAt ahead of
+// the clock lengthens that hold (ga-mmq1ft).
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""
@@ -475,13 +509,28 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	case e.ObservationUncertain:
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
+		if e.Desired == desireDrain && info.PendingCreateClaim && !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now) {
+			return reasonPendingCreate
+		}
 		return ""
-	case pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
+	case !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
 	}
 	return ""
+}
+
+// pendingCreateAnchorAhead reports a pending create's lease anchor
+// (last_woke_at or pending_create_started_at) pendingCreateFutureSkew or more
+// past now: a clock stepped back, which must not extend the keep.
+func pendingCreateAnchorAhead(info session.Info, now time.Time) bool {
+	for _, raw := range []string{info.LastWokeAt, info.PendingCreateStartedAt} {
+		if at, ok := parseRFC3339Metadata(raw); ok && at.Sub(now) >= pendingCreateFutureSkew {
+			return true
+		}
+	}
+	return false
 }
 
 // awake is steps 10 and 11: the awake set keyed by bead ID over the
@@ -614,6 +663,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 				e.DrainReason = drainSuspended
 			}
 		}
+		e.WakeHonored = p.honorsExplicitWake(info, e.Template)
 		if reason := p.keepReason(e, info); reason != "" {
 			e.Desired, e.Reason = desireKeep, reason
 		}
@@ -708,6 +758,71 @@ func (p *decidePass) retains(template string, info session.Info) bool {
 
 // agentSuspended reports a configured template whose agent or rig is
 // suspended: its undesired rows drain as suspended, not orphaned.
+// honorWakes is D7 rule 4 (CONTRACT v5.10n): a row with a pending explicit
+// wake AL1 honors (WakeHonored) is wanted, in or out of its template's
+// desired set, so it is never Sleep or Drain and no drain or close takes it.
+// It wakes within its template's max_active_sessions (underMaxActive); past
+// the max, or while a hold or quarantine
+// suppresses the wake, it is Keep and the wake waits. Rows are taken in key
+// order, so the bound is deterministic.
+func (p *decidePass) honorWakes(decisions map[string]AwakeDecision) {
+	var keys []rowKey
+	for k, e := range p.snap.Entries {
+		if e.WakeHonored && (e.Desired == desireSleep || e.Desired == desireDrain) {
+			keys = append(keys, k)
+		}
+	}
+	sortRowKeys(keys)
+	for _, k := range keys {
+		e := p.snap.Entries[k]
+		d := decisions[p.in.Census.Rows[k].Info.ID]
+		e.Desired, e.DrainReason, e.OpenWork = desireKeep, "", nil
+		e.Reason = firstNonEmpty(d.Reason, reasonExplicitWake)
+		if d.ShouldWake && p.underMaxActive(k, e.Template) {
+			e.Desired = desireWake
+		}
+	}
+}
+
+// underMaxActive reports room under template's max_active_sessions for row
+// k to wake: everything else of the template that runs or is about to
+// numbers fewer than the max. That is its other rows woken this pass, alive,
+// or of unknown liveness (the awake set reads unknown as running), the
+// creates this pass plans, and the creates in flight the census does not
+// show yet. No max (nil) is unlimited.
+func (p *decidePass) underMaxActive(k rowKey, template string) bool {
+	agent := p.agentByTemplate(template)
+	if agent == nil || agent.EffectiveMaxActiveSessions() == nil {
+		return true
+	}
+	active := 0
+	for other, e := range p.snap.Entries {
+		if other != k && e.Template == template && (e.Desired == desireWake || e.Liveness == livenessAlive || e.Liveness == livenessUnknown) {
+			active++
+		}
+	}
+	for _, plan := range p.plans {
+		if plan.Template == template {
+			active++
+		}
+	}
+	for _, r := range p.inFlight {
+		if r.Template == template {
+			active++
+		}
+	}
+	return active < *agent.EffectiveMaxActiveSessions()
+}
+
+// honorsExplicitWake is the awake set's explicit-wake desire
+// (compute_awake_set.go, ExplicitWake) for a request still pending
+// (explicitWakePendingInfo: not served by a sleep since), on a row that is
+// not dependency-only, of a configured agent that is not suspended.
+func (p *decidePass) honorsExplicitWake(info session.Info, template string) bool {
+	return explicitWakePendingInfo(info) && !info.DependencyOnly &&
+		p.agentByTemplate(template) != nil && !p.agentSuspended(template)
+}
+
 func (p *decidePass) agentSuspended(template string) bool {
 	agent := p.agentByTemplate(template)
 	return agent != nil && (agent.Suspended || agentInSuspendedRig(p.in.CityPath, agent, p.cfg.Rigs, p.in.SuspendedRigPaths))
