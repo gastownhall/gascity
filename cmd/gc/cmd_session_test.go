@@ -3695,3 +3695,31 @@ func TestCmdSessionNew_RegisteredCityDefersStartWhileSupervisorDown(t *testing.T
 		t.Errorf("warning must tell how to start the supervisor:\n%s", got)
 	}
 }
+
+// TestCmdSessionNew_UnreadableRegistryFailsLoudly pins the registry half of
+// issue #8382: a $GC_HOME/cities.toml that cannot be parsed fails the start
+// loudly when no controller answers, instead of silently reading as
+// "unregistered" and starting the session in the caller's environment.
+func TestCmdSessionNew_UnreadableRegistryFailsLoudly(t *testing.T) {
+	cityDir := sessionStartOwnershipEnv(t)
+	registry := filepath.Join(os.Getenv("GC_HOME"), "cities.toml")
+	corrupt := fmt.Sprintf("[[cities]]\n  path = %q\n  name = \"fixture\n", cityDir)
+	if err := os.WriteFile(registry, []byte(corrupt), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", registry, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+		t.Fatalf("cmdSessionNew(corrupt registry) = 0, want non-zero; stdout=%s", stdout.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, registry) {
+		t.Errorf("stderr must name the registry file %s:\n%s", registry, got)
+	}
+	if !strings.Contains(got, "parsing registry") {
+		t.Errorf("stderr must carry the registry parse error:\n%s", got)
+	}
+	if created := sessionBeads(t, cityDir); len(created) != 0 {
+		t.Errorf("session beads = %d, want none created before the registry read failed", len(created))
+	}
+}
