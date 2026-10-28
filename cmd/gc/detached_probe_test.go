@@ -2,13 +2,38 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 )
+
+// bindDetachedProbeSocket binds a unix listener at the canonical path of the
+// named tmux socket, standing in for the live server the detached probe must
+// attest before it asks tmux anything. The probe dials the socket but never
+// speaks the tmux protocol, so no accept loop is needed.
+func bindDetachedProbeSocket(t *testing.T, socketName string) string {
+	t.Helper()
+	path := sessiontmux.SocketPath(socketName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create detached probe socket dir: %v", err)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("bind detached probe socket %s: %v", path, err)
+	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = os.Remove(path)
+	})
+	return path
+}
 
 func TestParseDetachedProbeSpec(t *testing.T) {
 	tests := []struct {
@@ -27,13 +52,14 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "session keeps extra colons",
-			spec: "tmux:gascity:scope:soak-loop",
-			want: detachedProbeSpec{
-				Kind:    "tmux",
-				Socket:  "gascity",
-				Session: "scope:soak-loop",
-			},
+			name:    "session with colon is rejected",
+			spec:    "tmux:gascity:scope:soak-loop",
+			wantErr: true,
+		},
+		{
+			name:    "session with dot is rejected",
+			spec:    "tmux:gascity:soak.loop",
+			wantErr: true,
 		},
 		{
 			name:    "unsupported kind",
@@ -54,6 +80,20 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 			name:    "empty session",
 			spec:    "tmux:gascity:",
 			wantErr: true,
+		},
+		{
+			name:    "relative socket with slash is rejected",
+			spec:    "tmux:rel/ative:soak-loop",
+			wantErr: true,
+		},
+		{
+			name: "absolute socket path is accepted",
+			spec: "tmux:/tmp/tmux-1000/probe:soak-loop",
+			want: detachedProbeSpec{
+				Kind:    "tmux",
+				Socket:  "/tmp/tmux-1000/probe",
+				Session: "soak-loop",
+			},
 		},
 	}
 
@@ -76,21 +116,49 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 	}
 }
 
-func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
+// TestProbeDetachedWork_UnreachableSocketIsErrorNeverDead pins the probe's
+// fail-closed contract for a socket it cannot observe: a tmux that reports
+// "no server running" (exit 1 against a missing socket) means the namespace
+// is unreachable, not that the session died. The probe must answer error —
+// without even consulting tmux, because no socket file exists at the
+// canonical path.
+func TestProbeDetachedWork_UnreachableSocketIsErrorNeverDead(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit 1`)
+	t.Setenv("FAKE_TMUX_ARGS", argsFile)
+
+	got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+	if got.Status != detachedProbeError {
+		t.Fatalf("Status = %q, want %q (err=%v)", got.Status, detachedProbeError, got.Err)
+	}
+	if got.Err == nil {
+		t.Fatal("Err = nil, want unobservable-namespace error")
+	}
+	if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+		t.Fatalf("tmux was consulted for an unreachable socket (args file stat err=%v), want no invocation", err)
+	}
+}
+
+// TestProbeDetachedWork_TmuxListSessionsAnswer pins how the probe asks an
+// attested live server: list-sessions addressed by the resolved -S path, alive
+// only on an exact session-name line, dead when the server answers without
+// the session, error when the client cannot ask.
+func TestProbeDetachedWork_TmuxListSessionsAnswer(t *testing.T) {
 	tests := []struct {
 		name       string
-		exitCode   string
+		body       string
 		wantStatus detachedProbeStatus
 	}{
-		{name: "alive on exit zero", exitCode: "0", wantStatus: detachedProbeAlive},
-		{name: "dead on exit one", exitCode: "1", wantStatus: detachedProbeDead},
-		{name: "error on other exit", exitCode: "2", wantStatus: detachedProbeError},
+		{name: "alive on exact session line", body: `printf 'soak-loop\n'`, wantStatus: detachedProbeAlive},
+		{name: "dead on an answer without the session", body: `printf 'soak-loop-2\n'`, wantStatus: detachedProbeDead},
+		{name: "error on client failure", body: `exit 2`, wantStatus: detachedProbeError},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			path := bindDetachedProbeSocket(t, "gascity")
 			argsFile := filepath.Join(t.TempDir(), "args")
-			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
+			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; `+tt.body)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
 			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
@@ -101,7 +169,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read fake tmux args: %v", err)
 			}
-			wantArgs := "-L\ngascity\nhas-session\n-t\nsoak-loop\n"
+			wantArgs := fmt.Sprintf("-u\n-S\n%s\nlist-sessions\n-F\n#{session_name}\n", path)
 			if string(args) != wantArgs {
 				t.Fatalf("tmux args = %q, want %q", string(args), wantArgs)
 			}
@@ -120,6 +188,7 @@ func TestProbeDetachedWork_MalformedSpecIsError(t *testing.T) {
 }
 
 func TestProbeDetachedWork_Timeout(t *testing.T) {
+	bindDetachedProbeSocket(t, "gascity")
 	installFakeTmux(t, "sleep 1")
 
 	got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", 10*time.Millisecond)

@@ -152,6 +152,18 @@ func namedSocketPath(socketName string) string {
 	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 }
 
+// SocketPath resolves the path tmux itself uses for a socket reference: an
+// absolute path (the -S form) is returned clean, a named -L socket is joined
+// under tmux's TMUX_TMPDIR root. Callers that must talk to the same server as
+// a tmux client — or prove they cannot — resolve through here, never by
+// re-deriving the join. TMPDIR is never consulted: tmux does not read it.
+func SocketPath(ref string) string {
+	if filepath.IsAbs(ref) {
+		return filepath.Clean(ref)
+	}
+	return namedSocketPath(ref)
+}
+
 // serverSocketPath returns the socket path of the server t talks to: its
 // named -L socket, or tmux's "default" socket when SocketName is empty.
 func (t *Tmux) serverSocketPath() string {
@@ -191,29 +203,58 @@ func observeNamedSocket(ctx context.Context, path string) error {
 	})
 }
 
-// observeNamedSocketWith keeps the socket policy testable without opening a
-// listener. The lstat calls are context-bounded from the caller's perspective:
-// an OS syscall already in progress cannot be canceled, but its buffered result
-// cannot hold the caller after the context ends.
-func observeNamedSocketWith(
+// socketObservationKind classifies one observation of a named-socket path.
+// observeNamedSocketWith folds the safe kinds into "creation is safe"; the
+// session probe (session_probe.go) reads the kinds directly to separate an
+// attested death from a namespace it cannot observe.
+type socketObservationKind int
+
+const (
+	// socketAbsent: the first lstat reported os.ErrNotExist. No socket file
+	// is at this process's canonical path — also the state a TMUX_TMPDIR
+	// split produces.
+	socketAbsent socketObservationKind = iota
+	// socketStaleRefused: the dial was ECONNREFUSED and the inode stayed
+	// stable or the path went absent. The server that owned this socket is
+	// gone.
+	socketStaleRefused
+	// socketStaleVanished: the dial reported os.ErrNotExist with the path
+	// now absent. The socket raced away mid-observation; its owner is
+	// unproven, so this is not safe to treat as a gone server.
+	socketStaleVanished
+	// socketLive: a unix socket answered the dial with an attested peer pid.
+	socketLive
+	// socketUncertain: every outcome the observation could not prove either
+	// way, including a canceled or expired context.
+	socketUncertain
+)
+
+// classifyNamedSocketWith is observeNamedSocketWith's core: it observes path
+// with the injected lstat and dial and classifies the result. The returned
+// error carries the diagnostics observeNamedSocketWith reports for the
+// non-safe kinds (nil for the safe ones), so the folded policy keeps its
+// messages. The lstat calls are context-bounded from the caller's
+// perspective: an OS syscall already in progress cannot be canceled, but its
+// buffered result cannot hold the caller after the context ends.
+func classifyNamedSocketWith(
 	ctx context.Context,
 	path string,
 	lstat func(string) (os.FileInfo, error),
 	dial func(context.Context, string) (net.Conn, error),
-) error {
+) (socketObservationKind, error) {
 	before, err := lstatWithContext(ctx, lstat, path)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
+		return socketUncertain, fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return socketAbsent, nil
 	}
 	if err != nil {
-		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
+		return socketUncertain, fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
 	}
 	inode := socketInode(before)
 	if before.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=not-unix-socket", path, inode)
+		return socketUncertain, fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=not-unix-socket", path, inode)
 	}
 
 	conn, err := dial(ctx, path)
@@ -221,31 +262,50 @@ func observeNamedSocketWith(
 		defer func() { _ = conn.Close() }()
 		unixConn, ok := conn.(*net.UnixConn)
 		if !ok {
-			return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unexpected-connection-type-%T", path, inode, conn)
+			return socketUncertain, fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unexpected-connection-type-%T", path, inode, conn)
 		}
 		peerPID, peerErr := socketPeerPID(unixConn)
 		if peerErr != nil {
-			return fmt.Errorf("path=%s inode=%s peer_pid=unknown peer_pid_reason=%w", path, inode, peerErr)
+			return socketUncertain, fmt.Errorf("path=%s inode=%s peer_pid=unknown peer_pid_reason=%w", path, inode, peerErr)
 		}
-		return fmt.Errorf("path=%s inode=%s peer_pid=%d reason=live-unix-socket", path, inode, peerPID)
+		return socketLive, fmt.Errorf("path=%s inode=%s peer_pid=%d reason=live-unix-socket", path, inode, peerPID)
 	}
 
 	after, afterErr := lstatWithContext(ctx, lstat, path)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown post_lstat=%w", path, inode, contextErr)
+		return socketUncertain, fmt.Errorf("path=%s inode=%s peer_pid=unknown post_lstat=%w", path, inode, contextErr)
 	}
 	pathAbsent := errors.Is(afterErr, os.ErrNotExist)
 	stable := afterErr == nil && os.SameFile(before, after)
 	if errors.Is(err, syscall.ECONNREFUSED) && (pathAbsent || stable) {
-		return nil
+		return socketStaleRefused, nil
 	}
 	if errors.Is(err, os.ErrNotExist) && pathAbsent {
-		return nil
+		return socketStaleVanished, nil
 	}
 	if afterErr != nil {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)
+		return socketUncertain, fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)
 	}
-	return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_inode=%s reason=socket-identity-changed-or-dial-failed", path, inode, err, socketInode(after))
+	return socketUncertain, fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_inode=%s reason=socket-identity-changed-or-dial-failed", path, inode, err, socketInode(after))
+}
+
+// observeNamedSocketWith keeps the socket policy testable without opening a
+// listener. It folds classifyNamedSocketWith's safe kinds — absent, stale by
+// stable refusal, or vanished mid-dial — into nil; every other outcome,
+// including a live or unreadable socket, is a non-nil error.
+func observeNamedSocketWith(
+	ctx context.Context,
+	path string,
+	lstat func(string) (os.FileInfo, error),
+	dial func(context.Context, string) (net.Conn, error),
+) error {
+	kind, err := classifyNamedSocketWith(ctx, path, lstat, dial)
+	switch kind {
+	case socketAbsent, socketStaleRefused, socketStaleVanished:
+		return nil
+	default:
+		return err
+	}
 }
 
 type lstatResult struct {

@@ -3674,7 +3674,8 @@ func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
 func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 0")
+	bindDetachedProbeSocket(t, "gctest-stranded")
+	installFakeTmux(t, `printf 'soak-loop\n'`)
 	rec := emitStrandedDiagnosticForTest(t, store, &session)
 
 	if stranded := rec.strandedEvents(); len(stranded) != 0 {
@@ -3695,7 +3696,8 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *test
 func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 1")
+	bindDetachedProbeSocket(t, "gctest-stranded")
+	installFakeTmux(t, `exit 0`)
 	rec := emitStrandedDiagnosticForTest(t, store, &session)
 
 	stranded := rec.strandedEvents()
@@ -3717,7 +3719,8 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testin
 func TestEmitSessionStrandedDiagnostic_DetachedProbeErrorEmitsNormally(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 2")
+	bindDetachedProbeSocket(t, "gctest-stranded")
+	installFakeTmux(t, `exit 2`)
 	rec := emitStrandedDiagnosticForTest(t, store, &session)
 
 	stranded := rec.strandedEvents()
