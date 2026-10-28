@@ -629,6 +629,21 @@ printf 'rc=%s\n' "$rc"
 	})
 }
 
+// TestRunWithTimeoutRejectedDurationFallsBackToOneSecond guards the 1 s
+// fallback for a timeout duration sleep rejects: the call still kills the
+// command and returns 143 no earlier than one second, also under the
+// script's set -e.
+func TestRunWithTimeoutRejectedDurationFallsBackToOneSecond(t *testing.T) {
+	forEachPinShell(t, func(t *testing.T, shell string) {
+		harness := pinHarness(runWithTimeoutFn(t), `
+rc=0
+run_with_timeout abc sleep 5 || rc=$?
+printf 'rc=%s\n' "$rc"
+`)
+		runTimeoutKillPin(t, shell, harness, time.Second)
+	})
+}
+
 func prodRepoState(backupDir string) string {
 	return `{"head":"refs/heads/main","backups":{"prod-backup":{"name":"prod-backup","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
 }
