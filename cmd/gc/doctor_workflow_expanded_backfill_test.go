@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -88,5 +89,44 @@ func TestWorkflowExpandedBackfillCheckWarnsOnLegacyExpandedRoots(t *testing.T) {
 	}
 	if !strings.Contains(res.FixHint, "gc doctor --fix") {
 		t.Fatalf("FixHint = %q, want a gc doctor --fix hint", res.FixHint)
+	}
+}
+
+// TestWorkflowExpandedBackfillCheckFixStampsLegacyExpandedRoots proves the
+// repair closes #7436's claim loop: once --fix stamps a legacy expanded root,
+// the hook claim matcher refuses it on its route and the check reports OK.
+func TestWorkflowExpandedBackfillCheckFixStampsLegacyExpandedRoots(t *testing.T) {
+	check, cityStore, rigStore := legacyExpandedRootFixture(t)
+	route := []string{"repo/worker"}
+	before, err := cityStore.Get("WR-1")
+	if err != nil {
+		t.Fatalf("get WR-1: %v", err)
+	}
+	if !hookCandidateClaimable(before, route, time.Now()) {
+		t.Fatalf("fixture WR-1 is not claimable before the fix; the case proves nothing")
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	for _, tc := range []struct {
+		store beads.Store
+		id    string
+	}{{cityStore, "WR-1"}, {cityStore, "WR-2"}, {rigStore, "RR-1"}} {
+		b, err := tc.store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("get %s: %v", tc.id, err)
+		}
+		if got := b.Metadata["gc.workflow_expanded"]; got != "true" {
+			t.Errorf("%s gc.workflow_expanded = %q, want true", tc.id, got)
+		}
+		b.Assignee = ""
+		if hookCandidateClaimable(b, route, time.Now()) {
+			t.Errorf("%s is still claimable on %v after the fix", tc.id, route)
+		}
+	}
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res.Status, res)
 	}
 }
