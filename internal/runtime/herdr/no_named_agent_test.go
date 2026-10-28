@@ -28,7 +28,13 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 		if n, p, ok := strings.Cut(entry, "="); ok {
 			name, pane = n, p
 		}
-		entries = append(entries, fmt.Sprintf(`{"agent":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
+		// herdr's shape: "agent" is the detected kind every opencode pane
+		// shares, and "name" is the registration, omitted for "=<pane>".
+		named := ""
+		if name != "" {
+			named = fmt.Sprintf(`"name":"%s",`, name)
+		}
+		entries = append(entries, fmt.Sprintf(`{"agent":"opencode",%s"pane_id":"%s","agent_status":"working"}`, named, pane))
 	}
 	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
 	if registered == nil {

@@ -28,6 +28,10 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// rawAgents, when set, is served verbatim as agent.list's agents array
+	// instead of agents. agents round-trips gc's own struct tags, so only raw
+	// herdr JSON can catch a decode bug.
+	rawAgents string
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -95,6 +99,14 @@ func (f *fakeHerdrServer) setAgents(agents ...agentInfo) {
 	f.agents = append([]agentInfo(nil), agents...) // copy: callers keep mutating their slice
 }
 
+// setRawAgents serves entries, a comma-separated list of literal herdr agent
+// objects, as agent.list's agents array.
+func (f *fakeHerdrServer) setRawAgents(entries string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rawAgents = entries
+}
+
 func (f *fakeHerdrServer) serve(conn net.Conn) {
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
@@ -116,10 +128,14 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	switch req.Method {
 	case "agent.list":
 		f.mu.Lock()
-		agents := f.agents
+		agents, raw := f.agents, f.rawAgents
 		f.mu.Unlock()
 		resp := map[string]any{"id": req.ID, "result": map[string]any{"type": "agent_list", "agents": agents}}
 		b, _ := json.Marshal(resp)
+		if raw != "" {
+			idJSON, _ := json.Marshal(req.ID)
+			b = []byte(`{"id":` + string(idJSON) + `,"result":{"type":"agent_list","agents":[` + raw + `]}}`)
+		}
 		_, _ = conn.Write(append(b, '\n'))
 		_ = conn.Close()
 	case "events.subscribe":
