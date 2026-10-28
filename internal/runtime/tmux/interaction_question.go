@@ -14,7 +14,7 @@ import (
 //
 // Claude Code's AskUserQuestion tool opens a dialog that owns the pane's input:
 // a submitted Enter selects the focused option, so any typed nudge answers it.
-// As of Claude Code 2.1.280 it looks like this:
+// As of Claude Code 2.1.280 a question page looks like this:
 //
 //	 ☐ be-tx30v
 //	│ Push the deploy branch and open the PR. How do you want to proceed?
@@ -27,26 +27,34 @@ import (
 //	  4. Chat about this
 //	Enter to select · ↑/↓ to navigate · Esc to cancel
 //
-// The dialog is live only while its select footer is the last thing on screen.
-// Once it is answered the frame stays in scrollback with the agent's output (or
-// the idle composer) beneath it, so a footer with anything below it is history.
-// Detection also needs the dialog's other two anchors above the footer, a ☐
-// header row and the focused numbered option, so the folder-trust dialog
-// ("Enter to confirm") and an idle composer's bare "❯" never read as a question.
+// A multi-question dialog leads the header with a tab strip whose chips turn
+// from ☐ to ☒ as questions are answered ("←  ☒ Q1  ☐ Q2  ✔ Submit  →") and
+// navigates with "Tab/Arrow keys".
 //
-// The matcher is checked against one live frame shape, a single-select,
-// single-question dialog (Claude Code 2.1.280). A multiSelect question, a
-// multi-question dialog's later tabs, or a status row under the footer are not
-// verified against a live capture. A form the matcher misses reads as no
-// question and is delivered to as it was before this guard existed.
+// A dialog is live only while it is the bottom-most block on screen. Once it is
+// answered the frame stays in scrollback with the agent's output (or the idle
+// composer) beneath it, so a dialog with anything below it is history.
+//
+// A question page is keyed on its select footer (which a narrow pane may wrap
+// onto a few rows), a ☐/☒ header row above it, and at least one numbered
+// option between them. The focused option is not required: focus on the
+// "Type something." row draws no cursor. The folder-trust, resume and
+// spend-limit dialogs end in "Enter to confirm" and the Codex model switch in
+// "Press enter to confirm", so none of them reads as a question.
+//
+// The question page is checked against a live single-question frame (Claude
+// Code 2.1.280) and a live multi-question dialog's pages (ga-ngrme8). A form
+// the matcher misses reads as no question and is delivered to as it was before
+// this guard existed.
 
 var (
-	// askUserQuestionFooterRe matches the select footer on its trimmed row.
+	// askUserQuestionFooterRe matches the select footer, its wrapped rows
+	// joined, trimmed.
 	askUserQuestionFooterRe = regexp.MustCompile(`^Enter to select\b.*Esc to cancel$`)
 
-	// askUserQuestionHeaderRe matches the ☐ header row. A multi-question dialog
-	// leads it with the tab arrow ("← ☐ Approach  ☐ Scope  ✔ Submit →").
-	askUserQuestionHeaderRe = regexp.MustCompile(`^\s*(?:←\s*)?☐\s+(.+)$`)
+	// askUserQuestionHeaderRe matches the header row: a ☐ (open) or ☒
+	// (answered) chip, led by the tab arrow in a multi-question dialog.
+	askUserQuestionHeaderRe = regexp.MustCompile(`^\s*(?:←\s*)?[☐☒]\s+(.+)$`)
 
 	// askUserQuestionOptionRe matches a numbered option row; the focused one
 	// carries the cursor glyph.
@@ -55,11 +63,17 @@ var (
 
 const (
 	// askUserQuestionTailSpan is how many non-blank rows from the bottom, the
-	// footer's own row included, the footer may sit within. A row that starts
-	// with a prompt glyph below it is the composer, so the dialog is history.
+	// footer's own last row included, the footer may end within. A row that
+	// starts with a prompt glyph below it is the composer, so the dialog is
+	// history.
 	askUserQuestionTailSpan = 2
 
-	// askUserQuestionMaxRows bounds how far above the footer the header may be.
+	// askUserQuestionFooterRows is how many rows a narrow pane may wrap the
+	// select footer onto.
+	askUserQuestionFooterRows = 3
+
+	// askUserQuestionMaxRows bounds how far above the footer the header may
+	// be.
 	askUserQuestionMaxRows = 60
 
 	// askUserQuestionPromptMax bounds the prompt text a client is shown, in runes.
@@ -72,55 +86,87 @@ type parsedQuestion struct {
 	Question string
 	// Choices are the numbered options' labels in pane order.
 	Choices []string
-	// Focused is the label of the highlighted option.
+	// Focused is the label of the highlighted option; empty when no option
+	// row draws the cursor.
 	Focused string
 }
 
-// parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
+// parseAskUserQuestion returns the open AskUserQuestion page the pane lines
 // show, or nil when they show none.
 func parseAskUserQuestion(lines []string) *parsedQuestion {
-	// Walk up from the bottom to the footer, allowing only the dialog's own
-	// trailing rows below it.
-	footer, seen := -1, 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" {
-			continue
-		}
-		if askUserQuestionFooterRe.MatchString(trimmed) {
-			footer = i
-			break
-		}
-		seen++
-		if seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
-			return nil
-		}
-	}
+	footer := askUserQuestionFooterRow(lines)
 	if footer < 0 {
 		return nil
 	}
+	return parseAskUserQuestionPage(lines, footer)
+}
 
-	header := -1
-	for i := footer - 1; i >= 0 && footer-i <= askUserQuestionMaxRows; i-- {
-		if askUserQuestionHeaderRe.MatchString(lines[i]) {
-			header = i
-			break
+// bottomRows returns the indexes of the last n non-blank lines, bottom first.
+func bottomRows(lines []string, n int) []int {
+	rows := make([]int, 0, n)
+	for i := len(lines) - 1; i >= 0 && len(rows) < n; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			rows = append(rows, i)
 		}
 	}
+	return rows
+}
+
+// askUserQuestionFooterRow returns the index of the select footer's first row
+// when the footer ends the pane's bottom block, or -1.
+func askUserQuestionFooterRow(lines []string) int {
+	rows := bottomRows(lines, askUserQuestionTailSpan+askUserQuestionFooterRows-1)
+	for skip := 0; skip < askUserQuestionTailSpan && skip < len(rows); skip++ {
+		if skip > 0 {
+			below := strings.TrimSpace(lines[rows[skip-1]])
+			if strings.HasPrefix(below, "❯") || strings.HasPrefix(below, ">") {
+				return -1
+			}
+		}
+		joined := ""
+		for n := 0; n < askUserQuestionFooterRows && skip+n < len(rows); n++ {
+			row := strings.TrimSpace(lines[rows[skip+n]])
+			if joined == "" {
+				joined = row
+			} else {
+				joined = row + " " + joined
+			}
+			if strings.HasPrefix(row, "Enter to select") && askUserQuestionFooterRe.MatchString(joined) {
+				return rows[skip+n]
+			}
+		}
+	}
+	return -1
+}
+
+// askUserQuestionHeaderAbove returns the index of the nearest header row
+// within askUserQuestionMaxRows above row, or -1.
+func askUserQuestionHeaderAbove(lines []string, row int) int {
+	for i := row - 1; i >= 0 && row-i <= askUserQuestionMaxRows; i-- {
+		if askUserQuestionHeaderRe.MatchString(lines[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// parseAskUserQuestionPage reads the question page whose footer starts at
+// row footer. It needs a header above the footer and a numbered option between
+// them.
+func parseAskUserQuestionPage(lines []string, footer int) *parsedQuestion {
+	header := askUserQuestionHeaderAbove(lines, footer)
 	if header < 0 {
 		return nil
 	}
 
 	q := &parsedQuestion{Header: strings.TrimSpace(askUserQuestionHeaderRe.FindStringSubmatch(lines[header])[1])}
 	var question []string
-	focused := false
 	for _, line := range lines[header+1 : footer] {
 		trimmed := strings.TrimSpace(line)
 		if m := askUserQuestionOptionRe.FindStringSubmatch(trimmed); m != nil {
 			label := strings.TrimSpace(m[3])
 			q.Choices = append(q.Choices, label)
 			if m[1] != "" {
-				focused = true
 				q.Focused = label
 			}
 			continue
@@ -129,7 +175,7 @@ func parseAskUserQuestion(lines []string) *parsedQuestion {
 			question = append(question, strings.TrimSpace(strings.TrimPrefix(trimmed, "│")))
 		}
 	}
-	if !focused {
+	if len(q.Choices) == 0 {
 		return nil
 	}
 	q.Question = strings.Join(question, " ")

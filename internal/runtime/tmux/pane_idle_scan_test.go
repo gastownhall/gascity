@@ -39,3 +39,36 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 		})
 	}
 }
+
+// An open Claude Code AskUserQuestion dialog renders its focused option as
+// "❯ 1. …", which matches the ready-prompt prefix. It is not an idle boundary:
+// a nudge pasted now and followed by Enter selects that option instead of
+// reaching the composer (#8150).
+func TestPaneShowsIdlePromptAskUserQuestionDialogIsNotIdle(t *testing.T) {
+	lines := []string{
+		"⏺ I have a few questions before I plan this.",
+		"",
+		"────────────────────────────────────────────────────────────",
+		" ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →",
+		"",
+		"Which scope should the change cover?",
+		"",
+		"❯ 1. Small",
+		"     Only the bug fix",
+		"  2. Medium",
+		"     Fix plus regression tests",
+		"  3. Large",
+		"     Fix, tests and a refactor",
+		"  4. Type something.",
+		"────────────────────────────────────────────────────────────",
+		"  5. Chat about this",
+		"",
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+	}
+	if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+		t.Errorf("PaneShowsIdlePrompt reported an open AskUserQuestion dialog as idle; a nudge would answer it")
+	}
+	if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); err == nil && idle {
+		t.Errorf("ClassifyIdlePane(AskUserQuestion dialog) = (true, nil), want not idle")
+	}
+}

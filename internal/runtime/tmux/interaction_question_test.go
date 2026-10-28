@@ -3,6 +3,8 @@ package tmux
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -372,11 +374,12 @@ func TestSnapshotPaneIdleRejectsAskUserQuestionDialog(t *testing.T) {
 	}
 }
 
-// A pane reads as an open dialog only when it has all three anchors (select footer, a focused
-// numbered option row, a ☐ header row), in the pane's bottom block. Each anchor
-// is what keeps a different pane from reading as an open dialog: the
-// folder-trust dialog must stay nudgeable, an idle composer's "❯ " must not
-// look like a focused option, and an answered frame in scrollback is not live.
+// A pane reads as an open question page only when it has all three anchors
+// (select footer, a numbered option row, a ☐/☒ header row), with the footer
+// in the pane's bottom block. Each anchor is what keeps a different pane from
+// reading as an open dialog: the folder-trust dialog must stay nudgeable, an
+// idle composer's "❯ " is not a numbered option, and an answered frame in
+// scrollback is not live.
 // The control runs first so the nil cases cannot pass vacuously.
 func TestPendingRejectsNonDialogPanes(t *testing.T) {
 	pendingFor := func(pane string) (*runtime.PendingInteraction, error) {
@@ -395,7 +398,7 @@ func TestPendingRejectsNonDialogPanes(t *testing.T) {
 		{"folder-trust pane", " Do you trust the files in this folder?\n\n /work/repo\n\n" + askUserQuestionOptionRows + "\n" + askUserQuestionFooterConfirm},
 		{"footer only", "Working...\n" + askUserQuestionFooterSelect},
 		{"footer and option without header", askUserQuestionOptionRows + "\n" + askUserQuestionFooterSelect},
-		{"footer and header with numbered rows but no focused option", askUserQuestionHeaderRows + "  1. Yes\n  2. No\n\n" + askUserQuestionFooterSelect},
+		{"footer and header with no numbered option", askUserQuestionHeaderRows + "\n" + askUserQuestionFooterSelect},
 		{"option and header with the confirm footer", askUserQuestionHeaderRows + askUserQuestionOptionRows + "\n" + askUserQuestionFooterConfirm},
 		{"idle composer with the select footer", "● Done.\n\n❯ \n" + askUserQuestionFooterSelect},
 		{"answered frame above an idle composer", answeredAskUserQuestionPane},
@@ -444,4 +447,147 @@ func TestDismissersLeaveAskUserQuestionDialogAlone(t *testing.T) {
 		_ = tm.DismissKnownDialogs(context.Background(), "auq", 300*time.Millisecond)
 		requireNoKeys(t, ex.calls, false)
 	})
+}
+
+// readQuestionFixture reads a capture under testdata/claude-question. The
+// ga-ngrme8 files are the pane captures taken one key at a time while gc's
+// nudge key sequence was replayed against a live multi-question
+// AskUserQuestion dialog (commit 7ffbed8d04): the first page, the page after
+// one Enter answered Q1, the review page, and a seat's idle pane quoting a
+// dialog in its scrollback.
+func readQuestionFixture(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "claude-question", name))
+	if err != nil {
+		t.Fatalf("reading fixture %s: %v", name, err)
+	}
+	return strings.TrimRight(string(data), "\n")
+}
+
+// askUserQuestionC1Pane is the multi-question page from the #8150 triage
+// repro: a tab strip, options with description rows, and the rule between
+// "Type something." and "Chat about this".
+const askUserQuestionC1Pane = `⏺ I have a few questions before I plan this.
+
+────────────────────────────────────────────────────────────
+ ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →
+
+Which scope should the change cover?
+
+❯ 1. Small
+     Only the bug fix
+  2. Medium
+     Fix plus regression tests
+  3. Large
+     Fix, tests and a refactor
+  4. Type something.
+────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel`
+
+// askUserQuestionWrappedFooterPane is a question page in a pane too narrow for
+// the select footer, which wraps onto a second row.
+const askUserQuestionWrappedFooterPane = `←  ☐ Scope  ☐ Approach  ✔ Submit  →
+Which scope should the change cover?
+❯ 1. Small
+  2. Medium
+  3. Type something.
+───────────────────────────────────
+  4. Chat about this
+Enter to select · Tab/Arrow keys to
+navigate · Esc to cancel`
+
+// askUserQuestionTypeSomethingPane is the 2.1.280 frame with focus moved to the
+// "Type something." row, which draws no cursor: no option row carries ❯.
+var askUserQuestionTypeSomethingPane = strings.Replace(askUserQuestionPane, "❯ 1. Run gates", "  1. Run gates", 1)
+
+// askUserQuestionPageCase is an open question page and what the parser reads
+// from it.
+type askUserQuestionPageCase struct {
+	name     string
+	pane     string
+	question string
+	choices  []string
+	focused  string
+}
+
+func askUserQuestionPageCases(t *testing.T) []askUserQuestionPageCase {
+	t.Helper()
+	single := []string{
+		"Run gates, then ship if clean (Recommended)",
+		"Run gates, ask again before push",
+		"Keep holding",
+		"Type something.",
+		"Chat about this",
+	}
+	singleQuestion := "Push deploy/be-tx30v-gate to headfork and open the PR against gastownhall/beads. How do you want to proceed?"
+	return []askUserQuestionPageCase{
+		{
+			name:     "triage repro page",
+			pane:     askUserQuestionC1Pane,
+			question: "Which scope should the change cover?",
+			choices:  []string{"Small", "Medium", "Large", "Type something.", "Chat about this"},
+			focused:  "Small",
+		},
+		{
+			name:     "multi-question first page (ga-ngrme8)",
+			pane:     readQuestionFixture(t, "multi-question-page-ga-ngrme8.txt"),
+			question: "Which approach would you prefer for this feature?",
+			choices:  []string{"Alpha approach (Recommended)", "Beta variant", "Gamma variant", "Type something.", "Chat about this"},
+			focused:  "Alpha approach (Recommended)",
+		},
+		{
+			name:     "page after one answer (ga-ngrme8)",
+			pane:     readQuestionFixture(t, "multi-question-after-answer-ga-ngrme8.txt"),
+			question: "How should we handle configuration?",
+			choices:  []string{"Environment variables (Recommended)", "Config file Beta", "Command-line Gamma", "Type something.", "Chat about this"},
+			focused:  "Environment variables (Recommended)",
+		},
+		{
+			name:     "single-question frame (2.1.280)",
+			pane:     askUserQuestionPane,
+			question: singleQuestion,
+			choices:  single,
+			focused:  "Run gates, then ship if clean (Recommended)",
+		},
+		{
+			name:     "focus in Type something, no cursor drawn",
+			pane:     askUserQuestionTypeSomethingPane,
+			question: singleQuestion,
+			choices:  single,
+		},
+		{
+			name:     "footer wrapped at a narrow width",
+			pane:     askUserQuestionWrappedFooterPane,
+			question: "Which scope should the change cover?",
+			choices:  []string{"Small", "Medium", "Type something.", "Chat about this"},
+			focused:  "Small",
+		},
+	}
+}
+
+// An open question page is no idle boundary in any of its shapes: the
+// focused row ("❯ 1. …") matches the ready prefix, and focus in "Type
+// something." draws no cursor at all, so the scan must key on the dialog.
+func TestAskUserQuestionPagesAreNotIdle(t *testing.T) {
+	for _, tc := range askUserQuestionPageCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := strings.Split(tc.pane, "\n")
+			q := parseAskUserQuestion(lines)
+			if q == nil {
+				t.Fatalf("parseAskUserQuestion = nil for an open question page:\n%s", tc.pane)
+			}
+			if q.Question != tc.question || !slices.Equal(q.Choices, tc.choices) || q.Focused != tc.focused {
+				t.Errorf("parsed question = %q %q focused %q, want %q %q focused %q",
+					q.Question, q.Choices, q.Focused, tc.question, tc.choices, tc.focused)
+			}
+			if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+				t.Errorf("PaneShowsIdlePrompt = true; a nudge's Enter would answer the question")
+			}
+			if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); idle || !errors.Is(err, runtime.ErrIdleIndeterminate) {
+				t.Errorf("ClassifyIdlePane = (%v, %v), want (false, runtime.ErrIdleIndeterminate)", idle, err)
+			}
+		})
+	}
 }
