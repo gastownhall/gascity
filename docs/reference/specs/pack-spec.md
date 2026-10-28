@@ -625,7 +625,7 @@ A command runs with the invoking environment plus these variables:
 |---|---|
 | `GC_BIN` | The `gc` executable that invoked the command. Use it for recursive `gc` calls. |
 | `GC_CITY`, `GC_CITY_PATH` | The city root. |
-| `GC_CITY_NAME` | The city name. |
+| `GC_CITY_NAME` | The city name: the name the city is registered under with a supervisor, else its site-bound name or `[workspace].name`, else the city directory's basename. Agent sessions, exec orders, and `proxy_process` services receive the same value. An inherited value is never passed through. |
 | `GC_CITY_RUNTIME_DIR` | The city's runtime state directory. |
 | `GC_PACK_DIR` | The root of the pack that defines the command. |
 | `GC_PACK_NAME` | That pack's name. |
