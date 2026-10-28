@@ -155,3 +155,58 @@ esac
 		})
 	}
 }
+
+// TestEffectiveWorkQueryLatchWindowRereadFailsLoudly is AC-3: when the
+// unbounded re-read's reader fails, the query fails with the reader-failure
+// message instead of answering "[]" — the same never-a-no-work-verdict
+// contract every other tier read carries (workQueryReadFailure).
+func TestEffectiveWorkQueryLatchWindowRereadFailsLoudly(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	window := "[" + strings.Join(latchWindowRows(routedReadyWindowRows), ",") + "]"
+
+	stdout, stderr, exit := runWorkQueryWithFakeBdCapture(t, a.EffectiveWorkQuery(), map[string]string{
+		"GC_TEST_ROUTED_WINDOW": window,
+		"GC_TEST_ROUTED_ALL":    "[]",
+	}, `#!/bin/sh
+set -eu
+case "$1" in
+  list) printf '[]' ;;
+  query) printf '[]' ;;
+  ready)
+    case "$*" in
+      *"gc.run_target="*) printf '[]' ;;
+      *"--limit 0"*) printf 'bd: store exploded\n' >&2; exit 1 ;;
+      *"gc.routed_to="*) printf '%s' "$GC_TEST_ROUTED_WINDOW" ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if exit == 0 {
+		t.Fatalf("work query exited 0 over a failed unbounded routed re-read and printed %q (stderr=%q); the failure must not be answered as \"no work\"", stdout, stderr)
+	}
+	if strings.Contains(stdout, "[]") {
+		t.Errorf("work query printed %q over a failed re-read; \"[]\" is what every consumer reads as an empty queue", stdout)
+	}
+	if !strings.Contains(stderr, "bd ready failed") {
+		t.Errorf("work query stderr = %q, want it to name the failed reader", stderr)
+	}
+}
+
+// runWorkQueryWithFakeBdCapture runs command with a fake `bd` on PATH and
+// returns stdout, stderr and the exit status without failing the test on a
+// non-zero exit, for tests whose subject IS the failure path.
+func runWorkQueryWithFakeBdCapture(t *testing.T, command string, env map[string]string, bdScript string) (stdout, stderr string, exit int) {
+	t.Helper()
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	for k, v := range env {
+		commandEnv = append(commandEnv, k+"="+v)
+	}
+	return runShellCommandCapture(t, command, commandEnv)
+}
