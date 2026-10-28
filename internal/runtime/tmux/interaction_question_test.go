@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -850,5 +851,139 @@ func TestQuotedAskUserQuestionAboveAComposerIsNotADialog(t *testing.T) {
 				t.Fatalf("the message was never pasted; calls=%v", ex.calls)
 			}
 		})
+	}
+}
+
+// Mid-session dialogs gc dismisses, as their dismissers' tests render them.
+const (
+	claudeResumeDialogPane = resumeDialogPane
+	codexModelSwitchPane   = "Approaching rate limits\n" +
+		"Switch to gpt-5.4-mini for lower credit usage?\n" +
+		"› 1. Switch to gpt-5.4-mini\n" +
+		"  2. Keep current model\n" +
+		"  3. Keep current model (never show again)\n" +
+		"Press enter to confirm or esc to go back"
+	claudeSpendLimitPane = `What do you want to do?
+Usage credit balance: $573.37
+❯ Adjust monthly spend limit: $1503.19
+  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)
+Enter to confirm · Esc to cancel`
+)
+
+// No approval capture and no dialog gc dismisses reads as a question: the
+// approvals are classified exactly as the approval parser reads them (same
+// tool, options and request ID), and the dismissable dialogs are left to
+// their dismissers.
+func TestApprovalAndDismissableDialogsAreNotQuestions(t *testing.T) {
+	for _, dir := range []string{"claude-approval", "codex-approval"} {
+		entries, err := os.ReadDir(filepath.Join("testdata", dir))
+		if err != nil {
+			t.Fatalf("reading %s: %v", dir, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("no fixtures under testdata/%s", dir)
+		}
+		for _, entry := range entries {
+			t.Run(dir+"/"+entry.Name(), func(t *testing.T) {
+				data, err := os.ReadFile(filepath.Join("testdata", dir, entry.Name()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				pane := string(data)
+				if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(pane, "\r", ""), "\n")); q != nil {
+					t.Fatalf("parseAskUserQuestion = %+v for an approval capture, want nil", q)
+				}
+				want := parseApprovalPrompt(pane)
+				if want == nil || want.Codex {
+					// Codex overlays are re-read with pane geometry, which
+					// the fake executor does not serve; the parse above is
+					// the question-first precedence they depend on.
+					return
+				}
+				tm, _ := questionTmux(pane)
+				got, err := tm.approvalInPane("auq")
+				if err != nil {
+					t.Fatalf("approvalInPane: %v", err)
+				}
+				if !reflect.DeepEqual(got, want) || approvalHash(got) != approvalHash(want) {
+					t.Fatalf("approvalInPane = %+v, want the approval parser's %+v", got, want)
+				}
+			})
+		}
+	}
+
+	for name, pane := range map[string]string{
+		"claude-resume":            claudeResumeDialogPane,
+		"session feedback":         feedbackSurveySessionFixture,
+		"memory feedback":          feedbackSurveyMemoryFixture,
+		"session-limit chooser":    sessionLimitChooserPane,
+		"Codex model switch":       codexModelSwitchPane,
+		"spend-limit modal":        claudeSpendLimitPane,
+		"folder-trust (confirm)":   " Do you trust the files in this folder?\n\n /work/repo\n\n" + askUserQuestionOptionRows + "\n" + askUserQuestionFooterConfirm,
+		"approval prompt fixture":  approvalPromptPane(),
+		"idle composer":            "● Done.\n\n❯ \n",
+		"question header, no menu": askUserQuestionHeaderRows + "\n" + askUserQuestionFooterSelect,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if q := parseAskUserQuestion(strings.Split(pane, "\n")); q != nil {
+				t.Fatalf("parseAskUserQuestion = %+v, want nil", q)
+			}
+			tm, _ := questionTmux(pane)
+			if pending, err := (&Provider{tm: tm}).Pending("auq"); err == nil && pending != nil && pending.Kind == "question" {
+				t.Fatalf("Pending = %+v, want no question", pending)
+			}
+		})
+	}
+}
+
+// dismissableDialogPane is a fake Claude pane that shows dialog on top of its
+// composer until dismissKeys arrive, in order, the way the session-limit
+// chooser takes "1" then "Enter".
+type dismissableDialogPane struct {
+	*fakeClaudePane
+	dialog      string
+	dismissKeys []string
+	received    []string
+}
+
+func (d *dismissableDialogPane) execute(args []string) (string, error) {
+	if d.dialog != "" {
+		if slices.Contains(args, "capture-pane") {
+			return d.dialog, nil
+		}
+		if slices.Contains(args, "send-keys") {
+			key := args[len(args)-1]
+			d.received = append(d.received, key)
+			if slices.Equal(d.received, d.dismissKeys) {
+				d.dialog = ""
+			}
+			return "", nil
+		}
+	}
+	return d.fakeClaudePane.execute(args)
+}
+
+func (d *dismissableDialogPane) executeCtx(_ context.Context, args []string) (string, error) {
+	return d.execute(args)
+}
+
+// The session-limit chooser is not a question: NudgeSession still dismisses
+// it with "1", "Enter" and then delivers the message.
+func TestNudgeSessionStillDismissesTheSessionLimitChooser(t *testing.T) {
+	pane := &dismissableDialogPane{
+		fakeClaudePane: newFakeClaudePane(""),
+		dialog:         sessionLimitChooserPane,
+		dismissKeys:    []string{"1", "Enter"},
+	}
+	tm := NewTmux()
+	tm.exec = pane
+	if err := tm.NudgeSession(pane.sessionName, "run the tests"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	if !slices.Equal(pane.received, []string{"1", "Enter"}) {
+		t.Fatalf("the chooser received %q, want 1, Enter", pane.received)
+	}
+	if submitted, _ := pane.state(); !slices.Equal(submitted, []string{"run the tests"}) {
+		t.Fatalf("submitted %q, want the message", submitted)
 	}
 }
