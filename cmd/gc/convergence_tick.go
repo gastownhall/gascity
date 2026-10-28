@@ -23,13 +23,13 @@ type convergenceRequest struct {
 	User    string            `json:"user,omitempty"` // resolved client-side for audit attribution
 	Params  map[string]string `json:"params"`         // command-specific parameters
 	replyCh chan convergenceReply
-	// cancelled is set by handleConvergeSocketCmd when its 60s reply wait
+	// canceled is set by handleConvergeSocketCmd when its 60s reply wait
 	// expires, so the event loop can skip a request whose caller already
 	// gave up on (gastownhall/gascity#8387) instead of still running it: the
 	// value sent on the channel is a copy of this struct, but the pointer is
 	// shared, so a late Store(true) on the sender's side is visible to
 	// whichever side eventually dequeues and processes the request.
-	cancelled *atomic.Bool
+	canceled *atomic.Bool
 }
 
 // convergenceReply is the response from the event loop to a socket command.
@@ -408,7 +408,7 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 	// caller this request failed; running it now would silently succeed
 	// behind that caller's back and, on a retry, create a second loop for
 	// the same work (gastownhall/gascity#8387). Skip it instead.
-	if req.cancelled != nil && req.cancelled.Load() {
+	if req.canceled != nil && req.canceled.Load() {
 		fmt.Fprintf(cr.stderr, "%s: convergence: skipping %s %s: caller already timed out waiting for the reply\n", //nolint:errcheck
 			cr.logPrefix, req.Command, req.BeadID)
 		return convergenceReply{Error: "request abandoned: caller's reply wait already expired"}
