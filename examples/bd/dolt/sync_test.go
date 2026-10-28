@@ -2005,3 +2005,30 @@ func TestSyncWritesNoOutcomeWhenNoDatabaseSkipped(t *testing.T) {
 		}
 	})
 }
+
+// TestSyncFailedRunWritesNoOutcomeDeclaration covers the failure gate: the
+// controller reads the declaration only after a successful exit, so a run
+// that failed at least one database must leave the outcome file empty even
+// when it also skipped databases, and the existing failure summary must
+// stay the last line of output for tailForOrderFailureEvent.
+func TestSyncFailedRunWritesNoOutcomeDeclaration(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	writeSyncCLIDatabase(t, dataDir, "bad", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+	writeSyncCLIDatabase(t, dataDir, "skipme", "")
+	binDir := t.TempDir()
+	writeSyncFakeDoltCLIPushFailsForDB(t, binDir, "bad", 1)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+	out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_BAD="})
+	if err == nil {
+		t.Fatalf("expected a non-zero exit when one database fails to push:\n%s", out)
+	}
+	assertNoCompactOutcome(t, outcomeFile)
+	wantLast := "sync: 1/2 database(s) failed: bad (push failed (exit 1));"
+	if last := lastSyncOutputLine(out); last != wantLast {
+		t.Fatalf("last line = %q, want %q\nout:\n%s", last, wantLast, out)
+	}
+}

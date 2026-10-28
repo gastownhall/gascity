@@ -805,7 +805,12 @@ fi
 if [ "$skip_count" -gt 0 ] && [ "$skip_count" -eq "$total_count" ]; then
   echo "sync: $skip_count/$total_count database(s) skipped, nothing synced: $skipped_summary" >&2
 fi
-write_order_outcome
+# The controller reads the declaration only after a successful exit, and a
+# failed run already records order.failed with its stderr tail — so declare
+# only when the run is about to exit 0.
+if [ "$exit_code" -eq 0 ]; then
+  write_order_outcome
+fi
 
 # Positioned as the last line of output: an OrderFailed event built from this
 # script's output (tailForOrderFailureEvent, cmd/gc/order_dispatch.go) keeps
