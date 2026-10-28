@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -149,5 +150,39 @@ func TestReleaseOrphanedPoolAssignments_HandsClosedSeatRowClaimToSuccessor(t *te
 	}
 	if got.Status != "in_progress" {
 		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_SeatHandOverWritesOnlyAssignee (AC-2):
+// the hand-over moves the claim and nothing else. Status, the claim
+// projection (gc.session_id, gc.session_name, gc.claimed_at), routing and all
+// other metadata stay as they were until the successor's own hook rebinds
+// them. Revision, ClaimFence and UpdatedAt are the store's bookkeeping of the
+// write itself.
+func TestReleaseOrphanedPoolAssignments_SeatHandOverWritesOnlyAssignee(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := seatHandoverCity()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	if err := store.SetMetadata(work.ID, "gc.session_affinity", "require"); err != nil {
+		t.Fatalf("set affinity: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Labels: []string{"pool:worker"}, Description: stringPtr("bake for a while")}); err != nil {
+		t.Fatalf("set labels: %v", err)
+	}
+	work = getSeatBead(t, store, work.ID)
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+	if released := sweepSeatWork(store, cfg, []beads.Bead{successor}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+	got := getSeatBead(t, store, work.ID)
+	if got.Assignee != successor.ID {
+		t.Fatalf("assignee = %q, want successor %q", got.Assignee, successor.ID)
+	}
+	got.Assignee = work.Assignee
+	got.Revision, got.ClaimFence, got.UpdatedAt = work.Revision, work.ClaimFence, work.UpdatedAt
+	if !reflect.DeepEqual(got, work) {
+		t.Fatalf("hand-over changed more than the assignee:\n got  %+v\n want %+v", got, work)
 	}
 }
