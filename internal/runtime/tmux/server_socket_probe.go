@@ -65,7 +65,7 @@ func (t *Tmux) verifyAttachSocketWitness(initial namedSocketWitness) error {
 }
 
 func (t *Tmux) captureNamedSocketWitness(ctx context.Context) (namedSocketWitness, error) {
-	path, err := filepath.Abs(filepath.Clean(namedSocketPath(t.cfg.SocketName)))
+	path, err := filepath.Abs(filepath.Clean(t.namedServerSocketPath()))
 	if err != nil {
 		return namedSocketWitness{}, namedSocketWitnessFailure("canonical-path", nil, 0)
 	}
@@ -137,7 +137,8 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	if witness.canonicalPath != "" {
 		args = append(args, "-N", "-S", witness.canonicalPath)
 	} else if t.cfg.SocketName != "" {
-		args = append(args, "-N", "-L", t.cfg.SocketName)
+		args = append(args, "-N")
+		args = append(args, t.socketArgs()...)
 	}
 	return append(args, "attach-session", "-t", target)
 }
@@ -181,6 +182,16 @@ func (t *Tmux) socketArgs() []string {
 	return []string{"-L", t.cfg.SocketName}
 }
 
+// namedServerSocketPath is the filesystem path of the named server socket:
+// the path pinned from $TMUX when inside that server's pane, else the path
+// tmux resolves from TMUX_TMPDIR.
+func (t *Tmux) namedServerSocketPath() string {
+	if pinned := t.pinnedServerSocket(); pinned != "" {
+		return pinned
+	}
+	return namedSocketPath(t.cfg.SocketName)
+}
+
 // namedSocketPath resolves the exact path tmux uses for a named -L socket.
 // tmux honors TMUX_TMPDIR here; TMPDIR is deliberately not a fallback.
 func namedSocketPath(socketName string) string {
@@ -192,13 +203,14 @@ func namedSocketPath(socketName string) string {
 }
 
 // serverSocketPath returns the socket path of the server t talks to: its
-// named -L socket, or tmux's "default" socket when SocketName is empty.
+// named socket (the $TMUX-pinned path when inside that server's pane, else
+// the path tmux resolves from TMUX_TMPDIR), or tmux's "default" socket when
+// SocketName is empty.
 func (t *Tmux) serverSocketPath() string {
-	name := t.cfg.SocketName
-	if name == "" {
-		name = "default"
+	if t.cfg.SocketName == "" {
+		return namedSocketPath("default")
 	}
-	return namedSocketPath(name)
+	return t.namedServerSocketPath()
 }
 
 // observeServerSocket observes path with the injected observer, or with

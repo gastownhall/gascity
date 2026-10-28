@@ -658,7 +658,7 @@ func (t *Tmux) probeServerAlive() error {
 		return nil
 	}
 	if errors.Is(err, ErrNoServer) {
-		path := namedSocketPath(t.cfg.SocketName)
+		path := t.namedServerSocketPath()
 		observationErr := t.observeServerSocket(ctx, path)
 		if observationErr == nil {
 			return nil
@@ -2324,7 +2324,8 @@ func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSoc
 	if witness.canonicalPath != "" {
 		args = append(args, "-N", "-S", witness.canonicalPath)
 	} else if t.cfg.SocketName != "" {
-		args = append(args, "-N", "-L", t.cfg.SocketName)
+		args = append(args, "-N")
+		args = append(args, t.socketArgs()...)
 	}
 	return append(args, "attach-session", "-t", target)
 }
