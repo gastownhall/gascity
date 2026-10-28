@@ -30,6 +30,7 @@ go_test(
         "federated_marker_guard_test.go",
         "fence_conformance_test.go",
         "import_boundary_test.go",
+        "projection_guard_test.go",
         "projection_test.go",
         "ratchet_test.go",
         "split_stores_test.go",

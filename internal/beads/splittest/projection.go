@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
-	"weak"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -109,12 +109,12 @@ func (s projectionSide) String() string {
 
 var (
 	projectionsMu sync.Mutex
-	// projections maps a root to its projection. Both halves are weak where
-	// the root's type allows (the in-memory roots tests use), so a finished
-	// test's stores are collectable: a live view holds its projection, and
-	// nothing else needs to.
-	projections   = map[any]weak.Pointer[Projection]{}
-	projectionsGC = 64
+	// projections maps a root to its projection, held strongly for the life
+	// of the test binary: a projection carries the misplaced-row pins, and a
+	// projection collected mid-test (as a weakly held one could be) would
+	// forget them and turn later reads into nondeterministic violations. The
+	// stores tests open are small; a shard's worth is cheap to keep.
+	projections = map[any]*Projection{}
 )
 
 // ProjectionOf returns the memoized projection over store's root, building it
@@ -135,7 +135,7 @@ func projectionOf(store beads.Store, sink *violationSink) *Projection {
 	projectionsMu.Lock()
 	defer projectionsMu.Unlock()
 	if keyable {
-		if p := projections[key].Value(); p != nil {
+		if p, ok := projections[key]; ok {
 			return p
 		}
 	}
@@ -150,35 +150,13 @@ func projectionOf(store beads.Store, sink *violationSink) *Projection {
 		minter.SetMintPrefixFunc(classMintPrefix)
 	}
 	if keyable {
-		projections[key] = weak.Make(p)
-		if len(projections) > projectionsGC {
-			for k, w := range projections {
-				if w.Value() == nil {
-					delete(projections, k)
-				}
-			}
-			projectionsGC = 2*len(projections) + 64
-		}
+		projections[key] = p
 	}
 	return p
 }
 
-// rootKey returns a map key for root: a weak pointer for the in-memory roots
-// tests use, so the key does not keep the store alive, and the value itself
-// for any other comparable root.
+// rootKey returns root as a map key when its dynamic value is comparable.
 func rootKey(root beads.Store) (any, bool) {
-	switch r := root.(type) {
-	case *beads.MemStore:
-		return weak.Make(r), true
-	case *beads.FileStore:
-		return weak.Make(r), true
-	case *beads.CachingStore:
-		return weak.Make(r), true
-	case *StrictStore:
-		return weak.Make(r), true
-	case *strictStorageStore:
-		return weak.Make(r), true
-	}
 	if root == nil || !reflect.TypeOf(root).Comparable() {
 		return nil, false
 	}
@@ -622,9 +600,42 @@ func (v *view) Count(context.Context, beads.ListQuery, ...string) (int, error) {
 	return 0, fmt.Errorf("counting beads through a split-strict view: %w", beads.ErrCountUnsupported)
 }
 
+// guardCreateEdges refuses a create whose edges name a row of the other side:
+// a parent (ParentID), a dependency (Needs, Dependencies) the store asked to
+// hold this row could not resolve on a split city. A Needs entry that is not
+// a row id (a formula step ref) is not a row and passes.
+func (v *view) guardCreateEdges(b beads.Bead) error {
+	if b.ParentID != "" && !v.attachmentParent(b, b.ParentID) {
+		if err := v.guardID("create-parent", b.ParentID); err != nil {
+			return err
+		}
+	}
+	for _, need := range b.Needs {
+		target := need
+		if _, after, ok := strings.Cut(need, ":"); ok && after != "" {
+			target = after
+		}
+		if err := v.guardID("create-dep", target); err != nil {
+			return err
+		}
+	}
+	for _, dep := range b.Dependencies {
+		if dep.DependsOnID != "" {
+			if err := v.guardID("create-dep", dep.DependsOnID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Create lands the row, flagging a bead of the other side's class and pinning
-// it to this view, the only one that will see it.
+// it to this view, the only one that will see it. A create whose parent or
+// dependency is the other side's row is refused (guardCreateEdges).
 func (v *view) Create(b beads.Bead) (beads.Bead, error) {
+	if err := v.guardCreateEdges(b); err != nil {
+		return beads.Bead{}, err
+	}
 	created, err := v.Store.Create(b)
 	if err != nil {
 		return created, err
@@ -635,6 +646,9 @@ func (v *view) Create(b beads.Bead) (beads.Bead, error) {
 
 // CreateWithStorage is Create through the front's storage-tier create.
 func (v *storageView) CreateWithStorage(b beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
+	if err := v.guardCreateEdges(b); err != nil {
+		return beads.Bead{}, err
+	}
 	created, err := v.storage.CreateWithStorage(b, storage)
 	if err != nil {
 		return created, err
@@ -659,9 +673,41 @@ func (v *view) afterCreate(requested, created beads.Bead) {
 	v.p.pin(created.ID, v.side)
 }
 
-// Update refuses a wrong-class row.
-func (v *view) Update(id string, opts beads.UpdateOpts) error {
+// guardUpdate refuses an update of a wrong-class row, and one that re-parents
+// a row under the other side's row.
+func (v *view) guardUpdate(id string, opts beads.UpdateOpts) error {
 	if err := v.guardID("update", id); err != nil {
+		return err
+	}
+	if opts.ParentID != nil && *opts.ParentID != "" {
+		row, err := v.Store.Get(id)
+		if err == nil && v.attachmentParent(row, *opts.ParentID) {
+			return nil
+		}
+		return v.guardID("update-parent", *opts.ParentID)
+	}
+	return nil
+}
+
+// attachmentParent reports the one cross-store parent edge the design
+// sanctions: a graph row (a molecule or wisp root) created through the class
+// view under a WORK row, which is how a workflow attaches to its source bead
+// (sling --on, formula cook --on; sling.CollectAttachedBeads reads exactly
+// those children). ParentID is a weak, city-scoped reference (beads.Store
+// Children), and the binding stores it without resolving it. Every other
+// cross-store parent (a work row under an infrastructure row, a session or
+// mail row under a work row) is refused.
+func (v *view) attachmentParent(child beads.Bead, parentID string) bool {
+	if v.side != sideClass || coordclass.Classify(child) != coordclass.ClassGraph {
+		return false
+	}
+	parent, err := v.Store.Get(parentID)
+	return err == nil && v.p.sideOf(parent) == sideWork
+}
+
+// Update refuses a wrong-class row, or a parent of the other side.
+func (v *view) Update(id string, opts beads.UpdateOpts) error {
+	if err := v.guardUpdate(id, opts); err != nil {
 		return err
 	}
 	return v.Store.Update(id, opts)
@@ -773,9 +819,13 @@ func (v *view) DepAddWithMetadata(issueID, dependsOnID, depType, metadata string
 	return writer.DepAddWithMetadata(issueID, dependsOnID, depType, metadata)
 }
 
-// DepRemove refuses a wrong-class source row.
+// DepRemove refuses an edge whose source or target is a wrong-class row: no
+// split city's store holds it.
 func (v *view) DepRemove(issueID, dependsOnID string) error {
 	if err := v.guardID("dep-remove", issueID); err != nil {
+		return err
+	}
+	if err := v.guardID("dep-remove", dependsOnID); err != nil {
 		return err
 	}
 	return v.Store.DepRemove(issueID, dependsOnID)
@@ -846,6 +896,9 @@ type viewTx struct {
 }
 
 func (t *viewTx) Create(b beads.Bead) (beads.Bead, error) {
+	if err := t.v.guardCreateEdges(b); err != nil {
+		return beads.Bead{}, err
+	}
 	created, err := t.tx.Create(b)
 	if err != nil {
 		return created, err
@@ -855,7 +908,7 @@ func (t *viewTx) Create(b beads.Bead) (beads.Bead, error) {
 }
 
 func (t *viewTx) Update(id string, opts beads.UpdateOpts) error {
-	if err := t.v.guardID("update", id); err != nil {
+	if err := t.v.guardUpdate(id, opts); err != nil {
 		return err
 	}
 	return t.tx.Update(id, opts)
@@ -1058,7 +1111,7 @@ type condTargetGuarded struct {
 
 // UpdateIfAssignment refuses a wrong-class row, then forwards.
 func (t *condTargetGuarded) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error) {
-	if err := t.guardID("update", id); err != nil {
+	if err := t.guardUpdate(id, opts); err != nil {
 		return false, err
 	}
 	return t.updater.UpdateIfAssignment(id, expectedStatus, expectedAssignee, opts)
@@ -1108,7 +1161,7 @@ type checkedConditionalWriter struct {
 }
 
 func (c checkedConditionalWriter) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
-	if err := c.v.guardID("update", id); err != nil {
+	if err := c.v.guardUpdate(id, opts); err != nil {
 		return err
 	}
 	return c.writer.UpdateIfMatch(id, rev, opts)
@@ -1171,7 +1224,12 @@ type checkedBatcher struct {
 func (c checkedBatcher) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
 	for _, item := range b.Items {
 		if item.Update != nil {
-			if err := c.v.guardID("update", item.Update.ID); err != nil {
+			if err := c.v.guardUpdate(item.Update.ID, item.Update.Opts); err != nil {
+				return beads.GuardedResult{}, err
+			}
+		}
+		if item.Create != nil {
+			if err := c.v.guardCreateEdges(*item.Create); err != nil {
 				return beads.GuardedResult{}, err
 			}
 		}
