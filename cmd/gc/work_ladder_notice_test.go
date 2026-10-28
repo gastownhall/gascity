@@ -438,6 +438,69 @@ func TestWorkLadderKeepsOneLadderNoticePerSeat(t *testing.T) {
 	}
 }
 
+// S4 (the review's P7): once a mark settles at its bound while its op is
+// still in flight, the seat's nudge slot is free, and only the notice's
+// Exclusive (its purpose's one notice in the conversation) keeps the seat's
+// other claim, due then, from opening a second notice beside it.
+func TestWorkLadderExclusiveKeepsOneNoticeWhileOneIsInFlight(t *testing.T) {
+	lc := newLadderLaneCity(t, "message")
+	lc.startedClaim()
+	lc.claim("not started")
+	lc.at(0)
+	lc.at(halfPast(1))
+	stuck := lc.onlyOp()
+	lc.startOp(stuck.ID) // in flight, and never closed
+	lc.run(time.Hour, 30*time.Second, func() {
+		if ops := lc.ladderOps(); len(ops) > 1 {
+			t.Fatalf("at %v: %d open ladder notices %+v, want at most the one in flight", lc.now.Sub(lc.start), len(ops), ops)
+		}
+	})
+	// The attempts reserved after the stuck one settled were withdrawn,
+	// each re-counted as paused, while it stayed in flight.
+	withdrawn := 0
+	for _, e := range lc.cell().Entries {
+		withdrawn += e.Paused
+	}
+	if markedWith(lc.cell(), stuck.ID) || withdrawn < 2 {
+		t.Fatalf("cell %+v: want the stuck notice settled and later attempts withdrawn beside it", lc.cell())
+	}
+}
+
+// A seat whose idle stop is pending is held, and its pacing resumes where it
+// stood, without a reset, once the stop clears: the next reminder is the
+// entry's next attempt in the same episode, due from its last.
+func TestWorkLadderPacingResumesWhenAnIdleStopClears(t *testing.T) {
+	lc := newLadderLaneCity(t, "message")
+	id := lc.startedClaim()
+	lc.at(0)
+	lc.at(halfPast(1))
+	lc.closeOp(lc.onlyOp().ID, succeeded)
+	lc.at(2 * time.Minute)
+	before := lc.entry(id)
+	if before.Attempts != 1 || !before.Notice.IsZero() {
+		t.Fatalf("entry %+v, want one delivered attempt", before)
+	}
+	lc.setRow(map[string]string{"sleep_intent": "idle-stop-pending"})
+	lc.run(time.Hour, 30*time.Second, func() {
+		if ops := lc.ladderOps(); len(ops) != 0 {
+			t.Fatalf("ladder notices %+v under the idle stop", ops)
+		}
+	})
+	if e := lc.entry(id); e.Attempts != before.Attempts || e.Paused != before.Paused || !e.Since.Equal(before.Since) {
+		t.Fatalf("entry %+v under the idle stop, want it as it stood (%+v)", e, before)
+	}
+	lc.setRow(map[string]string{"sleep_intent": ""})
+	lc.pass()
+	op := lc.onlyOp()
+	e := lc.entry(id)
+	if e.Attempts != 2 || e.Paused != 0 || !e.Since.Equal(before.Since) || e.Notice.Op != op.ID {
+		t.Fatalf("entry %+v, want the episode's second attempt marked on %s", e, op.ID)
+	}
+	if want := wantLadderKey(e, 2); op.ClientKey != want {
+		t.Fatalf("notice key %q, want %q: pacing resumed in the same episode", op.ClientKey, want)
+	}
+}
+
 // markedWith reports whether a mark in r names op.
 func markedWith(r workladder.Record, op string) bool {
 	for _, e := range r.Entries {
@@ -1503,6 +1566,43 @@ func TestWorkLadderCommitReprovesAReleaseDecidedAfterANudgeHold(t *testing.T) {
 				t.Fatalf("claim %s %q: released though current_claim_bead_id names it started; log:\n%s", stamped, b.Status, log.String())
 			}
 		})
+	}
+}
+
+// S3 (the review's P6): a nudge the commit's fresh decision takes when the
+// pass's snapshot decided none, so no route was resolved, is held for the
+// pass: it is never typed directly under the lane's authority, and, with no
+// route, never proposed.
+func TestWorkLadderCommitHoldsANudgeWithNoRouteResolved(t *testing.T) {
+	var fs *snapshotWaitStore
+	lc := newLadderLaneCityOver(t, func(s laneTestStore) beads.Store {
+		fs = &snapshotWaitStore{laneTestStore: s}
+		return fs
+	}, "message")
+	id := lc.startedClaim()
+	lc.at(0)
+	e := lc.entry(id)
+	e.Attempts, e.Last = 1, lc.now.Add(-2*time.Hour)
+	lc.sp.SetActivity(ladderSeatName, lc.now.Add(-3*time.Hour)) // no progress since: no reset
+	lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{e}})})
+	lc.claim("new work") // a new entry: the snapshot's decision changes the cell, so it commits
+	fs.on = true
+	var log strings.Builder
+	lc.lane.stderr = &log
+	lc.at(time.Minute)
+	if n := lc.nudges(); n != 0 {
+		t.Fatalf("typed %d nudges under the lane's authority; log:\n%s", n, log.String())
+	}
+	if ops := lc.ladderOps(); len(ops) != 0 {
+		t.Fatalf("ladder notices %+v proposed with no route resolved", ops)
+	}
+	if got := lc.entry(id); got.Attempts != 1 || !got.Notice.IsZero() {
+		t.Fatalf("entry %+v, want the due nudge held, nothing reserved", got)
+	}
+	fs.on = false
+	lc.at(2 * time.Minute) // the next pass resolves the route: a lane notice
+	if op := lc.onlyOp(); op.Causation != id || lc.nudges() != 0 {
+		t.Fatalf("op %+v, nudges %d: want the held nudge proposed on the lane next pass", op, lc.nudges())
 	}
 }
 
