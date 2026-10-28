@@ -3805,3 +3805,37 @@ func TestCmdSessionNew_ControllerPingsButPokeFailsDefersStart(t *testing.T) {
 		t.Errorf("stderr must warn that the poke failed:\n%s", stderr.String())
 	}
 }
+
+// TestCmdSessionNew_RegisteredCityAttachDeferredWithoutWaiting pins the
+// attach-mode UX of issue #8382: when no controller answered the probe for a
+// registered city's deferred start, gc session new without --no-attach does
+// not wait out --wait-timeout and then fail the attach; it prints the
+// follow-up and exits 0 without starting or attaching the runtime.
+func TestCmdSessionNew_RegisteredCityAttachDeferredWithoutWaiting(t *testing.T) {
+	cityDir := sessionStartOwnershipEnv(t)
+	registerCityForStartOwnership(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	// A short --wait-timeout makes the waiting behavior observable: the
+	// command must not spend it.
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", false, false, 5*time.Second, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(registered, attach) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "Waiting for session to start...") {
+		t.Errorf("stdout must not wait for a start nothing was asked to do:\n%s", out)
+	}
+	if strings.Contains(out, "Attaching...") {
+		t.Errorf("stdout must not attach or start the runtime:\n%s", out)
+	}
+	if !strings.Contains(out, "No controller answered; not attaching.") {
+		t.Errorf("stdout must report that no controller answered:\n%s", out)
+	}
+	if !strings.Contains(out, "gc supervisor start") {
+		t.Errorf("stdout must print the supervisor restart follow-up:\n%s", out)
+	}
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Errorf("state = %q, want %q", got, session.StateStartPending)
+	}
+}

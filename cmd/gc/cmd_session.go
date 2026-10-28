@@ -387,7 +387,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		// appear between the probe and the keyed poke —
 		// TestCmdSessionNew_AllowsReservedNamedAliasWithController pins that
 		// socket order — so a failed probe does not skip the enqueue.
-		_ = noteDeferredSessionStart(stderr, "gc session new", info.ID, pokeErr)
+		reached := noteDeferredSessionStart(stderr, "gc session new", info.ID, pokeErr)
 		if !errors.Is(pokeErr, errWorkerSiteNoController) {
 			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 		}
@@ -423,6 +423,14 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			if !jsonOutput {
 				fmt.Fprintln(stdout, "Worker site: the remote controller runs this session; not attaching.") //nolint:errcheck // best-effort stdout
 			}
+			return 0
+		}
+		// Nothing answered the probe, so no controller has been asked to
+		// start this pane yet: waiting out --wait-timeout (and then failing
+		// the attach) helps nobody. The row is recorded and enqueued; the
+		// reconciler starts it, and attaching works once it is running.
+		if !reached {
+			fmt.Fprintf(stdout, "No controller answered; not attaching. Start the supervisor (\"gc supervisor start\"), then attach with \"gc session attach %s\" once \"gc session list\" shows the session running.\n", info.ID) //nolint:errcheck // best-effort stdout
 			return 0
 		}
 
