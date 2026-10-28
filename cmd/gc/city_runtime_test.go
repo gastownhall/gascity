@@ -2388,6 +2388,66 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	}
 }
 
+// TestOrderTrackingSweepsCloseOldestWithinBudget pins WHICH beads a budgeted
+// sweep closes: the oldest, ties by ID ascending, so newer tracking beads can
+// never starve a genuinely jammed old one. The store's insertion order differs
+// from creation order so a store-defined order cannot pass by accident.
+func TestOrderTrackingSweepsCloseOldestWithinBudget(t *testing.T) {
+	shuffled := func(t *testing.T) (*beads.MemStore, time.Time) {
+		t.Helper()
+		base := time.Now().Add(-time.Hour)
+		mk := func(id string, minutes int) beads.Bead {
+			return beads.Bead{
+				ID:        id,
+				Title:     "order:" + id,
+				Status:    "open",
+				Type:      "task",
+				CreatedAt: base.Add(time.Duration(minutes) * time.Minute),
+				Labels:    []string{"order-run:" + id, labelOrderTracking},
+			}
+		}
+		// ot-4 and ot-5 share a CreatedAt; the ID tie-break keeps ot-4.
+		seed := []beads.Bead{mk("ot-6", 4), mk("ot-3", 2), mk("ot-5", 3), mk("ot-1", 0), mk("ot-4", 3), mk("ot-2", 1)}
+		return beads.NewMemStoreFrom(len(seed), seed, nil), base.Add(10 * time.Minute)
+	}
+	assertClosed := func(t *testing.T, store *beads.MemStore) {
+		t.Helper()
+		for _, id := range []string{"ot-1", "ot-2", "ot-3", "ot-4", "ot-5", "ot-6"} {
+			got, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", id, err)
+			}
+			wantClosed := id <= "ot-4"
+			if (got.Status == "closed") != wantClosed {
+				t.Errorf("%s status = %s, want closed=%v (budget %d closes the four oldest)", id, got.Status, wantClosed, orderTrackingSweepCloseBudget)
+			}
+		}
+	}
+
+	t.Run("stale", func(t *testing.T) {
+		store, now := shuffled(t)
+		result, err := sweepStaleOrderTrackingWithOptionsLimit(store, now, time.Minute, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+		if err != nil {
+			t.Fatalf("sweepStaleOrderTrackingWithOptionsLimit(): %v", err)
+		}
+		if result.trackingClosed != orderTrackingSweepCloseBudget {
+			t.Fatalf("trackingClosed = %d, want %d", result.trackingClosed, orderTrackingSweepCloseBudget)
+		}
+		assertClosed(t, store)
+	})
+	t.Run("orphaned", func(t *testing.T) {
+		store, _ := shuffled(t)
+		n, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget)
+		if err != nil {
+			t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
+		}
+		if n != orderTrackingSweepCloseBudget {
+			t.Fatalf("closed = %d, want %d", n, orderTrackingSweepCloseBudget)
+		}
+		assertClosed(t, store)
+	})
+}
+
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{

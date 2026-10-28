@@ -137,7 +137,8 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 }
 
 // StaleOpenRuns lists not-closed tracking beads whose CreatedAt is at or before
-// cutoff, decoded into OrderRun across both tiers (legacy issues and wisp). It
+// cutoff, oldest-first so the caller's close budget drains the oldest jam,
+// decoded into OrderRun across both tiers (legacy issues and wisp). It
 // reads the LIVE tier like OpenRuns: the sweep exists to clear the open-work
 // gate OpenRuns enforces, and a cache snapshot that never absorbed the
 // dispatcher-written tracking beads left that gate shut while the sweep saw
@@ -168,7 +169,8 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 
 // OrphanedOpenRuns lists every not-closed tracking bead EXCEPT pre-dispatch
 // trigger-env-failure markers (which the open-work gate intentionally keeps open
-// until the normal stale sweep), decoded into OrderRun across both tiers. It
+// until the normal stale sweep), oldest-first, decoded into OrderRun across both
+// tiers. It
 // reads the LIVE tier for the same reason as StaleOpenRuns: the orphans it
 // exists to clear were written by a previous controller and are absent from
 // this process's cache snapshot. It is the typed read half of the
@@ -195,12 +197,16 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 }
 
 // liveOpenTracking lists every not-closed tracking bead (open and in_progress)
-// across both tiers on the LIVE tier — the read the stale and orphaned sweeps
-// share. No Status filter: an in_progress tracking bead gates its order too.
+// across both tiers on the LIVE tier, oldest-first — the read the stale and
+// orphaned sweeps share. No Status filter: an in_progress tracking bead gates
+// its order too. Oldest-first (unlike the cooldown indexes' newest-first)
+// because both callers apply a close budget in list order, and the oldest jam
+// must drain first. Unbounded: the callers post-filter before the budget cut.
 func (s *Store) liveOpenTracking() ([]beads.Bead, error) {
 	return beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
 		Label:         labelOrderTracking,
 		IncludeClosed: false,
+		Sort:          beads.SortCreatedAsc,
 		TierMode:      beads.TierBoth,
 	})
 }
