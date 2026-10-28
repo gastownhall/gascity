@@ -177,6 +177,21 @@ func splitWaitDepIDs(value string) []string {
 	return out
 }
 
+// ContinuationStale reports whether the wait no longer belongs to the
+// session's live conversation, so the wake pass must cancel it as
+// continuation-stale. An unflagged wait is stale whenever both epochs are
+// non-empty and differ — the rule the wake pass applied inline before the
+// predicate moved here. A wait flagged RegisteredResetPending was registered
+// while the session's fresh restart was pending (issue #8406): it belongs to
+// the conversation the pending start opens, so the rotation that start
+// publishes must not fence it out.
+func (w WaitInfo) ContinuationStale(s Info) bool {
+	if w.RegisteredResetPending {
+		return false
+	}
+	return w.RegisteredEpoch != "" && s.ContinuationEpoch != "" && w.RegisteredEpoch != s.ContinuationEpoch
+}
+
 // StampWaitLookupCapMetadata adds the shared durable wait lookup cap
 // diagnostic metadata to batch.
 func StampWaitLookupCapMetadata(batch map[string]string, label string, limit int, now time.Time, source string) {

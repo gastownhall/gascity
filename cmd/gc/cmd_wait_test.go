@@ -1513,6 +1513,140 @@ func TestPrepareWaitWakeState_CancelsStaleEpochWaitForClosedSession(t *testing.T
 	}
 }
 
+// TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset covers the
+// fresh-restart registration window (issue #8406): a wait registered after a
+// reset was requested, but before a start consumes it, belongs to the
+// conversation that start opens, so the epoch rotation must not cancel it as
+// continuation-stale. The control row pins the intended rule for a wait of the
+// retired conversation, and the closed-session row guards the targeted lookup
+// path (a flagged wait keeps a non-empty registered_epoch, so a closed session
+// is still canceled session-closed, never silently skipped).
+func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		registerInWindow  bool
+		depClosesInWindow bool
+		closeSession      bool
+		wantState         string
+		wantLastError     string
+	}{
+		{name: "dep-closes-after-start", registerInWindow: true, wantState: waitStateReady},
+		{name: "dep-closes-before-start", registerInWindow: true, depClosesInWindow: true, wantState: waitStateReady},
+		{name: "control-registered-before-reset", wantState: waitStateCanceled, wantLastError: "continuation-stale"},
+		{name: "closed-session-targeted-lookup", registerInWindow: true, closeSession: true, wantState: waitStateCanceled, wantLastError: "session-closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sf := sessionFrontDoor(store)
+			now := time.Date(2026, 10, 24, 16, 7, 0, 0, time.UTC)
+
+			dep, err := store.Create(beads.Bead{Title: "upstream step", Type: "task"})
+			if err != nil {
+				t.Fatalf("create dep: %v", err)
+			}
+			sess, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":       "worker",
+					"agent_name":         "worker",
+					"continuation_epoch": "2",
+					"state":              string(sessionpkg.StateActive),
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+
+			register := func() sessionpkg.WaitInfo {
+				w, err := sf.CreateWait(sessionpkg.WaitSpec{
+					SessionID:        sess.ID,
+					Kind:             "deps",
+					DepIDs:           []string{dep.ID},
+					DepMode:          "all",
+					Note:             "pick up the next step",
+					CreatedBySession: "coordinator",
+					Now:              now.Add(25 * time.Second),
+				})
+				if err != nil {
+					t.Fatalf("CreateWait: %v", err)
+				}
+				return w
+			}
+			requestReset := func() {
+				if err := sf.ApplyPatch(sess.ID, sessionpkg.MetadataPatch{
+					"restart_requested":          "true",
+					"continuation_reset_pending": "true",
+				}); err != nil {
+					t.Fatalf("request reset: %v", err)
+				}
+			}
+			var w sessionpkg.WaitInfo
+			if tc.registerInWindow {
+				requestReset()
+				w = register()
+			} else {
+				w = register()
+				requestReset()
+			}
+			if tc.depClosesInWindow {
+				if err := store.Close(dep.ID); err != nil {
+					t.Fatalf("close dep in window: %v", err)
+				}
+			}
+			if _, err := prepareWaitWakeState(store, now.Add(time.Minute)); err != nil {
+				t.Fatalf("prepareWaitWakeState (window): %v", err)
+			}
+
+			if tc.closeSession {
+				if err := store.Close(sess.ID); err != nil {
+					t.Fatalf("close session: %v", err)
+				}
+			} else {
+				// The start consumes the reset: epoch 2 -> 3, marker cleared.
+				start := now.Add(7 * time.Minute)
+				patch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+					Generation:        3,
+					InstanceToken:     "tok-3",
+					ContinuationEpoch: 3,
+					Now:               start,
+				})
+				patch["restart_requested"] = ""
+				patch["continuation_reset_pending"] = ""
+				if err := sf.ApplyPatch(sess.ID, patch); err != nil {
+					t.Fatalf("ApplyPatch(pre-wake): %v", err)
+				}
+				if err := sf.ApplyPatch(sess.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)}); err != nil {
+					t.Fatalf("ApplyPatch(active): %v", err)
+				}
+				if !tc.depClosesInWindow {
+					if err := store.Close(dep.ID); err != nil {
+						t.Fatalf("close dep after start: %v", err)
+					}
+				}
+			}
+
+			if _, err := prepareWaitWakeState(store, now.Add(8*time.Minute)); err != nil {
+				t.Fatalf("prepareWaitWakeState (final): %v", err)
+			}
+			raw, err := store.Get(w.ID)
+			if err != nil {
+				t.Fatalf("Get wait: %v", err)
+			}
+			if got := raw.Metadata["state"]; got != tc.wantState {
+				t.Fatalf("wait state = %q (last_error=%q), want %q", got, raw.Metadata["last_error"], tc.wantState)
+			}
+			if got := raw.Metadata["last_error"]; got != tc.wantLastError {
+				t.Fatalf("last_error = %q, want %q", got, tc.wantLastError)
+			}
+			if tc.wantState == waitStateCanceled && raw.Status != "closed" {
+				t.Fatalf("canceled wait status = %q, want closed", raw.Status)
+			}
+		})
+	}
+}
+
 func TestPrepareWaitWakeState_ProcessesOpenSessionWaitsWithoutGlobalWaitList(t *testing.T) {
 	base := beads.NewMemStore()
 	store := waitGlobalListOmitStore{Store: base}

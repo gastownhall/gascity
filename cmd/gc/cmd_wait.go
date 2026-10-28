@@ -1171,7 +1171,7 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 				continue
 			}
 		}
-		if epoch := wait.RegisteredEpoch; epoch != "" && sessionInfo.ContinuationEpoch != "" && epoch != sessionInfo.ContinuationEpoch {
+		if wait.ContinuationStale(sessionInfo) {
 			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
 				return nil, err
 			}
