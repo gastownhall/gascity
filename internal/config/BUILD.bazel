@@ -132,6 +132,7 @@ go_test(
         "loader_coverage_test.go",
         "maintenance_test.go",
         "migration_guide_overlay_test.go",
+        "named_sessions_test.go",
         "namepool_test.go",
         "native_transport_test.go",
         "ops_test.go",

@@ -22,25 +22,50 @@ func FindNamedSession(cfg *City, identity string) *NamedSession {
 			return &cfg.NamedSessions[i]
 		}
 	}
-	// V2 bare-name fallback: only when identity has no binding prefix.
-	if strings.Contains(identity, ".") {
+	candidates := NamedSessionBareCandidates(cfg, identity)
+	if len(candidates) != 1 {
+		// None, or ambiguous: the user must spell out the qualified name.
 		return nil
 	}
-	var match *NamedSession
+	return candidates[0]
+}
+
+// NamedSessionBareCandidates returns, in config order, the bound named
+// sessions a dot-free identity names by FindNamedSession's bare-name rule:
+// the entries with a binding whose IdentityName is "binding.identity",
+// whatever their Dir. It returns nil for an identity carrying a binding
+// prefix. More than one candidate means the bare identity is ambiguous.
+func NamedSessionBareCandidates(cfg *City, identity string) []*NamedSession {
+	if cfg == nil || identity == "" || strings.Contains(identity, ".") {
+		return nil
+	}
+	var out []*NamedSession
 	for i := range cfg.NamedSessions {
 		ns := &cfg.NamedSessions[i]
 		if ns.BindingName == "" {
 			continue
 		}
 		if ns.IdentityName() == ns.BindingName+"."+identity {
-			if match != nil {
-				// Ambiguous — user must spell out the qualified name.
-				return nil
-			}
-			match = ns
+			out = append(out, ns)
 		}
 	}
-	return match
+	return out
+}
+
+// NamedSessionBareIdentity returns the bare identity that FindNamedSession
+// resolves to ns: its name without the binding prefix, when ns has a
+// binding and that bare name denotes ns alone. It returns "" when ns has no
+// binding, when a top-level entry claims the bare name exactly, or when
+// another binding shares it.
+func NamedSessionBareIdentity(cfg *City, ns *NamedSession) string {
+	if ns == nil || ns.BindingName == "" {
+		return ""
+	}
+	leaf := strings.TrimPrefix(ns.IdentityName(), ns.BindingName+".")
+	if FindNamedSession(cfg, leaf) != ns {
+		return ""
+	}
+	return leaf
 }
 
 // FindAgent returns the configured agent template for the provided qualified

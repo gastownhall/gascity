@@ -25,6 +25,12 @@ type NamedSessionSpec struct {
 	Identity    string
 	SessionName string
 	Mode        string
+	// BareIdentity is the bare identity config.FindNamedSession resolves to
+	// Named (config.NamedSessionBareIdentity), when it differs from
+	// Identity. A row stored under it predates the session's binding
+	// qualification; the canonical resolvers adopt such a row only when it
+	// is the unique one.
+	BareIdentity string
 }
 
 // NormalizeNamedSessionTarget trims whitespace and trailing separators from a named session target.
@@ -57,13 +63,17 @@ func FindNamedSessionSpec(cfg *config.City, cityName, identity string) (NamedSes
 	if agentCfg == nil {
 		return NamedSessionSpec{}, false
 	}
-	return NamedSessionSpec{
+	spec := NamedSessionSpec{
 		Named:       named,
 		Agent:       agentCfg,
 		Identity:    identity,
 		SessionName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
 		Mode:        named.ModeOrDefault(),
-	}, true
+	}
+	if bare := config.NamedSessionBareIdentity(cfg, named); bare != identity {
+		spec.BareIdentity = bare
+	}
+	return spec, true
 }
 
 // NamedSessionBackingTemplate returns the resolved backing agent template for a named session spec.
@@ -685,6 +695,16 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 	}
 
+	if bare := NormalizeNamedSessionTarget(spec.BareIdentity); bare != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, bare)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing bare-identity named session candidates: %w", err)
+		}
+		if bead, ok := bareIdentityCanonicalNamedSessionBead(matches, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
 	if !includeConflict {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
@@ -840,7 +860,8 @@ func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) 
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName) {
+		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName) &&
+			!beadMatchesNamedSessionBareIdentity(b, spec) {
 			continue
 		}
 		RepairEmptyType(store, &b)
@@ -871,6 +892,14 @@ func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName
 		return true
 	}
 	return false
+}
+
+// beadMatchesNamedSessionBareIdentity reports whether b records spec's bare
+// identity as its configured named session identity: a row that predates the
+// session's binding qualification (NamedSessionSpec.BareIdentity).
+func beadMatchesNamedSessionBareIdentity(b beads.Bead, spec NamedSessionSpec) bool {
+	bare := NormalizeNamedSessionTarget(spec.BareIdentity)
+	return bare != "" && IsNamedSessionBead(b) && NamedSessionIdentity(b) == bare
 }
 
 // FindNamedSessionConflict finds the first live session bead that blocks a
@@ -1283,7 +1312,40 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 	// count -- keeps a true collision (two distinct live beads that both
 	// genuinely match the backing template) falling through to conflict
 	// detection instead of one silently winning as first-match.
-	return aliasOnlyCanonicalNamedSessionBead(candidates, spec)
+	if bead, ok := aliasOnlyCanonicalNamedSessionBead(candidates, spec); ok {
+		return bead, true
+	}
+	return bareIdentityCanonicalNamedSessionBead(candidates, spec)
+}
+
+// bareIdentityCanonicalNamedSessionBead is the canonical bead resolvers'
+// last pass: the one live, continuity-eligible configured-named bead whose
+// identity is spec.BareIdentity. Such a row was created before config
+// qualified its session with a binding (and a rig dir), and config's
+// bare-name rule still maps it to spec. It is not gated on the backing
+// template, which the qualification changes; config-level uniqueness of the
+// bare name, and uniqueness of the row here, are the guards. Two such rows
+// match none.
+func bareIdentityCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	if NormalizeNamedSessionTarget(spec.BareIdentity) == "" {
+		return beads.Bead{}, false
+	}
+	var match beads.Bead
+	count := 0
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+			continue
+		}
+		if !beadMatchesNamedSessionBareIdentity(b, spec) {
+			continue
+		}
+		count++
+		match = b
+	}
+	if count != 1 {
+		return beads.Bead{}, false
+	}
+	return match, true
 }
 
 // aliasOnlyCanonicalNamedSessionBead implements FindCanonicalNamedSessionBead's
@@ -1359,7 +1421,10 @@ func findCanonicalNamedSessionBeadForLookup(candidates []beads.Bead, spec NamedS
 	if NamedSessionBackingTemplate(spec) == "" {
 		return beads.Bead{}, false
 	}
-	return aliasOnlyCanonicalNamedSessionBead(candidates, spec)
+	if bead, ok := aliasOnlyCanonicalNamedSessionBead(candidates, spec); ok {
+		return bead, true
+	}
+	return bareIdentityCanonicalNamedSessionBead(candidates, spec)
 }
 
 // FindConflictingNamedSessionSpecForBead finds the configured named session blocked by a bead.
