@@ -272,6 +272,22 @@ func TestActivityPollFailureKeepsLastState(t *testing.T) {
 	}
 }
 
+// Activity is keyed by registered name only: a pane herdr detected but
+// nobody named has no activity entry, and none is ever keyed by its kind.
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgentsJSON(`[{"agent":"claude","name":"alpha","pane_id":"%1","agent_status":"working","revision":1},` +
+		`{"agent":"claude","pane_id":"%2","agent_status":"working","revision":1}]`)
+	p := activityTestProvider(t, sock)
+
+	if got := lastActivity(t, p, "alpha"); got.IsZero() {
+		t.Fatal("named agent alpha has no activity entry")
+	}
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Errorf("activity entry keyed by the kind %q: %v; a kind is not a session name", "claude", got)
+	}
+}
+
 // An agent that disappears from agent.list is gone: its entry drops and
 // GetLastActivity returns zero (unknown), so consumers fall back to their
 // no-op paths rather than acting on a stale stamp.
