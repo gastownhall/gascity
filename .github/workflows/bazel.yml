@@ -650,9 +650,13 @@ jobs:
       # failures: every shard's test.log ends with a RATCHET and a TESTS line
       # (internal/beads/splittest/gate.go). A shard without them hung or
       # crashed before reporting, which is a failure too. Reporting only.
+      # Not continue-on-error: a FAIL verdict fails this step, so the lane's
+      # check is red when the gate is; the job-level continue-on-error is what
+      # keeps the lane out of the required gate. A known flake
+      # (testdata/split_strict_known_flaky.list, with its owner bead) is
+      # reported without failing the TESTS verdict; Bazel retries stay off.
       - name: Split-strict verdicts
         if: always() && matrix.lane == 'split-strict' && steps.test.outcome != 'skipped'
-        continue-on-error: true
         run: |
           set -uo pipefail
           ratchet_fail=0 tests_fail=0 missing=0 shards=0
@@ -678,6 +682,19 @@ jobs:
             echo "- shards without a report: $missing"
           } >> "$GITHUB_STEP_SUMMARY"
           [ "$shards" -gt 0 ] && [ "$ratchet_fail" -eq 0 ] && [ "$tests_fail" -eq 0 ] && [ "$missing" -eq 0 ]
+
+      # The downward ratchet, nightly and on dispatch: a full run that no
+      # longer reaches a baseline row (fixed or renamed), or in which a known
+      # failure passes or no longer runs, fails until the inputs shrink
+      # (scripts/split-strict-baseline --check).
+      - name: Split-strict downward ratchet
+        if: always() && matrix.lane == 'split-strict' && steps.test.outcome != 'skipped' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          set -uo pipefail
+          rc=0
+          scripts/split-strict-baseline --check cmd/gc bazel-testlogs/cmd/gc/gc_split_strict_test | tee -a "$GITHUB_STEP_SUMMARY" || rc=1
+          scripts/split-strict-baseline --check internal/api bazel-testlogs/internal/api/api_split_strict_test | tee -a "$GITHUB_STEP_SUMMARY" || rc=1
+          exit "$rc"
 
       # The split-strict lane's logs carry its observed site tables (the gate
       # prints them; a remote run brings no test.outputs back), which

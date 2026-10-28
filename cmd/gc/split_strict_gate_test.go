@@ -36,6 +36,7 @@ import (
 var splitStrictFiles = splittest.GateFiles{
 	Baseline:      "testdata/split_strict_baseline.tsv",
 	KnownFailures: "testdata/split_strict_known_failures.list",
+	KnownFlaky:    "testdata/split_strict_known_flaky.list",
 }
 
 func init() {
@@ -72,6 +73,14 @@ func (splitStrictGate) classView(store beads.Store) beads.Store {
 type splitStrictTestingM struct{ m testscript.TestingM }
 
 func (m splitStrictTestingM) Run() int {
+	// A hung test exits the binary from the watchdog; run TestMain's
+	// teardown first (temp roots, managed Dolt, the tmux socket parent), or
+	// the hang leaks them.
+	splittest.SetHangCleanup(func() {
+		if testProcessTeardown != nil {
+			testProcessTeardown()
+		}
+	})
 	splittest.GateStart()
 	return splittest.GateMain(m.m.Run(), splitStrictFiles, os.Stderr)
 }
@@ -98,6 +107,14 @@ func TestSplitStrictGateInputsParse(t *testing.T) {
 	defer k.Close() //nolint:errcheck // read-only
 	if _, err := splittest.ParseKnownFailures(k); err != nil {
 		t.Fatalf("%s: %v", splitStrictFiles.KnownFailures, err)
+	}
+	fl, err := os.Open(splitStrictFiles.KnownFlaky)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fl.Close() //nolint:errcheck // read-only
+	if _, err := splittest.ParseKnownFlaky(fl); err != nil {
+		t.Fatalf("%s: %v", splitStrictFiles.KnownFlaky, err)
 	}
 }
 

@@ -245,6 +245,7 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.rbe.steps[base].if":                                                    "false",                      // the queue ref is already the merge
 	"bazel.yml jobs.rbe.steps[splitpaths].if":                                              "false",                      // a merge group has no PR file list; the lane never runs there
 	"bazel.yml jobs.rbe.steps[splitpaths].env.PR_NUMBER":                                   "",                           // (step skipped)
+	"bazel.yml jobs.lane.steps[Split-strict downward ratchet].if":                          "false",                      // nightly and dispatch only; the lane never runs in a merge group
 	"bazel.yml jobs.rbe.steps[base].env.BASE_REF":                                          "",                           // (step skipped)
 	"bazel.yml jobs.rbe.steps[Pre-warm the OSS worker pool (rbe-west)].env.DEFAULT_BRANCH": "main",
 	"bazel.yml jobs.lane.steps[worker-env].env.DEFAULT_BRANCH":                             "main",

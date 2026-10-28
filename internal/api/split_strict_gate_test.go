@@ -29,6 +29,7 @@ import (
 var splitStrictFiles = splittest.GateFiles{
 	Baseline:      "testdata/split_strict_baseline.tsv",
 	KnownFailures: "testdata/split_strict_known_failures.list",
+	KnownFlaky:    "testdata/split_strict_known_flaky.list",
 }
 
 func init() {
@@ -60,6 +61,14 @@ func TestSplitStrictGateInputsParse(t *testing.T) {
 	defer k.Close() //nolint:errcheck // read-only
 	if _, err := splittest.ParseKnownFailures(k); err != nil {
 		t.Fatalf("%s: %v", splitStrictFiles.KnownFailures, err)
+	}
+	fl, err := os.Open(splitStrictFiles.KnownFlaky)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fl.Close() //nolint:errcheck // read-only
+	if _, err := splittest.ParseKnownFlaky(fl); err != nil {
+		t.Fatalf("%s: %v", splitStrictFiles.KnownFlaky, err)
 	}
 }
 
