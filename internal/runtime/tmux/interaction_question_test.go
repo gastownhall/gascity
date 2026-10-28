@@ -752,3 +752,61 @@ func TestRespondRefusesEveryAskUserQuestionPage(t *testing.T) {
 		})
 	}
 }
+
+// The review page has no footer, and one Enter on it submits every answer: it
+// is not idle, every nudge look refuses it with no key sent, and Pending
+// reports it as a question.
+func TestAskUserQuestionReviewPageHoldsEveryLook(t *testing.T) {
+	review := readQuestionFixture(t, "review-page-ga-ngrme8.txt")
+	panes := map[string]string{
+		"review page (ga-ngrme8)":     review,
+		"cursor on Cancel":            strings.Replace(strings.Replace(review, "❯ 1. Submit", "1. Submit", 1), "\n2. Cancel", "\n❯ 2. Cancel", 1),
+		"title without the tab strip": "Review your answers\n● Which approach?\n→ Alpha\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel\n",
+	}
+	for name, pane := range panes {
+		t.Run(name, func(t *testing.T) {
+			lines := strings.Split(pane, "\n")
+			if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+				t.Error("PaneShowsIdlePrompt = true for the review page; a nudge's Enter would submit every answer")
+			}
+			if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); idle || !errors.Is(err, runtime.ErrIdleIndeterminate) {
+				t.Errorf("ClassifyIdlePane = (%v, %v), want (false, runtime.ErrIdleIndeterminate)", idle, err)
+			}
+
+			tm, ex := questionTmux(pane)
+			pending, err := (&Provider{tm: tm}).Pending("auq")
+			if err != nil || pending == nil || pending.Kind != "question" || len(pending.Options) != 0 {
+				t.Fatalf("Pending = %+v, %v; want Kind question with no options", pending, err)
+			}
+			if !strings.Contains(pending.Prompt, "Ready to submit your answers?") {
+				t.Errorf("Prompt = %q, want the review prompt", pending.Prompt)
+			}
+			requireQuestionRefusal(t, "NudgeSession", tm.NudgeSession("auq", "hello"))
+			requireNoKeys(t, ex.calls, false)
+
+			for _, setup := range []func(*fakeClaudePane){
+				func(p *fakeClaudePane) { p.promptOnCapture = 1 },
+				func(p *fakeClaudePane) { p.promptOnCapture = 2 },
+				func(p *fakeClaudePane) { p.promptAfterPaste = true },
+			} {
+				fake := newFakeClaudePane("")
+				fake.prompt = pane
+				setup(fake)
+				requireQuestionRefusal(t, "NudgeNow", nudgeNowText(t, fake, "run the tests"))
+				if len(fake.promptKeys) != 0 || len(fake.submitted) != 0 {
+					t.Fatalf("the review page received %q (submitted %q), want nothing", fake.promptKeys, fake.submitted)
+				}
+			}
+
+			cfg := DefaultConfig()
+			cfg.NudgeIdleTimeout = 5 * time.Second
+			wex := &paneExecutor{pane: pane, inMode: "0"}
+			start := time.Now()
+			requireQuestionRefusal(t, "Nudge", (&Provider{tm: &Tmux{cfg: cfg, exec: wex}}).Nudge("auq", runtime.TextContent("hello")))
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("Nudge took %s to refuse; it waited for idle", elapsed)
+			}
+			requireNoKeys(t, wex.calls, false)
+		})
+	}
+}

@@ -29,7 +29,16 @@ import (
 //
 // A multi-question dialog leads the header with a tab strip whose chips turn
 // from ☐ to ☒ as questions are answered ("←  ☒ Q1  ☐ Q2  ✔ Submit  →") and
-// navigates with "Tab/Arrow keys".
+// navigates with "Tab/Arrow keys". After the last question it shows a review
+// page with no footer, where one Enter submits every answer:
+//
+//	←  ☒ Q1  ☒ Q2  ✔ Submit  →
+//	Review your answers
+//	● Which approach would you prefer for this feature?
+//	→ Alpha approach (Recommended)
+//	Ready to submit your answers?
+//	❯ 1. Submit answers
+//	2. Cancel
 //
 // A dialog is live only while it is the bottom-most block on screen. Once it is
 // answered the frame stays in scrollback with the agent's output (or the idle
@@ -40,12 +49,14 @@ import (
 // option between them. The focused option is not required: focus on the
 // "Type something." row draws no cursor. The folder-trust, resume and
 // spend-limit dialogs end in "Enter to confirm" and the Codex model switch in
-// "Press enter to confirm", so none of them reads as a question.
+// "Press enter to confirm", so none of them reads as a question. The review
+// page is keyed on its fixed two-option menu directly under its fixed prompt,
+// with the review title or the ✔ Submit tab strip above.
 //
 // The question page is checked against a live single-question frame (Claude
-// Code 2.1.280) and a live multi-question dialog's pages (ga-ngrme8). A form
-// the matcher misses reads as no question and is delivered to as it was before
-// this guard existed.
+// Code 2.1.280) and a live multi-question dialog's pages, review page included
+// (ga-ngrme8). A form the matcher misses reads as no question and is delivered
+// to as it was before this guard existed.
 
 var (
 	// askUserQuestionFooterRe matches the select footer, its wrapped rows
@@ -72,12 +83,19 @@ const (
 	// select footer onto.
 	askUserQuestionFooterRows = 3
 
-	// askUserQuestionMaxRows bounds how far above the footer the header may
-	// be.
+	// askUserQuestionMaxRows bounds how far above the footer, or the review
+	// page's prompt, the header may be.
 	askUserQuestionMaxRows = 60
 
 	// askUserQuestionPromptMax bounds the prompt text a client is shown, in runes.
 	askUserQuestionPromptMax = 400
+
+	// The review page's fixed rows.
+	askUserQuestionReviewTitle  = "Review your answers"
+	askUserQuestionReviewPrompt = "Ready to submit your answers?"
+	askUserQuestionReviewSubmit = "Submit answers"
+	askUserQuestionReviewCancel = "Cancel"
+	askUserQuestionSubmitTab    = "✔ Submit"
 )
 
 // parsedQuestion is the AskUserQuestion dialog a pane shows.
@@ -91,14 +109,13 @@ type parsedQuestion struct {
 	Focused string
 }
 
-// parseAskUserQuestion returns the open AskUserQuestion page the pane lines
-// show, or nil when they show none.
+// parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
+// show, a question page or the review page, or nil when they show none.
 func parseAskUserQuestion(lines []string) *parsedQuestion {
-	footer := askUserQuestionFooterRow(lines)
-	if footer < 0 {
-		return nil
+	if footer := askUserQuestionFooterRow(lines); footer >= 0 {
+		return parseAskUserQuestionPage(lines, footer)
 	}
-	return parseAskUserQuestionPage(lines, footer)
+	return parseAskUserQuestionReview(lines)
 }
 
 // bottomRows returns the indexes of the last n non-blank lines, bottom first.
@@ -180,6 +197,43 @@ func parseAskUserQuestionPage(lines []string, footer int) *parsedQuestion {
 	}
 	q.Question = strings.Join(question, " ")
 	return q
+}
+
+// parseAskUserQuestionReview reads the dialog's review page: its two-option
+// menu as the pane's bottom rows, directly under the review prompt, with the
+// review title or the ✔ Submit tab strip above.
+func parseAskUserQuestionReview(lines []string) *parsedQuestion {
+	rows := bottomRows(lines, 3)
+	if len(rows) < 3 || strings.TrimSpace(lines[rows[2]]) != askUserQuestionReviewPrompt {
+		return nil
+	}
+	q := &parsedQuestion{Question: askUserQuestionReviewPrompt}
+	for i, want := range []struct{ number, label string }{
+		{"1", askUserQuestionReviewSubmit},
+		{"2", askUserQuestionReviewCancel},
+	} {
+		m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(lines[rows[1-i]]))
+		if m == nil || m[2] != want.number || strings.TrimSpace(m[3]) != want.label {
+			return nil
+		}
+		q.Choices = append(q.Choices, want.label)
+		if m[1] != "" {
+			q.Focused = want.label
+		}
+	}
+
+	for i := rows[2] - 1; i >= 0 && rows[2]-i <= askUserQuestionMaxRows; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if m := askUserQuestionHeaderRe.FindStringSubmatch(lines[i]); m != nil && strings.Contains(trimmed, askUserQuestionSubmitTab) {
+			q.Header = strings.TrimSpace(m[1])
+			return q
+		}
+		if trimmed == askUserQuestionReviewTitle {
+			q.Header = askUserQuestionReviewTitle
+			return q
+		}
+	}
+	return nil
 }
 
 // promptText renders the description a client shows for the pending question:
