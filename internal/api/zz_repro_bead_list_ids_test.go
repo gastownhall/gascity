@@ -19,8 +19,8 @@ import (
 // declared filter (?stauts=closed). /work/ready, by contrast, refuses an
 // unknown parameter with 422 before touching a store.
 //
-// The test passes if the server either honours ?ids= or refuses it; it fails
-// on the current behaviour (silently widened answer).
+// The test passes if the server either honors ?ids= or refuses it; it fails
+// on the current behavior (silently widened answer).
 func TestReproBeadListIgnoresIDsQuery(t *testing.T) {
 	state := newFakeState(t)
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -65,7 +65,7 @@ func TestReproBeadListIgnoresIDsQuery(t *testing.T) {
 	case code == http.StatusUnprocessableEntity:
 		t.Logf("?ids= refused as an unknown parameter (422)")
 	case code == http.StatusOK && len(got) == 1 && got[0] == "aa-2":
-		t.Logf("?ids= honoured")
+		t.Logf("?ids= honored")
 	default:
 		t.Errorf("GET /beads?ids=aa-2: want the one bead or a 422, got %d with %v (the ids parameter was silently dropped)", code, got)
 	}
