@@ -711,3 +711,44 @@ func TestPendingQuestionRequestIDFollowsThePage(t *testing.T) {
 		t.Errorf("Pending = %+v once the pane is back at its composer, want nil", done)
 	}
 }
+
+// askUserQuestionProceedPane is an answered-chip question page whose question
+// reads like a permission prompt's: question-first classification keeps it a
+// question, so Respond's approve keys never reach it.
+const askUserQuestionProceedPane = `←  ☒ Scope  ☐ Confirm  ✔ Submit  →
+Do you want to proceed?
+❯ 1. Yes
+  2. No
+  3. Type something.
+────────────────────────────────────────────────────────────
+  4. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel`
+
+// Respond refuses every question page, one asking "Do you want to …?"
+// included, for every action with or without a request ID, before any key.
+func TestRespondRefusesEveryAskUserQuestionPage(t *testing.T) {
+	panes := map[string]string{"question reading Do you want to proceed?": askUserQuestionProceedPane}
+	for _, tc := range askUserQuestionPageCases(t) {
+		panes[tc.name] = tc.pane
+	}
+	for name, pane := range panes {
+		t.Run(name, func(t *testing.T) {
+			tm, _ := questionTmux(pane)
+			live := "tmux-question-0123456789abcdef"
+			if pending, err := (&Provider{tm: tm}).Pending("auq"); err == nil && pending != nil {
+				live = pending.RequestID
+			}
+			for _, action := range []string{"approve", "deny", "1"} {
+				for _, id := range []string{"", live} {
+					ex := &paneExecutor{pane: pane, inMode: "0"}
+					tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+					err := tm.Respond("auq", runtime.InteractionResponse{Action: action, RequestID: id})
+					if !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+						t.Fatalf("Respond(%s, request %q) = %v, want runtime.ErrInteractionActionUnavailable", action, id, err)
+					}
+					requireNoKeys(t, ex.calls, false)
+				}
+			}
+		})
+	}
+}
