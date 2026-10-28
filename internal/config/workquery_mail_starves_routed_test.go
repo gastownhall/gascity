@@ -220,6 +220,28 @@ func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 	})
 }
 
+// TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier pins AC-4: when the
+// only candidate anywhere is an open mail bead, the query's frontier must be
+// empty — mail is delivered via nudges/inbox, never served as work, and the
+// empty case must exit 0 so the hook reads a clean no_work, not a failure.
+func TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	a := singleSessionConfigAgent()
+	env := map[string]string{
+		"GC_SESSION_ID":   "gcg-session-5815",
+		"GC_SESSION_NAME": "gascity--run-operator",
+	}
+	mail := `{"id":"gcg-mail-1","status":"open","issue_type":"message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+		fakeBdOpenEphemeralStore(`[`+mail+`]`, `[]`))
+	if got := strings.TrimSpace(out); got != "[]" {
+		t.Fatalf("mail-only store must yield an empty frontier ([]), got %q", got)
+	}
+}
+
 // TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType pins the fix's
 // scope: the message withholding lives in the jq probes over the ephemeral
 // snapshots, never as --exclude-type flags on the generated ready reads. bd's
