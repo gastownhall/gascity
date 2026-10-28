@@ -3,6 +3,8 @@ package tmux
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +12,17 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// readQuestionFixture reads one of the real pane captures under
+// testdata/claude-question.
+func readQuestionFixture(t *testing.T, name string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "claude-question", name))
+	if err != nil {
+		t.Fatalf("reading fixture %s: %v", name, err)
+	}
+	return strings.Split(strings.ReplaceAll(string(data), "\r", ""), "\n")
+}
 
 // askUserQuestionPane is a live capture (Claude Code v2.1.280, fullscreen TUI)
 // of an open AskUserQuestion dialog; header lines sanitized. The select footer
@@ -129,6 +142,106 @@ func questionTmux(pane string) (*Tmux, *paneExecutor) {
 	return &Tmux{cfg: DefaultConfig(), exec: ex}, ex
 }
 
+// The captures under testdata/claude-question parse to the dialog fields a
+// client is shown. Provenance, per file:
+//   - question-page-ga-ngrme8.txt, question-after-enter-ga-ngrme8.txt: real
+//     multi-question captures taken for ga-ngrme8 (commit 7ffbed8d04,
+//     nudge_human_prompt_test.go) — the page before the first key, and the
+//     page after one Enter (Q1 answered, ☒ chip).
+//   - question-single-2.1.280.txt: the live single-question frame captured for
+//     ga-61fduec (Claude Code v2.1.280, fullscreen TUI).
+//   - question-multi-2.1.304-c1.txt: the #8150 report's pane lines (Claude
+//     Code 2.1.304, macOS, tmux runtime).
+//   - question-multi-wrapped-footer-40x18.txt: a reconstruction of the C1 page
+//     at a width that wraps the select footer onto two rows.
+func TestParseQuestionDialog_Fixtures(t *testing.T) {
+	cases := []struct {
+		fixture string
+		// wantQuestion and wantFocused may be empty when the capture's
+		// rendering leaves them blank.
+		wantQuestion string
+		wantChoices  []string
+		wantFocused  string
+	}{
+		{
+			fixture:      "question-page-ga-ngrme8.txt",
+			wantQuestion: "Which approach would you prefer for this feature?",
+			wantChoices: []string{
+				"Alpha approach (Recommended)",
+				"Beta variant",
+				"Gamma variant",
+				"Type something.",
+				"Chat about this",
+			},
+			wantFocused: "Alpha approach (Recommended)",
+		},
+		{
+			fixture:      "question-after-enter-ga-ngrme8.txt",
+			wantQuestion: "How should we handle configuration?",
+			wantChoices: []string{
+				"Environment variables (Recommended)",
+				"Config file Beta",
+				"Command-line Gamma",
+				"Type something.",
+				"Chat about this",
+			},
+			wantFocused: "Environment variables (Recommended)",
+		},
+		{
+			fixture:      "question-single-2.1.280.txt",
+			wantQuestion: "Push deploy/be-tx30v-gate to headfork and open the PR against gastownhall/beads. How do you want to proceed?",
+			wantChoices: []string{
+				"Run gates, then ship if clean (Recommended)",
+				"Run gates, ask again before push",
+				"Keep holding",
+				"Type something.",
+				"Chat about this",
+			},
+			wantFocused: "Run gates, then ship if clean (Recommended)",
+		},
+		{
+			fixture:      "question-multi-2.1.304-c1.txt",
+			wantQuestion: "Which scope should the change cover?",
+			wantChoices: []string{
+				"Small",
+				"Medium",
+				"Large",
+				"Type something.",
+				"Chat about this",
+			},
+			wantFocused: "Small",
+		},
+		{
+			// A width that wraps the select footer onto two rows; the
+			// question wraps with the pane.
+			fixture:      "question-multi-wrapped-footer-40x18.txt",
+			wantQuestion: "Which scope should the change cover?",
+			wantChoices:  []string{"Small", "Medium", "Chat about this"},
+			wantFocused:  "Small",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			q := parseQuestionDialog(readQuestionFixture(t, tc.fixture))
+			if q == nil {
+				t.Fatal("parseQuestionDialog = nil; want the live question page")
+			}
+			if q.Question != tc.wantQuestion {
+				t.Errorf("Question = %q, want %q", q.Question, tc.wantQuestion)
+			}
+			if !slices.Equal(q.Choices, tc.wantChoices) {
+				t.Errorf("Choices = %q, want %q", q.Choices, tc.wantChoices)
+			}
+			if q.Focused != tc.wantFocused {
+				t.Errorf("Focused = %q, want %q", q.Focused, tc.wantFocused)
+			}
+			if !strings.HasPrefix(q.requestID(), "tmux-question-") {
+				t.Errorf("requestID = %q, want the tmux-question- prefix", q.requestID())
+			}
+		})
+	}
+}
+
 // An open AskUserQuestion owns the pane's input: a submitted Enter selects the
 // focused option. Pending must report it, as a question with no response verbs,
 // so guarded send paths refuse to type.
@@ -172,10 +285,9 @@ func TestProviderPendingReportsAskUserQuestionDialog(t *testing.T) {
 // the pane still shows owns its input.
 func TestProviderPendingIgnoresAnsweredAskUserQuestionDialog(t *testing.T) {
 	for name, pane := range map[string]string{
-		"idle composer below":  answeredAskUserQuestionPane,
-		"agent working below":  answeredAskUserQuestionWorkingPane,
-		"no dialog at all":     "● Done.\n\n❯ \n",
-		"only the select line": askUserQuestionFooterSelect,
+		"idle composer below": answeredAskUserQuestionPane,
+		"agent working below": answeredAskUserQuestionWorkingPane,
+		"no dialog at all":    "● Done.\n\n❯ \n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			tm, _ := questionTmux(pane)
@@ -372,12 +484,14 @@ func TestSnapshotPaneIdleRejectsAskUserQuestionDialog(t *testing.T) {
 	}
 }
 
-// A pane reads as an open dialog only when it has all three anchors (select footer, a focused
-// numbered option row, a ☐ header row), in the pane's bottom block. Each anchor
-// is what keeps a different pane from reading as an open dialog: the
-// folder-trust dialog must stay nudgeable, an idle composer's "❯ " must not
-// look like a focused option, and an answered frame in scrollback is not live.
-// The control runs first so the nil cases cannot pass vacuously.
+// A pane reads as an open question dialog when the select footer is its
+// bottom-most block — the cursor, the ☐ chips and the question rows above the
+// footer never decide: focus in "Type something." draws no cursor, an answered
+// question's chip reads ☒, and the question can wrap. What keeps other panes
+// from reading as one is the footer itself: the folder-trust dialog's "Enter to
+// confirm", an approval's "Esc to cancel · Tab to amend", and a composer
+// standing below the footer, which makes the frame history. The control runs
+// first so the nil cases cannot pass vacuously.
 func TestPendingRejectsNonDialogPanes(t *testing.T) {
 	pendingFor := func(pane string) (*runtime.PendingInteraction, error) {
 		tm, _ := questionTmux(pane)
@@ -393,11 +507,7 @@ func TestPendingRejectsNonDialogPanes(t *testing.T) {
 
 	for _, tc := range []struct{ name, pane string }{
 		{"folder-trust pane", " Do you trust the files in this folder?\n\n /work/repo\n\n" + askUserQuestionOptionRows + "\n" + askUserQuestionFooterConfirm},
-		{"footer only", "Working...\n" + askUserQuestionFooterSelect},
-		{"footer and option without header", askUserQuestionOptionRows + "\n" + askUserQuestionFooterSelect},
-		{"footer and header with numbered rows but no focused option", askUserQuestionHeaderRows + "  1. Yes\n  2. No\n\n" + askUserQuestionFooterSelect},
 		{"option and header with the confirm footer", askUserQuestionHeaderRows + askUserQuestionOptionRows + "\n" + askUserQuestionFooterConfirm},
-		{"idle composer with the select footer", "● Done.\n\n❯ \n" + askUserQuestionFooterSelect},
 		{"answered frame above an idle composer", answeredAskUserQuestionPane},
 		{"answered frame above working output", answeredAskUserQuestionWorkingPane},
 		{"control frame with an idle composer under it", control + "\n❯ \n  ? for shortcuts\n"},
@@ -406,6 +516,61 @@ func TestPendingRejectsNonDialogPanes(t *testing.T) {
 			got, err := pendingFor(tc.pane)
 			if err != nil || got != nil {
 				t.Fatalf("Pending = %+v, %v; want nothing for a pane that is not a live open dialog:\n%s", got, err, tc.pane)
+			}
+		})
+	}
+}
+
+// Every live question page reports a pending question: the multi-question
+// captures, the page after one Enter (☒ chips), the 2.1.280 single-question
+// frame, a wrapped select footer, and a page whose focus sits in the
+// free-text row, which draws no cursor. The older detector keyed on the ❯
+// cursor and ☐ chips, so the cursorless and answered pages read as idle
+// composers and a nudge's Enter answered them (#8150).
+func TestProviderPendingReportsEveryLiveQuestionPage(t *testing.T) {
+	// questionPaneFocusInTypeSomething is a reconstruction: the 2.1.304
+	// multi-question page with focus in the free-text row, which draws no ❯.
+	const questionPaneFocusInTypeSomething = ` ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →
+
+Which scope should the change cover?
+
+  1. Small
+     Only the bug fix
+  2. Medium
+     Fix plus regression tests
+  3. Large
+     Fix, tests and a refactor
+  4. Type something.
+     fix it fast
+────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+	for name, pane := range map[string]string{
+		// Real multi-question capture, ga-ngrme8 (7ffbed8d04).
+		"multi-question page":  strings.Join(readQuestionFixture(t, "question-page-ga-ngrme8.txt"), "\n") + "\n",
+		"page after one Enter": strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n",
+		// Real single-question frame, Claude Code 2.1.280 (ga-61fduec).
+		"single-question 2.1.280": askUserQuestionPane,
+		// Reconstruction: the 2.1.304 page at a width that wraps the footer.
+		"wrapped select footer":    strings.Join(readQuestionFixture(t, "question-multi-wrapped-footer-40x18.txt"), "\n") + "\n",
+		"focus in Type something.": questionPaneFocusInTypeSomething,
+		// The C1 lines of the #8150 report, Claude Code 2.1.304.
+		"multi-question 2.1.304 C1": strings.Join(readQuestionFixture(t, "question-multi-2.1.304-c1.txt"), "\n") + "\n",
+		// Minimal panes on the key's boundary: the footer alone is the key.
+		"select footer alone":                       "Working...\n" + askUserQuestionFooterSelect,
+		"numbered rows with no cursor":              askUserQuestionHeaderRows + "  1. Yes\n  2. No\n\n" + askUserQuestionFooterSelect,
+		"idle composer row above the select footer": "● Done.\n\n❯ \n" + askUserQuestionFooterSelect,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm, _ := questionTmux(pane)
+			pending, err := (&Provider{tm: tm}).Pending("auq")
+			if err != nil {
+				t.Fatalf("Pending: %v", err)
+			}
+			if pending == nil || pending.Kind != "question" {
+				t.Fatalf("Pending = %+v; want a pending question — a nudge's Enter would answer this dialog", pending)
 			}
 		})
 	}
