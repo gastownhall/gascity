@@ -597,3 +597,29 @@ func TestReleaseOrphanedPoolAssignments_KeepsNamedClaimOfFallbackIdentityRow(t *
 	}
 	assertSeatWorkKept(t, store, work.ID, "reviewer")
 }
+
+// TestReleaseOrphanedPoolAssignments_ReleasesHandedClaimWhenSuccessorCloses
+// (AC-8): a bead handed to a successor that closes without adopting it is
+// handed on again only if another row holds the seat; with none, the next
+// sweep releases it.
+func TestReleaseOrphanedPoolAssignments_ReleasesHandedClaimWhenSuccessorCloses(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := seatHandoverCity()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+	if released := sweepSeatWork(store, cfg, []beads.Bead{successor}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("first sweep released = %v, want the hand-over to %s", released, successor.ID)
+	}
+	handed := getSeatBead(t, store, work.ID)
+	if handed.Assignee != successor.ID {
+		t.Fatalf("assignee after first sweep = %q, want successor %q", handed.Assignee, successor.ID)
+	}
+	if err := store.Close(successor.ID); err != nil {
+		t.Fatalf("close successor: %v", err)
+	}
+
+	released := sweepSeatWork(store, cfg, nil, []beads.Bead{handed})
+	assertSeatWorkReleased(t, store, handed, released)
+}
