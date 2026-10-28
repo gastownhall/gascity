@@ -595,16 +595,17 @@ func TestCircuitResetGenerationSurfacesStoreError(t *testing.T) {
 }
 
 // TestPersistedMarkersReturnsVerbatimValues proves the typed read returns the
-// persisted session_name / continuation_epoch / sleep_reason metadata values
-// verbatim — equivalent to the raw store.Get(id) + read .Metadata[...] the
+// persisted session_name / continuation_epoch / sleep_reason /
+// continuation_reset_pending metadata values verbatim — equivalent to the raw store.Get(id) + read .Metadata[...] the
 // cmd_wait registration and retry/clear paths performed. It performs no bead
 // validation (matching the raw reads) and emits no mutating op.
 func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{
-		"__title":            "My Session",
-		"session_name":       "polecat-1",
-		"continuation_epoch": "4",
-		"sleep_reason":       "wait-hold",
+		"__title":                    "My Session",
+		"session_name":               "polecat-1",
+		"continuation_epoch":         "4",
+		"sleep_reason":               "wait-hold",
+		"continuation_reset_pending": "true",
 	})
 	is, rec := recordingStore(t, b)
 
@@ -613,10 +614,11 @@ func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 		t.Fatalf("PersistedMarkers: %v", err)
 	}
 	want := PersistedMarkers{
-		Title:             "My Session",
-		SessionName:       "polecat-1",
-		ContinuationEpoch: "4",
-		SleepReason:       "wait-hold",
+		Title:                    "My Session",
+		SessionName:              "polecat-1",
+		ContinuationEpoch:        "4",
+		SleepReason:              "wait-hold",
+		ContinuationResetPending: "true",
 	}
 	if got != want {
 		t.Errorf("PersistedMarkers = %#v, want %#v (the raw read values)", got, want)
