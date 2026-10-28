@@ -336,16 +336,26 @@ func TestStopHandler_MissingActiveWisp_RecoversReplacementBeforeForceClose(t *te
 
 // TestStopHandler_ForceCloseClosesOpenWispDescendants asserts that stop
 // force-closes every open or in-progress descendant of the active wisp
-// before the wisp root, and terminates the loop with
-// terminal_reason=stopped (ga-i4s7ce, issue #8386).
+// with CloseReasonManualSupersede before the wisp root, leaves an
+// already-closed descendant's own close_reason and gc.outcome untouched,
+// and terminates the loop with terminal_reason=stopped (ga-i4s7ce,
+// issue #8386).
 func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
 
 	// Wisp step beads: step-a open, step-b in_progress with open child
-	// step-b1.
+	// step-b1, step-c closed before the stop with its own close_reason
+	// and gc.outcome.
 	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
 	store.addBead("step-b", "in_progress", "wisp-iter-2", "", nil)
 	store.addBead("step-b1", "open", "step-b", "", nil)
+	store.addBead("step-c", "open", "wisp-iter-2", "", nil)
+	if err := store.CloseBead("step-c", CloseReasonManualApprove); err != nil {
+		t.Fatalf("pre-closing step-c: %v", err)
+	}
+	if err := store.SetMetadata("step-c", "gc.outcome", "pass"); err != nil {
+		t.Fatalf("stamping step-c gc.outcome: %v", err)
+	}
 
 	result, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
 	if err != nil {
@@ -355,7 +365,7 @@ func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 		t.Errorf("Action = %q, want %q", result.Action, ActionStopped)
 	}
 
-	// Every open or in-progress descendant is closed.
+	// Every open or in-progress descendant is closed with the stop reason.
 	for _, id := range []string{"step-a", "step-b", "step-b1"} {
 		info, err := store.GetBead(id)
 		if err != nil {
@@ -364,6 +374,28 @@ func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 		if info.Status != "closed" {
 			t.Errorf("step %s status = %q, want closed", id, info.Status)
 		}
+		meta, err := store.GetMetadata(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if meta["close_reason"] != CloseReasonManualSupersede {
+			t.Errorf("step %s close_reason = %q, want %q", id, meta["close_reason"], CloseReasonManualSupersede)
+		}
+	}
+
+	// The already-closed descendant keeps its own close_reason and
+	// gc.outcome.
+	cMeta, err := store.GetMetadata("step-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cMeta["close_reason"] != CloseReasonManualApprove {
+		t.Errorf("step-c close_reason = %q, want %q (prior close must be preserved)",
+			cMeta["close_reason"], CloseReasonManualApprove)
+	}
+	if cMeta["gc.outcome"] != "pass" {
+		t.Errorf("step-c gc.outcome = %q, want %q (prior outcome must be preserved)",
+			cMeta["gc.outcome"], "pass")
 	}
 
 	// The wisp root closes only after every descendant has.
