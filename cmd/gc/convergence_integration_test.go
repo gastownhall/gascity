@@ -1187,3 +1187,100 @@ func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 		t.Errorf("status = %q, want closed", closed.Status)
 	}
 }
+
+func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
+	const reason = "convergence: test descendant close reason"
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, nil, false)
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("creating %q: %v", b.Title, err)
+		}
+		return created
+	}
+	wisp := create(beads.Bead{Title: "wisp", Type: "molecule"})
+	a := create(beads.Bead{Title: "a", Type: "task", ParentID: wisp.ID})
+	b := create(beads.Bead{Title: "b", Type: "task", ParentID: wisp.ID})
+	b1 := create(beads.Bead{Title: "b1", Type: "task", ParentID: b.ID})
+	c := create(beads.Bead{Title: "c", Type: "task", ParentID: wisp.ID})
+	if err := store.DepAdd(c.ID, a.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	const priorReason = "step finished by its worker normally"
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"close_reason": priorReason, "gc.outcome": "pass"}); err != nil {
+		t.Fatalf("stamping b: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("closing b: %v", err)
+	}
+
+	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {
+		t.Fatalf("CloseOpenDescendants: %v", err)
+	}
+
+	for _, id := range []string{a.ID, b1.ID, c.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != reason {
+			t.Errorf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], reason)
+		}
+		if got.Metadata["gc.outcome"] != "skipped" {
+			t.Errorf("%s gc.outcome = %q, want skipped", id, got.Metadata["gc.outcome"])
+		}
+	}
+	gotB, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get b: %v", err)
+	}
+	if gotB.Metadata["close_reason"] != priorReason || gotB.Metadata["gc.outcome"] != "pass" {
+		t.Errorf("already-closed b close_reason=%q gc.outcome=%q, want %q/pass",
+			gotB.Metadata["close_reason"], gotB.Metadata["gc.outcome"], priorReason)
+	}
+	gotWisp, err := store.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("Get wisp: %v", err)
+	}
+	if gotWisp.Status == "closed" {
+		t.Errorf("wisp root closed by CloseOpenDescendants, want it left open")
+	}
+
+	before, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {
+		t.Fatalf("second CloseOpenDescendants: %v", err)
+	}
+	after, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("bead count changed on second call: %d -> %d", len(before), len(after))
+	}
+	for i := range before {
+		if before[i].Status != after[i].Status || before[i].Revision != after[i].Revision {
+			t.Errorf("bead %s changed on second call: status %s->%s revision %d->%d",
+				before[i].ID, before[i].Status, after[i].Status, before[i].Revision, after[i].Revision)
+		}
+	}
+
+	// The adapter's Children omits closed beads, so a walk over it alone
+	// would never reach b1 under the closed b.
+	kids, err := adapter.Children(wisp.ID)
+	if err != nil {
+		t.Fatalf("Children: %v", err)
+	}
+	for _, k := range kids {
+		if k.ID == b.ID {
+			t.Errorf("adapter.Children(%s) lists closed %s", wisp.ID, b.ID)
+		}
+	}
+}

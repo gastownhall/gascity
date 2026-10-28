@@ -42,6 +42,14 @@ type fakeStore struct {
 	// write; a non-nil return fails the write (nothing is recorded or stored).
 	SetMetadataErrFunc func(key string) error
 
+	// CloseDescendantErrFunc, when non-nil, is consulted before each
+	// CloseOpenDescendants close; a non-nil return fails that close.
+	CloseDescendantErrFunc func(id string) error
+
+	// CloseLog records the ID of every bead closed by CloseBead or
+	// CloseOpenDescendants in order, enabling close-ordering assertions.
+	CloseLog []string
+
 	ActivatedWispIDs []string
 }
 
@@ -126,6 +134,12 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 	if !ok {
 		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
 	}
+	closeRecordLocked(rec, reason)
+	s.CloseLog = append(s.CloseLog, id)
+	return nil
+}
+
+func closeRecordLocked(rec *fakeBeadRecord, reason string) {
 	rec.info.Status = "closed"
 	rec.info.ClosedAt = time.Now()
 	if reason != "" {
@@ -133,6 +147,41 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 			rec.metadata = map[string]string{}
 		}
 		rec.metadata["close_reason"] = reason
+	}
+}
+
+// CloseOpenDescendants walks the full child list, closed children included,
+// post-order so nested work is closed before its parent.
+func (s *fakeStore) CloseOpenDescendants(id, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.beads[id]
+	if !ok {
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+	}
+	return s.closeOpenDescendantsLocked(rec, reason)
+}
+
+func (s *fakeStore) closeOpenDescendantsLocked(rec *fakeBeadRecord, reason string) error {
+	for _, childID := range rec.children {
+		child, ok := s.beads[childID]
+		if !ok {
+			continue
+		}
+		if err := s.closeOpenDescendantsLocked(child, reason); err != nil {
+			return err
+		}
+		if child.info.Status == "closed" {
+			continue
+		}
+		if s.CloseDescendantErrFunc != nil {
+			if err := s.CloseDescendantErrFunc(childID); err != nil {
+				return err
+			}
+		}
+		closeRecordLocked(child, reason)
+		child.metadata["gc.outcome"] = "skipped"
+		s.CloseLog = append(s.CloseLog, childID)
 	}
 	return nil
 }
