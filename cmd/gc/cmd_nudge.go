@@ -2156,6 +2156,14 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			}
 			return true, nil
 		}
+		if outcome == session.WakeNotDormant {
+			// The row is not asleep or drained — starting, draining, or a
+			// stale active state over a dead runtime — so no wake was recorded;
+			// the nudge rides the session's next run.
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: queued for %s; no wake was recorded because the session is not asleep (it is starting, draining, or its state is stale); it is delivered the next time the session runs\n", target.agentKey()) //nolint:errcheck // best-effort warning
+			}
+		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			if nudgeWarningWriter != nil {
 				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
