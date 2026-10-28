@@ -1253,6 +1253,114 @@ func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
 	}
 }
 
+// TestConvergenceStore_CloseOpenDescendants pins the adapter's subtree
+// close: every open descendant of the wisp root is closed with the given
+// reason and gc.outcome=skipped — including one nested under an
+// already-closed intermediate — the root itself stays open,
+// already-closed descendants keep their own close_reason and gc.outcome,
+// and a second call is a no-op (ga-i4s7ce, issue #8386).
+func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, nil, false)
+
+	wisp, err := store.Create(beads.Bead{Title: "wisp", Type: "molecule", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("creating wisp: %v", err)
+	}
+	a, err := store.Create(beads.Bead{Title: "A", Type: "step", ParentID: wisp.ID})
+	if err != nil {
+		t.Fatalf("creating A: %v", err)
+	}
+	b, err := store.Create(beads.Bead{Title: "B", Type: "step", ParentID: wisp.ID})
+	if err != nil {
+		t.Fatalf("creating B: %v", err)
+	}
+	b1, err := store.Create(beads.Bead{Title: "B1", Type: "step", ParentID: b.ID})
+	if err != nil {
+		t.Fatalf("creating B1: %v", err)
+	}
+	c, err := store.Create(beads.Bead{Title: "C", Type: "step", ParentID: wisp.ID})
+	if err != nil {
+		t.Fatalf("creating C: %v", err)
+	}
+	if err := store.DepAdd(c.ID, a.ID, "blocks"); err != nil {
+		t.Fatalf("adding blocks dep: %v", err)
+	}
+
+	// B closes before the stop with its own close_reason and gc.outcome.
+	if err := store.SetMetadata(b.ID, "close_reason", convergence.CloseReasonManualApprove); err != nil {
+		t.Fatalf("stamping B close_reason: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, beadmeta.OutcomeMetadataKey, "pass"); err != nil {
+		t.Fatalf("stamping B gc.outcome: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("closing B: %v", err)
+	}
+
+	// The adapter's Children omits closed beads, so a handler walking it
+	// would never reach B1: pin why the close cannot be driven by Children.
+	children, err := adapter.Children(wisp.ID)
+	if err != nil {
+		t.Fatalf("Children: %v", err)
+	}
+	for _, child := range children {
+		if child.ID == b.ID {
+			t.Errorf("adapter.Children(wisp) lists closed bead %s", b.ID)
+		}
+	}
+
+	reason := convergence.CloseReasonManualSupersede
+	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {
+		t.Fatalf("CloseOpenDescendants: %v", err)
+	}
+
+	for _, tc := range []struct {
+		id         string
+		wantClosed bool
+		wantReason string
+		wantGcOut  string
+	}{
+		{a.ID, true, reason, beadmeta.OutcomeSkipped},
+		{b1.ID, true, reason, beadmeta.OutcomeSkipped},
+		{c.ID, true, reason, beadmeta.OutcomeSkipped},
+		{b.ID, true, convergence.CloseReasonManualApprove, "pass"},
+	} {
+		got, err := store.Get(tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got.Status == "closed") != tc.wantClosed {
+			t.Errorf("bead %s status = %q, want closed=%v", tc.id, got.Status, tc.wantClosed)
+		}
+		if got.Metadata["close_reason"] != tc.wantReason {
+			t.Errorf("bead %s close_reason = %q, want %q", tc.id, got.Metadata["close_reason"], tc.wantReason)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != tc.wantGcOut {
+			t.Errorf("bead %s gc.outcome = %q, want %q", tc.id, got.Metadata[beadmeta.OutcomeMetadataKey], tc.wantGcOut)
+		}
+	}
+	root, err := store.Get(wisp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Status == "closed" {
+		t.Errorf("wisp root %s closed, want open", wisp.ID)
+	}
+
+	// A second call over the now fully closed subtree is a no-op.
+	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {
+		t.Fatalf("second CloseOpenDescendants: %v", err)
+	}
+	again, err := store.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Status != "closed" || again.Metadata["close_reason"] != reason {
+		t.Errorf("second call changed bead %s: status %q close_reason %q", a.ID, again.Status, again.Metadata["close_reason"])
+	}
+}
+
 // --- Active index tests ---
 
 func TestConvergenceIndex_PopulateAndQuery(t *testing.T) {
