@@ -421,6 +421,14 @@ func buildDemandTargetsPreRefactor(
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 	coldWakeTemplates := map[string]bool{}
 	namedOnDemandTemplates := map[string]bool{}
+	// coldWakeDisabledTemplates marks templates whose agent set cold_wake=false
+	// (see demandTargets.coldWakeDisabledTemplates for the full rationale).
+	coldWakeDisabledTemplates := map[string]bool{}
+	for i := range cfg.Agents {
+		if !cfg.Agents[i].EffectiveColdWake() {
+			coldWakeDisabledTemplates[cfg.Agents[i].QualifiedName()] = true
+		}
+	}
 	type activeStore struct {
 		store beads.Store
 		ref   string
@@ -535,11 +543,12 @@ func buildDemandTargetsPreRefactor(
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
 	return demandTargets{
-		pendingPools:             pendingPools,
-		defaultScaleTargets:      defaultScaleTargets,
-		defaultNamedScaleTargets: defaultNamedScaleTargets,
-		coldWakeTemplates:        coldWakeTemplates,
-		namedOnDemandTemplates:   namedOnDemandTemplates,
+		pendingPools:              pendingPools,
+		defaultScaleTargets:       defaultScaleTargets,
+		defaultNamedScaleTargets:  defaultNamedScaleTargets,
+		coldWakeTemplates:         coldWakeTemplates,
+		namedOnDemandTemplates:    namedOnDemandTemplates,
+		coldWakeDisabledTemplates: coldWakeDisabledTemplates,
 	}
 }
 
