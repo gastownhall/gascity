@@ -1906,3 +1906,44 @@ func TestSyncSQLDeclaresSkippedOutcomeForUnusableRemote(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkip covers a run where one
+// database syncs (pushed, or would be pushed under --dry-run) while another
+// has no usable remote: the declaration is partial and scopes only the
+// skipped database.
+func TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkip(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "pushed", want: "good: pushed"},
+		{name: "dry run", args: []string{"--dry-run"}, want: "good: would"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cityPath := t.TempDir()
+			writeSyncCLIDatabase(t, cityPath, "good", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+			writeSyncCLIDatabase(t, cityPath, "hq", `{"remotes":[{"name":"origin","url":"git+ssh://example.invalid/org/hq"}]}`)
+			binDir := t.TempDir()
+			_ = writeSyncFakeDolt(t, binDir)
+			_ = writeSyncFakeBeadsBD(t, cityPath)
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_GOOD=", "GC_DOLT_REMOTE_HQ="}, tc.args...)
+			if err != nil {
+				t.Fatalf("a run that synced one database and skipped another must exit 0: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("expected database good to sync (%q):\n%s", tc.want, out)
+			}
+			if strings.Contains(out, "database(s) skipped") {
+				t.Fatalf("a run that synced a database must not print the all-skipped summary:\n%s", out)
+			}
+			assertSyncRemoteSkipOutcome(t, outcomeFile, orders.ExecOutcomePartial, "some databases were not synced to a remote",
+				orders.ExecOutcomeScope{Scope: "hq", Reason: "no local remote; set GC_DOLT_REMOTE_HQ to push to a non-local remote"},
+			)
+		})
+	}
+}
