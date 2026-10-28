@@ -42,6 +42,11 @@ type fakeStore struct {
 	// write; a non-nil return fails the write (nothing is recorded or stored).
 	SetMetadataErrFunc func(key string) error
 
+	// CloseLog records the ID of every bead closed by CloseBead or
+	// CloseOpenDescendants, in close order, so tests can assert that a
+	// parent closes only after all of its descendants.
+	CloseLog []string
+
 	ActivatedWispIDs []string
 }
 
@@ -134,7 +139,60 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 		}
 		rec.metadata["close_reason"] = reason
 	}
+	s.CloseLog = append(s.CloseLog, id)
 	return nil
+}
+
+// CloseOpenDescendants closes every non-closed descendant of id (but not
+// id itself) with close_reason=reason. It walks the record's children in
+// post order — children before parents, recursing through closed beads
+// so open beads under them are still reached — leaving already-closed
+// descendants untouched, mirroring the adapter's subtree close.
+func (s *fakeStore) CloseOpenDescendants(id, reason string) error {
+	children, err := s.childIDs(id)
+	if err != nil {
+		return err
+	}
+	for _, childID := range children {
+		if err := s.closeDescendantTree(childID, reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *fakeStore) closeDescendantTree(id, reason string) error {
+	children, err := s.childIDs(id)
+	if err != nil {
+		return err
+	}
+	for _, childID := range children {
+		if err := s.closeDescendantTree(childID, reason); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	rec, ok := s.beads[id]
+	closed := ok && rec.info.Status == "closed"
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+	}
+	if closed {
+		return nil
+	}
+	return s.CloseBead(id, reason)
+}
+
+// childIDs returns a copy of the bead's child IDs, or ErrNotFound.
+func (s *fakeStore) childIDs(id string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.beads[id]
+	if !ok {
+		return nil, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+	}
+	return append([]string(nil), rec.children...), nil
 }
 
 func (s *fakeStore) DeleteBead(id string) error {

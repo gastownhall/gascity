@@ -334,6 +334,76 @@ func TestStopHandler_MissingActiveWisp_RecoversReplacementBeforeForceClose(t *te
 	}
 }
 
+// TestStopHandler_ForceCloseClosesOpenWispDescendants asserts that stop
+// force-closes every open or in-progress descendant of the active wisp
+// before the wisp root, and terminates the loop with
+// terminal_reason=stopped (ga-i4s7ce, issue #8386).
+func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
+	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
+
+	// Wisp step beads: step-a open, step-b in_progress with open child
+	// step-b1.
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-b", "in_progress", "wisp-iter-2", "", nil)
+	store.addBead("step-b1", "open", "step-b", "", nil)
+
+	result, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != ActionStopped {
+		t.Errorf("Action = %q, want %q", result.Action, ActionStopped)
+	}
+
+	// Every open or in-progress descendant is closed.
+	for _, id := range []string{"step-a", "step-b", "step-b1"} {
+		info, err := store.GetBead(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Status != "closed" {
+			t.Errorf("step %s status = %q, want closed", id, info.Status)
+		}
+	}
+
+	// The wisp root closes only after every descendant has.
+	wisp, err := store.GetBead("wisp-iter-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wisp.Status != "closed" {
+		t.Errorf("wisp status = %q, want closed", wisp.Status)
+	}
+	lastDescendant := -1
+	wispAt := -1
+	for i, id := range store.CloseLog {
+		switch id {
+		case "step-a", "step-b", "step-b1":
+			if i > lastDescendant {
+				lastDescendant = i
+			}
+		case "wisp-iter-2":
+			wispAt = i
+		}
+	}
+	if wispAt < 0 {
+		t.Fatalf("wisp-iter-2 not found in close log %v", store.CloseLog)
+	}
+	if lastDescendant >= 0 && wispAt < lastDescendant {
+		t.Errorf("close log %v: wisp-iter-2 closed at %d before a descendant at %d",
+			store.CloseLog, wispAt, lastDescendant)
+	}
+
+	// The loop is terminated with terminal_reason=stopped.
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateTerminated)
+	}
+	if meta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("terminal_reason = %q, want %q", meta[FieldTerminalReason], TerminalStopped)
+	}
+}
+
 func TestStopHandler_StoreErrorReadingActiveWisp_ReportsError(t *testing.T) {
 	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
 
