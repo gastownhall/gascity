@@ -699,6 +699,23 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 	}
 
+	// The requalified prior form (gastownhall/gascity#5957): when spec carries
+	// a BareIdentity, the live row still stamped with it is this session
+	// awaiting its in-place rename. Uniqueness is enforced inside the pass —
+	// two bare rows fall through to conflict detection, which no bare row
+	// reaches (no stage above queried for the bare form against a
+	// qualified-scoped key).
+	if bare := strings.TrimSpace(spec.BareIdentity); bare != "" && bare != spec.Identity {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, bare)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing named session candidates by requalified prior identity: %w", err)
+		}
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
 	if !includeConflict {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
@@ -854,7 +871,7 @@ func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) 
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName) {
+		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName, strings.TrimSpace(spec.BareIdentity)) {
 			continue
 		}
 		RepairEmptyType(store, &b)
@@ -867,9 +884,12 @@ func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) 
 // of the metadata predicates that NamedSessionResolutionCandidates folds
 // in process: configured-named-identity, session_name against the runtime
 // name, session_name against the bare identity, or alias against the bare
-// identity. Empty arguments disable their respective predicates so the
+// identity. bare is the spec's requalified prior form (empty unless a bare
+// leaf uniquely maps to the spec's identity — gastownhall/gascity#5957); a
+// row stamped with it is admitted so the canonical pickers can rename it in
+// place. Empty arguments disable their respective predicates so the
 // behavior matches ExactMetadataSessionCandidates' empty-filter handling.
-func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName string) bool {
+func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName, bare string) bool {
 	if identity != "" {
 		if strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata]) == identity {
 			return true
@@ -882,6 +902,9 @@ func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName
 		}
 	}
 	if sessionName != "" && strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+		return true
+	}
+	if bare != "" && bare != identity && strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata]) == bare {
 		return true
 	}
 	return false
@@ -1347,7 +1370,12 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 	// count -- keeps a true collision (two distinct live beads that both
 	// genuinely match the backing template) falling through to conflict
 	// detection instead of one silently winning as first-match.
-	return aliasOnlyCanonicalNamedSessionBead(candidates, spec)
+	if bead, ok := aliasOnlyCanonicalNamedSessionBead(candidates, spec); ok {
+		return bead, true
+	}
+	// The requalified prior form is the last, weakest signal, exactly as in
+	// FindCanonicalNamedSessionInfo (gastownhall/gascity#5957).
+	return bareIdentityCanonicalBead(candidates, spec)
 }
 
 // aliasOnlyCanonicalNamedSessionBead implements FindCanonicalNamedSessionBead's
@@ -1378,6 +1406,37 @@ func aliasOnlyCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessi
 	}
 	if aliasMatchCount == 1 {
 		return aliasCanonical, true
+	}
+	return beads.Bead{}, false
+}
+
+// bareIdentityCanonicalBead is the bead mirror of bareIdentityCanonicalInfo:
+// the strictly-last unique-bare pass the spec-to-row resolvers share, for
+// callers that hold beads.Bead candidates instead of session.Info. See
+// bareIdentityCanonicalInfo's doc comment for the pass's rationale and its
+// guards (uniqueness, open and continuity-eligible only, exact passes
+// first).
+func bareIdentityCanonicalBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	bare := strings.TrimSpace(spec.BareIdentity)
+	if bare == "" || bare == NormalizeNamedSessionTarget(spec.Identity) {
+		return beads.Bead{}, false
+	}
+	var canonical beads.Bead
+	matches := 0
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+			continue
+		}
+		if !IsNamedSessionBead(b) || NamedSessionIdentity(b) != bare {
+			continue
+		}
+		matches++
+		if matches == 1 {
+			canonical = b
+		}
+	}
+	if matches == 1 {
+		return canonical, true
 	}
 	return beads.Bead{}, false
 }
@@ -1423,7 +1482,10 @@ func findCanonicalNamedSessionBeadForLookup(candidates []beads.Bead, spec NamedS
 	if NamedSessionBackingTemplate(spec) == "" {
 		return beads.Bead{}, false
 	}
-	return aliasOnlyCanonicalNamedSessionBead(candidates, spec)
+	if bead, ok := aliasOnlyCanonicalNamedSessionBead(candidates, spec); ok {
+		return bead, true
+	}
+	return bareIdentityCanonicalBead(candidates, spec)
 }
 
 // FindConflictingNamedSessionSpecForBead finds the configured named session blocked by a bead.
