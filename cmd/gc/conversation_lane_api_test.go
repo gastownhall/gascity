@@ -143,6 +143,44 @@ func TestConversationLaneHostAwaitOpWakesAtPassEnd(t *testing.T) {
 	}
 }
 
+// An await whose context ends reads the op once more before it answers, so
+// an op that closed while it waited, with no pass end to wake it, is
+// returned closed rather than as the open op it read before the wait.
+func TestConversationLaneHostAwaitOpRereadsWhenItsContextEnds(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message", "interrupt")
+	st, _, err := hh.h.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	op := f.propose(t, st, f.msg("now-1", opjournal.RolePrompt, "hello"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	got := make(chan opjournal.Op, 1)
+	go func() {
+		o, err := hh.h.awaitOp(ctx, f.id, op.ID)
+		if err != nil {
+			t.Errorf("awaitOp: %v", err)
+		}
+		got <- o
+	}()
+	// The await read the op open and waits on its re-read timer, which this
+	// test never fires.
+	hh.nextTimer(t)
+	if _, err := st.Close(op.ID, opjournal.Outcome{Arm: opjournal.ArmSucceeded}, "lane:test"); err != nil {
+		t.Fatalf("closing op: %v", err)
+	}
+	cancel()
+	select {
+	case o := <-got:
+		if o.Status != opjournal.StatusClosed {
+			t.Fatalf("await = %+v, want the op closed", o)
+		}
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the await did not return when its context ended")
+	}
+}
+
 // An await that returns with no pass over its conversation leaves no
 // pass-end waiter behind: one that found its op closed, and one whose
 // context ended. One leaving does not take the channel from another await

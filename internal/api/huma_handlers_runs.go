@@ -668,7 +668,7 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 
 	sp := s.state.SessionProvider()
 	if s.laneExecutes(opjournal.KindInterrupt) {
-		interrupted := s.interruptRunHoldersLane(ctx, store, runID, s.liveRunHolders(store, sp, ids, fail), fail)
+		interrupted := s.interruptRunHoldersLane(ctx, store, runID, s.liveRunHolders(ctx, store, ids, fail), fail)
 		return interrupted, failures
 	}
 	results := make([]error, len(ids))
@@ -714,23 +714,6 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 // guard).
 func holderHasNoTurn(info session.Info, sp runtime.Provider) bool {
 	return info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName)
-}
-
-// liveRunHolders is the sessions among ids with a turn to interrupt, as
-// interruptRunHolders skips the rest (holderHasNoTurn); one that cannot be
-// read is a failure.
-func (s *Server) liveRunHolders(store beads.Store, sp runtime.Provider, ids []string, fail func(string, error)) []string {
-	live := make([]string, 0, len(ids))
-	for _, id := range ids {
-		info, err := s.sessionManager(store).Get(id)
-		switch {
-		case err != nil:
-			fail(id, err)
-		case !holderHasNoTurn(info, sp):
-			live = append(live, id)
-		}
-	}
-	return live
 }
 
 // findWorkflowRoots returns the graph-workflow roots in store that match runID

@@ -96,7 +96,9 @@ func (h *conversationLaneHost) awaitOp(ctx context.Context, conv, id string) (op
 
 // awaitOpOnce reads op id of conv and, while it is open, waits for the end
 // of the next pass over conv, laneAwaitReread, or ctx. done reports that the
-// await is over: the op closed, ctx ended, or the read failed (err).
+// await is over: the op closed, ctx ended, or the read failed (err). When
+// ctx ends it reads the op once more, so a pass that closed the op as ctx
+// ended is not answered with the op still open.
 func (h *conversationLaneHost) awaitOpOnce(ctx context.Context, st *opjournal.Store, conv, id string) (op opjournal.Op, done bool, err error) {
 	// Taken before the read, so a pass that ends between the read and the
 	// wait still wakes it, and released on every return, so an await that
@@ -116,6 +118,9 @@ func (h *conversationLaneHost) awaitOpOnce(ctx context.Context, st *opjournal.St
 	defer stop()
 	select {
 	case <-ctx.Done():
+		if op, err = st.Get(id); err != nil {
+			return op, true, fmt.Errorf("reading op %s: %w", id, err)
+		}
 		return op, true, nil
 	case <-ended:
 	case <-fire:

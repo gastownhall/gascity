@@ -300,7 +300,9 @@ func (c Cancel) Recorded() bool { return c.By != "" }
 // and TurnBasis are the conversation lane's delivery record and turn link
 // (DES-O1 §4.8): set only on a succeeded lane op, and Turn is then the turn
 // CorrelateTurn linked. Turn without a link is legal: legacy and control ops
-// record a turn the runtime named.
+// record a turn the runtime named. An op the lane's scope rule closed
+// skipped{stale} unrun records the generation and epoch that fenced it off
+// (FencedOff).
 type Result struct {
 	Generation    int64
 	Turn          string
@@ -378,6 +380,27 @@ func (o Outcome) Effective() (Arm, string) {
 		return ArmFailed, ReasonOther
 	default:
 		return o.Arm, o.Reason
+	}
+}
+
+// FencedOff reports whether op closed skipped{stale} because the lane's scope
+// rule fenced it off unrun: its conversation had moved past its scope's
+// generation (a session-scoped op) or context epoch (a context-scoped one).
+// That close records the incarnation that fenced the op in its Result, past
+// its scope's; the executor's close of an op that found nothing to do, and
+// the dormant rule's, record none.
+func FencedOff(op Op) bool {
+	arm, reason := op.Outcome.Effective()
+	if op.Status != StatusClosed || arm != ArmSkipped || reason != ReasonStale {
+		return false
+	}
+	switch op.Scope.Kind {
+	case ScopeSession:
+		return op.Outcome.Result.Generation > op.Scope.Generation
+	case ScopeContext:
+		return op.Outcome.Result.ContextEpoch > op.Scope.Epoch
+	default:
+		return false
 	}
 }
 
