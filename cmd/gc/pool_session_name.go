@@ -73,6 +73,21 @@ func sessionBeadAssigneeIdentitiesForConfigInfo(i session.Info, cfg *config.City
 	return identities
 }
 
+// sweepSessionIdentities is the identity set the dead-assignee sweep credits
+// an open session row with: its persisted assignee identities plus the
+// config-derived identities the awake set credits it with
+// (sessionAssignmentIdentifiersForConfig), so a row the awake set keeps alive
+// for an identity also owns that identity's work in the sweep.
+func sweepSessionIdentities(sb beads.Bead, cfg *config.City) []string {
+	return compactSessionAssignmentIdentifiers(append(sessionBeadAssigneeIdentities(sb), sessionAssignmentIdentifiersForConfig(sb, cfg)...))
+}
+
+// sweepSessionIdentitiesInfo is the session.Info form of
+// sweepSessionIdentities.
+func sweepSessionIdentitiesInfo(info session.Info, cfg *config.City) []string {
+	return compactSessionAssignmentIdentifiers(append(sessionBeadAssigneeIdentitiesInfo(info), sessionAssignmentIdentifiersForConfigInfo(info, cfg)...))
+}
+
 type releasedPoolAssignment struct {
 	ID    string
 	Index int
@@ -280,7 +295,7 @@ func releaseOrphanedPoolAssignments(
 		if info.Closed {
 			continue
 		}
-		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
+		for _, id := range sweepSessionIdentitiesInfo(info, cfg) {
 			legacyOpenIdentifiers[id] = struct{}{}
 		}
 	}
@@ -390,10 +405,10 @@ func releaseOrphanedPoolAssignments(
 				probeCallStart := time.Now()
 				if storeAware && storeRefAware {
 					memoizedProbeCount++
-					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, assignee)
+					live = memoizedLiveOpenSessionAssignmentExists(ownerStoreLiveAssignee, workStoreRef+"\x00"+assignee, ownerStore, cfg, assignee)
 				} else {
 					fallbackProbeCount++
-					live = liveOpenSessionAssignmentExists(ownerStore, assignee)
+					live = liveOpenSessionAssignmentExists(ownerStore, cfg, assignee)
 				}
 				probeElapsed += time.Since(probeCallStart)
 				if live {
@@ -628,7 +643,7 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, leading bea
 		// identities (WI-5 W4 — the boundary projection this loop used to carry
 		// moved to the snapshot's load edge).
 		storeRefs := openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info)
-		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
+		for _, id := range sweepSessionIdentitiesInfo(info, cfg) {
 			for _, storeRef := range storeRefs {
 				addOpenSessionStoreRef(index, id, storeRef)
 			}
@@ -890,12 +905,12 @@ func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDet
 	return false
 }
 
-func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
+func liveOpenSessionAssignmentExists(store beads.Store, cfg *config.City, assignee string) bool {
 	assignee = strings.TrimSpace(assignee)
 	if store == nil || assignee == "" {
 		return false
 	}
-	if liveSessionBeadExistsByIdentity(store, assignee) {
+	if liveSessionBeadExistsByIdentity(store, cfg, assignee) {
 		return true
 	}
 	// NOTE: this call site intentionally keeps a label-only query — not
@@ -923,7 +938,7 @@ func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
 		if sb.Status == "closed" || !isSessionBead(sb) {
 			continue
 		}
-		for _, id := range sessionBeadAssigneeIdentities(sb) {
+		for _, id := range sweepSessionIdentities(sb, cfg) {
 			if assignee == id {
 				return true
 			}
@@ -940,19 +955,19 @@ func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
 // redundant I/O against the store the reconciler is already blocked on. The key
 // must identify the store as well as the assignee wherever more than one store is
 // probed; a caller with no stable store identifier must call the unmemoized form.
-func memoizedLiveOpenSessionAssignmentExists(memo map[string]bool, key string, store beads.Store, assignee string) bool {
+func memoizedLiveOpenSessionAssignmentExists(memo map[string]bool, key string, store beads.Store, cfg *config.City, assignee string) bool {
 	if memo == nil {
-		return liveOpenSessionAssignmentExists(store, assignee)
+		return liveOpenSessionAssignmentExists(store, cfg, assignee)
 	}
 	if cached, ok := memo[key]; ok {
 		return cached
 	}
-	live := liveOpenSessionAssignmentExists(store, assignee)
+	live := liveOpenSessionAssignmentExists(store, cfg, assignee)
 	memo[key] = live
 	return live
 }
 
-func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
+func liveSessionBeadExistsByIdentity(store beads.Store, cfg *config.City, assignee string) bool {
 	for _, id := range directSessionBeadIDCandidates(assignee) {
 		sb, err := store.Get(id)
 		if err != nil {
@@ -961,7 +976,7 @@ func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
 		if sb.Status == "closed" || !isSessionBead(sb) {
 			continue
 		}
-		for _, candidate := range sessionBeadAssigneeIdentities(sb) {
+		for _, candidate := range sweepSessionIdentities(sb, cfg) {
 			if assignee == candidate {
 				return true
 			}

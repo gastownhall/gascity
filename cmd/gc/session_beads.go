@@ -986,10 +986,11 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 // (requalifiedPriorIdentityOfBead) and its named session's runtime name while
 // the row keeps the bare form's (requalifiedSpecRuntimeName), and with the
 // configured named-session identity when a recovered bead is missing identity
-// metadata. Keep these additions aligned with sessionAssigneeMatches and
+// metadata. Keep these additions aligned with sessionAssigneeMatches,
 // compute_awake_bridge's AwakeSessionBead.Alias,
 // AwakeSessionBead.RequalifiedFrom, AwakeSessionBead.RequalifiedRuntimeName and
-// AwakeNamedSession fields.
+// AwakeNamedSession fields, and the dead-assignee sweep's
+// sweepSessionIdentities.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
 	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg), requalifiedPriorIdentityOfBead(sessionBead, cfg),
 		requalifiedSpecRuntimeName(sessionBead, cfg, config.EffectiveCityName(cfg, "")))

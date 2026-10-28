@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -541,4 +542,58 @@ func TestSeatHandOverIsAdoptedBySuccessorHook(t *testing.T) {
 	if want := []string{successor.ID + ":" + work.ID}; !reflect.DeepEqual(started, want) {
 		t.Fatalf("work_started records = %v, want %v", started, want)
 	}
+}
+
+// TestReleaseOrphanedPoolAssignments_KeepsNamedClaimOfFallbackIdentityRow
+// (AC-7): a row the awake set credits with a configured named identity only
+// through the configured-named fallback (configured_named_session without
+// configured_named_identity, session_name the identity's runtime name) owns
+// work assigned to that identity in the sweep too, even when the work's named
+// route gate misses.
+func TestReleaseOrphanedPoolAssignments_KeepsNamedClaimOfFallbackIdentityRow(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Name}}"},
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "polecat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{{
+			Name:     "reviewer",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+		ResolvedWorkspaceName: "test-city",
+	}
+	runtimeName := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "reviewer")
+	if runtimeName == "reviewer" {
+		t.Fatalf("runtime name = %q, want it to differ from the identity", runtimeName)
+	}
+	// The row that claimed the bead under the identity has closed.
+	createClosedSeatPredecessor(t, store, map[string]string{"session_name": runtimeName})
+	seat := createSeatSessionRow(t, store, "seat", seatRowMeta("awake", map[string]string{
+		"session_name":               runtimeName,
+		namedSessionIdentityMetadata: "",
+	}))
+	if ids := sessionAssignmentIdentifiersForConfig(seat, cfg); !slices.Contains(ids, "reviewer") {
+		t.Fatalf("awake-set identities of the seat row = %v, want them to credit reviewer", ids)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "polecat-routed",
+		Type:     "task",
+		Assignee: "reviewer",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "polecat"},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	work = getSeatBead(t, store, work.ID)
+
+	if released := sweepSeatWork(store, cfg, []beads.Bead{seat}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("released = %v, want none: open row %s answers to reviewer", released, seat.ID)
+	}
+	assertSeatWorkKept(t, store, work.ID, "reviewer")
 }
