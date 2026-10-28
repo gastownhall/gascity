@@ -9332,12 +9332,44 @@ func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver
-// re-derives GC_TRIGGER_BEAD_ID from candidate.info via sessionTriggerBeadEnv,
+// re-derives the demand marker from candidate.info via sessionDemandSpawnEnv,
 // so unless refreshConfiguredNamedStartCandidate folds the resolver's Info back
 // onto the candidate, the seat starting on the clearing tick still launches
-// aimed at the parked bead. Asserting on the resolved TemplateParams cannot
+// marked as demand-spawned. Asserting on the resolved TemplateParams cannot
 // catch that; only prepared.cfg.Env can.
 func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
+	prepared, after := prepareNamedTriggerStart(t, true)
+	if got, ok := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; ok {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want absent for a parked target", got)
+	}
+	assertNoTriggerBeadEnv(t, prepared.cfg.Env)
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
+		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// TestPrepareStartCandidateForCity_LiveNamedTriggerExportsOnlyMarker pins
+// gastownhall/gascity#5738 on the legacy start path: a named session whose
+// trigger stamp survives the start-time refresh launches with the
+// presence-only demand marker and never with the trigger bead id, which a
+// ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain would take for its own
+// bead. The durable stamp itself is kept.
+func TestPrepareStartCandidateForCity_LiveNamedTriggerExportsOnlyMarker(t *testing.T) {
+	prepared, after := prepareNamedTriggerStart(t, false)
+	if got := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want demand for a live stamp", got)
+	}
+	assertNoTriggerBeadEnv(t, prepared.cfg.Env)
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v == "" {
+		t.Error("durable trigger stamp cleared, want it kept for a servable target")
+	}
+}
+
+// prepareNamedTriggerStart prepares the legacy start of an on-demand named
+// session stamped with a work bead that is parked or servable, and returns the
+// prepared start and the session bead as stored afterwards.
+func prepareNamedTriggerStart(t *testing.T, parked bool) (*preparedStart, beads.Bead) {
+	t.Helper()
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
@@ -9346,8 +9378,7 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	}
 	// The production shape of a parked target: real stores fold bd's raw
 	// `blocked` into "open" and report the park via the IsBlocked projection.
-	blocked := true
-	work, err := store.Create(beads.Bead{Title: "parked work", Status: "open", IsBlocked: &blocked})
+	work, err := store.Create(beads.Bead{Title: "work", Status: "open", IsBlocked: &parked})
 	if err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
@@ -9378,17 +9409,9 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
-	if got := prepared.cfg.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
-		t.Errorf("launched GC_TRIGGER_BEAD_ID = %q, want cleared for a parked target", got)
-	}
-	if got := prepared.cfg.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
-		t.Errorf("launched GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a parked target", got)
-	}
 	after, err := store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("Get session bead after prepare: %v", err)
 	}
-	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
-		t.Errorf("durable trigger stamp = %q, want cleared", v)
-	}
+	return prepared, after
 }

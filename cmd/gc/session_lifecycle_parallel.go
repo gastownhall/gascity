@@ -1159,9 +1159,9 @@ func refreshConfiguredNamedStartCandidate(
 	// Fold the resolver's Info too, not just the params: the resolve may have
 	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
 	// gascity#4373), and buildPreparedStartWithWorkDirResolver re-derives the
-	// launch env from candidate.info via sessionTriggerBeadEnv. Keeping the
-	// pre-call Info here would hand the seat starting on the clearing tick the
-	// stale GC_TRIGGER_BEAD_ID the clear just removed.
+	// launch env from candidate.info via sessionDemandSpawnEnv. Keeping the
+	// pre-call Info here would launch the seat starting on the clearing tick
+	// with the stale GC_SPAWN_ORIGIN=demand marker the clear just removed.
 	candidate.info = refreshedInfo
 	return candidate
 }
@@ -1480,8 +1480,8 @@ func buildPreparedStartWithTranscript(
 	if gcProvider := sessionpkg.ProviderFamilyFromInfo(candidate.info, ""); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
-	if triggerEnv := sessionTriggerBeadEnv(candidate.info); len(triggerEnv) > 0 {
-		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	if demandEnv := sessionDemandSpawnEnv(candidate.info); len(demandEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, demandEnv)
 	}
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)

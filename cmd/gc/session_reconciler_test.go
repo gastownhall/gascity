@@ -8240,12 +8240,10 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp(
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
-	if got := preservedTP.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
-		t.Errorf("GC_TRIGGER_BEAD_ID = %q, want cleared for a blocked target", got)
+	if got, ok := preservedTP.Env["GC_SPAWN_ORIGIN"]; ok {
+		t.Errorf("GC_SPAWN_ORIGIN = %q, want absent once the stamp is cleared for a blocked target", got)
 	}
-	if got := preservedTP.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
-		t.Errorf("GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a blocked target", got)
-	}
+	assertNoTriggerBeadEnv(t, preservedTP.Env)
 	// The returned Info carries the clear back to the caller's snapshot; a
 	// caller that keeps its pre-call Info re-injects the stamp downstream.
 	if preservedInfo.TriggerBeadID != "" {
