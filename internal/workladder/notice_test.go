@@ -168,6 +168,8 @@ func TestSettleNotice(t *testing.T) {
 		{"failed keeps refusals", NoticeFailed, false, 2, t0, want{2, 1, 2, false}},
 		{"refused re-counts paused", NoticeRefused, false, 0, t0, want{1, 2, 1, false}},
 		{"the third refusal alerts", NoticeRefused, false, 2, t0, want{1, 2, 3, true}},
+		{"the fourth refusal does not", NoticeRefused, false, 3, t0, want{1, 2, 4, false}},
+		{"refusals that go on re-alert", NoticeRefused, false, refusedAlertAt + refusedRealertEvery - 1, t0, want{1, 2, refusedAlertAt + refusedRealertEvery, true}},
 		{"withdrawn re-counts paused, no refusal", NoticeWithdrawn, false, 2, t0, want{1, 2, 2, false}},
 		{"a paused mark refused records nothing", NoticeRefused, true, 2, t0, want{2, 1, 2, false}},
 		{"a paused mark withdrawn records nothing", NoticeWithdrawn, true, 0, t0, want{2, 1, 0, false}},

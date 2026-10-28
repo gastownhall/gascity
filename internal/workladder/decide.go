@@ -360,17 +360,31 @@ func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now
 	return r, true
 }
 
-// refusedAlertAt is how many nudges in a row a seat refuses before the one
-// nudge_refused alert.
-const refusedAlertAt = 3
+// refusedAlertAt is how many nudges in a row a seat refuses before its first
+// nudge_refused alert, and refusedRealertEvery how many more it refuses
+// before each repeat while the refusals go on (refusalAlerts). Refused
+// nudges are paced at PausedCap or slower, so the repeat comes about every
+// Cap at the default policy: hourly, the ladder's own steady pace.
+const (
+	refusedAlertAt      = 3
+	refusedRealertEvery = int(DefaultCap / DefaultPausedCap)
+)
+
+// refusalAlerts reports whether refused, a seat's refusals in a row, is a
+// count that raises the nudge_refused alert: the refusedAlertAt-th, then
+// every refusedRealertEvery-th after it, so a seat that keeps refusing is
+// re-alerted, never silenced after one alert.
+func refusalAlerts(refused int) bool {
+	return refused >= refusedAlertAt && (refused-refusedAlertAt)%refusedRealertEvery == 0
+}
 
 // NudgeRefused is r after the seat could not take the nudge of attempt
 // about key that landed at now (a permission prompt, the runtime
 // unavailable): the attempt is re-counted as paused, so it moves nothing
 // toward escalation, and the entry backs off to PausedCap until a nudge is
-// taken. alert is true exactly when the refusals reach refusedAlertAt: the
-// caller raises one nudge_refused alert. ok is false when r no longer holds
-// that attempt.
+// taken. alert is true when the refusals reach a count refusalAlerts names:
+// the caller raises a nudge_refused alert. ok is false when r no longer
+// holds that attempt.
 func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Record, alert, ok bool) {
 	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
 	if i < 0 || !r.Entries[i].Last.Equal(now) || r.Entries[i].Attempts != attempt {

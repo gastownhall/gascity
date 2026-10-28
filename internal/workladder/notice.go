@@ -30,9 +30,11 @@ const (
 	// NoticeFailed: it failed, perhaps after reaching the seat. It counts,
 	// as a delivery error does.
 	NoticeFailed
-	// NoticeRefused: the seat could not take it within its window. It is
-	// re-counted as paused, and the third refusal in a row raises the
-	// nudge_refused alert (NudgeRefused's rule).
+	// NoticeRefused: the seat could not take it within its window, for a
+	// cause the caller found refuses a nudge (W3's: a pending interaction,
+	// the runtime unavailable). It is re-counted as paused, and the third
+	// refusal in a row raises the nudge_refused alert, repeated while the
+	// refusals go on (NudgeRefused's rule).
 	NoticeRefused
 	// NoticeWithdrawn: it was canceled or skipped before delivery. It is
 	// re-counted as paused, with no refusal.
@@ -55,8 +57,9 @@ func MarkNotice(r Record, key ClaimKey, m NoticeMark) (Record, bool) {
 // and, only within the episode the nudge was reserved in (the entry's Since
 // not after the mark's At), a counted nudge re-counted per fate. A paused
 // mark records nothing beyond the clear, and a delivered one's end of the
-// refusals. alert reports the third refusal in a row (refusedAlertAt). ok is
-// false when no entry carries the mark.
+// refusals. alert reports a refusal that raises the nudge_refused alert
+// (refusalAlerts: the third in a row, then periodically). ok is false when
+// no entry carries the mark.
 func SettleNotice(r Record, op string, fate NoticeFate) (out Record, alert, ok bool) {
 	if op == "" {
 		return r, false, false
@@ -86,7 +89,7 @@ func SettleNotice(r Record, op string, fate NoticeFate) (out Record, alert, ok b
 
 // recountPaused moves e's last counted nudge to its paused count, as a nudge
 // that never reached the seat; refused also counts it a refusal. It reports
-// whether the refusals just reached refusedAlertAt.
+// whether the refusals just reached a count that alerts (refusalAlerts).
 func recountPaused(e *Entry, refused bool) bool {
 	if e.Attempts > 0 {
 		e.Attempts--
@@ -96,7 +99,7 @@ func recountPaused(e *Entry, refused bool) bool {
 		return false
 	}
 	e.Refused++
-	return e.Refused == refusedAlertAt
+	return refusalAlerts(e.Refused)
 }
 
 // anyMarked reports whether an entry of r carries a notice mark.

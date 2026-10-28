@@ -599,7 +599,7 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 // nudge lands only on a pass that resolved its route (route non-nil): on
 // another, its key is held and the decision taken again, and a release that
 // decision newly writes is re-proved like any other. A route that could not
-// be read lands its nudge unmarked, for act to refuse.
+// be read lands its nudge unmarked, for act to report unsent.
 func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime, outs []ladderNoticeResult, route *ladderRoute) (ladderLanded, bool) {
 	id := row.ID
 	landed := ladderLanded{row: row}
@@ -707,7 +707,7 @@ func newRelease(prev workladder.Record, d workladder.Decision) (workladder.Claim
 
 // act performs what landed: the settled notices' events and the dropped
 // marks' withdrawals, the releases (a claim given back needs no nudge), then
-// the nudge (a lane notice when its attempt landed marked, refused when its
+// the nudge (a lane notice when its attempt landed marked, unsent when its
 // route could not be read, else direct), the recycle and the alerts.
 func (p *ladderPass) act(l ladderLanded, route *ladderRoute) {
 	row, d := l.row, l.d
@@ -744,7 +744,7 @@ func (p *ladderPass) act(l ladderLanded, route *ladderRoute) {
 			case !l.mark.IsZero() && e.Notice.Op == l.mark.Op:
 				p.proposeNotice(row, a, e, gen, l.mark, route)
 			case route.unreadable():
-				p.routeRefused(row, a, gen, route.err)
+				p.routeUnsent(row, a, gen, route.err)
 			default:
 				p.nudge(row, a, gen, refusedOf(d.Next, a.Key))
 			}

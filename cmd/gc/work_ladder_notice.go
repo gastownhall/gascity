@@ -14,10 +14,10 @@ package main
 // in Unix nanoseconds, and its Attempts+Paused after the nudge), so no key
 // ever recurs. Otherwise the nudge is delivered as before (ladderDeliver).
 // A route that cannot be read (the lane's op store, or the seat's runtime
-// row) refuses the nudge, as a seat that cannot take one does: its attempt
-// lands, is re-counted as paused, and reported (work.nudge_failed, with the
-// nudge_refused alert at the third refusal in a row), so the seat stays paced
-// and the recycle, release and alerts decided with the nudge still run.
+// row) sends nothing: the nudge's attempt lands and counts as failed, as a
+// direct nudge's delivery error does, and is reported (work.nudge_failed),
+// so the seat stays paced, and escalates, recycles and releases on the
+// ladder's own counts.
 //
 // The commit that reserves a lane nudge's attempt stamps the entry with a
 // notice mark naming the op (workladder.NoticeMark). While the mark stands
@@ -25,13 +25,22 @@ package main
 // one ladder notice open, and attempt n+1 waits until attempt n is settled.
 // Each pass reads the marked op live and folds its fate back into the cell by
 // CAS (workladder.SettleNotice): delivered counts and ends the refusals;
-// failed, perhaps after reaching the seat, counts; never delivered in its
-// window (expired_before_start: a prompt, an unavailable runtime, a held or
-// busy session) is refused, re-counted as paused, with the nudge_refused
-// alert at the third in a row; canceled or skipped is withdrawn, re-counted
-// as paused. A mark still unsettled ladderNoticeSettleBound after it was
-// reserved counts as failed (WN4), so no lost op can silence a seat. The
-// events follow the fold: work.nudged means the notice reached the seat.
+// failed, perhaps after reaching the seat, counts; canceled or skipped is
+// withdrawn, re-counted as paused. One never delivered in its window
+// (expired_before_start, open past its start_by with no attempt that may
+// have reached the seat, or never proposed) is classified by its cause, as
+// W3 classifies a direct nudge's error (S1): the op does not record why the
+// lane held it, so the pass reads the seat live (seatRefusal). A seat at a
+// pending interaction, or whose runtime is unavailable, refused it:
+// re-counted as paused, with the nudge_refused alert at the third refusal in
+// a row and again while they go on (workladder's refusalAlerts); one
+// undelivered while the ladder's own gate holds the seat is withdrawn; any
+// other cause (a content gate the ladder does not model, an incarnation
+// block, a busy seat, a host that never delivered) counts as failed, so a
+// wedged seat escalates, recycles and releases as on the direct path. A mark
+// still unsettled ladderNoticeSettleBound after it was reserved counts as
+// failed (WN4), so no lost op can silence a seat. The events follow the
+// fold: work.nudged means the notice reached the seat.
 //
 // A held ladder gate (ladderGate: a stop request, a drain, a kill, a start,
 // a restart, a content or operator hold, a wait, a heartbeat, a quarantine),
@@ -50,12 +59,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workladder"
 )
 
@@ -79,7 +90,8 @@ var (
 
 // ladderRoute is how one seat's nudges are delivered this pass: as notices
 // through lane, whose op store is st; with lane nil, directly; or, when the
-// route could not be read (err), not at all: the nudge is refused.
+// route could not be read (err), not at all: the nudge is unsent and
+// counts (routeUnsent).
 type ladderRoute struct {
 	lane plannerNoticeLane
 	st   *opjournal.Store
@@ -93,13 +105,16 @@ func (r *ladderRoute) unreadable() bool { return r != nil && r.err != nil }
 
 // ladderNoticeResult is what a pass read of a marked notice: still pending,
 // or its fate, with the reason its event or log carries, and the generation
-// the op was scoped to (zero when it could not be read).
+// the op was scoped to (zero when it could not be read). undelivered marks a
+// fate of NoticeFailed for a notice that never reached the seat in its
+// window, whose cause the pass has yet to classify (classifyUndelivered).
 type ladderNoticeResult struct {
-	op      string
-	pending bool
-	fate    workladder.NoticeFate
-	reason  string
-	gen     int64
+	op          string
+	pending     bool
+	fate        workladder.NoticeFate
+	reason      string
+	gen         int64
+	undelivered bool
 }
 
 // ladderSettled is a fate a commit folded into the cell: the entry as it
@@ -140,7 +155,7 @@ func (p *ladderPass) opStore() (*opjournal.Store, error) {
 }
 
 // route is row's delivery route this pass (readRoute), or the error that kept
-// it from being read: then the seat's nudge is refused (routeRefused).
+// it from being read: then the seat's nudge is not sent (routeUnsent).
 func (p *ladderPass) route(row beads.Bead) *ladderRoute {
 	r, err := p.readRoute(row)
 	if err != nil {
@@ -173,26 +188,23 @@ func (p *ladderPass) readRoute(row beads.Bead) (ladderRoute, error) {
 }
 
 // routeFailed logs that row's route could not be read, at most once per
-// laneErrorLogInterval: the seat's nudge is refused.
+// laneErrorLogInterval: the seat's nudge is not sent.
 func (p *ladderPass) routeFailed(row beads.Bead, err error) {
 	if lane := p.noticeLane(); lane != nil {
 		if _, logNow := lane.noticeFailed(ladderRouteTallyKey(row.ID)); !logNow {
 			return
 		}
 	}
-	fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its notice route: %v; its nudge is refused\n", row.ID, err) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(p.l.stderr, "work-ladder: %s: reading its notice route: %v; its nudge is not sent\n", row.ID, err) //nolint:errcheck // best-effort stderr
 }
 
-// routeRefused reports nudge n, whose attempt landed while its seat's route
-// could not be read (err): it was never sent, so, as a nudge the seat could
-// not take, it is re-counted as paused, with work.nudge_failed and the
-// nudge_refused alert at the third refusal in a row.
-func (p *ladderPass) routeRefused(row beads.Bead, n workladder.Nudge, gen int64, err error) {
+// routeUnsent reports nudge n, whose attempt landed while its seat's route
+// could not be read (err): it was never sent, and, as a direct nudge whose
+// delivery failed, its attempt counts (S1: an unreadable route is no
+// refusal by the seat).
+func (p *ladderPass) routeUnsent(row beads.Bead, n workladder.Nudge, gen int64, err error) {
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused, Reason: "notice route unreadable: " + err.Error()}
 	p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
-	if !n.Paused && p.refused(row.ID, n) {
-		p.event(events.WorkEscalated, row, n.Key, gen, workLadderEventFields{Reason: workladder.AlertNudgeRefused})
-	}
 }
 
 // routeRecovered clears row's route-failure tally.
@@ -240,7 +252,11 @@ func ladderNoticeOpID(st *opjournal.Store, row beads.Bead, key workladder.ClaimK
 	return opjournal.DeriveID(st.Prefix(), row.ID, ladderNoticePrincipal, plannerNoticeKey(ladderNotice(key, e, ""), plannerNoticeToken(row)))
 }
 
-// ladderNoticeFate reads mark m's op (op, or the read's err) at now.
+// ladderNoticeFate reads mark m's op (op, or the read's err) at now. A
+// notice that never reached the seat in its window is settled failed and
+// undelivered, for its caller to classify by cause; one the lane closed
+// provider_unavailable is refused: the lane recorded the runtime
+// unavailable.
 func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now time.Time) ladderNoticeResult {
 	r := ladderNoticeResult{op: m.Op}
 	if err == nil {
@@ -249,6 +265,10 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 	settled := func(f workladder.NoticeFate, reason string) ladderNoticeResult {
 		r.fate, r.reason = f, reason
 		return r
+	}
+	undelivered := func(why string) ladderNoticeResult {
+		r.undelivered = true
+		return settled(workladder.NoticeFailed, why)
 	}
 	unsettled := func(why string) ladderNoticeResult {
 		if now.Before(m.At.Add(ladderNoticeSettleBound)) {
@@ -259,7 +279,7 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 	}
 	switch {
 	case errors.Is(err, beads.ErrNotFound):
-		return settled(workladder.NoticeRefused, "notice not proposed")
+		return undelivered("notice not proposed")
 	case err != nil:
 		return unsettled(err.Error())
 	case op.Status == opjournal.StatusClosed:
@@ -280,8 +300,11 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 		if op.LastError != "" {
 			why += ": " + op.LastError
 		}
-		if reason == opjournal.ReasonExpiredBeforeStart || reason == opjournal.ReasonProviderUnavailable {
+		switch reason {
+		case opjournal.ReasonProviderUnavailable:
 			return settled(workladder.NoticeRefused, why)
+		case opjournal.ReasonExpiredBeforeStart:
+			return undelivered(why)
 		}
 		return settled(workladder.NoticeFailed, why)
 	case plannerNoticeInFlight(op):
@@ -290,7 +313,7 @@ func ladderNoticeFate(op opjournal.Op, err error, m workladder.NoticeMark, now t
 		if op.MaybeDelivered > 0 {
 			return settled(workladder.NoticeFailed, "notice past its start_by after an attempt that may have reached the seat")
 		}
-		return settled(workladder.NoticeRefused, "notice past its start_by undelivered")
+		return undelivered("notice past its start_by undelivered")
 	}
 	return unsettled("waiting for a boundary")
 }
@@ -314,7 +337,9 @@ func (p *ladderPass) withdrawGate(row beads.Bead, prev workladder.Record, gate w
 // noticeOutcomes reads the fate of every mark prev carries, live. While gate
 // holds the seat it withdraws each pending notice first (WL5): one not yet
 // started, or never proposed, is withdrawn; one in flight keeps the cancel
-// as a request and stays pending. It returns the settled marks.
+// as a request and stays pending. A notice that never reached the seat is
+// classified by its cause (classifyUndelivered). It returns the settled
+// marks.
 func (p *ladderPass) noticeOutcomes(row beads.Bead, prev workladder.Record, gate workladder.Gate) []ladderNoticeResult {
 	var marks []workladder.NoticeMark
 	for _, e := range prev.Entries {
@@ -327,6 +352,7 @@ func (p *ladderPass) noticeOutcomes(row beads.Bead, prev workladder.Record, gate
 	}
 	st, stErr := p.opStore()
 	var out []ladderNoticeResult
+	refusal := sync.OnceValue(func() string { return p.seatRefusal(row) })
 	for _, m := range marks {
 		op, err := opjournal.Op{}, stErr
 		if stErr == nil {
@@ -336,11 +362,56 @@ func (p *ladderPass) noticeOutcomes(row beads.Bead, prev workladder.Record, gate
 		if gate.Held && stErr == nil && (res.pending || errors.Is(err, beads.ErrNotFound)) {
 			res = p.withdrawHeld(row, st, m, gate.Reason, res)
 		}
+		if res.undelivered {
+			res = classifyUndelivered(res, gate, refusal)
+		}
 		if !res.pending {
 			out = append(out, res)
 		}
 	}
 	return out
+}
+
+// classifyUndelivered is res, a notice that never reached the seat in its
+// window, settled by its cause (S1, W3 parity): withdrawn while gate, the
+// ladder's own, holds the seat; refused when the seat refuses nudges now
+// (refusal: a pending interaction, the runtime unavailable); else failed, as
+// res stands, so a cause the ladder does not see still counts.
+func classifyUndelivered(res ladderNoticeResult, gate workladder.Gate, refusal func() string) ladderNoticeResult {
+	res.undelivered = false
+	switch {
+	case gate.Held:
+		res.fate, res.reason = workladder.NoticeWithdrawn, res.reason+"; the work ladder holds the seat: "+gate.Reason
+	default:
+		if cause := refusal(); cause != "" {
+			res.fate, res.reason = workladder.NoticeRefused, res.reason+"; the seat refuses nudges: "+cause
+		}
+	}
+	return res
+}
+
+// seatRefusal is why row's seat cannot take a nudge now, read live as W3's
+// direct delivery finds it (ladderPass.nudge's refusals): its runtime
+// unavailable, or a pending interaction only a human can answer. It is ""
+// for neither, and for a read that answered with any other error.
+func (p *ladderPass) seatRefusal(row beads.Bead) string {
+	name := strings.TrimSpace(row.Metadata["session_name"])
+	sp := p.env.SP
+	if sp == nil || name == "" {
+		return runtime.ErrRuntimeUnavailable.Error()
+	}
+	ip, ok := sp.(runtime.InteractionProvider)
+	if !ok {
+		return ""
+	}
+	pending, err := ip.Pending(name)
+	switch {
+	case errors.Is(err, runtime.ErrRuntimeUnavailable), errors.Is(err, runtime.ErrPendingInteraction):
+		return err.Error()
+	case err != nil || pending == nil:
+		return ""
+	}
+	return runtime.ErrPendingInteraction.Error()
 }
 
 // withdrawHeld cancels mark m's op because the ladder's gate holds the seat
@@ -396,11 +467,11 @@ func droppedMarks(prev, next workladder.Record) []string {
 
 // noticeSettled reports a fate the commit folded in: work.nudged for a
 // notice that reached the seat, work.nudge_failed (and the refusal alert at
-// the third in a row) for one that failed or was refused, a log line for one
-// withdrawn. As a direct nudge's, the events carry the attempt the notice was
-// reserved as, not one a refusal re-counted, and the generation it was
-// scoped to (the cell's before the fold when the op could not be read), not
-// the one the fold landed at.
+// the third in a row, then periodically) for one that failed or was refused,
+// a log line for one withdrawn. As a direct nudge's, the events carry the
+// attempt the notice was reserved as, not one a refusal re-counted, and the
+// generation it was scoped to (the cell's before the fold when the op could
+// not be read), not the one the fold landed at.
 func (p *ladderPass) noticeSettled(row beads.Bead, s ladderSettled) {
 	gen := s.gen
 	if s.res.gen > 0 {

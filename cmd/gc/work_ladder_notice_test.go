@@ -136,6 +136,22 @@ func (lc *ladderLaneCity) at(d time.Duration) {
 
 func (lc *ladderLaneCity) nudges() int { return lc.sp.CountCalls("Nudge", ladderSeatName) }
 
+// promptUp puts a pending interaction (a permission prompt) on the seat: it
+// refuses nudges.
+func (lc *ladderLaneCity) promptUp() {
+	lc.sp.SetPendingInteraction(ladderSeatName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "allow?"})
+}
+
+// refusalAlertsUpTo is the nudge_refused alerts refused refusals in a row
+// raise: at the third, then every DefaultCap/DefaultPausedCap more.
+func refusalAlertsUpTo(refused int) []string {
+	var out []string
+	for n := 3; n <= refused; n += int(workladder.DefaultCap / workladder.DefaultPausedCap) {
+		out = append(out, workladder.AlertNudgeRefused)
+	}
+	return out
+}
+
 // startedClaim is a claim the hook's stamp names started.
 func (lc *ladderLaneCity) startedClaim() string {
 	id := lc.claim("the step")
@@ -149,14 +165,14 @@ func failed(reason string) opjournal.Outcome {
 
 var succeeded = opjournal.Outcome{Arm: opjournal.ArmSucceeded}
 
-// wantLadderKey is the pinned key of e's notice at ordinal n:
-// work-ladder:<token>:<bead>[/<store>]:<episode>:<ordinal>.
-func wantLadderKey(token string, e workladder.Entry, n int) string {
+// wantLadderKey is the pinned key of e's notice at ordinal n on the seat
+// (token tok-7): work-ladder:<token>:<bead>[/<store>]:<episode>:<ordinal>.
+func wantLadderKey(e workladder.Entry, n int) string {
 	trigger := e.Key.Bead
 	if e.Key.Store != "" {
 		trigger += "/" + e.Key.Store
 	}
-	return fmt.Sprintf("work-ladder:%s:%s:%d:%d", token, trigger, e.Since.UnixNano(), n)
+	return fmt.Sprintf("work-ladder:tok-7:%s:%d:%d", trigger, e.Since.UnixNano(), n)
 }
 
 func TestWorkLadderNudgeIsALaneNotice(t *testing.T) {
@@ -181,8 +197,8 @@ func TestWorkLadderNudgeIsALaneNotice(t *testing.T) {
 		t.Fatalf("scope %+v, want session(7)", op.Scope)
 	case op.Causation != id:
 		t.Fatalf("causation %q, want %s", op.Causation, id)
-	case op.ClientKey != wantLadderKey("tok-7", e, 1):
-		t.Fatalf("key %q, want %q", op.ClientKey, wantLadderKey("tok-7", e, 1))
+	case op.ClientKey != wantLadderKey(e, 1):
+		t.Fatalf("key %q, want %q", op.ClientKey, wantLadderKey(e, 1))
 	case !op.StartBy.Equal(lc.now.Add(2*time.Minute + 45*time.Second)):
 		t.Fatalf("start_by %v, want +2m45s", op.StartBy.Sub(lc.now))
 	case op.Payload != fmt.Sprintf(ladderStartedNudge, id):
@@ -266,9 +282,23 @@ func TestWorkLadderSettlesItsNoticeFromItsOutcome(t *testing.T) {
 			lc.closeOp(op.ID, failed(opjournal.ReasonDeadlineInFlight))
 		}, want{false, 1, 0, 0, 0, 1}},
 		{"failed poison", 30 * time.Second, func(lc *ladderLaneCity, op opjournal.Op) { lc.closeOp(op.ID, failed(opjournal.ReasonPoison)) }, want{false, 1, 0, 0, 0, 1}},
+		// S1: an expiry counts, unless the seat refuses nudges (W3's
+		// causes: a pending interaction, the runtime unavailable).
 		{"failed expired_before_start", 30 * time.Second, func(lc *ladderLaneCity, op opjournal.Op) {
 			lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
+		}, want{false, 1, 0, 0, 0, 1}},
+		{"failed expired_before_start at a pending interaction", 30 * time.Second, func(lc *ladderLaneCity, op opjournal.Op) {
+			lc.promptUp()
+			lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
 		}, want{false, 0, 1, 1, 0, 1}},
+		{"failed expired_before_start with the runtime unavailable", 30 * time.Second, func(lc *ladderLaneCity, op opjournal.Op) {
+			lc.sp.PendingErrors[ladderSeatName] = fmt.Errorf("tmux: %w", runtime.ErrRuntimeUnavailable)
+			lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
+		}, want{false, 0, 1, 1, 0, 1}},
+		{"failed expired_before_start, the seat's prompt unreadable", 30 * time.Second, func(lc *ladderLaneCity, op opjournal.Op) {
+			lc.sp.PendingErrors[ladderSeatName] = errors.New("capture failed")
+			lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
+		}, want{false, 1, 0, 0, 0, 1}},
 		{"failed provider_unavailable", 30 * time.Second, func(lc *ladderLaneCity, op opjournal.Op) {
 			lc.closeOp(op.ID, failed(opjournal.ReasonProviderUnavailable))
 		}, want{false, 0, 1, 1, 0, 1}},
@@ -281,7 +311,10 @@ func TestWorkLadderSettlesItsNoticeFromItsOutcome(t *testing.T) {
 			lc.closeOp(op.ID, opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale})
 		}, want{false, 0, 1, 0, 0, 0}},
 		{"open before start_by", 30 * time.Second, func(*ladderLaneCity, opjournal.Op) {}, want{true, 1, 0, 0, 0, 0}},
-		{"open past start_by", 3 * time.Minute, func(*ladderLaneCity, opjournal.Op) {}, want{false, 0, 1, 1, 0, 1}},
+		// 2m50s: past the notice's start_by (2m45s), before its attempt's
+		// successor is due (3m).
+		{"open past start_by", 2*time.Minute + 50*time.Second, func(*ladderLaneCity, opjournal.Op) {}, want{false, 1, 0, 0, 0, 1}},
+		{"open past start_by at a pending interaction", 2*time.Minute + 50*time.Second, func(lc *ladderLaneCity, _ opjournal.Op) { lc.promptUp() }, want{false, 0, 1, 1, 0, 1}},
 		{"in flight", 3 * time.Minute, func(lc *ladderLaneCity, op opjournal.Op) { lc.startOp(op.ID) }, want{true, 1, 0, 0, 0, 0}},
 		// Past its bound it counts; the next due attempt, reserved the same
 		// pass, waits on the op still in flight, so it is withdrawn.
@@ -450,12 +483,14 @@ func TestWorkLadderReplaysTheWedgeOnTheLane(t *testing.T) {
 	}
 }
 
-// A seat whose every notice expires undelivered is reminded every PausedCap,
-// alerted once, and its unstarted claim is never released on reminders it
-// never saw.
+// A seat at a permission prompt, whose every notice expires undelivered, is
+// reminded every PausedCap, alerted at the third refusal and again about
+// hourly while the refusals go on, and its unstarted claim is never released
+// on reminders it could not take.
 func TestWorkLadderBacksOffASeatThatCannotTakeItsNotices(t *testing.T) {
 	lc := newLadderLaneCity(t, "message")
 	id := lc.claim("never started")
+	lc.promptUp()
 	var proposed []time.Duration
 	lc.run(8*time.Hour, 30*time.Second, func() {
 		for _, op := range lc.ladderOps() {
@@ -471,12 +506,70 @@ func TestWorkLadderBacksOffASeatThatCannotTakeItsNotices(t *testing.T) {
 			t.Fatalf("notices %v and %v %v apart, want >= PausedCap", proposed[i-1], proposed[i], gap)
 		}
 	}
-	if got := escalations(lc.ladderCity); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertNudgeRefused}) {
-		t.Fatalf("escalations %v, want one nudge_refused", got)
+	want := refusalAlertsUpTo(len(proposed))
+	if got := escalations(lc.ladderCity); len(want) < 4 || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("escalations %v, want %d nudge_refused for %d refusals", got, len(want), len(proposed))
 	}
 	if b, _ := lc.work.Get(id); b.Status != "in_progress" || len(lc.events(events.WorkReleased)) != 0 {
 		t.Fatalf("claim %q released on reminders the seat never saw", b.Status)
 	}
+}
+
+// S1: a notice that expires for a cause the ladder does not see (here the
+// lane never delivers it, and the seat refuses nothing) counts, as a direct
+// nudge's delivery error does: a started claim keeps the wedge replay's
+// times, recycle and escalation, and an unstarted one is released, where
+// counting every expiry a refusal stalled both after one alert.
+func TestWorkLadderCountsNoticesThatExpireForOtherCauses(t *testing.T) {
+	t.Run("started", func(t *testing.T) {
+		lc := newLadderLaneCity(t, "message")
+		id := lc.startedClaim()
+		var proposed []time.Duration
+		lc.run(8*time.Hour, 30*time.Second, func() {
+			for _, op := range lc.ladderOps() {
+				proposed = append(proposed, op.CreatedAt.Sub(lc.start))
+				lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
+			}
+			if len(lc.posted) > 0 && lc.row().Metadata["generation"] == "7" {
+				lc.setRow(map[string]string{"generation": "8", "instance_token": "tok-8"})
+			}
+		})
+		want := []time.Duration{
+			halfPast(1), halfPast(4), halfPast(10), halfPast(22), halfPast(46), halfPast(94),
+			halfPast(156), halfPast(159), halfPast(165), halfPast(177), halfPast(201), halfPast(249),
+			halfPast(309), halfPast(369), halfPast(429),
+		}
+		if fmt.Sprint(proposed) != fmt.Sprint(want) {
+			t.Fatalf("notices at\n %v\nwant\n %v", proposed, want)
+		}
+		if len(lc.posted) != 1 || lc.posted[0].Generation != "7" {
+			t.Fatalf("recycles %+v, want one at generation 7", lc.posted)
+		}
+		if got := escalations(lc.ladderCity); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertStartedRecycled, workladder.AlertStartedUnanswered}) {
+			t.Fatalf("escalations %v, want the recycle's, then started_unanswered; no nudge_refused", got)
+		}
+		if e := lc.entry(id); e.Rung != workladder.RungEscalated || e.Refused != 0 {
+			t.Fatalf("entry %+v, want escalated with no refusal", e)
+		}
+	})
+	t.Run("unstarted", func(t *testing.T) {
+		lc := newLadderLaneCity(t, "message")
+		id := lc.claim("never started")
+		lc.run(30*time.Minute, 30*time.Second, func() {
+			for _, op := range lc.ladderOps() {
+				lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
+			}
+		})
+		if b, _ := lc.work.Get(id); b.Status != "open" || len(lc.events(events.WorkReleased)) != 1 {
+			t.Fatalf("claim %q, want released after its counted reminders", b.Status)
+		}
+		if got := escalations(lc.ladderCity); len(got) != 0 {
+			t.Fatalf("escalations %v, want none", got)
+		}
+		if n := lc.nudges(); n != 0 {
+			t.Fatalf("typed %d nudges", n)
+		}
+	})
 }
 
 // ladderGateMeta are the row writes that hold the ladder's gate.
@@ -576,6 +669,25 @@ func TestWorkLadderWithdrawsItsNoticeWhenItsGateHolds(t *testing.T) {
 			t.Fatalf("work.nudge_failed = %d for a withdrawn notice", n)
 		}
 	})
+	// S1: a notice the lane held undelivered past its start_by while the
+	// ladder's own gate holds the seat is withdrawn, not counted: the hold
+	// is a cause the ladder sees.
+	t.Run("expired under the hold", func(t *testing.T) {
+		lc := newLadderLaneCity(t, "message")
+		id := lc.startedClaim()
+		lc.at(0)
+		lc.at(halfPast(1))
+		op := lc.onlyOp()
+		lc.setRow(map[string]string{"wait_hold": "true"})
+		lc.closeOp(op.ID, failed(opjournal.ReasonExpiredBeforeStart))
+		lc.at(2 * time.Minute)
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want withdrawn under the hold", e)
+		}
+		if n := len(lc.events(events.WorkNudgeFailed)); n != 0 {
+			t.Fatalf("work.nudge_failed = %d for a withdrawn notice", n)
+		}
+	})
 	t.Run("in flight", func(t *testing.T) {
 		lc := newLadderLaneCity(t, "message")
 		id := lc.startedClaim()
@@ -636,9 +748,10 @@ func TestWorkLadderWithdrawsTheNoticeOfWorkThatEnded(t *testing.T) {
 }
 
 // A commit that landed a mark whose op was never proposed (a crash between
-// the two) is settled refused on the next pass, and the next attempt gets a
-// key of its own.
-func TestWorkLadderNoticeLostToACrashIsRefused(t *testing.T) {
+// the two) is settled on the next pass: as a notice that never reached a
+// seat refusing nothing, it counts (S1). The next attempt gets a key of its
+// own.
+func TestWorkLadderNoticeLostToACrashCounts(t *testing.T) {
 	lc := newLadderLaneCity(t, "message")
 	id := lc.startedClaim()
 	lc.at(0)
@@ -652,22 +765,22 @@ func TestWorkLadderNoticeLostToACrashIsRefused(t *testing.T) {
 	cell.Entries[0].Notice.Op = lost
 	lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(cell)})
 	lc.at(2 * time.Minute)
-	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 1 {
-		t.Fatalf("entry %+v, want refused", e)
+	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 1 || e.Paused != 0 || e.Refused != 0 {
+		t.Fatalf("entry %+v, want counted failed", e)
 	}
 	fails := lc.events(events.WorkNudgeFailed)
 	if len(fails) != 1 || !strings.Contains(fails[0].Message, "notice not proposed") {
 		t.Fatalf("work.nudge_failed = %+v", fails)
 	}
 	if !strings.Contains(string(fails[0].Payload), `"attempt":1`) {
-		t.Fatalf("work.nudge_failed payload %s, want the reserved attempt 1, as a direct refusal reports", fails[0].Payload)
+		t.Fatalf("work.nudge_failed payload %s, want the reserved attempt 1, as a direct failure reports", fails[0].Payload)
 	}
-	lc.run(15*time.Minute, 30*time.Second, nil)
+	lc.at(halfPast(4)) // the second attempt is due Base after the first
 	next := lc.onlyOp()
 	if next.ID == op.ID || next.ClientKey == op.ClientKey {
 		t.Fatalf("next attempt reused %s", op.ClientKey)
 	}
-	if e := lc.entry(id); next.ClientKey != wantLadderKey("tok-7", e, 2) {
+	if e := lc.entry(id); next.ClientKey != wantLadderKey(e, 2) {
 		t.Fatalf("next key %q, want ordinal 2", next.ClientKey)
 	}
 }
@@ -803,10 +916,11 @@ func newUnreadableRouteCity(t *testing.T) *ladderLaneCity {
 	return lc
 }
 
-// A route that cannot be read refuses the seat's due nudge, as a seat that
-// cannot take one does: nothing is typed or proposed, the attempt is
-// re-counted as paused, and the refusal is reported.
-func TestWorkLadderUnreadableRouteRefusesTheNudge(t *testing.T) {
+// A route that cannot be read sends the seat's due nudge nowhere: nothing is
+// typed or proposed, and the attempt counts, as a direct nudge's delivery
+// error does (S1: an unreadable route is no refusal by the seat), and is
+// reported.
+func TestWorkLadderUnreadableRouteCountsTheUnsentNudge(t *testing.T) {
 	lc := newUnreadableRouteCity(t)
 	id := lc.startedClaim()
 	lc.at(0)
@@ -815,8 +929,8 @@ func TestWorkLadderUnreadableRouteRefusesTheNudge(t *testing.T) {
 	if n, ops := lc.nudges(), lc.ladderOps(); n != 0 || len(ops) != 0 {
 		t.Fatalf("%d nudges, ops %+v: nudged blind", n, ops)
 	}
-	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 1 {
-		t.Fatalf("entry %+v, want the attempt refused: re-counted paused, unmarked", e)
+	if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 1 || e.Paused != 0 || e.Refused != 0 {
+		t.Fatalf("entry %+v, want the attempt counted, unmarked", e)
 	}
 	fails := lc.events(events.WorkNudgeFailed)
 	if len(fails) != 1 || !strings.Contains(fails[0].Message, "notice route unreadable") {
@@ -835,15 +949,15 @@ func (lc *ladderLaneCity) setAtThreshold(bead string, set func(e *workladder.Ent
 	lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{e}})})
 }
 
-// A route that cannot be read refuses only the nudge: the recycle, the
+// A route that cannot be read sends only the nudge nowhere: the recycle, the
 // release and the alerts decided with it still run.
 func TestWorkLadderUnreadableRouteStillRecyclesReleasesAndAlerts(t *testing.T) {
 	for name, tc := range map[string]struct {
 		seed func(lc *ladderLaneCity) string
-		// refused: the nudge decided with the action was refused (not
-		// released with its claim).
-		refused bool
-		check   func(t *testing.T, lc *ladderLaneCity, id string)
+		// unsent: a nudge was decided with the action (not released with
+		// its claim), and went unsent.
+		unsent bool
+		check  func(t *testing.T, lc *ladderLaneCity, id string)
 	}{
 		"a trigger at its threshold is recycled": {
 			seed: func(lc *ladderLaneCity) string {
@@ -857,7 +971,7 @@ func TestWorkLadderUnreadableRouteStillRecyclesReleasesAndAlerts(t *testing.T) {
 				lc.setAtThreshold(b.ID, func(e *workladder.Entry) { e.Attempts = workladder.DefaultTriggerThreshold })
 				return b.ID
 			},
-			refused: true,
+			unsent: true,
 			check: func(t *testing.T, lc *ladderLaneCity, _ string) {
 				if len(lc.posted) != 1 || len(lc.events(events.WorkRecycleRequested)) != 1 {
 					t.Fatalf("recycles posted %+v, want the trigger's", lc.posted)
@@ -889,7 +1003,7 @@ func TestWorkLadderUnreadableRouteStillRecyclesReleasesAndAlerts(t *testing.T) {
 				})
 				return id
 			},
-			refused: true,
+			unsent: true,
 			check: func(t *testing.T, lc *ladderLaneCity, id string) {
 				if e := lc.entry(id); e.Rung != workladder.RungEscalated {
 					t.Fatalf("entry %+v, want escalated", e)
@@ -909,10 +1023,10 @@ func TestWorkLadderUnreadableRouteStillRecyclesReleasesAndAlerts(t *testing.T) {
 				t.Fatalf("%d nudges, ops %+v: nudged blind", n, ops)
 			}
 			want := 0
-			if tc.refused {
+			if tc.unsent {
 				want = 1
-				if e := lc.entry(id); e.Paused != 1 || e.Refused != 1 {
-					t.Fatalf("entry %+v, want its nudge refused", e)
+				if e := lc.entry(id); e.Paused != 0 || e.Refused != 0 {
+					t.Fatalf("entry %+v, want its unsent nudge counted", e)
 				}
 			}
 			if n := len(lc.events(events.WorkNudgeFailed)); n != want {
@@ -922,34 +1036,41 @@ func TestWorkLadderUnreadableRouteStillRecyclesReleasesAndAlerts(t *testing.T) {
 	}
 }
 
-// Over 8 hours on a route that cannot be read, a started claim is still
-// paced: every due nudge is refused, at most every PausedCap, and reported;
-// the seat is alerted once, and it is not recycled on reminders it never got.
-func TestWorkLadderUnreadableRouteKeepsPacingTheSeat(t *testing.T) {
+// Over 8 hours on a route that cannot be read, a started claim is paced,
+// recycled and escalated as on the direct path with every delivery failing
+// (S1, the review's P1): each unsent nudge counts and is reported at the
+// wedge replay's times; nothing is typed or proposed.
+func TestWorkLadderUnreadableRouteEscalatesAsTheDirectPathDoes(t *testing.T) {
 	lc := newUnreadableRouteCity(t)
 	id := lc.startedClaim()
-	var refused []time.Duration
+	var unsent []time.Duration
 	lc.run(8*time.Hour, 30*time.Second, func() {
-		if n := len(lc.events(events.WorkNudgeFailed)); n > len(refused) {
-			refused = append(refused, lc.now.Sub(lc.start))
+		if n := len(lc.events(events.WorkNudgeFailed)); n > len(unsent) {
+			unsent = append(unsent, lc.now.Sub(lc.start))
+		}
+		if len(lc.posted) > 0 && lc.row().Metadata["generation"] == "7" {
+			lc.setRow(map[string]string{"generation": "8", "instance_token": "tok-8"})
 		}
 	})
 	if n, ops := lc.nudges(), lc.ladderOps(); n != 0 || len(ops) != 0 {
 		t.Fatalf("%d nudges, ops %+v: nudged blind", n, ops)
 	}
-	if len(refused) < 8*60/11 {
-		t.Fatalf("%d refused nudges in 8h, want one about every 10 minutes", len(refused))
+	want := []time.Duration{
+		halfPast(1), halfPast(4), halfPast(10), halfPast(22), halfPast(46), halfPast(94),
+		halfPast(156), halfPast(159), halfPast(165), halfPast(177), halfPast(201), halfPast(249),
+		halfPast(309), halfPast(369), halfPast(429),
 	}
-	for i := 1; i < len(refused); i++ {
-		if gap := refused[i] - refused[i-1]; gap < workladder.DefaultPausedCap {
-			t.Fatalf("refusals at %v and %v, %v apart, want >= PausedCap", refused[i-1], refused[i], gap)
-		}
+	if fmt.Sprint(unsent) != fmt.Sprint(want) {
+		t.Fatalf("unsent nudges at\n %v\nwant\n %v", unsent, want)
 	}
-	if got := escalations(lc.ladderCity); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertNudgeRefused}) {
-		t.Fatalf("escalations %v, want one nudge_refused", got)
+	if len(lc.posted) != 1 || lc.posted[0].Generation != "7" {
+		t.Fatalf("recycles %+v, want one at generation 7", lc.posted)
 	}
-	if e := lc.entry(id); len(lc.posted) != 0 || e.Attempts != 0 {
-		t.Fatalf("entry %+v, recycles %+v: counted reminders the seat never got", e, lc.posted)
+	if got := escalations(lc.ladderCity); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertStartedRecycled, workladder.AlertStartedUnanswered}) {
+		t.Fatalf("escalations %v, want the recycle's, then started_unanswered", got)
+	}
+	if e := lc.entry(id); e.Rung != workladder.RungEscalated || e.Refused != 0 {
+		t.Fatalf("entry %+v, want escalated with no refusal", e)
 	}
 }
 
@@ -1125,6 +1246,7 @@ func TestWorkLadderPausedNoticeRefusalRecordsNothing(t *testing.T) {
 		}
 	}
 	writeHealth()
+	lc.promptUp()
 	proposed := 0
 	lc.run(time.Hour, 30*time.Second, func() {
 		writeHealth()
@@ -1430,17 +1552,44 @@ func TestWorkLadderNudgedEventCarriesTheNoticesGeneration(t *testing.T) {
 	}
 }
 
-// An open notice past its start_by is refused when no attempt may have
-// reached the seat, and counts as failed when one may have.
+// An open notice past its start_by is undelivered, for the pass to classify
+// by cause, when no attempt may have reached the seat, and counts as failed
+// when one may have.
 func TestLadderNoticeFatePastStartBy(t *testing.T) {
 	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 	m := workladder.NoticeMark{Op: "gc-op-1", At: now.Add(-3 * time.Minute)}
-	for maybe, want := range map[int]workladder.NoticeFate{0: workladder.NoticeRefused, 1: workladder.NoticeFailed} {
+	for maybe, undelivered := range map[int]bool{0: true, 1: false} {
 		op := opjournal.Op{ID: m.Op, Status: opjournal.StatusSubmitted, StartBy: now.Add(-time.Second), MaybeDelivered: maybe}
 		got := ladderNoticeFate(op, nil, m, now)
-		if got.pending || got.fate != want {
-			t.Fatalf("maybe_delivered=%d: %+v, want fate %d", maybe, got, want)
+		if got.pending || got.fate != workladder.NoticeFailed || got.undelivered != undelivered {
+			t.Fatalf("maybe_delivered=%d: %+v, want failed, undelivered=%v", maybe, got, undelivered)
 		}
+	}
+}
+
+// classifyUndelivered settles an undelivered notice by its cause: withdrawn
+// under the ladder's own gate, refused by a seat that refuses nudges, else
+// failed; the seat is read only when the gate is open.
+func TestClassifyUndelivered(t *testing.T) {
+	res := ladderNoticeResult{op: "gc-op-1", fate: workladder.NoticeFailed, reason: "notice failed{expired_before_start}", undelivered: true}
+	for _, tc := range []struct {
+		name  string
+		gate  workladder.Gate
+		cause string
+		want  workladder.NoticeFate
+		reads int
+	}{
+		{"held", workladder.Gate{Held: true, Reason: "wait"}, "session has a pending interaction", workladder.NoticeWithdrawn, 0},
+		{"refusing", workladder.Gate{}, "session has a pending interaction", workladder.NoticeRefused, 1},
+		{"refusing nothing", workladder.Gate{}, "", workladder.NoticeFailed, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := 0
+			got := classifyUndelivered(res, tc.gate, func() string { reads++; return tc.cause })
+			if got.fate != tc.want || got.undelivered || reads != tc.reads || !strings.HasPrefix(got.reason, res.reason) {
+				t.Fatalf("%+v after %d reads, want fate %d after %d", got, reads, tc.want, tc.reads)
+			}
+		})
 	}
 }
 

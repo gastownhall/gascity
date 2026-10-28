@@ -1360,8 +1360,9 @@ func TestWorkLadderRereadsTheHold(t *testing.T) {
 }
 
 // A seat stuck at a permission prompt refuses every nudge: it is retried no
-// more often than every 10 minutes, its count does not move, and one
-// nudge_refused alert is raised.
+// more often than every 10 minutes, its count does not move, and it is
+// alerted nudge_refused at the third refusal, then about hourly while the
+// refusals go on.
 func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("waiting on a permission prompt")
@@ -1372,8 +1373,8 @@ func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
 	if calls > 6*6+2 {
 		t.Fatalf("%d delivery attempts in 6h", calls)
 	}
-	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertNudgeRefused}) {
-		t.Fatalf("escalations %v, want one nudge_refused", got)
+	if got, want := escalations(c), refusalAlertsUpTo(calls); len(want) < 4 || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("escalations %v, want %d nudge_refused for %d refusals", got, len(want), calls)
 	}
 	if e := c.entry(id); e.Attempts != 0 || len(c.posted) != 0 {
 		t.Fatalf("entry %+v, recycles %+v: refusals moved it toward a recycle", e, c.posted)
