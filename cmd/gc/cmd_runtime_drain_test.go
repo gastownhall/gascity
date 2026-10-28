@@ -1580,6 +1580,88 @@ func TestDoRuntimeDrainAckFailsWhenNoServerAnswersTheReadBack(t *testing.T) {
 	}
 }
 
+// readBackGoneDrainOps writes the ack successfully but reports the session
+// gone on the read-back, as a reap racing the ack does.
+type readBackGoneDrainOps struct {
+	*fakeDrainOps
+}
+
+func (g *readBackGoneDrainOps) isDrainAcked(string) (bool, error) {
+	return false, fmt.Errorf("reading GC_DRAIN_ACK: %w", fmt.Errorf("worker: %w: %w", runtime.ErrSessionNotFound, errors.New("session not found")))
+}
+
+// A read-back that reports the session gone stays benign: the reap race
+// the write side already tolerates, not a failed ack.
+func TestDoRuntimeDrainAckReadBackGoneStaysAcknowledged(t *testing.T) {
+	pokes := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error {
+		pokes++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := &readBackGoneDrainOps{fakeDrainOps: newFakeDrainOps()}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !dops.acked["worker"] {
+		t.Error("drain ack flag not set")
+	}
+	if got, want := stdout.String(), "Drain acknowledged. Controller poked for immediate stop.\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if pokes != 1 {
+		t.Errorf("poke called %d times, want 1", pokes)
+	}
+}
+
+// mirrorLagDrainOps reports a mirror-only ack failure: the value landed, only
+// the runtime's own view of it lags.
+type mirrorLagDrainOps struct {
+	*fakeDrainOps
+	t *testing.T
+}
+
+func (m *mirrorLagDrainOps) setDrainAck(string) error {
+	return &runtime.MetadataNotMirroredError{Session: "worker", Key: "GC_DRAIN_ACK", Cause: errors.New("runtime view lagged")}
+}
+
+func (m *mirrorLagDrainOps) isDrainAcked(string) (bool, error) {
+	m.t.Fatal("isDrainAcked must not run when the ack write reports a mirror-only failure")
+	return false, nil
+}
+
+// A mirror-only ack failure is already in force; the read-back must not
+// second-guess it, and the ack stays a warning, exactly as before.
+func TestDoRuntimeDrainAckMirrorOnlyErrorSkipsReadBack(t *testing.T) {
+	pokes := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error {
+		pokes++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := &mirrorLagDrainOps{fakeDrainOps: newFakeDrainOps(), t: t}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning:") {
+		t.Errorf("stderr = %q, want the mirror warning", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Drain acknowledged.") {
+		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), "Drain acknowledged.")
+	}
+	if pokes != 1 {
+		t.Errorf("poke called %d times, want 1", pokes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // newDrainOps factory tests
 // ---------------------------------------------------------------------------
