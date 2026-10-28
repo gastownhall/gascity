@@ -807,7 +807,12 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	}
 }
 
-func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *testing.T) {
+// TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID: a
+// continuity-eligible archived row takes the wake, but archived is a state the
+// controller skips, so the wake reports that it will not start and names the
+// close that releases the row. Kills a "wake requested" success for a row no
+// reconciler ever starts.
+func TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -844,11 +849,17 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 0 {
-		t.Fatalf("cmdSessionWake() = %d, want success; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "wake requested") {
-		t.Fatalf("stdout = %q, want wake requested message", stdout.String())
+	for _, want := range []string{
+		"gc session wake: wake recorded for session " + sessionID + ", but it will not start: ",
+		`"archived"`,
+		"gc session close " + sessionID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
 	}
 
 	freshStore, err := openCityStoreAt(cityDir)
@@ -867,6 +878,46 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	}
 	if got := updated.Metadata["wake_request"]; got != "explicit" {
 		t.Fatalf("wake_request = %q, want explicit", got)
+	}
+}
+
+// TestDoSessionWake_RefusesUnknownStateRow: a row in a state the controller
+// skips records the wake but exits 1 with the will-not-start line naming the
+// raw state and the close that releases it; the state is left as it was.
+// Kills a wake that reports success for a row the reconciler never starts.
+func TestDoSessionWake_RefusesUnknownStateRow(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "future-state",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := sessionWakeDeps{
+		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+		cityUsesManagedReconciler: func(string) bool { return false },
+		pokeController:            func(string, reconcilekey.Key) error { return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
+		t.Fatalf("doSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"gc session wake: wake recorded for session " + b.ID + ", but it will not start: ",
+		`"future-state"`,
+		"gc session close " + b.ID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "future-state" || got.Metadata["wake_request"] != "explicit" {
+		t.Fatalf("state = %q, wake_request = %q; want future-state with the wake recorded", got.Metadata["state"], got.Metadata["wake_request"])
 	}
 }
 

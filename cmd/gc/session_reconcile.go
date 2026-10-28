@@ -1583,6 +1583,24 @@ func isKnownStateInfo(i sessionpkg.Info) bool {
 	return knownSessionStates[i.MetadataState]
 }
 
+// isUnknownStateInfo reports whether the controller skips info's row as a
+// state it does not manage: legacy's !isKnownStateInfo skip, which runs after
+// the drain-ack stop-pending handler has taken its rows, and v2's unknown-state
+// arm over the census flag.
+func isUnknownStateInfo(i sessionpkg.Info) bool {
+	return !isKnownStateInfo(i) && !isDrainAckStopPendingInfo(i)
+}
+
+// unknownStateRefusal is the operator-facing reason the controller will not
+// act on a wake, reset or kill of info's row because it skips the row's state,
+// or "" when it does not skip it.
+func unknownStateRefusal(i sessionpkg.Info) string {
+	if !isUnknownStateInfo(i) {
+		return ""
+	}
+	return fmt.Sprintf("its state %q is not one this gc version's controller manages, so the controller skips it; `gc session close %s` releases it", i.MetadataState, i.ID)
+}
+
 // reverseBeads returns a reversed copy of the bead slice.
 func reverseBeads(beadSlice []beads.Bead) []beads.Bead {
 	n := len(beadSlice)
