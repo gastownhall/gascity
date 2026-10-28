@@ -1734,7 +1734,9 @@ func (s *Server) cancelLaneMessage(st *opjournal.Store, id, why string) bool {
 // fate, a close the read missed included, is op.changed's
 // (laneSubmitSettle).
 func (s *Server) emitLaneMessageResult(store beads.Store, op opjournal.Op, operation string) {
-	cur, err := s.awaitLaneOp(context.Background(), op.Conversation, op.ID, laneSubmitSettle)
+	ctx, cancel := context.WithTimeout(context.Background(), laneSubmitSettle)
+	defer cancel()
+	cur, err := s.awaitLaneOp(ctx, op.Conversation, op.ID)
 	if err != nil {
 		s.ops.logf("api: op %s: reading its outcome for the request's result: %v", op.ID, err)
 		cur = op
