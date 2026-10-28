@@ -241,6 +241,9 @@ func controllerClosed(gate beads.Bead) bool {
 // it holds the item, "" when it does not.
 func gateAnswer(store beads.Store, gate beads.Bead, foundOpen bool) (string, error) {
 	if gate.Status != "closed" {
+		if _, err := clearLeftoverGateMarker(store, gate); err != nil {
+			return "", err
+		}
 		return gate.ID, nil
 	}
 	if controllerClosed(gate) {
@@ -343,6 +346,50 @@ func handBackGate(store beads.Store, gate beads.Bead) (string, error) {
 	return "", nil
 }
 
+// leftoverOpenGateMarker reports whether an OPEN gate still carries a closed
+// gate's marker: an operator reopened (`bd reopen`, which keeps gc.* metadata)
+// a gate that was overridden, released or retired. Left in place, a later
+// controller teardown of the gate would read as that old state — an
+// overridden marker as an operator's final close, so a revived drain's item
+// would run unjudged.
+func leftoverOpenGateMarker(b beads.Bead) bool {
+	if b.Status == "closed" {
+		return false
+	}
+	switch b.Metadata[beadmeta.CrossStoreGateStateMetadataKey] {
+	case CrossStoreGateStateOverridden, CrossStoreGateStateReleased, CrossStoreGateStateRetired:
+		return true
+	}
+	return b.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey] != ""
+}
+
+// clearLeftoverGateMarker clears a leftover closed-gate marker from an open
+// gate (leftoverOpenGateMarker) in ONE conditional write, so it reads as an
+// ordinary open gate. It returns the gate as the caller should judge it.
+func clearLeftoverGateMarker(store beads.Store, gate beads.Bead) (beads.Bead, error) {
+	if !leftoverOpenGateMarker(gate) {
+		return gate, nil
+	}
+	cleared := map[string]string{
+		beadmeta.CrossStoreGateStateMetadataKey:       "",
+		beadmeta.CrossStoreGateRetiredFromMetadataKey: "",
+		beadmeta.OutcomeMetadataKey:                   "",
+		"close_reason":                                "",
+	}
+	if _, err := writeGateIfStill(store, gate.ID, leftoverOpenGateMarker, beads.UpdateOpts{Metadata: cleared}, false); err != nil {
+		return gate, fmt.Errorf("clearing the leftover marker of reopened cross-store gate %s: %w", gate.ID, err)
+	}
+	meta := make(map[string]string, len(gate.Metadata))
+	for k, v := range gate.Metadata {
+		meta[k] = v
+	}
+	for k := range cleared {
+		delete(meta, k)
+	}
+	gate.Metadata = meta
+	return gate, nil
+}
+
 // reReadGateAnswer answers from the gate's live row after a write whose
 // premise moved under it: an open gate holds, a closed one does not.
 func reReadGateAnswer(store beads.Store, id string) (string, error) {
@@ -418,7 +465,8 @@ func reopenGateOpts() beads.UpdateOpts {
 		Metadata: map[string]string{
 			beadmeta.CrossStoreGateStateMetadataKey:       "",
 			beadmeta.CrossStoreGateRetiredFromMetadataKey: "",
-			"close_reason": "",
+			beadmeta.OutcomeMetadataKey:                   "",
+			"close_reason":                                "",
 		},
 	}
 }
@@ -476,7 +524,7 @@ func ensureCrossStoreGate(store beads.Store, control beads.Bead, blockerID strin
 		sort.Slice(existing, func(i, j int) bool { return existing[i].ID < existing[j].ID })
 		for _, gate := range existing {
 			if gate.Status != "closed" {
-				return gate.ID, nil
+				return gateAnswer(store, gate, foundOpen)
 			}
 		}
 		return gateAnswer(store, existing[0], foundOpen)
@@ -591,15 +639,25 @@ func ReleaseCrossStoreGates(store beads.Store, resolve CrossStoreBlockerResolver
 	sort.Slice(open, func(i, j int) bool { return open[i].ID < open[j].ID })
 	sort.Slice(released, func(i, j int) bool { return released[i].ID < released[j].ID })
 	report.Open = len(open)
+	var errs []error
+	// An open gate an operator reopened may still carry its closed marker;
+	// clear it before judging, so a gate the pass leaves open reads as an
+	// ordinary open gate.
+	for i, gate := range open {
+		cleared, err := clearLeftoverGateMarker(store, gate)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("gate %s: %w", gate.ID, err))
+		}
+		open[i] = cleared
+	}
 	if len(open) == 0 && len(released) == 0 {
 		// Nothing gated and nothing released: the two listings are the pass.
 		return report, nil
 	}
 	controls, err := gateControls(store, append(slices.Clone(open), released...))
 	if err != nil {
-		return report, err
+		return report, errors.Join(append(errs, err)...)
 	}
-	var errs []error
 	// A released gate whose drain is finished can never matter again: retire
 	// it (one write, once), which takes it out of the released listing.
 	var reopenable []beads.Bead

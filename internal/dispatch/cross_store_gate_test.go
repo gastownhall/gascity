@@ -1613,3 +1613,79 @@ func TestIsControllerClosedCrossStoreGateIsFalseForAnOpenGate(t *testing.T) {
 		t.Fatal("a released gate does not read as controller-closed")
 	}
 }
+
+// TestAnOperatorReopenedOverriddenGateIsJudgedAfreshAfterATeardown: an
+// operator overrides a gate (closes it; the drain records overridden), then
+// reopens it — `bd reopen` keeps the gc.* marker. Whichever sees the open gate
+// first, the drain or the release pass, clears the leftover marker in one
+// write. A later controller teardown and revival of the drain then reads as
+// the controller's close, so the gate holds the item until the pass judges
+// it, instead of reading as the old operator override and letting it run.
+func TestAnOperatorReopenedOverriddenGateIsJudgedAfreshAfterATeardown(t *testing.T) {
+	for _, seenBy := range []string{"drain", "release pass"} {
+		t.Run("seen first by the "+seenBy, func(t *testing.T) {
+			for name, graph := range gateStores(t) {
+				t.Run(name, func(t *testing.T) {
+					resolver := storesResolver(beads.NewMemStore())
+					control := newGateControl(t, graph)
+					gateID, err := ensureCrossStoreGate(graph, control, "rg-9", false)
+					if err != nil || gateID == "" {
+						t.Fatalf("mint: %q, %v", gateID, err)
+					}
+					if _, err := graph.CloseAll([]string{gateID}, map[string]string{"close_reason": "operator: ship it"}); err != nil {
+						t.Fatal(err)
+					}
+					for tick, found := range []bool{false, true} {
+						if got, err := ensureCrossStoreGate(graph, mustGetBead(t, graph, control.ID), "rg-9", found); err != nil || got != "" {
+							t.Fatalf("override tick %d: drain = %q, %v; an overridden gate never holds", tick, got, err)
+						}
+						if _, err := ReleaseCrossStoreGates(graph, resolver); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if g := mustGetBead(t, graph, gateID); g.Status != "closed" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != CrossStoreGateStateOverridden {
+						t.Fatalf("gate = %s %v; want closed and overridden", g.Status, g.Metadata)
+					}
+					if err := graph.Reopen(gateID); err != nil {
+						t.Fatal(err)
+					}
+					if seenBy == "drain" {
+						if got, err := ensureCrossStoreGate(graph, mustGetBead(t, graph, control.ID), "rg-9", false); err != nil || got != gateID {
+							t.Fatalf("drain on the reopened gate = %q, %v; want it holding", got, err)
+						}
+					} else if _, err := ReleaseCrossStoreGates(graph, undecidedResolver); err != nil {
+						// Undecided: the pass leaves the gate's judgement as
+						// it is, so only the clearing writes it.
+						t.Fatal(err)
+					}
+					g := mustGetBead(t, graph, gateID)
+					if g.Status != "open" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] == CrossStoreGateStateOverridden || g.Metadata["close_reason"] != "" {
+						t.Fatalf("reopened gate = %s %v; want the leftover override and its reason cleared", g.Status, g.Metadata)
+					}
+					if _, err := molecule.CloseMembersWithMetadataExcept(graph, []beads.Bead{g}, map[string]string{
+						beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
+						"close_reason":              sourceworkflow.RunCanceledCloseReason,
+					}, nil); err != nil {
+						t.Fatal(err)
+					}
+					if err := graph.Close(control.ID); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := ReleaseCrossStoreGates(graph, resolver); err != nil {
+						t.Fatal(err)
+					}
+					if err := graph.Reopen(control.ID); err != nil {
+						t.Fatal(err)
+					}
+					if got, err := ensureCrossStoreGate(graph, mustGetBead(t, graph, control.ID), "rg-9", false); err != nil || got != gateID {
+						t.Fatalf("revived drain = %q, %v; want the torn-down gate reopened for judgment, not read as the old override", got, err)
+					}
+					g = mustGetBead(t, graph, gateID)
+					if g.Status != "open" || g.Metadata[beadmeta.OutcomeMetadataKey] != "" {
+						t.Fatalf("gate after revival = %s %v; want open with gc.outcome cleared", g.Status, g.Metadata)
+					}
+				})
+			}
+		})
+	}
+}
