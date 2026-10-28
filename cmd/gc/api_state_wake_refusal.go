@@ -39,6 +39,13 @@ type wakeVerdictDeps struct {
 // controller pool seat starts only for pool demand, which it cannot see
 // (legacy drops a seat without demand whatever its pin).
 func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (why string, certain bool) {
+	// The row's state is read before the config: a state this gc version's
+	// controller does not manage is skipped every tick whatever the config
+	// says, so the recorded wake cannot be honored (issue #1497). The wake
+	// stays recorded — a gc version that manages the state can honor it.
+	if why := unknownStateRefusal(info); why != "" {
+		return why, true
+	}
 	if d.cfg == nil {
 		return "", true
 	}

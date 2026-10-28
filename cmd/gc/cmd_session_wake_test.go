@@ -807,7 +807,13 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	}
 }
 
-func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *testing.T) {
+// TestCmdSessionWake_ContinuityEligibleArchivedSessionWakeRecordedButRefused
+// is issue #1497's wake half: a continuity-eligible archived row is one the
+// controller skips, so the wake is recorded (a gc version that manages the
+// state can honor it) but the command reports it will not start, naming the
+// raw state and the close that releases the row, instead of the false
+// "wake requested" success the base printed.
+func TestCmdSessionWake_ContinuityEligibleArchivedSessionWakeRecordedButRefused(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -844,11 +850,17 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 0 {
-		t.Fatalf("cmdSessionWake() = %d, want success; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "wake requested") {
-		t.Fatalf("stdout = %q, want wake requested message", stdout.String())
+	if want := "wake recorded for session " + sessionID + ", but it will not start:"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"archived"`) {
+		t.Errorf("stderr does not name the raw state:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc session close "+sessionID) {
+		t.Errorf("stderr does not name the close that releases the row:\n%s", stderr.String())
 	}
 
 	freshStore, err := openCityStoreAt(cityDir)

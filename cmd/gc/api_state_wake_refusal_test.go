@@ -59,6 +59,7 @@ func TestWakeStartRefusal(t *testing.T) {
 			episode: true, want: "startup-health quarantine",
 		},
 		"abandoned create":      {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker", MetadataState: "creating"}, want: "create never completed"},
+		"unknown state":         {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", MetadataState: "future-state"}, want: "not one this gc version's controller manages"},
 		"non-interactive latch": {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m", Attach: boolPtr(false)}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}},
 		"idle latch":            {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}, want: "idle sleep policy"},
 		"latch with held open work": {
@@ -113,6 +114,24 @@ func TestWakeStartRefusal(t *testing.T) {
 				t.Fatalf("WakeStartRefusal certain = %v, want %v", certain, !tc.uncertain)
 			}
 		})
+	}
+}
+
+// TestWakeStartRefusal_RefusesUnknownStateWithoutCityConfig: the unknown-state
+// arm runs before the no-config early return, so a controller with no city
+// config loaded still refuses a row the controller skips (issue #1497) — the
+// refusal reads only the row, never the config — and stays certain.
+func TestWakeStartRefusal_RefusesUnknownStateWithoutCityConfig(t *testing.T) {
+	cs := &controllerState{cityPath: t.TempDir(), cityBeadStore: beads.NewMemStore(), sp: runtime.NewFake()}
+	why, certain := cs.WakeStartRefusal(sessionpkg.Info{ID: "gc-1", Template: "worker", MetadataState: "future-state"})
+	if !certain {
+		t.Fatalf("WakeStartRefusal certain = false, want true")
+	}
+	if !strings.Contains(why, `"future-state"`) {
+		t.Errorf("refusal %q does not name the raw state", why)
+	}
+	if !strings.Contains(why, "gc session close gc-1") {
+		t.Errorf("refusal %q does not name the close that releases the row", why)
 	}
 }
 
