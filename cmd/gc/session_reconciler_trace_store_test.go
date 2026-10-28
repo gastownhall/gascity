@@ -576,3 +576,112 @@ func TestTraceReaderSkipsTornBatchGluedToNextBatch(t *testing.T) {
 		}
 	})
 }
+
+// TestTraceRecoveryKeepsTornSegment reopens a store over a segment shaped like
+// issue #7954 with no head matching its size. The glued line is a torn write,
+// not silent corruption: the segment stays, its committed batches stay
+// readable, and the next append goes to a fresh segment with the next seq.
+func TestTraceRecoveryKeepsTornSegment(t *testing.T) {
+	cityDir := t.TempDir()
+	root := traceStoreTestRoot(cityDir)
+	traceTornBatchSegment(t, root, 2, true)
+
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close() //nolint:errcheck
+
+	if quarantined := traceTestQuarantined(t, root); len(quarantined) != 0 {
+		t.Fatalf("quarantined = %v, want none for a torn write", quarantined)
+	}
+	segments := traceStoreTestSegments(t, root)
+	if len(segments) != 1 {
+		t.Fatalf("segments = %d, want the poisoned segment kept", len(segments))
+	}
+	seq, err := store.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq: %v", err)
+	}
+	if seq != 9 {
+		t.Fatalf("LatestSeq = %d, want 9 (the highest verified commit seq)", seq)
+	}
+
+	appendTraceStoreTestBatch(t, store, "cycle-z", 1, time.Second, TraceDurabilityDurable)
+	if quarantined := traceTestQuarantined(t, root); len(quarantined) != 0 {
+		t.Fatalf("quarantined = %v, want none after the append", quarantined)
+	}
+	segments = traceStoreTestSegments(t, root)
+	if len(segments) != 2 {
+		t.Fatalf("segments after append = %d, want a fresh segment", len(segments))
+	}
+	records, err := ReadTraceRecords(root, TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	counts := traceTestRecordCountByTraceID(records)
+	if counts["cycle-a"] != 3 || counts["cycle-c"] != 3 || counts["cycle-z"] != 2 {
+		t.Fatalf("records by trace = %v, want cycle-a, cycle-c and cycle-z", counts)
+	}
+	commit := traceTestCommitRecord(t, records, "cycle-z")
+	if commit.FirstSeq != 10 {
+		t.Fatalf("cycle-z first_seq = %d, want 10 (LatestSeq before the append, plus one)", commit.FirstSeq)
+	}
+	assertTraceSeqsUnique(t, records)
+}
+
+// TestTraceStoreRestartAfterTornTailUsesFreshSegment pins the crash path at
+// issue #7954's core: a torn tail left by a crash mid-write is tolerated by
+// the reader, quarantined nowhere, and the restarted store appends to a new
+// segment with its own seqs.
+func TestTraceStoreRestartAfterTornTailUsesFreshSegment(t *testing.T) {
+	cityDir := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	appendTraceStoreTestBatch(t, store, "cycle-a", 1, 0, TraceDurabilityDurable)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	root := traceStoreTestRoot(cityDir)
+	segments := traceStoreTestSegments(t, root)
+	if len(segments) != 1 {
+		t.Fatalf("segments = %d, want 1", len(segments))
+	}
+	f, err := os.OpenFile(segments[0], os.O_APPEND|os.O_WRONLY, sessionReconcilerTraceOwnerFilePerm)
+	if err != nil {
+		t.Fatalf("open segment: %v", err)
+	}
+	if _, err := f.WriteString(`{"trace_schema_version":1,"seq":3,"trace_id":"cycle-torn","ts":"2026-1`); err != nil {
+		f.Close() //nolint:errcheck
+		t.Fatalf("write torn tail: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close segment: %v", err)
+	}
+
+	reopened, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close() //nolint:errcheck
+	appendTraceStoreTestBatch(t, reopened, "cycle-b", 1, time.Second, TraceDurabilityDurable)
+
+	if quarantined := traceTestQuarantined(t, root); len(quarantined) != 0 {
+		t.Fatalf("quarantined = %v, want none for a torn tail", quarantined)
+	}
+	segments = traceStoreTestSegments(t, root)
+	if len(segments) != 2 {
+		t.Fatalf("segments after restart = %d, want a fresh segment", len(segments))
+	}
+	records, err := ReadTraceRecords(root, TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	counts := traceTestRecordCountByTraceID(records)
+	if counts["cycle-a"] != 2 || counts["cycle-b"] != 2 {
+		t.Fatalf("records by trace = %v, want cycle-a and cycle-b", counts)
+	}
+	assertTraceSeqsUnique(t, records)
+}
