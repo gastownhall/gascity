@@ -826,3 +826,63 @@ func TestStartGateDeferredPartialStorePassLeavesTheMemoAlone(t *testing.T) {
 		})
 	}
 }
+
+// A create made after a tick read its session snapshot, but before that tick's
+// start executor began, is never offered in that tick (it is not in the
+// snapshot). The next tick's lease check must still hold it: it has not been
+// offered a start. Regression test adapted from the reproduction posted on
+// PR #8298 (the first-chance boundary keys off executor entry, not the
+// snapshot read). The control is the same create made after the executor began.
+func TestStartDeferralMemoHoldsACreateBornBetweenSnapshotAndExecutor(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bornInGap bool
+	}{
+		{"born between the snapshot read and executor entry", true},
+		{"control: born after executor entry", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDeferralHarness(t, 20261027, 1, true)
+			d.tick(t) // pass 1 starts the only create
+			d.env.clk.Advance(time.Minute)
+
+			// Tick 2: the snapshot is read first.
+			sessions, err := loadSessionBeads(d.env.store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			var bornID, bornName string
+			create := func() {
+				info, err := d.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: d.template, Title: "Manual worker", Command: d.command, Provider: "fake"})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				bornID, bornName = info.ID, info.SessionName
+			}
+			if tc.bornInGap {
+				create()
+			}
+			// Snapshot reload to executor entry: the bead-reconcile work
+			// before the start stage.
+			d.env.clk.Advance(2 * time.Minute)
+			d.env.reconcile(sessions)
+			if !tc.bornInGap {
+				d.env.clk.Advance(time.Second)
+				create()
+			}
+			// Tick 3 sees the create in its snapshot and desired state, after
+			// a tick gap longer than the never-started lease.
+			tp := d.templateParams()
+			tp.SessionName = bornName
+			d.env.desiredState[bornName] = tp
+			d.env.clk.Advance(pendingCreateNeverStartedTimeout + time.Minute)
+			d.tick(t)
+
+			got := d.bead(t, bornID)
+			t.Logf("create %s: status=%q state=%q last_woke_at=%q running=%v", bornID, got.Status, got.Metadata["state"], got.Metadata["last_woke_at"], d.env.sp.IsRunning(bornName))
+			if got.Status == "closed" {
+				t.Errorf("create %s rolled back (state=%q) without ever being offered a start", bornID, got.Metadata["state"])
+			}
+		})
+	}
+}
