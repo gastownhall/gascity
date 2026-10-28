@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -209,6 +211,95 @@ func TestTraceStoreFailedWriteRollsBackPartialBatch(t *testing.T) {
 	})
 }
 
+// TestTraceStoreNextBatchAfterFailedWrite pins the batch appended after a
+// rolled-back failure (issue #7954): it goes to the same segment, starts on
+// its own line with the next unused seq, and leaves no trace of the failed
+// batch.
+func TestTraceStoreNextBatchAfterFailedWrite(t *testing.T) {
+	t.Run("after-committed-batch", func(t *testing.T) {
+		cityDir := t.TempDir()
+		root := traceStoreTestRoot(cityDir)
+		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		defer store.Close() //nolint:errcheck
+		appendTraceStoreTestBatch(t, store, "cycle-a", 1, 0, TraceDurabilityDurable)
+		preSeq, err := store.LatestSeq()
+		if err != nil {
+			t.Fatalf("LatestSeq: %v", err)
+		}
+		injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, nil)
+		failed := []SessionReconcilerTraceRecord{
+			traceStoreTestRecord("cycle-b", time.Now().UTC().Add(time.Second)),
+			traceStoreTestRecord("cycle-b", time.Now().UTC().Add(time.Second)),
+		}
+		if err := store.AppendBatch(failed, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("append batch b error = %v, want ENOSPC", err)
+		}
+		appendTraceStoreTestBatch(t, store, "cycle-c", 1, 2*time.Second, TraceDurabilityDurable)
+
+		segments := traceStoreTestSegments(t, root)
+		if len(segments) != 1 {
+			t.Fatalf("segments = %d, want 1 (the rolled-back segment keeps being used)", len(segments))
+		}
+		records, err := ReadTraceRecords(root, TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		counts := traceTestRecordCountByTraceID(records)
+		if counts["cycle-a"] != 2 || counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+			t.Fatalf("records by trace = %v, want cycle-a and cycle-c committed, no cycle-b", counts)
+		}
+		commit := traceTestCommitRecord(t, records, "cycle-c")
+		if commit.FirstSeq != preSeq+1 {
+			t.Fatalf("batch c first_seq = %d, want %d (the failed batch's seqs are reused safely)", commit.FirstSeq, preSeq+1)
+		}
+		assertTraceSeqsUnique(t, records)
+	})
+
+	t.Run("on-fresh-segment", func(t *testing.T) {
+		cityDir := t.TempDir()
+		root := traceStoreTestRoot(cityDir)
+		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		defer store.Close() //nolint:errcheck
+		now := time.Now().UTC()
+		segmentPath := filepath.Join(traceDayDir(filepath.Join(root, sessionReconcilerTraceSegments), now), traceSegmentFileName(1))
+		if err := os.MkdirAll(filepath.Dir(segmentPath), sessionReconcilerTraceOwnerDirPerm); err != nil {
+			t.Fatalf("mkdir segment dir: %v", err)
+		}
+		if err := store.openSegment(segmentPath, 0, 0); err != nil {
+			t.Fatalf("openSegment: %v", err)
+		}
+		injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, nil)
+		if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-b", now)}, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("append batch b error = %v, want ENOSPC", err)
+		}
+		appendTraceStoreTestBatch(t, store, "cycle-c", 1, time.Second, TraceDurabilityDurable)
+
+		segments := traceStoreTestSegments(t, root)
+		if len(segments) != 1 {
+			t.Fatalf("segments = %d, want 1 (the truncated fresh segment keeps being used)", len(segments))
+		}
+		records, err := ReadTraceRecords(root, TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		counts := traceTestRecordCountByTraceID(records)
+		if counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+			t.Fatalf("records by trace = %v, want only cycle-c", counts)
+		}
+		commit := traceTestCommitRecord(t, records, "cycle-c")
+		if commit.FirstSeq != 1 {
+			t.Fatalf("batch c first_seq = %d, want 1", commit.FirstSeq)
+		}
+		assertTraceSeqsUnique(t, records)
+	})
+}
+
 // TestTraceStoreFailedRollbackAbandonsSegment pins the rollback half where
 // the segment cannot be cut back (issue #7954): the next batch starts a
 // segment with a higher index, the failed batch's seqs are retired, and the
@@ -352,91 +443,136 @@ func traceTestCommitRecord(t *testing.T, records []SessionReconcilerTraceRecord,
 	return SessionReconcilerTraceRecord{}
 }
 
-// TestTraceStoreNextBatchAfterFailedWrite pins the batch appended after a
-// rolled-back failure (issue #7954): it goes to the same segment, starts on
-// its own line with the next unused seq, and leaves no trace of the failed
-// batch.
-func TestTraceStoreNextBatchAfterFailedWrite(t *testing.T) {
-	t.Run("after-committed-batch", func(t *testing.T) {
+// buildTraceSegmentBatch lays down one committed batch the way AppendBatch
+// does: count records with seqs from firstSeq, a CRC32 over the trimmed record
+// lines, and a trailing batch_commit record.
+func buildTraceSegmentBatch(t *testing.T, traceID string, firstSeq uint64, count int, ts time.Time) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	var crc uint32
+	for i := 0; i < count; i++ {
+		rec := traceStoreTestRecord(traceID, ts)
+		rec.Seq = firstSeq + uint64(i)
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal record %s seq %d: %v", traceID, rec.Seq, err)
+		}
+		line = append(line, '\n')
+		buf.Write(line)
+		crc = crc32.Update(crc, crc32.IEEETable, bytes.TrimSpace(line))
+	}
+	commit := SessionReconcilerTraceRecord{
+		TraceSchemaVersion: sessionReconcilerTraceSchemaVersion,
+		TraceID:            traceID,
+		TickID:             traceID + "-tick",
+		RecordType:         TraceRecordBatchCommit,
+		Ts:                 ts,
+		Seq:                firstSeq + uint64(count),
+		FirstSeq:           firstSeq,
+		LastSeq:            firstSeq + uint64(count) - 1,
+		RecordCount:        count,
+		BatchCRC32:         crc,
+		TraceMode:          TraceModeBaseline,
+		TraceSource:        TraceSourceAlwaysOn,
+	}
+	line, err := json.Marshal(commit)
+	if err != nil {
+		t.Fatalf("marshal commit %s: %v", traceID, err)
+	}
+	buf.Write(append(line, '\n'))
+	return buf.Bytes()
+}
+
+// writeTraceTestSegment writes raw segment bytes as segment-000001 under the
+// trace root.
+func writeTraceTestSegment(t *testing.T, root string, contents ...[]byte) string {
+	t.Helper()
+	dayDir := filepath.Join(root, sessionReconcilerTraceSegments, "2026", "10", "15")
+	if err := os.MkdirAll(dayDir, sessionReconcilerTraceOwnerDirPerm); err != nil {
+		t.Fatalf("mkdir segment dir: %v", err)
+	}
+	path := filepath.Join(dayDir, traceSegmentFileName(1))
+	if err := os.WriteFile(path, bytes.Join(contents, nil), sessionReconcilerTraceOwnerFilePerm); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	return path
+}
+
+// traceTornBatchSegment builds the on-disk shape a failed batch write left
+// behind (issue #7954): a committed batch, an uncommitted record cut off
+// inside its ts field, the next batch glued onto the torn bytes and reusing
+// its seqs, and committed batches after it when withTrailingBatch is set.
+func traceTornBatchSegment(t *testing.T, root string, glueBatchCount int, withTrailingBatch bool) string {
+	t.Helper()
+	now := time.Now().UTC()
+	var segment []byte
+	segment = append(segment, buildTraceSegmentBatch(t, "cycle-a", 1, 2, now)...)
+	// The uncommitted batch would have written seqs 4 and 5; its write was
+	// cut off inside the first record.
+	segment = append(segment, []byte(`{"trace_schema_version":1,"seq":4,"trace_id":"cycle-x","ts":"2026-1`)...)
+	segment = append(segment, buildTraceSegmentBatch(t, "cycle-b", 4, glueBatchCount, now.Add(time.Second))...)
+	if withTrailingBatch {
+		firstSeq := uint64(4 + glueBatchCount + 1)
+		segment = append(segment, buildTraceSegmentBatch(t, "cycle-c", firstSeq, 2, now.Add(2*time.Second))...)
+	}
+	return writeTraceTestSegment(t, root, segment)
+}
+
+// TestTraceReaderSkipsTornBatchGluedToNextBatch reads the segment shape
+// issue #7954 left behind: an uncommitted batch cut off mid-record with the
+// next batch glued onto the torn bytes. The reader must serve the committed
+// batches around the glued line instead of failing the whole query.
+func TestTraceReaderSkipsTornBatchGluedToNextBatch(t *testing.T) {
+	t.Run("report-shape", func(t *testing.T) {
 		cityDir := t.TempDir()
 		root := traceStoreTestRoot(cityDir)
-		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
-		if err != nil {
-			t.Fatalf("new store: %v", err)
-		}
-		defer store.Close() //nolint:errcheck
-		appendTraceStoreTestBatch(t, store, "cycle-a", 1, 0, TraceDurabilityDurable)
-		preSeq, err := store.LatestSeq()
-		if err != nil {
-			t.Fatalf("LatestSeq: %v", err)
-		}
-		injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, nil)
-		failed := []SessionReconcilerTraceRecord{
-			traceStoreTestRecord("cycle-b", time.Now().UTC().Add(time.Second)),
-			traceStoreTestRecord("cycle-b", time.Now().UTC().Add(time.Second)),
-		}
-		if err := store.AppendBatch(failed, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
-			t.Fatalf("append batch b error = %v, want ENOSPC", err)
-		}
-		appendTraceStoreTestBatch(t, store, "cycle-c", 1, 2*time.Second, TraceDurabilityDurable)
+		traceTornBatchSegment(t, root, 2, true)
 
-		segments := traceStoreTestSegments(t, root)
-		if len(segments) != 1 {
-			t.Fatalf("segments = %d, want 1 (the rolled-back segment keeps being used)", len(segments))
-		}
 		records, err := ReadTraceRecords(root, TraceFilter{})
 		if err != nil {
 			t.Fatalf("ReadTraceRecords: %v", err)
 		}
 		counts := traceTestRecordCountByTraceID(records)
-		if counts["cycle-a"] != 2 || counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+		if counts["cycle-a"] != 3 || counts["cycle-c"] != 3 || counts["cycle-b"] != 0 {
 			t.Fatalf("records by trace = %v, want cycle-a and cycle-c committed, no cycle-b", counts)
 		}
-		commit := traceTestCommitRecord(t, records, "cycle-c")
-		if commit.FirstSeq != preSeq+1 {
-			t.Fatalf("batch c first_seq = %d, want %d (the failed batch's seqs are reused safely)", commit.FirstSeq, preSeq+1)
-		}
 		assertTraceSeqsUnique(t, records)
+
+		// The SeqAfter pre-scan reads the same segment and must not fail
+		// either. cycle-a's commit holds seq 3, so only the trailing
+		// committed batch is above the bound.
+		after, err := ReadTraceRecords(root, TraceFilter{SeqAfter: 3})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords with SeqAfter: %v", err)
+		}
+		counts = traceTestRecordCountByTraceID(after)
+		if len(counts) != 1 || counts["cycle-c"] != 3 {
+			t.Fatalf("records by trace above seq 3 = %v, want only cycle-c", counts)
+		}
 	})
 
-	t.Run("on-fresh-segment", func(t *testing.T) {
+	t.Run("glued-single-record-batch", func(t *testing.T) {
 		cityDir := t.TempDir()
 		root := traceStoreTestRoot(cityDir)
-		store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
-		if err != nil {
-			t.Fatalf("new store: %v", err)
-		}
-		defer store.Close() //nolint:errcheck
-		now := time.Now().UTC()
-		segmentPath := filepath.Join(traceDayDir(filepath.Join(root, sessionReconcilerTraceSegments), now), traceSegmentFileName(1))
-		if err := os.MkdirAll(filepath.Dir(segmentPath), sessionReconcilerTraceOwnerDirPerm); err != nil {
-			t.Fatalf("mkdir segment dir: %v", err)
-		}
-		if err := store.openSegment(segmentPath, 0, 0); err != nil {
-			t.Fatalf("openSegment: %v", err)
-		}
-		injectTraceWriteFailure(t, store, func([]byte) int { return 40 }, nil)
-		if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-b", now)}, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
-			t.Fatalf("append batch b error = %v, want ENOSPC", err)
-		}
-		appendTraceStoreTestBatch(t, store, "cycle-c", 1, time.Second, TraceDurabilityDurable)
+		path := traceTornBatchSegment(t, root, 1, false)
 
-		segments := traceStoreTestSegments(t, root)
-		if len(segments) != 1 {
-			t.Fatalf("segments = %d, want 1 (the truncated fresh segment keeps being used)", len(segments))
-		}
 		records, err := ReadTraceRecords(root, TraceFilter{})
 		if err != nil {
 			t.Fatalf("ReadTraceRecords: %v", err)
 		}
 		counts := traceTestRecordCountByTraceID(records)
-		if counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
-			t.Fatalf("records by trace = %v, want only cycle-c", counts)
+		if len(counts) != 1 || counts["cycle-a"] != 3 {
+			t.Fatalf("records by trace = %v, want only cycle-a", counts)
 		}
-		commit := traceTestCommitRecord(t, records, "cycle-c")
-		if commit.FirstSeq != 1 {
-			t.Fatalf("batch c first_seq = %d, want 1", commit.FirstSeq)
+		// The glued batch's commit sees 0 buffered records against
+		// record_count=1 while resynchronizing; only verified commits count
+		// into the segment's max seq.
+		maxSeq, ok, err := scanTraceSegment(path)
+		if err != nil || !ok {
+			t.Fatalf("scanTraceSegment = %d, %v, %v; want the segment to scan cleanly", maxSeq, ok, err)
 		}
-		assertTraceSeqsUnique(t, records)
+		if maxSeq != 3 {
+			t.Fatalf("scanTraceSegment maxSeq = %d, want 3 (cycle-a's commit seq; verified commits only)", maxSeq)
+		}
 	})
 }

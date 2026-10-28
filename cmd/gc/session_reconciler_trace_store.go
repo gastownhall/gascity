@@ -688,6 +688,9 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 	var maxSeq uint64
 	var batchRecords []SessionReconcilerTraceRecord
 	var batchCRC uint32
+	// resyncing is set after an unparseable line that is not the EOF tail,
+	// until the next batch commit.
+	resyncing := false
 	reader := bufio.NewReader(f)
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -706,29 +709,50 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 		}
 		var rec SessionReconcilerTraceRecord
 		if parseErr := json.Unmarshal(line, &rec); parseErr != nil {
-			if tolerateTail && readErr == io.EOF {
-				break
+			if readErr != nil {
+				if tolerateTail && readErr == io.EOF {
+					break
+				}
+				return nil, 0, fmt.Errorf("unmarshal trace record %s: %w", path, parseErr)
 			}
-			return nil, 0, fmt.Errorf("unmarshal trace record %s: %w", path, parseErr)
+			// A write that failed partway left a torn line, and the batch
+			// appended after it was glued onto it. The records buffered for
+			// the uncommitted batch never committed, and the glued batch lost
+			// its first record: drop the buffered records and resynchronize
+			// at the next lines.
+			batchRecords = batchRecords[:0]
+			batchCRC = 0
+			resyncing = true
+			continue
 		}
 		if rec.RecordType == TraceRecordBatchCommit {
-			if rec.RecordCount != len(batchRecords) {
-				return nil, 0, fmt.Errorf("trace batch %s: commit record_count=%d does not match buffered records=%d", path, rec.RecordCount, len(batchRecords))
+			var verifyErr error
+			switch {
+			case rec.RecordCount != len(batchRecords):
+				verifyErr = fmt.Errorf("trace batch %s: commit record_count=%d does not match buffered records=%d", path, rec.RecordCount, len(batchRecords))
+			case rec.BatchCRC32 != batchCRC:
+				verifyErr = fmt.Errorf("trace batch %s: crc32 mismatch", path)
 			}
-			if rec.BatchCRC32 != batchCRC {
-				return nil, 0, fmt.Errorf("trace batch %s: crc32 mismatch", path)
+			// A commit that does not verify is corruption, unless it closes
+			// the batch that lost its first record to a glued line. Only a
+			// verified commit counts into maxSeq.
+			if verifyErr != nil && !resyncing {
+				return nil, 0, verifyErr
 			}
-			for _, buffered := range batchRecords {
-				if matchesTraceFilter(buffered, filter) {
-					out = append(out, buffered)
+			if verifyErr == nil {
+				for _, buffered := range batchRecords {
+					if matchesTraceFilter(buffered, filter) {
+						out = append(out, buffered)
+					}
+				}
+				if matchesTraceFilter(rec, filter) {
+					out = append(out, rec)
+				}
+				if rec.Seq > maxSeq {
+					maxSeq = rec.Seq
 				}
 			}
-			if matchesTraceFilter(rec, filter) {
-				out = append(out, rec)
-			}
-			if rec.Seq > maxSeq {
-				maxSeq = rec.Seq
-			}
+			resyncing = false
 			batchRecords = batchRecords[:0]
 			batchCRC = 0
 			if readErr == io.EOF {
