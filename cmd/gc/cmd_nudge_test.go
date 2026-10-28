@@ -659,6 +659,22 @@ func (c *mailNotifyWakeCity) requireOneNotifyLine(t *testing.T, want ...string) 
 	}
 }
 
+// TestSendMailNotifyToHeldSessionReportsTheHold: a mail notice to a managed
+// session an operator holds queues, records no wake, pokes no controller,
+// and says so. Kills a city-site notice that stays silent over a hold.
+func TestSendMailNotifyToHeldSessionReportsTheHold(t *testing.T) {
+	c := newMailNotifyWakeCity(t, true)
+	if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), c.id, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	c.notify(t)
+	c.requireOneQueued(t)
+	if got := c.wakeRequest(t); c.pokes != 0 || got != "" {
+		t.Fatalf("pokes = %d, wake_request = %q; want neither for a held session", c.pokes, got)
+	}
+	c.requireOneNotifyLine(t, "queued for", "held by an operator")
+}
+
 // TestSendMailNotifyWithoutControllerReportsSkippedWake: with no controller
 // or supervisor detected, a mail notice to an asleep, unheld session is a
 // plain enqueue that requests no wake, and the line names the missing

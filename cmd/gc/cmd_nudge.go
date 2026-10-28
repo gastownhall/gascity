@@ -2156,7 +2156,9 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			return false, err
 		}
 		if outcome == session.WakeHeld {
-			return true, nil // a held session keeps the nudge queued; no poke
+			// A held session keeps the nudge queued; no poke.
+			warnMailNotify("queued for %s%s", target.agentKey(), queuedNudgeDowngradeNote(target, worker.NudgeQueuedHeld))
+			return true, nil
 		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			warnMailNotify("warning: poke failed after managed wake: %v", err)
