@@ -515,8 +515,11 @@ func (p *ladderPass) withdrawDropped(row beads.Bead, ops []string) {
 // proposeNotice proposes n's notice, whose attempt landed marked m, through
 // route, and settles the mark at once when the proposal cannot stand: the
 // route changed under the pass or a ladder notice is in flight (withdrawn),
-// the op store refuses the request itself (failed: it counts, as a delivery
-// error does), or the journal cannot be written (refused).
+// or the op store refuses the request itself (failed: it counts, as a
+// delivery error does). Any other error leaves the mark: the op may have
+// landed though the call failed (a create whose follow-up read failed), so
+// the next pass's fold reads it by id and settles its real fate, or, if it
+// never landed, settles it never proposed.
 func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e workladder.Entry, gen int64, m workladder.NoticeMark, route *ladderRoute) {
 	notice := ladderNotice(n.Key, e, p.nudgeText(row, n))
 	out, op, err := proposePlannerNotice(route.lane, row, notice)
@@ -529,13 +532,8 @@ func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e worklad
 		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
 		p.settleMark(row.ID, m.Op, workladder.NoticeFailed)
 	case err != nil:
-		fields.Reason = "notice not proposed: " + err.Error()
 		if _, logNow := route.lane.noticeFailed(tally); logNow {
-			fmt.Fprintf(p.l.stderr, "work-ladder: %s: proposing its notice about %s: %v\n", row.ID, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
-		}
-		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
-		if p.settleMark(row.ID, m.Op, workladder.NoticeRefused) {
-			p.event(events.WorkEscalated, row, n.Key, gen, workLadderEventFields{Reason: workladder.AlertNudgeRefused})
+			fmt.Fprintf(p.l.stderr, "work-ladder: %s: proposing its notice about %s: %v; the next pass settles notice %s\n", row.ID, n.Key.Bead, err, m.Op) //nolint:errcheck // best-effort stderr
 		}
 	case out == plannerNoticeDirect, out == plannerNoticePending:
 		why := "no lane serves the seat now"
@@ -556,14 +554,11 @@ func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e worklad
 	}
 }
 
-// settleMark settles row id's mark op with fate by CAS, and reports whether
-// it raised the refusal alert.
-func (p *ladderPass) settleMark(id, op string, fate workladder.NoticeFate) bool {
-	var alert bool
+// settleMark settles row id's mark op with fate, one that raises no alert
+// (failed or withdrawn), by CAS.
+func (p *ladderPass) settleMark(id, op string, fate workladder.NoticeFate) {
 	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {
-		out, a, ok := workladder.SettleNotice(r, op, fate)
-		alert = a
+		out, _, ok := workladder.SettleNotice(r, op, fate)
 		return out, ok
 	})
-	return alert
 }

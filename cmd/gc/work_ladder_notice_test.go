@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -814,6 +816,40 @@ func TestWorkLadderLostNoticeReportsItsReservedGeneration(t *testing.T) {
 	}
 }
 
+// ambiguousCreateStore, while armed, creates an op and then answers the
+// create with an error, and fails the read that follows it: a proposal that
+// landed though it reports failure.
+type ambiguousCreateStore struct {
+	laneTestStore
+	arm      atomic.Bool
+	mu       sync.Mutex
+	failRead string
+}
+
+func (s *ambiguousCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.laneTestStore.Create(b)
+	if err != nil || b.Type != opjournal.BeadType || !s.arm.Load() {
+		return created, err
+	}
+	s.mu.Lock()
+	s.failRead = created.ID
+	s.mu.Unlock()
+	return beads.Bead{}, errors.New("connection reset after the write")
+}
+
+func (s *ambiguousCreateStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	fail := id != "" && id == s.failRead
+	if fail {
+		s.failRead = ""
+	}
+	s.mu.Unlock()
+	if fail {
+		return beads.Bead{}, errors.New("connection reset")
+	}
+	return s.laneTestStore.Get(id)
+}
+
 func TestWorkLadderNoticeProposalFailures(t *testing.T) {
 	t.Run("the journal cannot be listed", func(t *testing.T) {
 		var fs *failingOpListStore
@@ -826,11 +862,49 @@ func TestWorkLadderNoticeProposalFailures(t *testing.T) {
 		fs.fail.Store(true)
 		lc.at(halfPast(1))
 		fs.fail.Store(false)
-		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 0 || e.Paused != 1 || e.Refused != 1 {
-			t.Fatalf("entry %+v, want refused at once", e)
+		// S2: the mark stands; the next pass's fold settles it.
+		if e := lc.entry(id); e.Notice.IsZero() || e.Attempts != 1 || e.Paused != 0 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want the mark kept for the next pass", e)
 		}
-		if n := len(lc.events(events.WorkNudgeFailed)); n != 1 {
-			t.Fatalf("work.nudge_failed = %d", n)
+		if n := len(lc.events(events.WorkNudgeFailed)); n != 0 {
+			t.Fatalf("work.nudge_failed = %d before the fold", n)
+		}
+		lc.at(2 * time.Minute)
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 1 || e.Paused != 0 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want counted failed: never proposed to a seat refusing nothing", e)
+		}
+		if fails := lc.events(events.WorkNudgeFailed); len(fails) != 1 || !strings.Contains(fails[0].Message, "notice not proposed") {
+			t.Fatalf("work.nudge_failed = %+v, want one from the fold", fails)
+		}
+	})
+	// S2: a proposal whose create landed though the call failed (its
+	// follow-up read failed too) keeps its mark, so the next pass's fold
+	// reads the op by id and settles its real fate: delivered, once.
+	t.Run("a proposal that landed though it failed", func(t *testing.T) {
+		var fs *ambiguousCreateStore
+		lc := newLadderLaneCityOver(t, func(s laneTestStore) beads.Store {
+			fs = &ambiguousCreateStore{laneTestStore: s}
+			return fs
+		}, "message")
+		id := lc.startedClaim()
+		lc.at(0)
+		fs.arm.Store(true)
+		lc.at(halfPast(1))
+		fs.arm.Store(false)
+		op := lc.onlyOp()
+		if e := lc.entry(id); e.Notice.Op != op.ID || e.Refused != 0 {
+			t.Fatalf("entry %+v, want its mark on the op that landed (%s)", e, op.ID)
+		}
+		if n := len(lc.events(events.WorkNudgeFailed)); n != 0 {
+			t.Fatalf("work.nudge_failed = %d for a notice that landed", n)
+		}
+		lc.closeOp(op.ID, succeeded)
+		lc.at(2 * time.Minute)
+		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 1 || e.Paused != 0 || e.Refused != 0 {
+			t.Fatalf("entry %+v, want one delivered attempt", e)
+		}
+		if n, f := len(lc.events(events.WorkNudged)), len(lc.events(events.WorkNudgeFailed)); n != 1 || f != 0 {
+			t.Fatalf("work.nudged = %d, work.nudge_failed = %d, want 1, 0", n, f)
 		}
 	})
 	t.Run("a long outage keeps one failure tally per seat", func(t *testing.T) {
