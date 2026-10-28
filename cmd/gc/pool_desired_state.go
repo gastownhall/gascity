@@ -56,6 +56,13 @@ type SessionRequest struct {
 	// rather than draining as an orphan, but takes no cap headroom and is
 	// not pool demand (PoolDesiredCounts) until its pin is ready.
 	Parked bool
+	// ParkedContinuation marks a resume request of a parked seat, or of one
+	// waking from its park, for its pre-assigned work (parkVerdict.Continues):
+	// the wake resumes the seat's conversation, so its binding keeps the
+	// seat's recorded work dir, as a live continuation's does
+	// (computePoolTriggerBindingPatch), while that dir can host the resume
+	// (parkedWorkDirUsable).
+	ParkedContinuation bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -468,16 +475,17 @@ func computePoolDesiredStatesParkedAt(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:       template,
-					BeadPriority:   beadPriorityRank(beadPriority(wb)),
-					Tier:           "resume",
-					SessionBeadID:  sessionBeadID,
-					WorkBeadID:     wb.ID,
-					WorkBeadTitle:  strings.TrimSpace(wb.Title),
-					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
-					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-					Parked:         parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
+					Template:           template,
+					BeadPriority:       beadPriorityRank(beadPriority(wb)),
+					Tier:               "resume",
+					SessionBeadID:      sessionBeadID,
+					WorkBeadID:         wb.ID,
+					WorkBeadTitle:      strings.TrimSpace(wb.Title),
+					WorkPack:           strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:      strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					BrainParentSID:     strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Parked:             parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
+					ParkedContinuation: parked.continues(sessionBeadID) && !unparkable[sessionBeadID],
 				})
 				continue
 			}

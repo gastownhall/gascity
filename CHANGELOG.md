@@ -661,20 +661,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released the step and closed the seat, so the step ran in a fresh seat
   without the conversation. The seat now stays parked (asleep, holding the
   step) until the step is ready, then wakes in place and resumes its
-  conversation. A parked seat takes no pool cap headroom; a slot-bounded pool
-  unparks its oldest seats while its slots are full (a seat it unparks parks
-  again, unrepaired, if a slot frees first); and a seat parked for 24 hours
-  falls back to the stranded repair. When the step turns ready at a full rig
-  or city cap, the seat competes with the other existing seats by bead
-  priority. If it loses while the controller keeps no other seat of its
-  agent, it is closed and the step returned to the pool, so the step runs in
-  a fresh seat as before; otherwise it still wakes, past the cap.
-  `session.stranded` now fires only for seats that do not park: a seat
-  holding started work, a crashed seat, a seat its idle timeout stopped, a
-  fresh-wake seat, a seat a full slot-bounded pool unparks, or a parked seat
-  past its bound. The core pack's `cascade-nudge-on-blocker-close` order no
-  longer nudges (and so wakes) the assignee of a dependent that another open
-  blocker still holds.
+  conversation in the work dir it ran in, even when the step's binding would
+  derive another (a managed per-bead worktree, pack metadata, a changed
+  `work_dir`); a recorded dir that is gone or in another rig is re-derived,
+  and the seat starts fresh there. A parked seat takes no pool cap headroom; a
+  slot-bounded pool unparks its oldest seats while its slots are full (a seat
+  it unparks parks again, unrepaired, if a slot frees first); and a seat
+  parked for 24 hours falls back to the stranded repair. When the step turns
+  ready at a full rig or city cap, the seat competes with the other existing
+  seats by bead priority. If it loses while the controller keeps no other seat
+  of its agent, it is closed and the step returned to the pool, so the step
+  runs in a fresh seat as before; otherwise it still wakes, past the cap.
+  `session.stranded` now fires only for seats that do not park: a seat holding
+  started work, a crashed seat, a seat its idle timeout stopped, a fresh-wake
+  seat, a seat a full slot-bounded pool unparks, or a parked seat past its
+  bound. The core pack's `cascade-nudge-on-blocker-close` order no longer
+  nudges (and so wakes) the assignee of a dependent that another open blocker
+  still holds.
 
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or

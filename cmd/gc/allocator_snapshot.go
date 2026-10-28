@@ -229,6 +229,11 @@ type bindingTarget struct {
 	// when set, must be verified by the session key before it applies.
 	WorkDir      string
 	WorktreeSpec *worktree.Spec
+	// KeptWorkDir is the recorded work dir Patch keeps over WorkDir for a
+	// parked seat's resume (parkedWorkDirKept), which the PreWake verifies
+	// still hosts the resume (parkedWorkDirUsable) and otherwise binds
+	// WorkDir instead.
+	KeptWorkDir string
 	// Patch is computePoolTriggerBindingPatch against the pass's row: what
 	// the start effect's PreWake folds (v5 S1).
 	Patch session.MetadataPatch

@@ -4282,7 +4282,11 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 	// fresh, or otherwise reusable session that will start in a newly derived
 	// worktree. currently_processing_bead_id is deliberately not required here:
 	// that secondary marker can lag the live process and must not authorize a cwd
-	// metadata rewrite while the process is still running.
+	// metadata rewrite while the process is still running. A parked seat waking
+	// for its pre-assigned work (parkedResumeContinuation) is asleep, but it
+	// resumes its conversation, whose transcript is filed under the dir it ran
+	// in, so it keeps that dir too; where the binding applies, a recorded dir
+	// that cannot host the resume is re-derived (parkedWorkDirKept).
 	if workDir != "" {
 		targetWorkDir := workDir
 		existingWorkDir := strings.TrimSpace(info.WorkDirCanonical)
@@ -4294,7 +4298,7 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 			request.SessionBeadID == info.ID &&
 			info.State == session.StateActive &&
 			info.WakeMode != "fresh"
-		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
+		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation || parkedResumeContinuation(info, request)) {
 			targetWorkDir = existingWorkDir
 		}
 		if strings.TrimSpace(info.WorkDirCanonical) != targetWorkDir {
@@ -4333,6 +4337,14 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return info, err
 	}
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
+	if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
+		if err := parkedWorkDirUsable(bp.city, bp.cityPath, cfgAgent, kept, workDir); err != nil {
+			if bp.stderr != nil {
+				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: not resuming in its recorded work dir: %v; binding %s, where it starts fresh\n", qualifiedName, info.ID, err, workDir) //nolint:errcheck // best-effort stderr
+			}
+			patch = withRederivedWorkDir(patch, info, workDir)
+		}
+	}
 	if len(patch) == 0 {
 		return info, nil
 	}

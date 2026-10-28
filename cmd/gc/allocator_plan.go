@@ -512,7 +512,9 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 	// moves to the session key that applies it). Unusable evidence leaves a
 	// start candidate out of desired, as legacy skips the item; refused
 	// evidence (#34) is unusable while its verdict stands. A live row, or one
-	// whose liveness is unknown, keeps its selection and gets no binding.
+	// whose liveness is unknown, keeps its selection and gets no binding. A
+	// parked seat's resume keeps its recorded work dir (KeptWorkDir), which
+	// the PreWake verifies as it verifies a worktree.
 	if p.snap.Entries[k].Liveness.startCandidate() {
 		workDir, err := verifiedPoolTriggerWorkDir(p.bp, cfgAgent, ref.QualifiedInstance, request)
 		if err == nil && p.worktreeRefused(request) {
@@ -522,9 +524,10 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 			p.refuse(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, gateWorktreeRefused)
 			return
 		}
-		if patch := computePoolTriggerBindingPatch(info, request, workDir); len(patch) > 0 {
+		patch := computePoolTriggerBindingPatch(info, request, workDir)
+		if kept := parkedWorkDirKept(info, request, workDir); len(patch) > 0 || kept != "" {
 			sel.binding = bindingOf(request, workDir)
-			sel.binding.Patch = patch
+			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
 		}
 	}
 	p.selected[k] = sel

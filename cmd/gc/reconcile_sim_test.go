@@ -85,9 +85,11 @@ type simRuntime struct {
 }
 
 // simStart and simKill are the spy's records of a Start and of a
-// destructive call, with the runtime it hit.
+// destructive call, with the runtime it hit. A Start records the command it
+// launched and the work dir it launched in.
 type simStart struct {
 	Name, ID, Token              string
+	Command, WorkDir             string
 	FreshOnly, External, Created bool
 }
 
@@ -296,7 +298,7 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], FreshOnly: cfg.FreshOnly, External: p.external}
+	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], Command: cfg.Command, WorkDir: cfg.WorkDir, FreshOnly: cfg.FreshOnly, External: p.external}
 	err := p.nextStart
 	p.nextStart = nil
 	if err == nil && p.rts[name] != nil {

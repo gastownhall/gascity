@@ -150,6 +150,20 @@ parked state to store or clear.
   the default `wake_mode=resume` it resumes its provider conversation (the
   `session_key` stays while its transcript exists), and `gc hook --claim`
   claims the pin by session ID.
+- The resume runs in the work dir the seat ran in, where its transcript is
+  filed. A pin's binding would otherwise derive the dir afresh: the agent's
+  `work_dir` for the seat's instance, plus the pin's `gc.pack` and
+  `gc.pack_workspace`. That dir differs from the recorded one when the seat
+  was created on a managed per-bead worktree, when its last step and its pin
+  carry different pack metadata, or when `work_dir` changed while it was
+  parked. The planner marks a parked seat's resume
+  (`SessionRequest.ParkedContinuation`), while the pin is blocked and once it
+  is ready, and `computePoolTriggerBindingPatch` keeps the recorded dir for it,
+  as it does for a live continuation. Where the binding applies (legacy's bind
+  write, v2's PreWake), the recorded dir must still be a directory in the rig
+  of the derived dir, or, when no rig owns that path, the seat's own rig. A
+  dir that is gone or in another rig is re-derived, and the seat starts fresh
+  there.
 - A slot-bounded pool (`max_active_sessions`, or a namepool) parks only while
   it keeps a free slot: once its open rows (a workless asleep seat the close
   ends this pass aside) reach the bound, its oldest parked seats fall back to

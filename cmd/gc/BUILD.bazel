@@ -1961,6 +1961,7 @@ go_test(
         "seat_hook_config_compose_test.go",
         "seat_hook_overlap_test.go",
         "seat_hook_split_city_test.go",
+        "seat_parked_resume_test.go",
         "seat_parked_test.go",
         "seat_work_helpers_test.go",
         "session_action_json_test.go",
