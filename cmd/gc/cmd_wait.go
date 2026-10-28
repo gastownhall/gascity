@@ -1340,6 +1340,9 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if !cachedSessionCanReceiveWaitNudge(sessionInfo) {
 			continue
 		}
+		if wait.HeldForPendingReset(sessionInfo) {
+			continue
+		}
 		nudgeID := waitNudgeID(wait)
 		if nudgeID == "" {
 			continue

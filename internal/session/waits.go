@@ -182,6 +182,16 @@ func (w WaitInfo) ContinuationStale(s Info) bool {
 	return c != n+1
 }
 
+// HeldForPendingReset reports whether the wait's reminder must wait for the
+// start that consumes the session's pending reset: the wait was registered for
+// the conversation that start opens, and the session is still the outgoing
+// incarnation at the registered epoch with the reset not yet consumed.
+func (w WaitInfo) HeldForPendingReset(s Info) bool {
+	return w.RegisteredResetPending &&
+		s.ContinuationEpoch == w.RegisteredEpoch &&
+		strings.TrimSpace(s.ContinuationResetPending) != ""
+}
+
 // splitWaitDepIDs splits a comma-separated dep_ids value into trimmed, non-empty
 // IDs, returning nil for a blank value. It is the confined codec for the wait
 // dependency-ID list (formerly cmd/gc's splitWaitIDs).

@@ -4920,3 +4920,124 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 		})
 	}
 }
+
+// TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset covers the
+// reminder of a wait registered while a fresh restart was pending: it is meant
+// for the conversation that restart starts, so the dispatcher holds it while
+// the outgoing incarnation is live and enqueues it once after the start.
+func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		flagged     bool
+		withdraw    bool
+		wantInReset int
+	}{
+		{name: "flagged-held-until-start", flagged: true},
+		{name: "flagged-released-when-reset-withdrawn", flagged: true, withdraw: true, wantInReset: 1},
+		{name: "unflagged-nudged-as-before", wantInReset: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setWaitTestFileBeads(t)
+			dir := t.TempDir()
+			store, err := openCityStoreAt(dir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt: %v", err)
+			}
+			sessionBead, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":               "worker",
+					"agent_name":                 "worker",
+					"continuation_epoch":         "2",
+					"state":                      string(sessionpkg.StateActive),
+					"restart_requested":          "true",
+					"continuation_reset_pending": "true",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			waitMeta := map[string]string{
+				"session_id":       sessionBead.ID,
+				"session_name":     "worker",
+				"kind":             "deps",
+				"state":            waitStateReady,
+				"dep_ids":          "gc-1",
+				"dep_mode":         "all",
+				"registered_epoch": "2",
+				"delivery_attempt": "1",
+			}
+			if tc.flagged {
+				waitMeta["registered_reset_pending"] = "true"
+			}
+			waitBead, err := store.Create(beads.Bead{
+				Type:        waitBeadType,
+				Labels:      []string{waitBeadLabel, "session:" + sessionBead.ID},
+				Description: "Pick up the next step.",
+				Metadata:    waitMeta,
+			})
+			if err != nil {
+				t.Fatalf("create wait bead: %v", err)
+			}
+			sf := sessionFrontDoor(store)
+			if tc.withdraw {
+				if err := sf.ApplyPatch(sessionBead.ID, sessionpkg.MetadataPatch{
+					"restart_requested":          "",
+					"continuation_reset_pending": "",
+				}); err != nil {
+					t.Fatalf("withdraw reset: %v", err)
+				}
+			}
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			queued := func(stage string) []queuedNudge {
+				t.Helper()
+				pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now().UTC())
+				if err != nil {
+					t.Fatalf("%s: listQueuedNudges: %v", stage, err)
+				}
+				return append(append(pending, inFlight...), dead...)
+			}
+			dispatch := func(stage string) {
+				t.Helper()
+				if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+					t.Fatalf("%s: dispatchReadyWaitNudges: %v", stage, err)
+				}
+			}
+
+			dispatch("inside the reset window")
+			if got := queued("inside the reset window"); len(got) != tc.wantInReset {
+				t.Fatalf("inside the reset window: queued %d nudges, want %d", len(got), tc.wantInReset)
+			}
+			if tc.wantInReset != 0 {
+				return
+			}
+
+			p := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+				Generation:        3,
+				InstanceToken:     "tok-3",
+				ContinuationEpoch: 3,
+				Now:               time.Now().UTC(),
+			})
+			p["restart_requested"] = ""
+			if err := sf.ApplyPatch(sessionBead.ID, p); err != nil {
+				t.Fatalf("ApplyPatch(pre-wake): %v", err)
+			}
+			if err := sf.ApplyPatch(sessionBead.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)}); err != nil {
+				t.Fatalf("ApplyPatch(active): %v", err)
+			}
+			dispatch("after the start")
+			dispatch("after the start, second pass")
+			got := queued("after the start")
+			if len(got) != 1 {
+				t.Fatalf("after the start: queued %d nudges, want 1", len(got))
+			}
+			if want := "wait-" + waitBead.ID + "-2-1"; got[0].ID != want {
+				t.Fatalf("after the start: queued nudge id = %q, want %q", got[0].ID, want)
+			}
+		})
+	}
+}
