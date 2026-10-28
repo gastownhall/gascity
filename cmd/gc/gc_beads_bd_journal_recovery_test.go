@@ -553,6 +553,24 @@ printf 'rc=%s\n' "$status"
 	})
 }
 
+func TestRunWithTimeoutRejectedDurationFallsBackToOneSecond(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		harness := "set -eu\n" + runWithTimeoutFunction(t) + `
+status=0
+run_with_timeout abc sleep 5 || status=$?
+printf 'rc=%s\n' "$status"
+`
+		out, elapsed, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
+		if want := "rc=143\n"; out != want {
+			t.Errorf("harness output = %q, want %q", out, want)
+		}
+		if elapsed < time.Second || elapsed >= 4*time.Second {
+			t.Errorf("run_with_timeout abc sleep 5 took %s, want at least the 1s fallback and well under 5s", elapsed)
+		}
+		expectProcessGroupGone(t, pgid)
+	})
+}
+
 func prodRepoState(backupDir string) string {
 	return `{"head":"refs/heads/main","backups":{"prod-backup":{"name":"prod-backup","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
 }
