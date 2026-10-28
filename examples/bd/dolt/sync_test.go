@@ -2002,3 +2002,31 @@ func TestSyncDeclaresNothingWhenNoDatabaseSkipsForRemote(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncFailedRunDeclaresNoSkipOutcome covers a run where one database fails
+// to push while another is skipped for lack of a usable remote: the failure
+// already records order.failed, so the run declares no outcome and the
+// failure summary stays the last line of output.
+func TestSyncFailedRunDeclaresNoSkipOutcome(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	writeSyncCLIDatabase(t, cityPath, "bad", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+	writeSyncCLIDatabase(t, cityPath, "hq", `{"remotes":[{"name":"origin","url":"git+ssh://example.invalid/org/hq"}]}`)
+	binDir := t.TempDir()
+	writeSyncFakeDoltCLIPushFailsForDB(t, binDir, "bad", 1)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+	out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_BAD=", "GC_DOLT_REMOTE_HQ="})
+	if err == nil {
+		t.Fatalf("expected non-zero exit when a database fails to push:\n%s", out)
+	}
+	if !strings.Contains(out, "  hq: skipped (no local remote") {
+		t.Fatalf("expected database hq to be skipped for no local remote:\n%s", out)
+	}
+	const wantLast = "sync: 1/2 database(s) failed: bad (push failed (exit 1));"
+	if got := lastSyncOutputLine(out); got != wantLast {
+		t.Fatalf("last output line = %q, want %q\nout:\n%s", got, wantLast, out)
+	}
+	assertNoCompactOutcome(t, outcomeFile)
+}
