@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/workladder"
@@ -148,8 +149,9 @@ func (c *laneCity) seatOps(conv string) []opjournal.Op {
 // TestWorkLadderLaneNoticeEndToEnd (W5 §12.3): with message on the lane, a
 // quiet pool seat holding a claim gets the ladder's reminder as a lane
 // notice. The controller's lane host types it into the
-// seat as one reminder block carrying no identifier, closes it succeeded,
-// and the ladder settles its mark from that close: one delivered attempt.
+// seat as one reminder block carrying no identifier, exactly once, closes it
+// succeeded, and the ladder settles its mark from that close: one delivered
+// attempt, reported as one work.nudged.
 func TestWorkLadderLaneNoticeEndToEnd(t *testing.T) {
 	parallelCity(t)
 	c := newLaneCityWith(t, armSQLite, activityNone, cityOptions{pool: true})
@@ -204,7 +206,9 @@ func TestWorkLadderLaneNoticeEndToEnd(t *testing.T) {
 	}
 
 	// The ladder settles the mark from the close on its next pass: one
-	// delivered attempt, no refusal, no mark left.
+	// delivered attempt, no refusal, no mark left, reported as work.nudged
+	// about the claim (the fold's event follows its write).
+	var nudged []events.Event
 	for deadline := time.Now().Add(time.Minute); ; time.Sleep(time.Second) {
 		var row beads.Bead
 		c.mustStore(func(raw beads.Store, _ *opjournal.Store) error {
@@ -222,14 +226,34 @@ func TestWorkLadderLaneNoticeEndToEnd(t *testing.T) {
 				entry = &cell.Entries[i]
 			}
 		}
+		nudged, err = events.ReadFiltered(filepath.Join(c.dir, ".gc", "events.jsonl"), events.Filter{Type: events.WorkNudged, Subject: claim})
+		if err != nil {
+			t.Fatalf("reading the city's events: %v", err)
+		}
 		if entry != nil && entry.Notice.IsZero() {
 			if entry.Attempts != 1 || entry.Refused != 0 || entry.Paused != 0 {
 				t.Fatalf("ladder entry %+v, want one delivered attempt", *entry)
 			}
-			break
+			if len(nudged) > 0 {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the ladder never settled its notice: cell %+v", cell)
+			t.Fatalf("the ladder never settled its notice, or never reported it: cell %+v, work.nudged %+v", cell, nudged)
 		}
+	}
+	if len(nudged) != 1 || nudged[0].SessionID != seat.ID {
+		t.Fatalf("work.nudged about %s = %+v, want one for seat %s", claim, nudged, seat.ID)
+	}
+
+	// Exactly once: the lane typed the block once, and nothing typed the
+	// reminder's text beside it (a direct keystroke under the lane's
+	// authority would).
+	typed = readFile(c.typedPath())
+	if n := strings.Count(typed, want); n != 1 {
+		t.Fatalf("the seat was typed the reminder block %d times, want once:\n%s", n, typed)
+	}
+	if n := strings.Count(typed, notice.Payload); n != 1 {
+		t.Fatalf("the seat was typed the reminder's text %d times, want once:\n%s", n, typed)
 	}
 }
