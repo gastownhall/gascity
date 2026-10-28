@@ -1770,6 +1770,7 @@ go_test(
         "providers_test.go",
         "quality_gate_fallback_test.go",
         "requalify_v2_test.go",
+        "requalify_stability_test.go",
         "ready_federation_test.go",
         "ready_work_api_test.go",
         "reconcile_admit_test.go",
