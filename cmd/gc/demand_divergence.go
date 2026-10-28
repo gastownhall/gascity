@@ -15,6 +15,10 @@ package main
 //   - It reads the trigger bead by id SOLELY to classify. That id is demand
 //     bookkeeping, never an assignment: nothing on the claim path may consult it
 //     to decide what to claim, and nothing here feeds back into that path.
+//   - It takes that id from the seat's live session row (gc.trigger_bead_id,
+//     via ReadSessionTrigger), never from the shell: no session env carries a
+//     trigger id, and a copy frozen at exec would name a row the controller may
+//     since have re-pointed or cleared.
 //   - It is scoped to seats the controller spawned on demand evidence
 //     (GC_SPAWN_ORIGIN=demand, presence only). A named session or a manual hook
 //     draining empty is not evidence about anything.
@@ -49,7 +53,8 @@ var demandDivergenceRecorder = openCityRecorder
 // recordDemandClaimDivergence publishes the diagnostics event for a
 // demand-spawned seat that drained with no work. It is best-effort and silent on
 // every failure: a diagnostics counter must never turn into a second failure
-// mode on the drain path.
+// mode on the drain path. A session row that cannot be read yields an empty
+// trigger, which classifies unknown.
 func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	if hookClaimEnvValue(opts.Env, "GC_SPAWN_ORIGIN") != demandSpawnOriginValue {
 		return
@@ -58,7 +63,7 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	if sessionID == "" {
 		return
 	}
-	triggerID := hookClaimEnvValue(opts.Env, "GC_TRIGGER_WORK_BEAD_ID")
+	triggerID := demandSessionTrigger(sessionID, ops)
 	status, classification := classifyDemandTrigger(triggerID, dir, opts, ops)
 	payload, err := json.Marshal(events.SessionDemandClaimDivergencePayload{
 		SessionID:            sessionID,
@@ -89,6 +94,19 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 		// seat could not see it.
 		fmt.Fprintf(stderr, "gc hook --claim: demand/claim divergence: %s is still claimable but this seat's query did not serve it\n", triggerID) //nolint:errcheck
 	}
+}
+
+// demandSessionTrigger reads the trigger stamp off the seat's session row, or
+// "" when no reader is wired or the read fails.
+func demandSessionTrigger(sessionID string, ops hookClaimOps) string {
+	if ops.ReadSessionTrigger == nil {
+		return ""
+	}
+	triggerID, err := ops.ReadSessionTrigger(sessionID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(triggerID)
 }
 
 // classifyDemandTrigger reads the trigger row and reports (status, verdict).
@@ -173,9 +191,10 @@ func classifyDemandTriggerBlockedness(triggerID, dir string, opts hookClaimOptio
 }
 
 // demandDivergenceOpsForBead is a tiny adapter so the classification read can be
-// driven directly in tests without constructing a whole claim. The blockedness
-// settlement answers "not blocked", the shape a row with no unmet plain `blocks`
-// edge produces; demandDivergenceOpsForBlockedBead drives the other answers.
+// driven directly in tests without constructing a whole claim. The session row
+// is stamped with bead's id, and the blockedness settlement answers "not
+// blocked", the shape a row with no unmet plain `blocks` edge produces;
+// demandDivergenceOpsForBlockedBead drives the other answers.
 func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
 	return demandDivergenceOpsForBlockedBead(bead, err, false, nil)
 }
@@ -185,6 +204,9 @@ func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
 // blocker or a failed dependency read.
 func demandDivergenceOpsForBlockedBead(bead beads.Bead, readErr error, blocked bool, confirmErr error) hookClaimOps {
 	return hookClaimOps{
+		ReadSessionTrigger: func(string) (string, error) {
+			return bead.ID, nil
+		},
 		ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
 			return bead, readErr
 		},

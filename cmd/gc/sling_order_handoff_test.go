@@ -19,9 +19,10 @@ import (
 //
 // Tick 1 counts demand and realizes a seat; the seat's FIRST hook cycle
 // discovers and claims through the ordinary generated-query path. The seat knows
-// it was spawned from demand (GC_SPAWN_ORIGIN) and knows which row justified it
-// (GC_TRIGGER_WORK_BEAD_ID) — and neither may influence what it claims. The pool
-// is pull: the controller scales capacity, the worker chooses.
+// it was spawned from demand (GC_SPAWN_ORIGIN); which row justified it lives
+// only on its session bead (gc.trigger_bead_id), never in its shell — and
+// neither may influence what it claims. The pool is pull: the controller scales
+// capacity, the worker chooses.
 
 // TestDemandSpawnedSeatClaimsThroughItsOwnQuery is the happy path the agreement
 // invariant is supposed to produce.
@@ -56,7 +57,7 @@ func TestDemandSpawnedSeatClaimsThroughItsOwnQuery(t *testing.T) {
 	}
 }
 
-// THE anti-assignment control. The seat's trigger env names row X, but the query
+// THE anti-assignment control. The seat's trigger stamp names row X, but the query
 // serves row Y — and the seat claims Y. If any code path ever re-reads the
 // trigger id to decide what to claim, this row fails, which is exactly what the
 // operator ruling forbids: "the controller should never be assuming which bead
@@ -65,7 +66,7 @@ func TestDemandSpawnedSeatClaimsWhatItsQueryServesNotItsTrigger(t *testing.T) {
 	h := newHandoffFixture(t)
 	trigger := h.seedRoutedWork(t, "the row the controller counted")
 	served := h.seedRoutedWork(t, "the row this seat's query served")
-	h.triggerID = trigger.ID
+	h.stampTrigger(t, trigger.ID)
 
 	result := h.runHook(t, h.workQueryServing(served))
 
@@ -89,7 +90,7 @@ func TestDemandSpawnedSeatClaimsWhatItsQueryServesNotItsTrigger(t *testing.T) {
 func TestDemandSpawnedSeatDrainsCleanlyOnAGenuineEmpty(t *testing.T) {
 	h := newHandoffFixture(t)
 	trigger := h.seedRoutedWork(t, "row a sibling already took")
-	h.triggerID = trigger.ID
+	h.stampTrigger(t, trigger.ID)
 	// A sibling claimed it between the demand read and this seat's query.
 	sibling := "gc__worker-2"
 	inProgress := "in_progress"
@@ -112,7 +113,6 @@ type handoffFixture struct {
 	cfg         *config.City
 	sessionBead beads.Bead
 	sessionName string
-	triggerID   string
 	stepStarted []string
 	drainAcked  bool
 	dir         string
@@ -154,15 +154,27 @@ func newHandoffFixture(t *testing.T) *handoffFixture {
 	}
 	h.sessionBead = sessionBead
 	h.sessionName = strings.TrimSpace(sessionBead.Metadata["session_name"])
-	h.triggerID = seedID
+	if got := sessionBead.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != seedID {
+		t.Fatalf("realized seat trigger stamp = %q, want %q", got, seedID)
+	}
 
-	// The controller marks a demand-spawned seat: presence only.
+	// The controller marks a demand-spawned seat: presence only, no trigger id.
 	for _, tp := range desired {
 		if tp.Env["GC_SPAWN_ORIGIN"] != "demand" {
 			t.Fatalf("realized seat env GC_SPAWN_ORIGIN = %q, want demand", tp.Env["GC_SPAWN_ORIGIN"])
 		}
+		assertNoTriggerBeadEnv(t, tp.Env)
 	}
 	return h
+}
+
+// stampTrigger re-points the seat's session-bead trigger stamp at beadID, as
+// the controller's next binding patch would.
+func (h *handoffFixture) stampTrigger(t *testing.T, beadID string) {
+	t.Helper()
+	if err := h.store.Update(h.sessionBead.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.TriggerBeadIDMetadataKey: beadID}}); err != nil {
+		t.Fatalf("stamping trigger %s: %v", beadID, err)
+	}
 }
 
 func (h *handoffFixture) mustSeed(t *testing.T, title string) beads.Bead {
@@ -203,7 +215,6 @@ func (h *handoffFixture) env() []string {
 		"GC_SESSION_NAME=" + h.sessionName,
 		"GC_TEMPLATE=worker",
 		"GC_SPAWN_ORIGIN=demand",
-		"GC_TRIGGER_WORK_BEAD_ID=" + h.triggerID,
 	}
 }
 
@@ -275,5 +286,9 @@ func (h *handoffFixture) ops() hookClaimOps {
 		PublishRunMap:     func(string, string, ...string) error { return nil },
 		DrainAck:          func(io.Writer) error { h.drainAcked = true; return nil },
 		ReadWorkStarted:   noStartedClaims,
+		ReadSessionTrigger: func(sessionID string) (string, error) {
+			row, err := h.store.Get(sessionID)
+			return row.Metadata[beadmeta.TriggerBeadIDMetadataKey], err
+		},
 	}
 }
