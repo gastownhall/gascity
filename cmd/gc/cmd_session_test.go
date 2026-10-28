@@ -3607,3 +3607,91 @@ func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
 }
+
+// --- Session start ownership (issue #8382) ---
+
+// sessionStartOwnershipEnv installs an isolated environment whose supervisor
+// registry ($GC_HOME/cities.toml) and runtime dirs are empty scratch dirs: no
+// supervisor and no controller are running, which is the state a registered
+// city is in across a supervisor restart. It returns a city dir with a
+// configured named session "mayor" and leaves GC_CITY pointing at it.
+func sessionStartOwnershipEnv(t *testing.T) string {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-own-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-own-run-"))
+	cityDir := shortSocketTempDir(t, "gc-own-city-")
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	return cityDir
+}
+
+// registerCityForStartOwnership writes a supervisor-registry entry for cityDir
+// into the scratch GC_HOME set by sessionStartOwnershipEnv.
+func registerCityForStartOwnership(t *testing.T, cityDir string) {
+	t.Helper()
+	registry := filepath.Join(os.Getenv("GC_HOME"), "cities.toml")
+	entry := fmt.Sprintf("[[cities]]\n  path = %q\n  name = \"fixture\"\n", cityDir)
+	if err := os.WriteFile(registry, []byte(entry), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", registry, err)
+	}
+}
+
+// TestCmdSessionNew_RegisteredCityDefersStartWhileSupervisorDown pins issue
+// #8382: a city registered with the supervisor keeps its starts
+// reconciler-owned while the supervisor is down (as across a restart). The
+// bead is created deferred (start-pending, claimed for the controller)
+// instead of the CLI starting the runtime in the caller's environment, with
+// one poke warning naming the session and the command that brings the
+// supervisor back.
+func TestCmdSessionNew_RegisteredCityDefersStartWhileSupervisorDown(t *testing.T) {
+	cityDir := sessionStartOwnershipEnv(t)
+	registerCityForStartOwnership(t, cityDir)
+	if pid := supervisorAlive(); pid != 0 {
+		t.Fatalf("supervisorAlive() = %d, want 0 (no supervisor in this environment)", pid)
+	}
+	if pid := controllerAlive(cityDir); pid != 0 {
+		t.Fatalf("controllerAlive(%q) = %d, want 0 (no controller in this environment)", cityDir, pid)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(registered, supervisor down) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var created sessionNewJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &created); err != nil {
+		t.Fatalf("unmarshal session new JSON %q: %v", stdout.String(), err)
+	}
+	if !created.DeferredStart {
+		t.Errorf("deferred_start = false, want true: a registered city's start is reconciler-owned")
+	}
+	if created.SessionID == "" {
+		t.Fatal("session_id missing from session new JSON")
+	}
+	b := onlySessionBead(t, cityDir)
+	if b.ID != created.SessionID {
+		t.Errorf("session bead = %s, want the created session %s", b.ID, created.SessionID)
+	}
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Errorf("state = %q, want %q (reconciler-owned start)", got, session.StateStartPending)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Errorf("pending_create_claim = %q, want true", got)
+	}
+
+	got := stderr.String()
+	if n := strings.Count(got, "warning:"); n != 1 {
+		t.Errorf("stderr carries %d warning lines, want exactly one:\n%s", n, got)
+	}
+	if !strings.Contains(got, "gc session new: warning: poke failed:") {
+		t.Errorf("stderr must warn that the poke found no controller:\n%s", got)
+	}
+	if !strings.Contains(got, created.SessionID) {
+		t.Errorf("warning must name the session %s:\n%s", created.SessionID, got)
+	}
+	if !strings.Contains(got, "gc supervisor start") {
+		t.Errorf("warning must tell how to start the supervisor:\n%s", got)
+	}
+}

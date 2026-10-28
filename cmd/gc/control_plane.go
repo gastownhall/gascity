@@ -490,6 +490,24 @@ func noteWorkerSitePoke(stderr io.Writer, command string, err error) bool {
 	return true
 }
 
+// noteDeferredSessionStart reports that a session create was left to the
+// reconciler after a probe poke that returned pokeErr, as one notice line on
+// stderr naming the session and the command that brings the reconciler back.
+// A worker site's notice comes through noteWorkerSitePoke instead. It
+// returns whether a controller answered the probe: a caller about to wait
+// for, or attach to, the session uses that to skip waiting when nothing has
+// been asked to start it yet.
+func noteDeferredSessionStart(stderr io.Writer, command, id string, pokeErr error) bool {
+	if pokeErr == nil {
+		return true
+	}
+	if noteWorkerSitePoke(stderr, command, pokeErr) {
+		return false
+	}
+	fmt.Fprintf(stderr, "%s: warning: poke failed: %v; session %s will start when the city's controller next reconciles (if the supervisor is stopped, run \"gc supervisor start\")\n", command, pokeErr, id) //nolint:errcheck // best-effort stderr
+	return false
+}
+
 // controllerWillReconcile reports whether a controller will act on a durable
 // session write after a poke that returned pokeErr: the poke reached one, or
 // cityPath is a worker site, whose remote controller acts at its next

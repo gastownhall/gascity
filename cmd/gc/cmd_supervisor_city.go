@@ -163,19 +163,36 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 
 // cityUsesManagedReconciler reports whether a controller manages cityPath. A
 // worker site is managed by definition: its controller is remote, so the
-// answer is true without probing a socket.
+// answer is true without probing a socket. Otherwise the answer follows
+// session start ownership: a live controller, or a city registered with the
+// supervisor, is managed whether or not the supervisor is running at this
+// moment (as across a supervisor restart), and a registry that cannot be read
+// fails closed to managed rather than reading a corrupt file as
+// "unregistered".
 func cityUsesManagedReconciler(cityPath string) bool {
+	owned, err := sessionStartOwnedByReconciler(cityPath)
+	return err != nil || owned
+}
+
+// sessionStartOwnedByReconciler reports whether starting a session in
+// cityPath belongs to a controller rather than to this CLI process: a worker
+// site, a city whose controller answers, or a city registered with the
+// supervisor, whether or not the supervisor is running now. A registry that
+// cannot be read or parsed is an error, never "unregistered"; the commands
+// that start sessions fail loudly on it instead of starting the runtime in
+// the caller's environment.
+func sessionStartOwnedByReconciler(cityPath string) (bool, error) {
 	if onWorkerSite(cityPath) {
-		return true
+		return true, nil
 	}
 	if controllerAlive(cityPath) != 0 {
-		return true
+		return true, nil
 	}
 	_, registered, err := registeredCityEntry(cityPath)
-	if err != nil || !registered {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
 	}
-	return supervisorAlive() != 0
+	return registered, nil
 }
 
 // justRestartedSupervisorPID records the PID of a supervisor we just

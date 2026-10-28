@@ -4577,6 +4577,13 @@ Create a new persistent conversation from an agent template defined
 in the loaded city configuration. By default, attaches the terminal
 after creation.
 
+Who starts the session follows who owns the city: a worker site, a city
+whose controller answers, or a city registered with the supervisor —
+whether or not the supervisor is currently running — gets a deferred
+start (the bead is created start-pending and the controller starts the
+pane at its next reconcile). Only an unregistered city with no live
+controller is started directly in this process.
+
 When --title-hint is provided without --title, the session title is
 auto-generated from the hint text: a short version is set immediately
 and refined by the title model in the background.
