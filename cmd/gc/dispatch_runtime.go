@@ -455,19 +455,12 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
-		if len(queue) == 0 {
-			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
-				idlePolls++
-				workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
-				time.Sleep(workflowServeIdlePollInterval)
-				continue
-			}
-			workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
-			return result, nil
+		if len(queue) > 0 {
+			idlePolls = 0
 		}
-		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
+		skippedCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
@@ -482,6 +475,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			callsBefore, started := snapshotControlBdCalls(), time.Now()
 			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
 				if errors.Is(err, errControlNotProcessed) {
+					skippedCount++
 					calls := snapshotControlBdCalls().since(callsBefore)
 					workflowTracef("serve skipped bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 					continue
@@ -539,6 +533,20 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
+		// An empty queue and a queue of skips alike hold no work to advance.
+		// After progress, re-poll a bounded number of times to absorb
+		// read-after-write lag in the ready source before going idle.
+		if skippedCount > 0 {
+			workflowTracef("serve skip-queue agent=%s count=%d", agentCfg.QualifiedName(), skippedCount)
+		}
+		if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
+			idlePolls++
+			workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
+			time.Sleep(workflowServeIdlePollInterval)
+			continue
+		}
+		workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
+		return result, nil
 	}
 }
 

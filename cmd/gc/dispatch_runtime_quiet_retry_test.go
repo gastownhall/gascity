@@ -67,6 +67,15 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// A no-op dispatch (a control bead that is no longer open) is
+			// neither progress nor pending, so the drain goes idle after one
+			// query and the backoff grows.
+			name:            "not-processed skip neither processes nor pends",
+			serveErr:        errControlNotProcessed,
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {

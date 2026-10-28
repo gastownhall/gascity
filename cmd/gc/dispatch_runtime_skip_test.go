@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,7 +11,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
+
+// serveQueueCallCap bounds the stubbed serve queue so a drain that spins on a
+// no-op dispatch fails fast instead of hanging the test.
+const serveQueueCallCap = 20
 
 // newSkipDispatchCity writes a minimal city with its .gc directory and routes
 // the production dispatch's scope-store opens to store. The .gc directory has
@@ -63,6 +69,54 @@ func createNonOpenScopeCheck(t *testing.T, store beads.Store, status string) bea
 	return got
 }
 
+// stubServeQueue installs a workflowServeList that answers queue() on every
+// call, failing the test once the drain queries more than serveQueueCallCap
+// times. It returns the call counter.
+func stubServeQueue(t *testing.T, queue func() []hookBead) *int {
+	t.Helper()
+	prev := workflowServeList
+	t.Cleanup(func() { workflowServeList = prev })
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls > serveQueueCallCap {
+			t.Fatalf("serve queue queried %d times: the drain re-queried with no bound", calls)
+		}
+		return queue(), nil
+	}
+	return &calls
+}
+
+// countServeDispatches wraps the production controlDispatcherServe and counts
+// dispatches per bead ID.
+func countServeDispatches(t *testing.T) map[string]int {
+	t.Helper()
+	prev := controlDispatcherServe
+	t.Cleanup(func() { controlDispatcherServe = prev })
+	counts := map[string]int{}
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
+		counts[beadID]++
+		return prev(cityPath, storePath, beadID, stdout, stderr, emits)
+	}
+	return counts
+}
+
+func controlQueueRow(b beads.Bead) hookBead {
+	return hookBead{ID: b.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: b.Metadata[beadmeta.KindMetadataKey]}}
+}
+
+func dispatchWakeFileExists(t *testing.T, cityDir string) bool {
+	t.Helper()
+	_, err := os.Stat(dispatchWakeFile(cityDir))
+	if err == nil {
+		return true
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat dispatch wake file: %v", err)
+	}
+	return false
+}
+
 // TestRunControlDispatcherNotOpenSkipContract pins both entry points on a
 // control bead that is not open: the one-shot `gc convoy control <id>` path
 // keeps returning nil with no output, while the serve seam reports the no-op as
@@ -91,5 +145,79 @@ func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
 	}
 	if got := store.closes(); got != 1 {
 		t.Fatalf("scope store closed %d times, want 1: the skip path must close the store the seam opened", got)
+	}
+}
+
+// TestDrainWorkflowServeWorkSkipsNonOpenControlWithoutSpinning is issue #6024:
+// a control bead that is no longer open but still offered by the ready queue
+// must not count as drain progress. Counted as progress, it re-queried the
+// store with no sleep and no bound, rewrote the dispatch wake file on every
+// pass, and reported processedAny so the --follow backoff never engaged.
+func TestDrainWorkflowServeWorkSkipsNonOpenControlWithoutSpinning(t *testing.T) {
+	for _, status := range []string{"closed", "in_progress"} {
+		t.Run(status, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cityDir := newSkipDispatchCity(t, store)
+			stale := createNonOpenScopeCheck(t, store, status)
+			listCalls := stubServeQueue(t, func() []hookBead { return []hookBead{controlQueueRow(stale)} })
+			dispatches := countServeDispatches(t)
+
+			result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, cityDir, cityDir, "bd ready", nil, io.Discard)
+			if err != nil {
+				t.Fatalf("drainWorkflowServeWork: %v", err)
+			}
+			if *listCalls != 1 {
+				t.Errorf("serve queue queried %d times, want 1", *listCalls)
+			}
+			if got := dispatches[stale.ID]; got != 1 {
+				t.Errorf("%s control bead dispatched %d times, want 1", status, got)
+			}
+			if result.processedAny || result.pendingAny {
+				t.Errorf("drain result = %+v, want neither processed nor pending for a skip-only drain", result)
+			}
+			if dispatchWakeFileExists(t, cityDir) {
+				t.Errorf("dispatch wake file written for a drain that only skipped a %s control bead", status)
+			}
+			got, err := store.Get(stale.ID)
+			if err != nil {
+				t.Fatalf("read control bead: %v", err)
+			}
+			if got.Status != status {
+				t.Errorf("control bead status = %q after the skip, want it left %q", got.Status, status)
+			}
+		})
+	}
+}
+
+// TestDrainWorkflowServeWorkSkipBesidePendingReportsPending: a pass holding a
+// skipped control bead and a pending one still ends through the pending-queue
+// exit and reports pendingAny; the skip only stops counting as progress.
+func TestDrainWorkflowServeWorkSkipBesidePendingReportsPending(t *testing.T) {
+	clearGCEnv(t)
+	listCalls := stubServeQueue(t, func() []hookBead {
+		return []hookBead{
+			{ID: "gc-stale", Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck}},
+			{ID: "gc-pending", Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: "retry-eval"}},
+		}
+	})
+	prevControl := controlDispatcherServe
+	t.Cleanup(func() { controlDispatcherServe = prevControl })
+	controlDispatcherServe = func(_, _, beadID string, _, _ io.Writer, _ *executionEmitDeferral) error {
+		if beadID == "gc-pending" {
+			return dispatch.ErrControlPending
+		}
+		return errControlNotProcessed
+	}
+
+	cityDir := t.TempDir()
+	result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, cityDir, cityDir, "bd ready", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if *listCalls != 1 {
+		t.Errorf("serve queue queried %d times, want 1", *listCalls)
+	}
+	if result.processedAny || !result.pendingAny {
+		t.Errorf("drain result = %+v, want pending and not processed", result)
 	}
 }
