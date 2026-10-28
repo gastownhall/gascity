@@ -1077,6 +1077,7 @@ go_test(
         "city_arg_resolve_test.go",
         "city_discovery_symlink_test.go",
         "city_layout_test.go",
+        "city_name_env_test.go",
         "city_registry_test.go",
         "city_runtime_bead_worktree_reap_test.go",
         "city_runtime_config_publication_test.go",
