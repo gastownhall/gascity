@@ -910,7 +910,9 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	cs.mu.RLock()
 	stores := []beads.Store{
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
-		cs.cityBeadStore,
+		// The city leg is a work leg (the split-strict gate's work view;
+		// identity in production).
+		splitStrictWorkView(cs.cityBeadStore),
 	}
 	// A suspended rig is not swept: it runs nothing, and a bd read restarts
 	// its retired proxy and Dolt.
@@ -920,7 +922,7 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 		if suspendedRigs[name] {
 			continue
 		}
-		rigStores[name] = store
+		rigStores[name] = splitStrictWorkView(store)
 	}
 	cs.mu.RUnlock()
 
@@ -1079,6 +1081,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	wake.OnBeadEvent(evt, snapshot)
+	// The reads after the cache application (autoclose) see the event's
+	// stores as the split-strict test gate's views (identity in production).
+	stores = splitStrictEventStores(id, stores)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheLocalActor {
 			cs.applyCommittedClose(evt, stores[0], storeRef)

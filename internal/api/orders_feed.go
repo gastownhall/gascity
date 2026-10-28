@@ -99,8 +99,11 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+
+		// debt; on the class binding the same read is legitimate.
 		// One leg of the workflowStores federation (graph, city, rigs): each
 		// leg lists only the roots it holds.
 		var roots []beads.Bead
@@ -231,8 +234,11 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+
+		// debt; on the class binding the same read is legitimate.
 		// One leg of the workflowStores federation (graph, city, rigs): each
 		// leg lists only the roots it holds.
 		var roots []beads.Bead
@@ -377,8 +383,9 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 		front := orders.NewStore(beads.OrdersStore{Store: info.store})
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// One leg of the order-feed federation (graph, orders binding, and
 		// the city and rig scopes for pre-cutover history).
 		var runs []orders.OrderRun

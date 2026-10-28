@@ -487,8 +487,9 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 		if info.store == nil {
 			continue
 		}
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// One leg of the workflowStores federation (graph, city, rigs): the
 		// root probes miss on every leg but the one that owns the run.
 		var roots []beads.Bead

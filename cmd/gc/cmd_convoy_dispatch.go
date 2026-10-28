@@ -1283,8 +1283,9 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 	if err != nil {
 		return nil, "", fmt.Errorf("opening city store: %w", err)
 	}
-	// Relic leg (S4 debt): a scope store holds this class only as rows
-	// written before the split; beads.RelicRead counts it as debt.
+	// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+	// rows only as pre-split copies, so beads.RelicRead counts the read as
+	// debt; on the class binding the same read is legitimate.
 	// A scope probe (city, then rigs, then the graph binding below): a miss
 	// moves to the next scope.
 	if _, err := beads.RelicGet(cityStore, beadID); err == nil {
@@ -1908,8 +1909,9 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 	}
 	for _, info := range stores {
 		label := workflowDeleteStoreLabelForView(cfg, cityPath, info)
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// One view of the federated sweep (scope stores and the binding):
 		// each holds only its own rows of the workflow.
 		var found []beads.Bead
@@ -3048,16 +3050,7 @@ func (c *sourceWorkflowMatchCollector) collect(currentSourceID, currentSourceSto
 		return nil
 	}
 	for i, info := range c.stores {
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
-		// One view of the source-workflow walk (scope stores and the
-		// binding): each lists only the roots and children it holds.
-		var children []beads.Bead
-		err := beads.RelicRead(func() error {
-			var scanErr error
-			children, scanErr = c.scanStore(i, info, currentSourceID, currentSourceStoreRef)
-			return scanErr
-		})
+		children, err := c.scanStore(i, info, currentSourceID, currentSourceStoreRef)
 		if err != nil {
 			return err
 		}
@@ -3099,7 +3092,16 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+	// Relic leg (S4 debt): the walk's root probe reads every view (scope
+	// stores and the binding), and a scope store holds graph roots only as
+	// rows written before the split; beads.RelicRead counts it as debt. The
+	// child-source listing below is not covered: it is ratcheted as it is.
+	var roots []beads.Bead
+	err := beads.RelicRead(func() error {
+		var listErr error
+		roots, listErr = sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+		return listErr
+	})
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
 	}
@@ -3253,8 +3255,9 @@ func assessZeroMatchSourceWorkflowScan(scans []sourceWorkflowStoreScan, sourceBe
 
 	blockingSet := make(map[string]struct{})
 	for _, view := range successfulViews {
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// One view of the zero-match re-scan; each holds only its own roots.
 		var roots []beads.Bead
 		err := beads.RelicRead(func() error {

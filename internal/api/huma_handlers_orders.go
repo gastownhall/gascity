@@ -561,8 +561,9 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows []beads.Bead
 			err  error
 		)
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// One leg of the order-history federation (rig and city scopes for
 		// pre-cutover history, the orders binding): each leg holds only its
 		// own rows.
@@ -622,8 +623,9 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 		if info.store == nil {
 			continue
 		}
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// One leg of the order-history federation; each leg holds only its
 		// own rows.
 		var rows []beads.Bead
@@ -680,8 +682,9 @@ func orderHistoryBeadAcrossStoreInfos(infos []workflowStoreInfo, beadID string) 
 		if info.store == nil {
 			continue
 		}
-		// Relic leg (S4 debt): a scope store holds this class only as rows
-		// written before the split; beads.RelicRead counts it as debt.
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
 		// A residence probe over the order-history legs.
 		bead, err := beads.RelicGet(info.store, beadID)
 		if err == nil {

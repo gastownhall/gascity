@@ -300,6 +300,9 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		storeRef := cs.autocloseStoreRefLocked(id)
 		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
 		cs.mu.RUnlock()
+		// The sweep's reads see the split-strict gate's views, like the
+		// event path's (identity in production).
+		stores = splitStrictEventStores(id, stores)
 		if len(stores) == 0 {
 			continue
 		}
