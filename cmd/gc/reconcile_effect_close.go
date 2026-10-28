@@ -195,9 +195,11 @@ type strandedWork struct {
 // strandedProbe reads the stranded branch's work, only when it applies: L5
 // found work on a pool slot that is not killed and carries no marker. The
 // detached probes run concurrently after the read, each on its own bound
-// (detachedProbeDefaultTimeout) apart from the read's; a probe that times
-// out reads not alive, as legacy's does. One the Probe's own bound cut
-// short leaves the work unsearched, so this attempt refuses.
+// (detachedProbeDefaultTimeout) apart from the read's. A probe that errors
+// or times out leaves the work unsearched, so this attempt refuses — an
+// unobservable namespace is never death, and no stamp rests on a probe that
+// did not answer — as does one the Probe's own bound cut short. Only an
+// attested death (or work with no probe) counts toward the stamp.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	if c.Kind != closePoolSlot || c.Killed || v.Fence.Work == nil || v.Fence.Work.Free ||
@@ -206,18 +208,25 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	}
 	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
 	alive := make([]bool, len(work))
+	var unobservable bool
 	var wg sync.WaitGroup
 	for i, item := range work {
 		if spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				alive[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status == detachedProbeAlive
+				switch probeDetachedWork(context.WithoutCancel(ctx), spec).Status {
+				case detachedProbeAlive:
+					alive[i] = true
+				case detachedProbeDead:
+				default:
+					unobservable = true
+				}
 			}()
 		}
 	}
 	wg.Wait()
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || unobservable {
 		return strandedWork{}, nil
 	}
 	out := strandedWork{searched: true}
