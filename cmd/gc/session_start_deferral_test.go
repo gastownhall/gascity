@@ -639,7 +639,7 @@ func TestStartGateDeferredHoldHasACeiling(t *testing.T) {
 func TestStartGateDeferredFirstChanceHoldsARowBornAfterTheLastPass(t *testing.T) {
 	t.Run("with the memo", func(t *testing.T) {
 		d := newDeferralHarness(t, 20261018, 1, true)
-		d.tick(t) // pass 1 starts the only create and stamps the pass start
+		d.tick(t) // pass 1 starts the only create and records its snapshot
 		d.env.clk.Advance(time.Second)
 		born := d.addIntent(t)
 		// A slow gap before the next pass: the new row's lease runs out
