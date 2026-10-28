@@ -130,3 +130,52 @@ func TestWorkflowExpandedBackfillCheckFixStampsLegacyExpandedRoots(t *testing.T)
 		t.Fatalf("post-fix Run status = %v, want OK: %#v", res.Status, res)
 	}
 }
+
+// TestWorkflowExpandedBackfillCheckLeavesRootOnlyRootsClaimable pins the
+// evidence rule: a root no workflow-finalize step names is root-only — the
+// root itself is the work — even when attached fragment steps (which carry no
+// finalizer) point at it, so --fix leaves it unstamped and claimable.
+func TestWorkflowExpandedBackfillCheckLeavesRootOnlyRootsClaimable(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "RO-1", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "repo/worker",
+		}},
+		{ID: "RO-2", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "repo/worker",
+		}},
+		// An attached fragment's steps name the root but bring no finalizer.
+		{ID: "RO-2.frag", Title: "fragment step", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "task", "gc.root_bead_id": "RO-2", "gc.routed_to": "repo/worker",
+		}},
+		// A finalizer for another root is not evidence about these.
+		{ID: "OTHER.finalize", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow-finalize", "gc.root_bead_id": "OTHER",
+		}},
+	}, nil)
+	check := newWorkflowExpandedBackfillCheck(nil, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("Run status = %v, want OK for root-only roots: %#v", res.Status, res)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, id := range []string{"RO-1", "RO-2"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got, ok := b.Metadata["gc.workflow_expanded"]; ok {
+			t.Errorf("%s gc.workflow_expanded = %q, want unset on a root-only root", id, got)
+		}
+		if !hookCandidateClaimable(b, []string{"repo/worker"}, time.Now()) {
+			t.Errorf("%s is no longer claimable on its route after the fix", id)
+		}
+	}
+}
