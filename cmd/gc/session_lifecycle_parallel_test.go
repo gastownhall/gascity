@@ -168,22 +168,19 @@ func (s *panicMetadataBatchStore) SetMetadataBatch(string, map[string]string) er
 	panic("metadata batch panic")
 }
 
-func TestSessionTriggerBeadEnv(t *testing.T) {
-	env := sessionTriggerBeadEnv(sessionpkg.Info{
+// TestSessionDemandSpawnEnv pins the launch-env half of the demand marker: a
+// stamped row earns exactly the presence marker, and nothing id-shaped ever
+// reaches a session shell (gascity#5738).
+func TestSessionDemandSpawnEnv(t *testing.T) {
+	stamped := sessionDemandSpawnEnv(sessionpkg.Info{
 		TriggerBeadID:       "gp-59q",
 		TriggerBeadStoreRef: "rig:gascity-packs",
 	})
-	if got := env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+	if len(stamped) != 1 || stamped["GC_SPAWN_ORIGIN"] != "demand" {
+		t.Fatalf("stamped env = %v, want exactly GC_SPAWN_ORIGIN=demand", stamped)
 	}
-	if got := env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-	}
-	if got := env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-	}
-	if got := env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+	if env := sessionDemandSpawnEnv(sessionpkg.Info{}); env != nil {
+		t.Fatalf("unstamped env = %v, want nil", env)
 	}
 }
 
@@ -9332,11 +9329,11 @@ func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver
-// re-derives GC_TRIGGER_BEAD_ID from candidate.info via sessionTriggerBeadEnv,
+// re-derives the demand marker from candidate.info via sessionDemandSpawnEnv,
 // so unless refreshConfiguredNamedStartCandidate folds the resolver's Info back
 // onto the candidate, the seat starting on the clearing tick still launches
-// aimed at the parked bead. Asserting on the resolved TemplateParams cannot
-// catch that; only prepared.cfg.Env can.
+// claiming demand evidence the clear just removed. Asserting on the resolved
+// TemplateParams cannot catch that; only prepared.cfg.Env can.
 func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{

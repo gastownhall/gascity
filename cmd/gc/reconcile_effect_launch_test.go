@@ -1109,16 +1109,18 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 }
 
 // Kills a launch env carrying the trigger the template was resolved under
-// after PreWake cleared or re-pointed it: the trigger env and the demand
-// origin follow the bound row (legacy binds, then resolves).
+// after PreWake cleared or re-pointed it: the demand origin follows the
+// bound row (legacy binds, then resolves), a stale id-shaped GC_TRIGGER_*
+// key never survives into the launch, and unrelated keys are kept
+// (gascity#5738).
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
 	for _, c := range []struct {
-		name, bind string
-		want       map[string]string
+		name, bind  string
+		wantSpawned bool
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", false},
+		{"re-pointed", "w-new", true},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1127,10 +1129,18 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
 			t.Fatalf("%s: settlement %+v, want one launch", c.name, s)
 		}
-		for key, want := range c.want {
-			if got := leaf.cfgs[0].Env[key]; got != want {
-				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+		for key := range stale {
+			if strings.HasPrefix(key, "GC_TRIGGER_") {
+				if got, ok := leaf.cfgs[0].Env[key]; ok {
+					t.Errorf("%s: launch %s = %q, want the stale trigger key scrubbed", c.name, key, got)
+				}
 			}
+		}
+		if got, ok := leaf.cfgs[0].Env["GC_SPAWN_ORIGIN"]; (ok && got == "demand") != c.wantSpawned {
+			t.Errorf("%s: launch GC_SPAWN_ORIGIN = %q (ok %v), want demand exactly when the bound row is stamped", c.name, got, ok)
+		}
+		if got := leaf.cfgs[0].Env["GC_KEEP"]; got != "1" {
+			t.Errorf("%s: launch GC_KEEP = %q, want the unrelated key kept", c.name, got)
 		}
 	}
 }
