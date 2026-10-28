@@ -3992,3 +3992,41 @@ func TestHealState_KilledRuntimeExitPreservesResumeIdentity(t *testing.T) {
 		t.Errorf("dead heal set continuation_reset_pending; patch = %v", dead)
 	}
 }
+
+// TestIsUnknownStateInfo pins the population the controller skips as a state
+// it does not manage: every known state and a drain-ack stop-pending row are
+// managed, and the rest (this binary's own archived, closing and plain
+// draining rows, a padded state, a newer version's state) are skipped. The
+// census flag v2 acts on and the v2-migration count agree with it, and
+// unknownStateRefusal refuses exactly the skipped rows, naming the raw state
+// and the close that releases the row.
+func TestIsUnknownStateInfo(t *testing.T) {
+	var rows []sessionpkg.Info
+	for state := range knownSessionStates {
+		rows = append(rows, sessionpkg.Info{ID: "gc-1", MetadataState: state})
+	}
+	rows = append(rows, sessionpkg.Info{ID: "gc-1", MetadataState: "draining", StateReason: sessionpkg.DrainAckStopPendingReason})
+	managed := len(rows)
+	for _, state := range []string{"archived", "closing", "draining", " active ", "future-state"} {
+		rows = append(rows, sessionpkg.Info{ID: "gc-1", MetadataState: state})
+	}
+	for i, info := range rows {
+		want := i >= managed
+		if got := isUnknownStateInfo(info); got != want {
+			t.Errorf("isUnknownStateInfo(state=%q reason=%q) = %v, want %v", info.MetadataState, info.StateReason, got, want)
+		}
+		if got := newCensusRow(rowKey{}, info).UnknownState; got != want {
+			t.Errorf("census UnknownState(state=%q reason=%q) = %v, want %v", info.MetadataState, info.StateReason, got, want)
+		}
+		if _, got, _, _ := v2SessionMigrationKeys(nil, "", info); got != want {
+			t.Errorf("v2SessionMigrationKeys unknown(state=%q reason=%q) = %v, want %v", info.MetadataState, info.StateReason, got, want)
+		}
+		why := unknownStateRefusal(info)
+		if (why != "") != want {
+			t.Errorf("unknownStateRefusal(state=%q reason=%q) = %q, want refused = %v", info.MetadataState, info.StateReason, why, want)
+		}
+		if want && (!strings.Contains(why, fmt.Sprintf("%q", info.MetadataState)) || !strings.Contains(why, "gc session close gc-1")) {
+			t.Errorf("unknownStateRefusal(state=%q) = %q, want the raw state and `gc session close gc-1` named", info.MetadataState, why)
+		}
+	}
+}
