@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,6 +243,8 @@ type journalRecoveryEnv struct {
 	binDir    string
 	// backupAddLog collects the fake dolt's `backup add` calls.
 	backupAddLog string
+	// shell runs the harness; empty means bash.
+	shell string
 }
 
 func setupJournalRecoveryEnv(t *testing.T) journalRecoveryEnv {
@@ -291,7 +295,11 @@ func (e journalRecoveryEnv) addDatabase(t *testing.T, name string, corrupt bool,
 // extraEnv sets it, so recovery uses its default whatever the host's
 // environment holds; a later extraEnv entry overrides an earlier one.
 func (e journalRecoveryEnv) command(harness string, extraEnv ...string) *exec.Cmd {
-	cmd := exec.Command("bash", "-c", harness)
+	shell := e.shell
+	if shell == "" {
+		shell = "bash"
+	}
+	cmd := exec.Command(shell, "-c", harness)
 	cmd.Env = append(os.Environ(),
 		"PATH="+e.binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"DATA_DIR="+e.dataDir,
@@ -379,34 +387,14 @@ func (e journalRecoveryEnv) assertNoRecoveryLeftovers(t *testing.T) {
 }
 
 func TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		runWithTimeout := runWithTimeoutFunction(t)
+		signalR, signalW := newRunWithTimeoutPipe(t, "sleep-signal")
+		releaseR, releaseW := newRunWithTimeoutPipe(t, "sleep-release")
+		commandGateR, commandGateW := newRunWithTimeoutPipe(t, "command-gate")
 
-	root := repoRootForLint(t)
-	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
-	if err != nil {
-		t.Fatalf("read script: %v", err)
-	}
-	runWithTimeout := extractShellFunction(t, string(scriptBytes), "run_with_timeout")
-
-	newPipe := func(name string) (*os.File, *os.File) {
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("create %s pipe: %v", name, err)
-		}
-		t.Cleanup(func() {
-			_ = r.Close()
-			_ = w.Close()
-		})
-		return r, w
-	}
-	signalR, signalW := newPipe("sleep-signal")
-	releaseR, releaseW := newPipe("sleep-release")
-	commandGateR, commandGateW := newPipe("command-gate")
-
-	binDir := t.TempDir()
-	writeExecutable(t, filepath.Join(binDir, "sleep"), `#!/bin/sh
+		binDir := t.TempDir()
+		writeExecutable(t, filepath.Join(binDir, "sleep"), `#!/bin/sh
 set -u
 [ "$#" -eq 1 ] && [ "$1" = "120" ] || exit 64
 : "${SLEEP_SIGNAL_FD:?}"
@@ -419,111 +407,364 @@ IFS= read -r release <&"$SLEEP_RELEASE_FD"
 printf 'finished\n' >&"$SLEEP_SIGNAL_FD"
 `)
 
-	harness := "#!/usr/bin/env bash\nset -u\n" + runWithTimeout + `
+		harness := "set -eu\n" + runWithTimeout + `
 result=$(run_with_timeout 120 sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gate" = go ]; printf command-output')
 printf 'result=%s\n' "$result"
 `
-	env := journalRecoveryEnv{binDir: binDir}
-	cmd := env.command(harness,
-		"SLEEP_SIGNAL_FD=3",
-		"SLEEP_RELEASE_FD=4",
-		"COMMAND_GATE_WRITE_FD=5",
-		"COMMAND_GATE_READ_FD=6",
-	)
-	cmd.ExtraFiles = []*os.File{signalW, releaseR, commandGateW, commandGateR}
+		env := journalRecoveryEnv{binDir: binDir, shell: shell}
+		cmd := env.command(harness,
+			"SLEEP_SIGNAL_FD=3",
+			"SLEEP_RELEASE_FD=4",
+			"COMMAND_GATE_WRITE_FD=5",
+			"COMMAND_GATE_READ_FD=6",
+		)
+		cmd.ExtraFiles = []*os.File{signalW, releaseR, commandGateW, commandGateR}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start run_with_timeout harness: %v", err)
+		}
+		_ = signalW.Close()
+		_ = releaseR.Close()
+		_ = commandGateR.Close()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		controlsReleased := false
+		releaseControls := func() {
+			if controlsReleased {
+				return
+			}
+			controlsReleased = true
+			_, _ = fmt.Fprintln(commandGateW, "go")
+			_ = commandGateW.Close()
+			_, _ = fmt.Fprintln(releaseW, "release")
+			_ = releaseW.Close()
+		}
+		signalReader := bufio.NewReader(signalR)
+		if err := signalR.SetReadDeadline(time.Now().Add(testutil.ExecRaceTimeout)); err != nil {
+			t.Fatalf("set sleep-signal deadline: %v", err)
+		}
+		var runErr error
+		doneConsumed := false
+		waitCommand := func() bool {
+			if doneConsumed {
+				return true
+			}
+			timer := time.NewTimer(testutil.ExecRaceTimeout)
+			defer timer.Stop()
+			select {
+			case runErr = <-done:
+				doneConsumed = true
+				return true
+			case <-timer.C:
+				return false
+			}
+		}
+		defer func() {
+			releaseControls()
+			if waitCommand() {
+				return
+			}
+			_ = cmd.Process.Kill()
+			runErr = <-done
+			doneConsumed = true
+		}()
+
+		var started string
+		if _, err := fmt.Fscan(signalReader, &started); err != nil || started != "started" {
+			t.Fatalf("read watchdog sleep started signal = %q (%v), want started", started, err)
+		}
+
+		completedBeforeRelease := waitCommand()
+		releaseControls()
+		if !completedBeforeRelease && !waitCommand() {
+			t.Fatal("run_with_timeout harness did not finish after releasing the watchdog sleep")
+		}
+		if runErr != nil {
+			t.Errorf("run_with_timeout harness failed: %v\nstderr: %s", runErr, stderr.String())
+		}
+		if got, want := stdout.String(), "result=command-output\n"; got != want {
+			t.Errorf("harness output = %q, want %q", got, want)
+		}
+		if got := stderr.String(); got != "" {
+			t.Errorf("harness stderr = %q, want empty", got)
+		}
+		if !completedBeforeRelease {
+			t.Fatal("run_with_timeout command substitution stayed blocked after the timed command exited because the watchdog sleep retained the substitution output pipe")
+		}
+		rest, err := io.ReadAll(signalReader)
+		if err != nil {
+			t.Fatalf("sleep-signal pipe still held open after the harness exited: %v", err)
+		}
+		if got := strings.TrimSpace(string(rest)); got != "" {
+			t.Fatalf("watchdog sleep outlived run_with_timeout: sleep-signal pipe read %q after the harness exited, want EOF", got)
+		}
+	})
+}
+
+// runWithTimeoutShells are the shells gc-beads-bd.sh must work under: bash,
+// and the system sh (dash on Debian, bash in POSIX mode on macOS).
+var runWithTimeoutShells = []string{"bash", "sh"}
+
+// forEachRunWithTimeoutShell runs fn as one subtest per shell in
+// runWithTimeoutShells, skipping shells that are not installed.
+func forEachRunWithTimeoutShell(t *testing.T, fn func(t *testing.T, shell string)) {
+	t.Helper()
+	for _, shell := range runWithTimeoutShells {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s not available; skipping shell-function test", shell)
+			}
+			fn(t, shell)
+		})
+	}
+}
+
+// runWithTimeoutFunction returns run_with_timeout as written in gc-beads-bd.sh.
+func runWithTimeoutFunction(t *testing.T) string {
+	t.Helper()
+	root := repoRootForLint(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	return extractShellFunction(t, string(scriptBytes), "run_with_timeout")
+}
+
+// newRunWithTimeoutPipe returns a pipe whose ends are closed at test cleanup.
+func newRunWithTimeoutPipe(t *testing.T, name string) (*os.File, *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create %s pipe: %v", name, err)
+	}
+	t.Cleanup(func() {
+		_ = r.Close()
+		_ = w.Close()
+	})
+	return r, w
+}
+
+func TestRunWithTimeoutStopsWatchdogSleepWhenCommandFinishes(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		runWithTimeout := runWithTimeoutFunction(t)
+		signalR, signalW := newRunWithTimeoutPipe(t, "sleep-signal")
+		releaseR, releaseW := newRunWithTimeoutPipe(t, "sleep-release")
+		commandGateR, commandGateW := newRunWithTimeoutPipe(t, "command-gate")
+
+		binDir := t.TempDir()
+		writeExecutable(t, filepath.Join(binDir, "sleep"), `#!/bin/sh
+set -u
+[ "$#" -eq 1 ] && [ "$1" = "120" ] || exit 64
+printf 'started %s\n' "$$" >&"$SLEEP_SIGNAL_FD"
+printf 'go\n' >&"$COMMAND_GATE_WRITE_FD"
+IFS= read -r release <&"$SLEEP_RELEASE_FD"
+[ "$release" = "release" ] || exit 65
+printf 'finished\n' >&"$SLEEP_SIGNAL_FD"
+`)
+
+		harness := "set -eu\n" + runWithTimeout + `
+status=0
+run_with_timeout 120 sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gate" = go ]' || status=$?
+printf 'rc=%s\n' "$status"
+`
+		env := journalRecoveryEnv{binDir: binDir, shell: shell}
+		cmd := env.command(harness,
+			"SLEEP_SIGNAL_FD=3",
+			"SLEEP_RELEASE_FD=4",
+			"COMMAND_GATE_WRITE_FD=5",
+			"COMMAND_GATE_READ_FD=6",
+		)
+		cmd.ExtraFiles = []*os.File{signalW, releaseR, commandGateW, commandGateR}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start run_with_timeout harness: %v", err)
+		}
+		_ = signalW.Close()
+		_ = releaseR.Close()
+		_ = commandGateR.Close()
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		// Opening the gate and releasing the fake sleep lets a stray command
+		// or sleep finish, so a failing run leaves nothing behind.
+		defer func() {
+			_, _ = fmt.Fprintln(commandGateW, "go")
+			_ = commandGateW.Close()
+			_, _ = fmt.Fprintln(releaseW, "release")
+			_ = releaseW.Close()
+		}()
+
+		if err := signalR.SetReadDeadline(time.Now().Add(testutil.ExecRaceTimeout)); err != nil {
+			t.Fatalf("set sleep-signal deadline: %v", err)
+		}
+		signalReader := bufio.NewReader(signalR)
+		var started string
+		var sleepPID int
+		if _, err := fmt.Fscan(signalReader, &started, &sleepPID); err != nil || started != "started" {
+			_ = cmd.Process.Kill()
+			<-done
+			t.Fatalf("read watchdog sleep started signal = %q %d (%v), want started <pid>", started, sleepPID, err)
+		}
+
+		timer := time.NewTimer(testutil.ExecRaceTimeout)
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run_with_timeout harness failed: %v\nstderr: %s", err, stderr.String())
+			}
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			<-done
+			t.Fatal("run_with_timeout harness did not return after the timed command finished")
+		}
+		if got, want := stdout.String(), "rc=0\n"; got != want {
+			t.Errorf("harness output = %q, want %q", got, want)
+		}
+		if pidAlive(sleepPID) {
+			t.Fatalf("watchdog sleep (pid %d) still runs after run_with_timeout returned; it holds every caller descriptor above 2 until the timeout", sleepPID)
+		}
+
+		_, _ = fmt.Fprintln(releaseW, "release")
+		_ = releaseW.Close()
+		rest, err := io.ReadAll(signalReader)
+		if err != nil {
+			t.Fatalf("sleep-signal pipe still held open after the harness exited: %v", err)
+		}
+		if got := strings.TrimSpace(string(rest)); got != "" {
+			t.Fatalf("sleep-signal pipe read %q after the harness exited, want EOF", got)
+		}
+	})
+}
+
+// expectPipeEOF fails unless r reports EOF within timeout, which proves that
+// every process holding the pipe's write end has exited.
+func expectPipeEOF(t *testing.T, r *os.File, timeout time.Duration, what string) {
+	t.Helper()
+	if err := r.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set %s deadline: %v", what, err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("%s: write end still held open after %s (read %q): %v", what, timeout, data, err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("%s: read %q, want EOF", what, data)
+	}
+}
+
+// runWithTimeoutInGroup runs harness under shell as the leader of a new
+// process group, with extraFiles as fds 3 and up, and returns its stdout and
+// wall time. It fails the test when the harness exits non-zero or outlives
+// budget. stderr is not checked: dash reports a TERM-killed job there.
+func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Duration, extraFiles ...*os.File) (string, time.Duration, int) {
+	t.Helper()
+	env := journalRecoveryEnv{binDir: t.TempDir(), shell: shell}
+	cmd := env.command(harness)
+	cmd.ExtraFiles = extraFiles
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start run_with_timeout harness: %v", err)
 	}
-	_ = signalW.Close()
-	_ = releaseR.Close()
-	_ = commandGateR.Close()
-
+	for _, f := range extraFiles {
+		_ = f.Close()
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
 	}()
-	controlsReleased := false
-	releaseControls := func() {
-		if controlsReleased {
-			return
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s", elapsed, err, stderr.String())
 		}
-		controlsReleased = true
-		_, _ = fmt.Fprintln(commandGateW, "go")
-		_ = commandGateW.Close()
-		_, _ = fmt.Fprintln(releaseW, "release")
-		_ = releaseW.Close()
-	}
-	signalReader := bufio.NewReader(signalR)
-	readSignal := func(name, want string) error {
-		if err := signalR.SetReadDeadline(time.Now().Add(testutil.ExecRaceTimeout)); err != nil {
-			return fmt.Errorf("set %s deadline: %w", name, err)
-		}
-		var got string
-		if _, err := fmt.Fscan(signalReader, &got); err != nil {
-			return fmt.Errorf("read %s: %w", name, err)
-		}
-		if got != want {
-			return fmt.Errorf("%s = %q, want %q", name, got, want)
-		}
-		return nil
-	}
-	var runErr error
-	doneConsumed := false
-	waitCommand := func() bool {
-		if doneConsumed {
-			return true
-		}
-		timer := time.NewTimer(testutil.ExecRaceTimeout)
-		defer timer.Stop()
-		select {
-		case runErr = <-done:
-			doneConsumed = true
-			return true
-		case <-timer.C:
-			return false
-		}
-	}
-	defer func() {
-		releaseControls()
-		if waitCommand() {
-			return
-		}
+		return stdout.String(), elapsed, cmd.Process.Pid
+	case <-timer.C:
 		_ = cmd.Process.Kill()
-		runErr = <-done
-		doneConsumed = true
-	}()
-
-	if err := readSignal("watchdog sleep started signal", "started"); err != nil {
-		t.Fatal(err)
+		<-done
+		t.Fatalf("run_with_timeout harness still running after %s", budget)
+		return "", 0, 0
 	}
+}
 
-	completedBeforeRelease := waitCommand()
-	releaseControls()
-	if err := readSignal("watchdog sleep finished signal", "finished"); err != nil {
-		t.Fatal(err)
+// expectProcessGroupGone fails when any process of group pgid still runs:
+// after the harness exits, a member can only be something a call left behind.
+func expectProcessGroupGone(t *testing.T, pgid int) {
+	t.Helper()
+	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("process group %d still has members after the harness exited (kill -0 = %v), want ESRCH", pgid, err)
 	}
-	blockedByWatchdogPipe := !completedBeforeRelease
-	if blockedByWatchdogPipe {
-		if !waitCommand() {
-			t.Fatal("run_with_timeout harness did not finish after releasing the watchdog sleep")
+}
+
+func TestRunWithTimeoutLeavesNothingAfterInstantCommands(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		heldR, heldW := newRunWithTimeoutPipe(t, "held-descriptor")
+		harness := "set -eu\n" + runWithTimeoutFunction(t) + `
+i=0
+while [ "$i" -lt 200 ]; do
+	run_with_timeout 2 true
+	i=$((i + 1))
+done
+printf 'calls=%s\n' "$i"
+`
+		out, _, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout+3*2*time.Second, heldW)
+		if want := "calls=200\n"; out != want {
+			t.Errorf("harness output = %q, want %q", out, want)
 		}
-	}
+		expectProcessGroupGone(t, pgid)
+		expectPipeEOF(t, heldR, time.Second, "caller fd 3")
+	})
+}
 
-	if runErr != nil {
-		t.Errorf("run_with_timeout harness failed: %v\nstderr: %s", runErr, stderr.String())
-	}
-	if got, want := stdout.String(), "result=command-output\n"; got != want {
-		t.Errorf("harness output = %q, want %q", got, want)
-	}
-	if got := stderr.String(); got != "" {
-		t.Errorf("harness stderr = %q, want empty", got)
-	}
-	if blockedByWatchdogPipe {
-		t.Fatal("run_with_timeout command substitution stayed blocked after the watchdog sleep released the timed command because the sleep retained the substitution output pipe")
-	}
+func TestRunWithTimeoutKillsCommandAfterTimeout(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		harness := "set -eu\n" + runWithTimeoutFunction(t) + `
+status=0
+run_with_timeout 1 sleep 5 || status=$?
+printf 'rc=%s\n' "$status"
+`
+		out, elapsed, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
+		if want := "rc=143\n"; out != want {
+			t.Errorf("harness output = %q, want %q", out, want)
+		}
+		if elapsed < time.Second || elapsed >= 4*time.Second {
+			t.Errorf("run_with_timeout 1 sleep 5 took %s, want at least 1s and well under 5s", elapsed)
+		}
+		expectProcessGroupGone(t, pgid)
+	})
+}
+
+func TestRunWithTimeoutRejectedDurationFallsBackToOneSecond(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		harness := "set -eu\n" + runWithTimeoutFunction(t) + `
+status=0
+run_with_timeout abc sleep 5 || status=$?
+printf 'rc=%s\n' "$status"
+`
+		out, elapsed, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
+		if want := "rc=143\n"; out != want {
+			t.Errorf("harness output = %q, want %q", out, want)
+		}
+		if elapsed < time.Second || elapsed >= 4*time.Second {
+			t.Errorf("run_with_timeout abc sleep 5 took %s, want at least the 1s fallback and well under 5s", elapsed)
+		}
+		expectProcessGroupGone(t, pgid)
+	})
 }
 
 func prodRepoState(backupDir string) string {

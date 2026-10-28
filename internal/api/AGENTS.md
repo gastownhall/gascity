@@ -273,6 +273,96 @@ session's turns refuse only an adopted op, which runs, so a closed stop
 replays after its session closed or its runtime stopped answering too. One
 naming another turn is 422 `idempotency_mismatch`.
 
+## Session commands under lane authority
+
+When the running lane host executes a kind (`ConversationLaneKinds`, the
+kinds `[ops] authoritative` listed at the controller's start), the session
+command that produces it writes a lane op instead of running its legacy path
+inline (`session_lane_ops.go`), and the `ops.*` gate does not govern it. A
+request whose op cannot be written is 503 `op_journal_unavailable`, nothing
+done. The API sends nothing to the runtime itself: the lane host runs the
+op, and the API awaits it (`awaitLaneOp`, through the host's
+`AwaitConversationOp`, which wakes at the end of each pass over the
+conversation) for at most `laneControlAnswerBound` (45 s, under the Go
+client's 60 s), then answers from the outcome as OJ-4 answers the same
+outcome, or 409 `in_flight` naming the op and its key, under which a retry
+adopts it.
+
+- `/stop` (interrupt listed): a key that names a stop is its retry (an open
+  lane op awaited, a closed op replayed, a coalesced row followed); one
+  naming a turn the stop did not name, a session-scoped stop's included, is
+  422 `idempotency_mismatch`, as under OJ-4. A session with no turn to stop
+  as the lane's probe reads it (closed, suspended, or its runtime not both
+  running and alive, read through the session's worker handle with its agent
+  process names: `sessionHasNoTurn`) gets no lane op, which the lane would
+  hold `not_running` until its `start_by`: a named turn is 409
+  `turn_not_current`, nothing written, and a stop naming none is 200,
+  recorded under its key as an API-executed row closed
+  `skipped{not_needed}`, its causation `stop-found-no-turn`
+  (`noTurnStopCausation`), which the request digest does not cover. The
+  stop decides before it writes that row, so a request that finds the row
+  still open (its close failed, its API died between the writes, or a
+  concurrent request is between them) closes it `skipped{not_needed}` and
+  answers 200, and one that finds it closed any other way (the sweep's
+  `failed{deadline_in_flight}`) answers 200 too (`answerLegacyStop`); it
+  reads no turn again. A runtime that cannot be observed
+  (`runtime.ErrRuntimeUnavailable`, as a t3bridge snapshot outage reads) is
+  not known to run no turn: its op goes to the lane, whose probe holds it
+  until the runtime answers. Never read "no turn" there from the provider's
+  `IsRunning`, which answers false when the runtime cannot be read. A named
+  turn keeps OJ-4's front-door checks, is keyed `stop:<gen>:<turn>` and
+  scoped to the turn, and leaves an API-executed row under the request's own
+  key closed `skipped{coalesced_into}` (`recordLaneStopUnderKey`). A
+  same-key retry that finds that row still open (its close failed, or its
+  API died between the writes) closes it into the turn's op and answers from
+  that op (`finishTurnStopRecord`), as does one that finds it closed
+  `failed{deadline_in_flight}` by the sweep, when the turn's op is a lane
+  op. Any other API-executed op still open, an OJ-4 stop left at the flip
+  included, is a stop nothing runs while the lane runs stops: under the
+  request's key it is 409 `op_already_failed`, asking for a new key, and
+  under a turn's target key it is passed over, as a target-key op that
+  closed without success is: the request stops the turn under its own key.
+  Without a named turn the op is `session(gen)` under the request's key or a
+  minted one, and the executor reads the turn. A skip is 200 for an unnamed
+  stop and 409 `turn_not_current` for a named one (any skip but
+  `not_needed`: `skipped{stale}`, or `skipped{conversation_closed}` once the
+  session closed). The lane also closes an op of an older generation
+  `skipped{stale}`, unrun, recording the generation that fenced it off
+  (`opjournal.FencedOff`), which the executor's close of an op that found no
+  turn does not. An unnamed stop whose op was fenced off carries on to the
+  session's current incarnation within the same bound, keyed
+  `stop-restarted:<stale op id>` (`carryOnStop`), whether it awaited the op
+  or a retry found it closed (the first request answered `in_flight`): a
+  lane op when that incarnation may have a turn, else an API-executed row
+  closed `skipped{not_needed}`. The carry-on is scoped no earlier than the
+  generation the lane recorded fencing the op off (`followUpScope`): the
+  lane fences against its runtime row's incarnation when that leads the
+  session row, so an op at the lagging session row's generation would be
+  fenced off again, where one at the recorded generation waits for the
+  lane's view to catch up. It is due by the fenced op's `finish_by`, so
+  every carry-on of a chain is due by the stop's own, and the stop carries
+  on only until then: a retry after that which finds no carry-on is 409
+  `op_already_failed`, nothing proposed, as is a carry-on the journal
+  refuses because that `finish_by` passed meanwhile. A retry follows the
+  carry-on, however late, and an op the lane ran is answered as it closed,
+  so a retry never stops a turn that began after the stop answered.
+- Run cancel (interrupt listed): one op per holder session with a turn to
+  stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
+  `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that
+  restarted gets its own) with the run as causation, awaited together;
+  `succeeded` is interrupted, a failure or an op still open is a failure,
+  and `skipped` neither, but an op the lane fenced off after its holder
+  restarted, as for `/stop`, is followed by the new incarnation's op when
+  that may have a turn, scoped no earlier than the generation that fenced
+  the op off, as a `/stop` carry-on is, awaited within the same bound.
+  Every cancel interrupts each live holder again, as legacy's `StopTurn` of
+  every live holder does: an op that closed before a cancel reached it is
+  followed by the next, keyed
+  `run-cancel:<run id>:<gen>:retry:<that op's id>`, so a holder's ops form a
+  chain (`proposeRunCancelInterrupt`), which a cancel walks to its first op
+  still open, awaiting it, or else extends. Overlapping cancels share one
+  open op per holder.
+
 ## The producer API and journal-row events
 
 `POST`/`GET .../session/{id}/ops`, `GET .../ops/{op}` and

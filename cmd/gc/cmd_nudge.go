@@ -1342,6 +1342,9 @@ func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryM
 type sessionNudgeResult struct {
 	queued      bool
 	undelivered worker.NudgeUndeliveredReason
+	// note, when set, is the downgrade wording for a queued nudge in place of
+	// the one undelivered names (a question dialog is not a permission prompt).
+	note string
 }
 
 // deliverSessionNudgeKeyed records the nudge as a message{role: notice} op
@@ -1438,7 +1441,7 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 		return sessionNudgeResult{}, err
 	}
 	if pending != nil {
-		return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, describeWorkerPendingInteraction(pending))
+		return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, describeWorkerPendingInteraction(pending), isQuestionInteraction(pending))
 	}
 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
 	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
@@ -1494,8 +1497,14 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 		}
 		if errors.Is(err, runtime.ErrPendingInteraction) {
 			// The prompt appeared between the probe above and delivery; the
-			// runtime refused to type into it.
-			return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, err.Error())
+			// runtime refused to type into it. Read what it is again to word
+			// the answer: a refusal carries no kind, and a prompt answered in
+			// the meantime reads as the permission prompt this path used to be.
+			what, question := err.Error(), false
+			if pending, _ := nudgeTargetPendingInteraction(target, sessStore, sp, nudgeDeliveryWaitIdle, io.Discard); pending != nil {
+				what, question = describeWorkerPendingInteraction(pending), isQuestionInteraction(pending)
+			}
+			return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, what, question)
 		}
 		if errors.Is(err, runtime.ErrSessionBusy) {
 			// The runtime typed nothing rather than interrupt the session's
@@ -1527,7 +1536,11 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 // under --json the op that backs the run (op may be nil).
 func writeSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, res sessionNudgeResult, op *cliOp, stdout, stderr io.Writer) int {
 	if res.queued {
-		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, res.undelivered, op, stdout, stderr)
+		note := res.note
+		if note == "" {
+			note = queuedNudgeDowngradeNote(target, res.undelivered)
+		}
+		return writeQueuedSessionNudgeNote(target, mode, jsonOutput, note, op, stdout, stderr)
 	}
 	if jsonOutput {
 		result := sessionNudgeJSON{
@@ -1584,12 +1597,29 @@ func describeWorkerPendingInteraction(pending *worker.PendingInteraction) string
 	return what
 }
 
+// isQuestionInteraction reports whether pending is a question dialog: no
+// response verb answers it, only a person at the terminal can.
+func isQuestionInteraction(pending *worker.PendingInteraction) bool {
+	return pending.Kind == "question"
+}
+
 // refuseOrQueueNudgeBehindPendingInteraction handles a nudge to a session that
-// is waiting on a permission prompt: wait-idle queues it for delivery after
-// the prompt is answered; immediate is refused with an explanation.
-func refuseOrQueueNudgeBehindPendingInteraction(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, what string) (sessionNudgeResult, error) {
+// is waiting on a permission prompt or a question dialog: wait-idle queues it
+// for delivery after the interaction is answered; immediate is refused with an
+// explanation of how it is answered.
+func refuseOrQueueNudgeBehindPendingInteraction(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, what string, question bool) (sessionNudgeResult, error) {
 	if mode == nudgeDeliveryWaitIdle {
+		if question {
+			return queueSessionNudgeWithNote(target, store, sp, message, worker.NudgeUndeliveredPendingInteraction, queuedNudgeQuestionNote)
+		}
 		return queueSessionNudgeWithWorker(target, store, sp, message, worker.NudgeUndeliveredPendingInteraction)
+	}
+	if question {
+		attach := target.sessionID
+		if attach == "" {
+			attach = target.agentKey()
+		}
+		return sessionNudgeResult{}, &cliMessageRefusal{why: cliOpRefusedPendingInteraction, err: fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it in the terminal (gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)}
 	}
 	return sessionNudgeResult{}, &cliMessageRefusal{why: cliOpRefusedPendingInteraction, err: fmt.Errorf("%s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what)}
 }
@@ -1859,6 +1889,12 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, undelivered worker.NudgeUndeliveredReason) (sessionNudgeResult, error) {
+	return queueSessionNudgeWithNote(target, store, sp, message, undelivered, "")
+}
+
+// queueSessionNudgeWithNote is queueSessionNudgeWithWorker with note, the
+// downgrade wording that replaces the one undelivered names ("" keeps it).
+func queueSessionNudgeWithNote(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, undelivered worker.NudgeUndeliveredReason, note string) (sessionNudgeResult, error) {
 	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
 		return sessionNudgeResult{}, err
 	}
@@ -1867,7 +1903,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
 		maybeStartNudgePoller(target)
 	}
-	return sessionNudgeResult{queued: true, undelivered: undelivered}, nil
+	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note}, nil
 }
 
 // writeQueuedSessionNudgeResult reports a queued nudge truthfully: WHERE it was
@@ -1876,6 +1912,12 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 // and, when the live leg was skipped rather than tried, WHY. op (nil when none)
 // is the op that backs the run, which --json names.
 func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, op *cliOp, stdout, stderr io.Writer) int {
+	return writeQueuedSessionNudgeNote(target, mode, jsonOutput, queuedNudgeDowngradeNote(target, undelivered), op, stdout, stderr)
+}
+
+// writeQueuedSessionNudgeNote is writeQueuedSessionNudgeResult with the
+// rendered downgrade note.
+func writeQueuedSessionNudgeNote(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, note string, op *cliOp, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		result := sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -1892,9 +1934,13 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
 		"Queued nudge for %s in %s%s\n",
-		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, queuedNudgeDowngradeNote(target, undelivered))
+		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, note)
 	return 0
 }
+
+// queuedNudgeQuestionNote is the downgrade note for a nudge queued behind a
+// question dialog, which is answered in the terminal rather than with respond.
+const queuedNudgeQuestionNote = " (the session is waiting on a question; the queued dispatcher delivers it after the question is answered in the terminal)"
 
 // queuedNudgeDowngradeNote renders the reason the live leg was skipped, or "" for
 // a nudge that was queued by request. It names the provider for the unsupported

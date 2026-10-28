@@ -45,7 +45,8 @@ type OpsConfig struct {
 	// cannot; a store served through bd can record once that bd supports
 	// --if-revision, which no released bd does yet. "off" records nothing. "require" (opt-in)
 	// refuses a request it cannot record before any effect. A change takes
-	// effect at the next process start.
+	// effect at the next process start. A kind [ops] authoritative lists is
+	// a lane op instead, which this gate does not govern.
 	ControlMode string `toml:"control,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records wake, suspend, reset (restart), kill and close requests as ops.
 	// "auto" is the default. Left unset, it records only over a SQLite
@@ -59,7 +60,7 @@ type OpsConfig struct {
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
 	// of their legacy path. The default is empty, and message is not on by
-	// default anywhere yet. This build accepts message and respond.
+	// default anywhere yet. This build accepts message, interrupt and respond.
 	// Experimental: listing message switches on the producers that write lane
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
@@ -72,9 +73,20 @@ type OpsConfig struct {
 	// runtime can steer it, else at the next boundary. It leaves the rest to
 	// the controller's lane host, and the content gate no longer governs it.
 	// The API's submit and messages, gc session submit, mail --notify, sling
-	// --nudge and wait nudges keep their legacy delivery in this build. No
-	// request surface writes respond ops yet, so listing respond changes no
-	// request's delivery in this build.
+	// --nudge and wait nudges keep their legacy delivery in this build.
+	// Listing interrupt switches the API's POST
+	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
+	// each proposes interrupt ops the controller's lane host runs, and
+	// answers from their outcomes. A stop still running after 45 s answers
+	// 409 in_flight, naming the op; run cancel lists a holder whose interrupt
+	// is still running then, or failed, in its interrupt_failures. The ops
+	// route proposes interrupt ops too, and the control gate no longer
+	// governs them. gc stop's graceful interrupt wave is lifecycle and keeps
+	// its path.
+	// gc session nudge's inline pass never runs an interrupt, a respond or a
+	// deliver-now unit: it leaves them, and content queued behind them, to
+	// the controller's lane host. No request surface writes respond ops yet,
+	// so listing respond changes no request's delivery in this build.
 	// The city's controller, standalone or supervisor-hosted, runs the lane
 	// host that delivers lane ops, and gc doctor reports a listed kind as an
 	// error when no lane host serves the city. A keystroke-mode runtime (tmux)
@@ -86,12 +98,12 @@ type OpsConfig struct {
 	// A listed kind needs a sessions store with guarded batches. A change
 	// takes effect at the controller's next start; gc session nudge reads it
 	// at once.
-	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=respond"`
+	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
 // execute, so the only kinds [ops] authoritative accepts.
-var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindRespond}
+var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindInterrupt, opjournal.KindRespond}
 
 // LaneExecutes reports whether [ops] authoritative lists kind.
 func (o OpsConfig) LaneExecutes(kind string) bool {

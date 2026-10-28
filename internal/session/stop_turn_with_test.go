@@ -1161,3 +1161,34 @@ func TestStopTurnWithBoundaryDecidesAnUnobservedIdleWait(t *testing.T) {
 		})
 	}
 }
+
+// A restart decided when the caller's deadline leaves less than the restart
+// may take (stopTurnRestartBound) is withheld: it runs apart from ctx and
+// would outlive the caller's lease, leaving a stopped runtime under a lease
+// another host may take. The runtime is left running, and the error wraps
+// ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable.
+func TestStopTurnWithRestartWithheldPastItsDeadline(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("agent not idle before timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), stopTurnRestartBound-time.Second)
+	defer cancel()
+	report, err := mgr.StopTurnWith(ctx, info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+	if report.Restarted || !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+		t.Fatalf("StopTurnWith(restart, short deadline) = %+v, %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", report, err)
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Stop") + countMethod(sp.SnapshotCalls(), "Start"); n != 0 || !sp.IsRunning(info.SessionName) {
+		t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
+	}
+}
+
+// A deadline that covers the restart's bound lets the restart run.
+func TestStopTurnWithRestartRunsWithinACoveringDeadline(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("agent not idle before timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), stopTurnRestartBound+time.Minute)
+	defer cancel()
+	report, err := mgr.StopTurnWith(ctx, info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+	if err != nil || !report.Restarted {
+		t.Fatalf("StopTurnWith(restart, covering deadline) = %+v, %v; want a restart, nil", report, err)
+	}
+}

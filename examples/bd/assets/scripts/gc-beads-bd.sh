@@ -340,14 +340,35 @@ tcp_check() {
     tcp_check_port "$DOLT_PORT"
 }
 
+# run_with_timeout runs "$@" and sends it TERM once timeout_seconds elapse
+# (after 1s when sleep rejects the duration), returning its status. The
+# watchdog's sleep inherits every caller descriptor above 2 (op_start's fd 9
+# lock), so it must not outlive the call: the TERM that stops the watchdog
+# KILLs and reaps that sleep. KILL because a child that has forked but not
+# yet exec'd sleep runs the inherited trap and would swallow TERM. `stopped`
+# covers a TERM that lands before sleep_pid is set.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift
     "$@" &
     local cmd_pid=$!
     (
-        sleep "$timeout_seconds" 2>/dev/null || sleep 1
-        kill "$cmd_pid" 2>/dev/null || true
+        stopped=
+        sleep_pid=
+        trap 'stopped=1; [ -z "$sleep_pid" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true' TERM
+        for duration in "$timeout_seconds" 1; do
+            [ -z "$stopped" ] || break
+            sleep "$duration" 2>/dev/null &
+            sleep_pid=$!
+            [ -z "$stopped" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true
+            if wait "$sleep_pid"; then
+                sleep_pid=
+                break
+            fi
+            wait "$sleep_pid" 2>/dev/null || true
+            sleep_pid=
+        done
+        [ -n "$stopped" ] || kill "$cmd_pid" 2>/dev/null || true
     ) </dev/null >/dev/null 2>&1 &
     local watchdog_pid=$!
     local status=0
@@ -4707,6 +4728,19 @@ else
     }
 fi
 
+fsync_stall_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-fsync-stall.sh"
+if [ -r "$fsync_stall_helper" ]; then
+    . "$fsync_stall_helper"
+else
+    # Focused shell harnesses can run gc-beads-bd without sibling assets. The
+    # production helper is the only copy of the detector, so say that the
+    # guard is missing rather than silently dropping it.
+    recovery_should_skip_due_to_fsync_stall() {
+        echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside gc-beads-bd" >&2
+        return 1
+    }
+fi
+
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
     local read_only_status
@@ -4725,6 +4759,16 @@ op_recover() {
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2
         die "dolt recovery skipped: ENOSPC detected"
+    fi
+
+    # Skip recovery while the data directory's fsync is stalled. One stalled
+    # commit fsync freezes the whole Dolt server, so a live but unresponsive
+    # Dolt is waiting on storage; restarting it cannot fix that and adds
+    # recovery fsync load. Nothing to protect when Dolt is not listening.
+    if tcp_check && recovery_should_skip_due_to_fsync_stall; then
+        echo "skipping dolt recovery: the data directory's fsync is stalled; Dolt is waiting on storage, a restart cannot fix that" >&2
+        echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
+        die "dolt recovery skipped: storage stall"
     fi
 
     if load_recover_managed_from_gc; then

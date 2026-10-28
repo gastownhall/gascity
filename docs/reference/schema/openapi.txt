@@ -2705,7 +2705,7 @@
             "type": "string"
           },
           "context_epoch": {
-            "description": "Context epoch the operation ran in.",
+            "description": "Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.",
             "format": "int64",
             "type": "integer"
           },
@@ -2714,7 +2714,7 @@
             "description": "The conversation lane's delivery record."
           },
           "generation": {
-            "description": "Session generation the operation ran in.",
+            "description": "Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.",
             "format": "int64",
             "type": "integer"
           },
