@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 func TestEnsureProjectIDCmdRequiresCityFlag(t *testing.T) {
@@ -138,33 +139,31 @@ func startRealDoltServer(t *testing.T, repoDir, password string, setupQueries ..
 		run("sql", "-q", "CREATE USER 'root'@'%' IDENTIFIED BY '"+password+"'; GRANT ALL ON *.* TO 'root'@'%';")
 	}
 
-	port := reserveRandomTCPPort(t)
-	cmd := exec.Command(doltPath, "sql-server", "--host", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--allow-cleartext-passwords", "--loglevel=warning")
-	cmd.Dir = repoDir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start dolt sql-server: %v", err)
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltPath,
+		Args: func(port int) []string {
+			return []string{"sql-server", "--host", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--allow-cleartext-passwords", "--loglevel=warning"}
+		},
+		Dir: repoDir,
+	})
+	port := srv.Port
+	cleanup := func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
 	}
 
 	t.Setenv("GC_DOLT_PASSWORD", password)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := managedDoltQueryProbeDirect("127.0.0.1", fmt.Sprintf("%d", port), "root"); err == nil {
-			cleanup := func() {
-				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
-				_, _ = cmd.Process.Wait()
-			}
-			return repoDir, port, cmd.Process.Pid, cleanup
+			return repoDir, port, srv.PID, cleanup
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
-	t.Fatalf("dolt sql-server on %d did not become query-ready", port)
+	cleanup()
+	serverLog, _ := os.ReadFile(srv.LogPath)
+	t.Fatalf("dolt sql-server on %d did not become query-ready:\n%s", port, serverLog)
 	return "", 0, 0, func() {}
 }
 

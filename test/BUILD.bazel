@@ -49,6 +49,7 @@ test_suite(
         "//test/conversationlane:conversationlane_integration_solo_tests",
         "//test/conversationlane:conversationlane_test",
         "//test/dashport:dashport_test",
+        "//test/dolttest:dolttest_test",
     ],
 )
 

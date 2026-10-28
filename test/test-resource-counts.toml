@@ -694,7 +694,7 @@ calls = 3
 [[count]]
 path = "cmd/gc/dolt_project_id_test.go"
 resource = "subprocess"
-calls = 2
+calls = 1
 
 [[count]]
 path = "cmd/gc/dolt_runtime_test_helpers_test.go"
@@ -1297,7 +1297,7 @@ tagged = true
 [[count]]
 path = "examples/bd/dolt/compact_real_dolt_test.go"
 resource = "subprocess"
-calls = 5
+calls = 4
 tagged = true
 
 [[count]]
@@ -1437,26 +1437,14 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
-path = "examples/gastown/dolt_orphan_sweep_integration_test.go"
-resource = "subprocess"
-calls = 1
-tagged = true
-
-[[count]]
 path = "examples/gastown/gastown_test.go"
 resource = "subprocess"
 calls = 11
 
 [[count]]
 path = "examples/gastown/maintenance_bd_integration_test.go"
-resource = "fixed_sleep"
-calls = 1
-tagged = true
-
-[[count]]
-path = "examples/gastown/maintenance_bd_integration_test.go"
 resource = "subprocess"
-calls = 3
+calls = 2
 tagged = true
 
 [[count]]
@@ -1478,7 +1466,7 @@ tagged = true
 [[count]]
 path = "examples/gastown/maintenance_scripts_dolt_integration_test.go"
 resource = "subprocess"
-calls = 4
+calls = 3
 tagged = true
 
 [[count]]
@@ -1867,12 +1855,6 @@ calls = 1
 [[count]]
 path = "internal/beads/native_dolt_store_integration_test.go"
 resource = "fixed_sleep"
-calls = 1
-tagged = true
-
-[[count]]
-path = "internal/beads/native_dolt_store_integration_test.go"
-resource = "subprocess"
 calls = 1
 tagged = true
 
@@ -3162,26 +3144,14 @@ tagged = true
 
 [[count]]
 path = "test/integration/bdstore_test.go"
-resource = "fixed_sleep"
-calls = 1
-tagged = true
-
-[[count]]
-path = "test/integration/bdstore_test.go"
 resource = "subprocess"
-calls = 6
-tagged = true
-
-[[count]]
-path = "test/integration/dolt_config_test.go"
-resource = "fixed_sleep"
-calls = 1
+calls = 5
 tagged = true
 
 [[count]]
 path = "test/integration/dolt_config_test.go"
 resource = "subprocess"
-calls = 10
+calls = 9
 tagged = true
 
 [[count]]
