@@ -487,6 +487,38 @@ func TestRenderSupervisorSystemdTemplateUsesPreserveEnvFromData(t *testing.T) {
 	}
 }
 
+// TestBuildSupervisorServiceDataPersistsTMUXTMPDIRNotTMPDIR pins the tmux
+// namespace contract (issue #5526): the supervisor spawns the tmux servers
+// its sessions live in, and TMUX_TMPDIR decides which socket namespace a
+// server and its clients resolve to, so the service must carry the invoking
+// shell's TMUX_TMPDIR or the supervisor and the CLI probe different
+// namespaces. TMPDIR is never consulted by tmux and must stay out.
+func TestBuildSupervisorServiceDataPersistsTMUXTMPDIRNotTMPDIR(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	tmuxTmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving tmux tmp dir: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
+	t.Setenv("TMPDIR", t.TempDir())
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["TMUX_TMPDIR"] != tmuxTmpDir {
+		t.Fatalf("ExtraEnv[TMUX_TMPDIR] = %q, want %q (all env: %#v)", got["TMUX_TMPDIR"], tmuxTmpDir, got)
+	}
+	if got["TMPDIR"] != "" {
+		t.Fatalf("ExtraEnv[TMPDIR] = %q, want omitted: tmux never consults TMPDIR (all env: %#v)", got["TMPDIR"], got)
+	}
+}
+
 func TestBuildSupervisorServiceDataTreatsPreserveSignalEnvAsFixed(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
