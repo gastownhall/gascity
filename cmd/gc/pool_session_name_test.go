@@ -715,7 +715,7 @@ func TestLiveSessionBeadExistsByIdentity_SkipsClosedSessionBead(t *testing.T) {
 		directSessions: map[string]beads.Bead{"worker-mc-dead": closed},
 	}
 
-	if liveSessionBeadExistsByIdentity(store, "worker-mc-dead") {
+	if liveSessionBeadExistsByIdentity(store, nil, "worker-mc-dead") {
 		t.Error("liveSessionBeadExistsByIdentity = true, want false for closed session bead")
 	}
 }
@@ -747,7 +747,7 @@ func TestLiveSessionBeadExistsByIdentity_SkipsNonSessionBead(t *testing.T) {
 		directSessions: map[string]beads.Bead{"worker-mc-task": notSession},
 	}
 
-	if liveSessionBeadExistsByIdentity(store, "worker-mc-task") {
+	if liveSessionBeadExistsByIdentity(store, nil, "worker-mc-task") {
 		t.Error("liveSessionBeadExistsByIdentity = true, want false for non-session bead")
 	}
 }

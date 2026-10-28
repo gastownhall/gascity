@@ -980,8 +980,9 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 // identifiers with the session's stable alias (stableAssignmentAliasForConfig)
 // and with the configured named-session identity when a recovered bead is
 // missing identity metadata. Keep these additions aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
-// AwakeNamedSession fields.
+// sessionAssigneeMatches, compute_awake_bridge's AwakeSessionBead.Alias and
+// AwakeNamedSession fields, and the dead-assignee sweep's
+// sweepSessionIdentities.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
 	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
 	raw = append(raw, configuredNamedFallbackIdentities(sessionBead, cfg)...)
