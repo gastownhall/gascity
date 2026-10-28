@@ -272,6 +272,12 @@ type crashScenario struct {
 	// ignoreMetadataKeys are excluded from the comparison for a known,
 	// tracked divergence. Each use must cite its bead.
 	ignoreMetadataKeys []string
+	// stopWritesBeforePrefix halts the fault sweep before the first write
+	// whose op starts with this prefix (the prefix write itself is not
+	// faulted), bounding a scenario to a write window whose crash recovery is
+	// in scope. Everything after the bound still runs — the whole run still
+	// converges per fault position — it is only never faulted.
+	stopWritesBeforePrefix string
 }
 
 type ledgerBead struct {
@@ -588,6 +594,9 @@ func runCrashScenario(t *testing.T, sc crashScenario) {
 
 	for _, mode := range []writeFaultMode{writeFaultCrash, writeFaultTransient} {
 		for n := 1; n <= totalWrites; n++ {
+			if sc.stopWritesBeforePrefix != "" && strings.HasPrefix(writeOps[n-1], sc.stopWritesBeforePrefix) {
+				break
+			}
 			inj := &writeFaultInjector{mode: mode, faultAt: n}
 			fx := sc.build(t, func(s beads.Store) beads.Store { return faultStore{Store: s, f: inj} })
 			errs := serveToQuiescence(t, fx, inj)

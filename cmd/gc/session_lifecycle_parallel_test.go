@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1742,6 +1743,67 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 
 	if prepared.cfg.Command != "opencode acp" {
 		t.Fatalf("prepared.cfg.Command = %q, want ACP command without CLI resume flag", prepared.cfg.Command)
+	}
+}
+
+// TestPrepareStartCandidate_RecordedACPTransportKeepsACPLaunch covers a
+// session recorded on ACP whose template now resolves the CLI transport: the
+// prepared start keeps the template's ACP launch, its core hash matches the
+// drift hash, and one notice names the session and "gc session close".
+func TestPrepareStartCandidate_RecordedACPTransportKeepsACPLaunch(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":            "worker",
+			"session_name":        "worker",
+			"session_key":         "opencode-provider-session",
+			"started_config_hash": "previous-start",
+			"transport":           "acp",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := sessiontest.SeedBead(t, session)
+	tp := cliTemplateWithACPLaunch()
+
+	var logs bytes.Buffer
+	prevOutput, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	})
+
+	prepared, err := prepareStartCandidate(startCandidate{info: info, tp: tp, order: 0},
+		&config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if prepared.cfg.Command != "opencode acp" {
+		t.Errorf("prepared.cfg.Command = %q, want the ACP launch %q without a CLI resume flag", prepared.cfg.Command, "opencode acp")
+	}
+	if want := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, info)); prepared.coreHash != want {
+		t.Errorf("prepared.coreHash = %q, want the drift hash %q", prepared.coreHash, want)
+	}
+	var notices []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "recorded ACP transport") {
+			notices = append(notices, line)
+		}
+	}
+	if len(notices) != 1 {
+		t.Fatalf("notices = %q, want exactly one", notices)
+	}
+	for _, want := range []string{`session "worker"`, `template "worker"`, `gc session close worker`} {
+		if !strings.Contains(notices[0], want) {
+			t.Errorf("notice %q missing %q", notices[0], want)
+		}
 	}
 }
 

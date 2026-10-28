@@ -526,8 +526,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
 		pending, err := ops.DrainPending(sessionID)
 		switch {
+		case hookDrainProbeFailsClosed(err):
+			// A standing storage refusal fails CLOSED; see
+			// hookDrainProbeFailsClosed for why it is not a transient.
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
+			return hookClaimResult{terminal: true, code: reportHookDrainFenceClosed("gc hook --claim", sessionID, err, stderr)}
 		case err != nil:
-			// Fail open. This probe is one store read on every agent turn in the
+			// Fail open on a transient fault. This probe is one store read on every agent turn in the
 			// city, so a store hiccup here must not idle every healthy seat; the
 			// drain lanes remain the backstop exactly as they are today. Name the
 			// fault without the alarming refusal wording, the same shape the
@@ -2247,14 +2252,38 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 // identityCandidates, blocks. A root with no input convoy, or a convoy with
 // no resolvable members, is never "done".
 func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
+}
+
+// workflowRootIDForInputCheck is the workflow root workflowInputDone resolves
+// candidate to: itself when it carries gc.input_convoy_id, else its
+// gc.root_bead_id. It returns "" for a candidate that is not part of a
+// workflow (no root, or its own root without an input convoy).
+func workflowRootIDForInputCheck(candidate beads.Bead) string {
+	if strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) != "" {
+		return candidate.ID
+	}
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == candidate.ID {
+		return ""
+	}
+	return rootID
+}
+
+// workflowInputDoneAcross is workflowInputDone with the workflow's two halves
+// read from their own stores: the root and its steps from graph, the input
+// convoy and its members from work. On a single-store city both are the same
+// store; on a split city the root lives in the binding and the synthetic input
+// convoy, which is work class, beside the work it tracks.
+func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	root := candidate
 	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
-		rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-		if rootID == "" || rootID == candidate.ID {
+		rootID := workflowRootIDForInputCheck(candidate)
+		if rootID == "" {
 			return "", false, nil
 		}
 		var err error
-		root, err = store.Get(rootID)
+		root, err = graph.Get(rootID)
 		if err != nil {
 			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
@@ -2263,7 +2292,7 @@ func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidat
 	if convoyID == "" {
 		return root.ID, false, nil
 	}
-	members, err := convoy.Members(store, convoyID, true)
+	members, err := convoy.Members(work, convoyID, true)
 	if err != nil {
 		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
 	}
@@ -2280,7 +2309,7 @@ func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidat
 			// (typically dead, its steps reopened), not another lane: the
 			// member was never handed off (sys-pxryan.44).
 			if workflowSeats == nil {
-				workflowSeats, err = workflowStepAssignees(store, root.ID)
+				workflowSeats, err = workflowStepAssignees(graph, root.ID)
 				if err != nil {
 					return root.ID, false, err
 				}

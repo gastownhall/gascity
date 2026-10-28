@@ -63,6 +63,21 @@
 #   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
 #       gives up on a concurrent initializer and fails closed instead of
 #       proceeding unprotected, in milliseconds (default: 60000).
+#   GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS — how long start's automatic
+#       journal-corruption recovery lets one `dolt backup restore` run
+#       before stopping it (default: 45; 0 = no limit). gc SIGKILLs the
+#       provider's start operation after 120s. The default fits everything
+#       before the restored copy is swapped in inside that: the server start
+#       attempt that reported the corruption (up to 30s), the corrupt
+#       database's offline probe (up to 30s; a healthy one answers in well
+#       under a second), the restore, and the backup's registration on the
+#       restored copy (up to 10s). So a restore that runs out of time fails
+#       start with a message, and one that finishes is swapped in, before
+#       the kill. The server start after the swap (up to 30s) does not have
+#       to fit: a start killed there leaves the restored database in place.
+#       A restore that runs out of time leaves the corrupt store in place
+#       and fails start. `gc dolt start`, which gc runs with no time limit,
+#       sets 0, so a large database can finish restoring.
 
 set -e
 
@@ -325,14 +340,35 @@ tcp_check() {
     tcp_check_port "$DOLT_PORT"
 }
 
+# run_with_timeout runs "$@" and sends it TERM once timeout_seconds elapse
+# (after 1s when sleep rejects the duration), returning its status. The
+# watchdog's sleep inherits every caller descriptor above 2 (op_start's fd 9
+# lock), so it must not outlive the call: the TERM that stops the watchdog
+# KILLs and reaps that sleep. KILL because a child that has forked but not
+# yet exec'd sleep runs the inherited trap and would swallow TERM. `stopped`
+# covers a TERM that lands before sleep_pid is set.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift
     "$@" &
     local cmd_pid=$!
     (
-        sleep "$timeout_seconds" 2>/dev/null || sleep 1
-        kill "$cmd_pid" 2>/dev/null || true
+        stopped=
+        sleep_pid=
+        trap 'stopped=1; [ -z "$sleep_pid" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true' TERM
+        for duration in "$timeout_seconds" 1; do
+            [ -z "$stopped" ] || break
+            sleep "$duration" 2>/dev/null &
+            sleep_pid=$!
+            [ -z "$stopped" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true
+            if wait "$sleep_pid"; then
+                sleep_pid=
+                break
+            fi
+            wait "$sleep_pid" 2>/dev/null || true
+            sleep_pid=
+        done
+        [ -n "$stopped" ] || kill "$cmd_pid" 2>/dev/null || true
     ) </dev/null >/dev/null 2>&1 &
     local watchdog_pid=$!
     local status=0
@@ -2921,91 +2957,405 @@ database_journal_corrupt() {
     return "$probe_hit"
 }
 
-# backup_remote_url_for_recovery prints the <db>-backup remote URL recorded in
-# a database's repo_state.json. The file is plain JSON, so the URL is readable
-# even when the noms store itself can no longer be opened. Handles both the
-# object form ("backups": {"db-backup": {"url": "..."}}) and the legacy plain
-# string form.
-backup_remote_url_for_recovery() {
-    local recovery_db="$1" recovery_db_dir="$2" repo_state url
-    repo_state="$recovery_db_dir/.dolt/repo_state.json"
-    [ -f "$repo_state" ] || return 1
+# backup_registry_entries prints one `name<TAB>url` line for each backup
+# registered in a database's repo_state.json, which stays readable as plain
+# JSON when the noms store itself can no longer be opened. An entry is a key
+# of the top-level "backups" object, in either shape the file has used: the
+# object form ("name": {"url": "..."}) and the legacy plain string form. An
+# entry without a string URL prints an empty URL: callers select by presence
+# and fail closed on an unusable URL. Without jq, a small awk scanner tracks
+# strings and nesting, so a key of any other object (a remote or a tracked
+# branch named `default`, a field inside a backup's own object) is never read
+# as a backup.
+backup_registry_entries() {
     if command -v jq >/dev/null 2>&1; then
-        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url? // .backups[$name] // empty' "$repo_state" 2>/dev/null)
-    else
-        url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-        if [ -z "$url" ]; then
-            url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-        fi
+        jq -r '(.backups // {}) | objects | to_entries[] | [.key, ((.value.url? // .value) | (strings // ""))] | @tsv' "$1" 2>/dev/null
+        return
     fi
-    [ -n "$url" ] || return 1
-    printf '%s\n' "$url"
+    awk '
+        function in_backups() {
+            return kind[1] == "{" && key[1] == "backups" && kind[2] == "{"
+        }
+        { text = text $0 "\n" }
+        END {
+            n = length(text)
+            i = 1
+            while (i <= n) {
+                c = substr(text, i, 1)
+                if (c == "\"") {
+                    str = ""
+                    for (i++; i <= n; i++) {
+                        c = substr(text, i, 1)
+                        if (c == "\"") break
+                        if (c == "\\") {
+                            i++
+                            c = substr(text, i, 1)
+                            if (c != "\"" && c != "\\" && c != "/") c = "\\" c
+                        }
+                        str = str c
+                    }
+                    i++
+                    j = i
+                    while (j <= n && index(" \t\r\n", substr(text, j, 1)) > 0) j++
+                    if (j <= n && substr(text, j, 1) == ":") {
+                        key[depth] = str
+                        if (depth == 2 && in_backups()) {
+                            if (!(str in url)) names[++count] = str
+                            url[str] = ""
+                        }
+                        i = j + 1
+                    } else if (depth == 2 && in_backups()) {
+                        url[key[2]] = str
+                    } else if (depth == 3 && in_backups() && kind[3] == "{" && key[3] == "url") {
+                        url[key[2]] = str
+                    }
+                    continue
+                }
+                if (c == "{" || c == "[") {
+                    depth++
+                    kind[depth] = c
+                    key[depth] = ""
+                } else if (c == "}" || c == "]") {
+                    depth--
+                }
+                i++
+            }
+            for (k = 1; k <= count; k++) printf "%s\t%s\n", names[k], url[names[k]]
+        }
+    ' "$1"
 }
 
-# backup_restore_source_usable reports whether url points at a local backup
-# that actually has content to restore from. Only file:// remotes qualify:
-# remote backups cannot be cheaply verified, and restoring from an unverified
-# source is exactly the kind of silent data movement auto-recovery must not do.
-backup_restore_source_usable() {
-    local usable_url="$1" usable_path
-    case "$usable_url" in
-        file://*) usable_path="${usable_url#file://}" ;;
-        *) return 1 ;;
+# backup_registry_has_backup reports whether a backup name is registered in
+# repo_state.json. Presence means the key exists, not that its URL is usable:
+# the caller fails closed on an unusable selection rather than silently
+# skipping to a lower-precedence backup.
+backup_registry_has_backup() {
+    backup_registry_entries "$1" | cut -f1 | grep -qxF -- "$2"
+}
+
+# backup_registry_backup_url prints the URL recorded for a registered backup
+# name, or an empty line when the entry has none.
+backup_registry_backup_url() {
+    backup_registry_entries "$1" | awk -F '\t' -v name="$2" '$1 == name { url = $2 } END { print url }'
+}
+
+# backup_registry_summary prints a compact name=url listing of every backup
+# registered in a database's repo_state.json, for refusal diagnostics: the
+# operator judging a manual restore needs to see every registered backup,
+# not just the one recovery selected.
+backup_registry_summary() {
+    local repo_state="$1/.dolt/repo_state.json" summary
+    [ -f "$repo_state" ] || { printf 'none (no repo_state.json)'; return 0; }
+    summary=$(backup_registry_entries "$repo_state" | awk -F '\t' '{ printf "%s%s=%s", (NR > 1 ? ", " : ""), $1, $2 }')
+    printf '%s' "${summary:-none registered}"
+}
+
+# backup_remote_url_for_recovery prints the backup a journal-corrupt database
+# should be restored from, as `name<TAB>url`. It selects the first of bd's
+# canonical `default` backup (the name mol-dog-backup has registered via
+# `bd backup init` since #6751) and the legacy <db>-backup name that is
+# registered in the database's repo_state.json. Selection is by presence
+# only; the caller decides usability and fails closed instead of falling
+# through to a lower-precedence backup — the legacy entry stopped being
+# synced when #6751 renamed it. Returns 1 when neither name is registered.
+backup_remote_url_for_recovery() {
+    local recovery_db="$1" recovery_db_dir="$2" repo_state name
+    repo_state="$recovery_db_dir/.dolt/repo_state.json"
+    [ -f "$repo_state" ] || return 1
+    for name in default "${recovery_db}-backup"; do
+        if backup_registry_has_backup "$repo_state" "$name"; then
+            printf '%s\t%s\n' "$name" "$(backup_registry_backup_url "$repo_state" "$name")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# backup_restore_refusal prints why auto-recovery must not restore database
+# db from the backup at url, or nothing when it may. Only a non-empty local
+# file:// directory qualifies: remote backups cannot be cheaply verified, and
+# restoring from an unverified source is exactly the kind of silent data
+# movement auto-recovery must not do. A directory that another database in
+# the data dir also registers is refused too: a shared backup directory holds
+# whichever database synced to it last.
+backup_restore_refusal() {
+    local refusal_db="$1" refusal_url="$2" refusal_path other_dir other_state
+    case "$refusal_url" in
+        '') printf 'it has no URL'; return 0 ;;
+        file://*) refusal_path="${refusal_url#file://}" ;;
+        *) printf 'it is not a local file:// backup'; return 0 ;;
     esac
-    [ -d "$usable_path" ] || return 1
-    [ -n "$(ls -A "$usable_path" 2>/dev/null)" ]
+    if [ ! -d "$refusal_path" ]; then
+        printf 'its directory %s does not exist' "$refusal_path"
+        return 0
+    fi
+    if [ -z "$(ls -A "$refusal_path" 2>/dev/null)" ]; then
+        printf 'its directory %s is empty' "$refusal_path"
+        return 0
+    fi
+    for other_dir in "$DATA_DIR"/*/; do
+        other_state="${other_dir}.dolt/repo_state.json"
+        if [ "$(basename "$other_dir")" = "$refusal_db" ] || [ ! -f "$other_state" ]; then
+            continue
+        fi
+        if backup_registry_entries "$other_state" | cut -f2 | grep -qxF -- "$refusal_url"; then
+            printf 'database %s registers the same directory, and a shared backup directory holds whichever database synced to it last' "$(basename "$other_dir")"
+            return 0
+        fi
+    done
+}
+
+# journal_recovery_note reports one journal-recovery step on stderr and
+# appends it, timestamped, to $LOG_FILE. The provider's caller keeps stderr
+# only when an op fails, so the log is the durable record of a recovery that
+# succeeded, and operators need that record: a restored database is missing
+# every write since its last backup sync.
+journal_recovery_note() {
+    printf 'gc-beads-bd: %s\n' "$1" >&2
+    [ -n "${LOG_FILE:-}" ] || return 0
+    printf '%s gc-beads-bd: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$LOG_FILE" ||
+        printf 'gc-beads-bd: could not record the line above in %s\n' "$LOG_FILE" >&2
+}
+
+# reregister_restored_backup registers the backup database db was just
+# restored from on the restored copy in dir, while the server is still down.
+# `dolt backup restore` leaves the copy with no backups registered, and
+# nothing else adds one back: mol-dog-backup.sh asks bd, whose record of the
+# destination (.beads/dolt-backup.json) survives the restore, so every later
+# sync would fail and a second corruption would find nothing to restore from.
+# `dolt backup add` only opens the store and rewrites repo_state.json, which
+# takes a fraction of a second even for a gigabyte-scale copy, so it is
+# stopped after 10s: the registration runs before the restored copy is
+# swapped in, inside gc's start operation (see
+# GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS in the header). Returns 1, after
+# saying so loudly, when the registration fails.
+reregister_restored_backup() {
+    local rereg_dir="$1" rereg_db="$2" rereg_name="$3" rereg_url="$4" rereg_state
+    rereg_state="$rereg_dir/.dolt/repo_state.json"
+    if [ -f "$rereg_state" ] && backup_registry_has_backup "$rereg_state" "$rereg_name"; then
+        journal_recovery_note "restored '$rereg_db' still registers backup '$rereg_name'"
+        return 0
+    fi
+    if (cd "$rereg_dir" && run_with_timeout 10 dolt backup add "$rereg_name" "$rereg_url") >> "$LOG_FILE" 2>&1; then
+        journal_recovery_note "re-registered backup '$rereg_name' at $rereg_url on the restored '$rereg_db'"
+        return 0
+    fi
+    journal_recovery_note "WARNING: restored '$rereg_db' has no backup registered and is not backed up until it has one: with the server down, run \"dolt backup add $rereg_name '$rereg_url'\" in $DATA_DIR/$rereg_db (see $LOG_FILE)"
+    return 1
+}
+
+# journal_restore_limit prints how many seconds the automatic recovery lets
+# one `dolt backup restore` run, 0 meaning no limit: the whole number in
+# GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS, else 45, which keeps the restore
+# inside gc's start operation (see the header).
+journal_restore_limit() {
+    case "${GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS:-45}" in
+        *[!0-9]*)
+            journal_recovery_note "ignoring GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS='$GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS', which is not a whole number of seconds; using 45"
+            printf '45\n'
+            ;;
+        *) printf '%s\n' "${GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS:-45}" ;;
+    esac
+}
+
+# restore_backup_within runs `dolt backup restore url db` in the current
+# directory, stopping it after limit seconds unless limit is 0.
+restore_backup_within() {
+    local within_limit="$1" within_url="$2" within_db="$3"
+    if [ "$within_limit" -gt 0 ]; then
+        run_with_timeout "$within_limit" dolt backup restore "$within_url" "$within_db"
+    else
+        dolt backup restore "$within_url" "$within_db"
+    fi
+}
+
+# restore_swap_refusal prints why recovery cannot move databases between
+# each given directory and $DATA_DIR by renaming them, or nothing when it can.
+# Across filesystems mv copies instead, and a start killed during the copy
+# leaves a partial database where recovery relies on a whole one. A hard link
+# cannot cross filesystems either, so linking a file from each directory into
+# $DATA_DIR proves that a rename between them is atomic.
+restore_swap_refusal() {
+    local swap_dir swap_err swap_link="${DATA_DIR:?}/.gc-restore-fs-probe"
+    for swap_dir in "$@"; do
+        if ! swap_err=$(mkdir -p "$swap_dir" 2>&1); then
+            printf 'could not create %s: %s' "$swap_dir" "$swap_err"
+            return 0
+        fi
+        rm -f "$swap_dir/.gc-restore-fs-probe" "$swap_link"
+        if ! swap_err=$({ : > "$swap_dir/.gc-restore-fs-probe" && ln "$swap_dir/.gc-restore-fs-probe" "$swap_link"; } 2>&1); then
+            rm -f "$swap_dir/.gc-restore-fs-probe" "$swap_link"
+            printf '%s is not on the filesystem of %s (%s), and recovery moves a database only by renaming it' "$swap_dir" "$DATA_DIR" "$swap_err"
+            return 0
+        fi
+        rm -f "$swap_dir/.gc-restore-fs-probe" "$swap_link"
+    done
+}
+
+# finish_interrupted_journal_recovery puts the data dir in order after a
+# journal-corruption recovery that was killed or failed part way, and runs
+# before the server starts: a server started without a database serves the
+# city without it, and init then creates it as an empty bead store. A
+# restored copy in restore-ready/ whose database is missing from $DATA_DIR,
+# where a recovery stopped between moving the corrupt store aside and moving
+# the copy in, is moved into place. One whose database is in $DATA_DIR is
+# removed, and so is a partial restore in restore-staging/. Stores preserved
+# under corrupt-aside/ are never touched. Returns 1, after a CRITICAL note,
+# while a database is still missing.
+finish_interrupted_journal_recovery() {
+    local staging="${PACK_STATE_DIR:?}/restore-staging" ready="${PACK_STATE_DIR:?}/restore-ready"
+    local entry db refusal missing=0
+    if [ -d "$staging" ] && [ -n "$(ls -A "$staging")" ]; then
+        if rm -rf "${staging:?}"; then
+            journal_recovery_note "removed $staging, left by an interrupted restore"
+        else
+            journal_recovery_note "could not remove $staging, left by an interrupted restore"
+        fi
+    fi
+    for entry in "$ready"/*/; do
+        [ -d "$entry" ] || continue
+        db=$(basename "$entry")
+        if [ -e "$DATA_DIR/$db" ]; then
+            if rm -rf "${ready:?}/${db:?}"; then
+                journal_recovery_note "removed $ready/$db, left by an interrupted recovery: '$db' is in $DATA_DIR"
+            else
+                journal_recovery_note "could not remove $ready/$db, left by an interrupted recovery: '$db' is in $DATA_DIR"
+            fi
+            continue
+        fi
+        refusal=$(restore_swap_refusal "$ready")
+        if [ -z "$refusal" ] && mv "$ready/$db" "$DATA_DIR/$db"; then
+            journal_recovery_note "RESTORED '$db' by moving in $ready/$db, which an interrupted recovery restored from its backup — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept under $PACK_STATE_DIR/corrupt-aside"
+        else
+            journal_recovery_note "CRITICAL: '$db' is missing from $DATA_DIR, and the copy an interrupted recovery restored could not be moved in from $ready/$db${refusal:+ ($refusal)}; the pre-corruption store is under $PACK_STATE_DIR/corrupt-aside. Move one of them to $DATA_DIR/$db before the server starts"
+            missing=1
+        fi
+    done
+    return "$missing"
 }
 
 # attempt_journal_corruption_recovery scans the data dir for databases whose
-# noms journal dolt refuses to load, preserves each corrupt store under
-# $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
-# from its local <db>-backup remote (#3176). Fail-closed: when any corrupt
-# database has no usable backup or the restore fails, its store is moved back
-# so the server cannot come up silently missing a database, and the function
-# returns 1. Returns 0 only when at least one database was restored and none
-# were left unrecoverable. Everything is logged loudly — restored copies are
-# missing all writes since the last backup sync, and operators must know that.
+# noms journal dolt refuses to load and restores each from its registered
+# local backup (#3176): bd's canonical `default` backup when present, else
+# the legacy <db>-backup remote. The restore runs in
+# $PACK_STATE_DIR/restore-staging/ and the backup is registered on the
+# restored copy again. Only the finished copy moves to restore-ready/, and
+# then two renames run back to back: the corrupt store to
+# $PACK_STATE_DIR/corrupt-aside/ (never deleted), the copy into its place.
+# Until then the store stays in place: a restore that fails, runs out of time
+# (journal_restore_limit), or is SIGKILLed with gc's start operation leaves
+# it untouched, not an empty database that the next start would initialize
+# as a fresh bead store. A start killed between the two renames leaves the
+# database missing from $DATA_DIR; finish_interrupted_journal_recovery, which
+# op_start runs before it starts the server, moves the copy in from
+# restore-ready/ and removes a partial restore from restore-staging/. Every
+# move is a rename, so recovery refuses while those directories are not on
+# $DATA_DIR's filesystem (restore_swap_refusal), and no move targets an
+# existing path, which mv would move the source into.
+# Fail-closed: when the selected backup is unusable or the restore does not
+# succeed, the function returns 1 so the server cannot come up silently
+# missing a database. Returns 0 only when at least one database was
+# restored and none were left unrecoverable. Every step is reported through
+# journal_recovery_note, so it reaches $LOG_FILE as well as stderr: restored
+# copies are missing all writes since the last backup sync, and operators
+# must know that.
 attempt_journal_corruption_recovery() {
-    local aside_root="$PACK_STATE_DIR/corrupt-aside"
-    local ts db_dir db aside url recovered=0
+    local aside_root="${PACK_STATE_DIR:?}/corrupt-aside" staging="${PACK_STATE_DIR:?}/restore-staging" ready="${PACK_STATE_DIR:?}/restore-ready"
+    local ts db_dir db aside sel backup_name url refusal manual_url manual_hint limit began recovered=0
     ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
-    echo "gc-beads-bd: journal corruption reported at startup; probing databases in $DATA_DIR" >&2
+    limit=$(journal_restore_limit)
+    journal_recovery_note "journal corruption reported at startup; probing databases in $DATA_DIR"
     for db_dir in "$DATA_DIR"/*/; do
         [ -d "$db_dir/.dolt" ] || continue
         db=$(basename "$db_dir")
         database_journal_corrupt "$db_dir" || continue
-        echo "gc-beads-bd: journal corruption confirmed in database '$db'" >&2
-        url=$(backup_remote_url_for_recovery "$db" "$db_dir") || url=""
-        if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
-            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (remote url: ${url:-none})" >&2
-            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
-            return 1
-        fi
-        mkdir -p "$aside_root" || return 1
-        aside="$aside_root/$db.$ts"
-        if ! mv "$DATA_DIR/$db" "$aside"; then
-            echo "gc-beads-bd: could not move corrupt store $DATA_DIR/$db aside to $aside; aborting recovery" >&2
-            return 1
-        fi
-        echo "gc-beads-bd: preserved corrupt store at $aside" >&2
-        if (cd "$DATA_DIR" && run_with_timeout 600 dolt backup restore "$url" "$db") >> "$LOG_FILE" 2>&1; then
-            recovered=$((recovered + 1))
-            echo "gc-beads-bd: RESTORED '$db' from backup $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
-        else
-            # Fail closed: put the corrupt store back so the server cannot
-            # start without this database and silently drop it from the
-            # control plane. The partial restore output (if any) is fresh
-            # data written by the failed restore, not original state.
-            rm -rf "${DATA_DIR:?}/${db:?}" 2>/dev/null || true
-            if ! mv "$aside" "$DATA_DIR/$db"; then
-                echo "gc-beads-bd: CRITICAL: restore failed AND corrupt store could not be moved back; original data is at $aside" >&2
+        journal_recovery_note "journal corruption confirmed in database '$db'"
+        sel=$(backup_remote_url_for_recovery "$db" "$db_dir") || sel=""
+        # The manual command names the selected URL only when it may work: a
+        # usable backup that recovery cannot swap in, or a remote backup an
+        # operator can choose to trust. An empty, missing or shared local
+        # directory gets a placeholder instead.
+        manual_url='<url>'
+        manual_hint=", with <url> a backup from the registered backups listed above that holds this database"
+        if [ -n "$sel" ]; then
+            backup_name=$(printf '%s' "$sel" | cut -f1)
+            url=$(printf '%s' "$sel" | cut -f2)
+            refusal=$(backup_restore_refusal "$db" "$url")
+            if [ -n "$refusal" ]; then
+                refusal="selected backup '$backup_name' (url: ${url:-none}) cannot be restored automatically: $refusal"
+                case "$url" in
+                    '' | file://*) ;;
+                    *)
+                        manual_url="$url"
+                        manual_hint=""
+                        ;;
+                esac
+            else
+                refusal=$(restore_swap_refusal "$staging" "$ready" "$aside_root")
+                manual_url="$url"
+                manual_hint=""
             fi
-            echo "gc-beads-bd: backup restore failed for '$db' (see $LOG_FILE); not retrying" >&2
+        else
+            backup_name=""
+            url=""
+            refusal="neither backup default nor ${db}-backup is registered"
+        fi
+        if [ -n "$refusal" ]; then
+            journal_recovery_note "NOT auto-recovering '$db': $refusal"
+            journal_recovery_note "candidate backups checked: default, ${db}-backup; registered backups: $(backup_registry_summary "$db_dir")"
+            journal_recovery_note "manual recovery required: move $DATA_DIR/$db aside, then run \"dolt backup restore '$manual_url' $db\" from $DATA_DIR$manual_hint"
             return 1
         fi
+        if [ "$limit" -gt 0 ]; then
+            journal_recovery_note "restoring '$db' from backup '$backup_name' at $url in $staging; an automatic restore may take ${limit}s, and \"gc dolt start\" lets it run to completion"
+        else
+            journal_recovery_note "restoring '$db' from backup '$backup_name' at $url in $staging"
+        fi
+        began=$(date +%s)
+        if ! (cd "$staging" && restore_backup_within "$limit" "$url" "$db") >> "$LOG_FILE" 2>&1; then
+            # Only the staging copy is partial; the store was never moved.
+            rm -rf "${staging:?}"
+            if [ "$limit" -gt 0 ] && [ "$(($(date +%s) - began))" -ge "$limit" ]; then
+                journal_recovery_note "backup restore of '$db' did not finish within ${limit}s and was stopped; $DATA_DIR/$db is untouched. Run \"gc dolt start\", which lets the restore run to completion, then \"gc start\""
+            else
+                journal_recovery_note "backup restore failed for '$db' (see $LOG_FILE); $DATA_DIR/$db is untouched; not retrying"
+            fi
+            return 1
+        fi
+        # A failed registration is reported by the helper and flagged by
+        # mol-dog-doctor's backup coverage check; the restore stands.
+        reregister_restored_backup "$staging/$db" "$db" "$backup_name" "$url" || true
+        aside="$aside_root/$db.$ts"
+        if [ -e "$ready/$db" ] || [ -e "$aside" ] || ! mv "$staging/$db" "$ready/$db"; then
+            rm -rf "${staging:?}"
+            journal_recovery_note "could not move the restored '$db' to $ready/$db, or $aside is taken; $DATA_DIR/$db is untouched; aborting recovery"
+            return 1
+        fi
+        if ! mv "$DATA_DIR/$db" "$aside"; then
+            rm -rf "${ready:?}/${db:?}"
+            journal_recovery_note "could not move corrupt store $DATA_DIR/$db aside to $aside; aborting recovery"
+            return 1
+        fi
+        if [ -e "$DATA_DIR/$db" ] || ! mv "$ready/$db" "$DATA_DIR/$db"; then
+            # Fail closed: put the corrupt store back so the server cannot
+            # start without this database. The restored copy stays in
+            # restore-ready/ unless the store is back, and the next start
+            # moves it in.
+            if [ ! -e "$DATA_DIR/$db" ] && mv "$aside" "$DATA_DIR/$db"; then
+                rm -rf "${ready:?}/${db:?}"
+                journal_recovery_note "could not move the restored '$db' into $DATA_DIR; the corrupt store is back in place"
+            else
+                journal_recovery_note "CRITICAL: the restored '$db' could not be moved into $DATA_DIR AND the corrupt store could not be moved back; original data is at $aside, the restored copy at $ready/$db"
+            fi
+            return 1
+        fi
+        recovered=$((recovered + 1))
+        journal_recovery_note "preserved corrupt store at $aside"
+        journal_recovery_note "RESTORED '$db' from backup '$backup_name' at $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside"
     done
+    rm -rf "${staging:?}"
     if [ "$recovered" -eq 0 ]; then
-        echo "gc-beads-bd: no corrupt database confirmed by offline probe; not recovering" >&2
+        journal_recovery_note "no corrupt database confirmed by offline probe; not recovering"
         return 1
     fi
     return 0
@@ -3169,6 +3519,12 @@ op_start() {
             fi
         fi
     fi
+
+    # A journal-corruption recovery stopped between its two renames leaves a
+    # database's restored copy in restore-ready/, and the server must not
+    # start without it.
+    finish_interrupted_journal_recovery ||
+        die "a database is missing from $DATA_DIR after an interrupted journal-corruption recovery (check $LOG_FILE)"
 
     local journal_recovery_attempted=false
     while :; do

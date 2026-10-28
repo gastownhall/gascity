@@ -191,6 +191,9 @@ type buildDoctorChecksOpts struct {
 	// out and the probe's result cannot affect warmup output — it would only
 	// add up to doctorBeadStorePreflightTimeout of startup latency.
 	SkipStorePreflight bool
+	// Warmup builds the checks for gc start's warm-up scan: checks that
+	// would do slow work (the bd command-tree walk) report from caches only.
+	Warmup bool
 	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
@@ -294,6 +297,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoltDriftCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
+		// A split city's gc bd refuses everything when the scope's bd matches
+		// no pinned command-tree inventory (bd_inventory_trust.go).
+		if opts.Warmup {
+			register(newWarmupBdInventoryCheck(cityPath, cfg))
+		} else {
+			register(newBdInventoryCheck(cityPath, cfg))
+		}
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
 		register(reconcilerCheck)

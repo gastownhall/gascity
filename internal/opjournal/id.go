@@ -32,6 +32,10 @@ const (
 	maxTokenLen        = 128
 )
 
+// MaxClientKeyLen is the longest client key, in bytes, Propose accepts
+// (ValidateClientKey).
+const MaxClientKeyLen = maxClientKeyLen
+
 // The id families this package mints itself. ownIDFamilies is the one list of
 // them: PinnedID refuses each, and every <family>IDInfix of this package is
 // "-" + one of them + "-" (TestOwnIDFamiliesCoverEveryInfix), so a family

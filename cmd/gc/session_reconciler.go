@@ -2285,11 +2285,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Skip beads with unrecognized states. This enables forward-compatible
-		// rollback: if a newer version writes "draining" or "archived", the
-		// older reconciler ignores those beads rather than crashing. The skip is
-		// preserved; the previously per-tick stderr line is now a throttled,
+		// rollback: a newer version's states, and this binary's own archived and
+		// draining rows, are ignored rather than crashing the reconciler. An
+		// interrupted close of this binary's own (a close code left on an open
+		// row when the status Close was lost) is finished first instead, or
+		// rolled back to asleep when its gate now refuses it, and the next tick
+		// takes the asleep row (finishInterruptedClose). The skip is a throttled,
 		// durable session.unknown_state signal (folded onto the tick snapshot).
 		if !isKnownStateInfo(info) {
+			if gate, ok := interruptedCloseGate(info); ok {
+				fold, closed := finishInterruptedClose(cityPath, store, sw, sp, cfg, dt, info, gate, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, trace, clk, stderr)
+				if closed {
+					tick.markClosed(id)
+					continue
+				}
+				if fold != nil {
+					tick.apply(id, fold)
+					continue
+				}
+			}
 			if fold := emitSessionUnknownStateDiagnostic(store, info, snapshot, rec, clk, stderr); fold != nil {
 				tick.apply(id, fold)
 			}
@@ -3113,6 +3127,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
+				detail := "live runtime belongs to another session"
+				if identity.otherEpochOfThisSession() {
+					// The live runtime is this session's own earlier or later
+					// incarnation: held while its work is in flight, re-decided
+					// every tick, and rolled back like any other incarnation's
+					// once none is left or it exits.
+					if holdsOverLiveIncarnation(sw, infoPostZombie, identity, name, tp.TemplateName, dt, stderr, trace, clk.Now()) {
+						continue
+					}
+					detail = "a live incarnation of this session holds no in-progress work"
+				}
 				live, leaseErr := ownStartNotLive, error(nil)
 				if identity.unstamped() {
 					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
@@ -3162,7 +3187,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 				// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
-				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
+				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", detail, false))
 				continue
 			case pendingCreateRuntimeUnknown:
 				// The live runtime may be this create's own, and the rollback
@@ -5766,8 +5791,10 @@ const unknownStateEscalationAge = 30 * time.Minute
 // emitSessionUnknownStateDiagnostic surfaces a session bead whose metadata
 // state the reconciler does not recognize. The caller preserves the
 // forward-compatible skip (an older reconciler ignores a newer writer's state
-// rather than crashing); this turns the previously per-tick stderr line into a
-// throttled signal. It logs and records events.SessionUnknownState only on
+// rather than crashing) and finishes this binary's own interrupted closes
+// before it (finishInterruptedClose), so a half-closed row the finisher closes
+// never reaches it. This turns the per-tick stderr line into a throttled
+// signal. It logs and records events.SessionUnknownState only on
 // first sight or when the raw state changes to a different unrecognized value,
 // then re-records once with escalated=true after the bead has sat unrecognized
 // past unknownStateEscalationAge. Throttle state is read off the projected typed

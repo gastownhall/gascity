@@ -48,7 +48,27 @@ func (c *CachingStore) ApplyEventSnapshot(eventType string, payload json.RawMess
 	c.applyEvent(eventType, payload, true)
 }
 
+// ApplyResidentEventSnapshot is ApplyEventSnapshot for an event whose bead the
+// caller has PROVED resident in this cache's backing store, so the event is
+// applied whatever namespace its id is in.
+//
+// The namespace filter (WithEventIDPrefixes) is how a cache tells its own
+// events from another store's, and it is right for every id a prefix can
+// place. A migrated binding also holds rows whose ids keep their pre-migration
+// work prefix (`gc storage migrate` preserves ids), which no namespace of the
+// binding claims; the filter drops their events and the cache serves the old
+// row until its next re-scan. The controller probes residence for exactly
+// those ids and applies their events here. Everything else about the apply is
+// ApplyEventSnapshot's.
+func (c *CachingStore) ApplyResidentEventSnapshot(eventType string, payload json.RawMessage) {
+	c.applyEventFor(eventType, payload, true, true)
+}
+
 func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, depsAuthoritative bool) {
+	c.applyEventFor(eventType, payload, depsAuthoritative, false)
+}
+
+func (c *CachingStore) applyEventFor(eventType string, payload json.RawMessage, depsAuthoritative, residentProven bool) {
 	if len(payload) == 0 {
 		return
 	}
@@ -58,7 +78,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		c.recordProblem(fmt.Sprintf("apply %s event", eventType), err)
 		return
 	}
-	if !c.ownsBeadID(patch.ID) {
+	if !residentProven && !c.ownsBeadID(patch.ID) {
 		return
 	}
 

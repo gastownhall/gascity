@@ -534,16 +534,16 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	})
 }
 
-// TestPreflightCensusesRigScopesEvenOnAConvergedCity pins the one ordering that
-// matters, against the one city that hides it.
+// TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking pins what the
+// census means on a city that already converged.
 //
-// A converged city's migration is a no-op, so preflight reports it and returns
-// early. But the rig census runs BEFORE the marker is read — in the migration it
-// runs before the migration body is entered at all — and a converged city can
-// still accumulate an infrastructure bead in a rig scope afterwards. Reading the
-// marker first would clear that city while `gc storage migrate` refuses it by
-// name, which is the exact divergence this verb exists to prevent.
-func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
+// The migration's re-run there copies nothing: it re-checks containment and
+// clears the retained copies, so it does not census rig scopes
+// (doStorageMigrate), and a rig row is as unreachable after it as before.
+// Blocking here would tell the operator that a migration refuses when it does
+// not, over the one step that ends the retained copies boot refuses over. The
+// rows are still named, as a note.
+func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 	rigPath := t.TempDir()
 	request, cfg, _ := preflightReadyCity(t, 2)
 
@@ -567,11 +567,15 @@ func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
 	t.Cleanup(func() { openStorageScopeStore = prev })
 
 	var stdout, stderr bytes.Buffer
-	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatalf("preflight cleared a converged city holding infrastructure residue in a rig scope, which the migration refuses by name: %q", stdout.String())
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight refused a converged city over rig residue the migration does not stop for: %q", stdout.String())
 	}
-	if out := stdout.String() + stderr.String(); !strings.Contains(out, stray.ID) {
-		t.Errorf("preflight blocks without naming the stray bead: %q", out)
+	out := stdout.String()
+	if !strings.Contains(out, stray.ID) || !strings.Contains(out, preflightNoteTag) {
+		t.Errorf("preflight does not name the stray bead in a note: %q", out)
+	}
+	if strings.Contains(out, preflightBlockTag) {
+		t.Errorf("preflight reports a block on a converged city: %q", out)
 	}
 }
 

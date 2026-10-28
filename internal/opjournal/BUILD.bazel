@@ -62,6 +62,7 @@ go_test(
         "interrupt_credit_test.go",
         "kind_test.go",
         "lane_content_hold_test.go",
+        "lane_content_only_test.go",
         "lane_done_test.go",
         "lane_harness_test.go",
         "lane_interrupt_test.go",

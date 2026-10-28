@@ -170,8 +170,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = healRec.keys
 		}},
-		{"v2 A7 row-metadata effect", "agent_name alias alias_history builtin_ancestor close_reason closed_at command configured_named_identity configured_named_session continuation_epoch core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot provider provider_kind resume_command resume_flag resume_style session_id_flag session_key session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at wake_mode", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v6:x", "alias", "stale",
+		{"v2 A7 row-metadata effect", "agent_name alias alias_history builtin_ancestor close_reason closed_at command configured_named_identity configured_named_session continuation_epoch core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot provider provider_kind resume_command resume_flag resume_style session_id_flag session_key session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at wake_mode work_dir", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			c, _ := baselineCase(t, livenessGone, desireSleep, nil, "state", "asleep", "started_config_hash", "v6:x", "alias", "stale", // stopped: a live row mints no key (#5439)
 				poolAliasConflictMetadataKey, "stale", poolAliasConflictCountMetadataKey, "1", poolAliasConflictAtMetadataKey, rowAt(-time.Hour),
 				namedSessionIdentityMetadata, "old", namedSessionMetadataKey, "true", "close_reason", "orphaned", "closed_at", rowAt(-time.Hour))
 			c.w.Env = &reconcileEnv{Cfg: workerCity(3)}

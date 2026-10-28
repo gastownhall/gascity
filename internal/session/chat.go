@@ -243,6 +243,25 @@ func freshStartCommandFromMetadata(metadata map[string]string, fallback string) 
 	return fallback
 }
 
+// startFailure labels a failed provider Start: "resuming session" when cmd
+// carries a resume shape (the bead's resume flag and key, a generated resume
+// flag with any key, or the bead's expanded resume_command), otherwise
+// "starting session". The shape tests are the exact no-op strips that
+// retryFreshStartAfterStaleKey relies on.
+func startFailure(cmd string, meta map[string]string, err error) error {
+	resumeFlag := meta["resume_flag"]
+	sessionKey := meta["session_key"]
+	resumed := stripResumeFlag(cmd, resumeFlag, sessionKey) != cmd ||
+		stripResumeFlagArg(cmd, resumeFlag, meta["resume_style"]) != cmd
+	if rc := meta["resume_command"]; !resumed && rc != "" && sessionKey != "" {
+		resumed = cmd == strings.ReplaceAll(rc, "{{.SessionKey}}", sessionKey)
+	}
+	if resumed {
+		return fmt.Errorf("resuming session: %w", err)
+	}
+	return fmt.Errorf("starting session: %w", err)
+}
+
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
 		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
@@ -979,7 +998,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 					if unroute != nil {
 						unroute()
 					}
-					return fmt.Errorf("resuming session: %w", err)
+					return startFailure(resumeCommand, b.Metadata, err)
 				}
 				started = retried
 			case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -998,7 +1017,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return startFailure(resumeCommand, b.Metadata, err)
 			}
 		} else {
 			started = true
@@ -1233,7 +1252,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return startFailure(resumeCommand, b.Metadata, err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -1242,7 +1261,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
 		started = true

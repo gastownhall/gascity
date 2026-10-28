@@ -843,6 +843,11 @@ resource = "environment"
 calls = 3
 
 [[count]]
+path = "cmd/gc/infra_copy_manifest_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "cmd/gc/init_provider_readiness_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1061,6 +1066,11 @@ tagged = true
 [[count]]
 path = "cmd/gc/productmetrics_service_child_env_test.go"
 resource = "environment"
+calls = 1
+
+[[count]]
+path = "cmd/gc/prompt_query_topology_test.go"
+resource = "subprocess"
 calls = 1
 
 [[count]]
@@ -1324,6 +1334,11 @@ calls = 1
 path = "examples/bd/dolt/health_test.go"
 resource = "subprocess"
 calls = 20
+
+[[count]]
+path = "examples/bd/dolt/journal_recovery_runbook_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "examples/bd/dolt/logs_test.go"
@@ -1765,7 +1780,7 @@ calls = 2
 [[count]]
 path = "internal/bdflags/freshness_test.go"
 resource = "subprocess"
-calls = 1
+calls = 3
 tagged = true
 
 [[count]]
@@ -2812,6 +2827,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "test/acceptance/beads_cli_contract_port_file_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "test/acceptance/beads_proxied_default_test.go"
 resource = "fixed_sleep"
 calls = 2
@@ -2878,6 +2899,12 @@ tagged = true
 [[count]]
 path = "test/acceptance/init_lifecycle_test.go"
 resource = "listener_helper"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/acceptance/managed_session_dolt_port_move_test.go"
+resource = "subprocess"
 calls = 1
 tagged = true
 

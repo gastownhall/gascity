@@ -3,6 +3,7 @@ package readywork
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
@@ -74,6 +75,70 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 	if err != nil {
 		return nil, err
 	}
+	return readCompiled(ctx, legs, c, false)
+}
+
+// ReadUntilUnblocked is ReadContext for an in_progress answer ended at its first
+// unblocked row, one with no blocker that is not closed: the gated rows ahead of
+// it, then it. It is `gc ready --until-unblocked`, the crash-recovery tier's
+// read, which resumes the first row of its window it can serve and needs
+// nothing past it.
+//
+// Blockers are resolved in answer order and only as far as the cut, so a row
+// past it whose blockers cannot be resolved does not fail the read. A row at or
+// ahead of the cut still does: the cut cannot be placed past a row whose
+// blockers are unknown, since that row may be the one to resume. A window with
+// no unblocked row is answered whole.
+//
+// The cut is not a parameter of GET /work/ready. The controller answers the
+// whole window with every row resolved, and the CLI ends that answer with
+// CutUntilUnblocked, which is this read's answer whenever every row of the
+// window resolves. When one past the cut does not, the controller's read fails
+// and the CLI reads in-process, through this.
+func ReadUntilUnblocked(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) {
+	c, err := compileUntilUnblocked(q)
+	if err != nil {
+		return nil, err
+	}
+	return readCompiled(ctx, legs, c, true)
+}
+
+// ValidateUntilUnblocked reports whether q is a query ReadUntilUnblocked can
+// cut, without reading anything.
+func ValidateUntilUnblocked(q Query) error {
+	_, err := compileUntilUnblocked(q)
+	return err
+}
+
+// compileUntilUnblocked compiles q and refuses every arm but in_progress, whose
+// rows alone carry their blockers: anywhere else the cut would be a flag that
+// looks honored and selects nothing.
+func compileUntilUnblocked(q Query) (compiled, error) {
+	c, err := compile(q)
+	if err != nil {
+		return compiled{}, err
+	}
+	if c.status != StatusInProgress {
+		return compiled{}, fmt.Errorf("--until-unblocked needs --status %s, the one status whose rows carry their blockers", StatusInProgress)
+	}
+	return c, nil
+}
+
+// CutUntilUnblocked ends rows, an in_progress answer whose every row carries its
+// blockers, at its first unblocked row: the cut ReadUntilUnblocked makes,
+// applied to an answer that resolved every row.
+func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
+	for i, row := range rows {
+		if !hasOpenBlocker(row.BlockedBy) {
+			return rows[:i+1]
+		}
+	}
+	return rows
+}
+
+// readCompiled answers the compiled query c over legs, ending an in_progress
+// answer at its first unblocked row when untilUnblocked is set.
+func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bool) ([]ReadyBead, error) {
 	items, owners, err := readCandidates(ctx, legs, c)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
@@ -87,11 +152,16 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 		items = items[:c.query.Limit]
 	}
 	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
-	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
-	// this one dependency read on the one row that matters.
+	// actually emitted. The crash-recovery tier asks for --limit=20
+	// --until-unblocked and serves the first of those rows its gate passes, so
+	// its rows are resolved only as far as that one (blockedByUntilUnblocked).
 	var blockers map[string][]ReadyBeadBlocker
 	if c.status == StatusInProgress {
-		blockers, err = blockedByForRows(ctx, items, legs, owners)
+		if untilUnblocked {
+			items, blockers, err = blockedByUntilUnblocked(ctx, items, legs, owners)
+		} else {
+			blockers, err = blockedByForRows(ctx, items, legs, owners)
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
@@ -290,6 +360,63 @@ func merge(results []legResult) ([]beads.Bead, map[string]int) {
 // is fail-loud for the same reason. A read whose turn comes after ctx has ended
 // is not made, and fails its row with ctx's error.
 func blockedByForRows(ctx context.Context, items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, error) {
+	blockers, failed := resolveBlockers(ctx, items, legs, owners)
+	// Report the failure of the first row, in answer order, whose enrichment
+	// failed: the row the sequential walk would have stopped at.
+	for _, item := range items {
+		if err, bad := failed[item.ID]; bad {
+			return nil, err
+		}
+	}
+	return blockers, nil
+}
+
+// blockedByUntilUnblocked is blockedByForRows for an answer cut at its first
+// unblocked row (ReadUntilUnblocked): it returns the rows through that one, and
+// their blockers.
+//
+// The rows are resolved in answer order, a batch of LegFanOut at a time, which
+// keeps the concurrency of the full walk while a window whose first row is
+// unblocked costs one batch. A row whose enrichment failed fails the read when
+// the walk reaches it, because the cut cannot be placed past a row whose
+// blockers are unknown. A failure past the cut, in the cut's own batch, is
+// never consulted, and no later batch is read.
+func blockedByUntilUnblocked(ctx context.Context, items []beads.Bead, legs []Leg, owners map[string]int) ([]beads.Bead, map[string][]ReadyBeadBlocker, error) {
+	out := make(map[string][]ReadyBeadBlocker)
+	for start := 0; start < len(items); start += LegFanOut {
+		batch := items[start:min(start+LegFanOut, len(items))]
+		blockers, failed := resolveBlockers(ctx, batch, legs, owners)
+		for i, item := range batch {
+			if err, bad := failed[item.ID]; bad {
+				return nil, nil, err
+			}
+			if rowBlockers := blockers[item.ID]; len(rowBlockers) > 0 {
+				out[item.ID] = rowBlockers
+			}
+			if !hasOpenBlocker(blockers[item.ID]) {
+				return items[:start+i+1], out, nil
+			}
+		}
+	}
+	return items, out, nil
+}
+
+// hasOpenBlocker reports whether any of blockers is not closed: the serve
+// gate's reading of blocked_by, where every status but closed blocks
+// (internal/config openBlockerCountJQ).
+func hasOpenBlocker(blockers []ReadyBeadBlocker) bool {
+	for _, blocker := range blockers {
+		if !strings.EqualFold(blocker.Status, StatusClosed) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveBlockers reads the blockers of every row of items through the leg that
+// served it, as blockedByForRows describes, and returns each row's blockers
+// (only rows that have any) and each failed row's error.
+func resolveBlockers(ctx context.Context, items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, map[string]error) {
 	if len(owners) == 0 || len(items) == 0 {
 		return nil, nil
 	}
@@ -310,28 +437,19 @@ func blockedByForRows(ctx context.Context, items []beads.Bead, legs []Leg, owner
 		idx := legOrder[i]
 		perLeg[i] = readLegBlockers(ctx, legs[idx], byLeg[idx])
 	})
-	// Report the failure of the first row, in answer order, whose enrichment
-	// failed: the row the sequential walk would have stopped at.
 	failed := make(map[string]error)
+	out := make(map[string][]ReadyBeadBlocker, len(items))
 	for _, lb := range perLeg {
 		for id, err := range lb.errs {
 			failed[id] = err
 		}
-	}
-	out := make(map[string][]ReadyBeadBlocker, len(items))
-	for _, item := range items {
-		if err, bad := failed[item.ID]; bad {
-			return nil, err
-		}
-	}
-	for _, lb := range perLeg {
 		for id, blockers := range lb.blockers {
 			if len(blockers) > 0 {
 				out[id] = blockers
 			}
 		}
 	}
-	return out, nil
+	return out, failed
 }
 
 // legBlockers is one leg's enrichment: each row's blockers, or the error that

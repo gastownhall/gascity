@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 212,
+  "next_id": 213,
   "permanent_ids": [
     {
       "name": "help",
@@ -4129,6 +4129,21 @@
       "classification": "storage-status",
       "owner": "immediate",
       "id": 199
+    },
+    {
+      "path": "gc storage vouch-bd",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-vouch-bd",
+      "owner": "immediate",
+      "id": 212
     },
     {
       "path": "gc supervisor",

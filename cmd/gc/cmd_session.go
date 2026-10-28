@@ -771,19 +771,17 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // sessionListAPIClient returns (client, "") when the API path is available,
-// or (nil, reason) when the caller should fall back. Indirected through a
-// var so tests inject a client pointed at httptest.Server or force a
-// specific fallback reason without spinning up a real controller.
-var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+// or (nil, reason) when the caller should fall back. A supervisor-hosted city
+// always falls back: the local listing is the session list contract
+// (localWhenSupervisorHostedAPIClient). Indirected through a var so tests
+// inject a client pointed at httptest.Server or force a specific fallback
+// reason without spinning up a real controller.
+var sessionListAPIClient = localWhenSupervisorHostedAPIClient
 
-// routeSessionList dispatches `session list` to the supervisor API when a
-// controller is up; otherwise falls back to the local iterator. Emits
-// exactly one route=... log line per exit path (gated on GC_DEBUG).
+// routeSessionList dispatches `session list` to the API when
+// sessionListAPIClient resolved a client; otherwise falls back to the local
+// iterator. Emits exactly one route=... log line per exit path (gated on
+// GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]api.SessionView]
 	return routeRead(c, "session list", nilReason, stderr,
@@ -941,8 +939,8 @@ func sessionViewLastActive(lastActive string) string {
 }
 
 // cmdSessionList is the CLI entry point for "gc session list". It routes
-// through the supervisor API when a controller is up and falls back to the
-// local iterator otherwise.
+// through the API when sessionListAPIClient resolves a client and falls back
+// to the local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
 		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)

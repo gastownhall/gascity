@@ -58,6 +58,8 @@ go_test(
         "ralph_check_infra_retry_test.go",
         "ralph_check_unlaunchable_test.go",
         "ralph_hard_fail_test.go",
+        "ralph_iteration_drain_test.go",
+        "ralph_iteration_gate_test.go",
         "ralph_retry_iteration_test.go",
         "ralph_test.go",
         "retry_artifact_iteration_test.go",

@@ -142,6 +142,7 @@ func TestE2b2ProviderConstructionFailuresReturnThroughRun(t *testing.T) {
 		"GC_SESSION_ID="+sessionID,
 		"GC_SESSION_NAME=test-city--frontend--worker",
 		"GC_TMUX_SESSION=test-city--frontend--worker",
+		"GC_INSTANCE_TOKEN=tok-provider-failure",
 	)
 	var processStdout, processStderr bytes.Buffer
 	cmd.Stdout = &processStdout
@@ -249,6 +250,7 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 	t.Setenv("GC_SESSION_ID", sessionID)
 	t.Setenv("GC_SESSION_NAME", "test-city--frontend--worker")
 	t.Setenv("GC_TMUX_SESSION", "test-city--frontend--worker")
+	t.Setenv("GC_INSTANCE_TOKEN", "tok-provider-failure")
 
 	oldBuild := buildSessionProviderByName
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
@@ -282,7 +284,7 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 		{name: "runtime drain-ack explicit json", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID, "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
 		{name: "runtime drain-ack context text", args: []string{"--city", cityPath, "runtime", "drain-ack"}, wantCommand: "gc runtime drain-ack"},
 		{name: "runtime drain-ack context json", args: []string{"--city", cityPath, "runtime", "drain-ack", "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
-		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart"},
+		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart", wantMessage: "gc runtime request-restart: restart not recorded: " + constructionFailure},
 		{name: "rig status text", args: []string{"--city", cityPath, "rig", "status", "frontend"}, wantCommand: "gc rig status"},
 		{name: "rig status json", args: []string{"--city", cityPath, "rig", "status", "frontend", "--json"}, wantCommand: "gc rig status", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
 		{name: "city status text", args: []string{"--city", cityPath, "status"}, wantCommand: "gc status"},
@@ -1660,47 +1662,56 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 // doRuntimeRequestRestart tests
 // ---------------------------------------------------------------------------
 
+// TestDoRuntimeRequestRestartError pins that a failed runtime hint, which
+// follows the durable row write, is only a warning (SG-3).
 func TestDoRuntimeRequestRestartError(t *testing.T) {
-	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", testCity, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1", code)
+	code := doRuntimeRequestRestart(testRowFirstRestart("gc runtime request-restart", "worker", dops, &stderr), events.Discard, &stdout)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if got := stderr.String(); got != "gc runtime request-restart: tmux borked\n" {
-		t.Errorf("stderr = %q", got)
+	if got, want := stderr.String(), "gc runtime request-restart: warning: restart recorded; the runtime restart hint was not set: tmux borked\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }
 
-// TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart covers Fix 1 for
-// the gc runtime request-restart path: a pinned session (pin_awake ==
-// "true") is kill-protected by the reconciler unless an explicit controller
-// reset is persisted, so persistRestart is mandatory rather than best-effort
-// when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
-func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
-	testCity := t.TempDir()
+// TestDoRuntimeRequestRestart_RowWriteFailureRecordsNothing pins that the row
+// write is mandatory for every session (the pinned special case collapsed
+// into it): unavailable or failing, the command exits 1 with no hint, no
+// event and no poke.
+func TestDoRuntimeRequestRestart_RowWriteFailureRecordsNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		persistRestart func() error
+		name   string
+		record func(string) error
 	}{
-		{name: "nil persistRestart"},
-		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+		{name: "no session store"},
+		{name: "row write error", record: func(string) error { return errors.New("worker boundary unavailable") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dops := newFakeDrainOps()
 			rec := events.NewFake()
 			var stdout, stderr bytes.Buffer
-			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", testCity, &stdout, &stderr)
+			restart := testRowFirstRestart("gc runtime request-restart", "mayor", dops, &stderr)
+			restart.record = tc.record
+			poked := false
+			restart.poke = func(string, reconcilekey.Key) error { poked = true; return nil }
+			code := doRuntimeRequestRestart(restart, rec, &stdout)
 			if code != 1 {
 				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
 			}
-			if got := stdout.String(); strings.Contains(got, "Restart requested") {
-				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", got)
+			if got := stdout.String(); got != "" {
+				t.Errorf("stdout = %q, want nothing", got)
+			}
+			if dops.restartRequested["mayor"] {
+				t.Error("runtime restart hint set although the row write failed")
+			}
+			if poked {
+				t.Error("controller poked although nothing was recorded")
 			}
 			if len(rec.Events) != 0 {
-				t.Fatalf("got %d events, want 0 (must not record SessionDraining without a real restart request); events=%v", len(rec.Events), rec.Events)
+				t.Fatalf("events = %v, want none", rec.Events)
 			}
 		})
 	}
