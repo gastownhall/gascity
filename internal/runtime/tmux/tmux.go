@@ -3238,11 +3238,11 @@ func (t *Tmux) nudgeSessionCtx(ctx context.Context, session, message string) err
 }
 
 // pendingPromptRecheck returns NudgeSession's under-the-lock look for a
-// permission prompt. A capture that fails refuses the nudge as a prompt on
-// screen does, the way NudgeNow's first check refuses a pane it cannot read:
-// what the look cannot see may be a prompt, and Enter on one approves the tool
-// call. The capture error stays wrapped, so a session that is gone is still
-// recognized as gone.
+// permission prompt or question dialog. A capture that fails refuses the nudge
+// as a prompt on screen does, the way NudgeNow's first check refuses a pane it
+// cannot read: what the look cannot see may be a prompt, and Enter on one
+// approves the tool call or answers the question. The capture error stays
+// wrapped, so a session that is gone is still recognized as gone.
 func (t *Tmux) pendingPromptRecheck(session string) func(target string) error {
 	return func(target string) error {
 		err := t.checkNoApprovalPromptIn(session, target)
@@ -3280,11 +3280,12 @@ func isLookRefusal(err error) bool {
 	return errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, errPromptLookFailed)
 }
 
-// nudgePromptGuard takes a nudge's looks for a permission prompt (#2892):
-// under the nudge lock before the first key, immediately before the paste, and
-// immediately before every submit key. A look that finds a prompt, or cannot
-// read the pane, aborts the nudge with no further keys sent: text typed into a
-// prompt is read as menu input, and Enter picks its highlighted option.
+// nudgePromptGuard takes a nudge's looks for a permission prompt (#2892) or
+// question dialog (#8150): under the nudge lock before the first key,
+// immediately before the paste, and immediately before every submit key. A look
+// that finds one, or cannot read the pane, aborts the nudge with no further
+// keys sent: text typed into a prompt is read as menu input, and Enter picks
+// its highlighted option.
 type nudgePromptGuard struct {
 	session, target string
 	// look returns a refusal (see isLookRefusal) when a prompt is on screen

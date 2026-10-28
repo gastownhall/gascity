@@ -377,26 +377,56 @@ func TestNudgeSessionDeliversPastAnAnsweredAskUserQuestionDialog(t *testing.T) {
 }
 
 // Provider.Nudge and NudgeNow refuse before any key, and Nudge refuses before
-// it spends the idle wait on a pane that cannot turn idle by itself.
+// it spends the idle wait on a pane that cannot turn idle by itself. Every
+// live page shape must refuse: the cursorless and answered pages and the
+// review page read as idle composers to the idle scan, so a wait-first Nudge
+// would submit into them (#8150).
 func TestProviderNudgeRefusesAskUserQuestionDialog(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.NudgeIdleTimeout = 5 * time.Second
-	ex := &paneExecutor{pane: askUserQuestionPane, inMode: "0"}
-	p := &Provider{tm: &Tmux{cfg: cfg, exec: ex}}
+	focusInTypeSomething := ` ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →
 
-	start := time.Now()
-	err := p.Nudge("auq", runtime.TextContent("hello"))
-	if !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("Nudge = %v, want runtime.ErrPendingInteraction", err)
+Which scope should the change cover?
+
+  1. Small
+     Only the bug fix
+  2. Medium
+     Fix plus regression tests
+  3. Large
+     Fix, tests and a refactor
+  4. Type something.
+     fix it fast
+────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+	for name, pane := range map[string]string{
+		"question page":    askUserQuestionPane,
+		"no cursor":        focusInTypeSomething,
+		"page after Enter": strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n",
+		"wrapped footer":   strings.Join(readQuestionFixture(t, "question-multi-wrapped-footer-40x18.txt"), "\n") + "\n",
+		"review page":      reviewPagePane(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.NudgeIdleTimeout = 5 * time.Second
+			ex := &paneExecutor{pane: pane, inMode: "0"}
+			p := &Provider{tm: &Tmux{cfg: cfg, exec: ex}}
+
+			start := time.Now()
+			err := p.Nudge("auq", runtime.TextContent("hello"))
+			if !errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("Nudge = %v, want runtime.ErrPendingInteraction", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("Nudge took %s to refuse; it waited for idle instead of refusing at once", elapsed)
+			}
+			err = p.NudgeNow("auq", runtime.TextContent("hello"))
+			if !errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("Nudge took %s to refuse; it waited for idle instead of refusing at once", elapsed)
-	}
-	err = p.NudgeNow("auq", runtime.TextContent("hello"))
-	if !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
-	}
-	requireNoKeys(t, ex.calls, false)
 }
 
 // A look that cannot read the pane fails closed: what it cannot see may be a
@@ -682,4 +712,107 @@ func TestNudgeRefusesReviewPage(t *testing.T) {
 		t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
 	}
 	requireNoKeys(t, ex.calls, false)
+}
+
+// stagedPaneExecutor serves capture-pane with screens[0] until a call matches
+// trigger, and screens[1] afterwards: the pane changes under the nudge's feet
+// between two of its looks. swapIndex is the index of the first call answered
+// with screens[1] context, so a test can check what was keyed before and after
+// the change.
+type stagedPaneExecutor struct {
+	calls     [][]string
+	screens   [2]string
+	trigger   func(args []string) bool
+	inMode    string
+	swapped   bool
+	swapIndex int
+}
+
+func (e *stagedPaneExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
+	if slices.Contains(args, "#{pane_in_mode}") {
+		return e.inMode, nil
+	}
+	if !e.swapped && e.trigger(args) {
+		e.swapped = true
+	}
+	if slices.Contains(args, "capture-pane") {
+		if e.swapped {
+			e.swapIndex = len(e.calls) - 1
+			return e.screens[1], nil
+		}
+		return e.screens[0], nil
+	}
+	return "", nil
+}
+
+func (e *stagedPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// keysAfterSwap fails when the nudge sent keys once the swapped-in screen was
+// on the pane: whatever the dialog is, no text, Ctrl-U, Escape or Enter may
+// reach it.
+func keysAfterSwap(t *testing.T, e *stagedPaneExecutor) {
+	t.Helper()
+	for _, call := range e.calls[e.swapIndex:] {
+		if sendsKeys(call) {
+			t.Fatalf("sent keys while the question dialog was on screen: %q", call)
+		}
+	}
+}
+
+// A dialog that appears while the nudge holds the lock — after the first look,
+// before the paste — must stop it there: the paste and its Enter would land
+// on the dialog and answer it (#8150).
+func TestNudgeSessionRefusesQuestionDialogAppearingUnderTheLock(t *testing.T) {
+	afterEnter := strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n"
+	ex := &stagedPaneExecutor{
+		screens: [2]string{"❯ \n", afterEnter},
+		inMode:  "0",
+		// The mid-session dismissal peek is the visible-only capture (no
+		// "-S"): the dialog appears right after the nudge's first look.
+		trigger: func(args []string) bool {
+			return slices.Contains(args, "capture-pane") && !slices.Contains(args, "-S")
+		},
+	}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	err := tm.NudgeSession("auq", "hello")
+	if !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("NudgeSession = %v, want runtime.ErrPendingInteraction", err)
+	}
+	if !strings.Contains(err.Error(), "question dialog") || !strings.Contains(err.Error(), "tmux-question-") {
+		t.Fatalf("refusal %q must say it is a question dialog and carry the tmux-question- request ID", err)
+	}
+	if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") >= 0 {
+		t.Fatal("the message was pasted after the dialog appeared")
+	}
+	keysAfterSwap(t, ex)
+}
+
+// A dialog that appears after the paste must stop the nudge before its Enter:
+// the text sits in the pane's input, but the submit key is what answers the
+// dialog, so it is never sent.
+func TestNudgeSessionRefusesQuestionDialogAppearingAfterThePaste(t *testing.T) {
+	afterEnter := strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n"
+	ex := &stagedPaneExecutor{
+		screens: [2]string{"❯ \n", afterEnter},
+		inMode:  "0",
+		trigger: func(args []string) bool { return sendsKeys(args) && slices.Contains(args, "-l") },
+	}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	err := tm.NudgeSession("auq", "hello")
+	if !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("NudgeSession = %v, want runtime.ErrPendingInteraction", err)
+	}
+	if !strings.Contains(err.Error(), "question dialog") || !strings.Contains(err.Error(), "tmux-question-") {
+		t.Fatalf("refusal %q must say it is a question dialog and carry the tmux-question- request ID", err)
+	}
+	if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") < 0 {
+		t.Fatal("the message was never pasted; the dialog appeared only after the paste")
+	}
+	keysAfterSwap(t, ex)
 }
