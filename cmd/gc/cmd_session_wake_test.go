@@ -956,3 +956,29 @@ func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
 		})
 	}
 }
+
+// TestCmdSessionWakeRegisteredCitySupervisorDownDefersNamedStart wakes a
+// configured named session with no bead yet in a registered city whose
+// supervisor is down, through cmdSessionWake's production wiring: the
+// materialized row is left for the reconciler, and one warning says so.
+func TestCmdSessionWakeRegisteredCitySupervisorDownDefersNamedStart(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionWake([]string{"mayor"}, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("cmdSessionWake(registered, supervisor down) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "wake requested") {
+		t.Fatalf("stdout = %q, want it to report the wake requested", stdout.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	assertDeferredSessionBead(t, b)
+	errText := stderr.String()
+	if n := strings.Count(errText, "gc session wake: warning: poke failed:"); n != 1 {
+		t.Fatalf("poke-failed warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	if n := strings.Count(errText, "poke failed"); n != 1 {
+		t.Fatalf("poke-failed lines of any command = %d, want 1; stderr=%s", n, errText)
+	}
+}
