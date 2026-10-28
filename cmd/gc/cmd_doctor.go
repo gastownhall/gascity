@@ -475,6 +475,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newExecutorIdentityResidueCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
+			// Registered before run-target-routed-to-backfill: doctor runs
+			// check → fix → verify in registration order, so in one
+			// gc doctor --fix pass the gc.workflow_expanded stamp lands first
+			// and the routed-to backfill's re-collect then skips those roots
+			// (no longer fallback-eligible) instead of routing them.
+			registerCityStoreCheck(newWorkflowExpandedBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
