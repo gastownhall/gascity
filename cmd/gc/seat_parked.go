@@ -16,6 +16,11 @@ package main
 // the assigned-work wake restarts the same seat, resuming its conversation,
 // once the pin is ready. The pool planner keeps the seat selected but counts
 // it against no cap until then (parkedSeats, the planner's Parked request).
+// The resume runs in the work dir the seat ran in, where its transcript is
+// filed: the binding keeps that dir for a parked seat's resume, while the pin
+// is blocked and once it is ready (parkVerdict.Continues, the planner's
+// ParkedContinuation request), as long as the dir can still host it
+// (parkedWorkDirUsable).
 //
 // Parked is derived each pass from persisted facts, never stored, so it
 // survives a controller restart unchanged and needs no marker of its own.
@@ -33,10 +38,13 @@ package main
 import (
 	"fmt"
 	"io"
+	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
@@ -67,6 +75,13 @@ type parkVerdict struct {
 	Parked bool
 	// Until is when the hold ends: slept_at plus parkedWorkMaxHold.
 	Until time.Time
+	// Continues: the row is parkable (parkableRow), whatever its pool's slot
+	// headroom, and the pass's view of its assigned work is non-empty and all
+	// open, unstarted and not deferred, ready or not. It is parked, or waking
+	// from its park for that work, and its wake resumes its conversation: its
+	// binding keeps the work dir the conversation ran in
+	// (SessionRequest.ParkedContinuation).
+	Continues bool
 }
 
 // parkedSeats is one pass's verdicts, by session bead ID. A row with no
@@ -75,6 +90,10 @@ type parkedSeats map[string]parkVerdict
 
 // parked reports whether the row id is parked this pass.
 func (p parkedSeats) parked(id string) bool { return p[strings.TrimSpace(id)].Parked }
+
+// continues reports whether the row id's wake this pass continues its parked
+// conversation (parkVerdict.Continues).
+func (p parkedSeats) continues(id string) bool { return p[strings.TrimSpace(id)].Continues }
 
 // parkSeats decides, for one pass, which pool seats park. rows are the
 // pass's open session rows, in one or more sets (a set may stand in for rows
@@ -96,13 +115,14 @@ func parkSeats(cfg *config.City, rows [][]sessionpkg.Info, work []beads.Bead, re
 		}
 	}
 	type candidate struct {
-		info   *sessionpkg.Info
-		until  time.Time
-		slept  time.Time
-		marked bool // a stranded marker: on the stranded path, its repair freeing its slot
-		shaped bool // its work is all open, unstarted, not deferred and not ready
-		pool   string
-		agent  *config.Agent
+		info      *sessionpkg.Info
+		until     time.Time
+		slept     time.Time
+		marked    bool // a stranded marker: on the stranded path, its repair freeing its slot
+		shaped    bool // its work is all open, unstarted, not deferred and not ready
+		continues bool // its work is all open, unstarted and not deferred, ready or not
+		pool      string
+		agent     *config.Agent
 	}
 	var cands []candidate
 	for _, set := range rows {
@@ -117,10 +137,12 @@ func parkSeats(cfg *config.City, rows [][]sessionpkg.Info, work []beads.Bead, re
 			if !ok {
 				continue
 			}
+			continues, shaped := parkedWorkShape(*info, work, ready, seatWorkIndexes(*info, byAssignee), now)
 			cands = append(cands, candidate{
 				info: info, until: until, slept: slept, pool: template, agent: agent,
-				marked: strings.TrimSpace(info.StrandedEventEmittedAt) != "",
-				shaped: parkedWorkShape(*info, work, ready, seatWorkIndexes(*info, byAssignee), now),
+				marked:    strings.TrimSpace(info.StrandedEventEmittedAt) != "",
+				shaped:    shaped,
+				continues: continues,
 			})
 		}
 	}
@@ -185,9 +207,14 @@ func parkSeats(cfg *config.City, rows [][]sessionpkg.Info, work []beads.Bead, re
 	out := make(parkedSeats, len(cands))
 	for _, c := range cands {
 		if fallback[c.info.ID] {
+			// On the stranded path, but its wake, should its work turn ready
+			// before the repair, still resumes where its conversation ran.
+			if c.continues {
+				out[c.info.ID] = parkVerdict{Continues: true}
+			}
 			continue
 		}
-		out[c.info.ID] = parkVerdict{Eligible: true, Parked: c.shaped, Until: c.until}
+		out[c.info.ID] = parkVerdict{Eligible: true, Parked: c.shaped, Until: c.until, Continues: c.continues}
 	}
 	return out
 }
@@ -251,27 +278,31 @@ func seatWorkIndexes(info sessionpkg.Info, byAssignee map[string][]int) []int {
 	return slices.Compact(idx)
 }
 
-// parkedWorkShape is the work half of the verdict: the row holds work, and
-// every item is open, not started by the seat (its claim and wake stamps, its
-// work_started cell, its execution_claim_started stamp; an unreadable cell
-// reads every claim started), not deferred and not ready. A deferred bead is
-// no pool demand (filterAssignedWorkBeadsForPoolDemandAt), so no request
-// would keep the seat selected: it closes as today.
-func parkedWorkShape(info sessionpkg.Info, work []beads.Bead, ready []bool, idx []int, now time.Time) bool {
+// parkedWorkShape is the work half of the verdict: whether the row holds
+// work and every item is open, not started by the seat (its claim and wake
+// stamps, its work_started cell, its execution_claim_started stamp; an
+// unreadable cell reads every claim started) and not deferred (continues),
+// and whether none of it is ready either (parked). A deferred bead is no pool
+// demand (filterAssignedWorkBeadsForPoolDemandAt), so no request would keep
+// the seat selected: it closes as today.
+func parkedWorkShape(info sessionpkg.Info, work []beads.Bead, ready []bool, idx []int, now time.Time) (continues, parked bool) {
 	if len(idx) == 0 {
-		return false
+		return false, false
 	}
 	seat := releaseSeatOfInfo(info)
 	if seat.recordedUnread {
-		return false
+		return false, false
 	}
+	parked = true
 	for _, i := range idx {
-		b := work[i]
-		if !parkableItem(b, seat, now) || i < len(ready) && ready[i] {
-			return false
+		if !parkableItem(work[i], seat, now) {
+			return false, false
+		}
+		if i < len(ready) && ready[i] {
+			parked = false
 		}
 	}
-	return true
+	return true, parked
 }
 
 // parkableItem reports whether one of a seat's work beads may be parked on:
@@ -300,6 +331,96 @@ func poolSlotCapacity(agent *config.Agent) (slots int, bounded bool) {
 		return 0, false
 	}
 	return upper, true
+}
+
+// parkedResumeContinuation reports a parked seat's own resume for its
+// pre-assigned work (request.ParkedContinuation): a resume of this row, which
+// is not fresh-wake. Its wake resumes the seat's conversation, whose
+// transcript is filed under the work dir it ran in, so its binding keeps that
+// dir (computePoolTriggerBindingPatch), as a live continuation's does.
+func parkedResumeContinuation(info sessionpkg.Info, request SessionRequest) bool {
+	return request.ParkedContinuation &&
+		request.Tier == "resume" &&
+		request.SessionBeadID == info.ID &&
+		info.WakeMode != "fresh"
+}
+
+// parkedWorkDirKept is the recorded work dir computePoolTriggerBindingPatch
+// keeps for a parked resume over derived, the dir its binding derives: ""
+// when it keeps none (no parked resume, no recorded dir, or the recorded dir
+// is the derived one). Where the binding applies, legacy's bind write and
+// v2's PreWake, the kept dir must still host the resume (parkedWorkDirUsable);
+// one that cannot takes derived instead (withRederivedWorkDir).
+func parkedWorkDirKept(info sessionpkg.Info, request SessionRequest, derived string) string {
+	if derived == "" || !parkedResumeContinuation(info, request) {
+		return ""
+	}
+	if recorded := preparedStartSessionWorkDir(info); recorded != "" && recorded != derived {
+		return recorded
+	}
+	return ""
+}
+
+// withRederivedWorkDir is patch with info's work dir keys bound to derived
+// instead: the binding of a parked resume whose kept dir cannot host it. The
+// seat starts fresh there, where its new work runs: the stale-resume probe
+// finds no transcript under derived and clears the key.
+func withRederivedWorkDir(patch sessionpkg.MetadataPatch, info sessionpkg.Info, derived string) sessionpkg.MetadataPatch {
+	out := maps.Clone(patch)
+	if out == nil {
+		out = sessionpkg.MetadataPatch{}
+	}
+	delete(out, beadmeta.WorkDirMetadataKey)
+	delete(out, beadmeta.LegacyWorkDirMetadataKey)
+	if strings.TrimSpace(info.WorkDirCanonical) != derived {
+		out[beadmeta.WorkDirMetadataKey] = derived
+	}
+	if strings.TrimSpace(info.WorkDir) != derived {
+		out[beadmeta.LegacyWorkDirMetadataKey] = derived
+	}
+	return out
+}
+
+// parkedWorkDirUsable reports whether recorded, the work dir a parked resume
+// keeps over derived, can host the resume: it is still a directory, and it is
+// in the rig derived is in (rigOwningDir: the rig whose checkout holds the
+// dir, or the rig its worktree's .beads redirect names), or, when no rig owns
+// derived (it need not exist yet), in the seat's own rig (agent.Dir; none for
+// a city-scoped agent). A dir that is gone, or another rig's, cannot: nil
+// when it can, otherwise why not.
+func parkedWorkDirUsable(cfg *config.City, cityPath string, agent *config.Agent, recorded, derived string) error {
+	dir := resolveWorkDirAgainstCity(cityPath, recorded)
+	switch st, err := os.Stat(dir); {
+	case err != nil:
+		return fmt.Errorf("recorded work dir: %w", err)
+	case !st.IsDir():
+		return fmt.Errorf("recorded work dir %s is not a directory", dir)
+	}
+	got, err := workDirRigName(cfg, cityPath, dir)
+	if err != nil {
+		return fmt.Errorf("recorded work dir %s: %w", dir, err)
+	}
+	want, err := workDirRigName(cfg, cityPath, resolveWorkDirAgainstCity(cityPath, derived))
+	if (err != nil || want == "") && agent != nil {
+		want = strings.TrimSpace(agent.Dir)
+	}
+	if got != want {
+		return fmt.Errorf("recorded work dir %s is in rig %q, not %q", dir, got, want)
+	}
+	return nil
+}
+
+// workDirRigName is the name of the rig that owns dir (rigOwningDir), "" for
+// none.
+func workDirRigName(cfg *config.City, cityPath, dir string) (string, error) {
+	if cfg == nil {
+		return "", nil
+	}
+	rig, ok, err := rigOwningDir(cfg, cityPath, dir)
+	if err != nil || !ok {
+		return "", err
+	}
+	return rig.Name, nil
 }
 
 // liveParkedWork is the work half of the verdict over a live read of the

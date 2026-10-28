@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -49,6 +50,46 @@ func TestAllocator_ReadyPinWakesTheParkedSeatInPlace(t *testing.T) {
 	}
 	if e.Park.Parked {
 		t.Fatalf("park verdict %+v, want not parked once the pin is ready", e.Park)
+	}
+}
+
+// A parked seat's binding keeps the work dir its conversation ran in, and
+// carries it (KeptWorkDir) for the PreWake to verify: while the seat parks,
+// once its pin is ready, and when the binding writes nothing else (its
+// trigger already names the pin, as after a wake whose launch failed once its
+// PreWake landed), so a kept dir deleted since is still caught before the
+// launch.
+func TestAllocator_ParkedSeatsBindingKeepsItsRecordedWorkDir(t *testing.T) {
+	const recorded = "/city/.gc/worktrees/step-1"
+	for _, tc := range []struct {
+		name, trigger string
+		ready         bool
+	}{
+		{name: "parked", trigger: "step-1"},
+		{name: "its pin ready", trigger: "step-1", ready: true},
+		{name: "its pin ready, its trigger already the pin", trigger: "pin-1", ready: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", WorkDir: ".gc/worktrees/{{.AgentBase}}"}}}
+			row := poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", ago(time.Hour),
+				beadmeta.WorkDirMetadataKey, recorded, beadmeta.LegacyWorkDirMetadataKey, recorded, beadmeta.TriggerBeadIDMetadataKey, tc.trigger)
+			f := newAllocFixture(t, cfg).sessions(row)
+			f.in.Demand.AssignedWork = []beads.Bead{{ID: "pin-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+			f.in.Demand.AssignedStoreRefs = []string{""}
+			f.in.Demand.ReadyAssigned = map[storeScopedBeadKey]bool{{StoreRef: "", ID: "pin-1"}: tc.ready}
+			e := entryOf(t, f.decide(), "gc-1")
+			if e.Binding == nil || e.Binding.KeptWorkDir != recorded || e.Binding.WorkDir == recorded {
+				t.Fatalf("binding %+v, want the recorded %s kept over a derived dir", e.Binding, recorded)
+			}
+			for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+				if got, ok := e.Binding.Patch[key]; ok {
+					t.Fatalf("binding patch %s = %q, want the recorded dir kept", key, got)
+				}
+			}
+			if got, want := e.Binding.Patch[beadmeta.TriggerBeadIDMetadataKey], map[bool]string{true: "pin-1", false: ""}[tc.trigger != "pin-1"]; got != want {
+				t.Fatalf("binding trigger patch %q, want %q", got, want)
+			}
+		})
 	}
 }
 

@@ -65,6 +65,46 @@ func TestComputePoolDesiredStatesParkedSeatTakesNoCap(t *testing.T) {
 	})
 }
 
+// A parked seat's resume is a parked continuation, while its pin is blocked
+// and once the pin is ready, so its binding keeps the work dir its
+// conversation ran in. A seat that also holds work in progress is not, and
+// neither is a seat the pass did not judge.
+func TestComputePoolDesiredStatesMarksAParkedContinuation(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", nil, 0)}}
+	sessions := sessionInfosFromBeads([]beads.Bead{sessionBead("sess-1", "open")})
+	pinOnly := []beads.Bead{workBead("pin-1", "claude", "sess-1", "open", 2)}
+	for _, tc := range []struct {
+		name                 string
+		work                 []beads.Bead
+		verdict              parkedSeats
+		wantParked, wantCont bool
+	}{
+		{name: "parked on a blocked pin", work: pinOnly, verdict: parkedSeats{"sess-1": {Eligible: true, Parked: true, Continues: true}}, wantParked: true, wantCont: true},
+		{name: "waking for its ready pin", work: pinOnly, verdict: parkedSeats{"sess-1": {Eligible: true, Continues: true}}, wantCont: true},
+		{name: "unparked by its pool's slots, waking for its pin", work: pinOnly, verdict: parkedSeats{"sess-1": {Continues: true}}, wantCont: true},
+		{name: "holding work in progress too", work: append([]beads.Bead{workBead("claim-1", "claude", "sess-1", "in_progress", 2)}, pinOnly...), verdict: parkedSeats{"sess-1": {Eligible: true, Continues: true}}},
+		{name: "no verdict", work: pinOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			states := computePoolDesiredStatesParkedAt(cfg, tc.work, sessions, nil, nil, parkNow, tc.verdict, nil)
+			var seat []SessionRequest
+			for _, s := range states {
+				for _, r := range s.Requests {
+					if r.SessionBeadID == "sess-1" {
+						seat = append(seat, r)
+					}
+				}
+			}
+			if len(seat) != 1 || seat[0].Tier != "resume" {
+				t.Fatalf("states %+v, want one resume of sess-1", states)
+			}
+			if seat[0].Parked != tc.wantParked || seat[0].ParkedContinuation != tc.wantCont {
+				t.Fatalf("request %+v, want parked=%v parked continuation=%v", seat[0], tc.wantParked, tc.wantCont)
+			}
+		})
+	}
+}
+
 // A parked seat's pin turned ready competes for a full city cap with the
 // other existing seats' requests by bead priority, a tie keeping the pass's
 // order. The seat that loses has no request at all; whether the session
