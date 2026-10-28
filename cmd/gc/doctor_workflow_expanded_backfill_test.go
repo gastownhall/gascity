@@ -150,3 +150,67 @@ func TestWorkflowExpandedBackfillCheckFixStampsRootAndEndsClaimability(t *testin
 		t.Fatalf("post-fix Run status = %v, want OK: %#v", res.Status, res)
 	}
 }
+
+// TestWorkflowExpandedBackfillCheckLeavesRootOnlyWorkflowsClaimable is AC-6:
+// a graph.v2 workflow root with no workflow-finalize bead naming it — a
+// root-only root, including one that later grew attached fragment steps —
+// stays unstamped after gc doctor --fix, remains claimable on its route, and
+// is not reported by the check.
+func TestWorkflowExpandedBackfillCheckLeavesRootOnlyWorkflowsClaimable(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{}
+	rootOnly := beads.Bead{ID: "WR-3", Title: "root-only root", Type: "task", Status: "open", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "mayor",
+	}}
+	fragmentParent := beads.Bead{ID: "WR-4", Title: "fragment parent", Type: "task", Status: "open", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "mayor",
+	}}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		// The expanded root exist side by side with the root-only ones, so
+		// the fix runs with real targets and still leaves these untouched.
+		{ID: "WR-1", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "mayor",
+		}},
+		{ID: "FIN-1", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow-finalize", "gc.root_bead_id": "WR-1",
+		}},
+		rootOnly,
+		fragmentParent,
+		{ID: "ST-4", Title: "fragment member", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.root_bead_id": "WR-4", "gc.scope_role": "member",
+		}},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return cityStore, nil
+	}
+
+	check := newWorkflowExpandedBackfillCheck(cfg, cityDir, factory)
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	for _, b := range []beads.Bead{rootOnly, fragmentParent} {
+		after, err := cityStore.Get(b.ID)
+		if err != nil {
+			t.Fatalf("get %s: %v", b.ID, err)
+		}
+		if got := after.Metadata["gc.workflow_expanded"]; got == "true" {
+			t.Errorf("%s gc.workflow_expanded = %q after gc doctor --fix; a root-only root must stay unstamped", b.ID, got)
+		}
+		if !hookCandidateClaimable(after, []string{"mayor"}, time.Now()) {
+			t.Errorf("%s is not claimable on its route after gc doctor --fix; a root-only root is executable work", b.ID)
+		}
+	}
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res.Status, res)
+	}
+	if details := strings.Join(res.Details, "\n"); strings.Contains(details, "WR-3") || strings.Contains(details, "WR-4") {
+		t.Fatalf("post-fix Run details must not name the root-only roots: %#v", res)
+	}
+}
