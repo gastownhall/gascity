@@ -4230,21 +4230,72 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		t.Fatalf("desired sessions = %d, want 1", len(desired))
 	}
 	for _, tp := range desired {
-		if got := tp.Env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
-		}
-		if got := tp.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-		}
-		if got := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-		}
-		if got := tp.Env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Fatalf("GC_SPAWN_ORIGIN = %q, want demand", got)
 		}
 		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
 			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
 		}
+		assertNoTriggerBeadEnv(t, tp.Env)
+	}
+}
+
+// assertNoTriggerBeadEnv fails when env carries any GC_TRIGGER_* key: a
+// session shell must never receive the controller's demand evidence as a bead
+// id, because a ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain would take
+// it for the bead the seat claimed (gastownhall/gascity#5738).
+func assertNoTriggerBeadEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	for key, value := range env {
+		if strings.HasPrefix(key, "GC_TRIGGER_") {
+			t.Errorf("session env %s = %q, want no GC_TRIGGER_* key (a controller-chosen bead id is close-reachable)", key, value)
+		}
+	}
+}
+
+// TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID reproduces
+// gastownhall/gascity#5738: a demand-spawned pool seat's shell must carry only
+// the presence-only GC_SPAWN_ORIGIN marker, never an id-shaped trigger hint a
+// ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain could mistake for the
+// bead the seat actually claimed (the pool is pull). The request carries no
+// pack, so the store-ref pair is the only other id-bearing input.
+func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{
+			Template:     "worker",
+			Tier:         "new",
+			WorkBeadID:   "gp-a",
+			WorkStoreRef: "rig:gascity",
+		}},
+	}, desired, &stderr)
+
+	if len(desired) != 1 {
+		t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
+	}
+	for _, tp := range desired {
+		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Errorf("GC_SPAWN_ORIGIN = %q, want demand", got)
+		}
+		if got, ok := tp.Env["GC_PACKER_PACK"]; ok {
+			t.Errorf("GC_PACKER_PACK = %q, want absent for a pack-less request", got)
+		}
+		assertNoTriggerBeadEnv(t, tp.Env)
 	}
 }
 

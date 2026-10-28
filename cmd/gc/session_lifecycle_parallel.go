@@ -1664,6 +1664,22 @@ func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
 	return env
 }
 
+// sessionDemandSpawnEnv is the launch env a row's trigger stamp contributes:
+// the presence-only marker GC_SPAWN_ORIGIN=demand when the row is stamped,
+// otherwise nil. It never carries the trigger bead id or its store ref. The
+// stamp is controller-side demand evidence — under pull it names the row the
+// controller counted, not the bead the seat claims — and a shell copy is
+// frozen at exec while the stamp keeps moving, so an exported id would be a
+// foreign close target (gastownhall/gascity#5738). A seat names its own bead
+// through gc hook current --id-only. Like sessionTriggerBeadEnv it reads the
+// typed twin, so the start-prep refresh must fold its returned Info first.
+func sessionDemandSpawnEnv(info sessionpkg.Info) map[string]string {
+	if strings.TrimSpace(info.TriggerBeadID) == "" {
+		return nil
+	}
+	return map[string]string{"GC_SPAWN_ORIGIN": demandSpawnOriginValue}
+}
+
 // parseSessionTemplateOverridesForLaunch decodes the per-session template_overrides
 // off the typed twin (Info.TemplateOverrides, verbatim) instead of re-projecting the
 // raw bead. template_overrides is not mutated on the start-prep path, so the
