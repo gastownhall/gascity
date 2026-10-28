@@ -110,6 +110,50 @@ These record types are usually the fastest path to the bug:
 - `operation`: scale check, start, interrupt, and drain boundary calls
 - `mutation`: bead or runtime writes that actually landed
 
+## Sessions Skipped In An Unknown State
+
+The controller manages a session row only when its `state` metadata is one
+this gc version knows (`knownSessionStates` in `cmd/gc/session_reconcile.go`),
+or a drain-ack stop pending. Every other row is skipped: the reconciler never
+starts, stops, heals or closes it, so a newer version's state survives a
+rollback untouched. The skip is deliberate and stays action-free.
+
+Symptoms:
+
+- `gc session wake <id>` records the wake but exits 1 with "it will not
+  start", and the API wake answers 409 `wake-will-not-start`.
+- `gc session reset <id>` and the API reset refuse with "cannot be reset"
+  (409 on the API) and write nothing.
+- `gc session kill <id>` on a row whose runtime is gone fails with "session is
+  not active".
+- Each of these names the row's raw state and `gc session close <id>`.
+
+Listing the rows:
+
+```bash
+gc events --type session.unknown_state --since 24h
+gc trace show --since 30m --reason unknown_state_skipped
+```
+
+The legacy reconciler emits `session.unknown_state` on first sight and again,
+escalated, once the row has stayed unknown for 30 minutes, and stamps the
+`unknown_state_first_seen`, `unknown_state_value` and
+`unknown_state_escalated_at` markers on the bead. The v2 reconciler writes no
+marker and records a `reconciler.alert` instead.
+
+Causes:
+
+- A rollback from a gc version that added the state.
+- This version's own `archived`, `closing` or plain `draining` rows, which the
+  reconciler leaves alone.
+- A hand-edited or padded state (`" active "` is not `active`).
+
+Recovery: `gc session close <id>` releases the row and its alias, and the
+controller creates a replacement if the configuration still wants one.
+Upgrading to the gc version that wrote the state also works: that version
+manages it again. Do not expect wake or reset to move the row; they refuse by
+design, because the controller would never act on what they record.
+
 ## Acceptance And Integration Failures
 
 For acceptance or integration failures, keep baseline tracing as-is and collect trace artifacts on failure. Prefer template-scoped detail tracing only for tests that intentionally exercise reconciler or lifecycle behavior.
