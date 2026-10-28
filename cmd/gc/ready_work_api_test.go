@@ -805,7 +805,7 @@ func TestReadyRoutesThroughTheController(t *testing.T) {
 
 	q := readywork.Query{MetadataFields: []string{"gc.routed_to=" + f.routedTo}, Unassigned: true, Limit: 20}
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(q, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{query: q}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d; stderr=%s — the routed read must not open the broken rig", code, stderr.String())
 	}
 	var want bytes.Buffer
@@ -814,6 +814,231 @@ func TestReadyRoutesThroughTheController(t *testing.T) {
 	}
 	if stdout.String() != want.String() {
 		t.Fatalf("routed gc ready printed\n%s\nwant the in-process bytes\n%s", stdout.String(), want.String())
+	}
+}
+
+// TestReadyUntilUnblockedCutsTheControllersAnswer pins --until-unblocked on the
+// controller route. The endpoint takes no cut, so the command asks for the whole
+// window and cuts the controller's answer itself: it prints the cut of the
+// in-process window, a gated claim and then the first unblocked one. The city's
+// rig is broken, so an in-process read would fail; the answer is the
+// controller's.
+func TestReadyUntilUnblockedCutsTheControllersAnswer(t *testing.T) {
+	newReadyCityWithBrokenRig(t)
+	f := newReadyWorkSplitFixture(t)
+	gate := mustCreateReadyBead(t, f.city, beads.Bead{Title: "open gate", Type: "task"})
+	gated := mustCreateReadyBead(t, f.city, beads.Bead{Title: "gated claim", Type: "task", Priority: readyPriority(0)})
+	inProgress := readywork.StatusInProgress
+	if err := f.city.Update(gated.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.assignee}); err != nil {
+		t.Fatalf("claim %s: %v", gated.ID, err)
+	}
+	if err := f.city.DepAdd(gated.ID, gate.ID, "blocks"); err != nil {
+		t.Fatalf("gate %s: %v", gated.ID, err)
+	}
+	client := readyWorkTestServer(t, f.controller())
+	prev := readyAPIClient
+	readyAPIClient = func(string) (*api.Client, string) { return client, "" }
+	t.Cleanup(func() { readyAPIClient = prev })
+
+	q := readywork.Query{Status: readywork.StatusInProgress, Assignee: f.assignee, Limit: 20}
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readyFlags{query: q, untilUnblocked: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady(--until-unblocked) = %d; stderr=%s — the routed read must not open the broken rig", code, stderr.String())
+	}
+	cut := readywork.CutUntilUnblocked(f.inProcess(t, q))
+	if len(cut) != 2 || cut[0].ID != gated.ID {
+		t.Fatalf("the fixture window cuts to %v, want the gated claim %s then one unblocked claim", readyWireIDs(cut), gated.ID)
+	}
+	var want bytes.Buffer
+	if err := writeJSON(&want, cut); err != nil {
+		t.Fatalf("writeJSON: %v", err)
+	}
+	if stdout.String() != want.String() {
+		t.Fatalf("routed gc ready --until-unblocked printed\n%s\nwant the cut of the in-process window\n%s", stdout.String(), want.String())
+	}
+}
+
+// readyCrossStoreBlocker is a blocking edge's target no store of the city
+// holds. On a single-store city it never blocks and never fails a read: gc
+// keeps bd's semantics there (bd's IsExternalDepTarget reads a cross-prefix
+// target as external), and an unresolvable blocker marks only its own row.
+const readyCrossStoreBlocker = "gr-elsewhere"
+
+// failingDepListFor fails DepList for one row: a row whose blockers cannot be
+// judged, because its edges cannot be read.
+type failingDepListFor struct {
+	beads.Store
+	row string
+}
+
+func (s failingDepListFor) DepList(id, direction string) ([]beads.Dep, error) {
+	if id == s.row {
+		return nil, errors.New("injected: dependency read refused")
+	}
+	return s.Store.DepList(id, direction)
+}
+
+// faultReadyRig makes the frontend rig's store refuse the dependency read of
+// row, through the readyRigLegStoreFault seam, until the test ends or the
+// returned func lifts it.
+func faultReadyRig(t *testing.T, row string) (lift func()) {
+	t.Helper()
+	prev := readyRigLegStoreFault
+	readyRigLegStoreFault = func(rig string, store beads.Store) beads.Store {
+		if rig != "frontend" {
+			return store
+		}
+		return failingDepListFor{Store: store, row: row}
+	}
+	lift = func() { readyRigLegStoreFault = prev }
+	t.Cleanup(lift)
+	return lift
+}
+
+// newReadyUntilUnblockedCity is a file-backed city with one rig, in which the
+// session sess-1 holds two claims: a resumable one in the city store, first in
+// ready order, and one in the rig store blocked by readyCrossStoreBlocker. The
+// tests make the second one unjudgeable by faulting its dependency read
+// (faultReadyRig); unfaulted, it is an ordinary row (bd semantics).
+func newReadyUntilUnblockedCity(t *testing.T) (string, beads.Bead, beads.Bead) {
+	t.Helper()
+	cityDir := newReadyCityWithRigs(t, "frontend")
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	rigStore, err := openStoreAtForCity(filepath.Join(cityDir, "rigs", "frontend"), cityDir)
+	if err != nil {
+		t.Fatalf("open rig store: %v", err)
+	}
+	assignee := "sess-1"
+	inProgress := readywork.StatusInProgress
+	claim := func(store beads.Store, title string, priority int) beads.Bead {
+		b := mustCreateReadyBead(t, store, beads.Bead{Title: title, Type: "task", Priority: readyPriority(priority)})
+		if err := store.Update(b.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+			t.Fatalf("claim %s: %v", b.ID, err)
+		}
+		return b
+	}
+	leading := claim(cityStore, "resumable claim", 0)
+	broken := claim(rigStore, "claim with a cross-store blocker", 1)
+	if err := rigStore.DepAdd(broken.ID, readyCrossStoreBlocker, "blocks"); err != nil {
+		t.Fatalf("dep %s -> %s: %v", broken.ID, readyCrossStoreBlocker, err)
+	}
+	return cityDir, leading, broken
+}
+
+// untilUnblockedWindow is the crash-recovery tier's read of sess-1's claims.
+var untilUnblockedWindow = readywork.Query{Status: readywork.StatusInProgress, Assignee: "sess-1", Limit: 20}
+
+// decodeReadyIDs decodes a gc ready answer into its ids.
+func decodeReadyIDs(t *testing.T, out []byte) []string {
+	t.Helper()
+	var rows []readywork.ReadyBead
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("gc ready printed %q, not a JSON array: %v", out, err)
+	}
+	return readyWireIDs(rows)
+}
+
+// TestReadyUntilUnblockedServesTheLeadingClaimPastAnUnresolvableRow pins the
+// in-process read: a claim whose blockers cannot be read, behind the session's
+// resumable claim, does not fail --until-unblocked, while the whole window
+// still fails loud on it.
+//
+// Adapted from #8407 to the approved single-store semantics: the unjudgeable
+// row is one whose dependency read fails. Its edge to the absent
+// readyCrossStoreBlocker does not make it unjudgeable — with the fault lifted,
+// the whole window serves both claims, as bd would.
+func TestReadyUntilUnblockedServesTheLeadingClaimPastAnUnresolvableRow(t *testing.T) {
+	_, leading, broken := newReadyUntilUnblockedCity(t)
+	lift := faultReadyRig(t, broken.ID)
+	prev := readyAPIClient
+	readyAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
+	t.Cleanup(func() { readyAPIClient = prev })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readyFlags{query: untilUnblockedWindow}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), broken.ID) {
+		t.Fatalf("whole window = %d (stdout %s, stderr %q), want a failure naming the unjudgeable claim %s", code, stdout.String(), stderr.String(), broken.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdReady(readyFlags{query: untilUnblockedWindow, untilUnblocked: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady(--until-unblocked) = %d; stderr=%s", code, stderr.String())
+	}
+	if got := decodeReadyIDs(t, stdout.Bytes()); !reflect.DeepEqual(got, []string{leading.ID}) {
+		t.Fatalf("gc ready --until-unblocked = %v, want the leading claim [%s]", got, leading.ID)
+	}
+
+	// bd semantics on a single-store city: the absent cross-prefix blocker
+	// neither blocks the claim nor fails the read.
+	lift()
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdReady(readyFlags{query: untilUnblockedWindow}, &stdout, &stderr); code != 0 {
+		t.Fatalf("whole window without the fault = %d; stderr=%s; an absent %s blocker must not fail the read", code, stderr.String(), readyCrossStoreBlocker)
+	}
+	if got := decodeReadyIDs(t, stdout.Bytes()); !reflect.DeepEqual(got, []string{leading.ID, broken.ID}) {
+		t.Fatalf("whole window without the fault = %v, want both claims [%s %s]", got, leading.ID, broken.ID)
+	}
+}
+
+// TestReadyUntilUnblockedReadsInProcessWhenTheControllersWindowFails pins the
+// fallback the controller route rests on: the controller resolves the whole
+// window, so the unjudgeable claim (its dependency read faulted) fails its
+// read, and the command answers --until-unblocked from the in-process read
+// instead. Adapted from #8407 as above.
+func TestReadyUntilUnblockedReadsInProcessWhenTheControllersWindowFails(t *testing.T) {
+	cityDir, leading, broken := newReadyUntilUnblockedCity(t)
+	faultReadyRig(t, broken.ID)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	cityStore, err := openCityStoreAtWithConfig(cityDir, cfg)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	rigStores, err := readyRigLegStores(cfg, cityDir)
+	if err != nil {
+		t.Fatalf("open rig stores: %v", err)
+	}
+	cs := &controllerState{cfg: cfg, cityBeadStore: cityStore, beadStores: rigStores, cityName: loadedCityName(cfg, cityDir), cityPath: cityDir}
+	if _, err := cs.ReadyWork(context.Background(), untilUnblockedWindow); err == nil || !strings.Contains(err.Error(), broken.ID) {
+		t.Fatalf("controller window = %v, want a failure naming the unjudgeable claim %s", err, broken.ID)
+	}
+	client := readyWorkTestServer(t, cs)
+	prev := readyAPIClient
+	readyAPIClient = func(string) (*api.Client, string) { return client, "" }
+	t.Cleanup(func() { readyAPIClient = prev })
+	t.Setenv("GC_DEBUG", "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readyFlags{query: untilUnblockedWindow, untilUnblocked: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady(--until-unblocked) = %d; stderr=%s", code, stderr.String())
+	}
+	if got := decodeReadyIDs(t, stdout.Bytes()); !reflect.DeepEqual(got, []string{leading.ID}) {
+		t.Fatalf("gc ready --until-unblocked = %v, want the leading claim [%s]", got, leading.ID)
+	}
+	if !strings.Contains(stderr.String(), "route=fallback reason=api-error") {
+		t.Fatalf("stderr = %q, want the controller's failed window logged as the fallback", stderr.String())
+	}
+}
+
+// TestReadyUntilUnblockedIsRefusedOffTheInProgressArm pins the CLI validation:
+// --until-unblocked without --status in_progress is refused before any store is
+// opened, so the error names the flag, not the city's dead rig.
+func TestReadyUntilUnblockedIsRefusedOffTheInProgressArm(t *testing.T) {
+	newReadyCityWithBrokenRig(t)
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readyFlags{untilUnblocked: true}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc ready --until-unblocked without --status exited 0; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--until-unblocked needs --status in_progress") {
+		t.Fatalf("stderr = %q, want the refusal naming the flag", stderr.String())
+	}
+	if strings.Contains(stderr.String(), readyBrokenRigName) {
+		t.Fatalf("stderr = %q names the dead rig: the stores were opened before the flags were validated", stderr.String())
 	}
 }
 
@@ -834,7 +1059,7 @@ func TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure(t *testing.T) {
 	t.Cleanup(func() { readyAPIClient = prev })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code == 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdReady = 0 with stdout %s; the fallback read must fail loud on the broken rig", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), readyBrokenRigName) {
@@ -850,7 +1075,7 @@ func TestReadyReadsInProcessWithoutAController(t *testing.T) {
 	readyAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
 	t.Cleanup(func() { readyAPIClient = prev })
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d; stderr=%s", code, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "[]" {
@@ -874,7 +1099,7 @@ func TestReadyFallsBackWhenTheControllerHangs(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
-	go func() { done <- cmdReady(readywork.Query{}, &stdout, &stderr) }()
+	go func() { done <- cmdReady(readyFlags{}, &stdout, &stderr) }()
 	select {
 	case code := <-done:
 		if code != 0 {

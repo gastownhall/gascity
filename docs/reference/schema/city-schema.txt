@@ -2727,7 +2727,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports. When any layer\nsets acp_args, args and args_append reach only the CLI launch, except\nschema-managed flags such as a curated model, which become option\ndefaults that both launches carry: when a layer more specific than the\nacp_args layer declares args that reach the CLI launch, the CLI\ntransport is the default, and an explicit ACP session that still drops\nargs prints a warning."
         }
       },
       "additionalProperties": false,

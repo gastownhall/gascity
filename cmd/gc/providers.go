@@ -344,7 +344,10 @@ func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string
 	// StartCommand is ResolveProvider's escape hatch (step 1): it bypasses
 	// provider-catalog resolution entirely, so a cache entry for
 	// agentCfg.Provider would not describe this agent's actual resolution.
-	if agentCfg.StartCommand == "" {
+	// Neither would it under workspace.start_command (step 4b), which
+	// replaces the provider args the entry records as omitted from its ACP
+	// launch.
+	if agentCfg.StartCommand == "" && cfg.Workspace.StartCommand == "" {
 		name := agentCfg.Provider
 		if name == "" {
 			name = cfg.Workspace.Provider
@@ -417,8 +420,12 @@ func resolveProviderForACPTransport(cfg *config.City, providerName string) *conf
 	if cfg == nil || strings.TrimSpace(providerName) == "" {
 		return nil
 	}
-	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
-		return &resolved
+	// A cache entry resolves the provider alone; workspace.start_command
+	// replaces the args it records as omitted from its ACP launch.
+	if cfg.Workspace.StartCommand == "" {
+		if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+			return &resolved
+		}
 	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: providerName},
@@ -516,18 +523,10 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 }
 
 func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
-	transport := strings.TrimSpace(info.Transport)
-	if transport != "" {
+	if transport, recorded := recordedSessionTransport(info); recorded {
 		return transport == "acp"
 	}
 	providerName := strings.TrimSpace(info.Provider)
-	if providerName == "acp" {
-		return true
-	}
-	if strings.TrimSpace(info.MCPIdentity) != "" ||
-		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		return true
-	}
 	templateName := strings.TrimSpace(info.Template)
 	if cfg != nil {
 		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {

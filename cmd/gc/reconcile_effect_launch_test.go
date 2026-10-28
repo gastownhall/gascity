@@ -541,6 +541,28 @@ func TestACPLaunchRoutesBeforeStart(t *testing.T) {
 	}
 }
 
+// Kills a recorded ACP session launched on the default backend: a row whose
+// recorded transport is ACP, under a template that now resolves the CLI
+// transport, starts the template's ACP launch (templateParamsForSession)
+// routed to ACP before the Start, with no route seeded for it.
+func TestRecordedACPLaunchRoutesBeforeStart(t *testing.T) {
+	k, leaf := launchKit(t, "asleep", "transport", "acp")
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "opencode -m acme/model-x", ACPLaunch: &TemplateACPLaunch{Command: "opencode acp"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	leaf.onStart = func(context.Context) {
+		if len(leaf.routed) == 0 || leaf.routed[0] != "s-gc-1" {
+			t.Errorf("routes at Start = %v, want s-gc-1 routed to ACP", leaf.routed)
+		}
+	}
+	if s := k.runKind(); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if len(leaf.cfgs) != 1 || leaf.cfgs[0].Command != "opencode acp" {
+		t.Fatalf("started %+v, want one start of the ACP launch %q", leaf.cfgs, "opencode acp")
+	}
+}
+
 // Kills a launch commit that drops legacy's MCP keys, the runtime snapshot
 // file, the #46 mirror's clear or the episode's: the commit writes the
 // snapshot and identity and zeroes the mirror, the launch rewrites the

@@ -199,6 +199,7 @@ const (
 	TraceReasonPendingCreateCommitFailed     TraceReasonCode = "pending_create_commit_failed"
 	TraceReasonPendingCreateHealed           TraceReasonCode = "pending_create_healed"
 	TraceReasonPendingCreateSuperseded       TraceReasonCode = "pending_create_superseded"
+	TraceReasonPendingCreateLiveIncarnation  TraceReasonCode = "pending_create_live_incarnation"
 	TraceReasonAssignedWork                  TraceReasonCode = "assigned_work"
 	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"

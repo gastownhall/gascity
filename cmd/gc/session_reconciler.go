@@ -3127,6 +3127,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
+				detail := "live runtime belongs to another session"
+				if identity.otherEpochOfThisSession() {
+					// The live runtime is this session's own earlier or later
+					// incarnation: held while its work is in flight, re-decided
+					// every tick, and rolled back like any other incarnation's
+					// once none is left or it exits.
+					if holdsOverLiveIncarnation(sw, infoPostZombie, identity, name, tp.TemplateName, dt, stderr, trace, clk.Now()) {
+						continue
+					}
+					detail = "a live incarnation of this session holds no in-progress work"
+				}
 				live, leaseErr := ownStartNotLive, error(nil)
 				if identity.unstamped() {
 					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
@@ -3176,7 +3187,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 				// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
-				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
+				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", detail, false))
 				continue
 			case pendingCreateRuntimeUnknown:
 				// The live runtime may be this create's own, and the rollback

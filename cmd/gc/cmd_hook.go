@@ -452,13 +452,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	topo := cityQueryTopology(cityPath, cfg)
-	warnFederationBlindOverrides(stderr, &a, topo)
-	workQuery := a.EffectiveWorkQueryFor(topo)
-	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
-	// hook invocation sees the same rig substitution as the controller-side
-	// probes in build_desired_state.go / session_reconcile.go. #793.
-	workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, stderr)
+	topo, workQuery := hookWorkQuery(cityPath, cityName, cfg, &a, stderr)
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 
 	// Build the work query subprocess environment. Rig-backed agents get
@@ -1075,6 +1069,19 @@ func hookClaimRetryWindowClosed(err error, ops *hookClaimOps) error {
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 	return agentutil.RoutedToIdentity(a)
+}
+
+// hookWorkQuery returns the topology `gc hook` reads with and the work query it
+// runs for a, both built from the CITY topology, never from promptQueryTopology:
+// the hook reaches the rig stores itself, by running the single-store query
+// once per store (hookWorkQueryStores).
+func hookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, stderr io.Writer) (config.QueryTopology, string) {
+	topo := cityQueryTopology(cityPath, cfg)
+	warnFederationBlindOverrides(stderr, a, topo)
+	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
+	// hook invocation sees the same rig substitution as the controller-side
+	// probes in build_desired_state.go / session_reconcile.go. #793.
+	return topo, expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", a.EffectiveWorkQueryFor(topo), stderr)
 }
 
 // singleStoreHookWorkQuery returns the agent's work query built for the SAME

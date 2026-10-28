@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // reapDecision records one worktree the reaper acted on or declined to act on,
@@ -43,7 +44,8 @@ type reapReport struct {
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
-// cityPath/.gc/worktrees/<rig>/ and removes any whose associated bead is closed
+// <worktrees root>/<rig>/, the configured worktrees root
+// (workdir.WorktreesRoot), and removes any whose associated bead is closed
 // and that pass every safety gate. It returns a reapReport describing what was
 // reaped and what was protected.
 //
@@ -140,7 +142,7 @@ func reapClosedBeadWorktrees(
 		fmt.Fprintf(stderr, "reapClosedBeadWorktrees: liveness scanned via %s (/proc unavailable)\n", live.source) //nolint:errcheck
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 
 	for rigName, store := range rigStores {
 		if store == nil {

@@ -156,6 +156,19 @@ type TemplateParams struct {
 	// MCPServers is the effective ACP session/new MCP server set for this
 	// concrete session context.
 	MCPServers []runtime.MCPServerConfig
+	// ACPLaunch is the provider's ACP launch for a template that resolves
+	// the CLI transport on a provider that supports ACP. A session whose
+	// recorded transport is ACP keeps starting with it
+	// (templateParamsForSession). Nil for ACP templates and providers
+	// without ACP support.
+	ACPLaunch *TemplateACPLaunch
+}
+
+// TemplateACPLaunch is the ACP launch command and session/new MCP server set
+// a template would use if it resolved the ACP transport.
+type TemplateACPLaunch struct {
+	Command    string
+	MCPServers []runtime.MCPServerConfig
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -219,9 +232,21 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
+	var acpCommand string
+	if sessionTransport != config.SessionTransportACP && resolved.SupportsACP {
+		acpCommand, err = config.ProviderTemplateCommand(resolved, config.SessionTransportACP, installHooks, p.providers)
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("agent %q: building ACP launch: %w", qualifiedName, err)
+		}
+	}
 	if p.stderr != nil {
 		for _, pin := range resolved.UnhonoredOptionPins() {
 			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
+		}
+		if sessionTransport == config.SessionTransportACP {
+			if dropped := resolved.ACPDroppedArgs(cfgAgent); len(dropped) > 0 {
+				fmt.Fprintln(p.stderr, config.FormatACPOmittedArgs(qualifiedName, resolved.Name, command, dropped)) //nolint:errcheck
+			}
 		}
 	}
 	var sa string
@@ -235,6 +260,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	if sa != "" {
 		command = command + " " + sa
+		if acpCommand != "" {
+			acpCommand = acpCommand + " " + sa
+		}
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)
 		if settingsFile != "" {
 			// .gc/settings.json is managed by gc (regenerated on binary upgrade).
@@ -404,6 +432,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// The controller's own routes are the right source; threading them into
 	// this plumbing is a change to controller wiring, not part of swapping
 	// the reader, so it stays with the claim-routing slice (ga-601v2).
+	//
+	// The four discovery placeholders are a separate question from that
+	// storage-route fact. They run verbatim in the agent's own shell, with no
+	// hook-style store fan-out around them, so they render against
+	// promptQueryTopology, which federates them for a cross-store-eligible agent
+	// on a city with configured rigs and asks no storage route. SlingQuery is
+	// not a discovery reader and keeps the raw topology.
+	promptTopo := promptQueryTopology(topo, cfgAgent, p.rigs)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -415,10 +451,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranch,
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(topo), p.stderr),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(promptTopo), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(promptTopo), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(promptTopo), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(promptTopo), p.stderr),
 		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
@@ -593,6 +629,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		expanded := expandSessionSetup([]string{command}, setupCtx)
 		command = expanded[0]
 	}
+	if strings.Contains(acpCommand, "{{") {
+		expanded := expandSessionSetup([]string{acpCommand}, setupCtx)
+		acpCommand = expanded[0]
+	}
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
@@ -729,6 +769,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if mcpInBand {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
+	var acpLaunch *TemplateACPLaunch
+	if acpCommand != "" {
+		acpLaunch = &TemplateACPLaunch{
+			Command:    acpCommand,
+			MCPServers: materialize.RuntimeMCPServers(mcpCatalog.Servers),
+		}
+	}
 
 	// Step 12: Build startup hints.
 	nudge := cfgAgent.Nudge
@@ -782,6 +829,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
+		ACPLaunch:        acpLaunch,
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
@@ -841,6 +889,10 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
+	// Only withholdMirroredManagedDoltPort marks a target managed-local. The
+	// explicit empty value also outranks a marker that passthroughEnv copies
+	// from the controller's own environment.
+	env["GC_DOLT_MANAGED_LOCAL"] = ""
 	applySessionSharedServerOptOut(env, cityPath, rigRoot)
 
 	// Session env projection must not trigger provider recovery. Session setup
@@ -868,6 +920,12 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
+		} else {
+			// The projection carries the live port; withhold it when the
+			// scope's own port mirror already carries the same fact, so the
+			// session's raw bd follows the mirror across a managed Dolt
+			// restart onto a new port (gastownhall/gascity#1656).
+			withholdMirroredManagedDoltPort(env, cityPath, cityPath)
 		}
 		return env, nil
 	}
@@ -882,6 +940,12 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
+	} else {
+		// Same withhold as the city branch, judged against the rig's own
+		// .beads/dolt-server.port mirror: an inherited-city rig session's
+		// raw bd should follow the mirror gc reconciles, not the port dolt
+		// ran on when the session was spawned (gastownhall/gascity#1656).
+		withholdMirroredManagedDoltPort(env, cityPath, rigRoot)
 	}
 	return env, nil
 }

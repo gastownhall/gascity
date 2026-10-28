@@ -948,6 +948,24 @@ func supervisorCityAPIClient(cityPath string) *api.Client {
 	return api.NewCityScopedClient(baseURL, entry.EffectiveName())
 }
 
+// supervisorRequiresCityGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city routes: a write-auth or
+// read-auth verify key, or write_auth_required/read_auth_required, under
+// which the supervisor either gates those routes with a key from its
+// environment or refuses to boot. A key set only through the supervisor's
+// GC_CITY_WRITE_PUBKEY or GC_CITY_READ_PUBKEY environment is invisible here.
+// An unreadable supervisor.toml reports false: supervisorCityAPIClient cannot
+// resolve the supervisor's address from it either.
+func supervisorRequiresCityGrants() bool {
+	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		return false
+	}
+	s := cfg.Supervisor
+	return strings.TrimSpace(s.WriteAuthVerifyKey) != "" || s.WriteAuthRequired ||
+		strings.TrimSpace(s.ReadAuthVerifyKey) != "" || s.ReadAuthRequired
+}
+
 func supervisorCityRunning(cityPath string) (running bool, status string, known bool) {
 	if supervisorAliveHook() == 0 {
 		return false, "", false
