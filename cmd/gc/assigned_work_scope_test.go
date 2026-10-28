@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -1033,5 +1034,51 @@ func TestResolveTaskWorkDirPrefersCreatorWorkDirOverStampedCanonical(t *testing.
 
 	if got := resolveTaskWorkDir("", store, "worker-session"); got != creatorDir {
 		t.Fatalf("resolveTaskWorkDir = %q, want creator work_dir %q (not stamped %q)", got, creatorDir, observedDir)
+	}
+}
+
+// TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead
+// covers the demand/claim asymmetry left open by the #5094 gate (#6207): bd
+// records the row status=deferred with a defer_until that has already
+// elapsed, held by a session that no longer exists. bd ready — the pool claim
+// query, a raw status filter — can never serve an assigned deferred row, but
+// the deferral's date having elapsed used to let it pass IsDeferred, so the
+// reconciler counted permanent phantom demand against an empty hook and
+// spawned a worker per bead per tick. The row is built as production reads it
+// (beads.DecodeBeadEventPayload over bd's raw JSON), not hand-assembled: the
+// filter must exclude it through the read model's own deferral marker.
+func TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead(t *testing.T) {
+	raw := `{"id":"bd-elapsed","title":"parked route","status":"deferred","issue_type":"task","assignee":"worker","created_at":"2026-09-07T12:42:00Z","defer_until":"2020-01-01T00:00:00Z","metadata":{"gc.routed_to":"worker","gc.session_id":"gcs-dead"}}`
+	wb, ok := beads.DecodeBeadEventPayload(json.RawMessage(raw))
+	if !ok {
+		t.Fatal("raw bd deferred row failed to decode")
+	}
+	if wb.Status != "open" || !beads.IsDeferred(wb, time.Now()) {
+		t.Fatalf("decoded row = status %q deferred=%v, want bd's elapsed deferred status preserved as a deferral", wb.Status, !beads.IsDeferred(wb, time.Now()))
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("worker", "", intPtr(2), 0)},
+	}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, []beads.Bead{wb}, []string{""})
+	if len(got) != 0 {
+		t.Fatalf("filtered work = %#v, want the elapsed bd-deferred routed bead (unclaimable by bd ready, dead claimant) excluded from pool demand", got)
+	}
+
+	if class := classifyDemandRowClaimability(wb, time.Now().UTC()); class != demandRowDeferred {
+		t.Fatalf("classifyDemandRowClaimability = %q, want %q for a row the store still records deferred", class, demandRowDeferred)
+	}
+
+	// The filtered rows are what feed ComputePoolDesiredStates, so an empty
+	// filter answer must ask for no worker seat: an empty gc hook <pool> must
+	// never coexist with non-zero pool demand.
+	result := ComputePoolDesiredStates(cfg, got, nil, nil)
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Fatalf("pool requests = %d, want 0 — an out-of-ready routed bead must not wake or spawn a worker", total)
 	}
 }
