@@ -49,6 +49,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		"test-city",
 		workspaceEnv,
 		"worker",
 		"worker-named",
@@ -157,6 +158,7 @@ func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) 
 	}
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		"test-city",
 		workspaceEnv,
 		"worker",
 		"",
@@ -205,6 +207,7 @@ func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) 
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		"test-city",
 		nil,
 		"worker",
 		"",
@@ -289,6 +292,7 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
+		"test-city",
 		nil,
 		"worker",
 		"",
@@ -379,6 +383,7 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
+		"test-city",
 		nil,
 		"worker",
 		"",
@@ -415,7 +420,7 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 		"PROVIDER_TOKEN": "ok",
 	}
 
-	got := cityAnchoredSessionEnv(" \t\n ", nil, providerEnv)
+	got := cityAnchoredSessionEnv(" \t\n ", "test-city", nil, providerEnv)
 	if got["GC_CITY"] != "/provider/city" {
 		t.Fatalf("GC_CITY = %q, want provider value", got["GC_CITY"])
 	}
@@ -462,7 +467,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 			"GC_CITY_URL":    "https://remote.example.test",
 			"PROVIDER_TOKEN": "ok",
 		}
-		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		got := cityAnchoredSessionEnv(cityPath, "test-city", nil, providerEnv)
 		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
 			v, ok := got[key]
 			if !ok {
@@ -483,7 +488,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 		providerEnv := map[string]string{
 			"GC_CITY_CONTEXT": "remote-context",
 		}
-		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		got := cityAnchoredSessionEnv(cityPath, "test-city", nil, providerEnv)
 		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
 			v, ok := got[key]
 			if !ok {
@@ -495,7 +500,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 	})
 
 	t.Run("local — no remote keys present", func(t *testing.T) {
-		got := cityAnchoredSessionEnv(cityPath, nil, map[string]string{"PROVIDER_TOKEN": "ok"})
+		got := cityAnchoredSessionEnv(cityPath, "test-city", nil, map[string]string{"PROVIDER_TOKEN": "ok"})
 		if got["GC_CITY"] != cityPath {
 			t.Errorf("GC_CITY = %q, want %q (anchors still seeded when no remote target present)", got["GC_CITY"], cityPath)
 		}
@@ -512,6 +517,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		"test-city",
 		nil,
 		"worker",
 		"",
@@ -539,4 +545,50 @@ func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(
 	if got := cfg.Metadata[session.MCPServersSnapshotMetadataKey]; got != "" {
 		t.Fatalf("Metadata[mcp_servers_snapshot] = %q, want empty for tmux transport", got)
 	}
+}
+
+// TestCityAnchoredSessionEnvSetsCityName pins GC_CITY_NAME on the API create
+// and resume session env. The env is an overlay on what the session already
+// inherits, so an omitted key carries the supervisor's city name, which under
+// a multi-city supervisor is another city's.
+func TestCityAnchoredSessionEnvSetsCityName(t *testing.T) {
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+	cityPath := t.TempDir()
+
+	t.Run("resume", func(t *testing.T) {
+		got := cityAnchoredSessionEnv(cityPath, "own-city", nil, map[string]string{"PROVIDER_TOKEN": "ok"})
+		if got["GC_CITY_NAME"] != "own-city" {
+			t.Fatalf("GC_CITY_NAME = %q, want own-city", got["GC_CITY_NAME"])
+		}
+	})
+
+	t.Run("create", func(t *testing.T) {
+		cfg, err := resolvedSessionConfigForProvider(
+			cityPath,
+			"own-city",
+			nil,
+			"alias", "", "worker", "title", "",
+			nil,
+			&config.ResolvedProvider{Name: "test-agent", Command: "echo"},
+			"", cityPath,
+			nil,
+		)
+		if err != nil {
+			t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+		}
+		if got := cfg.Runtime.SessionEnv["GC_CITY_NAME"]; got != "own-city" {
+			t.Fatalf("SessionEnv[GC_CITY_NAME] = %q, want own-city", got)
+		}
+	})
+
+	t.Run("remote targeted", func(t *testing.T) {
+		got := cityAnchoredSessionEnv(cityPath, "own-city", nil, map[string]string{"GC_CITY_URL": "https://remote.example.test"})
+		v, ok := got["GC_CITY_NAME"]
+		if !ok {
+			t.Fatal("GC_CITY_NAME absent; want present and empty with the withheld local anchors (an omitted key is an inherited key)")
+		}
+		if v != "" {
+			t.Fatalf("GC_CITY_NAME = %q, want empty when the session targets a remote city", v)
+		}
+	})
 }

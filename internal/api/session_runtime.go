@@ -20,12 +20,13 @@ import (
 
 // cityAnchoredSessionEnv returns the provider process baseline merged with the
 // configured workspace env, resolved provider/agent env, the three
-// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR), and the
-// canonical path to the running gc binary. Later layers win, matching the
-// create-time precedence in cmd/gc/template_resolve.go: workspace env is the
-// lowest config layer, provider/agent env can override it, and runtime-owned
-// city anchors plus GC_BIN are authoritative. TOML-sourced workspace and
-// provider values support the same $VAR expansion as the CLI launch path.
+// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR), the
+// city's runtime name (GC_CITY_NAME), and the canonical path to the running gc
+// binary. Later layers win, matching the create-time precedence in
+// cmd/gc/template_resolve.go: workspace env is the lowest config layer,
+// provider/agent env can override it, and runtime-owned city anchors plus
+// GC_BIN are authoritative. TOML-sourced workspace and provider values support
+// the same $VAR expansion as the CLI launch path.
 //
 // As the final step — mirroring the CLI env finalization in template_resolve.go
 // — the gc binary's directory is prepended to PATH so a bare `gc` in the
@@ -50,7 +51,7 @@ import (
 // responsibility of the caller that knows the qualified agent name.
 //
 // If the merged baseline+workspace+provider env already targets a remote
-// city (GC_CITY_URL or GC_CITY_CONTEXT set), the local city anchors are
+// city (GC_CITY_URL or GC_CITY_CONTEXT set), the local city anchors and name are
 // PINNED EMPTY — withheld, not absent. Seeding them alongside a remote
 // target makes the nested gc binary in that session fail closed with
 // "conflicting targets" (cmd/gc/remote_target.go's local-vs-remote guard),
@@ -62,7 +63,7 @@ import (
 // drops the inherited entry. GC_CITY_ROOT is pinned too even though
 // citylayout.CityIdentityEnvMap never seeds it, because the guard trips on it
 // and nothing else clears an inherited value.
-func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
+func cityAnchoredSessionEnv(cityPath, cityName string, workspaceEnv, providerEnv map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
 	gcBin, _ := os.Executable()
 
@@ -82,10 +83,13 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 	if remoteTargeted {
 		anchors = map[string]string{
 			"GC_CITY":             "",
+			"GC_CITY_NAME":        "",
 			"GC_CITY_PATH":        "",
 			"GC_CITY_ROOT":        "",
 			"GC_CITY_RUNTIME_DIR": "",
 		}
+	} else if len(anchors) > 0 {
+		anchors["GC_CITY_NAME"] = cityName
 	}
 	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
 		return nil
@@ -405,7 +409,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), s.state.CityName(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
 }
 
@@ -523,7 +527,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 			resumeCommand = command
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), s.state.CityName(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),

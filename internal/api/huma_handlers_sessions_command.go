@@ -195,6 +195,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 		}
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
 			s.state.CityPath(),
+			s.state.CityName(),
 			configuredWorkspaceSessionEnv(s.state.Config()),
 			alias,
 			explicitName,
@@ -375,7 +376,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	go func() {
 		defer finishRequest()
 		defer s.recoverSessionCreate(reqID)
-		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), s.state.CityName(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
