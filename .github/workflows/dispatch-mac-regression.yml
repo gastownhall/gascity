@@ -1,0 +1,120 @@
+name: Dispatch Mac Regression for fork PRs
+
+# A pull_request run from a fork gets no secrets, so mac-regression.yml skips
+# fork PRs on that event. This workflow vets the author and then dispatches
+# mac-regression.yml; the dispatched run holds the secrets it needs
+# (OLLAMA_API_KEY) and tests the exact fork head. This job holds only
+# GITHUB_TOKEN, scoped to dispatching workflows
+# (scripts/pull_request_target_checkout_test.go,
+# scripts/dispatch_mac_regression_test.go).
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dispatch-mac-regression-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch-mac-regression:
+    name: Dispatch Mac Regression
+    if: >-
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # This workflow never checks out or runs pull request code. It reads the
+      # trusted allowlist from the commit this workflow file was read from
+      # (under pull_request_target always a default-branch commit, whatever
+      # the PR's base), vets the author, and only then dispatches
+      # mac-regression.yml with the PR head repository and SHA as explicit
+      # inputs. A branch name is never passed in place of the SHA.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Dispatch Mac Regression for trusted PR author
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          draft = os.environ.get("PR_DRAFT", "").lower() == "true"
+          author = os.environ.get("PR_AUTHOR", "").strip()
+          association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
+
+          if draft:
+              print("PR is draft; not dispatching Mac Regression")
+              raise SystemExit(0)
+
+          allowlist = set()
+          for raw_line in Path(".github/blacksmith-allowlist.txt").read_text(encoding="utf-8").splitlines():
+              line = raw_line.split("#", 1)[0].strip()
+              if line:
+                  allowlist.add(line.lower())
+
+          trusted = association in {"OWNER", "MEMBER", "COLLABORATOR"} or author.lower() in allowlist
+          if not trusted:
+              print(f"PR author {author or '<unknown>'} is not trusted for Mac Regression")
+              raise SystemExit(0)
+
+          workflow = "mac-regression.yml"
+          inputs = {
+              "suite": "full",
+              "pr_number": os.environ["PR_NUMBER"],
+              "head_repo": os.environ["PR_HEAD_REPO"],
+              "head_ref": os.environ["PR_HEAD_REF"],
+              "head_sha": os.environ["PR_HEAD_SHA"],
+          }
+          payload = json.dumps({
+              "ref": os.environ["BASE_REF"],
+              "inputs": inputs,
+          }).encode("utf-8")
+
+          workflow_id = urllib.parse.quote(workflow, safe="")
+          url = f"https://api.github.com/repos/{os.environ['REPOSITORY']}/actions/workflows/{workflow_id}/dispatches"
+          request = urllib.request.Request(
+              url,
+              data=payload,
+              method="POST",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "X-GitHub-Api-Version": "2026-03-10",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              if response.status not in {200, 204}:
+                  raise RuntimeError(f"unexpected dispatch status {response.status}")
+
+          print(f"Dispatched {workflow} for PR #{inputs['pr_number']} at {inputs['head_repo']}@{inputs['head_sha']}")
+          PY
