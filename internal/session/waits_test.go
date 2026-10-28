@@ -86,6 +86,39 @@ func TestWaitInfoFromBead_DecodesRegisteredResetPending(t *testing.T) {
 	}
 }
 
+// TestWaitInfoContinuationStale pins the stale predicate: an unflagged wait is
+// stale whenever both epochs are non-empty and differ; a wait flagged
+// RegisteredResetPending is additionally current at the epoch the pending
+// start opens (registered N, live N+1), so only that rotation spares it — a
+// second rotation, an epoch below the registered one, or a value that does
+// not parse returns to the unflagged rule.
+func TestWaitInfoContinuationStale(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		flagged    bool
+		registered string
+		live       string
+		want       bool
+	}{
+		{name: "unflagged equal epochs", registered: "2", live: "2", want: false},
+		{name: "unflagged differing epochs", registered: "2", live: "3", want: true},
+		{name: "unflagged empty registered epoch", registered: "", live: "3", want: false},
+		{name: "unflagged empty session epoch", registered: "2", live: "", want: false},
+		{name: "flagged at registered epoch", flagged: true, registered: "2", live: "2", want: false},
+		{name: "flagged at the rotation the reset opens", flagged: true, registered: "2", live: "3", want: false},
+		{name: "flagged after a second rotation", flagged: true, registered: "2", live: "4", want: true},
+		{name: "flagged below the registered epoch", flagged: true, registered: "2", live: "1", want: true},
+		{name: "flagged non-numeric session epoch falls back", flagged: true, registered: "2", live: "x", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
+			if got := w.ContinuationStale(Info{ContinuationEpoch: tc.live}); got != tc.want {
+				t.Fatalf("ContinuationStale(registered=%q, live=%q, flagged=%v) = %v, want %v", tc.registered, tc.live, tc.flagged, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitInfoFromBead_DepIDsSplitTrimEmpty(t *testing.T) {
 	cases := []struct {
 		name   string

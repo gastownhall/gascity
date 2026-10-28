@@ -1527,11 +1527,13 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 		registerInWindow  bool
 		depClosesInWindow bool
 		closeSession      bool
+		secondRotation    bool
 		wantState         string
 		wantLastError     string
 	}{
 		{name: "dep-closes-after-start", registerInWindow: true, wantState: waitStateReady},
 		{name: "dep-closes-before-start", registerInWindow: true, depClosesInWindow: true, wantState: waitStateReady},
+		{name: "second-rotation-cancels", registerInWindow: true, secondRotation: true, wantState: waitStateCanceled, wantLastError: "continuation-stale"},
 		{name: "control-registered-before-reset", wantState: waitStateCanceled, wantLastError: "continuation-stale"},
 		{name: "closed-session-targeted-lookup", registerInWindow: true, closeSession: true, wantState: waitStateCanceled, wantLastError: "session-closed"},
 	} {
@@ -1627,7 +1629,36 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 				}
 			}
 
-			if _, err := prepareWaitWakeState(store, now.Add(8*time.Minute)); err != nil {
+			if tc.secondRotation {
+				// The wait survived the start it was registered for; a second
+				// fresh restart opens another conversation and retires it.
+				if _, err := prepareWaitWakeState(store, now.Add(8*time.Minute)); err != nil {
+					t.Fatalf("prepareWaitWakeState (after first start): %v", err)
+				}
+				if err := sf.ApplyPatch(sess.ID, sessionpkg.MetadataPatch{
+					"restart_requested":          "true",
+					"continuation_reset_pending": "true",
+				}); err != nil {
+					t.Fatalf("request second reset: %v", err)
+				}
+				second := now.Add(9 * time.Minute)
+				patch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+					Generation:        4,
+					InstanceToken:     "tok-4",
+					ContinuationEpoch: 4,
+					Now:               second,
+				})
+				patch["restart_requested"] = ""
+				patch["continuation_reset_pending"] = ""
+				if err := sf.ApplyPatch(sess.ID, patch); err != nil {
+					t.Fatalf("ApplyPatch(second pre-wake): %v", err)
+				}
+				if err := sf.ApplyPatch(sess.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)}); err != nil {
+					t.Fatalf("ApplyPatch(active): %v", err)
+				}
+			}
+
+			if _, err := prepareWaitWakeState(store, now.Add(10*time.Minute)); err != nil {
 				t.Fatalf("prepareWaitWakeState (final): %v", err)
 			}
 			raw, err := store.Get(w.ID)

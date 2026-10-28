@@ -183,13 +183,21 @@ func splitWaitDepIDs(value string) []string {
 // non-empty and differ — the rule the wake pass applied inline before the
 // predicate moved here. A wait flagged RegisteredResetPending was registered
 // while the session's fresh restart was pending (issue #8406): it belongs to
-// the conversation the pending start opens, so the rotation that start
-// publishes must not fence it out.
+// the conversation the pending start opens, so it stays current at its
+// registered epoch N (the reset not yet consumed, or restored by a refused
+// or withdrawn start) and at N+1, and is stale at any other epoch — a second
+// rotation retires it like any wait of that conversation. A value that does
+// not parse as an integer falls back to the unflagged rule.
 func (w WaitInfo) ContinuationStale(s Info) bool {
-	if w.RegisteredResetPending {
-		return false
+	if !w.RegisteredResetPending {
+		return w.RegisteredEpoch != "" && s.ContinuationEpoch != "" && w.RegisteredEpoch != s.ContinuationEpoch
 	}
-	return w.RegisteredEpoch != "" && s.ContinuationEpoch != "" && w.RegisteredEpoch != s.ContinuationEpoch
+	registered, regErr := strconv.Atoi(strings.TrimSpace(w.RegisteredEpoch))
+	live, liveErr := strconv.Atoi(strings.TrimSpace(s.ContinuationEpoch))
+	if regErr != nil || liveErr != nil {
+		return w.RegisteredEpoch != "" && s.ContinuationEpoch != "" && w.RegisteredEpoch != s.ContinuationEpoch
+	}
+	return live != registered && live != registered+1
 }
 
 // StampWaitLookupCapMetadata adds the shared durable wait lookup cap
