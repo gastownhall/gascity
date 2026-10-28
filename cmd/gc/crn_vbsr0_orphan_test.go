@@ -78,7 +78,7 @@ func TestCrnVbsr0_A_TargetCloseWithOpenStepsOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	doWispAutocloseWith(store, targetID, &out)
+	doWispAutocloseWith(store, targetID, &out, beads.GraphStore{Store: store})
 
 	root, _ := store.Get(rootID)
 	openSteps := 0
@@ -112,7 +112,7 @@ func TestCrnVbsr0_B_LastStepCloseSelfHealsRoot(t *testing.T) {
 	// 1. Target closes first with all steps open — the orphaning event.
 	_ = store.Close(targetID)
 	var wispOut bytes.Buffer
-	doWispAutocloseWith(store, targetID, &wispOut)
+	doWispAutocloseWith(store, targetID, &wispOut, beads.GraphStore{Store: store})
 
 	// 2. Now each step closes, as an "always close your step bead" pack fix
 	//    would have each agent do. Fire the molecule autoclose hook per close.
@@ -121,7 +121,7 @@ func TestCrnVbsr0_B_LastStepCloseSelfHealsRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
-		doMoleculeAutocloseWith(store, "", events.Discard, id, &out)
+		doMoleculeAutocloseWith(store, "", events.Discard, id, &out, beads.GraphStore{Store: store})
 		root, _ := store.Get(rootID)
 		t.Logf("closed step %d/%d (%s): root=%s stdout=%q", i+1, len(steps), id, root.Status, out.String())
 	}
@@ -152,7 +152,7 @@ func TestCrnVbsr0_C_StepWithoutParentNeverReaps(t *testing.T) {
 
 	_ = store.Close(step.ID)
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out)
+	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, beads.GraphStore{Store: store})
 
 	r, _ := store.Get(root.ID)
 	t.Logf("parentless step closed: root=%s stdout=%q", r.Status, out.String())
