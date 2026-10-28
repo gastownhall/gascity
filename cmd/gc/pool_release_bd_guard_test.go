@@ -387,3 +387,42 @@ func TestReleaseOrphanedPoolAssignments_BdStoreKeepsStoreDeferredRow(t *testing.
 		t.Fatalf("row = status %q assignee %q defer_until %v, want deferred, worker-dead, %v unchanged", got.Status, got.Assignee, got.DeferUntil, elapsed)
 	}
 }
+
+// TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreWokenRow is the other
+// half of issue #6207's release contract: once the store wakes the row a
+// release kept (status back to open, defer_until cleared, as bd's sweep or
+// `bd undefer` writes), the next sweep's guarded release clears the dead
+// assignee and the bead reads ready.
+func TestReleaseOrphanedPoolAssignments_BdStoreReleasesStoreWokenRow(t *testing.T) {
+	elapsed := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Second)
+	ledger := newBdGuardLedger("deferred", "worker-dead", nil)
+	ledger.bead.DeferUntil = &elapsed
+	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+
+	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 0 {
+		t.Fatalf("released = %#v while bd records the row deferred, want none", released)
+	}
+
+	ledger.mu.Lock()
+	ledger.bead.Status = "open"
+	ledger.bead.DeferUntil = nil
+	ledger.mu.Unlock()
+
+	if released := sweepBdGuardLedger(t, store, ledger); len(released) != 1 {
+		t.Fatalf("released = %#v after the store woke the row, want the dead assignee released; bd updates %v", released, ledger.updates)
+	}
+	if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "open" || testFlagValue(ledger.updates[0], "--if-assignee") != "worker-dead" {
+		t.Fatalf("bd updates = %v, want one write guarded on open/worker-dead", ledger.updates)
+	}
+	woken, err := store.Get(ledger.row().ID)
+	if err != nil {
+		t.Fatalf("Get after release: %v", err)
+	}
+	if woken.Status != "open" || woken.Assignee != "" {
+		t.Fatalf("row = status %q assignee %q, want open and unassigned", woken.Status, woken.Assignee)
+	}
+	now := time.Now()
+	if beads.IsDeferred(woken, now) || !beads.IsReadyCandidate(woken, now) {
+		t.Fatalf("woken row %+v does not read ready (IsDeferred %v, IsReadyCandidate %v)", woken, beads.IsDeferred(woken, now), beads.IsReadyCandidate(woken, now))
+	}
+}
