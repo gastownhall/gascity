@@ -173,6 +173,91 @@ func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
 	}
 }
 
+// TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow pins that the
+// skip-aware exit keeps the freshness guarantee a processed pass buys: after
+// real work beside a stale row, the drain still takes the same bounded
+// skip-only re-polls the empty-queue path takes (workflowServeIdlePollAttempts),
+// so a minted successor is picked up without waiting for the --follow sleep.
+// The stale bead is dispatched exactly 2 + workflowServeIdlePollAttempts
+// times: once in the processed pass, once per re-poll, once in the exit scan.
+func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) {
+	cityDir, store := setUpControlReadyFileStoreCity(t)
+	noBDOnPathForTest(t)
+	ensureDispatchWakeDir(t, cityDir)
+
+	// The live control is the leak test's orphaned scope-check: its root is
+	// missing, so dispatching it closes it as orphaned-workflow — a real
+	// processed write beside the stale row. scope-check needs no city-config
+	// resolution.
+	live, err := store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:     freshnessControlTarget,
+			beadmeta.KindMetadataKey:         beadmeta.KindScopeCheck,
+			beadmeta.RootBeadIDMetadataKey:   "ga-missing-root",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create live control: %v", err)
+	}
+	stale := createRoutedControl(t, store, beadmeta.KindScopeCheck)
+	if err := store.Close(stale.ID); err != nil {
+		t.Fatalf("close stale control: %v", err)
+	}
+
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 3
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	scans := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		scans++
+		if scans > 2+workflowServeIdlePollAttempts+1 {
+			t.Fatalf("drain scanned the queue %d times, want %d", scans, 2+workflowServeIdlePollAttempts+1)
+		}
+		queue := []hookBead{{ID: stale.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck}}}
+		liveNow, err := store.Get(live.ID)
+		if err != nil {
+			return nil, err
+		}
+		if liveNow.Status == "open" {
+			queue = append([]hookBead{{ID: live.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck}}}, queue...)
+		}
+		return queue, nil
+	}
+
+	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if !result.processedAny {
+		t.Fatal("processedAny = false, want the live control processed")
+	}
+	wantScans := 2 + workflowServeIdlePollAttempts
+	if scans != wantScans {
+		t.Errorf("drain scanned the queue %d times, want %d (one processed pass, %d skip-only re-polls, one exit scan), so the stale bead is dispatched exactly %d times",
+			scans, wantScans, workflowServeIdlePollAttempts, wantScans)
+	}
+	if _, statErr := os.Stat(dispatchWakeFile(cityDir)); statErr != nil {
+		t.Errorf("dispatch wake file missing after a pass that processed the live control: %v", statErr)
+	}
+	liveNow, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatalf("reload live control: %v", err)
+	}
+	if liveNow.Status != "closed" {
+		t.Errorf("live control status = %s, want closed (dispatched as orphaned-workflow)", liveNow.Status)
+	}
+}
+
 // TestDrainWorkflowServeWorkSkipBesidePendingStillReportsPending is the mixed
 // edge: a pass with one skip and one pending row is a pending pass — pending
 // wins over skips, the drain ends through serve pending-queue, and pendingAny
