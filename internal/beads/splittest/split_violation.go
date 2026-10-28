@@ -76,6 +76,13 @@ type SiteSummary struct {
 	Tests int
 	// Events counts distinct (line, test) sightings, for information.
 	Events int
+	// TestNames are the distinct tests that reached the key ("?" for a
+	// goroutine off any test's stack), sorted. A fixture row of the baseline
+	// is bound to them: the same key reached from any other test is new.
+	TestNames []string
+	// CallerLines are the distinct lines of Key.Caller the key was reached
+	// from.
+	CallerLines []int
 	// SampleTest and SampleVia name one test and one caller, for triage.
 	SampleTest, SampleVia string
 }
@@ -99,11 +106,12 @@ const (
 
 // sighting is one distinct (kind, key, line, test) the sink has seen.
 type sighting struct {
-	kind eventKind
-	key  SiteKey
-	line int
-	test string
-	via  string
+	kind       eventKind
+	key        SiteKey
+	line       int
+	callerLine int
+	test       string
+	via        string
 }
 
 // violationSink collects sightings. The gate's process-wide sink also appends
@@ -145,6 +153,16 @@ func (s *violationSink) recordRelic(v SplitViolation) {
 }
 
 func (s *violationSink) add(kind eventKind, v SplitViolation) {
+	test := v.Test
+	if test == "" && v.Site.File != "" {
+		// Off the test's goroutine (a controller loop, a handler): charge
+		// the sighting to the one top-level test running, so a fixture row's
+		// scope binds it too. With none or several running it stays "?".
+		test = soleRunningTest()
+	}
+	if test == "" {
+		test = "?"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if v.Site.File == "" {
@@ -153,15 +171,16 @@ func (s *violationSink) add(kind eventKind, v SplitViolation) {
 		}
 		return
 	}
-	test := v.Test
-	if test == "" {
-		test = "?"
-	}
 	via := ""
 	if v.Via.File != "" {
 		via = v.Via.String() + " " + v.Via.Func
 	}
-	sg := sighting{kind: kind, key: keyOf(v), line: v.Site.Line, test: test}
+	key := keyOf(v)
+	if kind == kindRelic {
+		// Relic reads are ratcheted too, in a key space of their own.
+		key.View = relicViewPrefix + key.View
+	}
+	sg := sighting{kind: kind, key: key, line: v.Site.Line, callerLine: v.Pkg.Line, test: test}
 	if s.seen[sg] {
 		return
 	}
@@ -190,23 +209,27 @@ func formatSighting(sg sighting) string {
 	k := sg.key
 	return strings.Join([]string{
 		string(sg.kind), k.File, k.Func, k.Op, k.View, k.Class, k.Caller,
-		strconv.Itoa(sg.line), sg.test, sg.via,
+		strconv.Itoa(sg.line), strconv.Itoa(sg.callerLine), sg.test, sg.via,
 	}, "\t")
 }
 
 // parseSighting reads one events-file line.
 func parseSighting(line string) (sighting, bool) {
 	f := strings.Split(line, "\t")
-	if len(f) != 10 {
+	if len(f) != 11 {
 		return sighting{}, false
 	}
 	n, err := strconv.Atoi(f[7])
 	if err != nil {
 		return sighting{}, false
 	}
+	c, err := strconv.Atoi(f[8])
+	if err != nil {
+		return sighting{}, false
+	}
 	return sighting{
 		kind: eventKind(f[0]), key: SiteKey{File: f[1], Func: f[2], Op: f[3], View: f[4], Class: f[5], Caller: f[6]},
-		line: n, test: f[8], via: f[9],
+		line: n, callerLine: c, test: f[9], via: f[10],
 	}, true
 }
 
@@ -241,11 +264,10 @@ func (s *violationSink) reset() {
 // summarize folds sightings of one kind into per-key summaries, sorted.
 func summarize(all []sighting, kind eventKind) []SiteSummary {
 	type agg struct {
-		lines  map[int]bool
-		tests  map[string]bool
-		events map[[2]string]bool
-		sample string
-		via    string
+		lines, clines map[int]bool
+		tests         map[string]bool
+		events        map[[2]string]bool
+		sample, via   string
 	}
 	byKey := map[SiteKey]*agg{}
 	for _, sg := range all {
@@ -254,10 +276,13 @@ func summarize(all []sighting, kind eventKind) []SiteSummary {
 		}
 		a, ok := byKey[sg.key]
 		if !ok {
-			a = &agg{lines: map[int]bool{}, tests: map[string]bool{}, events: map[[2]string]bool{}}
+			a = &agg{lines: map[int]bool{}, clines: map[int]bool{}, tests: map[string]bool{}, events: map[[2]string]bool{}}
 			byKey[sg.key] = a
 		}
 		a.lines[sg.line] = true
+		if sg.callerLine > 0 {
+			a.clines[sg.callerLine] = true
+		}
 		a.tests[sg.test] = true
 		a.events[[2]string{strconv.Itoa(sg.line), sg.test}] = true
 		if a.sample == "" || (a.sample == "?" && sg.test != "?") {
@@ -269,16 +294,28 @@ func summarize(all []sighting, kind eventKind) []SiteSummary {
 	}
 	out := make([]SiteSummary, 0, len(byKey))
 	for k, a := range byKey {
-		lines := make([]int, 0, len(a.lines))
-		for l := range a.lines {
-			lines = append(lines, l)
-		}
-		sort.Ints(lines)
-		out = append(out, SiteSummary{Key: k, Lines: lines, Tests: len(a.tests), Events: len(a.events), SampleTest: a.sample, SampleVia: a.via})
+		out = append(out, SiteSummary{
+			Key: k, Lines: sortedInts(a.lines), CallerLines: sortedInts(a.clines),
+			Tests: len(a.tests), TestNames: sortedKeys(a.tests), Events: len(a.events),
+			SampleTest: a.sample, SampleVia: a.via,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return lessKey(out[i].Key, out[j].Key) })
 	return out
 }
+
+func sortedInts(m map[int]bool) []int {
+	out := make([]int, 0, len(m))
+	for n := range m {
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// relicViewPrefix marks a relic read's key: "relic:work" is a work-view read
+// under beads.RelicRead.
+const relicViewPrefix = "relic:"
 
 func lessKey(a, b SiteKey) bool {
 	for _, pair := range [][2]string{{a.File, b.File}, {a.Func, b.Func}, {a.Op, b.Op}, {a.View, b.View}, {a.Class, b.Class}, {a.Caller, b.Caller}} {

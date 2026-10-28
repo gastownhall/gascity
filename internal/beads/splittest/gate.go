@@ -92,6 +92,9 @@ func GateSites() []SiteSummary {
 type GateFiles struct {
 	// Baseline is the known violation keys (ParseBaseline).
 	Baseline string
+	// KnownFlaky lists tests whose failures are known flakes, each with the
+	// bead that owns the flake; a failure of one is reported, not counted.
+	KnownFlaky string
 	// KnownFailures lists the top-level tests known to fail under the gate,
 	// one per line; a test failing that is not listed fails the run.
 	KnownFailures string
@@ -196,6 +199,27 @@ func (g *gateRun) tee(r io.Reader) {
 	}
 }
 
+// soleRunningTest is the one top-level test the primary process's stdout
+// tee shows running, or "" when there is no gate run (a re-executed helper
+// process) or when none or several (parallel) tests are running.
+func soleRunningTest() string {
+	gateRunMu.Lock()
+	run := activeRun
+	gateRunMu.Unlock()
+	if run == nil {
+		return ""
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if len(run.running) != 1 {
+		return ""
+	}
+	for name := range run.running {
+		return name
+	}
+	return ""
+}
+
 // observe tracks top-level tests from one output line.
 func (g *gateRun) observe(line string) {
 	field := func(prefix string) (string, bool) {
@@ -264,8 +288,32 @@ func (g *gateRun) watch(limit time.Duration) {
 			n := runtime.Stack(buf, true)
 			fmt.Fprintf(os.Stderr, "SPLIT-STRICT HUNG TEST: %s ran longer than %s under the gate; goroutines:\n%s\n", hung, limit, buf[:n]) //nolint:errcheck // best-effort test log
 			code := finishGate(1, g, gateFilesForHang, os.Stderr)
+			runHangCleanup()
 			os.Exit(code)
 		}
+	}
+}
+
+var (
+	hangCleanupMu sync.Mutex
+	hangCleanup   func()
+)
+
+// SetHangCleanup registers the teardown the hang path runs before it exits
+// the binary: the work TestMain would have done after m.Run (temporary
+// roots, helper processes), which os.Exit would otherwise skip.
+func SetHangCleanup(fn func()) {
+	hangCleanupMu.Lock()
+	defer hangCleanupMu.Unlock()
+	hangCleanup = fn
+}
+
+func runHangCleanup() {
+	hangCleanupMu.Lock()
+	fn := hangCleanup
+	hangCleanupMu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 
@@ -332,8 +380,10 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	}
 	all = append(all, gateSink.sightings()...)
 	all = dedupeSightings(all)
-	observed := summarize(all, kindViolation)
 	relics := summarize(all, kindRelic)
+	// Relic keys are ratcheted with the violations (their views carry the
+	// relic: prefix), so a new relic read is new debt the run reports.
+	observed := append(summarize(all, kindViolation), relics...)
 	writeGateFile(run.dir, observedReportName, FormatSiteTable(observed), out)
 	writeGateFile(run.dir, relicReportName, FormatSiteTable(relics), out)
 	if path := strings.TrimSpace(os.Getenv(StrictReportEnv)); path != "" {
@@ -371,9 +421,18 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 		say("split-strict: %v", err)
 		tests = "FAIL"
 	}
-	var newFailing, fixed []string
+	flaky, err := readKnownFlaky(files.KnownFlaky)
+	if err != nil {
+		say("split-strict: %v", err)
+		tests = "FAIL"
+	}
+	var newFailing, fixed, flaked []string
 	for _, name := range failing {
-		if !known[name] {
+		switch {
+		case known[name] != "":
+		case flaky[name] != "":
+			flaked = append(flaked, name)
+		default:
 			newFailing = append(newFailing, name)
 		}
 	}
@@ -397,6 +456,9 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	fmt.Fprintf(out, "SPLIT-STRICT TESTS: %s (%d failing, %d not in %s%s)\n", tests, len(failing), len(newFailing), files.KnownFailures, hungNote(hung)) //nolint:errcheck // best-effort test log
 	for _, name := range newFailing {
 		fmt.Fprintf(out, "  NEW FAILING %s\n", name) //nolint:errcheck // best-effort test log
+	}
+	for _, name := range flaked {
+		fmt.Fprintf(out, "  KNOWN FLAKY %s failed (%s)\n", name, flaky[name]) //nolint:errcheck // best-effort test log
 	}
 	for _, name := range fixed {
 		fmt.Fprintf(out, "  NOW PASSING %s (remove it from %s)\n", name, files.KnownFailures) //nolint:errcheck // best-effort test log
@@ -461,9 +523,8 @@ func readBaselineFile(path string) ([]BaselineEntry, error) {
 	return entries, nil
 }
 
-// readKnownFailures reads a known-failures list: one top-level test name per
-// line, '#' comments.
-func readKnownFailures(path string) (map[string]bool, error) {
+// readKnownFailures reads a known-failures list (ParseKnownFailures).
+func readKnownFailures(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading the split-strict known failures: %w", err)
@@ -472,9 +533,37 @@ func readKnownFailures(path string) (map[string]bool, error) {
 	return ParseKnownFailures(f)
 }
 
-// ParseKnownFailures reads a known-failures list.
-func ParseKnownFailures(r io.Reader) (map[string]bool, error) {
-	out := map[string]bool{}
+// readKnownFlaky reads a known-flaky list (ParseKnownFlaky); a package
+// without one has none.
+func readKnownFlaky(path string) (map[string]string, error) {
+	if path == "" {
+		return map[string]string{}, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading the split-strict known flaky tests: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	return ParseKnownFlaky(f)
+}
+
+// ParseKnownFailures reads a known-failures list: one top-level test per
+// line, tab, the reason it fails under the gate; '#' comments. Every entry
+// needs a reason, so the list can only shrink by someone reading it.
+func ParseKnownFailures(r io.Reader) (map[string]string, error) {
+	return parseTestList(r, "known failures", 2)
+}
+
+// ParseKnownFlaky reads a known-flaky list: test, tab, the owner bead that
+// tracks the flake, tab, the reason. A listed test's failure is reported but
+// does not fail the TESTS verdict; it is not a known failure, so it is never
+// baked into the known-failures list either.
+func ParseKnownFlaky(r io.Reader) (map[string]string, error) {
+	return parseTestList(r, "known flaky", 3)
+}
+
+func parseTestList(r io.Reader, what string, fields int) (map[string]string, error) {
+	out := map[string]string{}
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
 	for scanner.Scan() {
@@ -483,13 +572,23 @@ func ParseKnownFailures(r io.Reader) (map[string]bool, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !strings.HasPrefix(line, "Test") || strings.ContainsAny(line, " \t/") {
-			return nil, fmt.Errorf("known failures line %d: %q is not a top-level test name", lineNo, line)
+		f := strings.Split(line, "\t")
+		if len(f) != fields {
+			return nil, fmt.Errorf("%s line %d: want %d tab-separated fields, got %d", what, lineNo, fields, len(f))
 		}
-		if out[line] {
-			return nil, fmt.Errorf("known failures line %d: %s repeats", lineNo, line)
+		name := f[0]
+		if !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " /") {
+			return nil, fmt.Errorf("%s line %d: %q is not a top-level test name", what, lineNo, name)
 		}
-		out[line] = true
+		for _, field := range f[1:] {
+			if strings.TrimSpace(field) == "" {
+				return nil, fmt.Errorf("%s line %d: %s has an empty field; every entry says why", what, lineNo, name)
+			}
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("%s line %d: %s repeats", what, lineNo, name)
+		}
+		out[name] = strings.Join(f[1:], ": ")
 	}
 	return out, scanner.Err()
 }

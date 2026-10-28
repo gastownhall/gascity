@@ -10,13 +10,18 @@ import (
 )
 
 const sampleBaseline = "# comment\n" +
-	"internal/api/residency_by_id.go\tapi.(*Server).resolveBeadOwner\tget\twork\tsessions\tapi.(*Server).humaHandleBeadReopen\t1\t3\tmisroute\tS3: by-id through the work leg\n" +
+	"internal/api/residency_by_id.go\tapi.(*Server).resolveBeadOwner\tget\twork\tsessions\tapi.(*Server).humaHandleBeadReopen\t1\t1\t3\t*\tmisroute\tS3: by-id through the work leg\n" +
 	"\n" +
-	"cmd/gc/sling.go\tgc.attach\tcreate\twork\tgraph\t-\t2\t1\tknown-violation\tS4: rig-store graph write\n" +
-	"cmd/gc/open.go\tgc.open\tget\twork\tgraph\t-\t1\t1\ttriage\tnot yet ruled on\n"
+	"cmd/gc/sling.go\tgc.attach\tcreate\twork\tgraph\t-\t2\t0\t1\t*\tknown-violation\tS4: rig-store graph write\n" +
+	"cmd/gc/fix.go\tgc.fix\tget\twork\tsessions\tgc.fixCaller\t1\t1\t1\tTestFixtureShape\tfixture\tthe test passes the work store\n" +
+	"cmd/gc/open.go\tgc.open\tget\twork\tgraph\t-\t1\t0\t1\t*\ttriage\tnot yet ruled on\n"
 
 func resolveKey() SiteKey {
 	return SiteKey{File: "internal/api/residency_by_id.go", Func: "api.(*Server).resolveBeadOwner", Op: "get", View: "work", Class: "sessions", Caller: "api.(*Server).humaHandleBeadReopen"}
+}
+
+func fixtureKey() SiteKey {
+	return SiteKey{File: "cmd/gc/fix.go", Func: "gc.fix", Op: "get", View: "work", Class: "sessions", Caller: "gc.fixCaller"}
 }
 
 func TestParseBaseline(t *testing.T) {
@@ -24,25 +29,31 @@ func TestParseBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 3 {
+	if len(entries) != 4 {
 		t.Fatalf("entries = %+v", entries)
 	}
-	want := BaselineEntry{Key: resolveKey(), MaxLines: 1, Tests: 3, Verdict: VerdictMisroute, Note: "S3: by-id through the work leg"}
-	if entries[0] != want {
-		t.Fatalf("entry = %+v, want %+v", entries[0], want)
+	e := entries[0]
+	if e.Key != resolveKey() || e.MaxLines != 1 || e.MaxCallerLines != 1 || e.Tests != 3 || !e.anyTest() || e.Verdict != VerdictMisroute || e.Note != "S3: by-id through the work leg" {
+		t.Fatalf("entry = %+v", e)
+	}
+	if f := entries[2]; f.anyTest() || len(f.Scope) != 1 || f.Scope[0] != "TestFixtureShape" {
+		t.Fatalf("fixture entry scope = %v, want [TestFixtureShape]", f.Scope)
 	}
 }
 
 func TestParseBaselineRejectsMalformedEntries(t *testing.T) {
 	row := func(fields ...string) string { return strings.Join(fields, "\t") + "\n" }
 	for name, text := range map[string]string{
-		"fields":    row("a.go", "f", "get", "work", "graph", "-", "1", "1", "misroute"),
-		"emptykey":  row("a.go", "", "get", "work", "graph", "-", "1", "1", "misroute", "n"),
-		"lines":     row("a.go", "f", "get", "work", "graph", "-", "0", "1", "misroute", "n"),
-		"tests":     row("a.go", "f", "get", "work", "graph", "-", "1", "x", "misroute", "n"),
-		"verdict":   row("a.go", "f", "get", "work", "graph", "-", "1", "1", "ok", "n"),
-		"note":      row("a.go", "f", "get", "work", "graph", "-", "1", "1", "misroute", " "),
-		"duplicate": row("a.go", "f", "get", "work", "graph", "-", "1", "1", "misroute", "n") + row("a.go", "f", "get", "work", "graph", "-", "1", "1", "fixture", "n"),
+		"fields":         row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "*", "misroute"),
+		"emptykey":       row("a.go", "", "get", "work", "graph", "-", "1", "0", "1", "*", "misroute", "n"),
+		"lines":          row("a.go", "f", "get", "work", "graph", "-", "0", "0", "1", "*", "misroute", "n"),
+		"callerlines":    row("a.go", "f", "get", "work", "graph", "-", "1", "x", "1", "*", "misroute", "n"),
+		"tests":          row("a.go", "f", "get", "work", "graph", "-", "1", "0", "x", "*", "misroute", "n"),
+		"scope":          row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "", "misroute", "n"),
+		"unboundfixture": row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "*", "fixture", "n"),
+		"verdict":        row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "*", "ok", "n"),
+		"note":           row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "*", "misroute", " "),
+		"duplicate":      row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "*", "misroute", "n") + row("a.go", "f", "get", "work", "graph", "-", "1", "0", "1", "TestA", "fixture", "n"),
 	} {
 		if _, err := ParseBaseline(strings.NewReader(text)); err == nil {
 			t.Errorf("%s: ParseBaseline accepted %q", name, text)
@@ -55,7 +66,7 @@ func TestCompareToBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	known := SiteSummary{Key: resolveKey(), Lines: []int{90}, Tests: 5}
+	known := SiteSummary{Key: resolveKey(), Lines: []int{90}, CallerLines: []int{12}, Tests: 5, TestNames: []string{"TestA"}}
 	t.Run("known key passes, line drift is fine", func(t *testing.T) {
 		r := CompareToBaseline([]SiteSummary{known}, baseline)
 		if r.Failed() || len(r.Grown) != 1 {
@@ -80,12 +91,32 @@ func TestCompareToBaseline(t *testing.T) {
 		two := known
 		two.Lines = []int{82, 95}
 		r := CompareToBaseline([]SiteSummary{two}, baseline)
-		if len(r.LineCap) != 1 || r.LineCap[0].Cap != 1 {
+		if len(r.LineCap) != 1 || r.LineCap[0].Cap != 1 || r.LineCap[0].Caller {
 			t.Fatalf("LineCap = %+v", r.LineCap)
 		}
 	})
+	t.Run("a second calling line in a known caller fails", func(t *testing.T) {
+		two := known
+		two.CallerLines = []int{12, 40}
+		r := CompareToBaseline([]SiteSummary{two}, baseline)
+		if len(r.LineCap) != 1 || !r.LineCap[0].Caller || !strings.Contains(r.Report("b"), "LINES caller") {
+			t.Fatalf("LineCap = %+v", r.LineCap)
+		}
+	})
+	t.Run("a fixture row reached from another test is new", func(t *testing.T) {
+		fix := SiteSummary{Key: fixtureKey(), Lines: []int{3}, CallerLines: []int{9}, Tests: 2, TestNames: []string{"TestFixtureShape", "TestNewCaller"}}
+		r := CompareToBaseline([]SiteSummary{fix}, baseline)
+		if len(r.OutOfScope) != 1 || r.OutOfScope[0].Tests[0] != "TestNewCaller" || !r.Failed() {
+			t.Fatalf("OutOfScope = %+v", r.OutOfScope)
+		}
+		fix.TestNames = []string{"TestFixtureShape"}
+		fix.Tests = 1
+		if r := CompareToBaseline([]SiteSummary{fix}, baseline); r.Failed() {
+			t.Fatalf("the bound test failed the ratchet: %+v", r)
+		}
+	})
 	t.Run("a triage row fails", func(t *testing.T) {
-		tri := SiteSummary{Key: SiteKey{File: "cmd/gc/open.go", Func: "gc.open", Op: "get", View: "work", Class: "graph", Caller: "-"}, Lines: []int{3}, Tests: 1}
+		tri := SiteSummary{Key: SiteKey{File: "cmd/gc/open.go", Func: "gc.open", Op: "get", View: "work", Class: "graph", Caller: "-"}, Lines: []int{3}, Tests: 1, TestNames: []string{"TestX"}}
 		r := CompareToBaseline([]SiteSummary{tri}, baseline)
 		if len(r.Triage) != 1 || !r.Failed() || !strings.Contains(r.Report("b"), "TRIAGE") {
 			t.Fatalf("result = %+v", r)
@@ -102,15 +133,22 @@ func TestCompareToBaseline(t *testing.T) {
 	})
 }
 
-func TestParseKnownFailures(t *testing.T) {
-	got, err := ParseKnownFailures(strings.NewReader("# known\nTestA\n\nTestB\n"))
-	if err != nil || !got["TestA"] || !got["TestB"] || len(got) != 2 {
+func TestParseKnownFailuresAndFlaky(t *testing.T) {
+	got, err := ParseKnownFailures(strings.NewReader("# known\nTestA\treads a session through the work view\n\nTestB\tfixture shape\n"))
+	if err != nil || got["TestA"] == "" || got["TestB"] == "" || len(got) != 2 {
 		t.Fatalf("ParseKnownFailures = %v, %v", got, err)
 	}
-	for _, bad := range []string{"TestA/sub\n", "notatest\n", "TestA\nTestA\n"} {
+	for _, bad := range []string{"TestA\n", "TestA/sub\tr\n", "notatest\tr\n", "TestA\tr\nTestA\tr\n", "TestA\t \n"} {
 		if _, err := ParseKnownFailures(strings.NewReader(bad)); err == nil {
 			t.Errorf("ParseKnownFailures accepted %q", bad)
 		}
+	}
+	flaky, err := ParseKnownFlaky(strings.NewReader("TestF\tmc-19h7i\ttiming under remote load\n"))
+	if err != nil || !strings.Contains(flaky["TestF"], "mc-19h7i") {
+		t.Fatalf("ParseKnownFlaky = %v, %v", flaky, err)
+	}
+	if _, err := ParseKnownFlaky(strings.NewReader("TestF\ttiming\n")); err == nil {
+		t.Error("ParseKnownFlaky accepted an entry without an owner bead")
 	}
 }
 
@@ -150,27 +188,34 @@ func TestGateFinishReportsRatchetAndTestsSeparately(t *testing.T) {
 	dir := t.TempDir()
 	baselinePath := filepath.Join(dir, "baseline.tsv")
 	knownPath := filepath.Join(dir, "known.txt")
-	adjudicatedOnly := strings.Replace(sampleBaseline, "cmd/gc/open.go\tgc.open\tget\twork\tgraph\t-\t1\t1\ttriage\tnot yet ruled on\n", "", 1)
+	adjudicatedOnly := strings.Replace(sampleBaseline, "cmd/gc/open.go\tgc.open\tget\twork\tgraph\t-\t1\t0\t1\t*\ttriage\tnot yet ruled on\n", "", 1)
+	if adjudicatedOnly == sampleBaseline {
+		t.Fatal("the triage row was not removed from the sample baseline")
+	}
 	if err := os.WriteFile(baselinePath, []byte(adjudicatedOnly), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(knownPath, []byte("TestKnown\n"), 0o644); err != nil {
+	if err := os.WriteFile(knownPath, []byte("TestKnown\tfixture shape\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flakyPath := filepath.Join(dir, "flaky.list")
+	if err := os.WriteFile(flakyPath, []byte("TestFlaky\tmc-19h7i\ttiming under load\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gateSink.reset()
 	t.Cleanup(gateSink.reset)
-	files := GateFiles{Baseline: baselinePath, KnownFailures: knownPath}
+	files := GateFiles{Baseline: baselinePath, KnownFailures: knownPath, KnownFlaky: flakyPath}
 
 	run := newTestGateRun(t)
 	close(run.done)
-	for _, line := range []string{"=== RUN   TestKnown", "--- FAIL: TestKnown (0.00s)", "=== RUN   TestOK", "--- PASS: TestOK (0.00s)"} {
+	for _, line := range []string{"=== RUN   TestKnown", "--- FAIL: TestKnown (0.00s)", "=== RUN   TestOK", "--- PASS: TestOK (0.00s)", "=== RUN   TestFlaky", "--- FAIL: TestFlaky (0.00s)"} {
 		run.observe(line)
 	}
 	var out bytes.Buffer
 	if code := finishGate(1, run, files, &out); code != 0 {
 		t.Fatalf("a run whose only failure is known exited %d:\n%s", code, out.String())
 	}
-	for _, want := range []string{"SPLIT-STRICT RATCHET: PASS", "SPLIT-STRICT TESTS: PASS"} {
+	for _, want := range []string{"SPLIT-STRICT RATCHET: PASS", "SPLIT-STRICT TESTS: PASS", "KNOWN FLAKY TestFlaky failed (mc-19h7i: timing under load)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output lacks %q:\n%s", want, out.String())
 		}
@@ -198,7 +243,7 @@ func TestGateFinishReportsRatchetAndTestsSeparately(t *testing.T) {
 		t.Fatalf("result file = %q, %v", result, err)
 	}
 	table, err := os.ReadFile(filepath.Join(run.dir, observedReportName))
-	if err != nil || !strings.Contains(string(table), "internal/api/new.go\tapi.fresh\tget\twork\tgraph\t-\t3\t1") {
+	if err != nil || !strings.Contains(string(table), "internal/api/new.go\tapi.fresh\tget\twork\tgraph\t-\t3\t\t1\t1\tTestNew\t") {
 		t.Fatalf("observed table = %q, %v", table, err)
 	}
 }
@@ -208,7 +253,7 @@ func TestGateFinishFoldsInHelperProcessEvents(t *testing.T) {
 	t.Setenv(StrictReportEnv, "")
 	dir := t.TempDir()
 	baselinePath := filepath.Join(dir, "baseline.tsv")
-	knownPath := filepath.Join(dir, "known.txt")
+	knownPath := filepath.Join(dir, "known.list")
 	_ = os.WriteFile(baselinePath, nil, 0o644)
 	_ = os.WriteFile(knownPath, nil, 0o644)
 	gateSink.reset()
@@ -234,9 +279,43 @@ func TestGateMainIsANoOpWhenTheGateIsOff(t *testing.T) {
 }
 
 func TestFormatSightingRoundTrips(t *testing.T) {
-	sg := sighting{kind: kindRelic, key: resolveKey(), line: 82, test: "TestA", via: "a.go:1 f"}
+	sg := sighting{kind: kindRelic, key: resolveKey(), line: 82, callerLine: 7, test: "TestA", via: "a.go:1 f"}
 	got, ok := parseSighting(formatSighting(sg))
 	if !ok || got != sg {
 		t.Fatalf("round trip = %+v, %v; want %+v", got, ok, sg)
+	}
+}
+
+// TestOffGoroutineSightingsAreChargedToTheSoleRunningTest: a sighting with no
+// test frame (a controller loop, a handler goroutine) is charged to the one
+// top-level test running, so fixture scopes bind it; with several running it
+// stays "?".
+func TestOffGoroutineSightingsAreChargedToTheSoleRunningTest(t *testing.T) {
+	g := newTestGateRun(t)
+	gateRunMu.Lock()
+	saved := activeRun
+	activeRun = g
+	gateRunMu.Unlock()
+	t.Cleanup(func() {
+		gateRunMu.Lock()
+		activeRun = saved
+		gateRunMu.Unlock()
+	})
+	site := Site{File: "internal/api/loop.go", Line: 7, Func: "api.loop"}
+	testOf := func() string {
+		sink := newViolationSink()
+		sink.record(SplitViolation{View: "work", Op: "get", Class: "graph", ID: "gcg-1", Site: site})
+		if len(sink.order) != 1 {
+			t.Fatalf("sightings = %d, want 1", len(sink.order))
+		}
+		return sink.order[0].test
+	}
+	g.observe("=== RUN   TestOnly")
+	if got := testOf(); got != "TestOnly" {
+		t.Fatalf("off-goroutine sighting charged to %q, want the sole running test", got)
+	}
+	g.observe("=== CONT  TestOther")
+	if got := testOf(); got != "?" {
+		t.Fatalf("with two tests running the sighting was charged to %q, want ?", got)
 	}
 }
