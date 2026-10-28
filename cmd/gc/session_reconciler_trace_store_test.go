@@ -450,3 +450,129 @@ func TestTraceReaderSkipsTornBatchGluedToNextBatch(t *testing.T) {
 		})
 	}
 }
+
+func TestTraceRecoveryKeepsTornSegment(t *testing.T) {
+	cases := []struct {
+		name       string
+		tail       bool
+		wantLatest uint64
+	}{
+		{"committed batches after the glued batch", true, 11},
+		{"glued batch last in the segment", false, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			root := traceStoreTestRoot(cityDir)
+			segPath := writeTraceSegmentFile(t, root, legacyPoisonedTraceSegment(t, 2, tc.tail))
+
+			store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+			if err != nil {
+				t.Fatalf("new store: %v", err)
+			}
+			defer store.Close() //nolint:errcheck
+			quarantined, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceQuarantine, "*"))
+			if err != nil {
+				t.Fatalf("glob quarantine: %v", err)
+			}
+			if len(quarantined) != 0 {
+				t.Fatalf("quarantined = %v, want none for a torn batch", quarantined)
+			}
+			if _, err := os.Stat(segPath); err != nil {
+				t.Fatalf("segment %s should stay in segments/: %v", segPath, err)
+			}
+			latest, err := store.LatestSeq()
+			if err != nil {
+				t.Fatalf("LatestSeq: %v", err)
+			}
+			if latest != tc.wantLatest {
+				t.Fatalf("LatestSeq = %d, want %d (highest verified commit)", latest, tc.wantLatest)
+			}
+
+			if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-f", time.Now().UTC())}, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch f: %v", err)
+			}
+			segments := traceStoreTestSegments(t, root)
+			if len(segments) != 2 || segments[0] != segPath {
+				t.Fatalf("segments = %v, want %s plus a fresh one", segments, segPath)
+			}
+			records, err := ReadTraceRecords(root, TraceFilter{TraceID: "cycle-f", RecordType: TraceRecordBatchCommit})
+			if err != nil {
+				t.Fatalf("ReadTraceRecords: %v", err)
+			}
+			if len(records) != 1 || records[0].FirstSeq != tc.wantLatest+1 {
+				t.Fatalf("batch f commits = %+v, want one with first_seq %d", records, tc.wantLatest+1)
+			}
+		})
+	}
+}
+
+func TestTraceStoreRestartAfterTornTailUsesFreshSegment(t *testing.T) {
+	cityDir := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-a", now)}, TraceDurabilityDurable); err != nil {
+		t.Fatalf("append batch a: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	root := traceStoreTestRoot(cityDir)
+	segments := traceStoreTestSegments(t, root)
+	if len(segments) != 1 {
+		t.Fatalf("segments = %d, want 1", len(segments))
+	}
+	// A crash mid-write leaves a record cut off mid-line.
+	f, err := os.OpenFile(segments[0], os.O_APPEND|os.O_WRONLY, sessionReconcilerTraceOwnerFilePerm)
+	if err != nil {
+		t.Fatalf("open segment: %v", err)
+	}
+	if _, err := f.WriteString(`{"trace_schema_version":1,"seq":3,"trace_id":"cycle-torn","ts":"2026-1`); err != nil {
+		f.Close() //nolint:errcheck
+		t.Fatalf("write torn tail: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close segment: %v", err)
+	}
+	torn, err := os.ReadFile(segments[0])
+	if err != nil {
+		t.Fatalf("read torn segment: %v", err)
+	}
+
+	reopened, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close() //nolint:errcheck
+	if err := reopened.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-b", now.Add(time.Second))}, TraceDurabilityDurable); err != nil {
+		t.Fatalf("append batch b: %v", err)
+	}
+	after, err := os.ReadFile(segments[0])
+	if err != nil {
+		t.Fatalf("read torn segment after append: %v", err)
+	}
+	if !bytes.Equal(after, torn) {
+		t.Fatalf("batch b was appended onto the torn segment:\n%s", after)
+	}
+	if got := traceStoreTestSegments(t, root); len(got) != 2 {
+		t.Fatalf("segments = %v, want the torn one plus a fresh one", got)
+	}
+	quarantined, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceQuarantine, "*"))
+	if err != nil {
+		t.Fatalf("glob quarantine: %v", err)
+	}
+	if len(quarantined) != 0 {
+		t.Fatalf("quarantined = %v, want none for a torn tail", quarantined)
+	}
+	records, err := ReadTraceRecords(root, TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	assertTraceSeqsUnique(t, records)
+	if counts := traceRecordCounts(records); counts["cycle-a"] != 2 || counts["cycle-b"] != 2 || len(counts) != 2 {
+		t.Fatalf("records by trace = %v, want cycle-a=2 and cycle-b=2", counts)
+	}
+}

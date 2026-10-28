@@ -743,9 +743,9 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 				if matchesTraceFilter(rec, filter) {
 					out = append(out, rec)
 				}
-			}
-			if rec.Seq > maxSeq {
-				maxSeq = rec.Seq
+				if rec.Seq > maxSeq {
+					maxSeq = rec.Seq
+				}
 			}
 			resyncing = false
 			batchRecords = batchRecords[:0]
