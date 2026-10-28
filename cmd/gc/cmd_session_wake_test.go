@@ -956,3 +956,46 @@ func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
 		})
 	}
 }
+
+// TestCmdSessionWake_RegisteredCityMaterializesDeferredWhileSupervisorDown
+// pins issue #8382's wake half: waking a configured named session in a city
+// registered with the supervisor while no controller or supervisor runs (as
+// across a supervisor restart) materializes the row start-pending — claimed
+// for the controller, with no runtime started — reports the wake, and prints
+// exactly one poke warning.
+func TestCmdSessionWake_RegisteredCityMaterializesDeferredWhileSupervisorDown(t *testing.T) {
+	cityDir := sessionStartOwnershipEnv(t)
+	registerCityForStartOwnership(t, cityDir)
+	if pid := supervisorAlive(); pid != 0 {
+		t.Fatalf("supervisorAlive() = %d, want 0 (no supervisor in this environment)", pid)
+	}
+	if pid := controllerAlive(cityDir); pid != 0 {
+		t.Fatalf("controllerAlive(%q) = %d, want 0 (no controller in this environment)", cityDir, pid)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionWake([]string{"mayor"}, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("cmdSessionWake(registered, supervisor down) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "wake requested") {
+		t.Errorf("stdout = %q, want the wake recorded", got)
+	}
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Errorf("state = %q, want %q (reconciler-owned start)", got, session.StateStartPending)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Errorf("pending_create_claim = %q, want true", got)
+	}
+
+	gotErr := stderr.String()
+	if n := strings.Count(gotErr, "warning:"); n != 1 {
+		t.Errorf("stderr carries %d warning lines, want exactly one:\n%s", n, gotErr)
+	}
+	if !strings.Contains(gotErr, "gc session wake: warning: poke failed:") {
+		t.Errorf("stderr must warn that the poke found no controller:\n%s", gotErr)
+	}
+	if strings.Contains(gotErr, "will not start") {
+		t.Errorf("stderr must not claim the wake will not start:\n%s", gotErr)
+	}
+}
