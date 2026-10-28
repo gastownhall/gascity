@@ -527,6 +527,9 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 			},
 			wantStop: true,
 		},
+		// The control row: a row nothing has touched since the snapshot is
+		// still torn down and released, exactly as before the re-read.
+		{name: "row unchanged", wantStop: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, session, name := newRestartedPendingCreate(t, rowPool)
@@ -548,9 +551,13 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 				fmt.Fprintln(&stderr, line) //nolint:errcheck
 			}
 			released := releaseRowOwnedRuntimeLeased(env.city, store, snapshot, execProfile(env.sp), &stderr, hold)
-			stopped := countCalls(env.sp, "Stop") > 0
-			if stopped != tc.wantStop || released != tc.wantStop {
-				t.Fatalf("stopped=%v released=%v, want %v; stderr=%s", stopped, released, tc.wantStop, stderr.String())
+			stops := countCalls(env.sp, "Stop")
+			wantStops := 0
+			if tc.wantStop {
+				wantStops = 1
+			}
+			if stops != wantStops || released != tc.wantStop {
+				t.Fatalf("stops=%d released=%v, want %d/%v; stderr=%s", stops, released, wantStops, tc.wantStop, stderr.String())
 			}
 			if !tc.wantStop && !env.sp.IsRunning(name) {
 				t.Fatal("the box of a row that moved on was stopped")
