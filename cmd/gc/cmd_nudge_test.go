@@ -675,6 +675,29 @@ func TestSendMailNotifyToHeldSessionReportsTheHold(t *testing.T) {
 	c.requireOneNotifyLine(t, "queued for", "held by an operator")
 }
 
+// TestSendMailNotifyToNotDormantSessionReportsNoWake: a mail notice to a
+// managed row that is active over a dead runtime records no wake
+// (WakeNotDormant), still pokes the controller, and says why no wake was
+// recorded.
+func TestSendMailNotifyToNotDormantSessionReportsNoWake(t *testing.T) {
+	c := newMailNotifyWakeCity(t, true)
+	if err := c.mgr.Start(context.Background(), testOperatorIn(t, c.dir), c.id, "", runtime.Config{WorkDir: c.dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := c.fake.Stop(c.target.sessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	c.notify(t)
+	c.requireOneQueued(t)
+	if c.pokes != 1 {
+		t.Fatalf("pokes = %d, want 1", c.pokes)
+	}
+	if got := c.wakeRequest(t); got != "" {
+		t.Fatalf("wake_request = %q, want none on a row that is not asleep", got)
+	}
+	c.requireOneNotifyLine(t, "queued for", "no wake was recorded because the session is not asleep")
+}
+
 // TestSendMailNotifyWithoutControllerReportsSkippedWake: with no controller
 // or supervisor detected, a mail notice to an asleep, unheld session is a
 // plain enqueue that requests no wake, and the line names the missing
