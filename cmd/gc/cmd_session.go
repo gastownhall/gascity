@@ -2659,7 +2659,17 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 		default:
 			op.finishOutcome(cliOpKillFailure(killErr))
 		}
-		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
+		// An unknown-state row's refusal names what releases it: there is no
+		// runtime to kill, and only `gc session close` frees the row (issue
+		// #1497). The kill itself, its exit code and its outcome are
+		// unchanged.
+		killReport := killErr.Error()
+		if infoErr == nil && errors.Is(killErr, session.ErrSessionInactive) {
+			if why := unknownStateRefusal(info); why != "" {
+				killReport += "; " + why
+			}
+		}
+		fmt.Fprintf(stderr, "gc session kill: %s\n", killReport) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
