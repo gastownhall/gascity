@@ -695,3 +695,83 @@ func TestProbeServerAliveBailsFastOnHang(t *testing.T) {
 		t.Fatalf("probe took %s, want < 2s (timeout should be ~100ms)", elapsed)
 	}
 }
+
+// pinTestServer sets $TMUX to a pane of the "bright-lights" server under a
+// TMUX_TMPDIR that differs from the caller's, and returns the pinned path.
+func pinTestServer(t *testing.T) string {
+	t.Helper()
+	sock := pinnedTestSocket()
+	t.Setenv("TMUX", sock+",4242,0")
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	return sock
+}
+
+func TestServerSocketPathFollowsPinnedServer(t *testing.T) {
+	sock := pinTestServer(t)
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}, exec: &fakeExecutor{}}
+	if got := tm.serverSocketPath(); got != sock {
+		t.Fatalf("serverSocketPath() = %q, want %q", got, sock)
+	}
+}
+
+func TestProbeServerAliveObservesPinnedSocket(t *testing.T) {
+	sock := pinTestServer(t)
+	var observed []string
+	tm := &Tmux{
+		cfg:  Config{SocketName: "bright-lights"},
+		exec: &fakeExecutor{err: ErrNoServer},
+		serverSocketObserver: func(_ context.Context, path string) error {
+			observed = append(observed, path)
+			return nil
+		},
+	}
+	if err := tm.probeServerAlive(); err != nil {
+		t.Fatalf("probeServerAlive() = %v, want nil", err)
+	}
+	if want := []string{sock}; !reflect.DeepEqual(observed, want) {
+		t.Fatalf("observed paths = %v, want %v", observed, want)
+	}
+}
+
+func TestCaptureNamedSocketWitnessUsesPinnedSocket(t *testing.T) {
+	sock := pinTestServer(t)
+	node, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lstatPaths []string
+	fe := &fakeExecutor{out: "4242"}
+	tm := &Tmux{
+		cfg:  Config{SocketName: "bright-lights"},
+		exec: fe,
+		namedSocketLstat: func(_ context.Context, path string) (namedSocketObservation, error) {
+			lstatPaths = append(lstatPaths, path)
+			return namedSocketObservation{node: node, isSocket: true}, nil
+		},
+	}
+	witness, err := tm.captureNamedSocketWitness(context.Background())
+	if err != nil {
+		t.Fatalf("captureNamedSocketWitness() = %v", err)
+	}
+	if witness.canonicalPath != sock {
+		t.Fatalf("witness path = %q, want %q", witness.canonicalPath, sock)
+	}
+	if want := []string{sock, sock}; !reflect.DeepEqual(lstatPaths, want) {
+		t.Fatalf("lstat paths = %v, want %v", lstatPaths, want)
+	}
+	if want := [][]string{{"-u", "-N", "-S", sock, "display-message", "-p", "#{pid}"}}; !reflect.DeepEqual(fe.calls, want) {
+		t.Fatalf("tmux calls = %v, want %v", fe.calls, want)
+	}
+}
+
+func TestAttachArgsFallBackToPinnedSocket(t *testing.T) {
+	sock := pinTestServer(t)
+	tm := &Tmux{cfg: Config{SocketName: "bright-lights"}, exec: &fakeExecutor{}}
+	want := []string{"-u", "-N", "-S", sock, "attach-session", "-t", "target"}
+	if got := tm.attachCommandArgs("target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("attachCommandArgs() = %v, want %v", got, want)
+	}
+	if got := tm.hiddenAttachCommandArgsForWitness("target", namedSocketWitness{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("hiddenAttachCommandArgsForWitness() = %v, want %v", got, want)
+	}
+}

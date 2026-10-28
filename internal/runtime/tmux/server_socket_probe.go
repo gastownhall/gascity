@@ -65,7 +65,7 @@ func (t *Tmux) verifyAttachSocketWitness(initial namedSocketWitness) error {
 }
 
 func (t *Tmux) captureNamedSocketWitness(ctx context.Context) (namedSocketWitness, error) {
-	path, err := filepath.Abs(filepath.Clean(namedSocketPath(t.cfg.SocketName)))
+	path, err := filepath.Abs(filepath.Clean(t.namedServerSocketPath()))
 	if err != nil {
 		return namedSocketWitness{}, namedSocketWitnessFailure("canonical-path", nil, 0)
 	}
@@ -137,7 +137,7 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	if witness.canonicalPath != "" {
 		args = append(args, "-N", "-S", witness.canonicalPath)
 	} else if t.cfg.SocketName != "" {
-		args = append(args, "-N", "-L", t.cfg.SocketName)
+		args = append(append(args, "-N"), t.socketArgs()...)
 	}
 	return append(args, "attach-session", "-t", target)
 }
@@ -188,14 +188,24 @@ func (t *Tmux) socketArgs() []string {
 	return []string{"-L", t.cfg.SocketName}
 }
 
-// serverSocketPath returns the socket path of the server t talks to: its
-// named -L socket, or tmux's "default" socket when SocketName is empty.
-func (t *Tmux) serverSocketPath() string {
-	name := t.cfg.SocketName
-	if name == "" {
-		name = "default"
+// namedServerSocketPath returns the socket path of t's named server: the
+// pinned server socket inside a pane of that server, otherwise the path tmux
+// resolves for -L <SocketName>.
+func (t *Tmux) namedServerSocketPath() string {
+	if pinned := t.pinnedServerSocket(); pinned != "" {
+		return pinned
 	}
-	return namedSocketPath(name)
+	return namedSocketPath(t.cfg.SocketName)
+}
+
+// serverSocketPath returns the socket path of the server t talks to: its
+// named server socket (see namedServerSocketPath), or tmux's "default"
+// socket when SocketName is empty.
+func (t *Tmux) serverSocketPath() string {
+	if t.cfg.SocketName == "" {
+		return namedSocketPath("default")
+	}
+	return t.namedServerSocketPath()
 }
 
 // observeServerSocket observes path with the injected observer, or with
