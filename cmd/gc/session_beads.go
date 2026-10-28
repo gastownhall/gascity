@@ -981,7 +981,9 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 // and with the configured named-session identity when a recovered bead is
 // missing identity metadata. Keep these additions aligned with
 // sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
-// AwakeNamedSession fields.
+// AwakeNamedSession fields, and with the dead-assignee release sweep, which
+// unions this into sweepSessionIdentities/sweepSessionIdentitiesInfo
+// (pool_session_name.go) so the sweep and the awake set credit the same rows.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
 	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
 	if cfg == nil ||
