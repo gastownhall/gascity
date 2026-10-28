@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -358,4 +361,103 @@ func assertSeatWorkKept(t *testing.T, store beads.Store, id, assignee string) {
 	if got.Status != "in_progress" || got.Assignee != assignee {
 		t.Fatalf("work = status %q assignee %q, want in_progress/%q", got.Status, got.Assignee, assignee)
 	}
+}
+
+// sessionGetErrorStore fails Get for one session row with a non-not-found
+// error, as a session store that cannot be read right now does.
+type sessionGetErrorStore struct {
+	beads.Store
+	failID string
+}
+
+func (s sessionGetErrorStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, errors.New("session store unavailable")
+	}
+	return s.Store.Get(id)
+}
+
+// TestReleaseOrphanedPoolAssignments_SeatHandOverKeepsClaimWhenItCannotWrite
+// (AC-5): when the hand-over cannot be made safely — the bead's assignee moved
+// after the snapshot, the store cannot write conditionally, or the
+// predecessor's row cannot be read — the pass neither reassigns the bead over
+// the newer state nor releases it, and logs a line naming the bead (or, for the
+// read error, the identity).
+func TestReleaseOrphanedPoolAssignments_SeatHandOverKeepsClaimWhenItCannotWrite(t *testing.T) {
+	t.Run("assignee changed since the snapshot", func(t *testing.T) {
+		store := beads.NewMemStore()
+		pred := createClosedSeatPredecessor(t, store, nil)
+		snapshot := createInProgressWorkClaimedBy(t, store, pred)
+		successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+		const newer = "gc-newer-claim"
+		if err := store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr(newer)}); err != nil {
+			t.Fatalf("land the newer claim: %v", err)
+		}
+
+		logs := sweepSeatWorkLogged(t, store, store, []beads.Bead{successor}, snapshot)
+		assertSeatWorkKept(t, store, snapshot.ID, newer)
+		if !strings.Contains(logs, snapshot.ID) {
+			t.Fatalf("log does not name bead %s:\n%s", snapshot.ID, logs)
+		}
+	})
+
+	t.Run("store cannot write conditionally", func(t *testing.T) {
+		store := beads.NewMemStore()
+		pred := createClosedSeatPredecessor(t, store, nil)
+		work := createInProgressWorkClaimedBy(t, store, pred)
+		successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+		store.DisableConditionalWrites = true
+
+		logs := sweepSeatWorkLogged(t, store, store, []beads.Bead{successor}, work)
+		assertSeatWorkKept(t, store, work.ID, pred.ID)
+		if got := linesNaming(logs, work.ID); got != 1 {
+			t.Fatalf("log names bead %s on %d lines, want 1:\n%s", work.ID, got, logs)
+		}
+	})
+
+	t.Run("predecessor row unreadable", func(t *testing.T) {
+		store := beads.NewMemStore()
+		pred := createClosedSeatPredecessor(t, store, nil)
+		work := createInProgressWorkClaimedBy(t, store, pred)
+		successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+		logs := sweepSeatWorkLogged(t, store, sessionGetErrorStore{Store: store, failID: pred.ID}, []beads.Bead{successor}, work)
+		assertSeatWorkKept(t, store, work.ID, pred.ID)
+		if got := linesNaming(logs, pred.ID); got != 1 {
+			t.Fatalf("log names identity %s on %d lines, want 1:\n%s", pred.ID, got, logs)
+		}
+	})
+}
+
+// sweepSeatWorkLogged runs one sweep over work with sessionStore as the
+// session store and returns what it logged, failing if it released the bead.
+func sweepSeatWorkLogged(t *testing.T, store, sessionStore beads.Store, openRows []beads.Bead, work beads.Bead) string {
+	t.Helper()
+	var buf bytes.Buffer
+	restore := captureLogOutput(&buf)
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: sessionStore},
+		seatHandoverCity(),
+		"",
+		sessionInfosFromBeads(openRows),
+		[]beads.Bead{work},
+		nil, nil, nil, nil, nil, nil,
+	)
+	restore()
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+	return buf.String()
+}
+
+// linesNaming counts the log lines that mention id.
+func linesNaming(logs, id string) int {
+	n := 0
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, id) {
+			n++
+		}
+	}
+	return n
 }
