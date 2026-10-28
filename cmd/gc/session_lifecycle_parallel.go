@@ -467,6 +467,9 @@ type startExecutionOptions struct {
 	// deferralMemo records the never-started creates this run deferred at a
 	// start gate. Nil records nothing.
 	deferralMemo *startDeferralMemo
+	// deferralSeen is the never-started pending creates the run's planning
+	// snapshot contained. Nil publishes nothing to the memo.
+	deferralSeen map[string]struct{}
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
@@ -4721,7 +4724,7 @@ func executePlannedStartsTraced(
 	// The run's start-gate deferrals publish when it ends, unless its context
 	// was canceled: a canceled run did not offer every candidate a start. A run
 	// with no candidates still publishes, so the memo drops a drained backlog.
-	deferrals := startOpts.deferralMemo.beginPass(clk)
+	deferrals := startOpts.deferralMemo.beginPass(startOpts.deferralSeen)
 	defer deferrals.finish(ctx)
 	if len(candidates) == 0 {
 		return 0

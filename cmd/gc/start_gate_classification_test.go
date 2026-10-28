@@ -735,7 +735,7 @@ func driveWakeBudgetRecords(t *testing.T) {
 	t.Run("wave level", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
 		e.limitToOneWake()
 		e.cfg.Agents[1].DependsOn = []string{"a"}
 		a := e.pendingCreate(t, "a", "", nil)
@@ -750,7 +750,7 @@ func driveWakeBudgetRecords(t *testing.T) {
 	t.Run("ready loop", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
 		e.limitToOneWake()
 		a := e.pendingCreate(t, "a", "", nil)
 		b := e.pendingCreate(t, "b", "", nil)
@@ -774,7 +774,7 @@ func driveAsyncLimitRecords(t *testing.T) {
 	}
 	defer release()
 	var tracker asyncStartTracker
-	opts := append(slices.Clone(e.startOptions), withStartDeferralMemo(memo), withAsyncStartExecution(), withAsyncStartLimiter(limiter), withAsyncStartTracker(&tracker))
+	opts := append(slices.Clone(e.startOptions), withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()), withAsyncStartExecution(), withAsyncStartLimiter(limiter), withAsyncStartTracker(&tracker))
 	a := e.pendingCreate(t, "a", "", nil)
 
 	executePlannedStartsTraced(context.Background(), []startCandidate{a}, e.cfg, e.desiredState, e.sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
@@ -803,7 +803,7 @@ func drivePrepareBudgetRecords(t *testing.T) {
 			b := e.candidate(t, "b", time.Second)
 			c := e.candidate(t, "c", time.Second)
 
-			e.run(testPrepareBudget, async, []startExecutionOption{withStartDeferralMemo(memo)}, a, b, c)
+			e.run(testPrepareBudget, async, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b, c)
 			e.requireDeferred(t, async, "b", "c")
 			requireCommitted(t, memo, b.info.ID, c.info.ID)
 		})
@@ -814,7 +814,7 @@ func drivePrepareBudgetRecords(t *testing.T) {
 		a := e.candidate(t, "a", time.Second)
 		b := e.candidate(t, "b", time.Second)
 
-		if woken := e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo)}, a, b); woken != 2 {
+		if woken := e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b); woken != 2 {
 			t.Fatalf("woken = %d, want 2: both fit the budget", woken)
 		}
 		requireCommitted(t, memo)
@@ -828,7 +828,7 @@ func drivePrepareBudgetRecords(t *testing.T) {
 		// both rows exist, so only the memo's record can hold b.
 		e.capacityEnv.clk.Time = time.Now().UTC().Add(time.Minute)
 
-		e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo)}, a, b)
+		e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b)
 		e.requireDeferred(t, false, "b")
 		info := e.sessionInfo(b.info.ID)
 		anchor := pendingCreateLeaseAnchor(info)
@@ -858,7 +858,7 @@ func driveDependencyBlocksRecordNothing(t *testing.T) {
 	t.Run("wave level", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
 		e.cfg.Agents[1].DependsOn = []string{"a"}
 		e.sp.StartErrors["a"] = fmt.Errorf("provider start failure")
 		a := e.pendingCreate(t, "a", "", nil)
@@ -909,7 +909,7 @@ func driveDependencyBlocksRecordNothing(t *testing.T) {
 		memo := newStartDeferralMemo()
 		var stderr bytes.Buffer
 
-		woken := executePlannedStartsTraced(context.Background(), candidates, cfg, desired, sp, store, "test-city", city, clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr, nil, withStartDeferralMemo(memo))
+		woken := executePlannedStartsTraced(context.Background(), candidates, cfg, desired, sp, store, "test-city", city, clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr, nil, withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
 		if woken != 3 || sp.IsRunning("app-4") {
 			t.Fatalf("premise: woken = %d, app-4 running = %v; want 3 started and app-4 held back", woken, sp.IsRunning("app-4"))
 		}
@@ -927,7 +927,7 @@ func driveOnDeathHookRecordsNothing(t *testing.T) {
 	memo := newStartDeferralMemo()
 	gate := newOnDeathGate()
 	gate.enqueue([]deathEdge{{name: "a"}})
-	e.startOptions = append(e.startOptions, withOnDeathGate(gate), withStartDeferralMemo(memo))
+	e.startOptions = append(e.startOptions, withOnDeathGate(gate), withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
 	a := e.pendingCreate(t, "a", "", nil)
 
 	e.start(context.Background(), a)
@@ -945,7 +945,7 @@ func driveRuntimeLeaseRecordsNothing(t *testing.T) {
 	held := f.hold(t)
 	defer held.Release()
 
-	if got := f.run(withStartDeferralMemo(memo)); got != 0 {
+	if got := f.run(withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())); got != 0 {
 		t.Fatalf("woken under a held lease = %d, want 0", got)
 	}
 	if !strings.Contains(f.log.String(), "outcome=deferred_by_runtime_lease") {
@@ -959,7 +959,7 @@ func driveRuntimeLeaseRecordsNothing(t *testing.T) {
 func driveEndpointCapacityRecordsNothing(t *testing.T) {
 	e := newCapacityEnv(t, true, "a")
 	memo := newStartDeferralMemo()
-	e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+	e.startOptions = append(e.startOptions, withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
 	a := e.pendingCreate(t, "a", "e", nil)
 	e.openEndpoint(t)
 

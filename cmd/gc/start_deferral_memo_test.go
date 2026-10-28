@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,28 +16,50 @@ import (
 // end-to-end behavior is pinned by session_start_deferral_test.go; these tests
 // pin the seams themselves.
 
-func TestStartDeferralMemoBeginPassTakesTheClock(t *testing.T) {
-	t.Run("a nil memo returns a nil pass and never reads the clock", func(t *testing.T) {
+func TestStartDeferralMemoBeginPassTakesTheObservation(t *testing.T) {
+	t.Run("a nil memo returns a nil pass", func(t *testing.T) {
 		var memo *startDeferralMemo
-		// A nil clock would panic on Now(): the nil memo must return first.
-		if pass := memo.beginPass(nil); pass != nil {
+		if pass := memo.beginPass(neverStartedSet("x")); pass != nil {
 			t.Fatalf("nil memo opened a pass: %+v", pass)
 		}
 	})
 
-	t.Run("a pass starts at the clock's now", func(t *testing.T) {
-		start := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	t.Run("a pass publishes the snapshot it was begun with", func(t *testing.T) {
 		memo := newStartDeferralMemo()
-		memo.beginPass(&clock.Fake{Time: start}).finish(context.Background())
-		if memo.lastPassStart != start {
-			t.Fatalf("lastPassStart = %v, want %v", memo.lastPassStart, start)
+		memo.beginPass(neverStartedSet("a", "b")).finish(context.Background())
+		if got, want := seenDeferrals(memo), []string{"a", "b"}; !slices.Equal(got, want) {
+			t.Fatalf("seen = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a pass with no observation publishes nothing", func(t *testing.T) {
+		memo := newStartDeferralMemo()
+		commitSeenDeferralPass(memo, []string{"old", "other"}, "old")
+		pass := memo.beginPass(nil)
+		pass.noteGateDeferred("new")
+		pass.finish(context.Background())
+		if got, want := committedDeferrals(memo), []string{"old"}; !slices.Equal(got, want) {
+			t.Fatalf("committed = %v, want %v untouched: a pass with no observation committed", got, want)
+		}
+		if got, want := seenDeferrals(memo), []string{"old", "other"}; !slices.Equal(got, want) {
+			t.Fatalf("seen = %v, want %v untouched: a pass with no observation published", got, want)
+		}
+	})
+
+	t.Run("an empty observation is an observation and publishes", func(t *testing.T) {
+		memo := newStartDeferralMemo()
+		commitSeenDeferralPass(memo, []string{"old"}, "old")
+		memo.beginPass(neverStartedSet()).finish(context.Background())
+		if got := committedDeferrals(memo); len(got) != 0 {
+			t.Fatalf("committed = %v, want the empty observation to replace it", got)
+		}
+		if got := seenDeferrals(memo); len(got) != 0 {
+			t.Fatalf("seen = %v, want the empty observation to replace it", got)
 		}
 	})
 }
 
 func TestStartDeferralPassFinishReadsTheContext(t *testing.T) {
-	start := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
-	clk := &clock.Fake{Time: start}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	var noCtx context.Context
@@ -52,21 +75,21 @@ func TestStartDeferralPassFinishReadsTheContext(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			memo := newStartDeferralMemo()
-			commitDeferralPass(memo, start.Add(-time.Hour), "old")
+			commitDeferralPass(memo, "old")
 
-			pass := memo.beginPass(clk)
+			pass := memo.beginPass(neverStartedSet("new"))
 			pass.noteGateDeferred("new")
 			pass.finish(tc.ctx)
 
-			got := committedDeferrals(memo)
+			got, seen := committedDeferrals(memo), seenDeferrals(memo)
 			if tc.wantTrack {
-				if len(got) != 1 || got[0] != "new" || memo.lastPassStart != start {
-					t.Fatalf("committed = %v at %v, want [new] at %v", got, memo.lastPassStart, start)
+				if len(got) != 1 || got[0] != "new" || len(seen) != 1 || seen[0] != "new" {
+					t.Fatalf("committed = %v seen = %v, want [new] and [new]", got, seen)
 				}
 				return
 			}
-			if len(got) != 1 || got[0] != "old" || memo.lastPassStart != start.Add(-time.Hour) {
-				t.Fatalf("a canceled run changed the record: committed = %v at %v, want [old] untouched", got, memo.lastPassStart)
+			if len(got) != 1 || got[0] != "old" || len(seen) != 1 || seen[0] != "old" {
+				t.Fatalf("a canceled run changed the record: committed = %v seen = %v, want [old] untouched", got, seen)
 			}
 		})
 	}
@@ -79,9 +102,9 @@ func TestStartDeferralPassFinishReadsTheContext(t *testing.T) {
 
 	t.Run("a context canceled after the defer is read at finish", func(t *testing.T) {
 		memo := newStartDeferralMemo()
-		commitDeferralPass(memo, start.Add(-time.Hour), "old")
+		commitDeferralPass(memo, "old")
 		ctx, cancelLater := context.WithCancel(context.Background())
-		pass := memo.beginPass(clk)
+		pass := memo.beginPass(neverStartedSet("new"))
 		pass.noteGateDeferred("new")
 		cancelLater()
 		pass.finish(ctx)
@@ -92,8 +115,6 @@ func TestStartDeferralPassFinishReadsTheContext(t *testing.T) {
 }
 
 func TestStartDeferralPassNoteStartOutcome(t *testing.T) {
-	start := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
-
 	t.Run("a nil pass records nothing and does not panic", func(_ *testing.T) {
 		var pass *startDeferralPass
 		pass.noteStartOutcome("deferred_by_async_start_limit", "x")
@@ -110,7 +131,7 @@ func TestStartDeferralPassNoteStartOutcome(t *testing.T) {
 			"":                              false,
 		} {
 			memo := newStartDeferralMemo()
-			pass := memo.beginPass(&clock.Fake{Time: start})
+			pass := memo.beginPass(neverStartedSet())
 			pass.noteStartOutcome(outcome, "id-1")
 			pass.finish(context.Background())
 
@@ -126,7 +147,7 @@ func TestStartDeferralPassNoteStartOutcome(t *testing.T) {
 
 	t.Run("an empty session id is never recorded", func(t *testing.T) {
 		memo := newStartDeferralMemo()
-		pass := memo.beginPass(&clock.Fake{Time: start})
+		pass := memo.beginPass(neverStartedSet())
 		pass.noteStartOutcome("deferred_by_async_start_limit", "")
 		pass.finish(context.Background())
 		if got := committedDeferrals(memo); len(got) != 0 {
@@ -145,7 +166,7 @@ func TestStartDeferralMemoHoldPendingCreate(t *testing.T) {
 
 	heldMemo := func() *startDeferralMemo {
 		memo := newStartDeferralMemo()
-		commitDeferralPass(memo, passStart, info.ID)
+		commitSeenDeferralPass(memo, []string{info.ID, "not-deferred"}, info.ID)
 		return memo
 	}
 
@@ -180,7 +201,7 @@ func TestStartDeferralMemoHoldPendingCreate(t *testing.T) {
 		trace := newPoolDesiredStateTestTrace("worker")
 		other := info
 		other.ID = "not-deferred"
-		other.CreatedAt = passStart.Add(-30 * time.Minute) // older than the last pass: offered a start already
+		other.CreatedAt = passStart.Add(-30 * time.Minute) // in the last pass's snapshot: offered a start already
 		other.PendingCreateStartedAt = ""
 		expired, held := heldMemo().holdPendingCreate(other, true, false, clk, &stderr, trace, "worker", "worker-2")
 		if !expired || held {

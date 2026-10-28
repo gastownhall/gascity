@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -33,20 +32,50 @@ func committedDeferrals(m *startDeferralMemo) []string {
 	return slices.Sorted(maps.Keys(m.committed))
 }
 
-// commitDeferralPass records ids as one completed pass that began at start.
-func commitDeferralPass(m *startDeferralMemo, start time.Time, ids ...string) {
-	pass := m.beginPass(&clock.Fake{Time: start})
-	for _, id := range ids {
+// seenDeferrals returns the memo's snapshot record, sorted. A memo that has
+// published nothing returns nil.
+func seenDeferrals(m *startDeferralMemo) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Sorted(maps.Keys(m.seen))
+}
+
+// commitDeferralPass records ids as one completed pass whose snapshot held
+// exactly ids and which deferred all of them.
+func commitDeferralPass(m *startDeferralMemo, ids ...string) {
+	commitSeenDeferralPass(m, ids, ids...)
+}
+
+// commitSeenDeferralPass records one completed pass whose snapshot held seen and
+// which deferred the ids in deferred.
+func commitSeenDeferralPass(m *startDeferralMemo, seen []string, deferred ...string) {
+	pass := m.beginPass(neverStartedSet(seen...))
+	for _, id := range deferred {
 		pass.noteGateDeferred(id)
 	}
 	pass.finish(context.Background())
+}
+
+// neverStartedSet returns ids as the non-nil set a pass is begun with.
+func neverStartedSet(ids ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
+}
+
+// deferralMemoOptions installs m and an empty (but non-nil) planning snapshot,
+// for tests that drive the executor directly rather than through a reconcile.
+func deferralMemoOptions(m *startDeferralMemo) []startExecutionOption {
+	return []startExecutionOption{withStartDeferralMemo(m), withStartDeferralSeen(neverStartedSet())}
 }
 
 func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 	t.Run("wake budget skips the batch tail", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		e.limitToOneWake()
 		a := e.pendingCreate(t, "a", "", nil)
 		b := e.pendingCreate(t, "b", "", nil)
@@ -66,7 +95,7 @@ func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 	t.Run("wake budget skips a later wave", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		e.limitToOneWake()
 		e.cfg.Agents[1].DependsOn = []string{"a"}
 		a := e.pendingCreate(t, "a", "", nil)
@@ -93,7 +122,8 @@ func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 		}
 		defer release()
 		var tracker asyncStartTracker
-		opts := append(slices.Clone(e.startOptions), withStartDeferralMemo(memo), withAsyncStartExecution(), withAsyncStartLimiter(limiter), withAsyncStartTracker(&tracker))
+		opts := append(slices.Clone(e.startOptions), deferralMemoOptions(memo)...)
+		opts = append(opts, withAsyncStartExecution(), withAsyncStartLimiter(limiter), withAsyncStartTracker(&tracker))
 		a := e.pendingCreate(t, "a", "", nil)
 
 		executePlannedStartsTraced(context.Background(), []startCandidate{a}, e.cfg, e.desiredState, e.sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
@@ -111,7 +141,7 @@ func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 	t.Run("a dependency block is not a start gate", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		e.cfg.Agents[1].DependsOn = []string{"a"}
 		e.sp.StartErrors["a"] = errors.New("provider start failure")
 		a := e.pendingCreate(t, "a", "", nil)
@@ -129,7 +159,7 @@ func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 	t.Run("an endpoint capacity refusal is not a start gate", func(t *testing.T) {
 		e := newCapacityEnv(t, true, "a")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		a := e.pendingCreate(t, "a", "e", nil)
 		e.openEndpoint(t)
 
@@ -145,7 +175,7 @@ func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 	t.Run("a started create is not recorded", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a")
 		memo := newStartDeferralMemo()
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		a := e.pendingCreate(t, "a", "", nil)
 
 		if got := e.start(context.Background(), a); got != 1 {
@@ -158,44 +188,42 @@ func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
 }
 
 func TestStartDeferralMemoCommitReplacesAndCanceledRunCommitsNothing(t *testing.T) {
-	prior := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
-
-	t.Run("a pass that defers nothing empties the set and stamps the pass start", func(t *testing.T) {
+	t.Run("a pass that defers nothing empties the set and publishes its snapshot", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a")
 		memo := newStartDeferralMemo()
-		commitDeferralPass(memo, prior, "stale-1", "stale-2")
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		commitDeferralPass(memo, "stale-1", "stale-2")
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		a := e.pendingCreate(t, "a", "", nil)
 
 		e.start(context.Background(), a)
 		if got := committedDeferrals(memo); len(got) != 0 {
 			t.Fatalf("committed = %v, want the prior set replaced, not merged", got)
 		}
-		if got, want := memo.lastPassStart, e.clk.Now(); !got.Equal(want) {
-			t.Fatalf("lastPassStart = %v, want this pass's start %v", got, want)
+		if got := seenDeferrals(memo); len(got) != 0 {
+			t.Fatalf("seen = %v, want this pass's snapshot replacing the prior one", got)
 		}
 	})
 
 	t.Run("a run with no candidates still commits", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a")
 		memo := newStartDeferralMemo()
-		commitDeferralPass(memo, prior, "stale-1")
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		commitDeferralPass(memo, "stale-1")
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 
 		e.start(context.Background())
 		if got := committedDeferrals(memo); len(got) != 0 {
 			t.Fatalf("committed = %v, want the empty pass to empty the set", got)
 		}
-		if got, want := memo.lastPassStart, e.clk.Now(); !got.Equal(want) {
-			t.Fatalf("lastPassStart = %v, want %v: an empty pass is still a pass", got, want)
+		if got := seenDeferrals(memo); len(got) != 0 {
+			t.Fatalf("seen = %v, want the empty pass to publish its empty snapshot: an empty pass is still a pass", got)
 		}
 	})
 
 	t.Run("a run canceled at entry leaves the committed record alone", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a")
 		memo := newStartDeferralMemo()
-		commitDeferralPass(memo, prior, "stale-1")
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		commitDeferralPass(memo, "stale-1")
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		a := e.pendingCreate(t, "a", "", nil)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -204,16 +232,16 @@ func TestStartDeferralMemoCommitReplacesAndCanceledRunCommitsNothing(t *testing.
 		if got, want := committedDeferrals(memo), []string{"stale-1"}; !slices.Equal(got, want) {
 			t.Fatalf("committed = %v, want %v untouched", got, want)
 		}
-		if !memo.lastPassStart.Equal(prior) {
-			t.Fatalf("lastPassStart = %v, want %v untouched", memo.lastPassStart, prior)
+		if got, want := seenDeferrals(memo), []string{"stale-1"}; !slices.Equal(got, want) {
+			t.Fatalf("seen = %v, want %v untouched", got, want)
 		}
 	})
 
 	t.Run("a run canceled after recording a deferral commits nothing and leaks nothing", func(t *testing.T) {
 		e := newCapacityEnv(t, false, "a", "b")
 		memo := newStartDeferralMemo()
-		commitDeferralPass(memo, prior, "stale-1")
-		e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+		commitDeferralPass(memo, "stale-1")
+		e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 		e.limitToOneWake()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -228,8 +256,8 @@ func TestStartDeferralMemoCommitReplacesAndCanceledRunCommitsNothing(t *testing.
 		if got, want := committedDeferrals(memo), []string{"stale-1"}; !slices.Equal(got, want) {
 			t.Fatalf("committed = %v, want %v: a canceled run commits nothing", got, want)
 		}
-		if !memo.lastPassStart.Equal(prior) {
-			t.Fatalf("lastPassStart = %v, want %v untouched", memo.lastPassStart, prior)
+		if got, want := seenDeferrals(memo), []string{"stale-1"}; !slices.Equal(got, want) {
+			t.Fatalf("seen = %v, want %v untouched", got, want)
 		}
 
 		// The canceled run's deferral must not surface in a later pass.
@@ -262,51 +290,81 @@ func deferralInfo(created, startedAt time.Time) sessionpkg.Info {
 }
 
 func TestStartDeferralMemoHolds(t *testing.T) {
-	passStart := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
-	before := passStart.Add(-5 * time.Minute)
-	after := passStart.Add(time.Second)
+	created := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	before := created.Add(-5 * time.Minute)
 
 	for _, tc := range []struct {
 		name      string
-		committed []string // ids committed by the pass that began at lastPass
-		lastPass  time.Time
+		committed []string // ids the last completed pass deferred at a start gate
+		seen      []string // never-started ids that pass's snapshot held
+		noPass    bool     // no pass has completed yet
 		info      sessionpkg.Info
 		now       time.Time
 		want      bool
 	}{
 		{
 			name:      "committed and past the lease",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: []string{"x"},
 			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: true,
 		},
 		{
 			name:      "committed, just inside the ceiling",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: []string{"x"},
 			info: deferralInfo(before, before), now: before.Add(startDeferralHoldCeiling - time.Second), want: true,
 		},
 		{
 			name:      "committed, past the ceiling",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: []string{"x"},
 			info: deferralInfo(before, before), now: before.Add(startDeferralHoldCeiling + time.Second), want: false,
 		},
 		{
-			name:      "not committed and born before the last pass began: it was offered a start",
-			committed: []string{"other"}, lastPass: passStart,
-			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: false,
-		},
-		{
-			name:      "not committed but born after the last pass began: first chance",
-			committed: []string{"other"}, lastPass: passStart,
-			info: deferralInfo(after, after), now: after.Add(11 * time.Minute), want: true,
-		},
-		{
 			name:      "committed, exactly at the ceiling: the hold ends only after it",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: []string{"x"},
 			info: deferralInfo(before, before), now: before.Add(startDeferralHoldCeiling), want: true,
 		},
 		{
+			name:      "seen but not committed: it was offered a start",
+			committed: []string{"other"}, seen: []string{"x", "other"},
+			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: false,
+		},
+		{
+			name:      "a pass that deferred nothing still ends the first-chance window of what it saw",
+			committed: nil, seen: []string{"x"},
+			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: false,
+		},
+		{
+			name:      "not in the last pass's snapshot: first chance",
+			committed: []string{"other"}, seen: []string{"other"},
+			info: deferralInfo(created, created), now: created.Add(11 * time.Minute), want: true,
+		},
+		{
+			name:      "an empty snapshot is still an observation: an unseen row gets its first chance",
+			committed: nil, seen: nil,
+			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: true,
+		},
+		{
+			name:      "first chance regardless of how old the row is next to the pass",
+			committed: nil, seen: []string{"other"},
+			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: true,
+		},
+		{
+			name:      "first chance still honors the ceiling",
+			committed: []string{"other"}, seen: []string{"other"},
+			info: deferralInfo(created, created), now: created.Add(startDeferralHoldCeiling + time.Second), want: false,
+		},
+		{
+			name:      "first chance in a pass that outlasts the lease",
+			committed: nil, seen: []string{"other"},
+			info: deferralInfo(created, created), now: created.Add(30 * time.Minute), want: true,
+		},
+		{
+			name:   "no pass yet: one pass of grace for every row",
+			noPass: true,
+			info:   deferralInfo(before, before), now: before.Add(11 * time.Minute), want: true,
+		},
+		{
 			name:      "a row that is not a claimed pending create is never held",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: nil,
 			info: func() sessionpkg.Info {
 				i := deferralInfo(before, before)
 				i.PendingCreateClaim = false
@@ -315,43 +373,8 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 			now: before.Add(11 * time.Minute), want: false,
 		},
 		{
-			name:      "born exactly when the last pass began: that pass had it, so no first chance",
-			committed: nil, lastPass: passStart,
-			info: deferralInfo(passStart, passStart), now: passStart.Add(11 * time.Minute), want: false,
-		},
-		{
-			name:      "a pass that deferred nothing still ends the first-chance window",
-			committed: nil, lastPass: passStart,
-			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: false,
-		},
-		{
-			name:      "a claim time before creation does not make the row older than the pass",
-			committed: nil, lastPass: passStart,
-			info: deferralInfo(after, before), now: before.Add(11 * time.Minute), want: true,
-		},
-		{
-			name:      "first chance still honors the ceiling",
-			committed: []string{"other"}, lastPass: passStart,
-			info: deferralInfo(after, after), now: after.Add(startDeferralHoldCeiling + time.Second), want: false,
-		},
-		{
-			name:      "first chance in a pass that outlasts the lease",
-			committed: nil, lastPass: passStart,
-			info: deferralInfo(after, after), now: after.Add(30 * time.Minute), want: true,
-		},
-		{
-			name:      "created before but claimed after the last pass began",
-			committed: nil, lastPass: passStart,
-			info: deferralInfo(before, after), now: after.Add(11 * time.Minute), want: true,
-		},
-		{
-			name:      "no pass yet: one pass of grace for every row",
-			committed: nil, lastPass: time.Time{},
-			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: true,
-		},
-		{
 			name:      "a started row is never held",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: nil,
 			info: func() sessionpkg.Info {
 				i := deferralInfo(before, before)
 				i.LastWokeAt = before.Add(time.Minute).UTC().Format(time.RFC3339)
@@ -361,12 +384,12 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 		},
 		{
 			name:      "a row with no anchor is never held",
-			committed: []string{"x"}, lastPass: passStart,
-			info: deferralInfo(time.Time{}, time.Time{}), now: passStart, want: false,
+			committed: []string{"x"}, seen: nil,
+			info: deferralInfo(time.Time{}, time.Time{}), now: created, want: false,
 		},
 		{
 			name:      "an unparseable claim time falls back to creation for the ceiling",
-			committed: []string{"x"}, lastPass: passStart,
+			committed: []string{"x"}, seen: []string{"x"},
 			info: func() sessionpkg.Info {
 				i := deferralInfo(before, time.Time{})
 				i.PendingCreateStartedAt = "not-a-time"
@@ -377,8 +400,8 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			memo := newStartDeferralMemo()
-			if !tc.lastPass.IsZero() {
-				commitDeferralPass(memo, tc.lastPass, tc.committed...)
+			if !tc.noPass {
+				commitSeenDeferralPass(memo, tc.seen, tc.committed...)
 			}
 			if got := memo.Holds(tc.info, tc.now); got != tc.want {
 				t.Fatalf("Holds = %v, want %v", got, tc.want)
@@ -388,7 +411,7 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 
 	t.Run("an empty session id is never recorded", func(t *testing.T) {
 		memo := newStartDeferralMemo()
-		pass := memo.beginPass(&clock.Fake{Time: passStart})
+		pass := memo.beginPass(neverStartedSet())
 		pass.noteGateDeferred("")
 		pass.finish(context.Background())
 		if got := committedDeferrals(memo); len(got) != 0 {
@@ -401,8 +424,8 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 		if memo.Holds(deferralInfo(before, before), before.Add(11*time.Minute)) {
 			t.Fatal("nil memo held a row")
 		}
-		memo.beginPass(&clock.Fake{Time: passStart}).noteGateDeferred("x") // must not panic
-		memo.beginPass(&clock.Fake{Time: passStart}).finish(context.Background())
+		memo.beginPass(neverStartedSet()).noteGateDeferred("x") // must not panic
+		memo.beginPass(neverStartedSet()).finish(context.Background())
 	})
 }
 
@@ -680,7 +703,9 @@ func TestReapStaleSessionBeadsHonorsTheStartDeferralHold(t *testing.T) {
 	endpoint := e.pendingCreate(t, "endpoint", "", creating(nil))
 
 	memo := newStartDeferralMemo()
-	commitDeferralPass(memo, e.clk.Now().Add(time.Second), held.info.ID, started.info.ID)
+	// The last pass's snapshot held every never-started row, so none has a first
+	// chance left; only the deferred ids are held.
+	commitSeenDeferralPass(memo, []string{held.info.ID, unheld.info.ID, endpoint.info.ID}, held.info.ID, started.info.ID)
 	e.clk.Advance(pendingCreateNeverStartedTimeout + time.Minute)
 	hold := pendingCreateHold(func(info sessionpkg.Info) bool { return info.ID == endpoint.info.ID }, memo, e.clk)
 
@@ -725,7 +750,7 @@ func TestStartGateDeferredHoldTraceDecision(t *testing.T) {
 	e := newCapacityEnv(t, false, "a", "b")
 	e.limitToOneWake()
 	memo := newStartDeferralMemo()
-	e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+	e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
 	// The store stamps CreatedAt from wall time, so run the fake clock on wall
 	// time too, and claim the creates a known five minutes before pass 1.
 	e.clk.Time = time.Now().UTC()
@@ -777,7 +802,7 @@ func TestStartGateDeferredHoldTraceDecision(t *testing.T) {
 }
 
 // A pass over a partial store read did not see every pending create, so it
-// must not replace the memo's record or move its pass start; a full pass does.
+// must not replace the memo's record; a full pass does.
 func TestStartGateDeferredPartialStorePassLeavesTheMemoAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -791,9 +816,8 @@ func TestStartGateDeferredPartialStorePassLeavesTheMemoAlone(t *testing.T) {
 			e := newCapacityEnv(t, false, "a", "b")
 			e.limitToOneWake()
 			memo := newStartDeferralMemo()
-			e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
-			prior := e.clk.Now().Add(-time.Minute)
-			commitDeferralPass(memo, prior, "held-id")
+			e.startOptions = append(e.startOptions, deferralMemoOptions(memo)...)
+			commitDeferralPass(memo, "held-id")
 			a := e.pendingCreate(t, "a", "", nil)
 			b := e.pendingCreate(t, "b", "", nil)
 
@@ -807,21 +831,21 @@ func TestStartGateDeferredPartialStorePassLeavesTheMemoAlone(t *testing.T) {
 			)
 
 			got := committedDeferrals(memo)
-			passStart := memoPassStart(memo)
+			gotSeen := seenDeferrals(memo)
 			if tc.wantUntouch {
 				if !slices.Equal(got, []string{"held-id"}) {
 					t.Fatalf("committed = %v, want [held-id]: a partial-store pass replaced the record", got)
 				}
-				if !passStart.Equal(prior) {
-					t.Fatalf("lastPassStart = %v, want %v: a partial-store pass moved it", passStart, prior)
+				if !slices.Equal(gotSeen, []string{"held-id"}) {
+					t.Fatalf("seen = %v, want [held-id]: a partial-store pass replaced the snapshot record", gotSeen)
 				}
 				return
 			}
 			if slices.Contains(got, "held-id") {
 				t.Fatalf("committed = %v: a full pass did not replace the prior record", got)
 			}
-			if want := e.clk.Now(); !passStart.Equal(want) {
-				t.Fatalf("lastPassStart = %v, want this pass's start %v", passStart, want)
+			if want := slices.Sorted(slices.Values([]string{a.info.ID, b.info.ID})); !slices.Equal(gotSeen, want) {
+				t.Fatalf("seen = %v, want this pass's never-started creates %v", gotSeen, want)
 			}
 		})
 	}
@@ -885,4 +909,167 @@ func TestStartDeferralMemoHoldsACreateBornBetweenSnapshotAndExecutor(t *testing.
 			}
 		})
 	}
+}
+
+// A create the last pass's planning snapshot lacked was never offered a start
+// there, even when it already existed: the snapshot read can lag the store (a
+// cache that has not yet seen the write). The hold keys on what the pass saw,
+// not on when the create was born.
+func TestStartDeferralMemoHoldsACreateTheSnapshotMissed(t *testing.T) {
+	d := newDeferralHarness(t, 20261028, 1, true)
+	d.tick(t) // pass 1 starts the only create
+	d.env.clk.Advance(time.Minute)
+
+	// The create exists in the store before tick 2 reads its snapshot, but the
+	// snapshot omits it: a lagging read.
+	info, err := d.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: d.template, Title: "Manual worker", Command: d.command, Provider: "fake"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := loadSessionBeads(d.env.store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	lagged := slices.DeleteFunc(slices.Clone(sessions), func(b beads.Bead) bool { return b.ID == info.ID })
+	if len(lagged) != len(sessions)-1 {
+		t.Fatalf("premise: the lagged snapshot dropped %d rows, want exactly the new create", len(sessions)-len(lagged))
+	}
+	d.env.clk.Advance(time.Minute)
+	d.env.reconcile(lagged)
+	if slices.Contains(seenDeferrals(d.memo), info.ID) {
+		t.Fatalf("premise: the lagged pass saw %s", info.ID)
+	}
+
+	// Tick 3 reads the create and the pool wants it, after a gap longer than
+	// the never-started lease.
+	tp := d.templateParams()
+	tp.SessionName = info.SessionName
+	d.env.desiredState[info.SessionName] = tp
+	d.env.clk.Advance(pendingCreateNeverStartedTimeout + time.Minute)
+	d.tick(t)
+
+	got := d.bead(t, info.ID)
+	if got.Status == "closed" {
+		t.Fatalf("create %s rolled back (state=%q) without ever being offered a start", info.ID, got.Metadata["state"])
+	}
+	if !d.env.sp.IsRunning(info.SessionName) {
+		t.Fatal("the held create was kept but not started")
+	}
+}
+
+// A create the last pass saw but did not offer a start (nothing wanted it) was
+// not deferred at a start gate, so the memo has no reason to keep it past its
+// lease: it rolls back as before.
+func TestStartDeferralMemoDoesNotHoldACreateTheLastPassSawButDidNotOffer(t *testing.T) {
+	d := newDeferralHarness(t, 20261029, 1, true)
+	d.tick(t) // pass 1 starts the only create
+	d.env.clk.Advance(time.Minute)
+
+	info, err := d.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: d.template, Title: "Manual worker", Command: d.command, Provider: "fake"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Tick 2 reads the create but the pool does not want it yet: not desired,
+	// so the executor is never given it.
+	d.env.clk.Advance(time.Minute)
+	d.tick(t)
+	if !slices.Contains(seenDeferrals(d.memo), info.ID) {
+		t.Fatalf("premise: tick 2 did not see %s; seen = %v", info.ID, seenDeferrals(d.memo))
+	}
+	if slices.Contains(committedDeferrals(d.memo), info.ID) {
+		t.Fatalf("premise: tick 2 deferred %s at a start gate", info.ID)
+	}
+	if d.env.sp.IsRunning(info.SessionName) {
+		t.Fatal("premise: the create started although nothing wanted it")
+	}
+
+	tp := d.templateParams()
+	tp.SessionName = info.SessionName
+	d.env.desiredState[info.SessionName] = tp
+	d.env.clk.Advance(pendingCreateNeverStartedTimeout + time.Minute)
+	d.tick(t)
+
+	got := d.bead(t, info.ID)
+	if got.Status != "closed" || got.Metadata["state"] != "failed-create" {
+		t.Fatalf("create %s: status=%q state=%q, want closed as failed-create: the last pass saw it, so it already had its chance", info.ID, got.Status, got.Metadata["state"])
+	}
+}
+
+// The memo's snapshot record after a reconcile run is exactly the never-started
+// pending creates the run's snapshot held: a started session and a create from
+// an earlier pass that has since started are not in it.
+func TestStartDeferralMemoSeenIsTheNeverStartedCreatesOfTheSnapshot(t *testing.T) {
+	d := newDeferralHarness(t, 20261030, 3, true)
+	if got := d.tick(t); got != 1 {
+		t.Fatalf("pass 1 started %d, want 1 under a budget of 1", got)
+	}
+	if got, want := seenDeferrals(d.memo), slices.Sorted(slices.Values(d.ids)); !slices.Equal(got, want) {
+		t.Fatalf("seen after pass 1 = %v, want all three never-started creates %v", got, want)
+	}
+
+	waiting := d.notRunning()
+	if len(waiting) != 2 {
+		t.Fatalf("premise: %d creates waiting after pass 1, want 2", len(waiting))
+	}
+	d.env.clk.Advance(time.Minute)
+	d.tick(t)
+	if got, want := seenDeferrals(d.memo), slices.Sorted(slices.Values(waiting)); !slices.Equal(got, want) {
+		t.Fatalf("seen after pass 2 = %v, want only the two creates still never started %v: the started one is not in it", got, want)
+	}
+}
+
+// startOptions ties a reconcile run to the memo: nothing for a nil memo, a
+// memo-less run on a partial read, and the snapshot's never-started creates
+// otherwise.
+func TestStartDeferralMemoStartOptions(t *testing.T) {
+	apply := func(opts []startExecutionOption, memo *startDeferralMemo) startExecutionOptions {
+		got := startExecutionOptions{deferralMemo: memo}
+		for _, o := range opts {
+			o(&got)
+		}
+		return got
+	}
+	infos := []sessionpkg.Info{
+		{ID: "never", PendingCreateClaim: true},
+		{ID: "never-blank-woke", PendingCreateClaim: true, LastWokeAt: "  "},
+		{ID: "started", PendingCreateClaim: true, LastWokeAt: "2026-03-08T12:00:00Z"},
+		{ID: "no-claim"},
+	}
+
+	t.Run("a nil memo adds nothing", func(t *testing.T) {
+		var memo *startDeferralMemo
+		if got := memo.startOptions(false, infos); len(got) != 0 {
+			t.Fatalf("nil memo returned %d options, want none", len(got))
+		}
+		if got := memo.startOptions(true, infos); len(got) != 0 {
+			t.Fatalf("nil memo returned %d options on a partial read, want none", len(got))
+		}
+	})
+
+	t.Run("a partial read drops the memo and offers no snapshot", func(t *testing.T) {
+		memo := newStartDeferralMemo()
+		got := apply(memo.startOptions(true, infos), memo)
+		if got.deferralMemo != nil || got.deferralSeen != nil {
+			t.Fatalf("partial read left memo=%v seen=%v, want neither", got.deferralMemo, got.deferralSeen)
+		}
+	})
+
+	t.Run("a full read offers the never-started creates and keeps the memo", func(t *testing.T) {
+		memo := newStartDeferralMemo()
+		got := apply(memo.startOptions(false, infos), memo)
+		if got.deferralMemo != memo {
+			t.Fatal("a full read dropped the memo")
+		}
+		if want := []string{"never", "never-blank-woke"}; !slices.Equal(slices.Sorted(maps.Keys(got.deferralSeen)), want) {
+			t.Fatalf("seen = %v, want %v", slices.Sorted(maps.Keys(got.deferralSeen)), want)
+		}
+	})
+
+	t.Run("a full read of no rows is still an observation", func(t *testing.T) {
+		memo := newStartDeferralMemo()
+		got := apply(memo.startOptions(false, nil), memo)
+		if got.deferralSeen == nil {
+			t.Fatal("seen is nil: an empty snapshot would publish nothing and keep a stale record")
+		}
+	})
 }

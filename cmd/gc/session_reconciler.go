@@ -2035,12 +2035,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
 	}
-	// A pass over a partial store read did not see every pending create, so
-	// its deferrals must not replace the memo or move its pass start; the
-	// previous record keeps holding while reads are incomplete.
-	if storeQueryPartial {
-		effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), withStartDeferralMemo(nil))
-	}
 	// Starts and launch-drift relaunches read the same dispatch option sources, so
 	// a relaunch applies the trigger-bead pins its fresh start would.
 	dispatchSources := reconcileDispatchOptionSources(reconcileOpts, sw)
@@ -2116,6 +2110,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedRows {
 		orderedInfos[i] = orderedRows[i].Info
 	}
+	// The start executor's memo record is this snapshot's never-started creates:
+	// a create the snapshot lacks was never offered a start (see
+	// startDeferralMemo).
+	effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), deferralMemo.startOptions(storeQueryPartial, orderedInfos)...)
 	// tick owns the coherent typed snapshot for this tick and is the single front
 	// door for folding a mutation onto it (see reconcileTick). Every forward-pass
 	// write below routes its infoByID fold through tick.apply / tick.applyResult /

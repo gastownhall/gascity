@@ -3855,9 +3855,10 @@ func (cr *CityRuntime) ensureEndpointCapacityGuard() *endpointCapacityGuard {
 // executor that meets the criterion on startDeferralMemo does, and so would a
 // later gate that meets it) and the stale-session reaper reads it. The
 // control-dispatcher tick must not be handed it: a completed executor run
-// replaces the committed set and moves lastPassStart, so a run over the
-// control-dispatcher rows alone would erase the pool creates the main tick
-// deferred.
+// replaces the committed and seen sets, so a run over the control-dispatcher
+// rows alone would erase the pool creates the main tick deferred. The memo is
+// installed only on a run over the city's complete open-session snapshot (see
+// startDeferralMemo.startOptions).
 func (cr *CityRuntime) ensureStartDeferralMemo() *startDeferralMemo {
 	if cr.startDeferrals == nil {
 		cr.startDeferrals = newStartDeferralMemo()

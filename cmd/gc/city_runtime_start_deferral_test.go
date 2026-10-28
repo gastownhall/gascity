@@ -63,13 +63,6 @@ func newControlDispatcherRuntime(t *testing.T) *CityRuntime {
 	return cr
 }
 
-// memoPassStart returns the memo's lastPassStart.
-func memoPassStart(m *startDeferralMemo) time.Time {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lastPassStart
-}
-
 func TestControlDispatcherTickLeavesTheMainTicksDeferralsAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -90,8 +83,7 @@ func TestControlDispatcherTickLeavesTheMainTicksDeferralsAlone(t *testing.T) {
 				}
 			}
 			memo := cr.ensureStartDeferralMemo()
-			mainPassStart := time.Now().Add(-time.Minute)
-			commitDeferralPass(memo, mainPassStart, "gc-pool-deferred")
+			commitSeenDeferralPass(memo, []string{"gc-pool-deferred", "gc-pool-waiting"}, "gc-pool-deferred")
 
 			cr.controlDispatcherTick(ctx)
 			cr.waitForAsyncStarts()
@@ -99,8 +91,8 @@ func TestControlDispatcherTickLeavesTheMainTicksDeferralsAlone(t *testing.T) {
 			if got := committedDeferrals(memo); len(got) != 1 || got[0] != "gc-pool-deferred" {
 				t.Errorf("a control-dispatcher tick replaced the main tick's deferrals: committed = %v, want [gc-pool-deferred]", got)
 			}
-			if got := memoPassStart(memo); !got.Equal(mainPassStart) {
-				t.Errorf("a control-dispatcher tick moved the main tick's lastPassStart %s -> %s", mainPassStart.Format(time.RFC3339Nano), got.Format(time.RFC3339Nano))
+			if got := seenDeferrals(memo); len(got) != 2 || got[0] != "gc-pool-deferred" || got[1] != "gc-pool-waiting" {
+				t.Errorf("a control-dispatcher tick replaced the main tick's snapshot record: seen = %v, want [gc-pool-deferred gc-pool-waiting]", got)
 			}
 		})
 	}
@@ -200,9 +192,9 @@ func TestCityRuntimeReapStaleSessionBeadsReadsTheCityMemo(t *testing.T) {
 			t.Fatalf("SetMetadataBatch(%s): %v", id, err)
 		}
 	}
-	// A pass that began after both rows were created, so neither has a first
-	// chance left; only the committed id is held.
-	commitDeferralPass(cr.ensureStartDeferralMemo(), time.Now().Add(time.Second), ids["a"])
+	// A pass whose snapshot held both rows, so neither has a first chance
+	// left; only the committed id is held.
+	commitSeenDeferralPass(cr.ensureStartDeferralMemo(), []string{ids["a"], ids["b"]}, ids["a"])
 
 	if n := cr.reapStaleSessionBeads(newSeatWork(cr.workLegs())); n != 1 {
 		t.Fatalf("reaped %d rows, want 1 (the one the memo does not hold)", n)
