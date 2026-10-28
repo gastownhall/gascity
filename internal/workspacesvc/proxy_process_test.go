@@ -191,6 +191,7 @@ func TestProxyProcessHelper(t *testing.T) {
 			"UNRELATED_SERVICE_SENTINEL":          os.Getenv("UNRELATED_SERVICE_SENTINEL"),
 			"GC_CITY":                             os.Getenv("GC_CITY"),
 			"GC_CITY_PATH":                        os.Getenv("GC_CITY_PATH"),
+			"GC_CITY_NAME":                        os.Getenv("GC_CITY_NAME"),
 			"GC_CITY_RUNTIME_DIR":                 os.Getenv("GC_CITY_RUNTIME_DIR"),
 			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": os.Getenv("GC_CONTROL_DISPATCHER_TRACE_DEFAULT"),
 			"GC_SERVICE_NAME":                     os.Getenv("GC_SERVICE_NAME"),
@@ -1401,4 +1402,57 @@ func containsPID(pids []int, pid int) bool {
 		}
 	}
 	return false
+}
+
+func TestProxyProcessServiceGetsItsOwnCityName(t *testing.T) {
+	t.Setenv("GC_SERVICE_HELPER", "1")
+	// The supervisor's ambient env names a different city.
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+	prev := extraHelperEnv
+	extraHelperEnv = []string{"GC_TESTENV_PASSTHROUGH=" + helperPassthroughForTests + ",GC_CITY_NAME"}
+	t.Cleanup(func() { extraHelperEnv = prev })
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "demo-app"},
+			Services: []config.Service{{
+				Name: "bridge",
+				Kind: "proxy_process",
+				Process: config.ServiceProcessConfig{
+					Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+					HealthPath: "/healthz",
+				},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	defer mgr.Close() //nolint:errcheck // best-effort cleanup
+
+	req := httptest.NewRequest(http.MethodGet, "/svc/bridge/env", nil)
+	rec := httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, req); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var env map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode env: %v", err)
+	}
+	if env["GC_CITY_NAME"] != rt.cityName {
+		t.Fatalf("GC_CITY_NAME = %q, want the service's own city %q over the ambient one", env["GC_CITY_NAME"], rt.cityName)
+	}
 }
