@@ -1435,6 +1435,10 @@ func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 		wantEnv string
 	}{
 		{name: "configured", env: []string{"GC_DOLT_PASSWORD=" + secret}, wantEnv: "set:" + secret},
+		// An unset DOLT_CLI_PASSWORD makes dolt prompt on a TTY and fail under a
+		// non-interactive caller, so the empty password still travels as set.
+		{name: "empty", env: []string{"GC_DOLT_PASSWORD="}, wantEnv: "set:"},
+		{name: "unset", wantEnv: "set:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls, out := runGcBeadsBdDoltClientCalls(t, append([]string{"DOLT_CLI_PASSWORD=other-pw"}, tc.env...)...)
