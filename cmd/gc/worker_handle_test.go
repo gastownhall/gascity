@@ -2813,3 +2813,50 @@ func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
 		})
 	}
 }
+
+// TestResolvedWorkerSessionEnvSetsOwnCityName pins GC_CITY_NAME on both worker
+// boundary env compositions. Direct creates and resumes never route through
+// resolveTemplate, and their env overlays an inherited environment, so an
+// omitted key would carry the supervisor's city name into the session.
+func TestResolvedWorkerSessionEnvSetsOwnCityName(t *testing.T) {
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+	cityDir := t.TempDir()
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "own-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "claude"}},
+		Providers: map[string]config.ProviderSpec{"claude": claude},
+	}
+
+	t.Run("create", func(t *testing.T) {
+		env := resolvedWorkerSessionEnvWithConfig(cityDir, cfg, &config.ResolvedProvider{Name: "claude"})
+		if got := env["GC_CITY_NAME"]; got != "own-city" {
+			t.Fatalf("create SessionEnv[GC_CITY_NAME] = %q, want own-city", got)
+		}
+	})
+
+	t.Run("resume", func(t *testing.T) {
+		resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+			Template: "worker",
+			WorkDir:  cityDir,
+		}, "")
+		if err != nil {
+			t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+		}
+		if resolved == nil {
+			t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+		}
+		if got := resolved.SessionEnv["GC_CITY_NAME"]; got != "own-city" {
+			t.Fatalf("resume SessionEnv[GC_CITY_NAME] = %q, want own-city", got)
+		}
+	})
+
+	t.Run("registered identity wins over workspace name", func(t *testing.T) {
+		registered := *cfg
+		applyRuntimeCityIdentity(&registered, "registered-city")
+		env := resolvedWorkerSessionEnvWithConfig(cityDir, &registered, &config.ResolvedProvider{Name: "claude"})
+		if got := env["GC_CITY_NAME"]; got != "registered-city" {
+			t.Fatalf("SessionEnv[GC_CITY_NAME] = %q, want registered-city", got)
+		}
+	})
+}

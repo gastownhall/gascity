@@ -447,6 +447,9 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	)
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
+		// Written even when empty: the session inherits an environment that
+		// may carry another city's name, and only an explicit value replaces it.
+		sessionEnv["GC_CITY_NAME"] = loadedCityName(cfg, cityPath)
 	}
 	return sessionEnv
 }
