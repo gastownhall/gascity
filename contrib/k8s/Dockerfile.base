@@ -39,6 +39,10 @@ ARG THRIFT_VERSION=0.24.0
 # v1.18.0), where CVE-2026-63209 is fixed. 1.18.7 requires no other module, so
 # its `go get` cannot move any of the pins above.
 ARG COMPRESS_VERSION=1.18.7
+# Dolt's pinned source selects go-jose/v4 4.1.4, which CVE-2026-116587 (DoS
+# parsing JWKs with RSA keys) affects; 4.1.6 is fixed and requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG JOSE_VERSION=4.1.6
 ARG DOLT_TOOLCHAIN_RELEASE=20260611_0.0.5_trixie
 ARG DOLT_OPTCROSS_X86_64_SHA256=caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0
 ARG DOLT_OPTCROSS_AARCH64_SHA256=5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce
@@ -123,6 +127,7 @@ RUN case "${TARGETARCH}" in \
        "golang.org/x/text@v${XTEXT_VERSION}" \
        "github.com/apache/thrift@v${THRIFT_VERSION}" \
        "github.com/klauspost/compress@v${COMPRESS_VERSION}" \
+       "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}" \
     && CGO_ENABLED=1 GOOS=linux GOARCH="${TARGETARCH}" \
        CC="${dolt_cc}" CXX="${dolt_cxx}" AS="${dolt_as}" \
        CGO_LDFLAGS="-static -s" go build \
@@ -137,7 +142,8 @@ RUN case "${TARGETARCH}" in \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
-    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} " \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
