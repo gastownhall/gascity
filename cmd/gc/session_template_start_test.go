@@ -265,3 +265,35 @@ func TestEnsureSessionForTemplateRegisteredCityDefersStart(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureSessionForTemplateCorruptRegistryFails: a cities.toml that cannot
+// be parsed fails the materialize instead of starting the session here.
+func TestEnsureSessionForTemplateCorruptRegistryFails(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+	cityPath := shortSocketTempDir(t, "gc-materialize-city-")
+	registryPath := writeCorruptSupervisorRegistryForTest(t)
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "mayor", StartCommand: "true"}},
+	}
+	_, err := ensureSessionForTemplate(cityPath, cfg, store, "mayor", io.Discard)
+	if err == nil {
+		t.Fatal("ensureSessionForTemplate(corrupt registry) = nil error, want the registry parse error")
+	}
+	for _, want := range []string{registryPath, "parsing registry"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	all, listErr := store.ListByLabel(session.LabelSession, 0)
+	if listErr != nil {
+		t.Fatalf("ListByLabel: %v", listErr)
+	}
+	if len(all) != 0 {
+		t.Fatalf("session beads = %d, want 0", len(all))
+	}
+}

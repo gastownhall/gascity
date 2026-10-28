@@ -2580,6 +2580,20 @@ func registerCityWithSupervisorForTest(t *testing.T, cityDir string) {
 	}
 }
 
+// writeCorruptSupervisorRegistryForTest writes a cities.toml that cannot be
+// parsed at the test GC_HOME's registry path and returns that path.
+func writeCorruptSupervisorRegistryForTest(t *testing.T) string {
+	t.Helper()
+	path := supervisor.RegistryPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte("[[cities]\npath = \"unterminated\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+	return path
+}
+
 // assertDeferredSessionBead fails unless b was created for the reconciler to
 // start: start-pending with the pending-create claim.
 func assertDeferredSessionBead(t *testing.T, b beads.Bead) {
@@ -2645,6 +2659,28 @@ func TestCmdSessionNewRegisteredCitySupervisorDownDoesNotWaitToAttach(t *testing
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout = %q, want it to contain %q", out, want)
 		}
+	}
+}
+
+// TestCmdSessionNewCorruptRegistryFailsLoudly: a cities.toml that cannot be
+// parsed is not read as "unregistered", so gc session new refuses to start the
+// session in this process and names the registry file.
+func TestCmdSessionNewCorruptRegistryFailsLoudly(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registryPath := writeCorruptSupervisorRegistryForTest(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+		t.Fatalf("cmdSessionNew(corrupt registry) = 0, want non-zero; stdout=%s", stdout.String())
+	}
+	errText := stderr.String()
+	for _, want := range []string{registryPath, "parsing registry"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+	if all := sessionBeads(t, cityDir); len(all) != 0 {
+		t.Fatalf("session beads = %d, want 0", len(all))
 	}
 }
 
