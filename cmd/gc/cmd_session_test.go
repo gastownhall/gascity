@@ -2726,6 +2726,35 @@ func TestCmdSessionNewUnregisteredCityStartsDirectly(t *testing.T) {
 	}
 }
 
+// TestCmdSessionNewLiveControllerPokeFailureDefers: a controller that answers
+// ping owns the start even when its poke fails, so the session is left
+// start-pending for it with the poke-failed warning.
+func TestCmdSessionNewLiveControllerPokeFailureDefers(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	startFakeUnixSocket(t, controllerSocketPath(cityDir), func(line string) string {
+		if line == "ping" {
+			return "4242\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(live controller, poke fails) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got sessionNewJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decoding JSON %q: %v", stdout.String(), err)
+	}
+	if !got.DeferredStart {
+		t.Fatalf("deferred_start = false, want true; stdout=%s", stdout.String())
+	}
+	assertDeferredSessionBead(t, onlySessionBead(t, cityDir))
+	if !strings.Contains(stderr.String(), "gc session new: warning: poke failed:") {
+		t.Fatalf("stderr = %q, want the poke-failed warning", stderr.String())
+	}
+}
+
 // namedSessionTestWorkspace is the workspace_name this fixture writes to
 // .gc/site.toml. gc derives the tmux socket from the workspace name, so any
 // test using this fixture that reaches the real tmux adapter drives a real
