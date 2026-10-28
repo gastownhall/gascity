@@ -490,6 +490,7 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 		// wantHold, when set, is the one hold kind the tick logs.
 		wantHold string
 	}{
+		{name: "row unchanged", wantStop: true},
 		{
 			name: "start committed",
 			after: func(_ *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
