@@ -30,7 +30,7 @@ ARG BD_BUILD=9b65b9e198a
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0
-ARG XNET_VERSION=0.60.0
+ARG XNET_VERSION=0.62.0
 
 # Rebuild the exact released source with its production CGO/pure-Go-regex
 # configuration and release identity. GRPC_VERSION, THRIFT_VERSION and
