@@ -576,3 +576,60 @@ func TestTraceStoreRestartAfterTornTailUsesFreshSegment(t *testing.T) {
 		t.Fatalf("records by trace = %v, want cycle-a=2 and cycle-b=2", counts)
 	}
 }
+
+func TestTraceReaderRejectsCorruptCommittedBatch(t *testing.T) {
+	join := func(parts ...[][]byte) []byte {
+		var data []byte
+		for _, p := range parts {
+			data = append(data, bytes.Join(p, nil)...)
+		}
+		return data
+	}
+	crcBad := func(t *testing.T, traceID string, firstSeq uint64) [][]byte {
+		lines := traceTestBatchLines(t, traceID, firstSeq, 1)
+		// Still parses, but the batch CRC no longer matches.
+		lines[0] = bytes.Replace(lines[0], []byte(`"worker-1"`), []byte(`"worker-2"`), 1)
+		return lines
+	}
+	cases := []struct {
+		name    string
+		segment func(t *testing.T) []byte
+	}{
+		{"crc mismatch", func(t *testing.T) []byte {
+			return join(traceTestBatchLines(t, "cycle-a", 1, 1), crcBad(t, "cycle-b", 3))
+		}},
+		{"record count mismatch", func(t *testing.T) []byte {
+			b := traceTestBatchLines(t, "cycle-b", 3, 2)
+			return join(traceTestBatchLines(t, "cycle-a", 1, 1), [][]byte{b[1], b[2]})
+		}},
+		{"crc mismatch after a verified commit closed the resync window", func(t *testing.T) []byte {
+			return join([][]byte{legacyPoisonedTraceSegment(t, 2, false)}, traceTestBatchLines(t, "cycle-d", 7, 1), crcBad(t, "cycle-e", 9))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			root := traceStoreTestRoot(cityDir)
+			segPath := writeTraceSegmentFile(t, root, tc.segment(t))
+
+			if _, err := ReadTraceRecords(root, TraceFilter{}); err == nil {
+				t.Fatal("ReadTraceRecords succeeded on a committed batch that does not verify, want an error")
+			}
+			store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+			if err != nil {
+				t.Fatalf("new store: %v", err)
+			}
+			defer store.Close() //nolint:errcheck
+			if _, err := os.Stat(segPath); !os.IsNotExist(err) {
+				t.Fatalf("segment %s should be quarantined, stat err = %v", segPath, err)
+			}
+			quarantined, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceQuarantine, "*"))
+			if err != nil {
+				t.Fatalf("glob quarantine: %v", err)
+			}
+			if len(quarantined) == 0 {
+				t.Fatal("quarantine is empty, want the corrupt segment")
+			}
+		})
+	}
+}
