@@ -1719,6 +1719,7 @@ go_test(
         "pool_session_name_route_assignee_liveness_test.go",
         "pool_orphan_seat_handover_test.go",
         "pool_orphan_seat_deferred_test.go",
+        "pool_orphan_seat_hook_adoption_test.go",
         "pool_orphan_seat_release_guards_test.go",
         "pool_orphan_seat_successor_ambiguity_test.go",
         "pool_session_name_test.go",
