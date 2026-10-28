@@ -366,3 +366,28 @@ func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
 		})
 	}
 }
+
+// The tracker keys activity by registered name only: an unnamed pane would
+// otherwise be tracked under its kind, shared by every pane running it.
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(`{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"working"},` +
+		`{"agent":"claude","pane_id":"w1:p3","agent_status":"working"}`)
+	p := activityTestProvider(t, sock)
+
+	if lastActivity(t, p, "alpha").IsZero() {
+		t.Fatal("alpha was not seeded from its registered name")
+	}
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Errorf("GetLastActivity(%q) = %v; an unnamed pane must not be tracked under its kind", "claude", got)
+	}
+	p.act.mu.Lock()
+	keys := make([]string, 0, len(p.act.entries))
+	for k := range p.act.entries {
+		keys = append(keys, k)
+	}
+	p.act.mu.Unlock()
+	if len(keys) != 1 || keys[0] != "alpha" {
+		t.Errorf("activity entries keyed %q; want only alpha", keys)
+	}
+}

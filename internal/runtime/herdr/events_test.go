@@ -616,3 +616,41 @@ func TestSessionEventStreamCtxCancelClosesChannel(t *testing.T) {
 		}
 	}
 }
+
+// A pane herdr detected an agent in but nobody registered a name for is no
+// session: the stream must not subscribe to it or attribute its frames, which
+// would key them by the kind every such pane shares.
+func TestSessionEventsSkipUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(`{"agent":"claude","name":"alpha","pane_id":"w1:p1"},{"agent":"claude","pane_id":"w1:p3"}`)
+	p := eventTestProvider(t, sock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+	statusPanes := map[string]bool{}
+	for _, s := range recvSubscribe(t, f, 2*time.Second) {
+		if s.Type == "pane.agent_status_changed" {
+			statusPanes[s.PaneID] = true
+		}
+	}
+	if len(statusPanes) != 1 || !statusPanes["w1:p1"] {
+		t.Errorf("per-pane agent-status subs = %v; want only w1:p1", statusPanes)
+	}
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p3","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Session != "" || ev.Ref != "w1:p3" {
+		t.Errorf("unnamed pane frame => %+v; want Session \"\" for w1:p3", ev)
+	}
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p1","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Session != "alpha" || ev.Ref != "w1:p1" {
+		t.Errorf("named pane frame => %+v; want Session alpha for w1:p1", ev)
+	}
+}
