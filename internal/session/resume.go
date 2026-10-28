@@ -151,6 +151,39 @@ func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.T
 	return verdict.outcome, nil
 }
 
+// WakeRequestVerdict is RequestWakeUnlessHeld's verdict on one read of a row
+// (info and persisted, as Store.GetPersistedResponse reads them), writing
+// nothing: WakeHeld for a row a hold keeps, WakeNotDormant for one that is
+// not asleep or drained, WakeRecorded for one the request would wake or
+// whose pending wake it would coalesce onto, and the wake's
+// *WakeConflictError for a row whose lifecycle refuses a wake. A producer
+// whose wake request another writer records (the conversation lane host,
+// for the lane's message ops) reads from it what that request decides.
+func WakeRequestVerdict(info Info, persisted PersistedResponse, runtimeRunning bool, now time.Time) (WakeRequestOutcome, error) {
+	verdict := decideWakeRequest(info.ID, info, persisted, runtimeRunning, now)
+	if verdict.conflict != nil {
+		return 0, verdict.conflict
+	}
+	return verdict.outcome, nil
+}
+
+// ResumeHeldPreview is the row ResumeHeld at notAfter would leave of one
+// read of a row (info and persisted, as Store.GetPersistedResponse reads
+// them), writing nothing: the read with the resume's write applied (the
+// suspend it consumes and the wake it records), the read itself when the
+// row carries no suspend stamped at or before notAfter, and, for a row the
+// resume refuses, the read with that refusal (ResumeHeldRefusal's). A
+// producer that tells a client what a resend with resume: true would do
+// (the API's result for a lane message still waiting) reads from it
+// whether the resend lifts the row's hold, and which holds stand after it.
+func ResumeHeldPreview(info Info, persisted PersistedResponse, notAfter, now time.Time) (Info, PersistedResponse, error) {
+	patch, err := resumeHeldPatch(info.ID, info, persisted, notAfter, now)
+	if err != nil {
+		return info, persisted, err
+	}
+	return info.ApplyPatch(patch), PersistedResponse{Status: persisted.Status, Metadata: patch.Apply(persisted.Metadata)}, nil
+}
+
 // ResumeHeld is an operator's resume that starts nothing itself: resume:
 // true on a message the conversation lane delivers, proposed at notAfter. On
 // a fresh read it consumes the row's operator suspend (the disposition's

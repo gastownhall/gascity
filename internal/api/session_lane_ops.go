@@ -1461,10 +1461,12 @@ const extmsgNoticePrincipal = "gc:extmsg"
 // would only ride another's boundary) and interrupt_now as a deliver-now
 // unit (D-DN: a failed interrupt makes the message wait, and nothing
 // restarts the session); /messages is the default. Every one wakes the
-// session if needed and is a prompt. gc session submit's local fallback
-// records its own op under MessageOpPolicy, and answers from the API's lane
-// op under its key by admitting again under this policy, which derives that
-// op's digest (cliOp.start).
+// session if needed and is a prompt. A follow_up is therefore the default
+// request on the lane: under one key either answers from the other's op,
+// and its results say default (submitIntentForWhen). gc session submit's
+// local fallback records its own op under MessageOpPolicy, and answers from
+// the API's lane op under its key by admitting again under this policy,
+// which derives that op's digest (cliOp.start).
 func LaneMessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 	when := opjournal.WhenBoundary
 	if intent == session.SubmitIntentInterruptNow {
@@ -1483,7 +1485,8 @@ func LaneMessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 // stopping) is refused before the op is written, so the key stays free
 // (checkLaneResume); a proposal that fails leaves the hold in place; and a
 // resume refused once the op is written cancels the op this request wrote,
-// its error saying the key is spent (laneKeySpent). A same-key retry is
+// its error saying the key is spent, and to resend under a new key only
+// when the cancel closed the op (laneKeySpent). A same-key retry is
 // answered from the op under the key (answerLaneMessage): a closed op
 // replays (OJ-2b's path), an open legacy op is 409 in_flight, and an open
 // lane op is accepted again once its resume runs again, since the request
@@ -1538,7 +1541,7 @@ func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *
 		if err := sameLegacyMessage(st, oreq, req.intent, prior); err != nil {
 			return asyncAcceptedBody{}, err
 		}
-		return s.answerLaneMessage(st, prior, false, req, ep, key, cursor)
+		return s.answerLaneMessage(store, st, prior, false, req, ep, key, cursor)
 	}
 	if !found && req.resume {
 		if err := checkLaneResume(store, conv); err != nil {
@@ -1563,13 +1566,13 @@ func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *
 	if req.resume && op.Status != opjournal.StatusClosed {
 		if err := s.resumeLaneSession(store, conv, op.CreatedAt); err != nil {
 			if owned {
-				s.cancelLaneMessage(st, op.ID, "the request's resume was refused")
-				return asyncAcceptedBody{}, laneKeySpent(err, op.ID)
+				canceled := s.cancelLaneMessage(st, op.ID, "the request's resume was refused")
+				return asyncAcceptedBody{}, laneKeySpent(err, op.ID, canceled)
 			}
 			return asyncAcceptedBody{}, err
 		}
 	}
-	return s.answerLaneMessage(st, op, owned, req, ep, key, cursor)
+	return s.answerLaneMessage(store, st, op, owned, req, ep, key, cursor)
 }
 
 // resumeLaneSession is resume: true under lane authority: the operator's own
@@ -1609,14 +1612,22 @@ func laneResumeError(id string, err error) error {
 }
 
 // laneKeySpent is err, the refused resume of message op id, which this
-// request wrote and then canceled (cancelLaneMessage), saying that the op's
-// key is spent: a same-key retry reports that op, its cancel or, had the
-// lane host taken it first, what became of it, instead of sending again,
-// so the message goes again only under a new Idempotency-Key.
-func laneKeySpent(err error, id string) error {
+// request wrote and then tried to cancel (cancelLaneMessage), saying that
+// the op's key is spent: a same-key retry reports that op instead of
+// sending again. Only an op its cancel closed (canceled) delivers nothing,
+// so only then does it say to resend under a new Idempotency-Key. An op
+// the lane host's scan took first, or whose cancel failed, may still
+// deliver the message, which a resend would deliver twice: then it says
+// that a same-key retry reports what became of the op.
+func laneKeySpent(err error, id string, canceled bool) error {
 	var problem *apierr.ErrorModel
-	if errors.As(err, &problem) {
+	if !errors.As(err, &problem) {
+		return err
+	}
+	if canceled {
 		problem.Detail += fmt.Sprintf("; op %s, which this request wrote, was canceled: a retry under this Idempotency-Key reports that op instead of sending again, so resend with a new Idempotency-Key", id)
+	} else {
+		problem.Detail += fmt.Sprintf("; op %s, which this request wrote, may still deliver the message, as its cancel did not close it: a retry under this Idempotency-Key reports what became of it instead of sending again", id)
 	}
 	return err
 }
@@ -1655,15 +1666,16 @@ func laneMessageProposeError(err error) error {
 // (storedReplayAnswer), and an open legacy op is 409 in_flight. An open lane
 // op is accepted, whether this request wrote it or retries it: its
 // acceptance is recorded, the lane host rung, and its terminal event follows
-// laneSubmitSettle after the cursor (emitLaneMessageResult), so a retry's
-// request_id resolves as the first request's does. The ring is idempotent,
-// and a retry rings too: the request that wrote the op may have died before
-// its own. A retry's acceptance waits, 409 in_flight, while a terminal event
-// of the op's stays kept (cityOps.flushKeeps). An owned op whose acceptance
-// the event log refused is canceled before the lane host is rung, so it
+// laneSubmitSettle after the cursor (emitLaneMessageResult, which reads the
+// session from store), so a retry's request_id resolves as the first
+// request's does. The ring is idempotent, and a retry rings too: the
+// request that wrote the op may have died before its own. A retry's
+// acceptance waits, 409 in_flight, while a terminal event of the op's stays
+// kept (cityOps.flushKeeps). An owned op whose acceptance the event log
+// refused is canceled before the lane host is rung, so it
 // delivers nothing unless the lane host's scan took it first: then the
 // cancel is only requested, and a same-key retry reports what became of it.
-func (s *Server) answerLaneMessage(st *opjournal.Store, op opjournal.Op, owned bool, req *messageOpRequest, ep events.Recorder, key, cursor string) (asyncAcceptedBody, error) {
+func (s *Server) answerLaneMessage(store beads.Store, st *opjournal.Store, op opjournal.Op, owned bool, req *messageOpRequest, ep events.Recorder, key, cursor string) (asyncAcceptedBody, error) {
 	switch {
 	case op.Status == opjournal.StatusClosed:
 		body, err := s.storedReplayAnswer(op, key, req.operation, cursor)
@@ -1686,17 +1698,18 @@ func (s *Server) answerLaneMessage(st *opjournal.Store, op opjournal.Op, owned b
 	s.pokeConversationLane(op.Conversation)
 	go func() {
 		defer finish()
-		s.emitLaneMessageResult(op, req.operation, string(req.intent))
+		s.emitLaneMessageResult(store, op, req.operation)
 	}()
 	return asyncAcceptedBody{Status: "accepted", RequestID: op.ID, EventCursor: cursor, IdempotencyKey: key, Op: conversationOpWire(op)}, nil
 }
 
 // cancelLaneMessage cancels lane message op id for the request that created
-// it, which answers with an error; why says what failed. It runs before the
-// lane host is rung, so the op delivers nothing unless the lane host's scan
-// took it first: then the cancel is only requested and is logged, and a
-// same-key retry reports what became of the op.
-func (s *Server) cancelLaneMessage(st *opjournal.Store, id, why string) {
+// it, which answers with an error; why says what failed. It reports whether
+// the cancel closed the op (opjournal.CancelClosed). It runs before the lane
+// host is rung, so the op delivers nothing unless the lane host's scan took
+// it first: then the cancel is only requested and is logged, as is a cancel
+// that fails, and a same-key retry reports what became of the op.
+func (s *Server) cancelLaneMessage(st *opjournal.Store, id, why string) bool {
 	res, _, err := st.Cancel(id, legacyop.PrincipalOperator, why)
 	switch {
 	case err != nil:
@@ -1704,28 +1717,146 @@ func (s *Server) cancelLaneMessage(st *opjournal.Store, id, why string) {
 	case res != opjournal.CancelClosed:
 		s.ops.logf("api: op %s was taken by the lane host before its cancel (%s: %s); a same-key retry reports its outcome", id, why, res)
 	}
+	return err == nil && res == opjournal.CancelClosed
 }
 
 // emitLaneMessageResult waits laneSubmitSettle for lane message op op and
 // emits its request's terminal event for operation: the result, queued
 // false, once it closed succeeded; request.failed once it closed otherwise;
-// the result, queued true, while it is still open.
-func (s *Server) emitLaneMessageResult(op opjournal.Op, operation, intent string) {
+// the result, queued true, while it is still open, saying whether the
+// controller will start the session for it (laneWillStart, reading the
+// session from store). A /submit result's intent is the one the op's
+// policy runs (submitIntentForWhen), as its replay's is. A read of the op
+// that fails emits the result from op as this request accepted it, queued
+// true, on purpose: the lane may still deliver the message, which a
+// request.failed would invite the client to send again, and emitting
+// nothing would leave the client waiting on its request_id. Its later
+// fate, a close the read missed included, is op.changed's
+// (laneSubmitSettle).
+func (s *Server) emitLaneMessageResult(store beads.Store, op opjournal.Op, operation string) {
 	cur, err := s.awaitLaneOp(context.Background(), op.Conversation, op.ID, laneSubmitSettle)
 	if err != nil {
 		s.ops.logf("api: op %s: reading its outcome for the request's result: %v", op.ID, err)
 		cur = op
 	}
 	wire := conversationOpWire(cur)
-	arm, reason := cur.Outcome.Effective()
-	switch {
-	case cur.Status == opjournal.StatusClosed && arm != opjournal.ArmSucceeded:
+	if arm, reason := cur.Outcome.Effective(); cur.Status == opjournal.StatusClosed && arm != opjournal.ArmSucceeded {
 		s.emitRequestFailedOp(op.ID, operation, messageReplayErrorCode(operation, reason), fmt.Sprintf("op %s closed %s", op.ID, laneOutcomeText(cur)), wire)
-	case operation == RequestOperationSessionSubmit:
-		s.emitSessionSubmitSucceeded(op.ID, op.Conversation, messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: cur.Status != opjournal.StatusClosed}}, intent, wire)
-	default:
-		s.emitSessionMessageSucceeded(op.ID, op.Conversation, messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: cur.Status != opjournal.StatusClosed}}, wire)
+		return
 	}
+	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: cur.Status != opjournal.StatusClosed}}
+	if out.Queued {
+		out.willStart, out.willNotStartReason = s.laneWillStart(store, op.Conversation, op.CreatedAt)
+	}
+	if operation == RequestOperationSessionSubmit {
+		s.emitSessionSubmitSucceeded(op.ID, op.Conversation, out, string(submitIntentForWhen(op.Policy.Message.When)), wire)
+		return
+	}
+	s.emitSessionMessageSucceeded(op.ID, op.Conversation, out, wire)
+}
+
+// laneSuspendedReason is will_not_start_reason for a lane message waiting
+// on a session that only a suspend stamped by the message's proposal holds.
+// The lane host's wake request cannot pass it; a resend of the request with
+// resume: true consumes it (session.Store.ResumeHeld).
+const laneSuspendedReason = "the session is suspended, so the message waits until it is resumed; resending this request with resume: true under the same Idempotency-Key resumes it"
+
+// laneHeldByReason is will_not_start_reason for a lane message waiting on
+// holds, named, that a resend of the request with resume: true leaves
+// standing.
+func laneHeldByReason(holds []string) string {
+	return "the session is held by " + strings.Join(holds, " and ") + ", so the message waits until the hold ends; resending this request with resume: true does not lift it (resume lifts only a suspend placed before the message)"
+}
+
+// laneSuspendedHeldByReason is will_not_start_reason for a lane message
+// waiting on a session that a suspend stamped by the message's proposal
+// holds beside other holds, named, that a resend of the request with
+// resume: true leaves standing: the resend consumes the suspend, and the
+// message then waits until the others end.
+func laneSuspendedHeldByReason(holds []string) string {
+	return "the session is suspended and held by " + strings.Join(holds, " and ") + "; resending this request with resume: true under the same Idempotency-Key resumes it, and the message then waits until the hold ends"
+}
+
+// laneHeldReason is will_not_start_reason for a lane message proposed at
+// proposed that waits on a held session (info and persisted, its runtime
+// reading live), told from the row a resend of the request with resume:
+// true would leave (session.ResumeHeldPreview, read as the lane host reads
+// the row: laneWakeVerdict): laneSuspendedReason when that row is unheld or
+// carries no hold; laneSuspendedHeldByReason when the resend lifts the
+// suspend, the one hold a resume lifts, and other holds stand; else the
+// holds that resend leaves standing (laneHeldByReason): a wait, a
+// quarantine, a heartbeat, a suspend stamped after the proposal, or one
+// whose drain refuses the resume.
+func laneHeldReason(info session.Info, persisted session.PersistedResponse, live bool, proposed, now time.Time) string {
+	holds := session.DecodeDisposition(persisted.Metadata).ConsumeHolds(now)
+	resumed, after, err := session.ResumeHeldPreview(info, persisted, proposed, now)
+	if err != nil {
+		return laneHeldByReason(holds)
+	}
+	outcome, err := laneWakeVerdict(resumed, after, live, now)
+	standing := session.DecodeDisposition(after.Metadata).ConsumeHolds(now)
+	switch {
+	case err == nil && outcome != session.WakeHeld, len(standing) == 0:
+		return laneSuspendedReason
+	case len(standing) < len(holds):
+		return laneSuspendedHeldByReason(standing)
+	}
+	return laneHeldByReason(standing)
+}
+
+// laneWakeVerdict is session.WakeRequestVerdict on a row (info and
+// persisted) as the lane host reads it, its runtime reading live: a dormant
+// row (asleep or drained) as not running, as the lane host's wake request
+// reads it (requestWake), since a dormant row is never probed; any other row
+// with live, as the lane host's content gate reads a probed one
+// (session.ContentGate), so a running session an agent's heartbeat keeps up
+// is not held.
+func laneWakeVerdict(info session.Info, persisted session.PersistedResponse, live bool, now time.Time) (session.WakeRequestOutcome, error) {
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	dormant := state == session.StateAsleep || state == session.StateDrained
+	return session.WakeRequestVerdict(info, persisted, live && !dormant, now)
+}
+
+// laneWillStart is will_start and will_not_start_reason for a lane message
+// op to session id, proposed at proposed, that is still open once
+// laneSubmitSettle passed: deferToController's verdict for a queued
+// message, read alone and as the lane host reads the row (laneWakeVerdict).
+// The lane host's wake request records the session's wake and asks the
+// controller to start it, so nothing is written or poked here. A held
+// session will not start (laneHeldReason). One the controller will not
+// start says why, with no resume: true to start it, since under the lane
+// resume: true starts nothing. A session that runs and nothing holds, whose
+// message waits for its boundary, has neither; nor has one that is
+// starting, closed, or unreadable (logged), or that the controller may
+// start only for demand.
+func (s *Server) laneWillStart(store beads.Store, id string, proposed time.Time) (*bool, string) {
+	info, persisted, err := session.NewStore(beads.SessionStore{Store: store}).GetPersistedResponse(id)
+	if err != nil {
+		s.ops.logf("api: reading session %s for a queued message's will_start: %v", id, err)
+		return nil, ""
+	}
+	now := time.Now().UTC()
+	live := sessionRuntimeRunning(s.state.SessionProvider(), info.SessionName)
+	outcome, err := laneWakeVerdict(info, persisted, live, now)
+	no := false
+	switch {
+	case err != nil, outcome == session.WakeNotDormant:
+		return nil, ""
+	case outcome == session.WakeHeld:
+		return &no, laneHeldReason(info, persisted, live, proposed, now)
+	}
+	certain := true
+	if refuser, ok := s.state.(WakeStartRefuser); ok {
+		var why string
+		if why, certain = refuser.WakeStartRefusal(info); why != "" {
+			return &no, why
+		}
+	}
+	if !certain {
+		return nil, ""
+	}
+	yes := true
+	return &yes, ""
 }
 
 // checkInitialMessage refuses, before anything is created, the initial

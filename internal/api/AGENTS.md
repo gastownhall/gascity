@@ -447,9 +447,10 @@ adopts it.
   consumes the session's operator hold once the op is proposed, and
   nothing else, recording the session's wake in the same write
   (`session.Store.ResumeHeld`): no wait is canceled and no will-not-start
-  verdict asked. It consumes only a hold stamped at or before the op's
-  `created_at`, so a hold the operator places while the message waits
-  stands through every retry and the CLI fallback's resume. A proposal
+  verdict refuses it (the result reports one). It consumes only a hold
+  stamped at or before the op's `created_at`, so a hold the operator
+  places while the message waits stands through every retry and the CLI
+  fallback's resume. A proposal
   that fails leaves the hold in place. A closed, closing or archived
   session is refused 409 and one draining under the operator's suspend
   409 `session_stopping` before anything is written
@@ -459,7 +460,11 @@ adopts it.
   op the request wrote (it created it, or its create committed and
   answered an error under a key the request minted) before the lane is
   rung, and the error says the key is spent: a retry under it reports that
-  op instead of sending again. Never reuse `wakeSession` there: it cancels
+  op instead of sending again. It offers a resend under a new key only when
+  the cancel closed the op: an op the lane host's scan took first (the
+  cancel only requested), or whose cancel failed, may still deliver the
+  message, and the error says so instead (`laneKeySpent`). Never reuse
+  `wakeSession` there: it cancels
   the session's waits. The 202 follows the commit, `request_id` the op
   id, and the acceptance is recorded before the lane is rung (a refused
   acceptance cancels the op; a cancel only requested, the lane host's scan
@@ -467,7 +472,26 @@ adopts it.
   follows `laneSubmitSettle` (5 s) later through `cityOps.emit`: the
   result, queued false, for an op closed succeeded; `request.failed`
   (`messageReplayErrorCode`) for one closed otherwise; the result, queued
-  true, for one still open. A same-key retry of a closed op replays it
+  true, for one still open, its `will_start` read alone (`laneWillStart`:
+  `session.WakeRequestVerdict` on the row as the lane host reads it, a
+  dormant row as not running and any other with its runtime's reading
+  (`laneWakeVerdict`), and the `WakeStartRefuser` reading, no wake written
+  and no poke, since the lane host's wake request does both). A failed read
+  of the op gets the result from the op as accepted, queued true: a
+  `request.failed` would invite a resend of a message the lane may still
+  deliver, and the op's fate is `op.changed`'s. A held
+  session's reason offers the same-key `resume: true` resend when that
+  resend lifts every hold (`session.ResumeHeldPreview`: a suspend stamped
+  by the op's `created_at`); when it lifts that suspend and other holds
+  stand, the reason names the suspend and those holds and offers the
+  resend for the suspend; and otherwise it names the holds the resend
+  leaves standing (`session.Disposition.ConsumeHolds`: a wait, a
+  quarantine, a heartbeat, a later suspend); a refusal carries no
+  `resume: true` hint, as resume starts nothing under the lane. A
+  `/submit` result says the intent the op's policy runs
+  (`submitIntentForWhen`), as its replay does: follow_up is the default
+  request on the lane, so under one key either answers from the other's
+  op. A same-key retry of a closed op replays it
   (`storedReplayAnswer`); an open lane op is accepted again
   (`answerLaneMessage`: its acceptance recorded, the lane rung and its
   terminal event emitted after the retry's cursor, so its `request_id`

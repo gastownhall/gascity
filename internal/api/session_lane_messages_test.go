@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -354,6 +358,78 @@ func TestSubmitUnderLaneResumeRefusedAfterTheProposalCancelsTheOp(t *testing.T) 
 	}
 }
 
+// A resume refused once the op is written, whose op its cancel does not
+// close, offers no resend under a new Idempotency-Key: the lane host's scan
+// took the op before the cancel (the cancel is only requested), or the
+// cancel's write failed, so the op may still deliver the message, which a
+// resend would deliver twice. The 409 says so, and that a retry under the
+// key reports what became of the op; here the lane host delivers it, and
+// the retry replays that. The session is suspended and its drain starts as
+// the op's create commits, so the resume is refused 409 session_stopping.
+// Kills an error that says the op was canceled whatever its cancel did.
+func TestSubmitUnderLaneResumeRefusedOffersANewKeyOnlyForACanceledOp(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// take moves the op to executing as its create commits, as the
+		// lane host's scan takes it; failCancel fails the cancel's write.
+		take, failCancel bool
+		want             opjournal.Status
+	}{
+		"taken by the lane host first": {take: true, want: opjournal.StatusExecuting},
+		"its cancel failed":            {failCancel: true, want: opjournal.StatusSubmitted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, st := laneMessageEnv(t, nil)
+			shortSettle(t)
+			info := e.session(t, "Not canceled")
+			wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
+			id, err := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "k-open")
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.store.set(func(s *opsTestStore) {
+				if tc.failCancel {
+					s.updateFails = 1
+				}
+				s.onOpCreate = func() {
+					if err := e.store.SetMetadata(info.ID, "state", string(session.StateDraining)); err != nil {
+						t.Errorf("draining the session: %v", err)
+					}
+					if !tc.take {
+						return
+					}
+					if _, err := st.ops.Transition(id, opjournal.StatusSubmitted, opjournal.StatusExecuting, "lane:n1"); err != nil {
+						t.Errorf("taking the op: %v", err)
+					}
+				}
+			})
+			const body = `{"message":"go","resume":true}`
+			rec := e.post(t, "/session/"+info.ID+"/submit", "k-open", body)
+			wantStatus(t, "resume refused after the proposal", rec, http.StatusConflict)
+			if got := rec.Body.String(); !strings.Contains(got, "session_stopping") || strings.Contains(got, "new Idempotency-Key") ||
+				!strings.Contains(got, "may still deliver the message") {
+				t.Fatalf("body = %s, want session_stopping saying the op may still deliver, with no resend under a new key", got)
+			}
+			op, err := st.ops.Get(id)
+			if err != nil || op.Status != tc.want || op.Cancel.Recorded() != tc.take {
+				t.Fatalf("op = %+v, %v; want it %s, its cancel requested %t", op, err, tc.want, tc.take)
+			}
+			if poked := st.poked(); len(poked) != 0 {
+				t.Fatalf("lane rung for %v, want never", poked)
+			}
+			if _, err := st.ops.Close(id, opjournal.Outcome{Arm: opjournal.ArmSucceeded}, "lane:n1"); err != nil {
+				t.Fatal(err)
+			}
+			e.restart(t)
+			e.resolver.state = st
+			retry := e.post(t, "/session/"+info.ID+"/submit", "k-open", body)
+			wantStatus(t, "same-key retry once the lane host delivered the op", retry, http.StatusAccepted)
+			if acc := decodeAsyncAccepted(t, retry.Body); acc.RequestID != id || !acc.Replayed {
+				t.Fatalf("retry = %+v, want op %s replayed", acc, id)
+			}
+		})
+	}
+}
+
 // crashAfterCommit posts body to session id's /submit under key, the
 // request dying (a panic) once its op row commits and before its resume,
 // and returns the op row it left.
@@ -438,9 +514,11 @@ func TestSubmitUnderLaneRetryResumeRefusalLeavesTheOpOpen(t *testing.T) {
 // stands. Here the API proposed the op a minute ago and its answer was
 // lost; the operator suspends the session now, and the client retries. The
 // retry is accepted with the op still open behind the hold, and the session
-// stays suspended with no wake recorded. Kills a retry whose resume
-// consumes whatever suspend the session carries now, after which the
-// controller starts the session the operator suspended.
+// stays suspended with no wake recorded; its result names the suspend and
+// offers no resume: true resend. Kills a retry whose resume consumes
+// whatever suspend the session carries now, after which the controller
+// starts the session the operator suspended, and a result that tells the
+// client to resend with resume: true, which leaves that suspend standing.
 func TestSubmitUnderLaneRetryLeavesALaterSuspendStanding(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	shortSettle(t)
@@ -470,6 +548,19 @@ func TestSubmitUnderLaneRetryLeavesALaterSuspendStanding(t *testing.T) {
 	if cur, err := st.ops.Get(op.ID); err != nil || cur.Status == opjournal.StatusClosed {
 		t.Fatalf("op = %+v, %v; want it open behind the hold", cur, err)
 	}
+	// Its result names the suspend and offers no resend with resume: true,
+	// which this retry was and which leaves that suspend standing.
+	evs := waitTerminalEvents(t, e.fs.eventProv, op.ID, 1)
+	var result struct {
+		WillStart          *bool  `json:"will_start"`
+		WillNotStartReason string `json:"will_not_start_reason"`
+	}
+	if err := json.Unmarshal(evs[0].Payload, &result); err != nil {
+		t.Fatalf("decoding %s: %v", evs[0].Payload, err)
+	}
+	if want := laneHeldByReason([]string{"a suspend"}); result.WillStart == nil || *result.WillStart || result.WillNotStartReason != want {
+		t.Fatalf("retry's result %s; want will_start false, will_not_start_reason %q", evs[0].Payload, want)
+	}
 }
 
 func TestSubmitUnderLaneResultAfterTheSettleWindow(t *testing.T) {
@@ -483,6 +574,133 @@ func TestSubmitUnderLaneResultAfterTheSettleWindow(t *testing.T) {
 	}
 	if op, err := st.ops.Get(acc.RequestID); err != nil || op.Status == opjournal.StatusClosed {
 		t.Fatalf("op = %+v, %v; want it still open for the lane", op, err)
+	}
+}
+
+// laneVerdictState is a lane host city whose controller answers the
+// will-not-start verdict with refusal, or cannot tell (uncertain).
+type laneVerdictState struct {
+	*lanePokeState
+	refusal   string
+	uncertain bool
+}
+
+func (s *laneVerdictState) WakeStartRefusal(session.Info) (string, bool) {
+	return s.refusal, !s.uncertain
+}
+
+// willStartText is will_start as a result shows it: absent, true or false.
+func willStartText(v *bool) string {
+	if v == nil {
+		return "absent"
+	}
+	return strconv.FormatBool(*v)
+}
+
+// A lane message still waiting once the settle window passes says, as a
+// queued legacy message does, whether the controller will start its
+// session, read alone and as the lane host reads the row: the lane host's
+// wake request records the wake and asks the controller to start it, and it
+// reads a dormant row as not running. A dormant session nothing holds will
+// start, or says why the controller will not, offering no resume: true
+// (under the lane it starts nothing). A held one will not: it offers the
+// same-key resume: true resend when that resend lifts every hold (a
+// suspend placed before the message); it names the suspend and the holds
+// standing beside it, and offers the resend for the suspend, when the
+// resend lifts the suspend alone; and otherwise names the holds the resend
+// leaves standing (an agent's wait, a quarantine), also to a request that
+// carried resume: true. A dormant row whose runtime has not stopped yet is
+// held by its wait as the lane host reads it. A pool seat waiting on
+// demand, and a running session the message waits on for its boundary, an
+// agent's heartbeat keeping it up included, say neither. Nothing here
+// records a wake or asks the controller to reconcile, on /submit and
+// /messages alike. Kills a lane result with no will_start, one that records
+// the wake or pokes the controller itself, one that offers resume: true to
+// start a session the controller will not start or to lift a hold it does
+// not lift, one that names only the holds a resend leaves, hiding a
+// suspend the resend lifts (the message would wait on it after the other
+// holds end), one that reads a dormant row's lingering runtime (it would
+// promise a start the lane host's held wake request never asks for), and
+// one that reads every row as not running (a busy session under a
+// heartbeat would read held).
+func TestLaneMessageResultSaysWhetherItWillStart(t *testing.T) {
+	yes, no := true, false
+	const refusal = "it is a dependency-only session; it starts with its dependents"
+	const later = "2099-01-01T00:00:00Z"
+	asleep := map[string]string{"state": "asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}
+	over := func(base map[string]string, extra map[string]string) map[string]string {
+		out := maps.Clone(base)
+		maps.Copy(out, extra)
+		return out
+	}
+	wait := map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold"}
+	heartbeat := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	for name, tc := range map[string]struct {
+		// suspend suspends the session through the API, which stops its
+		// runtime; meta is then written over the row.
+		suspend   bool
+		meta      map[string]string
+		resume    bool
+		refusal   string
+		uncertain bool
+		want      *bool
+		reason    string
+	}{
+		"unheld asleep":                    {suspend: true, meta: asleep, want: &yes},
+		"unheld, will not start":           {suspend: true, meta: asleep, refusal: refusal, want: &no, reason: refusal},
+		"unheld pool seat, demand unseen":  {suspend: true, meta: asleep, uncertain: true},
+		"suspended":                        {suspend: true, want: &no, reason: laneSuspendedReason},
+		"suspended over a wait":            {suspend: true, meta: map[string]string{"wait_hold": "true"}, want: &no, reason: laneSuspendedHeldByReason([]string{"an agent's wait"})},
+		"suspended over a quarantine":      {suspend: true, meta: map[string]string{"quarantined_until": later}, want: &no, reason: laneSuspendedHeldByReason([]string{"a quarantine until " + later})},
+		"suspended over a wait, resumed":   {suspend: true, meta: map[string]string{"wait_hold": "true"}, resume: true, want: &no, reason: laneHeldByReason([]string{"an agent's wait"})},
+		"quarantined":                      {suspend: true, meta: over(asleep, map[string]string{"quarantined_until": later}), want: &no, reason: laneHeldByReason([]string{"a quarantine until " + later})},
+		"waiting, its runtime not stopped": {meta: over(asleep, wait), want: &no, reason: laneHeldByReason([]string{"an agent's wait"})},
+		"running":                          {},
+		"running under a heartbeat":        {meta: map[string]string{"held_until": heartbeat}},
+	} {
+		for _, path := range []string{"/submit", "/messages"} {
+			t.Run(name+" "+path, func(t *testing.T) {
+				e, st := laneMessageEnv(t, nil)
+				shortSettle(t)
+				e.resolver.state = &laneVerdictState{lanePokeState: st, refusal: tc.refusal, uncertain: tc.uncertain}
+				info := e.session(t, "Lane will start")
+				if tc.suspend {
+					wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
+				}
+				if tc.meta != nil {
+					if err := e.store.SetMetadataBatch(info.ID, tc.meta); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if running := e.fs.sp.IsRunning(info.SessionName); running == tc.suspend {
+					t.Fatalf("runtime running = %t before the message; the case wants it %t", running, !tc.suspend)
+				}
+				body := `{"message":"hello"}`
+				if tc.resume {
+					body = `{"message":"hello","resume":true}`
+				}
+				enqueued := len(e.fs.enqueuedKeys())
+				acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+path, "", body).Body)
+				evs := waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+				var got struct {
+					Queued             bool   `json:"queued"`
+					WillStart          *bool  `json:"will_start"`
+					WillNotStartReason string `json:"will_not_start_reason"`
+				}
+				if err := json.Unmarshal(evs[0].Payload, &got); err != nil {
+					t.Fatalf("decoding %s: %v", evs[0].Payload, err)
+				}
+				if !got.Queued || !reflect.DeepEqual(got.WillStart, tc.want) || got.WillNotStartReason != tc.reason {
+					t.Fatalf("result %s; want queued, will_start %s, will_not_start_reason %q", evs[0].Payload, willStartText(tc.want), tc.reason)
+				}
+				if row, err := session.NewStore(e.fs.SessionsBeadStore()).Get(info.ID); err != nil || row.WakeRequest != "" {
+					t.Fatalf("session after the result = wake_request %q, %v; want no wake recorded by the API", row.WakeRequest, err)
+				}
+				if poked := e.fs.enqueuedKeys()[enqueued:]; slices.Contains(poked, reconcilekey.Session(info.ID)) {
+					t.Fatalf("the result asked the controller to reconcile %s: %v", info.ID, poked)
+				}
+			})
+		}
 	}
 }
 
@@ -720,25 +938,50 @@ func TestSubmitUnderLanePreFlipKeyAnswersOnlyItsRequest(t *testing.T) {
 	}
 }
 
-// A replayed lane interrupt_now reports the intent its first answer did.
-func TestSubmitUnderLaneInterruptNowReplaysItsIntent(t *testing.T) {
+// A lane submit's result and its replay report the intent the lane runs it
+// as: interrupt_now its own, and follow_up default, since the lane delivers
+// a follow_up at the session's boundary as it does a default. The two are
+// one request under a key: a retry with the other of them replays the op,
+// where interrupt_now under a default's key is 422. Kills a live result
+// that reports the caller's follow_up while its replay says default.
+func TestSubmitUnderLaneReportsTheIntentItRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, retry string
+		want               session.SubmitIntent
+	}{
+		{"interrupt_now", `{"message":"stop","intent":"interrupt_now"}`, `{"message":"stop","intent":"interrupt_now"}`, session.SubmitIntentInterruptNow},
+		{"follow_up", `{"message":"later","intent":"follow_up"}`, `{"message":"later","intent":"follow_up"}`, session.SubmitIntentDefault},
+		{"follow_up retried as default", `{"message":"later","intent":"follow_up"}`, `{"message":"later"}`, session.SubmitIntentDefault},
+		{"default retried as follow_up", `{"message":"later"}`, `{"message":"later","intent":"follow_up"}`, session.SubmitIntentDefault},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, st := laneMessageEnv(t, outcome(opjournal.ArmSucceeded, ""))
+			info := e.session(t, "Intent")
+			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-intent", tc.first).Body)
+			waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+			e.restart(t)
+			e.resolver.state = st
+			if replay := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-intent", tc.retry).Body); !replay.Replayed || replay.RequestID != first.RequestID {
+				t.Fatalf("retry = %+v, want op %s replayed", replay, first.RequestID)
+			}
+			for _, ev := range waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2) {
+				var p struct {
+					Intent string `json:"intent"`
+				}
+				if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Intent != string(tc.want) {
+					t.Fatalf("terminal event %s %s, want intent %s", ev.Type, ev.Payload, tc.want)
+				}
+			}
+		})
+	}
 	e, st := laneMessageEnv(t, outcome(opjournal.ArmSucceeded, ""))
-	info := e.session(t, "Now")
-	body := `{"message":"stop","intent":"interrupt_now"}`
-	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-now", body).Body)
+	info := e.session(t, "Intent")
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-now", `{"message":"stop"}`).Body)
 	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
 	e.restart(t)
 	e.resolver.state = st
-	if replay := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-now", body).Body); !replay.Replayed {
-		t.Fatalf("retry = %+v, want a replay", replay)
-	}
-	for _, ev := range waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2) {
-		var p struct {
-			Intent string `json:"intent"`
-		}
-		if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Intent != string(session.SubmitIntentInterruptNow) {
-			t.Fatalf("terminal event %s %s, want intent interrupt_now", ev.Type, ev.Payload)
-		}
+	if rec := e.post(t, "/session/"+info.ID+"/submit", "k-now", `{"message":"stop","intent":"interrupt_now"}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("interrupt_now under a default's key: %d %s, want 422", rec.Code, rec.Body.String())
 	}
 }
 

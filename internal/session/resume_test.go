@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -374,6 +375,69 @@ func TestRequestWakeNonDormantOutcomesUnchanged(t *testing.T) {
 	}
 }
 
+// TestWakeRequestVerdictAgreesWithRequestWakeUnlessHeld: WakeRequestVerdict
+// answers, on a read and with no write, what RequestWakeUnlessHeld answers
+// for the same row and runtime: WakeRecorded for a dormant row nothing holds
+// (a pending wake included), WakeHeld for a held one, WakeNotDormant for a
+// row that is starting or runs, and the wake's *WakeConflictError for a
+// closed one. A heartbeat holds a dormant row but not one whose runtime
+// runs. Kills a verdict that misreads a hold, dormancy or the runtime, and
+// one that writes.
+func TestWakeRequestVerdictAgreesWithRequestWakeUnlessHeld(t *testing.T) {
+	heartbeat := map[string]string{"state": string(StateActive), "held_until": "2026-10-08T13:00:00Z", "slept_at": ""}
+	for name, tc := range map[string]struct {
+		meta     map[string]string
+		running  bool
+		closed   bool
+		want     WakeRequestOutcome
+		conflict bool
+	}{
+		"unheld asleep":       {want: WakeRecorded},
+		"drained":             {meta: map[string]string{"state": string(StateDrained)}, want: WakeRecorded},
+		"pending wake":        {meta: map[string]string{"wake_request": string(WakeCauseExplicit), "wake_requested_at": "2026-10-08T11:00:00Z"}, want: WakeRecorded},
+		"operator suspend":    {meta: operatorSuspendedRow(nil), want: WakeHeld},
+		"soft suspend":        {meta: map[string]string{"state": string(StateSuspended)}, want: WakeHeld},
+		"wait hold":           {meta: map[string]string{"wait_hold": "true", "sleep_intent": string(SleepReasonWaitHold)}, want: WakeHeld},
+		"unparseable timer":   {meta: map[string]string{"quarantined_until": "x"}, want: WakeHeld},
+		"creating":            {meta: map[string]string{"state": string(StateCreating)}, want: WakeNotDormant},
+		"running":             {meta: map[string]string{"state": string(StateActive), "slept_at": ""}, running: true, want: WakeNotDormant},
+		"heartbeat, running":  {meta: heartbeat, running: true, want: WakeNotDormant},
+		"heartbeat, stopped":  {meta: heartbeat, want: WakeHeld},
+		"running, suspending": {meta: operatorSuspendedRow(nil), running: true, want: WakeHeld},
+		"closed":              {closed: true, conflict: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, id := coalesceRow(t, policyRow(tc.meta))
+			if tc.closed {
+				if err := store.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ss := NewStore(beads.SessionStore{Store: store})
+			rev0, _ := rowRevision(t, store, id)
+			info, persisted, err := ss.GetPersistedResponse(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := WakeRequestVerdict(info, persisted, tc.running, resumeNow)
+			if rev1, meta := rowRevision(t, store, id); rev1 != rev0 {
+				t.Fatalf("revision %d -> %d: WakeRequestVerdict wrote (row %v)", rev0, rev1, meta)
+			}
+			requested, reqErr := ss.RequestWakeUnlessHeld(id, tc.running, resumeNow)
+			var conflict *WakeConflictError
+			switch {
+			case tc.conflict && (!errors.As(err, &conflict) || !errors.As(reqErr, &conflict)):
+				t.Fatalf("WakeRequestVerdict = %v, %v and RequestWakeUnlessHeld = %v, %v; want *WakeConflictError from both", got, err, requested, reqErr)
+			case tc.conflict:
+			case err != nil || got != tc.want:
+				t.Fatalf("WakeRequestVerdict = %v, %v; want %v", got, err, tc.want)
+			case reqErr != nil || requested != got:
+				t.Fatalf("RequestWakeUnlessHeld = %v, %v where WakeRequestVerdict answered %v", requested, reqErr, got)
+			}
+		})
+	}
+}
+
 // TestRequestWakeFanInWritesOnce: 64 concurrent wake requests on one dormant
 // row produce exactly one write and no ErrWakeRequestContended; every caller
 // sees WakeRecorded. Kills fan-in CAS contention (decentralized-at-scale E14).
@@ -619,6 +683,79 @@ func resumeRefusalClass(t *testing.T, err error) string {
 	}
 	t.Fatalf("resume answered an unclassified error: %v", err)
 	return ""
+}
+
+// TestResumeHeldPreviewAgreesWithResumeHeld: ResumeHeldPreview, on one read
+// and with no write, is the row ResumeHeld then writes: the suspend
+// consumed and the wake recorded, a wait's hold or a quarantine left
+// standing, a later suspend left alone, a row with nothing to consume
+// unchanged, and ResumeHeld's refusal for a closed row and for one a drain
+// is stopping. Kills a preview that writes, one that lifts a hold the
+// resume leaves (so a client is told a resend with resume: true lifts it),
+// and one that keeps a suspend the resume consumes.
+func TestResumeHeldPreviewAgreesWithResumeHeld(t *testing.T) {
+	later := resumeNow.Add(-time.Minute)
+	for name, tc := range map[string]struct {
+		meta     map[string]string
+		notAfter time.Time
+		closed   bool
+		refusal  string // resumeRefusalClass of both answers
+	}{
+		"operator suspend":              {meta: operatorSuspendedRow(nil)},
+		"soft suspend":                  {meta: map[string]string{"state": string(StateSuspended)}},
+		"operator suspend over a wait":  {meta: operatorSuspendedRow(map[string]string{"wait_hold": "true"})},
+		"operator suspend, quarantined": {meta: operatorSuspendedRow(map[string]string{"quarantined_until": heldUntil})},
+		"suspend stamped after":         {meta: operatorSuspendedRow(map[string]string{"suspended_at": resumeNow.Format(time.RFC3339)}), notAfter: later},
+		"wait hold":                     {meta: map[string]string{"wait_hold": "true", "sleep_intent": string(SleepReasonWaitHold)}},
+		"quarantine":                    {meta: map[string]string{"quarantined_until": heldUntil}},
+		"unheld asleep":                 {},
+		"running":                       {meta: map[string]string{"state": string(StateActive), "slept_at": ""}},
+		"closed":                        {meta: operatorSuspendedRow(nil), closed: true, refusal: "conflict"},
+		"operator suspend, draining":    {meta: operatorSuspendedRow(map[string]string{"state": string(StateDraining)}), refusal: "stopping"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, id := coalesceRow(t, policyRow(tc.meta))
+			if tc.closed {
+				if err := store.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			notAfter := tc.notAfter
+			if notAfter.IsZero() {
+				notAfter = resumeNow
+			}
+			ss := NewStore(beads.SessionStore{Store: store})
+			info, persisted, err := ss.GetPersistedResponse(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rev0, before := rowRevision(t, store, id)
+			moved, after, previewErr := ResumeHeldPreview(info, persisted, notAfter, resumeNow)
+			if rev1, meta := rowRevision(t, store, id); rev1 != rev0 {
+				t.Fatalf("revision %d -> %d: ResumeHeldPreview wrote (row %v)", rev0, rev1, meta)
+			}
+			if got := resumeRefusalClass(t, previewErr); got != tc.refusal {
+				t.Fatalf("ResumeHeldPreview refused %q (%v), want %q", got, previewErr, tc.refusal)
+			}
+			resumeErr := ss.ResumeHeld(id, notAfter, resumeNow)
+			if got := resumeRefusalClass(t, resumeErr); got != tc.refusal {
+				t.Fatalf("ResumeHeld refused %q (%v) where ResumeHeldPreview refused %q", got, resumeErr, tc.refusal)
+			}
+			_, written := rowRevision(t, store, id)
+			if tc.refusal != "" {
+				if !reflect.DeepEqual(after.Metadata, before) || !reflect.DeepEqual(moved, info) {
+					t.Fatalf("refused preview = %v; want the read unchanged, %v", after.Metadata, before)
+				}
+				return
+			}
+			if !reflect.DeepEqual(after.Metadata, written) {
+				t.Fatalf("ResumeHeldPreview = %v; ResumeHeld wrote %v", after.Metadata, written)
+			}
+			if moved.MetadataState != written["state"] || moved.WakeRequest != written["wake_request"] || moved.SuspendedAt != written["suspended_at"] {
+				t.Fatalf("preview's info = state %q, wake %q, suspended_at %q; ResumeHeld wrote %v", moved.MetadataState, moved.WakeRequest, moved.SuspendedAt, written)
+			}
+		})
+	}
 }
 
 // TestResumeHeldLeavesWaitsOpen: the resume cancels none of the row's

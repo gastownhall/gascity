@@ -732,9 +732,10 @@ func MessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 }
 
 // submitIntentForWhen is the submit intent a recorded message policy came
-// from, for a replay's projection: MessageOpPolicy's and LaneMessageOpPolicy's
-// alike, except a lane follow_up, which the lane records at the boundary as
-// it records the default, so its replay says default.
+// from, for a replay's projection and a lane result's: MessageOpPolicy's and
+// LaneMessageOpPolicy's alike, except a lane follow_up, which the lane
+// records at the boundary as it records the default, so its result and its
+// replay say default.
 func submitIntentForWhen(when opjournal.When) session.SubmitIntent {
 	switch when {
 	case opjournal.WhenAfterTurn:
