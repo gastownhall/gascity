@@ -716,6 +716,25 @@ func TestSendMailNotifyWithoutControllerReportsSkippedWake(t *testing.T) {
 	c.requireOneNotifyLine(t, "no managed wake was requested", "no controller or supervisor was detected")
 }
 
+// TestSendMailNotifyRecordedWakeIsQuiet: the managed wake the notice exists
+// for is recorded once, the controller is poked once, and nothing extra is
+// printed.
+func TestSendMailNotifyRecordedWakeIsQuiet(t *testing.T) {
+	c := newMailNotifyWakeCity(t, true)
+	if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), c.id, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sleepUnheld(t, c.store, c.id)
+	c.notify(t)
+	c.requireOneQueued(t)
+	if got := c.wakeRequest(t); c.pokes != 1 || got != string(session.WakeCauseExplicit) {
+		t.Fatalf("pokes = %d, wake_request = %q; want 1 and explicit", c.pokes, got)
+	}
+	if lines := c.notifyLines(); len(lines) != 0 {
+		t.Fatalf("gc mail notify lines = %q, want none for a recorded wake", lines)
+	}
+}
+
 // sleepUnheld turns a suspended row into one nothing holds: asleep, with no
 // suspension, so a background nudge may still wake it (CONTRACT v5.9 D8).
 func sleepUnheld(t *testing.T, store beads.Store, id string) {
