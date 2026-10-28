@@ -3,6 +3,9 @@ package herdr
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -45,7 +48,7 @@ func TestAgentInfoNamelessEntryDecodesUnnamed(t *testing.T) {
 	want := []agentInfo{{Name: "alpha", Kind: "opencode", PaneID: "w1:p1"}, {Kind: "claude", PaneID: "w1:p3"}}
 	ctx := context.Background()
 
-	bin := agentLookupFake(t, "", named+","+unnamed)
+	bin, _ := agentLookupFake(t, "", named+","+unnamed)
 	got, err := (&client{session: "gc-test", bin: bin}).listAgents(ctx)
 	if err != nil {
 		t.Fatalf("listAgents: %v", err)
@@ -55,7 +58,7 @@ func TestAgentInfoNamelessEntryDecodesUnnamed(t *testing.T) {
 	}
 
 	for i, entry := range []string{named, unnamed} {
-		bin := agentLookupFake(t, `{"result":{"agent":`+entry+`}}`, "")
+		bin, _ := agentLookupFake(t, `{"result":{"agent":`+entry+`}}`, "")
 		a, ok, err := (&client{session: "gc-test", bin: bin}).getAgent(ctx, want[i].PaneID)
 		if err != nil || !ok {
 			t.Fatalf("getAgent(%q) = (%+v, %v, %v)", want[i].PaneID, a, ok, err)
@@ -78,13 +81,16 @@ func TestAgentInfoNamelessEntryDecodesUnnamed(t *testing.T) {
 
 // agentLookupFake writes a fake herdr whose `agent get` prints getAnswer, or
 // herdr's not-found envelope when getAnswer is empty, and whose `agent list`
-// returns entries, a comma-separated list of literal herdr agent objects.
-func agentLookupFake(t *testing.T, getAnswer, entries string) string {
+// returns entries, a comma-separated list of literal herdr agent objects. Every
+// invocation's argv is appended to the returned trace path.
+func agentLookupFake(t *testing.T, getAnswer, entries string) (bin, trace string) {
 	t.Helper()
 	if getAnswer == "" {
 		getAnswer = `{"error":{"code":"agent_not_found","message":"agent not found"}}`
 	}
+	trace = filepath.Join(t.TempDir(), "calls")
 	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + trace + "\n" +
 		"case \"$*\" in\n" +
 		"  *'agent get'*)\n" +
 		"    echo '" + getAnswer + "'\n" +
@@ -94,5 +100,34 @@ func agentLookupFake(t *testing.T, getAnswer, entries string) string {
 		"    ;;\n" +
 		"esac\n" +
 		"exit 0\n"
-	return writeFakeHerdr(t, script)
+	return writeFakeHerdr(t, script), trace
+}
+
+// herdr's "agent" key is the detected kind every pane of that kind shares, so
+// neither a kind nor an empty target may resolve to a pane: only a registered
+// name is an identity. An empty target never reaches herdr at all.
+func TestGetAgentNeverResolvesAKindOrEmptyTarget(t *testing.T) {
+	bin, trace := agentLookupFake(t, "",
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},`+
+			`{"agent":"opencode","name":"alpha","pane_id":"w1:p1","agent_status":"working"},`+
+			`{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"working"}`)
+	c := &client{session: "gc-test", bin: bin}
+	ctx := context.Background()
+
+	if a, ok, err := c.getAgent(ctx, "opencode"); err != nil || ok || a.PaneID != "" {
+		t.Errorf("getAgent(%q) = (%+v, %v, %v); want not-found with no pane", "opencode", a, ok, err)
+	}
+	if a, ok, err := c.getAgent(ctx, "alpha"); err != nil || !ok || a.PaneID != "w1:p1" {
+		t.Errorf("getAgent(%q) = (%+v, %v, %v); want pane w1:p1", "alpha", a, ok, err)
+	}
+
+	if err := os.Remove(trace); err != nil {
+		t.Fatalf("resetting the call trace: %v", err)
+	}
+	if a, ok, err := c.getAgent(ctx, ""); err != nil || ok || a.PaneID != "" {
+		t.Errorf("getAgent(\"\") = (%+v, %v, %v); want not-found with no pane", a, ok, err)
+	}
+	if b, err := os.ReadFile(trace); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("getAgent(\"\") called herdr (trace err %v):\n%s", err, b)
+	}
 }

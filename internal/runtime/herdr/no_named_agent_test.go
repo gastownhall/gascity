@@ -434,3 +434,21 @@ func assertPasted(t *testing.T, trace string, want bool) {
 		t.Errorf("paste fallback ran = %v, want %v; verbs seen:\n%s", pasted, want, b)
 	}
 }
+
+// TestTargetHasNoNamedAgentIgnoresAKindOnlyName pins that the registry lookup
+// matches registered names only. waitForIdleOutcome passes an agent name, and
+// a gc session named after a kind must not read as registered just because
+// some unnamed pane runs that kind.
+func TestTargetHasNoNamedAgentIgnoresAKindOnlyName(t *testing.T) {
+	const agentless = `{"error":{"code":"agent_not_ready","message":"agent opencode is not an active named agent"},"id":"cli:agent:prompt"}`
+	bin, _ := registryFake(t, []string{"alpha=w1:p1", "beta=w2:p1", "=w1:p3"}, agentless)
+	c := &client{session: "gc-test", bin: bin}
+
+	err := c.agentPrompt(context.Background(), "opencode", "proceed")
+	if err == nil {
+		t.Fatal("fake herdr rejection produced no error")
+	}
+	if !c.targetHasNoNamedAgent(context.Background(), "opencode", err) {
+		t.Errorf("targetHasNoNamedAgent(%q) = false; an unnamed opencode pane is not an agent named opencode (err: %v)", "opencode", err)
+	}
+}
