@@ -14684,3 +14684,122 @@ func TestGcBeadsBdScriptNeverPassesPasswordInArgv(t *testing.T) {
 		}
 	}
 }
+
+// TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv pins issue #8376: every
+// dolt SQL client call in gc-beads-bd.sh must deliver the configured Dolt
+// password through DOLT_CLI_PASSWORD on the single dolt invocation (never a
+// --password flag, which any local user can read via ps), and must not let
+// a caller's already-set DOLT_CLI_PASSWORD win.
+func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
+	cityPath := t.TempDir()
+	materializeBuiltinPacksForTest(t, cityPath)
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	// row exercises the configured-password shape a caller can present.
+	rows := []struct {
+		name    string
+		secret  string // non-empty only when a password is configured
+		wantEnv string // DOLT_CLI_PASSWORD state each dolt process must see
+		env     []string
+	}{
+		{name: "configured", secret: "s3cr3t-dolt-pw", wantEnv: "set:s3cr3t-dolt-pw", env: []string{"GC_DOLT_PASSWORD=s3cr3t-dolt-pw"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			callsFile := filepath.Join(t.TempDir(), "dolt-calls.txt")
+			// The fake dolt records each call's argv (NUL-separated) and the
+			// DOLT_CLI_PASSWORD state it observed, then answers queries the
+			// way the sibling pack's fake does (examples/bd/dolt/sql_test.go).
+			if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+set -eu
+printf '%s\0' "$@" >> "$CALLS_FILE"
+printf '\n' >> "$CALLS_FILE"
+printf 'env=%s:%s\n' "${DOLT_CLI_PASSWORD+set}" "${DOLT_CLI_PASSWORD-}" >> "$CALLS_FILE"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *)
+    printf 'cnt\n1\n'
+    ;;
+esac
+exit 0
+`), 0o755); err != nil {
+				t.Fatalf("WriteFile(dolt): %v", err)
+			}
+
+			harness := filepath.Join(t.TempDir(), "dolt-client-argv.sh")
+			body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+set +e
+do_query_probe
+server_sql "SELECT 1"
+bd_runtime_bd_table_count beads
+bd_runtime_schema_cursor beads
+bd_runtime_schema_migration_count beads
+connections=$(get_connection_count)
+check_read_only
+set -e
+printf 'connections=%s\n' "$connections"
+`
+			if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			env := sanitizedBaseEnv(append([]string{
+				"CALLS_FILE=" + callsFile,
+				"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GC_BIN=",
+				// The caller's own DOLT_CLI_PASSWORD must never win inside a
+				// client call.
+				"DOLT_CLI_PASSWORD=other-pw",
+			}, row.env...)...)
+			out := runShHarness(t, harness, "dolt client argv", env)
+
+			data, err := os.ReadFile(callsFile)
+			if err != nil {
+				t.Fatalf("ReadFile(calls): %v", err)
+			}
+			// Each dolt call appends two lines: its argv (NUL-separated)
+			// and the DOLT_CLI_PASSWORD state it saw. Exactly ten client
+			// calls run (issue #8376's site count), so fewer means a call
+			// silently took another path and the test would pass vacuously.
+			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+			const wantCalls = 10
+			if len(lines) != 2*wantCalls {
+				t.Fatalf("%s: got %d dolt call records, want %d\nharness output:\n%s", row.name, len(lines)/2, wantCalls, out)
+			}
+			for i := 0; i < len(lines); i += 2 {
+				call := i/2 + 1
+				argv := strings.Split(lines[i], "\x00")
+				for _, arg := range argv {
+					if arg == "--password" || strings.HasPrefix(arg, "--password=") {
+						t.Errorf("%s: dolt call %d passes --password in argv: %q", row.name, call, argv)
+						break
+					}
+					if row.secret != "" && strings.Contains(arg, row.secret) {
+						t.Errorf("%s: dolt call %d leaks the password in argv: %q", row.name, call, argv)
+						break
+					}
+				}
+				if got, want := lines[i+1], "env="+row.wantEnv; got != want {
+					t.Errorf("%s: dolt call %d saw DOLT_CLI_PASSWORD %q, want %q", row.name, call, got, want)
+				}
+			}
+			if !strings.Contains(string(out), "connections=1") {
+				t.Errorf("%s: get_connection_count output missing or wrong through the env prefix: %s", row.name, out)
+			}
+		})
+	}
+}
