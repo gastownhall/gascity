@@ -48,12 +48,15 @@ type seatSuccessor struct {
 
 // seatPredecessor is the closed session row a claim's assignee names, with
 // the seat identities it held. ok is false when the assignee names no closed
-// session row with a seat.
+// session row with a seat. unreadable is true when the assignee's row could
+// not be read: uncertainty is not permission to reopen (gc-ft31x), so the
+// sweep keeps the claim this pass.
 type seatPredecessor struct {
-	id       string
-	template string
-	seats    []string
-	ok       bool
+	id         string
+	template   string
+	seats      []string
+	ok         bool
+	unreadable bool
 }
 
 func newSeatHandover(cityPath string, cfg *config.City, leading beads.Store, sessionStore beads.Store, openSessionInfos []session.Info, storeRefAware bool) *seatHandover {
@@ -86,9 +89,10 @@ func newSeatHandover(cityPath string, cfg *config.City, leading beads.Store, ses
 
 // handOver moves wb's claim from the closed session row its assignee names to
 // that row's seat successor, and reports whether the sweep must keep wb: true
-// once the claim was handed over or the hand-over write was fenced off or
-// refused; false when the assignee names no closed seat row or the seat has
-// no unique successor, so the release proceeds.
+// once the claim was handed over, the hand-over write was fenced off or
+// refused, or the assignee's row could not be read; false when the assignee
+// names no closed seat row or the seat has no unique successor, so the
+// release proceeds.
 //
 // The write is ReassignWorkBead's single assignee-only write, fenced on the
 // snapshot's status and assignee, so a claim that lands after the snapshot is
@@ -96,6 +100,9 @@ func newSeatHandover(cityPath string, cfg *config.City, leading beads.Store, ses
 // metadata are left for the successor's hook to rebind.
 func (h *seatHandover) handOver(ownerStore beads.Store, wb beads.Bead, assignee, workStoreRef string) bool {
 	pred := h.predecessor(assignee)
+	if pred.unreadable {
+		return true
+	}
 	if !pred.ok {
 		return false
 	}
@@ -134,10 +141,11 @@ func (h *seatHandover) lookupPredecessor(assignee string) seatPredecessor {
 	}
 	sb, err := h.sessionStore.Get(assignee)
 	if err != nil {
-		if !errors.Is(err, beads.ErrNotFound) {
-			log.Printf("releaseOrphanedPoolAssignments: reading session %q for a seat hand-over: %v", assignee, err)
+		if errors.Is(err, beads.ErrNotFound) {
+			return seatPredecessor{}
 		}
-		return seatPredecessor{}
+		log.Printf("releaseOrphanedPoolAssignments: keeping work assigned to %q: reading its session row for a seat hand-over: %v", assignee, err)
+		return seatPredecessor{unreadable: true}
 	}
 	if sb.ID != assignee || !isSessionBead(sb) || sb.Status != "closed" {
 		return seatPredecessor{}
