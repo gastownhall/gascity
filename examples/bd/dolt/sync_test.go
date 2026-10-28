@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 const syncScript = "commands/sync/run.sh"
@@ -22,12 +25,15 @@ const syncScript = "commands/sync/run.sh"
 // otherwise flip success-path tests red and make the refspec-failure tests pass
 // for the wrong reason. Centralizing the key list here keeps every sync test
 // hermetic against the same surface and prevents the strip-set from drifting
-// per call site.
+// per call site. GC_ORDER_OUTCOME_FILE is in the set for the same hermeticity:
+// the script reads it for its skipped/partial declaration, and a test that
+// needs one passes it via extraEnv after the strip.
 func syncFilteredEnv() []string {
 	return filteredEnv(
 		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
 		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
 		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS", "GC_DOLT_SYNC_FETCH_TIMEOUT_SECS",
+		"GC_ORDER_OUTCOME_FILE",
 	)
 }
 
@@ -1753,4 +1759,118 @@ func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
 	if strings.Contains(output, "3/3 database(s) failed") {
 		t.Fatalf("summary must not read as if every database failed, got:\n%s", output)
 	}
+}
+
+// writeSyncCLIDatabase creates a data/<name>/.dolt database directory for a
+// CLI-mode sync test, with the given remotes.json content when non-empty (an
+// empty string leaves no remotes.json, i.e. a database with no remote).
+func writeSyncCLIDatabase(t *testing.T, dataDir, name, remotesJSON string) {
+	t.Helper()
+	dbDir := filepath.Join(dataDir, name)
+	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db %s: %v", name, err)
+	}
+	if remotesJSON == "" {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotesJSON), 0o644); err != nil {
+		t.Fatalf("write remotes for %s: %v", name, err)
+	}
+}
+
+// lastSyncOutputLine returns the final line of a sync run's combined output,
+// trimmed: the script's summary joins leave a trailing space, and being the
+// last line is part of the output contract (tailForOrderFailureEvent keeps
+// only a bounded tail of the output).
+func lastSyncOutputLine(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// TestSyncDeclaresSkippedOutcomeWhenNoDatabaseHasUsableRemote covers #8317
+// on the CLI path: when every counted database is skipped for lack of a
+// usable remote (none configured, or only non-file:// ones without a
+// GC_DOLT_REMOTE_<DB> override), the run exits 0 with its per-database skip
+// lines unchanged, prints an all-skipped summary on stderr, and declares a
+// typed `skipped` outcome with one scope per skipped database through
+// GC_ORDER_OUTCOME_FILE — instead of recording as a silent success.
+func TestSyncDeclaresSkippedOutcomeWhenNoDatabaseHasUsableRemote(t *testing.T) {
+	t.Parallel()
+	const hqReason = "no local remote; set GC_DOLT_REMOTE_HQ to push to a non-local remote"
+	const wantSummary = "sync: 2/2 database(s) skipped, nothing synced: " +
+		"hq (" + hqReason + "); mpa (no remote);"
+	newCity := func(t *testing.T) string {
+		t.Helper()
+		cityPath := t.TempDir()
+		dataDir := filepath.Join(cityPath, "data")
+		writeSyncCLIDatabase(t, dataDir, "hq", `{"remotes":[{"name":"origin","url":"git+ssh://example.invalid/org/hq"}]}`)
+		writeSyncCLIDatabase(t, dataDir, "mpa", "")
+		return cityPath
+	}
+
+	t.Run("declares skipped with one scope per database", func(t *testing.T) {
+		t.Parallel()
+		cityPath := newCity(t)
+		binDir := t.TempDir()
+		doltLog := writeSyncFakeDolt(t, binDir)
+		_ = writeSyncFakeBeadsBD(t, cityPath)
+		outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+		out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_HQ="})
+		if err != nil {
+			t.Fatalf("a run that only skipped is not a failure: %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			"  hq: skipped (" + hqReason + ")",
+			"  mpa: skipped (no remote)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("per-database skip lines must stay unchanged; missing %q:\n%s", want, out)
+			}
+		}
+		if log, err := os.ReadFile(doltLog); err == nil && strings.Contains(string(log), "push") {
+			t.Fatalf("a run that skipped every database must never push:\n%s", log)
+		}
+		outcome, ok := readCompactOutcome(t, outcomeFile)
+		if !ok {
+			t.Fatal("a sync that skipped every database wrote no order outcome declaration")
+		}
+		if outcome.Outcome != orders.ExecOutcomeSkipped {
+			t.Fatalf("outcome = %q, want %q: %+v", outcome.Outcome, orders.ExecOutcomeSkipped, outcome)
+		}
+		if outcome.Reason != "no database was synced to a remote" {
+			t.Fatalf("outcome reason = %q, want %q", outcome.Reason, "no database was synced to a remote")
+		}
+		wantScopes := []orders.ExecOutcomeScope{
+			{Scope: "hq", Reason: hqReason},
+			{Scope: "mpa", Reason: "no remote"},
+		}
+		if !slices.Equal(outcome.Scopes, wantScopes) {
+			t.Fatalf("outcome scopes = %+v, want %+v", outcome.Scopes, wantScopes)
+		}
+		if last := lastSyncOutputLine(out); last != wantSummary {
+			t.Fatalf("last line = %q, want %q\nout:\n%s", last, wantSummary, out)
+		}
+	})
+
+	t.Run("without an outcome file only the summary is printed", func(t *testing.T) {
+		t.Parallel()
+		cityPath := newCity(t)
+		binDir := t.TempDir()
+		_ = writeSyncFakeDolt(t, binDir)
+		_ = writeSyncFakeBeadsBD(t, cityPath)
+
+		// A manual run has no GC_ORDER_OUTCOME_FILE; the operator's record of
+		// the all-skipped run is the stderr summary.
+		out, err := runSync(t, binDir, cityPath, []string{"GC_DOLT_REMOTE_HQ="})
+		if err != nil {
+			t.Fatalf("a run that only skipped is not a failure: %v\n%s", err, out)
+		}
+		if last := lastSyncOutputLine(out); last != wantSummary {
+			t.Fatalf("last line = %q, want %q\nout:\n%s", last, wantSummary, out)
+		}
+	})
 }

@@ -13,13 +13,17 @@ package dolt_test
 // and an absent remote ref yields "branch not found: remotes/...".
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // runFFSyncEnv sets up a one-DB ("app") SQL-mode city with the fake dolt
@@ -533,5 +537,102 @@ func TestSyncRejectsInvalidFetchTimeout(t *testing.T) {
 		if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_FETCH_TIMEOUT_SECS") {
 			t.Errorf("fetch timeout %q: want validation message\nout: %s", bad, out)
 		}
+	}
+}
+
+// TestSyncSQLDeclaresSkippedOutcomeForUnusableRemote is the SQL-server-path
+// twin of TestSyncDeclaresSkippedOutcomeWhenNoDatabaseHasUsableRemote: the
+// SQL and CLI skip branches are separate code paths, and both must declare
+// the same typed `skipped` outcome with the database's reason through
+// GC_ORDER_OUTCOME_FILE. Table-driven over the two reasons the SQL path can
+// skip for: no remote at all, and only non-file:// remotes without a
+// GC_DOLT_REMOTE_<DB> override.
+func TestSyncSQLDeclaresSkippedOutcomeForUnusableRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		remoteRows []string
+		wantReason string
+	}{
+		{
+			name:       "no remote configured",
+			remoteRows: nil,
+			wantReason: "no remote",
+		},
+		{
+			name:       "only non-local remote",
+			remoteRows: []string{"origin,git+ssh://example.invalid/org/app"},
+			wantReason: "no local remote; set GC_DOLT_REMOTE_APP to push to a non-local remote",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			binDir := t.TempDir()
+			writeSyncFakeDoltMultiRemote(t, binDir, tt.remoteRows)
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := runFFSyncEnv(t, binDir, []string{outcomeEnv, "GC_DOLT_REMOTE_APP="}, "--db", "app")
+			if err != nil {
+				t.Fatalf("a run that only skipped is not a failure: %v\n%s", err, out)
+			}
+			outcome, ok := readCompactOutcome(t, outcomeFile)
+			if !ok {
+				t.Fatal("a sync that skipped every database wrote no order outcome declaration")
+			}
+			if outcome.Outcome != orders.ExecOutcomeSkipped {
+				t.Fatalf("outcome = %q, want %q: %+v", outcome.Outcome, orders.ExecOutcomeSkipped, outcome)
+			}
+			if outcome.Reason != "no database was synced to a remote" {
+				t.Fatalf("outcome reason = %q, want %q", outcome.Reason, "no database was synced to a remote")
+			}
+			wantScopes := []orders.ExecOutcomeScope{{Scope: "app", Reason: tt.wantReason}}
+			if !slices.Equal(outcome.Scopes, wantScopes) {
+				t.Fatalf("outcome scopes = %+v, want %+v", outcome.Scopes, wantScopes)
+			}
+			wantLast := "sync: 1/1 database(s) skipped, nothing synced: app (" + tt.wantReason + ");"
+			if last := lastSyncOutputLine(out); last != wantLast {
+				t.Fatalf("last line = %q, want %q\nout:\n%s", last, wantLast, out)
+			}
+		})
+	}
+}
+
+// TestSyncAllSkippedDeclaresSkippedOrderOutcome covers ga-hy0t0w (#8317): a
+// sync run (as dolt-remotes-patrol issues it) that skips every database for
+// "no local remote" pushed nothing, so it must declare a typed `skipped`
+// outcome, scoped per database with its reason, through GC_ORDER_OUTCOME_FILE
+// instead of exiting 0 with no declaration (recorded as order.completed).
+func TestSyncAllSkippedDeclaresSkippedOrderOutcome(t *testing.T) {
+	t.Parallel()
+	binDir := t.TempDir()
+	writeSyncFakeDoltMultiRemote(t, binDir, []string{
+		"origin,git+ssh://backup.example.invalid/org/repo",
+	})
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(outcomeFile, nil, 0o644); err != nil {
+		t.Fatalf("seed outcome file: %v", err)
+	}
+
+	out, err := runFFSyncEnv(t, binDir, []string{"GC_ORDER_OUTCOME_FILE=" + outcomeFile})
+	if !strings.Contains(out, "app: skipped (no local remote") {
+		t.Fatalf("precondition: expected the sole database to be skipped for no local remote (err=%v).\nout:\n%s", err, out)
+	}
+	data, readErr := os.ReadFile(outcomeFile)
+	if readErr != nil {
+		t.Fatalf("read outcome file: %v", readErr)
+	}
+	var decl struct {
+		Outcome string `json:"outcome"`
+		Scopes  []struct {
+			Scope  string `json:"scope"`
+			Reason string `json:"reason"`
+		} `json:"scopes"`
+	}
+	if jsonErr := json.Unmarshal(data, &decl); jsonErr != nil || decl.Outcome != "skipped" {
+		t.Fatalf("a sync that skipped every database must declare outcome \"skipped\" via GC_ORDER_OUTCOME_FILE; got %q (decode err %v).\nout:\n%s", data, jsonErr, out)
+	}
+	if len(decl.Scopes) != 1 || decl.Scopes[0].Scope != "app" || !strings.Contains(decl.Scopes[0].Reason, "no local remote") {
+		t.Fatalf("expected one scope for database app with its no-local-remote reason; got %+v", decl.Scopes)
 	}
 }
