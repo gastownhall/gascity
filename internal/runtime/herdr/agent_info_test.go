@@ -131,3 +131,29 @@ func TestGetAgentNeverResolvesAKindOrEmptyTarget(t *testing.T) {
 		t.Errorf("getAgent(\"\") called herdr (trace err %v):\n%s", err, b)
 	}
 }
+
+// A session whose registered name happens to be a kind still resolves to its
+// own pane, whether herdr's `agent get` answers directly or the lookup falls
+// back to scanning `agent list`, and never to an unnamed pane of that kind
+// listed ahead of it.
+func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
+	const own = `{"agent":"opencode","name":"opencode","pane_id":"w5:p1","agent_status":"idle"}`
+	list := `{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"alpha","pane_id":"w1:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"working"},` + own
+	for _, tc := range []struct {
+		name, getAnswer string
+	}{
+		{"agent get resolves it", `{"result":{"agent":` + own + `}}`},
+		{"agent get answers not-found, list scan resolves it", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, _ := agentLookupFake(t, tc.getAnswer, list)
+			c := &client{session: "gc-test", bin: bin}
+			a, ok, err := c.getAgent(context.Background(), "opencode")
+			if err != nil || !ok || a.PaneID != "w5:p1" {
+				t.Errorf("getAgent(%q) = (%+v, %v, %v); want its own pane w5:p1", "opencode", a, ok, err)
+			}
+		})
+	}
+}
