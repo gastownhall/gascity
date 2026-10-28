@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,5 +80,78 @@ func TestEffectiveWorkQueryLatchWindowServesReadyMember(t *testing.T) {
 	}, latchWindowBdScript)
 	if !strings.Contains(out, "gcg-ready-member") {
 		t.Fatalf("EffectiveWorkQuery() = %q, want the ready routed scope-member served past a window of %d stamped latches", out, routedReadyWindowRows)
+	}
+}
+
+// TestEffectiveWorkQueryLatchWindowRereadSkippedWhenWindowServesWork is AC-2:
+// the re-read fires only when a FULL window was entirely latches. A short
+// window, a window with one surviving executable row, or a window whose
+// survivor is an unstamped expanded workflow root (the legacy-root residual,
+// kept as a claimable anchor) must cost exactly one bounded routed read and
+// answer what the base path answered.
+func TestEffectiveWorkQueryLatchWindowRereadSkippedWhenWindowServesWork(t *testing.T) {
+	member := routedLatchMemberRow()
+	// An unstamped graph.v2 root: legacy-expanded or root-only, it survives the
+	// latch filter as a claimable anchor and must keep doing so.
+	unstampedRoot := `{"id":"gcg-legacy-root","issue_type":"task","status":"open","created_at":"2026-10-01T00:00:30Z","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"mayor"}}`
+
+	for _, tc := range []struct {
+		name   string
+		window string
+		want   string
+	}{
+		{
+			name:   "short window with a surviving member",
+			window: "[" + strings.Join(latchWindowRows(3), ",") + "," + member + "]",
+			want:   "gcg-ready-member",
+		},
+		{
+			name:   "full window with a surviving member",
+			window: "[" + strings.Join(latchWindowRows(routedReadyWindowRows-1), ",") + "," + member + "]",
+			want:   "gcg-ready-member",
+		},
+		{
+			name:   "full window with an unstamped expanded root",
+			window: "[" + strings.Join(latchWindowRows(routedReadyWindowRows-1), ",") + "," + unstampedRoot + "]",
+			want:   "gcg-legacy-root",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Agent{Name: "mayor"}
+			logPath := filepath.Join(t.TempDir(), "routed-reads.log")
+			out := runEffectiveWorkQuery(t, a, map[string]string{
+				"GC_TEST_ROUTED_WINDOW": tc.window,
+				"GC_TEST_ROUTED_ALL":    "[]",
+				"GC_TEST_READ_LOG":      logPath,
+			}, `#!/bin/sh
+set -eu
+case "$1" in
+  list) printf '[]' ;;
+  query) printf '[]' ;;
+  ready)
+    case "$*" in
+      *"gc.run_target="*) printf '[]' ;;
+      *"--limit 0"*) printf '[]' ;;
+      *"gc.routed_to="*) printf x >> "$GC_TEST_READ_LOG"; printf '%s' "$GC_TEST_ROUTED_WINDOW" ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("EffectiveWorkQuery() = %q, want candidate %q served from the bounded window", out, tc.want)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					t.Fatalf("EffectiveWorkQuery() issued no bounded routed read")
+				}
+				t.Fatalf("read routed-read log: %v", err)
+			}
+			if reads := strings.Count(string(log), "x"); reads != 1 {
+				t.Fatalf("work query issued %d bounded routed reads over a window that serves work, want exactly 1", reads)
+			}
+		})
 	}
 }
