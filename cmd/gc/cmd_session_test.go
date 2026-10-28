@@ -3751,3 +3751,57 @@ func TestCmdSessionNew_UnregisteredCityKeepsDirectStart(t *testing.T) {
 		t.Errorf("stdout = %q, want the direct-create report", got)
 	}
 }
+
+// TestCmdSessionNew_ControllerPingsButPokeFailsDefersStart pins the probe
+// sequence on a live controller: a socket that answers ping but not poke is
+// an answering controller, so the start stays deferred with one poke warning
+// instead of falling back to a direct start built from the caller's
+// environment.
+func TestCmdSessionNew_ControllerPingsButPokeFailsDefersStart(t *testing.T) {
+	cityDir := sessionStartOwnershipEnv(t)
+	// The city is deliberately unregistered: start ownership here comes from
+	// the live controller alone. The fake socket answers ping with a PID and
+	// drops every other connection without a reply.
+	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	t.Cleanup(func() { lis.Close() }) //nolint:errcheck
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 256)
+			n, _ := conn.Read(buf)
+			if string(buf[:n]) == "ping\n" {
+				fmt.Fprintf(conn, "123\n") //nolint:errcheck // best-effort test socket
+			}
+			conn.Close() //nolint:errcheck
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(ping ok, poke fails) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var created sessionNewJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &created); err != nil {
+		t.Fatalf("unmarshal session new JSON %q: %v", stdout.String(), err)
+	}
+	if !created.DeferredStart {
+		t.Errorf("deferred_start = false, want true: a live controller owns the start even when its poke fails")
+	}
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Errorf("state = %q, want %q", got, session.StateStartPending)
+	}
+	if got := b.Metadata["pending_create_claim"]; got != "true" {
+		t.Errorf("pending_create_claim = %q, want true", got)
+	}
+	if !strings.Contains(stderr.String(), "gc session new: warning: poke failed:") {
+		t.Errorf("stderr must warn that the poke failed:\n%s", stderr.String())
+	}
+}
