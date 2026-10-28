@@ -1150,7 +1150,7 @@ gc convoy
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc convoy add](#gc-convoy-add) | Add an issue to a convoy |
+| [gc convoy add](#gc-convoy-add) | Add one or more issues to a convoy |
 | [gc convoy check](#gc-convoy-check) | Auto-close convoys where all issues are closed |
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
@@ -1166,13 +1166,13 @@ gc convoy
 
 ## gc convoy add
 
-Link an existing issue bead to a convoy.
+Link one or more existing issue beads to a convoy.
 
-Adds a tracks dependency from the convoy to the issue, making it appear
+Adds a tracks dependency from the convoy to each issue, making it appear
 in the convoy's progress tracking without changing the issue parent.
 
 ```
-gc convoy add <convoy-id> <issue-id> [flags]
+gc convoy add <convoy-id> <bead-ids...> [flags]
 ```
 
 | Flag | Type | Default | Description |

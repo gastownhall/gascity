@@ -840,6 +840,52 @@ func TestConvoyAdd(t *testing.T) {
 	requireConvoyTrack(t, store, "gc-1", "gc-3")
 }
 
+// TestConvoyAddMultipleIDs pins GH#8422: every bead id given is tracked, not
+// just the first.
+func TestConvoyAddMultipleIDs(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "probe A"})               // gc-2
+	_, _ = store.Create(beads.Bead{Title: "probe B"})               // gc-3
+	_, _ = store.Create(beads.Bead{Title: "probe C"})               // gc-4
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyAdd(store, []string{"gc-1", "gc-2", "gc-3", "gc-4"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyAdd = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Added 3 issue(s) to convoy gc-1") {
+		t.Errorf("stdout = %q, want a 3-issue add confirmation", stdout.String())
+	}
+	requireConvoyTrack(t, store, "gc-1", "gc-2")
+	requireConvoyTrack(t, store, "gc-1", "gc-3")
+	requireConvoyTrack(t, store, "gc-1", "gc-4")
+}
+
+// TestConvoyAddJSONMultipleIDs pins the JSON leg of GH#8422: issue_ids
+// reports every id tracked, not just the first.
+func TestConvoyAddJSONMultipleIDs(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "probe A"})               // gc-2
+	_, _ = store.Create(beads.Bead{Title: "probe B"})               // gc-3
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyAddJSON(store, []string{"gc-1", "gc-2", "gc-3"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyAddJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result convoyActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal result: %v; stdout: %s", err, stdout.String())
+	}
+	if len(result.IssueIDs) != 2 || result.IssueIDs[0] != "gc-2" || result.IssueIDs[1] != "gc-3" {
+		t.Errorf("result.IssueIDs = %v, want [gc-2 gc-3]", result.IssueIDs)
+	}
+	requireConvoyTrack(t, store, "gc-1", "gc-2")
+	requireConvoyTrack(t, store, "gc-1", "gc-3")
+}
+
 func TestConvoyAddNotConvoy(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "just a task"}) // type=task
