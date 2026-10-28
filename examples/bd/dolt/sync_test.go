@@ -1874,3 +1874,56 @@ func TestSyncDeclaresSkippedOutcomeWhenNoDatabaseHasUsableRemote(t *testing.T) {
 		}
 	})
 }
+
+// TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkipped covers the partial
+// outcome: when at least one database syncs (pushed, or "would push" under
+// --dry-run) while another is skipped for lack of a usable remote, the run
+// declares `partial`, scoped to only the skipped databases.
+func TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkipped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		syncedLine string
+	}{
+		{name: "pushed", args: nil, syncedLine: "good: pushed"},
+		{name: "dry-run would push", args: []string{"--dry-run"}, syncedLine: "good: would push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "data")
+			writeSyncCLIDatabase(t, dataDir, "good", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+			writeSyncCLIDatabase(t, dataDir, "skipme", "")
+			binDir := t.TempDir()
+			_ = writeSyncFakeDolt(t, binDir)
+			_ = writeSyncFakeBeadsBD(t, cityPath)
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_GOOD="}, tc.args...)
+			if err != nil {
+				t.Fatalf("a mixed sync/skip run is not a failure: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, tc.syncedLine) {
+				t.Fatalf("expected the healthy database to sync (%q):\n%s", tc.syncedLine, out)
+			}
+			outcome, ok := readCompactOutcome(t, outcomeFile)
+			if !ok {
+				t.Fatal("a run that skipped a database for lack of a usable remote wrote no order outcome declaration")
+			}
+			if outcome.Outcome != orders.ExecOutcomePartial {
+				t.Fatalf("outcome = %q, want %q: %+v", outcome.Outcome, orders.ExecOutcomePartial, outcome)
+			}
+			if outcome.Reason != "some databases were not synced to a remote" {
+				t.Fatalf("outcome reason = %q, want %q", outcome.Reason, "some databases were not synced to a remote")
+			}
+			wantScopes := []orders.ExecOutcomeScope{{Scope: "skipme", Reason: "no remote"}}
+			if !slices.Equal(outcome.Scopes, wantScopes) {
+				t.Fatalf("outcome scopes = %+v, want %+v", outcome.Scopes, wantScopes)
+			}
+			if strings.Contains(out, "skipped, nothing synced") {
+				t.Fatalf("a run that synced something must not print the all-skipped summary:\n%s", out)
+			}
+		})
+	}
+}

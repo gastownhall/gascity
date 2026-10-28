@@ -715,14 +715,19 @@ sync_database_cli() {
 
 # write_order_outcome declares the databases skipped for lack of a usable
 # remote to the order runner (GC_ORDER_OUTCOME_FILE): skipped when every
-# counted database was skipped. Database names pass valid_database_name and
-# reasons are fixed text, so neither needs JSON escaping.
+# counted database was skipped, partial when others synced. Database names
+# pass valid_database_name and reasons are fixed text, so neither needs JSON
+# escaping.
 write_order_outcome() {
   if [ -z "${GC_ORDER_OUTCOME_FILE:-}" ] || [ -z "$skipped_scopes" ]; then return 0; fi
+  outcome_kind=partial
+  outcome_reason="some databases were not synced to a remote"
   if [ "$skip_count" -eq "$total_count" ]; then
-    printf '{"outcome":"skipped","reason":"no database was synced to a remote","scopes":[%s]}\n' \
-      "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"
+    outcome_kind=skipped
+    outcome_reason="no database was synced to a remote"
   fi
+  printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$outcome_reason" "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"
 }
 
 # Optional GC phase: purge closed ephemerals while server is still up.
