@@ -110,6 +110,57 @@ These record types are usually the fastest path to the bug:
 - `operation`: scale check, start, interrupt, and drain boundary calls
 - `mutation`: bead or runtime writes that actually landed
 
+## Sessions Skipped In An Unknown State
+
+The reconciler skips, on purpose, any open session row whose raw `state` is
+one this gc version's controller does not manage, and never acts on it. The
+skip is a durable, throttled signal, not an error — but a session parked
+there holds its pool slot (or its named row) until someone releases it.
+
+**Symptoms.**
+
+- The trace decision `reconciler.session.skip_unknown_state` (reason
+  `unknown_state_skipped`, payload `state`) on the same session, every tick
+  that observes it.
+- The `session.unknown_state` event on first sight or on a state change, and
+  once more with `escalated=true` after the row has sat unrecognized for 30
+  minutes.
+- The session bead's `unknown_state_first_seen`, `unknown_state_value` and
+  `unknown_state_escalated_at` markers.
+- Under the v2 controller, the `reconciler.alert` of kind `unknown-state`, and
+  the boot refusal about enterprise-era session rows.
+
+**Listing them.**
+
+```bash
+gc doctor --check v2-session-migration --verbose   # runs in either mode; lists the IDs
+```
+
+or read the `session.unknown_state` events.
+
+**Causes.**
+
+- A newer or older gc writer in a mixed-version fleet: the skip is what makes
+  forward-compatible rollback safe.
+- This version's own archived rows (retired named duplicates, removed named
+  sessions), parked open on purpose — their signal is expected.
+- A close whose `state=<close code>` landed but whose status write failed on
+  a store without the atomic close.
+- Pre-#1912 builds' `failed-create` rows.
+
+**Recovery.**
+
+```bash
+gc session close <id>
+```
+
+A pool seat's slot is freed and the pool spawns a replacement; a configured
+named session gets a fresh canonical row. Or run the gc version that wrote
+the state. `gc session wake` and `gc session reset` (and the API wake and
+reset) refuse such rows by design — the recorded wake aside, nothing takes
+effect until the row is released — and `gc session kill` on one answers
+"session is not active" and names the close.
+
 ## Acceptance And Integration Failures
 
 For acceptance or integration failures, keep baseline tracing as-is and collect trace artifacts on failure. Prefer template-scoped detail tracing only for tests that intentionally exercise reconciler or lifecycle behavior.
