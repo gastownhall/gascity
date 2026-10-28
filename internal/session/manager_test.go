@@ -6200,3 +6200,35 @@ func TestCloseRidesALifecycleWrite(t *testing.T) {
 		t.Fatalf("status %s, want closed", b.Status)
 	}
 }
+
+// AC-7: an untracked root still parented by a tmux server is a live pane the
+// provider's listing missed, not an orphan: the gate refuses the start
+// without killing it. A root reparented to init is an orphan and is killed.
+func TestStartRefusesTmuxParentedUntrackedRuntime(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	sp.results = []runtime.LiveRuntime{{PID: 4321, PPID: 777, ParentIsProviderInfrastructure: true}}
+
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Start error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "pid=4321") {
+		t.Fatalf("Start error = %v, want it to name pid=4321", err)
+	}
+	if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("events = %v, want no termination and no start", sp.events)
+	}
+}
+
+func TestStartKillsReparentedUntrackedRuntime(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	sp.results = []runtime.LiveRuntime{{PID: 4321, PPID: 1}}
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}

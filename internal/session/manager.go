@@ -762,8 +762,10 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
+// a non-nil error when an orphan could not be confirmed dead, or when an
+// untracked root is still parented by tmux (wrapping
+// runtime.ErrRuntimeUnavailable), so callers gating a Start can refuse rather
+// than race a survivor for the same work. A
 // scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
 // the roots the scan did surface are still killed, and matching the started
 // replacement is impossible because it does not exist yet.
@@ -794,6 +796,14 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		if proctable.IsCityInfrastructureRoot(live.PID) {
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
+		}
+		// A root whose parent is still a tmux server is a live pane the
+		// provider's listing missed (a listing hiccup, or a server on a
+		// socket this controller does not resolve), not an orphan: killing
+		// it would kill live work. Refuse the start instead; a root that
+		// reparented to init is still an orphan and is killed below.
+		if live.ParentIsProviderInfrastructure {
+			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s is parented by tmux but not listed by the provider: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
