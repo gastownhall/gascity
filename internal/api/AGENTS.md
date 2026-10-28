@@ -234,7 +234,12 @@ starts with `handoff:` or `request-restart:` is invalid
 (`legacyop.ErrReservedKey`): `gc handoff` and `gc runtime request-restart`
 record the same `restart{fresh}` request with their keys in those
 namespaces, so `require` answers 422 `invalid_idempotency_key` and `auto`
-runs the reset unrecorded. With the gates off nothing is read or
+runs the reset unrecorded. A recorded `/respond`'s key in `respond:`
+(`opjournal.IsRespondKey`) is invalid the same way: a lane respond op is
+keyed there by the raising it answers, and an op's id derives from its key,
+so a legacy respond under it would take the id of the operator's lane op
+for that raising and refuse every answer to it `key_reuse` once respond is
+listed. With the gates off nothing is read or
 written beyond the legacy path, except that a `/stop` that names a turn is
 stopped turn-scoped through the worker in every mode. A request `auto` could
 not record runs exactly as in off (I8).
@@ -370,7 +375,13 @@ adopts it.
   occurrence's own (`respond:<raised fact id>`, as a producer that saw the
   raising keys its answer) pins nothing: the lane op is the row under it,
   and a pin would take the op's id and refuse every answer to the prompt
-  `key_reuse`. A row that cannot be written is 503, no op proposed. A
+  `key_reuse`. Any other key in that namespace (`opjournal.IsRespondKey`)
+  that names no op names no raising pending now (one that ended, one of
+  another request, one not raised yet, or none) and is 409 `no_pending`,
+  nothing proposed or pinned: a pin would send its answer to the prompt
+  pending now, which can be a later, identical one, and would take the id
+  of the operator's op answering the raising the key names. A row that
+  cannot be written is 503, no op proposed. A
   retry under the key never runs the front door or `RecordRaising` again:
   it proposes the pinned occurrence's op create-if-absent and answers from
   it, whether the row is closed, still open (its request died, or its close
@@ -393,7 +404,14 @@ adopts it.
   and replays, and one inside it is adopted. The lane then answers only the
   request id the op names, in the op's generation, through the lane op of
   its occurrence, into which the adopted op closes `skipped{coalesced_into}`;
-  the API never answers the runtime itself while respond is listed. A
+  the API never answers the runtime itself while respond is listed. Before
+  that lane op is proposed, the adopted op names the occurrence as its
+  causation (`opjournal.Store.SetCausation`), as a pin does, so from then on
+  it is read as a pin: a retry under the key, and a rollback, follow it to
+  the occurrence's lane op whether its close landed, never landed (its API
+  died once the lane answered) or was the op sweeper's
+  `failed{deadline_in_flight}`, and nothing adopts it again. A name that
+  cannot be written leaves the op open, nothing proposed, 503. A
   front-door refusal closes the op as OJ-4 closes it (no prompt pending,
   another one, or another generation is `skipped{stale}`), and an occurrence
   whose op records another answer closes it `failed{refused:key_reuse}`,
@@ -401,7 +419,8 @@ adopts it.
   it.
   While OJ-4 answers `/respond` again (respond unlisted: a rollback, or no
   lane host runs), a key the lane path wrote or answered a respond under (a
-  lane op, a pin, or OJ-4's op the lane finished) answers from that lane op
+  lane op, a pin, OJ-4's op the lane adopted, or OJ-4's op the lane
+  closed) answers from that lane op
   (`replayLaneRespond`), never by running the respond, whatever
   `ops.control` says: the key's row is read from the lane path's own store,
   which no gate governs, since `off`, and `auto` by its builtin default over
@@ -416,9 +435,10 @@ adopts it.
   replays under the request's key, one still open is 409 `in_flight`, and
   a pinned occurrence whose op records another answer, like OJ-4's op the
   lane closed `failed{refused:key_reuse}`, is 409 `key_reuse`. Nothing
-  proposes a lane op then. A pin whose request ended before it proposed the
-  op sent nothing, and answers from itself: `in_flight` until the op sweeper
-  closes it at its `finish_by`, then that close.
+  proposes a lane op then. A pin, or an adopted OJ-4 op, whose request ended
+  before it proposed the op had the lane send nothing, and answers from
+  itself: `in_flight` until the op sweeper closes it at its `finish_by`,
+  then that close.
 - Run cancel (interrupt listed): one op per holder session with a turn to
   stop, or that may have one, as for `/stop` (`sessionHasNoTurn`), keyed
   `run-cancel:<run id>:<gen>` (one per holder incarnation, so a holder that

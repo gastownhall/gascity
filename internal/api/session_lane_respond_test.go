@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,12 @@ import (
 
 const laneRespondRequest = "req-1"
 
+// pendingApproval is the approval laneRespondRequest that a lane respond
+// session shows pending.
+func pendingApproval() *runtime.PendingInteraction {
+	return &runtime.PendingInteraction{RequestID: laneRespondRequest, Kind: "approval", Options: []string{"approve", "deny"}}
+}
+
 // laneRespondEnv is a city whose lane host executes respond, its passes
 // scripted by closeWith (laneStopEnv), with a session showing a pending
 // approval laneRespondRequest.
@@ -31,7 +39,7 @@ func laneRespondEnv(t *testing.T, closeWith func(opjournal.Op) *opjournal.Outcom
 	t.Helper()
 	e, st := newLaneOpsEnv(t, "message", "respond")
 	info := e.session(t, "Lane respond")
-	e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: laneRespondRequest, Kind: "approval", Options: []string{"approve", "deny"}})
+	e.fs.sp.SetPendingInteraction(info.SessionName, pendingApproval())
 	st.onPoke = func(conv string) {
 		if closeWith == nil {
 			return
@@ -110,6 +118,19 @@ func keyRow(t *testing.T, st *opjournal.Store, conv, key string) opjournal.Op {
 		t.Fatalf("reading the row under key %q: %v", key, err)
 	}
 	return row
+}
+
+// wantNoRowUnder fails unless no op is stored under the operator's key on
+// conv.
+func wantNoRowUnder(t *testing.T, st *opjournal.Store, conv, key string) {
+	t.Helper()
+	id, err := opjournal.DeriveID(st.Prefix(), conv, legacyop.PrincipalOperator, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, err := st.Get(id); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("row under key %q = %+v, %v; want none", key, row, err)
+	}
 }
 
 // shortRespondBound shortens laneRespondAnswerBound for one test, so a
@@ -256,6 +277,139 @@ func TestRespondUnderLaneUnderTheOccurrencesOwnKey(t *testing.T) {
 	}
 	if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 0 {
 		t.Fatalf("the API answered the runtime itself %d times", n)
+	}
+}
+
+// raisingKey records requestID raised in conv's generation gen, as a lane
+// look records the prompt a producer sees, and returns the key of an answer
+// to that raising (opjournal.RespondKey).
+func raisingKey(t *testing.T, st *opjournal.Store, conv string, gen int64, requestID string) string {
+	t.Helper()
+	raising, _, err := st.RecordRaising(conv, gen, requestID, opjournal.FactBasisObserved, time.Now())
+	if err != nil {
+		t.Fatalf("recording the raising of %s: %v", requestID, err)
+	}
+	key, err := opjournal.RespondKey(raising.Raised)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// occurrenceKey is the key of an answer to occurrence occ of conv's
+// generation gen (opjournal.RespondKey), raised or not.
+func occurrenceKey(t *testing.T, st *opjournal.Store, conv string, gen int64, occ string) string {
+	t.Helper()
+	raised := opjournal.Fact{Kind: opjournal.FactInteractionRaised, Conversation: conv, Generation: gen, Interaction: occ}
+	id, err := opjournal.FactID(st.Prefix(), raised)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raised.ID = id
+	key, err := opjournal.RespondKey(raised)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// A /respond whose key is an occurrence key (opjournal.IsRespondKey)
+// answers only the occurrence its key names. A key that names no op and is
+// not the key of the occurrence pending now (an occurrence that ended before
+// an identical prompt was raised again, one of another request, one not
+// raised yet, or none) is 409 no_pending, no op proposed and none pinned,
+// however often it is sent. A pin would send its answer to the prompt
+// pending now, and would take the id of the operator's lane op of the
+// occurrence the key names, refusing every answer to that occurrence
+// key_reuse. An unkeyed /respond answers the prompt pending now, and once the
+// occurrence the key names is pending, an unkeyed answer to it is the op
+// under the key.
+func TestRespondUnderLaneAnotherOccurrencesKeyAnswersNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// key is the request's occurrence key, which may record a raising.
+		key  func(t *testing.T, st *opjournal.Store, conv string, gen int64) string
+		body string
+		// now is the occurrence pending when the request is sent.
+		now string
+		// next: the key names the raising after now, which is pending once
+		// now ends.
+		next bool
+	}{
+		{
+			name: "an occurrence that ended, an identical prompt pending",
+			key: func(t *testing.T, st *opjournal.Store, conv string, gen int64) string {
+				key := raisingKey(t, st, conv, gen, laneRespondRequest)
+				resolveFirstRaising(t, st, conv, gen)
+				return key
+			},
+			body: `{"action":"approve","request_id":"` + laneRespondRequest + `"}`,
+			now:  laneRespondRequest + "#2",
+		},
+		{
+			name: "an occurrence of another request",
+			key: func(t *testing.T, st *opjournal.Store, conv string, gen int64) string {
+				return raisingKey(t, st, conv, gen, "req-other")
+			},
+			body: respondBody("approve"),
+			now:  laneRespondRequest + "#1",
+		},
+		{
+			name: "the next raising of the request pending",
+			key: func(t *testing.T, st *opjournal.Store, conv string, gen int64) string {
+				return occurrenceKey(t, st, conv, gen, laneRespondRequest+"#2")
+			},
+			body: respondBody("approve"),
+			now:  laneRespondRequest + "#1",
+			next: true,
+		},
+		{
+			name: "no raising",
+			key:  func(*testing.T, *opjournal.Store, string, int64) string { return "respond:r-1" },
+			body: respondBody("approve"),
+			now:  laneRespondRequest + "#1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, st, info := laneRespondEnv(t, outcome(opjournal.ArmSucceeded, ""))
+			gen := generationOf(t, e.store, info.ID)
+			key := tc.key(t, st.ops, info.ID, gen)
+			for _, what := range []string{"first", "same-key retry"} {
+				rows := len(e.opRows(t))
+				rec := e.post(t, "/session/"+info.ID+"/respond", key, tc.body)
+				if rec.Code != http.StatusConflict || problemCode(t, rec) != "session-conflict" || !strings.Contains(rec.Body.String(), "no_pending") {
+					t.Fatalf("%s: %d %s, want 409 no_pending", what, rec.Code, rec.Body.String())
+				}
+				if n := len(e.opRows(t)) - rows; n != 0 {
+					t.Fatalf("%s wrote %d op rows, want none", what, n)
+				}
+			}
+			wantNoRowUnder(t, st.ops, info.ID, key)
+			if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 0 {
+				t.Fatalf("the API answered the runtime itself %d times", n)
+			}
+			unkeyed := e.post(t, "/session/"+info.ID+"/respond", "", respondBody("approve"))
+			wantStatus(t, "an unkeyed answer", unkeyed, http.StatusAccepted)
+			a := decodeCommandAnswer(t, unkeyed)
+			if ops := laneRespondOps(t, e); len(ops) != 1 || a.Op == nil || a.Op.ID != ops[0].ID || ops[0].Scope.Interaction != tc.now {
+				t.Fatalf("an unkeyed answer = %+v, lane respond ops %+v; want one, answering %s", a, ops, tc.now)
+			}
+			if !tc.next {
+				return
+			}
+			resolveFirstRaising(t, st.ops, info.ID, gen)
+			later := e.post(t, "/session/"+info.ID+"/respond", "", respondBody("approve"))
+			wantStatus(t, "an unkeyed answer to the next raising", later, http.StatusAccepted)
+			b := decodeCommandAnswer(t, later)
+			if b.Op == nil || b.IdempotencyKey != key {
+				t.Fatalf("an unkeyed answer to the next raising = %+v, want the op under key %q", b, key)
+			}
+			keyed := e.post(t, "/session/"+info.ID+"/respond", key, respondBody("approve"))
+			wantStatus(t, "an answer under the key", keyed, http.StatusAccepted)
+			if c := decodeCommandAnswer(t, keyed); c.Op == nil || c.Op.ID != b.Op.ID || !c.Replayed {
+				t.Fatalf("an answer under the key = %+v, want op %s replayed", c, b.Op.ID)
+			}
+		})
 	}
 }
 
@@ -603,6 +757,18 @@ func rollBackRespond(t *testing.T, e *opsEnv, st *lanePokeState, control string)
 	e.resolver.state = st
 }
 
+// listRespond restarts e's API with respond listed again and ops.control set
+// to control, as the controller restart that lists it does: /respond takes
+// the lane's path, and nothing is in flight.
+func listRespond(t *testing.T, e *opsEnv, st *lanePokeState, control string) {
+	t.Helper()
+	st.kinds = []string{"message", "respond"}
+	e.fs.cfg.Ops.Authoritative = st.kinds
+	e.fs.cfg.Ops.ControlMode = control
+	e.restart(t)
+	e.resolver.state = st
+}
+
 // rollbackControlModes are the ops.control settings a rollback may leave:
 // auto set explicitly, which records over e's store; off, which records
 // nothing; and unset, whose builtin auto records only over a SQLite-backed
@@ -818,11 +984,7 @@ func openOJ4Respond(t *testing.T, e *opsEnv, st *lanePokeState, info session.Inf
 	if first.Code != http.StatusServiceUnavailable || op.Status == opjournal.StatusClosed || op.Executor != opjournal.ExecutorLegacyAPI {
 		t.Fatalf("OJ-4's respond: %d %s, op %+v; want 503 with its op left open", first.Code, first.Body.String(), op)
 	}
-	st.kinds = []string{"message", "respond"}
-	e.fs.cfg.Ops.Authoritative = st.kinds
-	e.fs.cfg.Ops.ControlMode = control
-	e.restart(t)
-	e.resolver.state = st
+	listRespond(t, e, st, control)
 	return op
 }
 
@@ -846,8 +1008,9 @@ func TestRespondUnderLaneFinishesAnOpenOJ4Respond(t *testing.T) {
 				t.Fatalf("retry = %+v, lane respond ops %+v; want the occurrence's lane op, answered under r-1", a, ops)
 			}
 			if op := keyRow(t, st.ops, info.ID, "r-1"); op.Status != opjournal.StatusClosed || op.Attempt != open.Attempt+1 ||
+				op.Causation != ops[0].Scope.Interaction ||
 				op.Outcome.Reason != opjournal.ReasonCoalescedInto || op.Outcome.Result.CoalescedInto != ops[0].ID {
-				t.Fatalf("OJ-4's op = %+v, want it adopted and closed coalesced into lane op %s", op, ops[0].ID)
+				t.Fatalf("OJ-4's op = %+v, want it adopted, naming its occurrence, and closed coalesced into lane op %s", op, ops[0].ID)
 			}
 			if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 1 {
 				t.Fatalf("Respond calls = %d, want OJ-4's failed one alone", n)
@@ -945,6 +1108,217 @@ func TestRespondUnderLaneOpenOJ4RespondRefusals(t *testing.T) {
 		retry(t, e, info, "key-reuse", "key_reuse")
 		if ops := laneRespondOps(t, e); len(ops) != 1 {
 			t.Fatalf("lane respond ops = %+v, want the other answer's alone", ops)
+		}
+	})
+}
+
+// crashingLaneState is a lane State whose Servers' recorders carry the
+// crash-point hook fn (OpsCrashPointsProvider).
+type crashingLaneState struct {
+	*lanePokeState
+	fn legacyop.CrashPointFunc
+}
+
+func (c *crashingLaneState) OpsCrashPoints() legacyop.CrashPointFunc { return c.fn }
+
+// adoptOJ4RespondAndDie leaves OJ-4's respond under key r-1 open
+// (openOJ4Respond, respond listed after it with ops.control auto), then
+// adopts it with a same-key retry whose API dies in the lane's pass, once
+// the lane has answered: the lane op closed succeeded, and the adopted op
+// still open, as everything the API did before it proposed the lane op left
+// it. It returns the adopted op as it stands and the lane op.
+func adoptOJ4RespondAndDie(t *testing.T, e *opsEnv, st *lanePokeState, info session.Info) (adopted, laneOp opjournal.Op) {
+	t.Helper()
+	open := openOJ4Respond(t, e, st, info, "auto")
+	lane, died := st.onPoke, make(chan struct{})
+	var once sync.Once
+	st.onPoke = func(conv string) {
+		lane(conv)
+		once.Do(func() { close(died) })
+		goruntime.Goexit()
+	}
+	answered := e.postAsync(t, "/session/"+info.ID+"/respond", "r-1", respondBody("approve"))
+	select {
+	case <-died:
+	case rec := <-answered:
+		t.Fatalf("the adopting retry answered %d %s, want its API dead once the lane answered", rec.Code, rec.Body.String())
+	case <-time.After(testEventTimeout):
+		t.Fatal("the adopting retry never poked the lane")
+	}
+	st.onPoke = lane
+	ops := laneRespondOps(t, e)
+	adopted = keyRow(t, st.ops, info.ID, "r-1")
+	if len(ops) != 1 || ops[0].Status != opjournal.StatusClosed || ops[0].Outcome.Arm != opjournal.ArmSucceeded ||
+		adopted.Status == opjournal.StatusClosed || adopted.Attempt != open.Attempt+1 {
+		t.Fatalf("lane respond ops %+v, OJ-4's op %+v; want the lane op succeeded and OJ-4's op adopted, still open", ops, adopted)
+	}
+	return adopted, ops[0]
+}
+
+// An OJ-4 respond the lane adopted names the occurrence whose lane op
+// answers it before that op is proposed (adoptLegacyRespond), as the row that
+// pins a key does, so a retry under its key follows it to that lane op even
+// when its close never landed: the API that adopted it died once the lane
+// answered, leaving it open, and the op sweeper may have closed it
+// failed{deadline_in_flight} since. With respond unlisted again (a rollback),
+// the retry answers from the lane op whatever ops.control says and never
+// answers the runtime again, which could answer a later, identical prompt;
+// with respond still listed, it replays the lane op's success rather than
+// offering a resend.
+func TestRespondUnderLaneAdoptedOJ4RespondWhoseCloseNeverLanded(t *testing.T) {
+	type next struct {
+		name string
+		then func(t *testing.T, e *opsEnv, st *lanePokeState)
+	}
+	nexts := []next{{"respond still listed", func(t *testing.T, e *opsEnv, st *lanePokeState) {
+		e.restart(t)
+		e.resolver.state = st
+	}}}
+	for _, control := range rollbackControlModes {
+		nexts = append(nexts, next{"rolled back, ops.control " + control.name, func(t *testing.T, e *opsEnv, st *lanePokeState) {
+			rollBackRespond(t, e, st, control.mode)
+		}})
+	}
+	for _, swept := range []bool{false, true} {
+		for _, n := range nexts {
+			name := "open, " + n.name
+			if swept {
+				name = "swept, " + n.name
+			}
+			t.Run(name, func(t *testing.T) {
+				e, st, info := laneRespondEnv(t, outcome(opjournal.ArmSucceeded, ""))
+				_, laneOp := adoptOJ4RespondAndDie(t, e, st, info)
+				if swept {
+					if _, err := legacyop.Sweep(st.ops, time.Now().Add(2*time.Hour), 100, "test:sweep"); err != nil {
+						t.Fatalf("sweeping: %v", err)
+					}
+					if row := keyRow(t, st.ops, info.ID, "r-1"); row.Status != opjournal.StatusClosed || row.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+						t.Fatalf("swept op = %+v, want it closed failed{deadline_in_flight}", row)
+					}
+				}
+				n.then(t, e, st)
+				before := e.fs.sp.CountCalls("Respond", info.SessionName)
+				rec := e.post(t, "/session/"+info.ID+"/respond", "r-1", respondBody("approve"))
+				if calls := e.fs.sp.CountCalls("Respond", info.SessionName) - before; calls != 0 {
+					t.Fatalf("the retry answered the runtime %d times", calls)
+				}
+				wantStatus(t, "retry", rec, http.StatusAccepted)
+				if a := decodeCommandAnswer(t, rec); a.Op == nil || a.Op.ID != laneOp.ID || !a.Replayed || a.IdempotencyKey != "r-1" {
+					t.Fatalf("retry = %+v, want lane op %s replayed under r-1", a, laneOp.ID)
+				}
+				if ops := laneRespondOps(t, e); len(ops) != 1 {
+					t.Fatalf("lane respond ops = %+v, want the first alone", ops)
+				}
+			})
+		}
+	}
+}
+
+// The adopted OJ-4 respond names its occurrence before the lane op is
+// proposed: a write of that name that fails leaves the op open, adopted and
+// naming nothing, proposes no lane op and pokes no lane, so nothing reaches
+// the prompt, and the request is 503. A retry adopts the op again and
+// answers through the lane.
+func TestRespondUnderLaneAdoptedOJ4RespondUnnamedProposesNothing(t *testing.T) {
+	e, st, info := laneRespondEnv(t, outcome(opjournal.ArmSucceeded, ""))
+	open := openOJ4Respond(t, e, st, info, "auto")
+	// A lane look recorded the raising, so the adoption records none, and its
+	// next op-row update names the occurrence.
+	raisingKey(t, st.ops, info.ID, generationOf(t, e.store, info.ID), laneRespondRequest)
+	e.resolver.state = &crashingLaneState{lanePokeState: st, fn: func(cp legacyop.CrashPoint, op opjournal.Op) error {
+		if cp == legacyop.CrashPointAdmitted && op.ID == open.ID && op.Attempt == open.Attempt+1 {
+			e.store.set(func(s *opsTestStore) { s.updateFails = 1 })
+		}
+		return nil
+	}}
+	first := e.post(t, "/session/"+info.ID+"/respond", "r-1", respondBody("approve"))
+	if first.Code != http.StatusServiceUnavailable || !strings.Contains(first.Body.String(), "op_journal_unavailable: naming interaction "+laneRespondRequest+"#1") {
+		t.Fatalf("first: %d %s, want 503 op_journal_unavailable naming the occurrence", first.Code, first.Body.String())
+	}
+	if ops := laneRespondOps(t, e); len(ops) != 0 {
+		t.Fatalf("lane respond ops = %+v, want none", ops)
+	}
+	if got := st.poked(); len(got) != 0 {
+		t.Fatalf("pokes = %v, want none", got)
+	}
+	if op := keyRow(t, st.ops, info.ID, "r-1"); op.Status == opjournal.StatusClosed || op.Attempt != open.Attempt+1 || op.Causation != "" {
+		t.Fatalf("OJ-4's op = %+v, want it adopted, open, naming nothing", op)
+	}
+	retry := e.post(t, "/session/"+info.ID+"/respond", "r-1", respondBody("approve"))
+	wantStatus(t, "retry", retry, http.StatusAccepted)
+	a := decodeCommandAnswer(t, retry)
+	ops := laneRespondOps(t, e)
+	if len(ops) != 1 || a.Op == nil || a.Op.ID != ops[0].ID || ops[0].Status != opjournal.StatusClosed {
+		t.Fatalf("retry = %+v, lane respond ops %+v; want the occurrence's lane op", a, ops)
+	}
+	if op := keyRow(t, st.ops, info.ID, "r-1"); op.Status != opjournal.StatusClosed || op.Attempt != open.Attempt+2 ||
+		op.Causation != ops[0].Scope.Interaction || op.Outcome.Result.CoalescedInto != ops[0].ID {
+		t.Fatalf("OJ-4's op = %+v, want it adopted again, naming %s, closed coalesced into lane op %s", op, ops[0].Scope.Interaction, ops[0].ID)
+	}
+	if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 1 {
+		t.Fatalf("Respond calls = %d, want OJ-4's failed one alone", n)
+	}
+}
+
+// While OJ-4 answers /respond (respond unlisted: a rollback, or no lane host
+// runs), a request under a raising's own key (opjournal.RespondKey, as a
+// producer that saw the raising keys its answer) records no op under the
+// key, however it ends: the key derives the id of the operator's lane op
+// answering that raising, so an op there would refuse every answer to the
+// raising key_reuse once respond is listed again (legacyop.ErrReservedKey).
+// auto answers it unrecorded, and require refuses it, 422
+// invalid_idempotency_key, nothing sent. Once respond is listed again, an
+// unkeyed answer to the raising is the raising's lane op, under that key.
+func TestRespondWhileOJ4AnswersUnderARaisingsKeyRecordsNothingUnderIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fails fails OJ-4's answer retryably; otherwise it lands, and an
+		// identical prompt is raised again before any lane look.
+		fails  bool
+		status int
+	}{
+		{"auto, an answer that fails", true, http.StatusServiceUnavailable},
+		{"auto, an answer that lands", false, http.StatusAccepted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, st, info := laneRespondEnv(t, outcome(opjournal.ArmSucceeded, ""))
+			key := raisingKey(t, st.ops, info.ID, generationOf(t, e.store, info.ID), laneRespondRequest)
+			rollBackRespond(t, e, st, "auto")
+			if tc.fails {
+				e.fs.sp.RespondErrors[info.SessionName] = fmt.Errorf("the answer was not acknowledged: %w", runtime.ErrRuntimeUnavailable)
+			}
+			wantStatus(t, "OJ-4's answer", e.post(t, "/session/"+info.ID+"/respond", key, respondBody("approve")), tc.status)
+			delete(e.fs.sp.RespondErrors, info.SessionName)
+			if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 1 {
+				t.Fatalf("Respond calls = %d, want OJ-4's one", n)
+			}
+			wantNoRowUnder(t, st.ops, info.ID, key)
+			// The prompt is still pending, or was raised again identically.
+			e.fs.sp.SetPendingInteraction(info.SessionName, pendingApproval())
+			listRespond(t, e, st, "auto")
+			rec := e.post(t, "/session/"+info.ID+"/respond", "", respondBody("approve"))
+			wantStatus(t, "an unkeyed answer once respond is listed", rec, http.StatusAccepted)
+			a := decodeCommandAnswer(t, rec)
+			ops := laneRespondOps(t, e)
+			if len(ops) != 1 || a.Op == nil || a.Op.ID != ops[0].ID || ops[0].ClientKey != key || ops[0].Scope.Interaction != laneRespondRequest+"#1" {
+				t.Fatalf("an unkeyed answer = %+v, lane respond ops %+v; want the raising's lane op, under %q", a, ops, key)
+			}
+		})
+	}
+	t.Run("require", func(t *testing.T) {
+		e, st, info := laneRespondEnv(t, outcome(opjournal.ArmSucceeded, ""))
+		key := raisingKey(t, st.ops, info.ID, generationOf(t, e.store, info.ID), laneRespondRequest)
+		rollBackRespond(t, e, st, "require")
+		rows := len(e.opRows(t))
+		rec := e.post(t, "/session/"+info.ID+"/respond", key, respondBody("approve"))
+		if rec.Code != http.StatusUnprocessableEntity || problemCode(t, rec) != "invalid-idempotency-key" {
+			t.Fatalf("OJ-4's answer: %d %s, want 422 invalid_idempotency_key", rec.Code, rec.Body.String())
+		}
+		if n := len(e.opRows(t)) - rows; n != 0 {
+			t.Fatalf("a refused answer wrote %d op rows, want none", n)
+		}
+		if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 0 {
+			t.Fatalf("a refused answer answered the runtime %d times", n)
 		}
 	})
 }

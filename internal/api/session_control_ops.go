@@ -903,7 +903,10 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 // ctx ends, and ops.control does not govern it. Otherwise a key the lane
 // path wrote or answered a respond under answers from that lane op in every
 // ops.control mode (replayLaneRespond), so a rollback never runs a respond
-// again for it.
+// again for it. A key in respond:, where a lane respond op is keyed by the
+// raising it answers (opjournal.IsRespondKey), records nothing here
+// (legacyop.ErrReservedKey): auto answers unrecorded and require refuses it,
+// so no op of OJ-4's takes the id of the lane op answering that raising.
 func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {

@@ -837,7 +837,13 @@ const refusedKeyReuse = "key_reuse"
 // (pinLaneRespondKey), so however the request ends, a retry under the key
 // answers that occurrence, never a later, identical prompt. A key that is the
 // op's own (RespondKey of the occurrence, as a producer that saw the raising
-// keys its answer) needs no pin: the op is the row under it.
+// keys its answer) needs no pin: the op is the row under it. Any other key in
+// that namespace (opjournal.IsRespondKey) that names no op names no raising
+// pending now (one that ended, one of another request, one not raised yet,
+// or none), so it is 409 no_pending, nothing proposed or pinned. A pin would
+// send its answer to the prompt pending now, and would take the id of the
+// operator's op answering the raising the key names, so every answer to that
+// raising would be 409 key_reuse.
 func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, store beads.Store, id, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	st, err := s.conversationOpStore()
 	if err != nil {
@@ -864,6 +870,9 @@ func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, s
 			return syncAnswer{}, err
 		}
 		return s.answerLaneRespond(ctx, id, key, op, !created)
+	}
+	if opjournal.IsRespondKey(key) {
+		return syncAnswer{}, humaSessionManagerError(fmt.Errorf("session %s: Idempotency-Key %q answers a raising that is not pending: the one pending now is interaction %s, keyed %q: %w", id, key, req.Scope.Interaction, req.ClientKey, session.ErrNoPendingInteraction))
 	}
 	row, created, err := pinLaneRespondKey(st, id, key, scope, resp, req.Scope.Interaction)
 	if err != nil {
@@ -951,15 +960,16 @@ func laneRespondPending(mgr *session.Manager, id string, resp runtime.Interactio
 
 // retryLaneRespond answers resp, a /respond of session id whose
 // Idempotency-Key key names prior, a respond. A request that asks again what
-// prior recorded (sameRespondRequest) is its retry: a row a keyed lane
-// respond pinned to its occurrence (laneRespondPin) answers through that
-// occurrence's op (respondUnderPin), whatever state the row is in, and a
-// lane op the key names itself is awaited while open and replayed once
-// closed. So a retry never resolves the occurrence again, and never answers
-// an identical prompt raised later. OJ-4's own op still open is finished
-// through the lane (adoptLegacyRespond), and one closed coalesced into a
-// lane op answers from that op; any other op the key names (OJ-4's own,
-// closed) is answered as OJ-4 replays it. One that asks anything else is 422
+// prior recorded (sameRespondRequest) is its retry: a row that names its
+// occurrence (laneRespondPin: the row a keyed lane respond pins its key
+// with, or OJ-4's own op the lane adopted) answers through that occurrence's
+// op (respondUnderPin), whatever state the row is in, and a lane op the key
+// names itself is awaited while open and replayed once closed. So a retry
+// never resolves the occurrence again, and never answers an identical prompt
+// raised later. OJ-4's own op still open and naming none is finished through
+// the lane (adoptLegacyRespond), and one closed coalesced into a lane op
+// answers from that op; any other op the key names (OJ-4's own, closed) is
+// answered as OJ-4 replays it. One that asks anything else is 422
 // idempotency_mismatch, nothing written, as OJ-4 answers it.
 func (s *Server) retryLaneRespond(ctx context.Context, mgr *session.Manager, store beads.Store, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
 	same, err := sameRespondRequest(st, prior, resp)
@@ -996,15 +1006,22 @@ func (s *Server) retryLaneRespond(ctx context.Context, mgr *session.Manager, sto
 // failed{deadline_in_flight} and replays, and one inside it is adopted. The
 // lane, which executes respond now, then answers the adopted op's request,
 // as OJ-4's adopted respond answers only the request id its op names: the
-// front door reads that request pending, and the lane op of its occurrence
-// answers it (respondUnderPin), the adopted op closed skipped{coalesced_into}
-// that lane op, so a retry under the key follows it there. The API sends the
-// runtime nothing itself. A refusal closes the op as OJ-4 closes the same
-// refusal: no prompt pending, another one, or a session that moved to
+// front door reads that request pending, the adopted op names that
+// request's occurrence as its causation (Store.SetCausation), as the row
+// that pins a key names it (laneRespondPin), and only then is the lane op of
+// the occurrence proposed to answer it (respondUnderPin), the adopted op
+// closed skipped{coalesced_into} that lane op. So a retry under the key, and
+// a rollback's replay (replayLaneRespond), follow the op to that lane op
+// even while it stays open, its close lost with the API that adopted it, or
+// once the op sweeper closed it failed{deadline_in_flight}: neither runs the
+// respond again, which could answer a later, identical prompt. The API sends
+// the runtime nothing itself. A refusal closes the op as OJ-4 closes the
+// same refusal: no prompt pending, another one, or a session that moved to
 // another generation since, whose prompt is a later one, is skipped{stale}.
 // A lane op that records another answer to the occurrence closes it
-// failed{refused:key_reuse}, and a write that fails before the lane op exists
-// leaves it open for a retry to adopt again.
+// failed{refused:key_reuse}, and a write that fails before the lane op
+// exists, the occurrence's name included, leaves it open for a retry to
+// adopt again.
 func (s *Server) adoptLegacyRespond(ctx context.Context, mgr *session.Manager, store beads.Store, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
 	payload, err := encodeRespondOpPayload(resp)
 	if err != nil {
@@ -1051,6 +1068,10 @@ func (s *Server) adoptLegacyRespond(ctx context.Context, mgr *session.Manager, s
 	if req.Scope.Generation != prior.Scope.Generation {
 		return syncAnswer{}, refused(fmt.Errorf("session %s runs generation %d, and op %s answers a prompt of generation %d: %w", id, req.Scope.Generation, prior.ID, prior.Scope.Generation, session.ErrNoPendingInteraction))
 	}
+	if _, err := st.SetCausation(adm.Op.ID, adm.Op.Attempt, req.Scope.Interaction, "api"); err != nil {
+		adm.Finish(legacyop.Result{LeaveOpen: true})
+		return syncAnswer{}, apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: naming interaction %s on op %s, as the occurrence whose lane op answers it, so nothing was sent: %v", req.Scope.Interaction, adm.Op.ID, err)
+	}
 	return s.respondUnderPin(ctx, st, id, key, req, func(_ string, res legacyop.Result) { adm.Finish(res) })
 }
 
@@ -1064,19 +1085,21 @@ func respondKeyMismatch(prior opjournal.Op) error {
 // replayLaneRespond answers resp, a /respond of session id while OJ-4
 // answers /respond (respond not listed: a rollback, or no lane host runs),
 // when its Idempotency-Key key names a respond the lane path wrote or
-// answered (laneRespondKeyRow), whatever ops.control says: a lane op, the
-// row a keyed lane respond pins its key with (laneRespondPin), or OJ-4's own
-// op the lane finished (adoptLegacyRespond). As under the lane
-// (retryLaneRespond), a request that asks again what that row recorded
-// answers from the lane op, never from a respond run again, and one that
-// asks anything else is 422 idempotency_mismatch. Nothing proposes a lane
-// op, which no lane executes now: a closed op replays under key, one still
-// open is 409 in_flight, as OJ-4 answers a request it holds, and a pinned
-// occurrence whose op records another answer is 409 key_reuse. A pin whose
-// occurrence has no op answers from the pin itself: its request ended before
-// it proposed one, so nothing was sent, and the pin is in_flight until the op
-// sweeper closes it at its finish_by, then replays that close. answered is
-// false, for OJ-4 to answer the request, when key names no such row.
+// answered (laneRespondKeyRow), whatever ops.control says: a lane op, a row
+// that names its occurrence (laneRespondPin: the row a keyed lane respond
+// pins its key with, or OJ-4's own op the lane adopted, adoptLegacyRespond),
+// or OJ-4's own op the lane closed. As under the lane (retryLaneRespond), a
+// request that asks again what that row recorded answers from the lane op,
+// never from a respond run again, and one that asks anything else is 422
+// idempotency_mismatch. Nothing proposes a lane op, which no lane executes
+// now: a closed op replays under key, one still open is 409 in_flight, as
+// OJ-4 answers a request it holds, and a named occurrence whose op records
+// another answer is 409 key_reuse. A row whose occurrence has no op answers
+// from the row itself: the request that named the occurrence ended before
+// it proposed the op, so the lane sent nothing for it, and the row is
+// in_flight until the op sweeper closes it at its finish_by, then replays
+// that close. answered is false, for OJ-4 to answer the request, when key
+// names no such row.
 func (s *Server) replayLaneRespond(ctx context.Context, store beads.SessionStore, id, key string, resp runtime.InteractionResponse) (answer syncAnswer, answered bool, err error) {
 	st, prior, found, err := s.laneRespondKeyRow(store, id, key)
 	if err != nil || !found {
@@ -1113,26 +1136,28 @@ func (s *Server) replayLaneRespond(ctx context.Context, store beads.SessionStore
 }
 
 // laneRespondKeyRow reads the respond row Idempotency-Key key names on
-// session conv when the lane path wrote or answered it: a lane op, the row a
-// keyed lane respond pins its key with (laneRespondPin), or OJ-4's own op a
-// lane retry finished (adoptLegacyRespond), closed coalesced into the lane
-// op that answered it, or failed{refused:key_reuse} when another answer won
-// its occurrence, a close only the lane path writes on a respond. It reads
-// the lane path's own store (openOpStore, which conversationOpStore opens),
-// which no ops.* gate governs: OJ-4 reads no row in off, nor in auto by its
-// builtin default over a sessions store that is not SQLite-backed, such as
-// the native Dolt store a lane host runs over, so a rollback that read
-// through OJ-4 would run the respond again. found is false when key is
-// empty or names no such row, and when the sessions store can never hold
-// one, which the store itself says: it cannot apply guarded batches, which
-// every lane host needs (so a bd-served store pays no op-store open per
-// request), or it names no id namespace (opjournal.ErrNoNamespace), so no
-// op id derives over it. OJ-4 then answers the request. Any other op store
-// that does not open, and a read that fails, is 503 op_journal_unavailable,
-// nothing done: the key may name an answer the lane sent. NewStore reports
-// storage it cannot reach, or a store closed under it, as the
-// ErrConditionalWriteUnsupported it reports for a store that cannot fence
-// writes, so that error does not say the lane never wrote there.
+// session conv when the lane path wrote or answered it: a lane op, a row
+// that names the occurrence whose lane op answers it (laneRespondPin: the
+// row a keyed lane respond pins its key with, or OJ-4's own op a lane retry
+// adopted, adoptLegacyRespond), open or closed, or a respond closed
+// coalesced into the lane op that answered it, or failed{refused:key_reuse}
+// when another answer won its occurrence, closes only the lane path writes
+// on a respond. It reads the lane path's own store (openOpStore, which
+// conversationOpStore opens), which no ops.* gate governs: OJ-4 reads no row
+// in off, nor in auto by its builtin default over a sessions store that is
+// not SQLite-backed, such as the native Dolt store a lane host runs over, so
+// a rollback that read through OJ-4 would run the respond again. found is
+// false when key is empty or names no such row, and when the sessions store
+// can never hold one, which the store itself says: it cannot apply guarded
+// batches, which every lane host needs (so a bd-served store pays no
+// op-store open per request), or it names no id namespace
+// (opjournal.ErrNoNamespace), so no op id derives over it. OJ-4 then answers
+// the request. Any other op store that does not open, and a read that fails,
+// is 503 op_journal_unavailable, nothing done: the key may name an answer
+// the lane sent. NewStore reports storage it cannot reach, or a store closed
+// under it, as the ErrConditionalWriteUnsupported it reports for a store
+// that cannot fence writes, so that error does not say the lane never wrote
+// there.
 func (s *Server) laneRespondKeyRow(store beads.SessionStore, conv, key string) (st *opjournal.Store, row opjournal.Op, found bool, err error) {
 	if key == "" {
 		return nil, opjournal.Op{}, false, nil
@@ -1250,10 +1275,13 @@ func pinLaneRespondKey(st *opjournal.Store, conv, key string, scope opjournal.Sc
 	return row, created, nil
 }
 
-// laneRespondPin is the occurrence row pins its key to when row is the row
-// a keyed lane /respond pins its key with (pinLaneRespondKey): its
-// causation, an occurrence of the request id its scope names. pinned is
-// false for any other op, such as a lane op or OJ-4's own respond op.
+// laneRespondPin is the occurrence row pins its key to when row names one:
+// the row a keyed lane /respond pins its key with (pinLaneRespondKey), or
+// OJ-4's own respond op the lane adopted, which names the occurrence before
+// the lane op answering it is proposed (adoptLegacyRespond). Its causation
+// is then an occurrence of the request id its scope names. pinned is false
+// for any other op, such as a lane op, or OJ-4's own respond op the lane
+// never adopted.
 func laneRespondPin(row opjournal.Op) (occ string, pinned bool) {
 	if row.Executor == opjournal.ExecutorLane {
 		return "", false
