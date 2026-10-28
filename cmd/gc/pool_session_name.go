@@ -274,6 +274,7 @@ func releaseOrphanedPoolAssignments(
 	var released []releasedPoolAssignment
 	claimGate := newForeignClaimGate(cfg, sessionStore)
 	defer claimGate.log()
+	seats := newSeatHandover(cityPath, cfg, store, sessionStore.Store, openSessionInfos, storeRefAware)
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
@@ -385,6 +386,11 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
+		// A claim held under a closed seat row's bead ID moves to that seat's
+		// live successor instead of reopening (pool_orphan_seat_handover.go).
+		if assignee != "" && seats.handOver(ownerStore, wb, assignee, workStoreRef) {
+			continue
+		}
 		// The verb's route guard is the one this sweep's pre-filter lacks:
 		// an expanded workflow root's run_target is no lane (NEW-5).
 		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
@@ -395,9 +401,10 @@ func releaseOrphanedPoolAssignments(
 	}
 	if recordPhase != nil {
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.release_sweep", sweepStart, map[string]any{
-			"memoized_count": memoizedProbeCount,
-			"fallback_count": fallbackProbeCount,
-			"probe_ms":       probeElapsed.Milliseconds(),
+			"memoized_count":    memoizedProbeCount,
+			"fallback_count":    fallbackProbeCount,
+			"probe_ms":          probeElapsed.Milliseconds(),
+			"handed_over_count": seats.handedOver,
 		})
 	}
 	return released
