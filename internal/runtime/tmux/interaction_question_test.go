@@ -912,3 +912,55 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 		})
 	}
 }
+
+// A question frame stays in scrollback once it is answered, and a composer
+// draft can hold numbered lines. Neither may read as a live dialog: the pane
+// is idle and a nudge must be delivered to it. The footer and the review menu
+// must be the pane's bottom-most block — anything standing below them
+// (the composer, working output) makes the frame history.
+func TestQuestionDialogIgnoresQuotedFramesAndComposerDrafts(t *testing.T) {
+	quotedReviewAboveComposer := strings.Join(readQuestionFixture(t, "review-page-ga-ngrme8.txt"), "\n") + `
+────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────
+  ? for shortcuts
+`
+	const numberedComposerDraft = `❯ 1. Small
+  2. Medium
+  3. Large
+`
+	panes := map[string]string{
+		"quoted question page above a composer": strings.Join(readQuestionFixture(t, "quoted-dialog-above-composer-ga-ngrme8.txt"), "\n") + "\n",
+		"quoted review page above a composer":   quotedReviewAboveComposer,
+		"numbered composer draft, no footer":    numberedComposerDraft,
+	}
+	for name, pane := range panes {
+		t.Run(name, func(t *testing.T) {
+			lines := strings.Split(strings.ReplaceAll(pane, "\r", ""), "\n")
+			if q := parseQuestionDialog(lines); q != nil {
+				t.Fatalf("parseQuestionDialog = %+v; the frame is history, not a live dialog", q)
+			}
+			if !PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+				t.Fatal("PaneShowsIdlePrompt = false; an idle composer under a quoted frame is an idle boundary")
+			}
+			tm, _ := questionTmux(pane)
+			pending, err := (&Provider{tm: tm}).Pending("auq")
+			if err != nil || pending != nil {
+				t.Fatalf("Pending = %+v, %v; a quoted frame holds nothing", pending, err)
+			}
+			if err := tm.checkNoApprovalPrompt("auq"); err != nil {
+				t.Fatalf("checkNoApprovalPrompt = %v; the nudge must be delivered", err)
+			}
+
+			ex := &paneExecutor{pane: pane, inMode: "0"}
+			tm = &Tmux{cfg: DefaultConfig(), exec: ex}
+			err = tm.NudgeSession("auq", "hello")
+			if errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("NudgeSession = %v; a quoted frame must not hold a nudge", err)
+			}
+			if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") < 0 {
+				t.Fatal("the message was never pasted; the nudge was not delivered")
+			}
+		})
+	}
+}
