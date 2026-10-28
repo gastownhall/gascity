@@ -2256,6 +2256,139 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	}
 }
 
+// TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset covers the
+// dispatcher's half of the reset-window rule (issue #8406): a flagged ready
+// wait is not nudged while the outgoing incarnation is still live, so the
+// reminder does not land in the conversation being discarded. The start that
+// consumes the reset releases the hold, and two dispatch runs enqueue exactly
+// one deterministic nudge. A withdrawn marker releases the hold; an unflagged
+// wait is never held.
+func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testing.T) {
+	setWaitTestFileBeads(t)
+	now := time.Date(2026, 10, 24, 16, 7, 0, 0, time.UTC)
+
+	seed := func(t *testing.T, flagWait bool) (string, beads.Store, beads.Bead, beads.Bead) {
+		t.Helper()
+		dir := t.TempDir()
+		store, err := openCityStoreAt(dir)
+		if err != nil {
+			t.Fatalf("openCityStoreAt: %v", err)
+		}
+		sessionBead, err := store.Create(beads.Bead{
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":               "worker",
+				"agent_name":                 "worker",
+				"continuation_epoch":         "2",
+				"continuation_reset_pending": "true",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create session bead: %v", err)
+		}
+		waitMeta := map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "2",
+			"delivery_attempt": "1",
+		}
+		if flagWait {
+			waitMeta["registered_reset_pending"] = "true"
+		}
+		waitBead, err := store.Create(beads.Bead{
+			Type:        waitBeadType,
+			Labels:      []string{waitBeadLabel, "session:" + sessionBead.ID},
+			Description: "Pick up the next step.",
+			Metadata:    waitMeta,
+		})
+		if err != nil {
+			t.Fatalf("create wait bead: %v", err)
+		}
+		return dir, store, sessionBead, waitBead
+	}
+	dispatch := func(dir string, store beads.Store) {
+		t.Helper()
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if err := dispatchReadyWaitNudges(dir, store, sp, now); err != nil {
+			t.Fatalf("dispatchReadyWaitNudges: %v", err)
+		}
+	}
+	pendingNudges := func(t *testing.T, dir string) []queuedNudge {
+		t.Helper()
+		pending, _, _, err := listQueuedNudges(dir, "worker", now)
+		if err != nil {
+			t.Fatalf("listQueuedNudges: %v", err)
+		}
+		return pending
+	}
+
+	t.Run("held while pending, one nudge after the start", func(t *testing.T) {
+		dir, store, sessionBead, waitBead := seed(t, true)
+		dispatch(dir, store)
+		if got := len(pendingNudges(t, dir)); got != 0 {
+			t.Fatalf("queued nudges while the reset is pending = %d, want 0", got)
+		}
+
+		start := now.Add(7 * time.Minute)
+		patch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+			Generation:        3,
+			InstanceToken:     "tok-3",
+			ContinuationEpoch: 3,
+			Now:               start,
+		})
+		patch["restart_requested"] = ""
+		patch["continuation_reset_pending"] = ""
+		sf := sessionFrontDoor(store)
+		if err := sf.ApplyPatch(sessionBead.ID, patch); err != nil {
+			t.Fatalf("ApplyPatch(pre-wake): %v", err)
+		}
+		if err := sf.ApplyPatch(sessionBead.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)}); err != nil {
+			t.Fatalf("ApplyPatch(active): %v", err)
+		}
+
+		dispatch(dir, store)
+		dispatch(dir, store)
+		pending := pendingNudges(t, dir)
+		if len(pending) != 1 {
+			t.Fatalf("queued nudges after the start = %d, want 1 (two dispatch runs enqueue one)", len(pending))
+		}
+		wantID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
+		if pending[0].ID != wantID {
+			t.Fatalf("queued nudge id = %q, want %q", pending[0].ID, wantID)
+		}
+		if want := "wait-" + strings.ReplaceAll(waitBead.ID, "/", "-") + "-2-1"; wantID != want {
+			t.Fatalf("nudge id %q does not embed the registered epoch and first attempt (want %q)", wantID, want)
+		}
+	})
+
+	t.Run("withdrawn marker releases the hold", func(t *testing.T) {
+		dir, store, sessionBead, _ := seed(t, true)
+		if err := sessionFrontDoor(store).ApplyPatch(sessionBead.ID, sessionpkg.MetadataPatch{"continuation_reset_pending": ""}); err != nil {
+			t.Fatalf("ApplyPatch(withdraw): %v", err)
+		}
+		dispatch(dir, store)
+		if got := len(pendingNudges(t, dir)); got != 1 {
+			t.Fatalf("queued nudges after the marker is withdrawn = %d, want 1", got)
+		}
+	})
+
+	t.Run("unflagged wait is not held", func(t *testing.T) {
+		dir, store, _, _ := seed(t, false)
+		dispatch(dir, store)
+		if got := len(pendingNudges(t, dir)); got != 1 {
+			t.Fatalf("queued nudges for an unflagged wait = %d, want 1", got)
+		}
+	})
+}
+
 // TestDispatchReadyWaitNudges_SkipsAttemptResolvedByTerminalShadow covers a
 // delivery acked between a tick's wait prepare and its dispatch: the wait is
 // still ready, but its current attempt's shadow is already closed delivered or

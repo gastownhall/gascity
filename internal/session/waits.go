@@ -200,6 +200,17 @@ func (w WaitInfo) ContinuationStale(s Info) bool {
 	return live != registered && live != registered+1
 }
 
+// HeldForPendingReset reports whether the wait's ready nudge must be held:
+// the wait was registered during a pending reset (RegisteredResetPending),
+// the session still sits at the registered epoch, and the reset marker is
+// still armed — the outgoing incarnation is live, so delivering the reminder
+// now would land it in the conversation being discarded (issue #8406). The
+// start that consumes the reset rotates the epoch and releases the hold; a
+// withdrawn marker releases it too.
+func (w WaitInfo) HeldForPendingReset(s Info) bool {
+	return w.RegisteredResetPending && s.ContinuationEpoch == w.RegisteredEpoch && strings.TrimSpace(s.ContinuationResetPending) != ""
+}
+
 // StampWaitLookupCapMetadata adds the shared durable wait lookup cap
 // diagnostic metadata to batch.
 func StampWaitLookupCapMetadata(batch map[string]string, label string, limit int, now time.Time, source string) {

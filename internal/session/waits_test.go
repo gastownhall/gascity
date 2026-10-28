@@ -119,6 +119,33 @@ func TestWaitInfoContinuationStale(t *testing.T) {
 	}
 }
 
+// TestWaitInfoHeldForPendingReset pins the dispatcher's hold predicate: a
+// flagged wait is held only while the session sits at the registered epoch
+// with the reset marker still armed (the outgoing incarnation live). The
+// start that consumes the reset and a withdrawn marker both release it.
+func TestWaitInfoHeldForPendingReset(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		flagged    bool
+		registered string
+		live       string
+		marker     string
+		want       bool
+	}{
+		{name: "held at the registered epoch with marker armed", flagged: true, registered: "2", live: "2", marker: "true", want: true},
+		{name: "released once the start rotated the epoch", flagged: true, registered: "2", live: "3", marker: "", want: false},
+		{name: "released when the marker is withdrawn", flagged: true, registered: "2", live: "2", marker: "", want: false},
+		{name: "unflagged wait is never held", registered: "2", live: "2", marker: "true", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
+			if got := w.HeldForPendingReset(Info{ContinuationEpoch: tc.live, ContinuationResetPending: tc.marker}); got != tc.want {
+				t.Fatalf("HeldForPendingReset(registered=%q, live=%q, marker=%q, flagged=%v) = %v, want %v", tc.registered, tc.live, tc.marker, tc.flagged, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitInfoFromBead_DepIDsSplitTrimEmpty(t *testing.T) {
 	cases := []struct {
 		name   string

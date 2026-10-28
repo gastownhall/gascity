@@ -1340,6 +1340,14 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if !cachedSessionCanReceiveWaitNudge(sessionInfo) {
 			continue
 		}
+		// A wait registered during a pending reset is for the conversation the
+		// pending start opens; hold its reminder while the outgoing
+		// incarnation is still live. The start rotates the epoch and releases
+		// the hold; nothing is written here, and the wait stays in
+		// readyWaitSet so the start is not delayed.
+		if wait.HeldForPendingReset(sessionInfo) {
+			continue
+		}
 		nudgeID := waitNudgeID(wait)
 		if nudgeID == "" {
 			continue
