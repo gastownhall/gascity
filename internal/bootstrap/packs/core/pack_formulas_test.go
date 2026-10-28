@@ -102,17 +102,18 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	// The startup-bead id is only needed by the ready-query fallback. Requiring
 	// it up front aborts drain on any seat that is not demand-spawned:
 	// GC_BEAD_ID exists only in the dispatch condition environment, never in a
-	// session shell, and GC_TRIGGER_BEAD_ID is pool-seat-only (see
-	// cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
+	// session shell, and no trigger id reaches a session shell at all
+	// (gascity#5738; see cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
 	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
 	if startupAt < 0 || startupAt < currentAt {
 		t.Fatal("drain must not require a startup bead id before consulting the current claim")
 	}
 	// The current claim carries gc.root_bead_id, and on a warm seat it is the
-	// ONLY source of it: GC_BEAD_ID never reaches a session shell and
-	// GC_TRIGGER_BEAD_ID is demand-spawn-only (cmd/gc/cmd_hook_current.go).
-	// Reading the root off the startup bead first strands every warm seat on
-	// the deferred path — the ga-2q2r0 failure, one layer in.
+	// ONLY source of it: GC_BEAD_ID never reaches a session shell and no
+	// trigger id is exported to one either (gascity#5738,
+	// cmd/gc/cmd_hook_current.go). Reading the root off the startup bead
+	// first strands every warm seat on the deferred path — the ga-2q2r0
+	// failure, one layer in.
 	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
 	if rootFromCurrent < 0 {
 		t.Fatal("drain must derive the workflow root from the current claim it already fetched")
@@ -725,4 +726,136 @@ func namesGraphBeadVar(command string) bool {
 		}
 	}
 	return false
+}
+
+// molDoWorkDrainBlock returns the drain step's bash block, the fence the
+// step's description opens first.
+func molDoWorkDrainBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+	open := strings.Index(step, "```bash\n")
+	if open < 0 {
+		t.Fatal("drain step has no bash block")
+	}
+	body := step[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("drain bash block is unterminated")
+	}
+	return body[:end]
+}
+
+// TestMolDoWorkDrainNeverFallsBackToTriggerBeadID runs the drain block in a
+// session shell that still carries a foreign GC_TRIGGER_BEAD_ID (gascity#5738:
+// the export is gone, but an old shell keeps its exec-time copy). The block
+// must resolve its continuation only from the current claim — never from an
+// id-shaped trigger hint — fail closed with the missing-startup-bead message
+// when no claim names a root, and close nothing on that path.
+func TestMolDoWorkDrainNeverFallsBackToTriggerBeadID(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	block := molDoWorkDrainBlock(t)
+
+	for _, tc := range []struct {
+		name     string
+		hookOut  string
+		show     string
+		wantExit bool
+		wantLog  []string
+	}{
+		{
+			// No current claim: nothing names a workflow root, so the drain
+			// must abort on its missing-startup-bead message and touch nothing.
+			name:    "no current claim",
+			hookOut: "",
+			wantLog: nil,
+		},
+		{
+			// A current claim rooted at root-9: the block derives the root
+			// from the claim, resolves the single ready drain step, closes it,
+			// and acks — without ever consulting the foreign trigger id.
+			name:     "current claim rooted at root-9",
+			hookOut:  "ga-work",
+			show:     `[{"id":"ga-work","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.root_bead_id":"root-9","gc.step_ref":"mol-do-work.do-work"}}]`,
+			wantExit: true,
+			wantLog: []string{
+				"gc bd update ga-drain --set-metadata gc.outcome=pass --status=closed",
+				"gc runtime drain-ack",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := "exit 1"
+			if tc.hookOut != "" {
+				hook = fmt.Sprintf("printf '%%s\\n' '%s'", tc.hookOut)
+			}
+			show := "echo 'gc: bd show failed' >&2; exit 1"
+			if tc.show != "" {
+				show = fmt.Sprintf("printf '%%s\\n' '%s'", tc.show)
+			}
+			// A no-claim drain must abort before the ready query; make
+			// reaching it a failure the log will name.
+			ready := "echo 'unexpected ready query' >&2; exit 64"
+			if tc.wantExit {
+				ready = `printf '%s\n' '[{"id":"ga-drain"}]'`
+			}
+			body := fmt.Sprintf(`case "$1 $2" in
+"hook current") %s ;;
+"bd show") %s ;;
+"bd update") ;;
+"runtime drain-ack") ;;
+*) case "$1" in
+ready) %s ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac ;;
+esac
+`, hook, show, ready)
+			binDir, logPath := fakeGCBin(t, body)
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatalf("create gc log: %v", err)
+			}
+			env := append([]string{"GC_SESSION_ID=gcg-session-me", "GC_SESSION_NAME=rig--polecat-1", "GC_TRIGGER_BEAD_ID=ga-foreign"}, nil...)
+			out, runErr := runPackScript(t, writePackScript(t, block), binDir, closeStepEnvKeys, env)
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read gc log: %v", err)
+			}
+			logged := string(data)
+			if strings.Contains(logged, "ga-foreign") || strings.Contains(out, "ga-foreign") {
+				t.Fatalf("the drain consulted the foreign trigger id\nlog:\n%s\noutput:\n%s", logged, out)
+			}
+			if tc.wantExit {
+				if runErr != nil {
+					t.Fatalf("drain failed: %v\noutput:\n%s\ngc calls:\n%s", runErr, out, logged)
+				}
+				for _, want := range tc.wantLog {
+					if !strings.Contains(logged, want) {
+						t.Fatalf("gc log missing %q\nlog:\n%s\noutput:\n%s", want, logged, out)
+					}
+				}
+				return
+			}
+			if runErr == nil {
+				t.Fatalf("drain exited 0 without a current claim\noutput:\n%s\ngc calls:\n%s", out, logged)
+			}
+			if !strings.Contains(out, "no startup bead id to fall back on") {
+				t.Fatalf("diagnostic does not name the missing startup bead id:\n%s", out)
+			}
+			if strings.Contains(logged, "bd update") || strings.Contains(logged, "runtime drain-ack") || strings.Contains(logged, "bd show") {
+				t.Fatalf("drain touched the ledger without a current claim\nlog:\n%s", logged)
+			}
+		})
+	}
+}
+
+// writePackScript writes script to a file and returns its path, for
+// runPackScript.
+func writePackScript(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "drain-step.sh")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatalf("write drain block: %v", err)
+	}
+	return path
 }
