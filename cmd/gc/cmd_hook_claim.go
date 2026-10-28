@@ -1497,7 +1497,10 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 // without this check it was returned by the existing/ready-assignment paths as work
 // ahead of any real routed work waiting in the same batch (#4419) -- not by
 // race, by construction, since this function runs before
-// claimFirstEligibleHookCandidate ever sees the routed candidates.
+// claimFirstEligibleHookCandidate ever sees the routed candidates. The default
+// generated work query now withholds mail at the query layer (#5815), so a
+// mail row cannot short-circuit a tier ahead of routed work; this check stays
+// as the backstop for custom work_query overrides, which are run verbatim.
 func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
 }

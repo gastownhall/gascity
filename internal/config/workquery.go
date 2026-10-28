@@ -195,6 +195,25 @@ func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
 }
 
+// mailMessageBeadType is the issue type every mail bead carries
+// (internal/mail/beadmail's messageBeadType, the hook's
+// hookClaimCandidateIsMessage, and bd's own ready-path infra types). It is
+// spelled here because internal/config must not import internal/mail.
+const mailMessageBeadType = "message"
+
+// excludeMailMessagesJQClause returns a jq select(...) clause dropping mail
+// beads. Mail is read, never claimed as work (#4419), yet a mail bead is open,
+// ephemeral and assigned to its recipient, exactly the shape of an assigned
+// wisp. The jq probes over `bd query` have no bd-side type exclusion to lean
+// on, so without this clause a mail bead takes a tier's truncated row and the
+// tier exits before later tiers run (#5815). The type is trimmed and
+// lower-cased the way hookClaimCandidateIsMessage compares it, and passed
+// through tostring so a non-string value cannot make the filter error out
+// (jq errors here are discarded and would read as an empty tier).
+func excludeMailMessagesJQClause() string {
+	return ` | select(((.issue_type // .type // "") | tostring | gsub("^\\s+|\\s+$"; "") | ascii_downcase) != "` + mailMessageBeadType + `")`
+}
+
 // heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
 // row of a work-query result carries. The in_progress serve gate reads it off
 // the candidate row it already holds, so the hold check costs no extra bd call.
@@ -352,15 +371,19 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
-// every label the routed pool-demand tier refuses
+// plus the epic and mail exclusions and, when excludeServeLabels is set, the
+// exclusion of every label the routed pool-demand tier refuses
 // (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// The mail exclusion (excludeMailMessagesJQClause) mirrors bd's own ready
+// path, which drops message beads natively; it runs before each caller's
+// truncation so an assigned mail bead cannot take the row a real candidate
+// behind it needs.
 // Dependency gating is layered on top by each caller, since `bd query --json`
 // exposes only a `dependency_count` scalar — never a `dependencies` array —
 // which is precise enough to prove "definitely no dependencies" but not to
 // resolve whether a nonzero count is still open.
 func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
-	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
+	body := selector + ` | select(((.issue_type // .type // "") != "epic"))` + excludeMailMessagesJQClause()
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
@@ -990,7 +1013,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -1006,7 +1029,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -1215,6 +1238,13 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // output). Roles that need different behavior still opt in via an explicit
 // work_query in their agent config; that custom query is returned unchanged
 // above.
+//
+// Mail (issue_type="message") is withheld from every tier. A mail bead is
+// assigned to its recipient and, being ephemeral, rides the same `bd query`
+// wisp probes as assigned work; served there, it takes the tier's single row
+// and the script exits before the routed tier runs, starving real work behind
+// a bead the hook refuses (#4419, #5815). bd's own ready path already drops
+// messages; the jq probes drop them via excludeMailMessagesJQClause.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
