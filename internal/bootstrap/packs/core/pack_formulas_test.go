@@ -100,19 +100,18 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
 	}
 	// The startup-bead id is only needed by the ready-query fallback. Requiring
-	// it up front aborts drain on any seat that is not demand-spawned:
-	// GC_BEAD_ID exists only in the dispatch condition environment, never in a
-	// session shell, and GC_TRIGGER_BEAD_ID is pool-seat-only (see
+	// it up front aborts drain on every seat: GC_BEAD_ID exists only in the
+	// dispatch condition environment, never in a session shell (see
 	// cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
 	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
 	if startupAt < 0 || startupAt < currentAt {
 		t.Fatal("drain must not require a startup bead id before consulting the current claim")
 	}
-	// The current claim carries gc.root_bead_id, and on a warm seat it is the
-	// ONLY source of it: GC_BEAD_ID never reaches a session shell and
-	// GC_TRIGGER_BEAD_ID is demand-spawn-only (cmd/gc/cmd_hook_current.go).
-	// Reading the root off the startup bead first strands every warm seat on
-	// the deferred path — the ga-2q2r0 failure, one layer in.
+	// The current claim carries gc.root_bead_id, and in a session shell it is
+	// the ONLY source of it: GC_BEAD_ID never reaches a session shell
+	// (cmd/gc/cmd_hook_current.go). Reading the root off the startup bead first
+	// strands every seat on the deferred path — the ga-2q2r0 failure, one layer
+	// in.
 	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
 	if rootFromCurrent < 0 {
 		t.Fatal("drain must derive the workflow root from the current claim it already fetched")
@@ -656,6 +655,141 @@ func TestMolDoWorkCloseStepNeverReadsGCBeadID(t *testing.T) {
 	}
 	if block := molDoWorkCloseStepBlock(t); strings.Contains(block, `\`) {
 		t.Errorf("close-step block contains a backslash:\n%s", block)
+	}
+}
+
+// molDoWorkDrainBlock returns the bash block of the drain step.
+func molDoWorkDrainBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+	open := strings.Index(step, "```bash\n")
+	if open < 0 {
+		t.Fatal("drain step has no bash block")
+	}
+	body := step[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("drain bash block is unterminated")
+	}
+	return body[:end]
+}
+
+// drainEnvKeys are the settings each drain case supplies itself: the startup
+// identity variables a live session might export, and the block's own
+// variables, which a leaked copy would otherwise decide.
+var drainEnvKeys = map[string]struct{}{
+	"GC_BEAD_ID":         {},
+	"GC_TRIGGER_BEAD_ID": {},
+	"GC_SESSION_ID":      {},
+	"GC_SESSION_NAME":    {},
+	"GC_ALIAS":           {},
+	"CURRENT_ID":         {},
+	"CURRENT":            {},
+	"DRAIN_BEAD_ID":      {},
+	"ROOT_BEAD_ID":       {},
+	"STARTUP_BEAD_ID":    {},
+	"STARTUP_BEAD":       {},
+	"READY_BEADS":        {},
+}
+
+// TestMolDoWorkDrainNeverFallsBackToTriggerBeadID runs the drain block in a
+// session shell that carries a foreign GC_TRIGGER_BEAD_ID. Under pull that id
+// is the row the controller counted, not this seat's claim, so the block must
+// never resolve a workflow root, close a drain step or acknowledge drain
+// through it (gastownhall/gascity#5738). The fake gc answers
+// `hook current --id-only` with the case's claim, `bd show` for the seat's own
+// closed do-work step and for the foreign bead, and `ready` with one drain row
+// per workflow root.
+func TestMolDoWorkDrainNeverFallsBackToTriggerBeadID(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	scriptPath := filepath.Join(t.TempDir(), "drain.sh")
+	if err := os.WriteFile(scriptPath, []byte(molDoWorkDrainBlock(t)), 0o644); err != nil {
+		t.Fatalf("write drain block: %v", err)
+	}
+	const foreign = "GC_TRIGGER_BEAD_ID=ga-foreign"
+	cases := []struct {
+		name      string
+		claim     string
+		env       []string
+		wantClose string
+	}{
+		{name: "no claim and a foreign trigger id", env: []string{foreign}},
+		{name: "claim names this seat's step", claim: "ga-dowork", env: []string{foreign}, wantClose: "drain-mine"},
+		{name: "GC_BEAD_ID names this seat's step", env: []string{foreign, "GC_BEAD_ID=ga-dowork"}, wantClose: "drain-mine"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, logPath := fakeGCBin(t, fmt.Sprintf(`case "$*" in
+"hook current --id-only") printf '%%s\n' '%s' ;;
+"bd show ga-dowork --json") printf '%%s\n' '[{"id":"ga-dowork","status":"closed","metadata":{"gc.step_ref":"mol-do-work.do-work","gc.root_bead_id":"ga-root-mine"}}]' ;;
+"bd show ga-foreign --json") printf '%%s\n' '[{"id":"ga-foreign","status":"open","metadata":{"gc.root_bead_id":"ga-root-foreign"}}]' ;;
+"ready --json --limit=2 --include-ephemeral --metadata-field gc.root_bead_id=ga-root-mine --metadata-field gc.step_ref=mol-do-work.drain") printf '%%s\n' '[{"id":"drain-mine"}]' ;;
+"ready --json --limit=2 --include-ephemeral --metadata-field gc.root_bead_id=ga-root-foreign --metadata-field gc.step_ref=mol-do-work.drain") printf '%%s\n' '[{"id":"drain-foreign"}]' ;;
+"bd update "*|"runtime drain-ack") ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac
+`, tc.claim))
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatalf("create gc log: %v", err)
+			}
+			env := append([]string{"GC_SESSION_ID=gcg-session-me"}, tc.env...)
+			out, runErr := runPackScript(t, scriptPath, binDir, drainEnvKeys, env)
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read gc log: %v", err)
+			}
+			logged := string(data)
+			if strings.Contains(logged, "foreign") {
+				t.Errorf("drain acted on the foreign trigger bead:\n%s", logged)
+			}
+			if tc.wantClose == "" {
+				if runErr == nil {
+					t.Fatalf("drain exited 0 with no claim and no GC_BEAD_ID\noutput:\n%s\ngc calls:\n%s", out, logged)
+				}
+				if !strings.Contains(out, "has no startup bead id") {
+					t.Errorf("diagnostic does not say the startup bead id is missing:\n%s", out)
+				}
+				if strings.Contains(logged, "gc bd update") || strings.Contains(logged, "gc runtime drain-ack") {
+					t.Fatalf("drain closed a bead or acknowledged drain without naming its own step:\n%s", logged)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatalf("drain failed: %v\noutput:\n%s\ngc calls:\n%s", runErr, out, logged)
+			}
+			for _, want := range []string{
+				"gc bd update " + tc.wantClose + " --set-metadata gc.outcome=pass --status=closed",
+				"gc runtime drain-ack",
+			} {
+				if !strings.Contains(logged, want) {
+					t.Errorf("gc calls missing %q:\n%s", want, logged)
+				}
+			}
+		})
+	}
+}
+
+// TestCoreShippedAssetsNeverReadTriggerBeadEnv pins that no core-pack formula,
+// prompt or script reads a GC_TRIGGER_* variable. No session shell carries a
+// trigger bead id; a seat names its own bead through `gc hook current`.
+func TestCoreShippedAssetsNeverReadTriggerBeadEnv(t *testing.T) {
+	err := fs.WalkDir(PackFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), "GC_TRIGGER_") {
+			t.Errorf("%s reads a GC_TRIGGER_* variable, which no session shell carries", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the core pack: %v", err)
 	}
 }
 
