@@ -21,16 +21,17 @@ import (
 
 // fakeBdOpenEphemeralStore answers the generated work query's `bd query`
 // ephemeral snapshot reads: the open snapshot holds openRows, the in_progress
-// snapshot is empty, and every other verb is empty. That is pre-1.0.5 ready
-// semantics — `bd ready` never returns ephemeral rows — so a wisp is
-// discoverable only through the jq probes over these snapshots, which
+// snapshot holds inProgressRows, and every other verb is empty. That is
+// pre-1.0.5 ready semantics — `bd ready` never returns ephemeral rows — so a
+// wisp is discoverable only through the jq probes over these snapshots, which
 // isolates the leak the live incident showed (#5815 repro).
-func fakeBdOpenEphemeralStore(openRows string) string {
+func fakeBdOpenEphemeralStore(openRows, inProgressRows string) string {
 	return `#!/bin/sh
 case "$1" in
   query)
     case "$*" in
       *"ephemeral=true AND status=open"*) printf '%s' '` + openRows + `' ;;
+      *"ephemeral=true AND status=in_progress"*) printf '%s' '` + inProgressRows + `' ;;
       *) printf '[]' ;;
     esac
     ;;
@@ -58,7 +59,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 	// Control: with no mail open, the fake's routed wisp is served.
 	t.Run("control without mail serves the routed wisp", func(t *testing.T) {
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+routedWisp+`]`))
+			fakeBdOpenEphemeralStore(`[`+routedWisp+`]`, `[]`))
 		if !strings.Contains(out, "gcg-routed-wisp") {
 			t.Fatalf("control: routed wisp not served with no mail open: %q", out)
 		}
@@ -69,7 +70,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 	// assigned-ready probe and exits the script ahead of the routed tier.
 	t.Run("open mail does not shadow routed work", func(t *testing.T) {
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+openMail+`,`+routedWisp+`]`))
+			fakeBdOpenEphemeralStore(`[`+openMail+`,`+routedWisp+`]`, `[]`))
 		if strings.Contains(out, "gcg-mail-1") || !strings.Contains(out, "gcg-routed-wisp") {
 			t.Fatalf("open mail bead starved routed work: work query served %q, want the routed wisp gcg-routed-wisp and no message bead", out)
 		}
@@ -81,7 +82,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 	t.Run("mail addressed to a second identity is skipped", func(t *testing.T) {
 		aliasMail := `{"id":"gcg-mail-2","status":"open","issue_type":"message","assignee":"` + env["GC_SESSION_NAME"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+aliasMail+`,`+routedWisp+`]`))
+			fakeBdOpenEphemeralStore(`[`+aliasMail+`,`+routedWisp+`]`, `[]`))
 		if strings.Contains(out, "gcg-mail-2") || !strings.Contains(out, "gcg-routed-wisp") {
 			t.Fatalf("mail to a second identity starved routed work: %q", out)
 		}
@@ -94,7 +95,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 		capsMail := `{"id":"gcg-mail-3","status":"open","issue_type":"Message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
 		paddedMail := `{"id":"gcg-mail-4","status":"open","issue_type":" message ","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:01:00Z","metadata":{}}`
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+capsMail+`,`+paddedMail+`,`+routedWisp+`]`))
+			fakeBdOpenEphemeralStore(`[`+capsMail+`,`+paddedMail+`,`+routedWisp+`]`, `[]`))
 		if strings.Contains(out, "gcg-mail-3") || strings.Contains(out, "gcg-mail-4") || !strings.Contains(out, "gcg-routed-wisp") {
 			t.Fatalf("non-exact message spellings starved routed work: %q", out)
 		}
@@ -105,7 +106,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 	t.Run("legacy .type spelling is withheld", func(t *testing.T) {
 		legacyMail := `{"id":"gcg-mail-5","status":"open","type":"message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+legacyMail+`,`+routedWisp+`]`))
+			fakeBdOpenEphemeralStore(`[`+legacyMail+`,`+routedWisp+`]`, `[]`))
 		if strings.Contains(out, "gcg-mail-5") || !strings.Contains(out, "gcg-routed-wisp") {
 			t.Fatalf("legacy-typed message starved routed work: %q", out)
 		}
@@ -118,7 +119,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 	t.Run("non-string issue_type does not empty the tier", func(t *testing.T) {
 		numericType := `{"id":"gcg-numeric-type","status":"open","issue_type":42,"assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+numericType+`]`))
+			fakeBdOpenEphemeralStore(`[`+numericType+`]`, `[]`))
 		if !strings.Contains(out, "gcg-numeric-type") {
 			t.Fatalf("non-string issue_type was dropped by the message clause (jq error read as an empty tier): %q", out)
 		}
@@ -131,7 +132,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 		reply := `{"id":"gcg-mail-reply","status":"open","issue_type":"message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":1,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
 		dependentTask := `{"id":"gcg-blocked-task","status":"open","issue_type":"task","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":1,"created_at":"2026-08-31T10:01:00Z","metadata":{}}`
 		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-			fakeBdOpenEphemeralStore(`[`+reply+`,`+dependentTask+`]`))
+			fakeBdOpenEphemeralStore(`[`+reply+`,`+dependentTask+`]`, `[]`))
 		if strings.Contains(out, "gcg-mail-reply") {
 			t.Fatalf("dependent mail reply was served by the slow path: %q", out)
 		}
@@ -147,7 +148,7 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 		script := legacyControlAssignedReadyWorkQueryScript(QueryTopology{}) + `printf "[]"`
 		out := runShellWithFakeBd(t, script, map[string]string{
 			"GC_SESSION_ID": "gcg-session-5815",
-		}, fakeBdOpenEphemeralStore(`[`+openMail+`]`))
+		}, fakeBdOpenEphemeralStore(`[`+openMail+`]`, `[]`))
 		if strings.Contains(out, "gcg-mail-1") {
 			t.Fatalf("legacy-control assigned-ready tier served a mail bead: %q", out)
 		}
@@ -170,10 +171,53 @@ func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing
 	task := `{"id":"gcg-assigned-task","status":"open","issue_type":"task","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:02:00Z","metadata":{}}`
 
 	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
-		fakeBdOpenEphemeralStore(`[`+mail+`,`+task+`]`))
+		fakeBdOpenEphemeralStore(`[`+mail+`,`+task+`]`, `[]`))
 	if strings.Contains(out, "gcg-mail-1") || !strings.Contains(out, "gcg-assigned-task") {
 		t.Fatalf("assigned-ready tier did not serve the task behind an older mail wisp: %q", out)
 	}
+}
+
+// TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp pins AC-3: the
+// in_progress jq probes truncate to one candidate before the crash-recovery
+// serve gate, so an in_progress mail wisp must not occupy the slot ahead of a
+// real in_progress task. The probes run on every single-store topology
+// (bd-1.0.4 and bd-1.0.5 alike) and in both the standard and the legacy
+// control-dispatcher loops.
+func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	a := singleSessionConfigAgent()
+	env := map[string]string{"GC_SESSION_ID": "sess-5815"}
+	mail := `{"id":"gcg-mail-ip","status":"in_progress","issue_type":"message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true}`
+	task := `{"id":"gcg-task-ip","status":"in_progress","issue_type":"task","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true}`
+	rows := `[` + mail + `,` + task + `]`
+
+	assertServesTaskNotMail := func(t *testing.T, out string) {
+		t.Helper()
+		if strings.Contains(out, "gcg-mail-ip") || !strings.Contains(out, "gcg-task-ip") {
+			t.Fatalf("in_progress tier did not serve the task behind a mail wisp: %q", out)
+		}
+	}
+
+	t.Run("bd-1.0.4", func(t *testing.T) {
+		out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+			fakeBdOpenEphemeralStore(`[]`, rows))
+		assertServesTaskNotMail(t, out)
+	})
+
+	t.Run("bd-1.0.5", func(t *testing.T) {
+		out := runEffectiveWorkQueryForBeads(t, a, BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, env,
+			fakeBdOpenEphemeralStore(`[]`, rows))
+		assertServesTaskNotMail(t, out)
+	})
+
+	t.Run("legacy control dispatcher", func(t *testing.T) {
+		script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
+		out := runShellWithFakeBd(t, script, env,
+			fakeBdOpenEphemeralStore(`[]`, rows))
+		assertServesTaskNotMail(t, out)
+	})
 }
 
 // TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType pins the fix's

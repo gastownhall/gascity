@@ -1009,6 +1009,13 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // Filtering before the `.[:1]` truncation also lets a second, unheld
 // in_progress candidate be served instead of being shadowed by a held first.
 //
+// It excludes mail message beads for the same reason
+// (excludeMailMessagesJQClause): a type that is never work must not occupy the
+// crash-recovery slot — an in_progress message wisp assigned to the seat would
+// be served here and refused by the hook's #4419 filter, starving the tiers
+// below (#5815). Hold transparency (ga-5736js) is unaffected: holds are labels,
+// this filter is a type.
+//
 // Failure mode differs from the bd-list tier's fail-open serve, deliberately:
 // this probe's jq consumes the `bd query` snapshot, never raw stdout, so it
 // never serves an unparseable row. An unparseable or failed scan does not fall
@@ -1021,7 +1028,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -1037,7 +1044,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
