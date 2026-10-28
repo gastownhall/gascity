@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +306,74 @@ func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
 	}
 	if got := fake.closes(); got != 1 {
 		t.Fatalf("scope store closed %d times, want 1: the no-op path must not leak the opened store", got)
+	}
+}
+
+// TestDrainWorkflowServeWorkCountsQuarantineAsProgress guards the nil-return
+// write path that must stay processed: when handleControlDispatchError
+// quarantines a failing control bead (here an unsupported kind, classified
+// TierNone) and returns nil, the dispatch DID write — the bead is closed and
+// labeled — so the drain counts it as progress and writes the wake file.
+// Passes before and after the skip fix; the skip arm must not swallow it.
+func TestDrainWorkflowServeWorkCountsQuarantineAsProgress(t *testing.T) {
+	cityDir, store := setUpControlReadyFileStoreCity(t)
+	noBDOnPathForTest(t)
+	ensureDispatchWakeDir(t, cityDir)
+
+	bogus, err := store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: freshnessControlTarget,
+			beadmeta.KindMetadataKey:     "unsupported-control-kind",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+
+	prevList := workflowServeList
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	scans := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		scans++
+		if scans > 20 {
+			t.Fatalf("drain scanned the queue %d times, want 2", scans)
+		}
+		if scans > 1 {
+			return nil, nil
+		}
+		return []hookBead{{ID: bogus.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: "unsupported-control-kind"}}}, nil
+	}
+
+	var stderr bytes.Buffer
+	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, &stderr)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if !result.processedAny {
+		t.Errorf("processedAny = false, want true: a quarantined dispatch closed the bead, and that write is progress")
+	}
+	if _, statErr := os.Stat(dispatchWakeFile(cityDir)); statErr != nil {
+		t.Errorf("dispatch wake file missing after a quarantine pass: %v", statErr)
+	}
+	if !strings.Contains(stderr.String(), "control dispatch: quarantined bead=") {
+		t.Errorf("stderr = %q, want the quarantine notice (pins that the nil return came from the quarantine write path)", stderr.String())
+	}
+	after, err := store.Get(bogus.ID)
+	if err != nil {
+		t.Fatalf("reload quarantined control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Errorf("quarantined control status = %s, want closed", after.Status)
 	}
 }
 
