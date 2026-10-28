@@ -434,7 +434,8 @@ func fixDanglingEdge(e danglingEdge, stillAbsent func(string) (bool, error)) err
 	if !literalPresent {
 		return nil
 	}
-	switch e.action {
+	action := e.action
+	switch action {
 	case danglingRewrite:
 		if _, err := beads.HandlesFor(e.store).Live.Get(e.realID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -453,8 +454,28 @@ func fixDanglingEdge(e danglingEdge, stillAbsent func(string) (bool, error)) err
 				return nil
 			}
 		}
+		if e.realID != "" {
+			// A typed literal whose bead no store held at the scan: if the
+			// row's own store holds it now, rewrite rather than remove; if
+			// another store does, it is the operator's (no cross-store edge).
+			_, err := beads.HandlesFor(e.store).Live.Get(e.realID)
+			switch {
+			case err == nil:
+				action = danglingRewrite
+			case !errors.Is(err, beads.ErrNotFound):
+				return fmt.Errorf("%s row %s: re-reading %s before the removal: %w", e.label, e.rowID, e.realID, err)
+			case stillAbsent != nil:
+				absent, err := stillAbsent(e.realID)
+				if err != nil {
+					return fmt.Errorf("%s row %s: %w", e.label, e.rowID, err)
+				}
+				if !absent {
+					return nil
+				}
+			}
+		}
 	}
-	if e.action == danglingRewrite && !realPresent {
+	if action == danglingRewrite && !realPresent {
 		if err := addTypedEdgeLike(e); err != nil {
 			return fmt.Errorf("%s row %s: writing the %s edge to %s (the literal %q is kept): %w", e.label, e.rowID, e.depType, e.realID, e.target, err)
 		}

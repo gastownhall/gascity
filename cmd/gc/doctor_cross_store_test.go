@@ -673,3 +673,139 @@ func TestDanglingBlockingEdgesFixKeepsTheLiteralWhenTheRewriteTargetWentAway(t *
 		t.Fatalf("deps = %+v; want the literal kept since %s is gone", deps, origin.ID)
 	}
 }
+
+// failingIDReads fails every by-id read once armed (the read stillAbsent
+// makes), leaving edge reads and writes alone.
+type failingIDReads struct {
+	beads.Store
+	armed bool
+}
+
+func (s *failingIDReads) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.armed && len(q.IDs) > 0 {
+		return nil, errors.New("injected: store unreachable")
+	}
+	return s.Store.List(q)
+}
+
+func (s *failingIDReads) Get(id string) (beads.Bead, error) {
+	if s.armed {
+		return beads.Bead{}, errors.New("injected: store unreachable")
+	}
+	return s.Store.Get(id)
+}
+
+// TestDanglingBlockingEdgesFixKeepsTheEdgeWhileAStoreCannotBeReRead: the
+// re-check before a removal cannot read a store; that store may hold the
+// target now, so the edge is kept and the failure reported.
+func TestDanglingBlockingEdgesFixKeepsTheEdgeWhileAStoreCannotBeReRead(t *testing.T) {
+	cityPath := t.TempDir()
+	sessionSplitRoutes(t, cityPath)
+	work := beads.NewMemStore()
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	if err := work.DepAdd(row.ID, "gc-404", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	rig := &failingIDReads{Store: beads.NewMemStore()}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	edges, _ := check.collect()
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v", edges)
+	}
+	check.scopes = append(check.scopes, doctorScope{label: "rig", store: rig})
+	rig.armed = true
+	if err := fixDanglingEdge(edges[0], check.stillAbsent); err == nil {
+		t.Fatal("fix reported no error although a store could not be re-read")
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 {
+		t.Fatalf("deps = %+v; want the edge kept while a store is unreadable", deps)
+	}
+}
+
+// TestDanglingBlockingEdgesFixRewritesALiteralWhoseBeadAppeared: a typed
+// literal whose bead no store held at the scan would be removed; if the row's
+// own store holds the bead by the time of the fix, it is rewritten into the
+// typed edge instead, and if only another store holds it, it is left for the
+// operator.
+func TestDanglingBlockingEdgesFixRewritesALiteralWhoseBeadAppeared(t *testing.T) {
+	for _, inRowStore := range []bool{true, false} {
+		t.Run(map[bool]string{true: "appeared in the row's store", false: "appeared in another store"}[inRowStore], func(t *testing.T) {
+			cityPath := t.TempDir()
+			sessionSplitRoutes(t, cityPath)
+			work := beads.NewMemStore()
+			work.HonorExplicitIDs = true
+			other := beads.NewMemStore()
+			other.HonorExplicitIDs = true
+			row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+			const literal = "discovered-from:gc-77"
+			if err := work.DepAdd(row.ID, literal, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+			edges, _ := check.collect()
+			if len(edges) != 1 || edges[0].action != danglingRemove {
+				t.Fatalf("edges = %+v; want one removal", edges)
+			}
+			check.scopes = append(check.scopes, doctorScope{label: "rig", store: other})
+			holder := other
+			if inRowStore {
+				holder = work
+			}
+			if _, err := holder.Create(beads.Bead{ID: "gc-77", Title: "origin", Type: "task"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixDanglingEdge(edges[0], check.stillAbsent); err != nil {
+				t.Fatal(err)
+			}
+			deps, _ := work.DepList(row.ID, "down")
+			if inRowStore {
+				if len(deps) != 1 || deps[0].DependsOnID != "gc-77" || deps[0].Type != "discovered-from" {
+					t.Fatalf("deps = %+v; want the literal rewritten as a discovered-from edge to gc-77", deps)
+				}
+				return
+			}
+			if len(deps) != 1 || deps[0].DependsOnID != literal {
+				t.Fatalf("deps = %+v; want the literal left for the operator", deps)
+			}
+		})
+	}
+}
+
+// failingGets fails single-bead reads once armed.
+type failingGets struct {
+	beads.Store
+	armed bool
+}
+
+func (s *failingGets) Get(id string) (beads.Bead, error) {
+	if s.armed {
+		return beads.Bead{}, errors.New("injected: read failed")
+	}
+	return s.Store.Get(id)
+}
+
+// TestDanglingBlockingEdgesFixKeepsALiteralWhenItsBeadCannotBeReRead: the
+// re-read of a typed literal's bead in the row's own store fails; the bead may
+// be there now, so the literal is kept and the failure reported.
+func TestDanglingBlockingEdgesFixKeepsALiteralWhenItsBeadCannotBeReRead(t *testing.T) {
+	cityPath := t.TempDir()
+	sessionSplitRoutes(t, cityPath)
+	work := &failingGets{Store: beads.NewMemStore()}
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	const literal = "discovered-from:gc-77"
+	if err := work.DepAdd(row.ID, literal, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	edges, _ := check.collect()
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v", edges)
+	}
+	work.armed = true
+	if err := fixDanglingEdge(edges[0], check.stillAbsent); err == nil {
+		t.Fatal("fix reported no error although the literal's bead could not be re-read")
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != literal {
+		t.Fatalf("deps = %+v; want the literal kept", deps)
+	}
+}
