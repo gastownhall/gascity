@@ -1053,3 +1053,73 @@ func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdSessionKill_GoneRuntimeNamesCloseForUnknownStateRow: killing an
+// unnamed row whose runtime is gone still fails with "session is not active";
+// for a row in a state the controller skips, the same line names the raw
+// state and the close that releases it, and for a known-state row it says
+// nothing more. Kills a bare "not active" that leaves the operator no way out
+// of a row the controller never acts on.
+func TestCmdSessionKill_GoneRuntimeNamesCloseForUnknownStateRow(t *testing.T) {
+	for _, tc := range []struct {
+		state    string
+		wantHint bool
+	}{
+		{state: "future-state", wantHint: true},
+		{state: "asleep"},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+			cityDir := shortSocketTempDir(t, "gc-session-kill-unknown-")
+			t.Setenv("GC_CITY", cityDir)
+			writeGenericNamedSessionCityTOML(t, cityDir)
+			if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+				t.Fatalf("MkdirAll(.gc): %v", err)
+			}
+			fakeProvider := runtime.NewFake()
+			oldBuild := buildSessionProviderByName
+			buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+				return runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: fakeProvider}), nil
+			}
+			t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt: %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:  "unnamed session",
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession, "template:worker"},
+				Metadata: map[string]string{
+					"template":     "worker",
+					"session_name": "s-gc-kill-unknown",
+					"state":        tc.state,
+					"generation":   "2",
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(session bead): %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionKill([]string{bead.ID}, &stdout, &stderr); code != 1 {
+				t.Fatalf("cmdSessionKill = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			var line string
+			for _, l := range strings.Split(stderr.String(), "\n") {
+				if strings.Contains(l, "session is not active") {
+					line = l
+				}
+			}
+			if line == "" {
+				t.Fatalf("stderr = %q, want the not-active failure", stderr.String())
+			}
+			hinted := strings.Contains(line, `"`+tc.state+`"`) && strings.Contains(line, "gc session close "+bead.ID)
+			if hinted != tc.wantHint {
+				t.Fatalf("not-active line = %q, want the state and close named = %v", line, tc.wantHint)
+			}
+		})
+	}
+}

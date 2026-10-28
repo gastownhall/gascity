@@ -2659,7 +2659,15 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 		default:
 			op.finishOutcome(cliOpKillFailure(killErr))
 		}
-		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
+		// A gone runtime on a row the controller skips is a dead end for the
+		// kill: the line names the close that releases the row.
+		hint := ""
+		if errors.Is(killErr, session.ErrSessionInactive) && infoErr == nil {
+			if why := unknownStateRefusal(info); why != "" {
+				hint = "; " + why
+			}
+		}
+		fmt.Fprintf(stderr, "gc session kill: %v%s\n", killErr, hint) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
