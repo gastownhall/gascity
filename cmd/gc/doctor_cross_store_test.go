@@ -809,3 +809,46 @@ func TestDanglingBlockingEdgesFixKeepsALiteralWhenItsBeadCannotBeReRead(t *testi
 		t.Fatalf("deps = %+v; want the literal kept", deps)
 	}
 }
+
+// failingIDReadOf fails a by-id read that asks for id, once armed.
+type failingIDReadOf struct {
+	beads.Store
+	id    string
+	armed bool
+}
+
+func (s *failingIDReadOf) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.armed && slices.Contains(q.IDs, s.id) {
+		return nil, errors.New("injected: store unreachable")
+	}
+	return s.Store.List(q)
+}
+
+// TestDanglingBlockingEdgesFixReportsAFailedReCheckOfALiteralsBead: before a
+// typed literal is removed, the stores are asked whether its bead appeared;
+// a store that cannot answer may hold it, so the literal is kept and the
+// failure reported.
+func TestDanglingBlockingEdgesFixReportsAFailedReCheckOfALiteralsBead(t *testing.T) {
+	cityPath := t.TempDir()
+	sessionSplitRoutes(t, cityPath)
+	work := beads.NewMemStore()
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	const literal = "discovered-from:gc-77"
+	if err := work.DepAdd(row.ID, literal, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	edges, _ := check.collect()
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v", edges)
+	}
+	rig := &failingIDReadOf{Store: beads.NewMemStore(), id: "gc-77"}
+	check.scopes = append(check.scopes, doctorScope{label: "rig", store: rig})
+	rig.armed = true
+	if err := fixDanglingEdge(edges[0], check.stillAbsent); err == nil {
+		t.Fatal("fix reported no error although a store could not be asked for gc-77")
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != literal {
+		t.Fatalf("deps = %+v; want the literal kept", deps)
+	}
+}
