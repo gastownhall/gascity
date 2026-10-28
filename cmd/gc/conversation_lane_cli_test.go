@@ -1022,7 +1022,7 @@ func TestCLILaneQueuedNote(t *testing.T) {
 	}{
 		{name: "busy", op: ifNeeded, res: wait(opjournal.WaitBusy), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
 		{name: "boundary unknown", op: ifNeeded, res: wait(opjournal.WaitBoundaryUnknown), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
-		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"},
+		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt or a question; the controller delivers it after that is answered)"},
 		{name: "not running, if_needed", op: ifNeeded, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
 		{name: "dormant, if_needed", op: ifNeeded, res: wait(opjournal.WaitDormant), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
 		{name: "not running, live_only", op: liveOnly, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the nudge is delivered the next time it runs)"},
@@ -1053,7 +1053,7 @@ func TestSessionNudgeLaneQueuedNotesFromThePass(t *testing.T) {
 		c := newCLILaneCity(t)
 		c.sp.SetPendingInteraction(c.name, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
 		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
-		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt;") {
+		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt or a question;") {
 			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
 		}
 	})

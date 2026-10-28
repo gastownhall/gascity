@@ -16,7 +16,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -613,6 +615,10 @@ func inProgressAssignees(members []beads.Bead, exclude func(beads.Bead) bool) []
 // that is suspended or whose runtime is not running, has no turn to interrupt
 // and is skipped.
 //
+// When the city's lane host executes interrupt, each live session's
+// interrupt is a lane op the host runs (interruptRunHoldersLane), keyed
+// run-cancel:<run id>:<generation>.
+//
 // Best-effort: the run is already durably marked canceling, so a failure is
 // logged and returned for the response rather than failing the cancel. Distinct sessions
 // are interrupted concurrently, since a provider's interrupt can wait for the
@@ -661,6 +667,10 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 	}
 
 	sp := s.state.SessionProvider()
+	if s.laneExecutes(opjournal.KindInterrupt) {
+		interrupted := s.interruptRunHoldersLane(ctx, store, runID, s.liveRunHolders(ctx, store, ids, fail), fail)
+		return interrupted, failures
+	}
 	results := make([]error, len(ids))
 	skipped := make([]bool, len(ids))
 	var wg sync.WaitGroup
@@ -674,10 +684,10 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 				results[i] = err
 				return
 			}
-			// StopTurn's own guard (a suspended or stopped session has no
-			// turn), checked first so such a session is neither waited on nor
-			// reported as interrupted.
-			if info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName) {
+			// StopTurn's own guard (holderHasNoTurn), checked first so a
+			// session without a turn is neither waited on nor reported as
+			// interrupted.
+			if holderHasNoTurn(info, sp) {
 				skipped[i] = true
 				return
 			}
@@ -697,6 +707,13 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 		}
 	}
 	return interrupted, failures
+}
+
+// holderHasNoTurn reports whether a run holder's session has no turn to
+// interrupt: closed, suspended, or its runtime not running (StopTurn's own
+// guard).
+func holderHasNoTurn(info session.Info, sp runtime.Provider) bool {
+	return info.Closed || info.State == session.StateSuspended || !sp.IsRunning(info.SessionName)
 }
 
 // findWorkflowRoots returns the graph-workflow roots in store that match runID

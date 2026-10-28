@@ -454,7 +454,8 @@ func (n *cliLaneNudge) json(queued bool, id string, replayed bool) sessionNudgeJ
 
 // cliLaneQueuedNote says why the pass left op waiting, from its wait in
 // res; none in queue mode, which runs no pass, and none for a wait it does
-// not name.
+// not name. A pending interaction is worded for both kinds: the pass's probe
+// carries a request id and no kind.
 func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 	for _, w := range res.Waits {
 		if w.ID != op.ID {
@@ -464,7 +465,7 @@ func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 		case opjournal.WaitBusy, opjournal.WaitBoundaryUnknown:
 			return " (the session is mid-turn; the controller delivers it at the next idle boundary)"
 		case opjournal.WaitPendingInteraction:
-			return " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"
+			return " (the session is waiting on a permission prompt or a question; the controller delivers it after that is answered)"
 		case opjournal.WaitNotRunning, opjournal.WaitDormant, opjournal.WaitNoSession:
 			if op.Policy.Message.Wake == opjournal.WakeLiveOnly {
 				return " (the session is not running; the nudge is delivered the next time it runs)"

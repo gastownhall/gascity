@@ -2740,11 +2740,11 @@ type ConversationOpResult struct {
 	// CoalescedInto The operation this one was delivered with, when coalesced.
 	CoalescedInto *string `json:"coalesced_into,omitempty"`
 
-	// ContextEpoch Context epoch the operation ran in.
+	// ContextEpoch Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.
 	ContextEpoch *int64                  `json:"context_epoch,omitempty"`
 	Delivery     *ConversationOpDelivery `json:"delivery,omitempty"`
 
-	// Generation Session generation the operation ran in.
+	// Generation Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.
 	Generation *int64 `json:"generation,omitempty"`
 
 	// Turn The turn the operation ran in or was linked to; empty when the link is none.

@@ -532,7 +532,9 @@ func humaStopError(err error) error {
 
 // stopSession stops target's turn, recorded as an interrupt op under
 // ops.control, and returns the answer. key is the Idempotency-Key header and
-// named the turn the request names, "" for none.
+// named the turn the request names, "" for none. When the city's lane host
+// executes interrupt, the stop is a lane op instead (stopSessionLane), and
+// ops.control does not govern it.
 func (s *Server) stopSession(ctx context.Context, target, key, named string) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -541,6 +543,9 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 	id, err := s.resolveSessionIDWithConfig(store.Store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
+	}
+	if s.laneExecutes(opjournal.KindInterrupt) {
+		return s.stopSessionLane(ctx, store.Store, id, key, named)
 	}
 	// A key that already names a stop (its own op, or the row a stop of a
 	// turn's target key left under it) makes this request its retry.

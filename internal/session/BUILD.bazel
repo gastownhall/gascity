@@ -181,6 +181,7 @@ go_test(
         "orphan_infrastructure_fence_linux_test.go",
         "overlay_test.go",
         "pending_create_lease_test.go",
+        "pending_question_test.go",
         "priming_lifetime_gate_test.go",
         "priming_markers_test.go",
         "productmetrics_child_env_test.go",

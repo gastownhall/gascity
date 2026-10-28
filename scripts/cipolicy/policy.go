@@ -320,7 +320,11 @@ const (
 	// bumps) merged without it running. requiredFilterPaths pins the three
 	// paths. Reviewed delta: three filter paths; no new job, step command or
 	// permission.
-	expectedCIExecutionHash     = "97af365879b1ea3c6a86cfdb6e9cc662a2cef31bc50463f833f57eef7067d6a9"
+	//
+	// Bumped again (eMudhra CA follow-up): the mcp-mail job's setup-python
+	// python-version moves from '3.12' to the patched '3.12.16'. Reviewed
+	// delta: one `with` input; no new job, step command or permission.
+	expectedCIExecutionHash     = "08e385730e9bde5864b1aec892f5e2a763b4cfc67b27d4c164ac2ee94ba0e04f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
