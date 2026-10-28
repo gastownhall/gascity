@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
@@ -270,5 +271,44 @@ func TestLegacyTickRenamesRequalifiedNamedSessionInPlace(t *testing.T) {
 	}
 	if s := stderr.String(); strings.Contains(s, "retiring") || strings.Contains(s, "closing") {
 		t.Errorf("tick stderr mentions retiring/closing: %s", s)
+	}
+}
+
+// AC-5: a born-qualified replacement row cannot see pre-adopt work. The bare
+// assignee matches none of a row minted under the qualified identity — this
+// pin held at the design base and must keep holding, because it is exactly
+// why a second row must not be minted: only the renamed pre-adopt row, whose
+// alias_history carries the bare form, owns that work.
+func TestBornQualifiedRowDoesNotMatchTheBareAssignee(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Title: "hon gate", Type: "task", Assignee: requalifyBare}); err != nil {
+		t.Fatalf("seeding work: %v", err)
+	}
+	row, err := store.Create(beads.Bead{
+		Title:  requalifyBare,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "contentbuild--lane__golden-hon",
+			"alias":                      requalifyQualified,
+			"template":                   "golden-hon",
+			"state":                      "active",
+			"session_origin":             "named",
+			"continuity_eligible":        "true",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: requalifyQualified,
+			// alias_history deliberately empty: the row was born qualified.
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the born-qualified row: %v", err)
+	}
+	if liveOpenSessionAssignmentExists(store, requalifyBare) {
+		t.Errorf("liveOpenSessionAssignmentExists(%q) = true, want the bare assignee to match no live row", requalifyBare)
+	}
+	for _, id := range session.AssigneeIdentities(sessionInfoFromBead(row)) {
+		if id == requalifyBare {
+			t.Errorf("session.AssigneeIdentities contains %q, want a born-qualified row to claim no bare identity", requalifyBare)
+		}
 	}
 }
