@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -255,6 +257,54 @@ func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) 
 	}
 	if liveNow.Status != "closed" {
 		t.Errorf("live control status = %s, want closed (dispatched as orphaned-workflow)", liveNow.Status)
+	}
+}
+
+// TestRunControlDispatcherNotOpenSkipContract pins both dispatch entry points
+// for a control bead whose status is not open. The one-shot `gc convoy control
+// <id>` path must succeed silently, exactly as it did before the skip crossed
+// the seam. The serve seam must report the no-op (errControlNotProcessed) so
+// the drain can count it as a skip, and must close the scope store it opened
+// exactly once on the way out.
+func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	fake := newCloseCountingStore(t, false)
+	stale, err := fake.Create(beads.Bead{
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+	if err := fake.Close(stale.ID); err != nil {
+		t.Fatalf("close control bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityDir, cityDir, fake, stale.ID, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("one-shot dispatch of a not-open control: %v (stderr=%q)", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("one-shot dispatch wrote %q, want no output for a no-op", stdout.String())
+	}
+
+	prev := openControlStoreForDispatch
+	openControlStoreForDispatch = func(_, _ string, _ *config.City) (beads.Store, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { openControlStoreForDispatch = prev })
+
+	seamErr := runControlDispatcherInStore(cityDir, cityDir, stale.ID, io.Discard, io.Discard, nil)
+	if !errors.Is(seamErr, errControlNotProcessed) {
+		t.Fatalf("serve-seam dispatch of a not-open control = %v, want errControlNotProcessed so the drain can count it as a skip", seamErr)
+	}
+	if got := fake.closes(); got != 1 {
+		t.Fatalf("scope store closed %d times, want 1: the no-op path must not leak the opened store", got)
 	}
 }
 
