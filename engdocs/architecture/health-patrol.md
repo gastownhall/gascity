@@ -173,9 +173,12 @@ are not in the desired set:
 Work beads may carry `gc.detached` when a controller/operator path has
 deliberately detached tmux-backed work from its owning session and still needs
 the controller to distinguish "live elsewhere" from "orphaned or stranded."
-The value is `tmux:<socket>:<session>`, where `<socket>` is the tmux socket name
-passed to `tmux -L` and `<session>` is the tmux session target passed to
-`has-session -t`.
+The value is `tmux:<socket>:<session>`, where `<socket>` is a tmux socket name
+(as for `tmux -L`) or an absolute socket path (as for `tmux -S`), and
+`<session>` is an exact tmux session name, which never contains `:` or `.`.
+The probe resolves a socket name to a path the way tmux does, observes that
+socket, and only when a server answers there asks it with
+`tmux -u -S <path> list-sessions`.
 
 This field is controller-owned work metadata, not user role behavior. The only
 valid producer is code that has just created or adopted detached tmux-backed
@@ -184,14 +187,23 @@ consumer-side protection and tests for the metadata but no in-repo producer;
 follow-up bead `ga-a3oya` tracks wiring the first producer or retiring the
 metadata if it is no longer needed.
 
-Consumers treat the field conservatively:
-- Alive probe: preserve the assignment and suppress stranded diagnostics for
-  that work.
-- Dead probe: clear `gc.detached` and let normal orphan/stranded handling
+Consumers treat the field conservatively. Only an attested-dead probe is
+destructive:
+- Alive probe: the server listed the exact session. Preserve the assignment
+  and suppress stranded diagnostics for that work.
+- Dead probe: the server answered without the session, or its socket refuses
+  connections. Clear `gc.detached` and let normal orphan/stranded handling
   proceed.
-- Probe error or timeout: orphan release waits for three consecutive probe
-  failures before releasing, while stranded diagnostics emit immediately and
-  preserve `gc.detached`.
+- Probe error or timeout: nothing was observed (no server at the socket path
+  this controller resolves, a socket it cannot prove, or a failed tmux
+  client), so the session may still be alive in a server it cannot see.
+  Orphan release holds the claim, every tick, with no strike count; stranded
+  diagnostics still emit and preserve `gc.detached`.
+
+Because an unobserved probe never releases, work whose tmux server has shut
+down and removed its socket, or whose socket the controller cannot reach,
+stays held until an operator clears `gc.detached` or a server answers at that
+path again.
 
 Orphan release clears `gc.detached` in the same store update that reopens the
 work. If the release update fails, the detached guard remains on the work bead

@@ -448,7 +448,6 @@ func TestIsRecoverableUnassignedInProgressPoolWorkUsesLegacyWorkflowRunTarget(t 
 }
 
 func TestReleaseOrphanedPoolAssignments_DetachedProbeAliveSkipsRelease(t *testing.T) {
-	resetDetachedProbeErrorCountsForTest()
 	store := beads.NewMemStore()
 	work := createDetachedOrphanedPoolWork(t, store)
 	listenDetachedProbeServer(t, "gascity")
@@ -489,7 +488,6 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeAliveSkipsRelease(t *testin
 }
 
 func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadReleasesAndClears(t *testing.T) {
-	resetDetachedProbeErrorCountsForTest()
 	store := beads.NewMemStore()
 	work := createDetachedOrphanedPoolWork(t, store)
 	listenDetachedProbeServer(t, "gascity")
@@ -524,7 +522,6 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadReleasesAndClears(t *te
 }
 
 func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadPreservesGuardWhenReleaseFails(t *testing.T) {
-	resetDetachedProbeErrorCountsForTest()
 	base := beads.NewMemStore()
 	work := createDetachedOrphanedPoolWork(t, base)
 	store := failReleaseUpdateStore{Store: base, failID: work.ID}
@@ -559,64 +556,60 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadPreservesGuardWhenRelea
 	}
 }
 
-func TestReleaseOrphanedPoolAssignments_DetachedProbeErrorsReleaseOnThirdTick(t *testing.T) {
-	resetDetachedProbeErrorCountsForTest()
-	store := beads.NewMemStore()
-	work := createDetachedOrphanedPoolWork(t, store)
-	listenDetachedProbeServer(t, "gascity")
-	installFakeTmux(t, "exit 2")
+// AC-5: a probe that observes nothing never releases detached work, however
+// many ticks it repeats; only an attested-dead probe releases.
+func TestReleaseOrphanedPoolAssignments_DetachedProbeErrorNeverReleases(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{name: "tmux client fails", setup: func(t *testing.T) {
+			listenDetachedProbeServer(t, "gascity")
+			installFakeTmux(t, "exit 2")
+		}},
+		{name: "no server at the socket", setup: func(t *testing.T) {
+			useDetachedProbeSocketDir(t, "gascity")
+			installFakeTmux(t, "exit 0")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			work := createDetachedOrphanedPoolWork(t, store)
+			tt.setup(t)
+			var logs bytes.Buffer
+			restore := captureLogOutput(&logs)
+			defer restore()
 
-	for tick := 1; tick <= 2; tick++ {
-		released := releaseOrphanedPoolAssignmentsFromBeads(
-			store,
-			testPoolReleaseConfig(),
-			"",
-			nil,
-			[]beads.Bead{work},
-			nil,
-			nil,
-			nil,
-		)
-		if len(released) != 0 {
-			t.Fatalf("tick %d released = %v, want none before third error", tick, released)
-		}
-		got, err := store.Get(work.ID)
-		if err != nil {
-			t.Fatalf("tick %d Get work bead: %v", tick, err)
-		}
-		if got.Status != "in_progress" {
-			t.Fatalf("tick %d status = %q, want in_progress", tick, got.Status)
-		}
-		if _, ok := got.Metadata["error_count"]; ok {
-			t.Fatalf("tick %d persisted error_count metadata: %+v", tick, got.Metadata)
-		}
-	}
-
-	released := releaseOrphanedPoolAssignmentsFromBeads(
-		store,
-		testPoolReleaseConfig(),
-		"",
-		nil,
-		[]beads.Bead{work},
-		nil,
-		nil,
-		nil,
-	)
-	if len(released) != 1 || released[0].ID != work.ID {
-		t.Fatalf("third tick released = %v, want [%s]", released, work.ID)
-	}
-	got, err := store.Get(work.ID)
-	if err != nil {
-		t.Fatalf("Get work bead: %v", err)
-	}
-	if got.Status != "open" {
-		t.Fatalf("status = %q, want open", got.Status)
-	}
-	if got.Metadata[detachedProbeMetadataKey] != "" {
-		t.Fatalf("gc.detached = %q, want cleared", got.Metadata[detachedProbeMetadataKey])
-	}
-	if _, ok := got.Metadata["error_count"]; ok {
-		t.Fatalf("persisted error_count metadata after release: %+v", got.Metadata)
+			for tick := 1; tick <= 5; tick++ {
+				released := releaseOrphanedPoolAssignmentsFromBeads(
+					store,
+					testPoolReleaseConfig(),
+					"",
+					nil,
+					[]beads.Bead{work},
+					nil,
+					nil,
+					nil,
+				)
+				if len(released) != 0 {
+					t.Fatalf("tick %d released = %v, want none while the probe observes nothing", tick, released)
+				}
+				got, err := store.Get(work.ID)
+				if err != nil {
+					t.Fatalf("tick %d Get work bead: %v", tick, err)
+				}
+				if got.Status != "in_progress" || got.Assignee != "worker-dead" {
+					t.Fatalf("tick %d status %q assignee %q, want in_progress worker-dead", tick, got.Status, got.Assignee)
+				}
+				if got.Metadata[detachedProbeMetadataKey] != testDetachedPoolProbeSpec {
+					t.Fatalf("tick %d gc.detached = %q, want preserved", tick, got.Metadata[detachedProbeMetadataKey])
+				}
+			}
+			if !strings.Contains(logs.String(), "holding "+work.ID) {
+				t.Fatalf("logs = %q, want the hold explained", logs.String())
+			}
+		})
 	}
 }
 
