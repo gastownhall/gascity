@@ -65,6 +65,7 @@ go_test(
         "conformance_test.go",
         "control_payloads_test.go",
         "events_test.go",
+        "hangbudget_test.go",
         "latest_archived_match_test.go",
         "mirror_test.go",
         "multiplexer_membership_test.go",
