@@ -1682,7 +1682,30 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				}
 				continue
 			}
-			if current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
+			// A row absent from the active-only scan that the cache still
+			// holds open, and that this cache instance has never itself
+			// locally written (no localBeadAt entry at all, not merely an
+			// old one — see below), survives the replace instead of being
+			// dropped. This is the controller-startup shape: PrimeActive's
+			// first scan populates the cache with rows this instance never
+			// wrote, so a close that lands behind it in the window before
+			// the full Prime has nothing else to protect it. Carrying the
+			// row over hands the question to the next reconcile pass's
+			// eviction cell, which already re-verifies a missing row per id
+			// and announces bead.closed correctly (gastownhall/gascity#8410).
+			//
+			// A row with ANY local-write history, aged out of
+			// recentLocalMutation's window or not, keeps the existing
+			// drop-on-replace behavior: several tests (e.g.
+			// TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows,
+			// TestCachingStoreGetAnswersRowDroppedByFullReplace) pin that an
+			// aged local write still drops here, and only its write
+			// revision survives through the separate writeSeq/writeAt
+			// retention path — broadening past "no local-write history at
+			// all" regresses that contract without evidence it is itself
+			// wrong.
+			_, everLocallyWritten := c.localBeadAt[id]
+			if current.Status != "closed" && (!everLocallyWritten || recentLocalMutation(c.localBeadAt[id], now)) {
 				nextBeads[id] = cloneBead(current)
 				if deps, ok := c.deps[id]; ok {
 					nextDeps[id] = cloneDeps(deps)
