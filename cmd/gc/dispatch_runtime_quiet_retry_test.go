@@ -67,6 +67,16 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// A bead_not_open no-op crosses the serve seam as
+			// errControlNotProcessed. It is a pure skip: neither processed nor
+			// pending, so a persistent stale queue row cannot hold the loop at
+			// its 1s floor (gastownhall/gascity#6024).
+			name:            "not-open skip does not pin the backoff",
+			serveErr:        errControlNotProcessed,
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {

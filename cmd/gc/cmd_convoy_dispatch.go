@@ -157,9 +157,21 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 // openControlStoreAtForCity.
 var openControlStoreForDispatch = openControlStoreAtForCity
 
+// errControlNotProcessed is the cmd-local sentinel the serve seam returns
+// when a control dispatch made no change: ProcessControl reported
+// Processed == false with a nil error (a bead whose status is no longer open,
+// a spawned fanout whose finalize is still pending, a terminal check). It
+// crosses the error-only controlDispatcherServe seam — whose nil means "the
+// bead advanced" — so the serve drain can count a no-op as neither processed
+// nor pending. The one-shot `gc convoy control <id>` path maps it back to nil,
+// so CLI output and exit status are unchanged.
+var errControlNotProcessed = errors.New("control bead not processed")
+
 // runControlDispatcherInStore dispatches one control bead for the serve drain.
 // When emits is non-nil, the execution-fact projection for a control that
-// created no steps is deferred to it; nil projects synchronously.
+// created no steps is deferred to it; nil projects synchronously. It returns
+// nil when the dispatch advanced the bead and errControlNotProcessed when
+// ProcessControl made no change, so the drain can tell a no-op from progress.
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	if cityPath == "" {
 		var err error
@@ -214,7 +226,14 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 // scope comes from an unrouted store, and gating on it while writing elsewhere
 // re-runs a control kind the graph store had already finished.
 func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
-	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	err := runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	if errors.Is(err, errControlNotProcessed) {
+		// A no-op dispatch (e.g. the bead is no longer open) is not an error
+		// for the one-shot CLI caller; its output and exit status stay as they
+		// were before the skip crossed the seam.
+		return nil
+	}
+	return err
 }
 
 // runControlDispatcherDeferringEmits is runControlDispatcherWithStoreAndConfig
@@ -335,31 +354,37 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
-	if result.Processed {
-		if rootID := controlRootID(bead.Metadata); rootID != "" {
-			switch {
-			case emits != nil && result.Created == 0:
-				// Nothing new to define: the serve drain projects this root
-				// once, after its last queued control (executionEmitDeferral).
-				emits.add(rootID, federatedGraphLeg)
-			default:
-				if emits != nil {
-					emits.forget(rootID)
-				}
-				if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
-					fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
-				}
+	if !result.Processed {
+		// ProcessControl made no change. Report the no-op through the serve
+		// seam so the drain counts it as neither processed nor pending;
+		// a stale queue row that persists across passes must not masquerade
+		// as progress (gastownhall/gascity#6024). The one-shot CLI path maps
+		// this back to nil.
+		return errControlNotProcessed
+	}
+	if rootID := controlRootID(bead.Metadata); rootID != "" {
+		switch {
+		case emits != nil && result.Created == 0:
+			// Nothing new to define: the serve drain projects this root
+			// once, after its last queued control (executionEmitDeferral).
+			emits.add(rootID, federatedGraphLeg)
+		default:
+			if emits != nil {
+				emits.forget(rootID)
+			}
+			if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
 			}
 		}
-		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
-		if result.Created > 0 {
-			_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
-		}
-		if result.Skipped > 0 {
-			_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
-		}
-		fmt.Fprintln(stdout) //nolint:errcheck
 	}
+	_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
+	if result.Created > 0 {
+		_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
+	}
+	if result.Skipped > 0 {
+		_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
+	}
+	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
 }
 

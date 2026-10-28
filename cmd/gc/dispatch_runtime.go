@@ -455,34 +455,27 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
-		if len(queue) == 0 {
-			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
-				idlePolls++
-				workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
-				time.Sleep(workflowServeIdlePollInterval)
-				continue
-			}
-			workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
-			return result, nil
-		}
-		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
+		skippedCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
-			// controlDispatcherServe currently returns nil both when it
-			// successfully advanced a control bead AND when ProcessControl
-			// chose to no-op (e.g., status != "open"). The caller cannot
-			// tell those apart without cross-referencing the store, so the
-			// trace line just below was previously identical in both
-			// cases. That masked a 20-minute stall on ga-ttn5z's retry
-			// control ga-fw2fm. The silent no-op now emits a separate
-			// `process-control ... skip reason=bead_not_open` line inside
-			// ProcessControl itself; see runtime.go.
+			// nil from controlDispatcherServe means the dispatch advanced the
+			// bead. A no-op — ProcessControl reported Processed=false with no
+			// error, most commonly a bead whose status is no longer open —
+			// crosses the seam as errControlNotProcessed instead, so a stale
+			// queue row can no longer masquerade as progress: it counts as
+			// neither processed nor pending (gastownhall/gascity#6024).
 			callsBefore, started := snapshotControlBdCalls(), time.Now()
 			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
+				if errors.Is(err, errControlNotProcessed) {
+					skippedCount++
+					calls := snapshotControlBdCalls().since(callsBefore)
+					workflowTracef("serve skipped bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
+					continue
+				}
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead
@@ -527,7 +520,16 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			result.processedAny = true
 			processedThisCycle = true
 		}
+		// One exit decision per pass. A pass that advanced work re-queries
+		// immediately so workers pick the new step beads up now. A pass that
+		// only found pending work hands the backoff decision to the --follow
+		// caller. Anything else — an empty queue, or a queue whose every row
+		// was a no-op skip — ends through the bounded idle path below, so a
+		// persistent skip row cannot spin the loop with no sleep.
 		if processedThisCycle {
+			// Only real progress resets the idle re-poll budget; a stale
+			// non-open row that keeps being offered must not.
+			idlePolls = 0
 			// Signal workers to skip their poll sleep: new step beads may be ready.
 			writeDispatchWakeFile(cityPath)
 			continue
@@ -536,6 +538,22 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
+		if skippedCount > 0 {
+			workflowTracef("serve skip-queue agent=%s count=%d", agentCfg.QualifiedName(), skippedCount)
+		}
+		// An earlier pass of this drain advanced work, so re-poll a bounded
+		// number of times to absorb read-after-write lag in the ready source
+		// (a minted successor should be picked up without waiting for the
+		// --follow sleep). With no progress behind it, this pass is genuinely
+		// idle: exit so the --follow backoff can engage.
+		if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
+			idlePolls++
+			workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
+			time.Sleep(workflowServeIdlePollInterval)
+			continue
+		}
+		workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
+		return result, nil
 	}
 }
 
