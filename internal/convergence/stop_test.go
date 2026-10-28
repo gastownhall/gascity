@@ -217,6 +217,44 @@ func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 	assertLoopStopped(t, store)
 }
 
+func TestStopHandler_ForceCloseKeepsAlreadyClosedDescendant(t *testing.T) {
+	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
+	addActiveWispSteps(store)
+	store.addBead("step-c1", "open", "step-c", "", nil)
+
+	if _, err := handler.StopHandler(context.Background(), "root-1", "alice", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	stepC, _ := store.GetMetadata("step-c")
+	if stepC["close_reason"] != "step finished by its worker normally" {
+		t.Errorf("step-c close_reason = %q, want its prior reason", stepC["close_reason"])
+	}
+	if stepC["gc.outcome"] != "pass" {
+		t.Errorf("step-c gc.outcome = %q, want pass", stepC["gc.outcome"])
+	}
+	for _, id := range store.CloseLog {
+		if id == "step-c" {
+			t.Errorf("CloseLog = %v, already-closed step-c was closed again", store.CloseLog)
+		}
+	}
+
+	nested, _ := store.GetBead("step-c1")
+	if nested.Status != "closed" {
+		t.Errorf("step-c1 under closed step-c status = %q, want closed", nested.Status)
+	}
+	nestedMeta, _ := store.GetMetadata("step-c1")
+	if nestedMeta["close_reason"] != CloseReasonManualSupersede {
+		t.Errorf("step-c1 close_reason = %q, want %q", nestedMeta["close_reason"], CloseReasonManualSupersede)
+	}
+	if nestedMeta["gc.outcome"] != "skipped" {
+		t.Errorf("step-c1 gc.outcome = %q, want skipped", nestedMeta["gc.outcome"])
+	}
+	assertClosedBeforeWisp(t, store, "step-a", "step-b", "step-b1", "step-c1")
+
+	assertLoopStopped(t, store)
+}
+
 func TestStopHandler_ForceClose_SyntheticEvent(t *testing.T) {
 	// Active wisp is open -> force-close emits synthetic iteration event.
 	handler, _, emitter := setupActiveHandler(t, "in_progress", nil)
