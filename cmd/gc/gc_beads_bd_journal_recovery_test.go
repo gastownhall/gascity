@@ -580,6 +580,55 @@ done
 	})
 }
 
+// runTimeoutKillPin runs a harness that must kill a blocking 5 s command
+// via the watchdog, print rc=143, take at least minKill (the timeout or
+// fallback duration) and well under the command's runtime, and leave
+// nothing behind in the harness's process group.
+func runTimeoutKillPin(t *testing.T, shell, harness string, minKill time.Duration) {
+	t.Helper()
+	env := journalRecoveryEnv{binDir: t.TempDir(), shell: shell}
+	cmd := env.command(harness)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// stderr stays free: dash reports its TERM'd background child with a
+	// "Terminated" notice there, which is the caller shell's job status,
+	// not the call's contract.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	start := time.Now()
+	err := cmd.Run()
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("run_with_timeout harness failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if got, want := stdout.String(), "rc=143\n"; got != want {
+		t.Fatalf("harness output = %q, want %q", got, want)
+	}
+	if elapsed < minKill {
+		t.Fatalf("run_with_timeout returned 143 after only %s; the kill fired before %s", elapsed, minKill)
+	}
+	if elapsed >= 4*time.Second {
+		t.Fatalf("run_with_timeout returned after %s; the 5s command ran to its end instead of being killed", elapsed)
+	}
+	if err := waitForProcessGroupExit(cmd.Process.Pid, 2*time.Second); err != nil {
+		t.Fatalf("processes started by the call outlived it: %v", err)
+	}
+}
+
+// TestRunWithTimeoutKillsCommandAfterTimeout guards the timeout path: a
+// command that outlives the timeout is TERMed, the call returns its 143 no
+// earlier than the timeout, and nothing the call started survives it.
+func TestRunWithTimeoutKillsCommandAfterTimeout(t *testing.T) {
+	forEachPinShell(t, func(t *testing.T, shell string) {
+		harness := pinHarness(runWithTimeoutFn(t), `
+rc=0
+run_with_timeout 1 sleep 5 || rc=$?
+printf 'rc=%s\n' "$rc"
+`)
+		runTimeoutKillPin(t, shell, harness, time.Second)
+	})
+}
+
 func prodRepoState(backupDir string) string {
 	return `{"head":"refs/heads/main","backups":{"prod-backup":{"name":"prod-backup","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
 }
