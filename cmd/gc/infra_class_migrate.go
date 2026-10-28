@@ -382,6 +382,9 @@ type infraMigrationReport struct {
 	// holds a different bead, for the same reason: their remedy is not the
 	// copy the others take (infraContainmentGap.HeldDifferent).
 	HeldDifferent []string
+	// PresumedReused holds the ids among Stranded that a legacy manifest
+	// lists by a bare id they are younger than (infraContainmentGap.PresumedReused).
+	PresumedReused []string
 	// ServedBinding, ServedProvider and ServedNotePath carry the genesis-blocked
 	// evidence: which binding this city previously served its infrastructure
 	// classes from, under which provider, and the note file whose removal is
@@ -494,11 +497,8 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		// documented way out, because the migration refuses to re-run and
 		// nothing else moved a bead. See infra_class_recover.go for why the
 		// repair is a separate, additive verb and not the migration again.
-		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer and copy them into the binding with:  %s. Re-check with `gc storage status`, which exits zero once none is left.",
-			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), storageRecoveryInstruction())
-		if advice := infraHeldDifferentAdvice(report.HeldDifferent); advice != "" {
-			situation += " " + advice
-		}
+		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding does not serve as the bead the work store holds: %s. They are intact in the retained work store. %s Re-check with `gc storage status`, which exits zero once none is left.",
+			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedAdvice(report.Stranded, report.HeldDifferent, report.PresumedReused))
 	case infraMigrationRetained:
 		cause := ""
 		if report.Fault != nil {
@@ -1538,13 +1538,9 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	// What to DO about it is not decided here. This names the defect; the single
 	// revert decision (infraMigrationOperatorAdvice, on evidence read from the
 	// binding) is what follows it.
-	held := ""
-	if advice := infraHeldDifferentAdvice(gap.HeldDifferent); advice != "" {
-		held = " " + advice
-	}
-	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store were never carried by the proven copy, and the converged binding %s cannot read them: %s%s. A writer this migration could not fence wrote them to the source during or after the cutover. They are intact in the work store. Stop every writer and copy the listed beads into the binding with:  %s.%s\n", //nolint:errcheck // best-effort stderr
-		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, storageRecoveryInstruction(), held)
-	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent}
+	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store are not recorded as carried by the proven copy, and the converged binding %s does not serve them as the beads the work store holds: %s%s. They are intact in the work store. %s\n", //nolint:errcheck // best-effort stderr
+		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused))
+	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused}
 }
 
 // reportUncheckableConvergence reports a converged city whose convergence could
@@ -1607,6 +1603,46 @@ type infraContainmentGap struct {
 	// carry such a row under its id; only recover-stranded's per-id choices
 	// resolve it (infra_class_recover_held.go).
 	HeldDifferent []string
+	// PresumedReused holds the sorted ids, among Stranded, that a legacy
+	// manifest lists by a bare id they are younger than
+	// (infraManifestPresumedReused) and the binding does not hold. No unfenced
+	// writer need have written them: an older build's recover-stranded may
+	// have carried them, and the binding since collected the bead. Only the
+	// operator's --move or --record-carried resolves an open one.
+	PresumedReused []string
+}
+
+// infraStrandedAdvice is the remedy every surface that names stranded rows
+// carries, split by why each is stranded, so no subset is told something false
+// about it: the ids the binding holds for a different bead lead (their remedy
+// is a per-id choice, not a copy), then the presumed-reused ids (a per-id
+// --move or --record-carried, not an unfenced writer), and only the rest —
+// absent from the binding, written by a writer the migration could not fence —
+// are told to copy them in.
+func infraStrandedAdvice(stranded, heldDifferent, presumed []string) string {
+	var parts []string
+	if advice := infraHeldDifferentAdvice(heldDifferent); advice != "" {
+		parts = append(parts, advice)
+	}
+	if len(presumed) > 0 {
+		parts = append(parts, fmt.Sprintf("%d of them (%s) are listed by a bare id in a manifest an earlier build wrote, and are younger than it: an older recover-stranded may have carried each and the binding since collected it, or the id was minted again. A closed one is moved by `%s`; decide each open one with --%s <id> (copy it into the binding) or --%s <id> (record it as carried, so the clear deletes its work-store row; the backup keeps it).",
+			len(presumed), infraStrandedIDList(presumed), storageRecoveryInstruction(), strandedMoveFlag, strandedRecordCarriedFlag))
+	}
+	skip := setOf(append(append([]string(nil), heldDifferent...), presumed...))
+	var absent []string
+	for _, id := range stranded {
+		if !skip[id] {
+			absent = append(absent, id)
+		}
+	}
+	if len(absent) > 0 {
+		lead := fmt.Sprintf("%d of them (%s) are", len(absent), infraStrandedIDList(absent))
+		if len(absent) == len(stranded) {
+			lead = "They are"
+		}
+		parts = append(parts, fmt.Sprintf("%s absent from the binding: a writer this migration could not fence wrote them to the source during or after the cutover. Stop every writer and copy them into the binding with:  %s.", lead, storageRecoveryInstruction()))
+	}
+	return strings.Join(parts, " ")
 }
 
 // classifyInfraContainmentGap classifies every source infrastructure bead the binding
@@ -1666,6 +1702,7 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, man
 	sort.Strings(gap.Retained)
 	sort.Strings(gap.Unrecorded)
 	sort.Strings(gap.HeldDifferent)
+	sort.Strings(gap.PresumedReused)
 	return gap, nil
 }
 
@@ -1706,6 +1743,9 @@ func (gap *infraContainmentGap) classify(b beads.Bead, held bool, manifest infra
 		gap.Unrecorded = append(gap.Unrecorded, b.ID)
 	default:
 		gap.Stranded = append(gap.Stranded, b.ID)
+		if match == infraManifestPresumedReused {
+			gap.PresumedReused = append(gap.PresumedReused, b.ID)
+		}
 	}
 	return false
 }

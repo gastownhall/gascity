@@ -688,10 +688,16 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		// about it. This report used to carry only the ids, so the one command
 		// an operator would reach for after a non-zero `gc storage status` said
 		// nothing about how to make it zero again.
-		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
 		if len(gap.HeldDifferent) > 0 {
-			fmt.Fprintf(stdout, "  held for a different bead: %s\n  %s\n", strings.Join(gap.HeldDifferent, ", "), infraHeldDifferentAdvice(gap.HeldDifferent)) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "  held for a different bead: %s\n", strings.Join(gap.HeldDifferent, ", ")) //nolint:errcheck // best-effort stdout
 		}
+		if len(gap.PresumedReused) > 0 {
+			fmt.Fprintf(stdout, "  presumed reused (bare id, younger than the legacy manifest): %s\n", strings.Join(gap.PresumedReused, ", ")) //nolint:errcheck // best-effort stdout
+		}
+		// Split by why each id is stranded (infraStrandedAdvice): a held
+		// different bead and a presumed-reused row need a per-id choice, and
+		// only an absent row is told to copy it in.
+		fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	note, notePresent, err := readInfraClearedNote(request.CityPath)

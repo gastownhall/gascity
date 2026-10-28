@@ -2496,3 +2496,61 @@ func TestRecoverNeverRecordsAsCarriedARowAnEarlierReplaceLeftAsTheOnlyCopy(t *te
 		t.Errorf("work-store %s = %q (err %v), want the only live copy kept", id, got.Title, err)
 	}
 }
+
+// The stranded remedy is split by why each id is stranded: an id the binding
+// holds for a different bead leads with the per-id replace/drop choice, a
+// presumed-reused id names --move/--record-carried and no unfenced writer, and
+// only an absent id is told to copy it in.
+func TestInfraStrandedAdviceSplitsByCause(t *testing.T) {
+	all := infraStrandedAdvice([]string{"gc-1", "gc-2", "gc-3"}, []string{"gc-1"}, []string{"gc-2"})
+	held := strings.Index(all, "gc-1")
+	presumed := strings.Index(all, "--"+strandedMoveFlag)
+	absent := strings.Index(all, "could not fence")
+	if held < 0 || presumed < 0 || absent < 0 || held >= presumed || presumed >= absent {
+		t.Fatalf("advice order wrong (held %d, presumed %d, absent %d): %s", held, presumed, absent, all)
+	}
+	if !strings.Contains(all, "--"+strandedReplaceBindingRowFlag) || !strings.Contains(all, "--"+strandedRecordCarriedFlag) {
+		t.Errorf("advice does not name every per-id choice: %s", all)
+	}
+	if !strings.Contains(all[absent-60:], "gc-3") {
+		t.Errorf("the copy-it-in sentence does not name only the absent id gc-3: %s", all)
+	}
+	for name, advice := range map[string]string{
+		"held only":     infraStrandedAdvice([]string{"gc-1"}, []string{"gc-1"}, nil),
+		"presumed only": infraStrandedAdvice([]string{"gc-2"}, nil, []string{"gc-2"}),
+	} {
+		if strings.Contains(advice, "could not fence") || strings.Contains(advice, "copy them into the binding") {
+			t.Errorf("%s: told to copy in / blamed on an unfenced writer: %s", name, advice)
+		}
+	}
+	if only := infraStrandedAdvice([]string{"gc-3"}, nil, nil); !strings.HasPrefix(only, "They are absent") {
+		t.Errorf("absent only = %q", only)
+	}
+}
+
+// gc storage status on a city whose only strand is presumed reused names the
+// per-id choice and blames no unfenced writer.
+func TestStorageStatusNamesTheChoiceForAPresumedReusedStrand(t *testing.T) {
+	prevSlack := infraManifestClockSlack
+	infraManifestClockSlack = 0
+	t.Cleanup(func() { infraManifestClockSlack = prevSlack })
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	writeLegacyManifest(t, target)
+	waitPastMarkerBound(t, target)
+	id := carriedMessageID(t, source)
+	if err := openMigratedDestination(t, target).Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	reuseCarriedID(t, source, id)
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code == 0 {
+		t.Fatalf("status exited 0 with %s stranded: %s", id, stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "presumed reused") || !strings.Contains(out, "--"+strandedMoveFlag) || !strings.Contains(out, "--"+strandedRecordCarriedFlag) {
+		t.Errorf("status does not name the per-id choice for %s:\n%s", id, out)
+	}
+	if strings.Contains(out, "could not fence") {
+		t.Errorf("status blames an unfenced writer for a presumed-reused row:\n%s", out)
+	}
+}
