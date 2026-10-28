@@ -41,6 +41,7 @@ go_test(
         "pod_test.go",
         "provider_stale_probe_test.go",
         "provider_test.go",
+        "relaunch_env_test.go",
         "seams_test.go",
         "session_script_test.go",
         "staging_test.go",

@@ -120,6 +120,7 @@ type fakeCall struct {
 	container string
 	cmd       []string
 	selector  string
+	stdin     string // what execInPod's stdin carried, if any
 }
 
 func newFakeK8sOps() *fakeK8sOps {
@@ -182,8 +183,13 @@ func (f *fakeK8sOps) listPods(_ context.Context, selector string, fieldSelector 
 	return result, nil
 }
 
-func (f *fakeK8sOps) execInPod(_ context.Context, pod, container string, cmd []string, _ io.Reader) (string, error) {
-	f.calls = append(f.calls, fakeCall{method: "execInPod", pod: pod, container: container, cmd: cmd})
+func (f *fakeK8sOps) execInPod(_ context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	call := fakeCall{method: "execInPod", pod: pod, container: container, cmd: cmd}
+	if stdin != nil {
+		b, _ := io.ReadAll(stdin)
+		call.stdin = string(b)
+	}
+	f.calls = append(f.calls, call)
 	if f.execFunc != nil {
 		return f.execFunc(pod, cmd)
 	}
