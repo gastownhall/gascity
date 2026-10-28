@@ -162,7 +162,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
-		"litellm>=1.89.7",
+		"litellm>=1.106.3",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
 	} {
@@ -192,7 +192,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
-		"litellm==1.89.7 \\",
+		"litellm==1.106.3 \\",
 		"fastmcp==3.4.10 \\",
 		"fastmcp-slim==3.4.10 \\",
 		"filelock==3.29.0 \\",
