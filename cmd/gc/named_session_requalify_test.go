@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -190,6 +191,83 @@ func TestV2RequalifiedNamedSessionSelectsAndRenamesBareRowInOnePass(t *testing.T
 	for k, b := range snap {
 		if b.Metadata["session_name"] == requalifiedRuntime {
 			t.Errorf("row %s (%s) was minted for the requalified session", k, b.Status)
+		}
+	}
+}
+
+// requalifiedTicker is one reconciler over a requalified fixture: tick runs
+// one tick and moves the clock a patrol on, store is the sessions store,
+// actions the runtime's action log.
+type requalifiedTicker struct {
+	tick    func()
+	store   beads.Store
+	actions func() map[string]int
+}
+
+// requalifiedTickerNames are the reconcilers newRequalifiedTicker runs.
+var requalifiedTickerNames = []string{"legacy", "v2"}
+
+// newRequalifiedTicker is the named reconciler over f.
+func newRequalifiedTicker(t *testing.T, name string, f parityFixture) requalifiedTicker {
+	if name == "legacy" {
+		w := newLegacyWorld(t, f, t.TempDir(), f.beads())
+		return requalifiedTicker{tick: func() { w.tick(t, true); w.clk.Advance(simPatrol) }, store: w.store, actions: w.sp.actions}
+	}
+	w := requalifiedV2World(t, f)
+	return requalifiedTicker{tick: func() { w.once(t); w.s.advance(simPatrol) }, store: w.s.legs[0].backing, actions: w.sp.actions}
+}
+
+// runtimeLifecycleActions are the actions that start or stop a runtime.
+func runtimeLifecycleActions(actions map[string]int) []string {
+	var out []string
+	for k := range actions {
+		method, _, _ := strings.Cut(k, " ")
+		switch method {
+		case "Start", "Stop", "Interrupt", "Relaunch", "TerminateRuntime", "KillCorpseObject", "KillZombieObject":
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// AC-3: across three ticks of either reconciler, in either mode, the
+// requalified session keeps its bare-assigned work, its row and its runtime,
+// and gains no second row.
+func TestRequalifiedNamedSessionKeepsWorkRowAndRuntimeAcrossTicks(t *testing.T) {
+	for _, name := range requalifiedTickerNames {
+		for _, mode := range []string{"always", "on_demand"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				w := newRequalifiedTicker(t, name, requalifiedFixture(t, mode, false))
+				for tick := 1; tick <= 3; tick++ {
+					w.tick()
+					work, err := w.store.Get("gw-1")
+					if err != nil {
+						t.Fatalf("tick %d: %v", tick, err)
+					}
+					if work.Status != "in_progress" || work.Assignee != requalifiedBare {
+						t.Errorf("tick %d: work %s assigned %q, want in_progress assigned %q", tick, work.Status, work.Assignee, requalifiedBare)
+					}
+					if !liveOpenSessionAssignmentExists(w.store, requalifiedBare) {
+						t.Errorf("tick %d: no live open session owns %q", tick, requalifiedBare)
+					}
+					all, err := w.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if row := rowByID(t, all, "gc-1"); row.Status != "open" {
+						t.Errorf("tick %d: row gc-1 is %s, want open", tick, row.Status)
+					}
+					for _, b := range all {
+						if b.ID != "gc-1" && b.ID != "gw-1" && b.Status != "closed" {
+							t.Errorf("tick %d: a second open row %s (%v)", tick, b.ID, b.Metadata)
+						}
+					}
+					if acted := runtimeLifecycleActions(w.actions()); len(acted) > 0 {
+						t.Errorf("tick %d: the runtime was started or stopped: %v", tick, acted)
+					}
+				}
+			})
 		}
 	}
 }
