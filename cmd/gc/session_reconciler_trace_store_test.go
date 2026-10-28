@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -684,4 +685,52 @@ func TestTraceStoreRestartAfterTornTailUsesFreshSegment(t *testing.T) {
 		t.Fatalf("records by trace = %v, want cycle-a and cycle-b", counts)
 	}
 	assertTraceSeqsUnique(t, records)
+}
+
+// TestTraceReaderRejectsCorruptCommittedBatch keeps the reader's corruption
+// guard: a batch commit whose records do not verify its count or CRC is an
+// error. A resync window opened by a torn line is closed by the next
+// verified commit, so corruption in a later committed batch still surfaces.
+func TestTraceReaderRejectsCorruptCommittedBatch(t *testing.T) {
+	assertCRCError := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("ReadTraceRecords succeeded on a committed batch with a bad CRC, want an error")
+		}
+		if !strings.Contains(err.Error(), "crc32") {
+			t.Fatalf("error = %v, want a crc32 mismatch", err)
+		}
+	}
+
+	t.Run("crc-mismatch", func(t *testing.T) {
+		cityDir := t.TempDir()
+		root := traceStoreTestRoot(cityDir)
+		batch := buildTraceSegmentBatch(t, "cycle-a", 1, 1, time.Now().UTC())
+		// Flip the worker name inside the committed record: it still parses,
+		// but the batch CRC no longer matches.
+		corrupt := bytes.Replace(batch, []byte(`"worker-1"`), []byte(`"worker-2"`), 1)
+		if bytes.Equal(corrupt, batch) {
+			t.Fatal("did not find the record field to corrupt")
+		}
+		writeTraceTestSegment(t, root, corrupt)
+		_, err := ReadTraceRecords(root, TraceFilter{})
+		assertCRCError(t, err)
+	})
+
+	t.Run("crc-mismatch-after-resync-window-closed", func(t *testing.T) {
+		cityDir := t.TempDir()
+		root := traceStoreTestRoot(cityDir)
+		now := time.Now().UTC()
+		var segment []byte
+		segment = append(segment, buildTraceSegmentBatch(t, "cycle-a", 1, 1, now)...)
+		// A torn line that ends in its own newline: an unparseable line
+		// mid-file, not a tail.
+		segment = append(segment, []byte(`{"trace_schema_version":1,"seq":3,"ts":"2026-1`+"\n")...)
+		segment = append(segment, buildTraceSegmentBatch(t, "cycle-b", 3, 1, now.Add(time.Second))...)
+		corrupt := buildTraceSegmentBatch(t, "cycle-c", 5, 1, now.Add(2*time.Second))
+		corrupt = bytes.Replace(corrupt, []byte(`"worker-1"`), []byte(`"worker-2"`), 1)
+		writeTraceTestSegment(t, root, segment, corrupt)
+		_, err := ReadTraceRecords(root, TraceFilter{})
+		assertCRCError(t, err)
+	})
 }
