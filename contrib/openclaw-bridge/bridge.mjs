@@ -190,9 +190,7 @@ async function handlePublish(pub) {
   try {
     const result = await oc.sendMessageIMessage(target, pub?.text ?? '', {
       config: ocConfig,
-      // No `client`: since 2026.10 send.ts ignores a caller-owned client and
-      // runs each send over its own short-lived `imsg rpc` client, which it
-      // stops afterwards. The persistent client above stays watch-only.
+      client, // reuse the persistent RPC client; send.ts leaves caller-owned clients open
       replyToId: pub?.reply_to_message_id || undefined,
       timeoutMs: 20000,
     })

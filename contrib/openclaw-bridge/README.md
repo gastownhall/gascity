@@ -40,7 +40,7 @@ From the published `@openclaw/imessage` npm package and its `openclaw` peer
 |---|---|
 | `probeIMessage` | imsg CLI handshake/capability probe at startup |
 | `createIMessageRpcClient` | persistent `imsg rpc --json` JSON-RPC client; watch-mode inbound notifications |
-| `sendMessageIMessage` | full outbound pipeline: target parsing, markdown formatting runs, chunking, receipts (each send runs over its own short-lived `imsg rpc` client) |
+| `sendMessageIMessage` | full outbound pipeline: target parsing, markdown formatting runs, chunking, receipts |
 | `resolveIMessageInboundConversationId`, `normalizeIMessageHandle`, `formatIMessageChatTarget` | the iMessage conversation/handle id model |
 
 Ours is the thin glue (`bridge.mjs`, ~250 lines): map openclaw's inbound
