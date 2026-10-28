@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,6 +242,8 @@ type journalRecoveryEnv struct {
 	binDir    string
 	// backupAddLog collects the fake dolt's `backup add` calls.
 	backupAddLog string
+	// shell runs the harness; empty means bash.
+	shell string
 }
 
 func setupJournalRecoveryEnv(t *testing.T) journalRecoveryEnv {
@@ -291,7 +294,11 @@ func (e journalRecoveryEnv) addDatabase(t *testing.T, name string, corrupt bool,
 // extraEnv sets it, so recovery uses its default whatever the host's
 // environment holds; a later extraEnv entry overrides an earlier one.
 func (e journalRecoveryEnv) command(harness string, extraEnv ...string) *exec.Cmd {
-	cmd := exec.Command("bash", "-c", harness)
+	shell := e.shell
+	if shell == "" {
+		shell = "bash"
+	}
+	cmd := exec.Command(shell, "-c", harness)
 	cmd.Env = append(os.Environ(),
 		"PATH="+e.binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"DATA_DIR="+e.dataDir,
@@ -524,6 +531,145 @@ printf 'result=%s\n' "$result"
 	if blockedByWatchdogPipe {
 		t.Fatal("run_with_timeout command substitution stayed blocked after the watchdog sleep released the timed command because the sleep retained the substitution output pipe")
 	}
+}
+
+// runWithTimeoutShells are the shells gc-beads-bd.sh must work under: bash,
+// and the system sh (dash on Debian, bash in POSIX mode on macOS).
+var runWithTimeoutShells = []string{"bash", "sh"}
+
+// forEachRunWithTimeoutShell runs fn as one subtest per shell in
+// runWithTimeoutShells, skipping shells that are not installed.
+func forEachRunWithTimeoutShell(t *testing.T, fn func(t *testing.T, shell string)) {
+	t.Helper()
+	for _, shell := range runWithTimeoutShells {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s not available; skipping shell-function test", shell)
+			}
+			fn(t, shell)
+		})
+	}
+}
+
+// runWithTimeoutFunction returns run_with_timeout as written in gc-beads-bd.sh.
+func runWithTimeoutFunction(t *testing.T) string {
+	t.Helper()
+	root := repoRootForLint(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	return extractShellFunction(t, string(scriptBytes), "run_with_timeout")
+}
+
+// newRunWithTimeoutPipe returns a pipe whose ends are closed at test cleanup.
+func newRunWithTimeoutPipe(t *testing.T, name string) (*os.File, *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create %s pipe: %v", name, err)
+	}
+	t.Cleanup(func() {
+		_ = r.Close()
+		_ = w.Close()
+	})
+	return r, w
+}
+
+func TestRunWithTimeoutStopsWatchdogSleepWhenCommandFinishes(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		runWithTimeout := runWithTimeoutFunction(t)
+		signalR, signalW := newRunWithTimeoutPipe(t, "sleep-signal")
+		releaseR, releaseW := newRunWithTimeoutPipe(t, "sleep-release")
+		commandGateR, commandGateW := newRunWithTimeoutPipe(t, "command-gate")
+
+		binDir := t.TempDir()
+		writeExecutable(t, filepath.Join(binDir, "sleep"), `#!/bin/sh
+set -u
+[ "$#" -eq 1 ] && [ "$1" = "120" ] || exit 64
+printf 'started %s\n' "$$" >&"$SLEEP_SIGNAL_FD"
+printf 'go\n' >&"$COMMAND_GATE_WRITE_FD"
+IFS= read -r release <&"$SLEEP_RELEASE_FD"
+[ "$release" = "release" ] || exit 65
+printf 'finished\n' >&"$SLEEP_SIGNAL_FD"
+`)
+
+		harness := "set -eu\n" + runWithTimeout + `
+status=0
+run_with_timeout 120 sh -c 'IFS= read -r gate <&"$COMMAND_GATE_READ_FD"; [ "$gate" = go ]' || status=$?
+printf 'rc=%s\n' "$status"
+`
+		env := journalRecoveryEnv{binDir: binDir, shell: shell}
+		cmd := env.command(harness,
+			"SLEEP_SIGNAL_FD=3",
+			"SLEEP_RELEASE_FD=4",
+			"COMMAND_GATE_WRITE_FD=5",
+			"COMMAND_GATE_READ_FD=6",
+		)
+		cmd.ExtraFiles = []*os.File{signalW, releaseR, commandGateW, commandGateR}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start run_with_timeout harness: %v", err)
+		}
+		_ = signalW.Close()
+		_ = releaseR.Close()
+		_ = commandGateR.Close()
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		// Opening the gate and releasing the fake sleep lets a stray command
+		// or sleep finish, so a failing run leaves nothing behind.
+		defer func() {
+			_, _ = fmt.Fprintln(commandGateW, "go")
+			_ = commandGateW.Close()
+			_, _ = fmt.Fprintln(releaseW, "release")
+			_ = releaseW.Close()
+		}()
+
+		if err := signalR.SetReadDeadline(time.Now().Add(testutil.ExecRaceTimeout)); err != nil {
+			t.Fatalf("set sleep-signal deadline: %v", err)
+		}
+		signalReader := bufio.NewReader(signalR)
+		var started string
+		var sleepPID int
+		if _, err := fmt.Fscan(signalReader, &started, &sleepPID); err != nil || started != "started" {
+			_ = cmd.Process.Kill()
+			<-done
+			t.Fatalf("read watchdog sleep started signal = %q %d (%v), want started <pid>", started, sleepPID, err)
+		}
+
+		timer := time.NewTimer(testutil.ExecRaceTimeout)
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run_with_timeout harness failed: %v\nstderr: %s", err, stderr.String())
+			}
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			<-done
+			t.Fatal("run_with_timeout harness did not return after the timed command finished")
+		}
+		if got, want := stdout.String(), "rc=0\n"; got != want {
+			t.Errorf("harness output = %q, want %q", got, want)
+		}
+		if pidAlive(sleepPID) {
+			t.Fatalf("watchdog sleep (pid %d) still runs after run_with_timeout returned; it holds every caller descriptor above 2 until the timeout", sleepPID)
+		}
+
+		_, _ = fmt.Fprintln(releaseW, "release")
+		_ = releaseW.Close()
+		rest, err := io.ReadAll(signalReader)
+		if err != nil {
+			t.Fatalf("sleep-signal pipe still held open after the harness exited: %v", err)
+		}
+		if got := strings.TrimSpace(string(rest)); got != "" {
+			t.Fatalf("sleep-signal pipe read %q after the harness exited, want EOF", got)
+		}
+	})
 }
 
 func prodRepoState(backupDir string) string {
