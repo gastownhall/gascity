@@ -350,3 +350,56 @@ func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) 
 		t.Errorf("live control bead status = %q, want closed by the orphaned-workflow dispatch", got.Status)
 	}
 }
+
+// TestDrainWorkflowServeWorkCountsQuarantineAsProgress guards the other nil
+// return that is not a Processed result: handleControlDispatchError
+// quarantines a control bead whose ProcessControl error has no retry tier by
+// closing it, which is a write, so the drain must keep counting it as progress.
+func TestDrainWorkflowServeWorkCountsQuarantineAsProgress(t *testing.T) {
+	store := beads.NewMemStore()
+	cityDir := newSkipDispatchCity(t, store)
+	unsupported, err := store.Create(beads.Bead{
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: "unsupported-control-kind"},
+	})
+	if err != nil {
+		t.Fatalf("seed control bead: %v", err)
+	}
+
+	prevInterval := workflowServeIdlePollInterval
+	t.Cleanup(func() { workflowServeIdlePollInterval = prevInterval })
+	workflowServeIdlePollInterval = 0
+
+	stubServeQueue(t, func() []hookBead {
+		current, err := store.Get(unsupported.ID)
+		if err != nil {
+			t.Fatalf("read control bead: %v", err)
+		}
+		if current.Status != "open" {
+			return nil
+		}
+		return []hookBead{controlQueueRow(current)}
+	})
+	dispatches := countServeDispatches(t)
+
+	result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, cityDir, cityDir, "bd ready", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if got := dispatches[unsupported.ID]; got != 1 {
+		t.Errorf("unsupported control bead dispatched %d times, want 1", got)
+	}
+	got, err := store.Get(unsupported.ID)
+	if err != nil {
+		t.Fatalf("read control bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("premise: control bead status = %q, want closed by quarantine", got.Status)
+	}
+	if !result.processedAny || result.pendingAny {
+		t.Errorf("drain result = %+v, want processed and not pending for a quarantine", result)
+	}
+	if !dispatchWakeFileExists(t, cityDir) {
+		t.Errorf("dispatch wake file missing after a quarantine close")
+	}
+}
