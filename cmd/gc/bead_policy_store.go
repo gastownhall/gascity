@@ -373,7 +373,11 @@ func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.Que
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
-		TierMode:      policyTierFromOpts(opts),
+		// Every unwrapped ListByLabel backing (CachingStore, BdStore, MemStore,
+		// sqlite, DoltLite) sorts newest-first; forwarding no sort left the order
+		// store-defined, and over a cached read that means map iteration order.
+		Sort:     beads.SortCreatedDesc,
+		TierMode: policyTierFromOpts(opts),
 	})
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -107,6 +108,19 @@ func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 			want: func(q beads.ListQuery) error {
 				if q.Label != "scope" || q.Limit != 7 || q.TierMode != beads.TierBoth {
 					return fmt.Errorf("query = %#v, want label scope, limit 7, and TierBoth", q)
+				}
+				return nil
+			},
+		},
+		{
+			name: "ListByLabel forwards the backings' newest-first sort",
+			run: func() error {
+				_, err := store.ListByLabel("scope", 7)
+				return err
+			},
+			want: func(q beads.ListQuery) error {
+				if q.Sort != beads.SortCreatedDesc {
+					return fmt.Errorf("query.Sort = %q, want SortCreatedDesc (every unwrapped ListByLabel sets it; SortDefault over a cache map is non-deterministic)", q.Sort)
 				}
 				return nil
 			},
@@ -277,6 +291,46 @@ func TestBeadPolicyStoreHandleReadsArePolicyAware(t *testing.T) {
 				t.Fatalf("handle Ready TierMode = %v, want TierBoth", backing.readyQueries[0].TierMode)
 			}
 		})
+	}
+}
+
+// TestBeadPolicyStoreListByLabelSortsNewestFirst pins the wrapper's forwarded
+// sort behaviorally: over a fully-primed CachingStore (rows served from the
+// snapshot map, whose iteration order is undefined), ListByLabel returns the
+// same newest-first order every unwrapped ListByLabel backing guarantees —
+// all rows newest-first, and with a limit, the newest rows.
+func TestBeadPolicyStoreListByLabelSortsNewestFirst(t *testing.T) {
+	backing := beads.NewMemStore()
+	for _, title := range []string{"oldest", "middle", "newest"} {
+		if _, err := backing.Create(beads.Bead{Title: title, Labels: []string{"scope"}}); err != nil {
+			t.Fatalf("seed %s: %v", title, err)
+		}
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(cached, &config.City{})
+
+	all, err := store.ListByLabel("scope", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 0): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("ListByLabel(scope, 0) returned %d beads, want 3", len(all))
+	}
+	got := []string{all[0].Title, all[1].Title, all[2].Title}
+	want := []string{"newest", "middle", "oldest"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ListByLabel(scope, 0) = %v, want %v (newest first)", got, want)
+	}
+
+	one, err := store.ListByLabel("scope", 1)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 1): %v", err)
+	}
+	if len(one) != 1 || one[0].Title != "newest" {
+		t.Fatalf("ListByLabel(scope, 1) = %+v, want only the newest bead", one)
 	}
 }
 
