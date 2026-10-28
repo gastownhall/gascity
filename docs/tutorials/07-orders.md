@@ -226,9 +226,13 @@ The rules:
 - Every order has either `formula` or `exec`, never both.
 - Exec orders can't have a `pool` — there's no agent pipeline to route to.
 - The script receives `ORDER_DIR` (the directory containing the order file) in
-  its environment; pack-sourced orders also get `PACK_DIR`.
+  its environment; pack-sourced orders also get `PACK_DIR`. It also receives
+  `GC_CITY_NAME`, the city's effective runtime identity (the registered name
+  under a supervisor, else the site-bound or declared name, else the city
+  directory basename) — never a supervisor-wide ambient value.
 - An `[order.env]` table exports extra environment variables into the script —
   handy for tuning thresholds without editing it. `env` is exec-only.
+  Controller-owned keys such as `GC_CITY_NAME` are rejected there.
 - Default timeout is 30s for formula orders, 300s for exec orders.
 
 ## Timeouts
