@@ -1,14 +1,19 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // This file pins the serve drain's handling of a control dispatch that made no
@@ -90,6 +95,81 @@ func TestDrainWorkflowServeWorkSkipsNonOpenControlWithoutSpinning(t *testing.T) 
 				t.Errorf("dispatch wake file written for a skip-only drain, want none: a skip must not tell every worker to skip its poll sleep")
 			}
 		})
+	}
+}
+
+// TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps pins the third impact of
+// #6024: a --follow drain that only ever skips a stale non-open row used to
+// report processedAny on every sweep, pinning the idle backoff at its 1s floor
+// forever. Skip-only sweeps are idle sweeps: the waits must see idleSweeps
+// 0, 1, 2, 3 with sleeps 1s, 2s, 4s and 5s (capped at workflowServeMaxIdleSleep).
+func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	cityDir, store := setUpControlReadyFileStoreCity(t)
+	noBDOnPathForTest(t)
+	stale := createRoutedControl(t, store, beadmeta.KindScopeCheck)
+	if err := store.Close(stale.ID); err != nil {
+		t.Fatalf("close control bead: %v", err)
+	}
+
+	prevList := workflowServeList
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	scans := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		scans++
+		if scans > 20 {
+			t.Fatalf("serve scanned the queue %d times, want one scan per sweep", scans)
+		}
+		return []hookBead{{ID: stale.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck}}}, nil
+	}
+
+	type waitCall struct {
+		idleSweeps int
+		sleepDur   time.Duration
+	}
+	var waitCalls []waitCall
+	stopErr := fmt.Errorf("stop after sequence")
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+		waitCalls = append(waitCalls, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
+		if len(waitCalls) == 4 {
+			return false, stopErr
+		}
+		return false, nil
+	}
+
+	agent := freshnessControlAgent()
+	err := runWorkflowServeFollow(agent, cityDir, cityDir, workflowServeControlReadyQuery(agent), nil, io.Discard)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+
+	want := []waitCall{
+		{idleSweeps: 0, sleepDur: 1 * time.Second},
+		{idleSweeps: 1, sleepDur: 2 * time.Second},
+		{idleSweeps: 2, sleepDur: 4 * time.Second},
+		{idleSweeps: 3, sleepDur: 5 * time.Second},
+	}
+	if !slices.Equal(waitCalls, want) {
+		t.Fatalf("wait calls = %#v, want %#v: skip-only sweeps must engage the idle backoff", waitCalls, want)
+	}
+	if scans != len(want) {
+		t.Errorf("serve scanned the queue %d times across %d sweeps, want one scan per sweep", scans, len(want))
 	}
 }
 
