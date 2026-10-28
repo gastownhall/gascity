@@ -640,9 +640,11 @@ type infraEdgePlan struct {
 	// held counts the edges the binding already carries, which is what makes a
 	// re-run's "0 restored" a statement rather than a hope.
 	held int
-	// crossBoundary counts edges into a work bead. The destination owns no row
-	// for the far endpoint, so the edge stays metadata linkage resolved by the
-	// owning-store read on each side — exactly as importInfraSnapshot leaves it.
+	// crossBoundary counts edges into a work bead: a far endpoint that is no
+	// source infrastructure bead and not resident in the binding. The
+	// destination owns no row for it, so the edge stays metadata linkage
+	// resolved by the owning-store read on each side — exactly as
+	// importInfraSnapshot leaves it.
 	crossBoundary int
 	// collected counts edges into an infrastructure bead the manifest records
 	// and the binding no longer holds. The binding's own GC took the row and the
@@ -677,6 +679,14 @@ type infraEdgePlan struct {
 // bead: none of its edges are planned, and an edge into it is counted, not
 // written. A replacing id's binding row is removed before the copy with every
 // edge touching it, so the binding is read as holding none of them.
+//
+// A far endpoint missing from the source's infrastructure snapshot is
+// cross-boundary only when it is not resident either. Once the clear has run,
+// a bead the copy carried is in the binding alone, and an edge into it from a
+// row this run recovers is a within-infra edge like any other: planned here,
+// and demanded by the equality stage over the same resident set. resident
+// leaves out an id the work store holds as a work bead, so an edge into one
+// stays cross-boundary.
 func planInfraEdges(rows []beads.Bead, resident, infra, proven, occupied, replacing map[string]bool,
 	edgesFor func(beads.Bead) ([]beads.Dep, bool, error), destination beads.Store,
 ) (infraEdgePlan, error) {
@@ -704,7 +714,7 @@ func planInfraEdges(rows []beads.Bead, resident, infra, proven, occupied, replac
 			switch {
 			case occupied[d.DependsOnID]:
 				plan.occupied++
-			case !infra[d.DependsOnID]:
+			case !infra[d.DependsOnID] && !resident[d.DependsOnID]:
 				plan.crossBoundary++
 			case !resident[d.DependsOnID]:
 				if proven[d.DependsOnID] {
@@ -841,7 +851,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// Selected under the manifest's classifier generation, exactly as the
 	// containment check selects: a row the copy's classifier left as work is
 	// no strand, and moving it would carry frozen pre-cutover state.
-	rows, err := readInfraSnapshotAt(source, manifest.Generation)
+	rows, workIDs, err := readInfraSnapshotWithIDs(source, manifest.Generation)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1240,6 +1250,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	for id := range heldRows {
 		if !replacing[id] {
 			occupied[id] = true
+			delete(resident, id)
+		}
+	}
+	// An id the work store holds as a work bead is that bead to every edge the
+	// work store records into it, whatever the binding holds under the id (the
+	// bead the copy carried, after the work store minted its id again): an edge
+	// into it is an edge into work, neither written nor demanded.
+	for id := range resident {
+		if workIDs[id] && !infraIDs[id] {
 			delete(resident, id)
 		}
 	}
@@ -1709,7 +1728,8 @@ func setOf(ids []string) map[string]bool {
 //
 // Resident is the plan's set (planInfraEdges), in both directions: an id the
 // binding holds for a different bead is not resident, so an edge into it,
-// which the plan leaves for the operator's per-id choice, is not demanded.
+// which the plan leaves for the operator's per-id choice, is not demanded;
+// nor is an edge into an id the work store holds as a work bead.
 //
 // A bead whose edges the second read cannot state is no disagreement: an edge
 // nobody can read is a topology this stage cannot prove, not a copy it can

@@ -50,6 +50,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The split-storage runbook walks through it under "Upgrading a city whose
   storage check refuses".
 
+- **Before you deploy, give a split city an explicit bead prefix if its
+  prefix, or a rig's, is in a reserved class namespace: this build refuses
+  such a city, so its `gc hook` stops claiming.** A split city's binding
+  mints ids under the reserved prefixes `gcg`, `gcm`, `gcs`, `gco`, `gcn`
+  and `gcnq`. A work store whose prefix is one of them, or starts with one
+  before its first hyphen (`gcg-alpha`), shares the binding's id namespace,
+  so their ids collide. Ordinary names derive such a prefix: a city named
+  `gas-city-ops` derives `gco`. Earlier builds only warned. This build
+  refuses `gc start`, boot, a config reload and `gc storage migrate` for
+  such a city. The refusal is standing, so from deploy on every `gc hook`
+  in the city fails closed, as in the note above, and the repair steps
+  there do not clear it. Run the new `gc storage status` in each split city
+  before you install it: it exits 1 with `boot plan: REFUSED` and names the
+  prefix. Then set a prefix whose first segment is outside the reserved
+  set: `workspace_prefix = "<prefix>"` in the city's `.gc/site.toml`, or
+  `prefix = "<prefix>"` on the rig's `[[rigs]]` entry. The new prefix
+  applies to beads minted from then on. Work beads already minted under the
+  reserved prefix keep their ids, which the split city looks up in the
+  binding: the new prefix does not move them. The split-storage runbook
+  covers it under "A bead prefix in a reserved namespace".
+
 - **The op journal now records session requests by default on a SQLite
   sessions store.** The three `[ops]` rollout gates, `content` (submit,
   messages, nudge, mail notify), `control` (interrupt, respond) and

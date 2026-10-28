@@ -563,6 +563,37 @@ binding already delivered would deliver it again. Decide per id:
 
 `--dry-run` and `--dump` list these rows without writing.
 
+### A bead prefix in a reserved namespace
+
+The binding mints ids under the reserved prefixes `gcg`, `gcm`, `gcs`, `gco`,
+`gcn` and `gcnq`. A split city whose bead prefix, or a rig's, is one of them,
+or starts with one before its first hyphen (`gcg-alpha`), shares the binding's
+id namespace, so their ids collide. Ordinary names derive such a prefix: a
+city named `gas-city-ops` derives `gco`. Earlier builds only warned. This
+build refuses `gc start`, boot, a config reload and `gc storage migrate`, and
+`gc storage status` exits 1 and names the prefix:
+
+```
+boot plan: REFUSED — a city boot would not serve this configuration: this city
+splits its coordination classes into a binding that mints ids under the
+reserved prefixes (...), and the city's bead prefix "gco" (derived from
+"gas-city-ops" unless set) is in the reserved "gco" namespace; ...
+```
+
+The refusal is standing, so from deploy on every `gc hook` in the city fails
+closed and claims nothing, and the repair steps above do not clear it. Fix it
+before you install the new `gc`, with a prefix whose first segment is outside
+the reserved set:
+
+| Prefix | Set it with |
+|---|---|
+| The city's | `workspace_prefix = "<prefix>"` in `.gc/site.toml` |
+| A rig's | `prefix = "<prefix>"` on its `[[rigs]]` entry |
+
+The new prefix applies to beads minted from then on. Work beads already minted
+under the reserved prefix keep their ids, which the split city looks up in the
+binding: the new prefix does not move them.
+
 ## Watching a cutover from outside
 
 A boot that reaches a verdict about the binding publishes one

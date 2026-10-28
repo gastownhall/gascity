@@ -1828,18 +1828,27 @@ func readInfraSnapshot(source beads.Store) ([]beads.Bead, error) {
 // a retained copy, or a row to move (infra_copy_manifest.go, "The classifier
 // generation").
 func readInfraSnapshotAt(source beads.Store, gen coordclass.Generation) ([]beads.Bead, error) {
+	infra, _, err := readInfraSnapshotWithIDs(source, gen)
+	return infra, err
+}
+
+// readInfraSnapshotWithIDs is readInfraSnapshotAt, also returning the id of
+// every row the work store holds, infrastructure or not, from the same list.
+func readInfraSnapshotWithIDs(source beads.Store, gen coordclass.Generation) ([]beads.Bead, map[string]bool, error) {
 	rows, err := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
-		return nil, fmt.Errorf("listing work store: %w", err)
+		return nil, nil, fmt.Errorf("listing work store: %w", err)
 	}
+	ids := make(map[string]bool, len(rows))
 	infra := make([]beads.Bead, 0, len(rows))
 	for _, b := range rows {
+		ids[b.ID] = true
 		if coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
 			continue
 		}
 		infra = append(infra, b)
 	}
-	return infra, nil
+	return infra, ids, nil
 }
 
 // infraSourceEdgePayloadRefusal walks the source's within-infra edges and

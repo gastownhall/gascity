@@ -31,7 +31,8 @@ import (
 //   - the city has served a split or migrated onto one, or cleared its work
 //     store (the durable notes storageBootGate already holds a revert with;
 //     `gc storage migrate` writes the served note too), or has a binding root
-//     at the default .gc/store;
+//     at the default .gc/store: one holding anything but the legacy sessions
+//     database, which a single-store city keeps there too;
 //   - city.toml, or a fragment its include list names, cannot be read or is
 //     remote;
 //   - any of those files declares a storage table or key;
@@ -72,9 +73,7 @@ func cityMayRelocateClasses(cityPath string) bool {
 	if _, present, err := readInfraClearedNote(cityPath); present || err != nil {
 		return true
 	}
-	// The default binding root inside the city: a binding has been created
-	// here, whatever the config now says.
-	if _, err := os.Stat(filepath.Join(cityPath, config.DefaultSQLiteStoragePath)); err == nil || !errors.Is(err, fs.ErrNotExist) {
+	if defaultBindingRootInUse(cityPath) {
 		return true
 	}
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
@@ -99,6 +98,35 @@ func cityMayRelocateClasses(cityPath string) bool {
 			return true
 		}
 		if fragmentMayDeclareStorage(localIncludePath(inc, cityPath)) {
+			return true
+		}
+	}
+	return false
+}
+
+// legacySessionsDatabaseEntries are the files a single-store city may keep at
+// the default binding root: the legacy sessions database
+// (sqlite.ReadLegacySessionsSnapshot) and its SQLite sidecars. None is a
+// binding's.
+var legacySessionsDatabaseEntries = map[string]bool{
+	"sessions.db": true, "sessions.db-wal": true, "sessions.db-shm": true, "sessions.db-journal": true,
+}
+
+// defaultBindingRootInUse reports whether the default binding root inside
+// cityPath holds anything but the legacy sessions database, or cannot be read:
+// then a binding has been created there, whatever the config now says. The
+// directory alone is no evidence, because a single-store city keeps that
+// database in it.
+func defaultBindingRootInUse(cityPath string) bool {
+	entries, err := os.ReadDir(filepath.Join(cityPath, config.DefaultSQLiteStoragePath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if !legacySessionsDatabaseEntries[e.Name()] {
 			return true
 		}
 	}

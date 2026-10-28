@@ -255,12 +255,13 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 // isOwnSessionWait reports a durable session wait written without gc:wait
 // (session.IsWaitBead): a wait-typed bead whose session:<session_id> label
 // names its own session_id. The per-entity label on any other shape is not a
-// class signal.
+// class signal. Both reads go through the vocabulary table, so TouchesClass
+// sees a write of either.
 func isOwnSessionWait(beadType string, labels []string, metadata map[string]string) bool {
 	if beadType != typeWait && beadType != typeWaitLegacy {
 		return false
 	}
-	sessionID := metadata["session_id"]
+	sessionID := classMeta(metadata, metaSessionID)
 	return sessionID != "" && hasLabel(labels, labelSessionPrefix+sessionID)
 }
 
@@ -321,17 +322,23 @@ func isSyntheticConvoy(metadata map[string]string) bool {
 // outside the table never fires (and the golden table fails), and anything a
 // write touches outside the table cannot change a class — which is what lets
 // TouchesClass skip the before-read for it.
+//
+// The own-session-wait arm puts the session: prefix and the session_id key in
+// it. The arm matches only the label naming the bead's own session_id, but
+// which label that is depends on the bead, so TouchesClass treats every
+// session: label write as live: an over-approximation that costs a write a
+// before-read, never a missed flip.
 var (
 	classifierLabels = map[string]bool{
 		labelWisp: true, labelGCWisp: true, labelOrderTracking: true, labelSession: true,
 		labelWait: true, labelOp: true, labelFact: true, labelRuntime: true,
 		labelNudge: true, labelNudgeQueue: true,
 	}
-	classifierLabelPrefixes = []string{labelExtmsgPrefix}
+	classifierLabelPrefixes = []string{labelExtmsgPrefix, labelSessionPrefix}
 	classifierMetadataKeys  = map[string]bool{
 		beadmeta.KindMetadataKey: true, beadmeta.FormulaContractMetadataKey: true,
 		beadmeta.RootBeadIDMetadataKey: true, beadmeta.SyntheticMetadataKey: true,
-		beadmeta.SyntheticKindMetadataKey: true,
+		beadmeta.SyntheticKindMetadataKey: true, metaSessionID: true,
 	}
 )
 
@@ -379,7 +386,7 @@ func classMeta(metadata map[string]string, k string) string {
 }
 
 func hasLabel(labels []string, want string) bool {
-	if !classifierLabels[want] {
+	if !isClassifierLabel(want) {
 		return false
 	}
 	for _, l := range labels {

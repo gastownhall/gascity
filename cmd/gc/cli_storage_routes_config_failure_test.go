@@ -268,6 +268,15 @@ func TestCityMayRelocateClassesEvidence(t *testing.T) {
 		{"cleared note", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/storage-infra-cleared.json": `{"binding":"infra","complete":true}`}, true},
 		// The default binding root inside the city.
 		{"binding root at .gc/store", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store/infra.migrated": "infrastructure classes migrated\n"}, true},
+		{"binding database at .gc/store", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store/graph/beads.sqlite": "SQLite format 3\x00"}, true},
+		{"unknown entry beside the legacy sessions database", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store/sessions.db": "SQLite format 3\x00", ".gc/store/other": ""}, true},
+		// Review: .gc/store is also where a single-store city keeps the legacy
+		// sessions database, which is no binding, so a syntax error there still
+		// gets the parse exemption.
+		{"legacy sessions database only at .gc/store", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store/sessions.db": "SQLite format 3\x00", ".gc/store/sessions.db-wal": "", ".gc/store/sessions.db-shm": "", ".gc/store/sessions.db-journal": ""}, false},
+		{"legacy sessions database only, root does not parse", map[string]string{"city.toml": "[workspace\nname = \n", ".gc/store/sessions.db": "SQLite format 3\x00"}, false},
+		{"empty .gc/store directory", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store/": ""}, false},
+		{".gc/store is a file", map[string]string{"city.toml": "[workspace]\nname = \"c\"\n", ".gc/store": ""}, true},
 		// Mutant N20: an include of a shape this scan cannot read.
 		{"include is not a list of strings", map[string]string{"city.toml": "include = 5\n[workspace]\nname = \"c\"\n"}, true},
 		{"include list holds a non-string", map[string]string{"city.toml": "include = [\"a.toml\", 5]\n"}, true},
