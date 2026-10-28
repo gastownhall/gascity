@@ -651,8 +651,7 @@ func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[wor
 				op, err := ladderNoticeOpID(route.st, freshRow, n.Key, e)
 				if err == nil {
 					mark = workladder.NoticeMark{Op: op, At: p.now, Paused: n.Paused}
-					d.Next, _ = workladder.MarkNotice(d.Next, n.Key, mark)
-					d.Changed = true
+					d.Next, _ = workladder.MarkNotice(d.Next, n.Key, mark) // the landed nudge already changed the cell
 					break
 				}
 				fmt.Fprintf(p.l.stderr, "work-ladder: %s: deriving its notice about %s: %v\n", id, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
@@ -736,12 +735,12 @@ func (p *ladderPass) act(l ladderLanded, route *ladderRoute) {
 				if !l.mark.IsZero() {
 					p.settleMark(row.ID, l.mark.Op, workladder.NoticeWithdrawn) // never proposed: the claim was given back
 				}
-			case released[a.Key] == ladderReleaseStarted && !l.mark.IsZero() && e.Notice.Op == l.mark.Op:
+			case released[a.Key] == ladderReleaseStarted && !l.mark.IsZero():
 				// Never proposed: the claim was found started, a new episode
 				// whose settle dropped the mark; one it could not drop is
 				// withdrawn here.
 				p.settleMark(row.ID, l.mark.Op, workladder.NoticeWithdrawn)
-			case !l.mark.IsZero() && e.Notice.Op == l.mark.Op:
+			case !l.mark.IsZero():
 				p.proposeNotice(row, a, e, gen, l.mark, route)
 			case route.unreadable():
 				p.routeUnsent(row, a, gen, route.err)
