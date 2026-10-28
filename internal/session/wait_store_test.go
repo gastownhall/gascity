@@ -266,6 +266,56 @@ func TestCreateWait_ProducesLiteralBeadShape(t *testing.T) {
 	}
 }
 
+// TestCreateWait_MarksRegistrationDuringPendingReset proves a wait registered
+// while a fresh restart is pending keeps the retiring epoch as registered_epoch
+// and records registered_reset_pending, so the wake pass can tell it belongs to
+// the conversation the pending reset starts.
+func TestCreateWait_MarksRegistrationDuringPendingReset(t *testing.T) {
+	sess := sessionBeadFixture("gc-session", "open", map[string]string{
+		"__title":                    "worker",
+		"session_name":               "worker-1",
+		"continuation_epoch":         "2",
+		"continuation_reset_pending": "true",
+	})
+	s, rec := recordingWaitStore(t, sess)
+
+	got, err := s.CreateWait(WaitSpec{
+		SessionID:        "gc-session",
+		Kind:             "deps",
+		DepIDs:           []string{"gc-1"},
+		DepMode:          "all",
+		Note:             "Pick up the next step.",
+		CreatedBySession: "gc-origin",
+		Now:              waitStoreNow,
+	})
+	if err != nil {
+		t.Fatalf("CreateWait: %v", err)
+	}
+	creates := rec.CallsForOp("Create")
+	if len(creates) != 1 {
+		t.Fatalf("want 1 Create, got %d", len(creates))
+	}
+	wantMeta := map[string]string{
+		"session_id":               "gc-session",
+		"session_name":             "worker-1",
+		"kind":                     "deps",
+		"state":                    "pending",
+		"dep_ids":                  "gc-1",
+		"dep_mode":                 "all",
+		"registered_epoch":         "2",
+		"registered_reset_pending": "true",
+		"delivery_attempt":         "1",
+		"created_by_session":       "gc-origin",
+		"created_at":               waitStoreNow.Format(time.RFC3339),
+	}
+	if !reflect.DeepEqual(map[string]string(creates[0].Bead.Metadata), wantMeta) {
+		t.Errorf("metadata = %#v, want %#v", creates[0].Bead.Metadata, wantMeta)
+	}
+	if got.RegisteredEpoch != "2" {
+		t.Errorf("returned RegisteredEpoch = %q, want 2", got.RegisteredEpoch)
+	}
+}
+
 // --- RetryClosedWait: ported oracles from cmd/gc TestRetryClosedWait_* ---
 
 func TestRetryClosedWait_CreatesReplacement(t *testing.T) {
@@ -378,6 +428,75 @@ func TestRetryClosedWait_PreservesNonDepsMetadata(t *testing.T) {
 	meta := rec.CallsForOp("Create")[0].Bead.Metadata
 	if meta["kind"] != "probe" || meta["probe_name"] != "github-pr-approval" || meta["probe_target"] != "owner/repo#123" {
 		t.Fatalf("non-deps metadata not preserved: %#v", meta)
+	}
+}
+
+// TestRetryClosedWait_RefreshesResetPendingMarker proves the retry refreshes
+// registered_reset_pending together with registered_epoch from the live
+// session: set while a reset is pending, dropped when none is, and carried
+// unchanged with the epoch when the session read fails.
+func TestRetryClosedWait_RefreshesResetPendingMarker(t *testing.T) {
+	for _, kind := range []string{"deps", "probe"} {
+		for _, tc := range []struct {
+			name        string
+			session     map[string]string // nil: the session bead is missing
+			carried     map[string]string
+			wantEpoch   string
+			wantPending string
+		}{
+			{
+				name:        "reset-pending-sets-flag",
+				session:     map[string]string{"continuation_epoch": "2", "continuation_reset_pending": "true"},
+				carried:     map[string]string{"registered_epoch": "1"},
+				wantEpoch:   "2",
+				wantPending: "true",
+			},
+			{
+				name:      "no-reset-drops-carried-flag",
+				session:   map[string]string{"continuation_epoch": "3"},
+				carried:   map[string]string{"registered_epoch": "2", "registered_reset_pending": "true"},
+				wantEpoch: "3",
+			},
+			{
+				name:        "session-read-fails-carries-pair",
+				carried:     map[string]string{"registered_epoch": "2", "registered_reset_pending": "true"},
+				wantEpoch:   "2",
+				wantPending: "true",
+			},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				meta := map[string]string{
+					"session_name":     "worker",
+					"kind":             kind,
+					"state":            "failed",
+					"delivery_attempt": "1",
+				}
+				for k, v := range tc.carried {
+					meta[k] = v
+				}
+				seed := []beads.Bead{waitBeadFixture("w-1", "closed", "gc-session", meta)}
+				if tc.session != nil {
+					sessMeta := map[string]string{"session_name": "worker"}
+					for k, v := range tc.session {
+						sessMeta[k] = v
+					}
+					seed = append(seed, sessionBeadFixture("gc-session", "open", sessMeta))
+				}
+				s, rec := recordingWaitStore(t, seed...)
+
+				if _, err := s.RetryClosedWait("w-1", "2", waitStoreNow); err != nil {
+					t.Fatalf("RetryClosedWait: %v", err)
+				}
+				created := rec.CallsForOp("Create")[0].Bead.Metadata
+				if got := created["registered_epoch"]; got != tc.wantEpoch {
+					t.Errorf("registered_epoch = %q, want %q", got, tc.wantEpoch)
+				}
+				got, present := created["registered_reset_pending"]
+				if got != tc.wantPending || present != (tc.wantPending != "") {
+					t.Errorf("registered_reset_pending = %q (present=%v), want %q", got, present, tc.wantPending)
+				}
+			})
+		}
 	}
 }
 
