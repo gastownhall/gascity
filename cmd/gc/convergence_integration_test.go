@@ -1188,6 +1188,152 @@ func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 	}
 }
 
+const convergenceStopRoutedFormula = `formula = "routed-flow"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+assignee = "worker"
+metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/worker" }
+`
+
+func readyForAssignee(t *testing.T, store beads.Store, assignee string) map[string]bool {
+	t.Helper()
+	ready, err := store.Ready(beads.ReadyQuery{Assignee: assignee})
+	if err != nil {
+		t.Fatalf("Ready(assignee=%s): %v", assignee, err)
+	}
+	ids := make(map[string]bool, len(ready))
+	for _, b := range ready {
+		ids[b.ID] = true
+	}
+	return ids
+}
+
+func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		params      map[string]string
+		iterations  int  // wisps closed by the worker before the stop
+		wantInReady bool // the step is offered to the worker before the stop
+	}{
+		{name: "manual-gate/iteration-1", params: map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, store := setupConvergenceRuntime(t)
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "routed-flow.toml"), []byte(convergenceStopRoutedFormula), 0o644); err != nil {
+				t.Fatalf("writing formula: %v", err)
+			}
+			cond := filepath.Join(dir, "never-converged.sh")
+			if err := os.WriteFile(cond, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatalf("writing gate condition: %v", err)
+			}
+			cr.convScopes[""] = cr.newConvergenceScope("", store, cr.cityPath, []string{dir}, false)
+
+			params := map[string]string{"formula": "routed-flow", "target": "worker", "max_iterations": "5"}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			if params["gate_mode"] == "condition" {
+				params["gate_condition"] = cond
+			}
+			reply := sendAndReceive(t, cr, convergenceRequest{Command: "create", Params: params})
+			if reply.Error != "" {
+				t.Fatalf("create: %s", reply.Error)
+			}
+			var created convergence.CreateResult
+			if err := json.Unmarshal(reply.Result, &created); err != nil {
+				t.Fatalf("unmarshaling create result: %v", err)
+			}
+			if err := hqScope(t, cr).adapter.populateIndex(); err != nil {
+				t.Fatalf("populateIndex: %v", err)
+			}
+			for i := 0; i < tc.iterations; i++ {
+				root, err := store.Get(created.BeadID)
+				if err != nil {
+					t.Fatalf("Get loop: %v", err)
+				}
+				active := root.Metadata[convergence.FieldActiveWisp]
+				kids, err := store.Children(active)
+				if err != nil {
+					t.Fatalf("Children(%s): %v", active, err)
+				}
+				for _, k := range kids {
+					if err := store.Close(k.ID); err != nil {
+						t.Fatalf("closing step %s: %v", k.ID, err)
+					}
+				}
+				if err := store.Close(active); err != nil {
+					t.Fatalf("closing wisp %s: %v", active, err)
+				}
+				cr.convergenceTick(context.Background())
+			}
+
+			root, err := store.Get(created.BeadID)
+			if err != nil {
+				t.Fatalf("Get loop: %v", err)
+			}
+			wispID := root.Metadata[convergence.FieldActiveWisp]
+			steps, err := store.Children(wispID)
+			if err != nil || len(steps) == 0 {
+				t.Fatalf("wisp %s steps: %v (n=%d)", wispID, err, len(steps))
+			}
+			readyBefore := readyForAssignee(t, store, "worker")
+			for _, s := range steps {
+				if s.Status == "closed" || s.Assignee != "worker" || s.Metadata["gc.routed_to"] != "pool/worker" {
+					t.Fatalf("step %s before stop: status=%s assignee=%q gc.routed_to=%q, want open, worker, pool/worker",
+						s.ID, s.Status, s.Assignee, s.Metadata["gc.routed_to"])
+				}
+				if readyBefore[s.ID] != tc.wantInReady {
+					t.Fatalf("step %s in Ready(assignee=worker) before stop = %v, want %v", s.ID, readyBefore[s.ID], tc.wantInReady)
+				}
+			}
+
+			if r := sendAndReceive(t, cr, convergenceRequest{Command: "stop", BeadID: created.BeadID, User: "op"}); r.Error != "" {
+				t.Fatalf("stop: %s", r.Error)
+			}
+
+			loop, err := store.Get(created.BeadID)
+			if err != nil {
+				t.Fatalf("Get loop: %v", err)
+			}
+			if loop.Status != "closed" || loop.Metadata[convergence.FieldState] != convergence.StateTerminated ||
+				loop.Metadata[convergence.FieldTerminalReason] != convergence.TerminalStopped {
+				t.Errorf("loop after stop: status=%s state=%s terminal_reason=%s, want closed/terminated/stopped",
+					loop.Status, loop.Metadata[convergence.FieldState], loop.Metadata[convergence.FieldTerminalReason])
+			}
+			wisp, err := store.Get(wispID)
+			if err != nil {
+				t.Fatalf("Get wisp: %v", err)
+			}
+			if wisp.Status != "closed" {
+				t.Errorf("wisp %s status = %q, want closed", wispID, wisp.Status)
+			}
+			readyAfter := readyForAssignee(t, store, "worker")
+			for _, s := range steps {
+				got, err := store.Get(s.ID)
+				if err != nil {
+					t.Fatalf("Get step: %v", err)
+				}
+				if got.Status != "closed" {
+					t.Errorf("step %s of the stopped loop's wisp is %q, want closed", got.ID, got.Status)
+				}
+				if got.Metadata["close_reason"] != convergence.CloseReasonManualSupersede {
+					t.Errorf("step %s close_reason = %q, want %q", got.ID, got.Metadata["close_reason"], convergence.CloseReasonManualSupersede)
+				}
+				if got.Metadata["gc.outcome"] != "skipped" {
+					t.Errorf("step %s gc.outcome = %q, want skipped", got.ID, got.Metadata["gc.outcome"])
+				}
+				if readyAfter[got.ID] {
+					t.Errorf("step %s still in Ready(assignee=worker) after stop", got.ID)
+				}
+			}
+		})
+	}
+}
+
 func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
 	const reason = "convergence: test descendant close reason"
 	store := beads.NewMemStore()
