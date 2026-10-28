@@ -2784,6 +2784,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
+					logAmbiguousBareNamedSession(cfg, dt, stderr, infoPostHeal, clk.Now())
 					// The drain ends a live runtime: the wide set, read live (O4).
 					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkInStores(sw, refuseScope(infoByID[id], cfg))
 					if assignedErr != nil {

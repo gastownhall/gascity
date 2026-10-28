@@ -197,11 +197,13 @@ func TestV2RequalifiedNamedSessionSelectsAndRenamesBareRowInOnePass(t *testing.T
 
 // requalifiedTicker is one reconciler over a requalified fixture: tick runs
 // one tick and moves the clock a patrol on, store is the sessions store,
-// actions the runtime's action log.
+// actions the runtime's action log, log the legacy reconciler's log (nil
+// for v2).
 type requalifiedTicker struct {
 	tick    func()
 	store   beads.Store
 	actions func() map[string]int
+	log     *strings.Builder
 }
 
 // requalifiedTickerNames are the reconcilers newRequalifiedTicker runs.
@@ -211,7 +213,9 @@ var requalifiedTickerNames = []string{"legacy", "v2"}
 func newRequalifiedTicker(t *testing.T, name string, f parityFixture) requalifiedTicker {
 	if name == "legacy" {
 		w := newLegacyWorld(t, f, t.TempDir(), f.beads())
-		return requalifiedTicker{tick: func() { w.tick(t, true); w.clk.Advance(simPatrol) }, store: w.store, actions: w.sp.actions}
+		log := &strings.Builder{}
+		w.log = log
+		return requalifiedTicker{tick: func() { w.tick(t, true); w.clk.Advance(simPatrol) }, store: w.store, actions: w.sp.actions, log: log}
 	}
 	w := requalifiedV2World(t, f)
 	return requalifiedTicker{tick: func() { w.once(t); w.s.advance(simPatrol) }, store: w.s.legs[0].backing, actions: w.sp.actions}
@@ -269,5 +273,58 @@ func TestRequalifiedNamedSessionKeepsWorkRowAndRuntimeAcrossTicks(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// AC-4: a bare identity two bindings share is ambiguous; neither reconciler
+// selects or migrates its row, nor stops, closes, retires or unclaims it, and
+// legacy logs both candidates.
+func TestAmbiguousBareNamedSessionRowIsKeptUntouched(t *testing.T) {
+	cfg := requalifiedCity(t, "always", true)()
+	d := newAllocFixture(t, cfg).sessions(preAdoptRow("always")).alive(requalifiedBare, InventoryAttrs{}).decide()
+	if e := entryOf(t, d, "gc-1"); e.InDesired {
+		t.Errorf("planNamed selected gc-1 for an ambiguous bare identity: %+v", e)
+	}
+	for _, name := range requalifiedTickerNames {
+		t.Run(name, func(t *testing.T) {
+			w := newRequalifiedTicker(t, name, requalifiedFixture(t, "always", true))
+			w.tick()
+			row, err := w.store.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Status != "open" {
+				t.Errorf("row gc-1 is %s, want open", row.Status)
+			}
+			for _, key := range []string{"session_name", "configured_named_identity", "alias"} {
+				if got := row.Metadata[key]; got != requalifiedBare {
+					t.Errorf("row %s = %q, want %q", key, got, requalifiedBare)
+				}
+			}
+			if got := row.Metadata["retired_named_identity"]; got != "" {
+				t.Errorf("row was retired as %q", got)
+			}
+			work, err := w.store.Get("gw-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if work.Status != "in_progress" || work.Assignee != requalifiedBare {
+				t.Errorf("work %s assigned %q, want in_progress assigned %q", work.Status, work.Assignee, requalifiedBare)
+			}
+			for _, acted := range runtimeLifecycleActions(w.actions()) {
+				if strings.HasSuffix(acted, " "+requalifiedBare) {
+					t.Errorf("the row's runtime was acted on: %s", acted)
+				}
+			}
+			if w.log == nil {
+				return
+			}
+			logged := slices.ContainsFunc(strings.Split(w.log.String(), "\n"), func(line string) bool {
+				return strings.Contains(line, "gc-1") && strings.Contains(line, requalifiedQualified) && strings.Contains(line, "contentbuild/ops.golden-hon")
+			})
+			if !logged {
+				t.Errorf("legacy logged no line naming gc-1's two candidates:\n%s", w.log.String())
+			}
+		})
 	}
 }

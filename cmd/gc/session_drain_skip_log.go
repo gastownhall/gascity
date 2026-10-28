@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -106,4 +108,26 @@ func logStandingCondition(dt *drainTracker, w io.Writer, beadID, kind, line stri
 	if dt.noteSkipLine(drainSkipKey{beadID: beadID, kind: kind}, kind, now) || gcDebugEnabled() {
 		fmt.Fprintln(w, line) //nolint:errcheck // best-effort diagnostics
 	}
+}
+
+// logAmbiguousBareNamedSession prints, as a standing condition, that info is
+// a named session row stored under a bare identity several bindings qualify
+// (gascity#5957): no one configured session adopts it, so it stays an
+// undesired row its work keeps.
+func logAmbiguousBareNamedSession(cfg *config.City, dt *drainTracker, w io.Writer, info sessionpkg.Info, now time.Time) {
+	if !isNamedSessionInfo(info) {
+		return
+	}
+	identity := namedSessionIdentityInfo(info)
+	candidates := config.NamedSessionBareCandidates(cfg, identity)
+	if len(candidates) < 2 || config.FindNamedSession(cfg, identity) != nil {
+		return
+	}
+	names := make([]string, len(candidates))
+	for i, ns := range candidates {
+		names[i] = ns.QualifiedName()
+	}
+	logStandingCondition(dt, w, info.ID, "named_identity_ambiguous", fmt.Sprintf(
+		"session reconciler: not migrating %s: named identity %q matches %d configured named sessions (%s)",
+		info.ID, identity, len(names), strings.Join(names, ", ")), now)
 }

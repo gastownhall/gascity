@@ -525,6 +525,8 @@ type legacyWorld struct {
 	// ticks and rebuilt on a reload, as city_runtime does.
 	it  idleTracker
 	adt assignedWorkDeferTracker
+	// log is the tick's log; nil discards it.
+	log io.Writer
 }
 
 // trackers builds the controller's lifecycle trackers for cfg.
@@ -596,6 +598,10 @@ func (w *legacyWorld) list(t *testing.T) []beads.Bead {
 // reconcile is set, the session reconciler over the synced rows.
 func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	cfg, now := w.cfg, w.clk.Now()
+	logw := w.log
+	if logw == nil {
+		logw = io.Discard
+	}
 	// The tick's one read of the work legs, as runTickPhases mints it.
 	sw := testSeatWork(w.cityPath, cfg, w.store, w.rigs)
 	snap, err := loadSessionBeadSnapshot(w.store)
@@ -604,15 +610,15 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	}
 	if reconcile {
 		// tickFinalizeDrainAckStopPending runs before the demand build.
-		finalizeDrainAckStopPendingSessions(w.cityPath, cfg, w.sp, beads.SessionStore{Store: w.store}, sw, snap.OpenInfos(), w.dops, w.dt, &w.stops, w.clk, w.rec, io.Discard)
+		finalizeDrainAckStopPendingSessions(w.cityPath, cfg, w.sp, beads.SessionStore{Store: w.store}, sw, snap.OpenInfos(), w.dops, w.dt, &w.stops, w.clk, w.rec, logw)
 		w.stops.wg.Wait()
 		if snap, err = loadSessionBeadSnapshot(w.store); err != nil {
 			t.Fatal(err)
 		}
 	}
-	result := buildDesiredStateWithSessionBeadsAt(cfg.Workspace.Name, w.cityPath, now, now, cfg, w.sp, w.store, w.rigs, snap, nil, io.Discard)
+	result := buildDesiredStateWithSessionBeadsAt(cfg.Workspace.Name, w.cityPath, now, now, cfg, w.sp, w.store, w.rigs, snap, nil, logw)
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cfg.Workspace.Name, snap)
-	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, sw, result.State, w.sp, cfgNames, cfg, w.clk, io.Discard, true, snap, nil)
+	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, sw, result.State, w.sp, cfgNames, cfg, w.clk, logw, true, snap, nil)
 	if !reconcile {
 		return
 	}
@@ -657,7 +663,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store, sw,
 		w.dops, awake, w.rigs, readyWaits, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
 		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, w.it, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
-		io.Discard, io.Discard,
+		logw, logw,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
 		withAsyncDrainAckStopTracker(&w.stops), withAssignedWorkDeferTracker(w.adt),
 		withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
