@@ -470,11 +470,14 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		// Two mitigations bound the blast radius: (1) KillByPID confirms death
 		// by PID + /proc start-time identity (pidutil.AliveWithStartTime), so a
 		// genuinely-live root is never misreported as dead — if it resists the
-		// kill it surfaces a real "not confirmed dead" error; and (2) that
-		// error propagates through killExistingOrphans to every gated Start,
-		// which then refuses rather than racing. Independently re-deriving
-		// "is this the current live session" here would require the very
-		// ListRunning that just failed, so it is intentionally not attempted.
+		// kill it surfaces a real "not confirmed dead" error; and (2) a root
+		// that is positively parented by tmux (ParentIsProviderInfrastructure)
+		// makes killExistingOrphans refuse the whole sweep — no root is
+		// terminated and the start fails with ErrRuntimeUnavailable — so a
+		// live pane is never reaped from under a provider that could not list
+		// it (issue #5526). Independently re-deriving "is this the current
+		// live session" here would require the very ListRunning that just
+		// failed, so it is intentionally not attempted.
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 
