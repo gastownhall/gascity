@@ -41,7 +41,8 @@ type wireMissStorage struct {
 }
 
 func (s *wireMissStorage) IssueClaimer() (issueops.Claimer, error) { return wireMissClaimer{s}, nil }
-func (s *wireMissStorage) IssueReader() (issueops.Reader, error)   { return wireMissReader{s: s}, nil }
+
+func (s *wireMissStorage) IssueReader() (issueops.Reader, error) { return wireMissReader{s: s}, nil }
 
 type wireMissClaimer struct{ s *wireMissStorage }
 

@@ -324,6 +324,13 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if shape == storageSplitUnsupported {
 		return nil, fmt.Errorf("%s: [storage.classes] describe an arrangement this build cannot serve. %s", logPrefix, storageSupportedTopologyStatement)
 	}
+	// A split whose HQ or rig prefix is a reserved class prefix shares the
+	// binding's id namespace (split-default audit R10). Refused here, before a
+	// plan is resolved or a binding opened or created; a city that relocates
+	// nothing never reaches this line and keeps the advisory warning.
+	if err := config.ReservedPrefixSplitRefusal(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
 
 	// Resolved once, for both shapes: an unknown provider, a defined reserved
 	// binding, an unreferenced binding or an unusable Work pin is a refusal
@@ -404,6 +411,9 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			advice = fmt.Sprintf("%s: binding %q cannot be served and the reason was not reported (%s)", logPrefix, target.Binding, report.Outcome)
 		}
 		recordStorageBindingOutcome(rec, report, advice)
+		if report.Transient {
+			return nil, storageGateTransientFault{err: errors.New(advice)}
+		}
 		return nil, errors.New(advice)
 	}
 	// The serving outcome is published before the binding opens, so a boot
@@ -425,6 +435,23 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// topology constructor.
 	censusBindingRelics(routes)
 	return routes, nil
+}
+
+// storageGateTransientFault marks a gate refusal that rests on a read that
+// failed (infraMigrationReport.Transient), not on a verdict about the city.
+// The refusal stands for this attempt — a check that could not run is not
+// permission to serve — but it is not memoized, and the drain fence does not
+// fail closed on it.
+type storageGateTransientFault struct{ err error }
+
+func (e storageGateTransientFault) Error() string { return e.err.Error() }
+func (e storageGateTransientFault) Unwrap() error { return e.err }
+
+// isTransientStorageGateFault reports whether err carries a transient gate
+// fault anywhere in its chain.
+func isTransientStorageGateFault(err error) bool {
+	var fault storageGateTransientFault
+	return errors.As(err, &fault)
 }
 
 // revertHoldingNote reports whether a city pointing its classes back at the
@@ -664,13 +691,13 @@ func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Write
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err)}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err), Transient: isTransientStoreFault(err)}
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	infra, err := readInfraSnapshot(source)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err)}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err), Transient: isTransientStoreFault(err)}
 	}
 	if len(infra) == 0 {
 		return infraMigrationReport{Outcome: infraMigrationConverged}

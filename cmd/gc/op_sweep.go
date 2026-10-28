@@ -36,17 +36,16 @@ package main
 // not pay NewStore's capability probe at every controller start.
 //
 // Gates that are auto only by their builtin default (none set in [ops] or
-// through GC_OPS_*) treat a sessions store that cannot record ops at all (no
-// conditional writes, no namespace) as off: a pass that finds the store so
-// logs that once and runs as a gates-off pass, so it raises no
-// ops.recording_degraded event. Every released bd lacks --if-revision, so a
-// default bd city would otherwise degrade on every pass for the controller's
-// life. The loop keeps ticking, as the gates are on, but while that store is
-// still the sessions store a tick with nothing left to retry does nothing: an
-// open over it fails the same way, so it can hold no op this sweeper could
-// close. A reload that replaces the store is opened on the next tick, so ops
-// recorded over a store that can record are swept. An explicit auto or
-// require stays loud.
+// through GC_OPS_*) record only over a SQLite sessions store
+// (opjournal.CheckRecordsByDefault): a pass that finds a Dolt-served or
+// otherwise non-SQLite store, or one that cannot record ops at all (every
+// released bd lacks --if-revision), logs that once and runs as a gates-off
+// pass, so it raises no ops.recording_degraded event and still closes the
+// expired ops an earlier explicit gate recorded there. The loop keeps
+// ticking, as the gates are on, but while that store is still the sessions
+// store a tick with nothing left to retry does nothing. A reload that
+// replaces the store is opened on the next tick, so ops recorded over a
+// SQLite store are swept. An explicit auto or require stays loud.
 
 import (
 	"context"
@@ -105,9 +104,10 @@ type opSweeper struct {
 	st     *opjournal.Store
 	stOver beads.Store
 	booted bool
-	// incapableOver is the sessions-class store the last open found unable
-	// to record ops at all under gates that are auto only by their builtin
-	// default, nil when the last open did not. While it is still the
+	// incapableOver is the sessions-class store the last open found would
+	// not record under gates that are auto only by their builtin default
+	// (not SQLite, or unable to record ops at all), nil when the last open
+	// did not. While it is still the
 	// sessions store, passes run as if every gate were off (pass).
 	incapableOver beads.Store
 	// leftWork reports that the last pass left something a later pass can
@@ -310,7 +310,7 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 			return false
 		}
 	}
-	st, over, err := s.store()
+	st, over, err := s.store(mode != rollout.Off && opsGatesBuiltinDefaultOnly(s.flags))
 	if err != nil {
 		reason := legacyop.DegradeReason(err)
 		if mode != rollout.Off && legacyop.CannotRecord(reason) && opsGatesBuiltinDefaultOnly(s.flags) {
@@ -318,17 +318,26 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 			s.incapableOver = over
 			s.mu.Unlock()
 			if s.logDue(opSweepLogKey{stage: legacyop.StageOpen, reason: "default:" + reason}) {
-				s.logf("op-sweep: the ops gates are auto by default, but the sessions store cannot record ops (%s: %v); "+
-					"sweeping as if every gate were off until a reload replaces it", reason, err)
+				what := "the sessions store cannot record ops"
+				if reason == legacyop.DegradeNotRecordedByDefault {
+					what = "that default records ops only on a SQLite sessions store"
+				}
+				s.logf("op-sweep: the ops gates are auto by default, but %s (%s: %v); "+
+					"sweeping as if every gate were off until a reload replaces it", what, reason, err)
 			}
 			return s.sweep(rollout.Off)
 		}
 		s.fail(mode, legacyop.StageOpen, reason, err)
 		return opSweepRetryable(reason)
 	}
-	s.mu.Lock()
-	s.incapableOver = nil
-	s.mu.Unlock()
+	if mode != rollout.Off {
+		// A pass as if every gate were off (the sessions store is one the
+		// builtin default does not record on, holding ops left to sweep)
+		// keeps the latch, so the ticker stops once that work is done.
+		s.mu.Lock()
+		s.incapableOver = nil
+		s.mu.Unlock()
+	}
 	s.healthy(legacyop.StageOpen)
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)
@@ -445,9 +454,18 @@ func (s *opSweeper) hasStore() bool {
 
 // store returns the cached op store, opening it over the current
 // sessions-class store when none is cached or that store was replaced, with
-// the sessions-class store it is over, or a failed open was over.
-func (s *opSweeper) store() (*opjournal.Store, beads.Store, error) {
+// the sessions-class store it is over, or a failed open was over. Under
+// builtinDefault (every ops gate that is on is auto only by its builtin
+// default, and the pass sweeps under it) a sessions store that is not
+// SQLite-backed answers *opjournal.NotRecordedByDefaultError, cached store
+// or not: that default records nothing there.
+func (s *opSweeper) store(builtinDefault bool) (*opjournal.Store, beads.Store, error) {
 	over := s.cs.SessionsBeadStore()
+	if builtinDefault {
+		if err := opjournal.CheckRecordsByDefault(over); err != nil {
+			return nil, over.Store, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st != nil && sameBeadStore(s.stOver, over.Store) {

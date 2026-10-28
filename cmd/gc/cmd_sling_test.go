@@ -4380,8 +4380,9 @@ version = 1
 	if root.Type != "molecule" {
 		t.Fatalf("attached root type = %q, want molecule", root.Type)
 	}
-	if root.Metadata["gc.kind"] == "wisp" {
-		t.Fatalf("attached root leaked gc.kind=wisp metadata: %+v", root.Metadata)
+	// The root stays a wisp (graph class): only its type keeps it private.
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("attached root lost its gc.kind=wisp marker: %+v", root.Metadata)
 	}
 	ready, err := deps.Store.Ready()
 	if err != nil {
@@ -9550,5 +9551,70 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "empty entry") {
 		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
+	}
+}
+
+// Review 6a: on a single-store bd-1.0.5 city the bead-policy layer maps the
+// wisp policy onto the ephemeral tier, which bd's own wisp GC (`gc bd mol wisp
+// gc --age`) reaps by age. The attached root-only wisp keeps its gc.kind=wisp
+// marker but must stay on the durable tier: it lives exactly as long as its
+// source bead. A standalone root-only wisp keeps the ephemeral tier.
+func TestAttachedRootOnlyWispIsNotEphemeralOnABd105City(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.toml"), []byte("formula = \"root-only\"\nversion = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+		Beads:         config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	runner := newFakeRunner()
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+	src, err := deps.Store.Create(beads.Bead{Title: "Work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := testOpts(a, src.ID)
+	opts.OnFormula = "root-only"
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --on returned %d; stderr: %s", code, stderr.String())
+	}
+	source, err := deps.Store.Get(src.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := deps.Store.Get(source.Metadata["molecule_id"])
+	if err != nil {
+		t.Fatalf("attached root: %v", err)
+	}
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("attached root lost its wisp marker: %+v", root.Metadata)
+	}
+	if root.Ephemeral {
+		t.Fatalf("attached root-only wisp %s is on the ephemeral tier; bd's wisp GC would reap it while its source %s is live", root.ID, src.ID)
+	}
+
+	standalone := testOpts(a, "root-only")
+	standalone.IsFormula = true
+	stdout.Reset()
+	stderr.Reset()
+	if code := doSling(standalone, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --formula returned %d; stderr: %s", code, stderr.String())
+	}
+	rows, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth, Metadata: map[string]string{"gc.kind": "wisp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundEphemeral := false
+	for _, b := range rows {
+		if b.Type != "molecule" && b.Ephemeral {
+			foundEphemeral = true
+		}
+	}
+	if !foundEphemeral {
+		t.Fatalf("standalone root-only wisp is not ephemeral on a bd-1.0.5 city: %+v", rows)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -182,6 +184,20 @@ type SlingDeps struct {
 func (deps SlingDeps) graphStore() beads.Store {
 	if deps.GraphStore != nil {
 		return deps.GraphStore
+	}
+	return deps.Store
+}
+
+// moleculeStoreFor returns the store a compiled recipe's molecule is poured
+// into: the graph store for a graph-class recipe (a graph.v2 workflow, a
+// root-only wisp), the work store for a work-class one (a v1 POURED molecule
+// container with plain steps). This is the rule order dispatch, `gc order
+// run` and `gc formula cook` follow (moleculeClassStore in cmd/gc), so a v1
+// poured molecule stays visible to every work-scope reader. On a single-store
+// city both are the same store.
+func (deps SlingDeps) moleculeStoreFor(recipe *formula.Recipe) beads.Store {
+	if molecule.RecipeClass(recipe) == coordclass.ClassGraph {
+		return deps.graphStore()
 	}
 	return deps.Store
 }
@@ -1434,7 +1450,7 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
-	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
+	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID, deps.StoreRef)
 	var replacedRootID string
 	if graphWorkflow {
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {
@@ -1460,7 +1476,7 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 			return nil, err
 		}
 	}
-	result, err := molecule.Instantiate(ctx, graphStore, recipe, opts)
+	result, err := molecule.Instantiate(ctx, deps.moleculeStoreFor(recipe), recipe, opts)
 	if err != nil {
 		SlingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
 		if len(replacedSnapshots) > 0 {
@@ -1668,8 +1684,28 @@ func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.R
 	}, nil
 }
 
-func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) {
-	if recipe == nil || !recipe.RootOnly || strings.TrimSpace(sourceBeadID) == "" || len(recipe.Steps) == 0 {
+// privatizeAttachedRootOnlyWisp keeps an attached root-only wisp out of
+// Ready(): the source bead it is attached to is the routed, claimable unit, so
+// the root is typed as a molecule container instead of an executable task.
+//
+// The root KEEPS its gc.kind=wisp marker. It is still a wisp — graph class,
+// poured through the graph store — and the marker is what classifies it so.
+// Stripping it (as this did before) turned the root into a work-class
+// molecule: on a city that relocates the graph class that is a work row in
+// the binding, invisible to work readers and refused by the containment
+// checks, and on any city it hid the wisp from the wisp GC's root scan.
+// Readers that treat a gc.kind=wisp bead as executable all exclude the
+// molecule type (see beads.IsMoleculeType), so the type alone keeps it private.
+//
+// It also records the one source the root is attached to
+// (gc.source_bead_id, and gc.source_store_ref when the sling knows its
+// store). The source's molecule_id is the forward pointer; this is the back
+// pointer, which lets the wisp GC's holder guard ask that one source instead
+// of scanning every store — and refuse only when that source's own rig is
+// suspended, not whenever any rig is.
+func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID, sourceStoreRef string) {
+	sourceBeadID = strings.TrimSpace(sourceBeadID)
+	if recipe == nil || !recipe.RootOnly || sourceBeadID == "" || len(recipe.Steps) == 0 {
 		return
 	}
 	root := &recipe.Steps[0]
@@ -1677,24 +1713,12 @@ func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) 
 		return
 	}
 	root.Type = "molecule"
-	root.Metadata = mapsCloneWithout(root.Metadata, beadmeta.KindMetadataKey)
-}
-
-func mapsCloneWithout(in map[string]string, drop string) map[string]string {
-	if len(in) == 0 {
-		return nil
+	meta := maps.Clone(root.Metadata)
+	meta[beadmeta.SourceBeadIDMetadataKey] = sourceBeadID
+	if ref := strings.TrimSpace(sourceStoreRef); ref != "" {
+		meta[beadmeta.SourceStoreRefMetadataKey] = ref
 	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		if key == drop {
-			continue
-		}
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	root.Metadata = meta
 }
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should

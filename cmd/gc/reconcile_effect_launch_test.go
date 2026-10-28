@@ -325,6 +325,7 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		fresh bool // a fresh key, not the row's
 	}{
 		{"no key", nil, true},
+		{"a started row the live-row guard left keyless", []string{"started_config_hash", "h-1", "continuation_epoch", "5"}, true}, // #5439
 		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
 		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
 	} {

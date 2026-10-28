@@ -555,6 +555,7 @@ type detectorReadCounter struct {
 }
 
 func (s *detectorReadCounter) Get(id string) (beads.Bead, error) { s.gets++; return s.Store.Get(id) }
+
 func (s *detectorReadCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
 	s.lists++
 	return s.Store.List(q)

@@ -980,3 +980,184 @@ func TestInterruptTurnFailedRestartStartIsRestartNotStarted(t *testing.T) {
 		t.Fatalf("calls = %v, running %v; want the runtime stopped once and not started", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
 	}
 }
+
+// A session-scoped stop whose waits read nothing showing the session busy
+// (every read failed or was indeterminate: runtime.ErrWaitUnobserved, or a
+// runtime that could not answer) is no ground for a restart: it has no turn
+// identity to check, so only a busy reading can show the turn still running
+// (SESSION-RUNTIME-026). The runtime is left running and the error wraps
+// ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
+// runtime.ErrTurnNotEnded.
+func TestStopTurnWithRestartWithheldWhenTheWaitsReadNothing(t *testing.T) {
+	for name, waitErr := range map[string]error{
+		"the idle wait read nothing":     fmt.Errorf("agent not idle before timeout: %w", runtime.ErrWaitUnobserved),
+		"the idle wait could not answer": fmt.Errorf("capturing the pane: %w", runtime.ErrRuntimeUnavailable),
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+			sp.WaitForIdleErrors[info.SessionName] = waitErr
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+			if report.Restarted || !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+				t.Fatalf("StopTurnWith(restart, waits read nothing) = %+v, %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", report, err)
+			}
+			if n := countMethod(sp.SnapshotCalls(), "Stop") + countMethod(sp.SnapshotCalls(), "Start"); n != 0 || !sp.IsRunning(info.SessionName) {
+				t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
+			}
+		})
+	}
+}
+
+// A wait that saw the session busy and timed out (the bare timeout, no
+// runtime.ErrWaitUnobserved) is the evidence a session-scoped restart needs.
+func TestStopTurnWithRestartsWhenTheWaitSawABusySession(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("agent not idle before timeout")
+	report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+	if err != nil || !report.Restarted {
+		t.Fatalf("StopTurnWith(restart, busy at the timeout) = %+v, %v; want a restart, nil", report, err)
+	}
+}
+
+// A soft-escape family's Ctrl-C fallback that fails to send with nothing
+// before it that read the session busy says nothing about whether the
+// interrupted turn still runs: the fallback wait read nothing or could not
+// answer, or the send found another incarnation, of which the fallback's
+// busy reading says nothing. A session-scoped stop with a restart on failure
+// withholds the restart, leaving the runtime running, with
+// ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
+// runtime.ErrTurnNotEnded (SESSION-RUNTIME-026).
+func TestStopTurnWithRestartWithheldWhenTheFollowUpInterruptFails(t *testing.T) {
+	sendFailed := errors.New("send-keys C-c: exit status 1")
+	for _, tc := range []struct {
+		name, provider string
+		fallback       error // the fallback wait's result
+		send           error // the Ctrl-C's send
+	}{
+		{"codex fallback after a wait that read nothing", "codex", fmt.Errorf("agent not idle before timeout: %w", runtime.ErrWaitUnobserved), sendFailed},
+		{"kimi fallback after a wait that read nothing", "kimi", fmt.Errorf("agent not idle before timeout: %w", runtime.ErrWaitUnobserved), sendFailed},
+		{"codex fallback after a wait that could not answer", "codex", fmt.Errorf("capturing the pane: %w", runtime.ErrRuntimeUnavailable), sendFailed},
+		{"codex fallback into another incarnation", "codex", errors.New("not idle yet"), fmt.Errorf("fenced send-keys C-c: %w", runtime.ErrFenceMismatch)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info, _ := newFencedStopSession(t, tc.provider, nil, runtime.TurnInterruptKeystroke)
+			sp.WaitForIdleSequence[info.SessionName] = []error{tc.fallback, nil}
+			sp.InterruptErrors[info.SessionName] = tc.send
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+			if report.Restarted || !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+				t.Fatalf("StopTurnWith(restart, follow-up send fails) = %+v, %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", report, err)
+			}
+			calls := sp.SnapshotCalls()
+			if countMethod(calls, "Interrupt") != 1 {
+				t.Fatalf("calls = %v, want the one follow-up interrupt tried", callMethods(calls))
+			}
+			if n := countMethod(calls, "Stop") + countMethod(calls, "Start"); n != 0 || !sp.IsRunning(info.SessionName) {
+				t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(calls), sp.IsRunning(info.SessionName))
+			}
+		})
+	}
+}
+
+// A follow-up interrupt whose send fails after the fallback wait saw the
+// session busy leaves that busy reading as the stop's last: nothing more was
+// sent, so the turn the Escape did not stop is seen still running, and a
+// session-scoped stop with a restart on failure restarts the runtime
+// (SESSION-RUNTIME-026).
+func TestStopTurnWithRestartsWhenTheFallbackSawABusySession(t *testing.T) {
+	for _, provider := range []string{"codex", "kimi"} {
+		t.Run(provider, func(t *testing.T) {
+			// newFencedStopSession's fallback wait reads busy: "not idle yet",
+			// a bare error.
+			mgr, sp, info, _ := newFencedStopSession(t, provider, nil, runtime.TurnInterruptKeystroke)
+			sp.InterruptErrors[info.SessionName] = errors.New("send-keys C-c: exit status 1")
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+			if err != nil || !report.Restarted {
+				t.Fatalf("StopTurnWith(restart, busy fallback, follow-up send fails) = %+v, %v; want a restart, nil", report, err)
+			}
+			methods := callMethods(sp.SnapshotCalls())
+			interrupt, stop, start := slices.Index(methods, "Interrupt"), slices.Index(methods, "Stop"), slices.Index(methods, "Start")
+			if interrupt < 0 || stop < interrupt || start < stop {
+				t.Fatalf("calls = %v, want the failed follow-up Interrupt, then Stop, then Start", methods)
+			}
+		})
+	}
+}
+
+// A stop whose idle wait read nothing showing the session busy (every pane
+// capture indeterminate: runtime.ErrWaitUnobserved) leaves the turn to its
+// family's boundary wait, which reads it apart from the pane (Codex's
+// rollout). A boundary wait that passes is the turn's end: the stop
+// succeeds and nothing restarts. One that timed out after reading the turn
+// running (the bare timeout) is the turn not ended, and a session-scoped
+// stop with a restart on failure restarts the runtime. One that read nothing
+// either or could not answer, or a runtime with no boundary wait, leaves the
+// idle wait's error: the restart is withheld, the runtime left running
+// (SESSION-RUNTIME-026).
+func TestStopTurnWithBoundaryDecidesAnUnobservedIdleWait(t *testing.T) {
+	unobserved := fmt.Errorf("agent not idle before timeout: %w", runtime.ErrWaitUnobserved)
+	for _, tc := range []struct {
+		name      string
+		boundary  error // the boundary wait's result; nil passes
+		restarted bool  // the turn read running: the restart runs
+		withheld  bool  // nothing read the turn: the restart is withheld
+	}{
+		{"the rollout recorded the turn's end", nil, false, false},
+		{"the rollout recorded the turn running", errors.New("agent not idle before timeout"), true, false},
+		{"the rollout read nothing", fmt.Errorf("agent not idle before timeout: %w", runtime.ErrWaitUnobserved), false, true},
+		{"the rollout could not be read", fmt.Errorf("reading the rollout: %w", runtime.ErrRuntimeUnavailable), false, true},
+		{"the runtime has no boundary wait", runtime.ErrInteractionUnsupported, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop := func(opts func(*Manager, Info) StopTurnOptions) (*runtime.Fake, StopTurnReport, error) {
+				t.Helper()
+				mgr, sp, info, _ := newFencedStopSession(t, "codex", nil, runtime.TurnInterruptKeystroke)
+				// Every capture indeterminate: the fallback wait and the idle
+				// wait after the Ctrl-C both read nothing.
+				sp.WaitForIdleSequence[info.SessionName] = []error{unobserved, unobserved}
+				if tc.boundary != nil {
+					sp.InterruptBoundaryErrors[info.SessionName] = tc.boundary
+				}
+				report, err := mgr.StopTurnWith(context.Background(), info.ID, opts(mgr, info))
+				if n := countMethod(sp.SnapshotCalls(), "WaitForInterruptBoundary"); n != 1 {
+					t.Fatalf("calls = %v, want the boundary wait once, after the idle wait", callMethods(sp.SnapshotCalls()))
+				}
+				return sp, report, err
+			}
+
+			sp, report, err := stop(func(mgr *Manager, info Info) StopTurnOptions {
+				return StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)}
+			})
+			restarts := countMethod(sp.SnapshotCalls(), "Stop") + countMethod(sp.SnapshotCalls(), "Start")
+			switch {
+			case tc.restarted:
+				if err != nil || !report.Restarted || restarts == 0 {
+					t.Fatalf("StopTurnWith(restart) = %+v, %v, calls %v; want a restart, nil", report, err, callMethods(sp.SnapshotCalls()))
+				}
+			case tc.withheld:
+				if report.Restarted || restarts != 0 || !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+					t.Fatalf("StopTurnWith(restart) = %+v, %v, calls %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", report, err, callMethods(sp.SnapshotCalls()))
+				}
+			default:
+				if err != nil || report.Restarted || restarts != 0 {
+					t.Fatalf("StopTurnWith(restart) = %+v, %v, calls %v; want nil and no restart: the turn ended", report, err, callMethods(sp.SnapshotCalls()))
+				}
+			}
+
+			// Without a restart the stop returns what its waits decided.
+			_, _, err = stop(func(*Manager, Info) StopTurnOptions { return StopTurnOptions{} })
+			switch {
+			case tc.restarted:
+				if !errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrWaitUnobserved) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("StopTurnWith = %v; want the boundary wait's ErrTurnNotEnded alone", err)
+				}
+			case tc.withheld:
+				if !errors.Is(err, runtime.ErrTurnNotEnded) || !errors.Is(err, runtime.ErrWaitUnobserved) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("StopTurnWith = %v; want the idle wait's ErrTurnNotEnded and ErrWaitUnobserved", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("StopTurnWith = %v; want nil: the turn ended", err)
+				}
+			}
+		})
+	}
+}

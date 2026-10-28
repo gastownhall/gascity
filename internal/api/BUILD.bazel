@@ -407,6 +407,7 @@ go_test(
         "handler_waits_partial_test.go",
         "handler_webhook_test.go",
         "hangbudget_test.go",
+        "huma_handlers_beads_class_flip_test.go",
         "huma_handlers_mail_telemetry_test.go",
         "huma_handlers_run_cancel_test.go",
         "huma_handlers_run_launch_test.go",

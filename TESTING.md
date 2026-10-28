@@ -687,6 +687,17 @@ rules above), and `rbe` fails the push. Rebase onto main to execute
 remotely again; a change that moves the pin runs its remote suite in CI
 after it merges, as `bazel.yml`'s own preflight does.
 
+In CI, `bazel.yml`'s lanes tell the two reasons a checkout's pin differs
+from main's apart. A change that moves the pin skips its remote suite, as
+above. A pull request run whose base predates a re-pin does not move the
+pin: the run chose its base commit (`base-sha`) before main re-pinned, and
+"Re-run failed jobs" keeps that base. A remote lane on it fails its
+`worker-env` preflight with `rbe worker-env stale base`, because no pool
+worker serves its pin; **Re-run all jobs** (not "Re-run failed jobs") or push
+a commit, either of which resolves a fresh base. A lane that is not remote
+runs, and push, schedule and dispatch runs, which have no `base-sha`, keep
+the skip.
+
 ### Remote repo contents cache (CI lanes)
 
 A cold lane client spends 15-38 s re-running repository rules (go_deps,
@@ -836,6 +847,9 @@ rbe-worker for the pools and the canary; gascity's own
   issue open until the re-pin lands.
 - While the issue is open, remote `bazel.yml` runs on its pin fail at
   their preflight instead of queueing.
+- Pull request runs whose base predates the re-pin fail their remote
+  lanes at the preflight with "rbe worker-env stale base" once it merges;
+  they want Re-run all jobs, not Re-run failed jobs.
 - `rbe-worker-env-canary.yml` measures a Blacksmith runner every six
   hours, so drift usually opens the issue before CI meets it.
 - A change to the worker host (`tools/rbe/worker-env.txt`,
@@ -1524,6 +1538,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/session` package `session` | TestRuntimeLeaseCrossProcess: subprocess | ga-cp3hwi | the runtime lease cross-process harness is a checked Medium subprocess owner; the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store | P0.4b | 2026-10-31 |
 | Medium owner | `internal/workrecord` package `workrecord` | TestCommitReachableOnBranch: subprocess | ga-cp3hwi | the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner; the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-10-31 |
+| Medium owner | `scripts` package `scripts_test` | TestBazelLaneWorkerEnvStepStaleBase: subprocess | ga-cp3hwi | the bazel lane worker-env stale-base proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestBazelLaneWorkerEnvStepStaleBase (ga-s9mdfm), which exists to run bazel.yml's lane worker-env preflight step itself against a scratch git origin whose main re-pins after the run chose its base (a stale base, a moved pin, a re-pinning PR, a lane that is not remote, no base-sha): the step is git plumbing feeding tools/rbe/worker-env-drift, so only real git and a real shell can prove a stale base fails a remote lane instead of skipping bazel green | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestBazelNightlyFreshDecision: subprocess | ga-cp3hwi | the nightly fresh-on-drift decision proof is a checked Medium subprocess owner; the bash subprocess per case is confined to TestBazelNightlyFreshDecision, which exists to run bazel-nightly.yml's decide step script against a PATH-injected stub gh (shadow mode, a covered week, a new fingerprint, a key prefix, a PR-scoped cache entry, a dispatch, no canary run, a malformed fingerprint): the decision is shell and gh, so only a real shell run can prove when the nightly re-executes every test and that it fails open to fresh | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestCacheProbes: http_test_server | ga-cp3hwi | the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-cp3hwi | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-31 |

@@ -134,6 +134,19 @@ var cliOpenOpStore = func(sessStore beads.Store) (*opjournal.Store, error) {
 	return opjournal.NewStore(beads.SessionStore{Store: sessStore}, cliOpClock)
 }
 
+// cliOpenOpStoreUnder is cliOpenOpStore for a gate that is auto only by its
+// builtin default when builtinAuto is set: such a gate records only over a
+// SQLite sessions store, so over any other it answers
+// *opjournal.NotRecordedByDefaultError without opening or probing anything.
+func cliOpenOpStoreUnder(builtinAuto bool, sessStore beads.Store) (*opjournal.Store, error) {
+	if builtinAuto {
+		if err := opjournal.CheckRecordsByDefault(beads.SessionStore{Store: sessStore}); err != nil {
+			return nil, err
+		}
+	}
+	return cliOpenOpStore(sessStore)
+}
+
 // cliOpClock is the clock CLI ops are proposed and closed under. A var so
 // tests can move past an op's finish_by.
 var cliOpClock clock.Clock = clock.Real{}
@@ -169,6 +182,13 @@ type cliOpRequest struct {
 	kind opjournal.Kind
 	// key is --key; empty mints one.
 	key string
+	// keyNamespace, when set, is the namespace the verb keeps key in
+	// (legacyop.Request.KeyNamespace): the in-session restart requests
+	// record restart{fresh} as gc session reset does, so each keeps its keys
+	// in its own, which no other restart request's key may start with, and
+	// never replays another verb's op under one --key. The command still
+	// names key as given.
+	keyNamespace string
 	// conversation is the resolved session id.
 	conversation string
 	scope        opjournal.Scope
@@ -185,6 +205,13 @@ type cliOpRequest struct {
 	// unreplayed names the execution options outside the op's digest this
 	// run was given (kill's --force); a replay says they were not reapplied.
 	unreplayed []string
+	// replaysAsSuccess, when set, decides a replayed op that did not
+	// succeed: ok replays it as the command's success after all, note
+	// following the op on the replay line. The in-session restart requests
+	// set it: their restart stops the session that asked for it, so it can
+	// stop the run before the run closes its op, which the op sweeper then
+	// closes failed{deadline_in_flight}.
+	replaysAsSuccess func(op opjournal.Op) (note string, ok bool)
 	// payload is a message op's text and causation the id of what caused it
 	// (a mail notify's message); both are empty for the lifecycle verbs.
 	payload   string
@@ -267,7 +294,7 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
 			if op.opened == nil && op.openErr == nil {
-				op.opened, op.openErr = cliOpenOpStore(op.sessStore)
+				op.opened, op.openErr = cliOpenOpStoreUnder(builtinAuto, op.sessStore)
 			}
 			return op.opened, op.openErr
 		},
@@ -279,11 +306,12 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 
 		// Under a gate that is auto only by its builtin default, a store that
 		// cannot record ops at all (a bd without --if-revision, a store with
-		// no id prefix) runs the request unrecorded without a warning, as if
-		// the gate were off: every released bd lacks --if-revision, so a
-		// warning there would print on every recorded command of a default
-		// city. A run that asked for a --key still warns, as it does not get
-		// the dedup it asked for.
+		// no id prefix), or one the default does not record on (not
+		// SQLite-backed, cliOpenOpStoreUnder), runs the request unrecorded
+		// without a warning, as if the gate were off: a warning there would
+		// print on every recorded command of a default city. A run that
+		// asked for a --key still warns, as it does not get the dedup it
+		// asked for.
 		QuietCannotRecord: builtinAuto && req.key == "",
 		CrashPoints:       opsFailpointState.hook(legacyop.SurfaceCLI),
 	}
@@ -329,14 +357,14 @@ func (o *cliOp) preflight() bool {
 		return false
 	}
 	if _, err := o.rec.Open(); err != nil {
-		_, aerr := o.rec.Admit(legacyop.Request{Key: o.requestKey(), Kind: o.req.kind})
+		_, aerr := o.rec.Admit(legacyop.Request{Key: o.requestKey(), KeyNamespace: o.req.keyNamespace, Kind: o.req.kind})
 		if !errors.Is(aerr, legacyop.ErrUnavailable) {
 			aerr = err
 		}
 		o.refuseAdmit(aerr)
 		return false
 	}
-	if err := o.rec.Check(legacyop.Request{Key: o.requestKey(), Payload: o.req.payload, Kind: o.req.kind}); err != nil {
+	if err := o.rec.Check(legacyop.Request{Key: o.requestKey(), KeyNamespace: o.req.keyNamespace, Payload: o.req.payload, Kind: o.req.kind}); err != nil {
 		o.refuseAdmit(err)
 		return false
 	}
@@ -378,6 +406,7 @@ func (o *cliOp) start() cliOpStart {
 		Principal:    principal,
 		Actor:        actor,
 		Key:          o.requestKey(),
+		KeyNamespace: req.keyNamespace,
 		Payload:      req.payload,
 		Causation:    req.causation,
 		Kind:         req.kind,
@@ -403,8 +432,12 @@ func (o *cliOp) start() cliOpStart {
 		o.warnUnrecordedKey(adm)
 		return cliOpExecute
 	}
-	if cliOpReplaysAsSuccess(adm.Op.Kind, adm.Op.Outcome) {
-		note := "replayed op " + adm.Op.ID + o.restartNote()
+	settled, success := "", cliOpReplaysAsSuccess(adm.Op.Kind, adm.Op.Outcome)
+	if !success && req.replaysAsSuccess != nil {
+		settled, success = req.replaysAsSuccess(adm.Op)
+	}
+	if success {
+		note := "replayed op " + adm.Op.ID + o.restartNote() + settled
 		if len(req.unreplayed) > 0 {
 			note += fmt.Sprintf("; %s was not reapplied (outside the op's request)", strings.Join(req.unreplayed, ", "))
 		}
@@ -430,7 +463,7 @@ func (o *cliOp) warnUnrecordedKey(adm *legacyop.Admission) {
 	if adm.Recorded || req.key == "" || o.rec.Mode != rollout.Auto {
 		return
 	}
-	if kerr := opjournal.ValidateClientKey(req.key); kerr != nil {
+	if kerr := legacyop.ValidateKey(req.kind, req.keyNamespace, req.key); kerr != nil {
 		fmt.Fprintf(req.stderr, "%s: warning: invalid --key (%v); running unrecorded, so a rerun acts again\n", req.verb, kerr) //nolint:errcheck // best-effort stderr
 		return
 	}
@@ -451,6 +484,7 @@ func (o *cliOp) principal() (principal, actor string) {
 
 // requestKey is the client key the op is admitted under: --key, else the key
 // the command minted itself (presetKey), else empty, which the recorder mints.
+// The recorder stores it in the verb's key namespace, if any.
 func (o *cliOp) requestKey() string {
 	if o.req.key != "" {
 		return o.req.key
@@ -528,7 +562,7 @@ func (o *cliOp) keyedOp(conversation, principal string) (prior opjournal.Op, fou
 	if err != nil {
 		return opjournal.Op{}, false, err
 	}
-	id, err := opjournal.DeriveID(st.Prefix(), conversation, principal, o.req.key)
+	id, err := opjournal.DeriveID(st.Prefix(), conversation, principal, legacyop.NamespacedKey(o.req.keyNamespace, o.req.key))
 	if err != nil {
 		return opjournal.Op{}, false, err
 	}
@@ -690,7 +724,7 @@ func (o *cliOp) refuseAdmit(err error) {
 		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), cliOpReusedID(err), o.requestKey())
 	case errors.Is(err, legacyop.ErrUnavailable):
 		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.requestKey())
-	case o.requestKey() != "" && opjournal.ValidateClientKey(o.requestKey()) != nil:
+	case o.requestKey() != "" && legacyop.ValidateKey(o.req.kind, o.req.keyNamespace, o.requestKey()) != nil:
 		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), "", o.requestKey())
 	default:
 		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.requestKey())

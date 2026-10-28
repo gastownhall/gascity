@@ -73,8 +73,10 @@ when the context ends. Take the bound from the caller's own context.
   did not get, while the check refuses as unknown (`idleUnknown`), since only
   a busy reading counts as the turn running, and the settle counts it a
   failed read, never the turn's end nor the turn running: a settle whose
-  reads all failed, after family waits that passed or could not answer, is
-  `session.TurnEndUnreadError`, which withholds a restart on failure. That
+  reads all failed, after family waits that passed, could not answer
+  (`runtime.ErrRuntimeUnavailable`) or timed out without one reading that
+  showed the session busy (`runtime.ErrWaitUnobserved`, RUNTIME-CONTRACT-016),
+  is `session.TurnEndUnreadError`, which withholds a restart on failure. That
   includes `ErrObservationOutstanding`, which every later check's own
   reading gets at once while one an earlier check left wedged is still out.
   A read that decides which turn to act on, such as the lane interrupt's

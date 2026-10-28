@@ -63,6 +63,12 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json",
 	".gc/scope-ownership.json",
+	// gc bd's trust state for this host's bd binaries: the verdict cache,
+	// its lock, the walks' scratch dirs, and the operator's vouches.
+	".gc/bd-inventory-vouch.json",
+	".gc/cache/bd-inventory.json",
+	".gc/cache/bd-inventory.json.lock",
+	".gc/cache/tmp/**",
 	".gc/mcp-locks/**",
 	".gc/dispatch-wake",
 	ControlPlaneDescriptorPath,

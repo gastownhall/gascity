@@ -315,34 +315,67 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 }
 
 // TestOpsRecordingDoctorCheckDefaultAuto covers the builtin default (every
-// ops gate auto, none set): a store that cannot record ops is treated as off,
-// so it is OK while it holds no op row, and a Warning once it holds one; a
-// capable store reads as recording.
+// ops gate auto, none set), which records only over a SQLite sessions store:
+// any other store is OK while it holds no op row, Dolt-served or not, capable
+// or not, and the check says whether an explicit gate would record there
+// (only a store that can record ops is offered the opt-in); one holding op
+// rows is still checked for expired ones when it can open, and a Warning when
+// it cannot. An explicit auto stays loud over a store that cannot record, and
+// a SQLite store reads as recording.
 func TestOpsRecordingDoctorCheckDefaultAuto(t *testing.T) {
-	defaulted := func(store beads.Store) *opsRecordingDoctorCheck {
-		c, _ := newTestOpsRecordingCheck(store, opSweepT0)
+	defaulted := func(store beads.Store, now time.Time) *opsRecordingDoctorCheck {
+		c, _ := newTestOpsRecordingCheck(store, now)
 		c.flags = rollout.ForTest()
 		return c
 	}
+	bdWithHelp := func(help string) *beads.BdStore {
+		return beads.NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+			if len(args) == 2 && args[1] == "--help" {
+				return []byte(help), nil
+			}
+			return nil, fmt.Errorf("unexpected bd %v", args)
+		}, "gc")
+	}
+	// A bd whose conditional-write verbs all advertise --if-revision: a
+	// Dolt-served store that can record ops.
+	bd := bdWithHelp("Flags:\n      --if-revision int   fence\n")
+	const optIn = "set the [ops] gates to auto or require to record ops here"
 	for _, tc := range []struct {
-		name   string
-		store  beads.Store
-		reason string
+		name  string
+		store beads.Store
+		where string
+		// cannot is the reason an explicit gate would not record either,
+		// empty for a store that can record ops.
+		cannot string
 	}{
-		{"no conditional writes", incapableStore{beads.NewMemStore()}, legacyop.DegradeConditionalWritesUnsupported},
-		{"no namespace", &beads.MemStore{HonorExplicitIDs: true}, legacyop.DegradeNoNamespace},
+		{"a Dolt-served store", cliOpBdLeafProxy{Store: newOpSweepStore(), leaf: bd}, "a Dolt-served sessions store", ""},
+		// The default gc init topology: a proxied store whose writes land in
+		// a released bd, which lacks --if-revision.
+		{"a Dolt-served store behind a released bd", cliOpBdLeafProxy{Store: newOpSweepStore(), leaf: bdWithHelp("Flags:\n      --json   JSON output\n")}, "a Dolt-served sessions store", legacyop.DegradeConditionalWritesUnsupported},
+		{"a capable memory store", newOpSweepStore(), "not SQLite-backed", ""},
+		{"no conditional writes", incapableStore{beads.NewMemStore()}, "not SQLite-backed", legacyop.DegradeConditionalWritesUnsupported},
+		{"no namespace", &beads.MemStore{HonorExplicitIDs: true}, "not SQLite-backed", legacyop.DegradeNoNamespace},
 	} {
 		t.Run(tc.name+" is OK", func(t *testing.T) {
-			r := defaulted(tc.store).Run(&doctor.CheckContext{})
-			if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "auto by default") || !strings.Contains(r.Message, tc.reason) {
-				t.Fatalf("result = %v %q, want OK naming the default and %s", r.Status, r.Message, tc.reason)
+			r := defaulted(tc.store, opSweepT0).Run(&doctor.CheckContext{})
+			if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "auto (default) records nothing on") || !strings.Contains(r.Message, tc.where) {
+				t.Fatalf("result = %v %q, want OK saying the default records nothing on %s", r.Status, r.Message, tc.where)
+			}
+			if tc.cannot == "" {
+				if !strings.Contains(r.Message, optIn) {
+					t.Fatalf("message %q, want the opt-in for a store that can record ops", r.Message)
+				}
+				return
+			}
+			if strings.Contains(r.Message, optIn) || !strings.Contains(r.Message, "cannot record ops ("+tc.cannot+")") {
+				t.Fatalf("message %q, want no opt-in and the store's own reason it cannot record ops (%s)", r.Message, tc.cannot)
 			}
 		})
 	}
 	t.Run("incapable store holding op rows warns", func(t *testing.T) {
 		store := newOpSweepStore()
 		seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "orphan")
-		r := defaulted(incapableStore{store}).Run(&doctor.CheckContext{})
+		r := defaulted(incapableStore{store}, opSweepT0).Run(&doctor.CheckContext{})
 		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "auto by default") || !strings.Contains(r.Message, "cannot be checked") {
 			t.Fatalf("result = %v %q, want a default Warning naming the unchecked op rows", r.Status, r.Message)
 		}
@@ -350,15 +383,30 @@ func TestOpsRecordingDoctorCheckDefaultAuto(t *testing.T) {
 			t.Fatalf("remedy %q offers turning the gates off, which does not reach the op rows", r.FixHint)
 		}
 	})
+	t.Run("a Dolt-served store holding an expired op warns about it", func(t *testing.T) {
+		store := newOpSweepStore()
+		op := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "left")
+		r := defaulted(cliOpBdLeafProxy{Store: store, leaf: bd}, op.FinishBy.Add(opsRecordingStaleAfter+time.Second)).Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "a Dolt-served sessions store") || !strings.Contains(r.Message, "expired") {
+			t.Fatalf("result = %v %q, want a Warning naming the default and the expired op", r.Status, r.Message)
+		}
+	})
 	t.Run("explicit auto stays loud", func(t *testing.T) {
-		c := defaulted(incapableStore{beads.NewMemStore()})
+		c := defaulted(incapableStore{beads.NewMemStore()}, opSweepT0)
 		c.flags = rollout.ForTest(rollout.WithOpsControl(rollout.Auto))
 		if r := c.Run(&doctor.CheckContext{}); r.Status != doctor.StatusWarning {
 			t.Fatalf("status = %v, want Warning under an explicit auto: %s", r.Status, r.Message)
 		}
 	})
-	t.Run("capable store records", func(t *testing.T) {
-		r := defaulted(newOpSweepStore()).Run(&doctor.CheckContext{})
+	t.Run("explicit auto over a capable non-SQLite store records", func(t *testing.T) {
+		c := defaulted(newOpSweepStore(), opSweepT0)
+		c.flags = rollout.ForTest(rollout.WithOpsContent(rollout.Auto))
+		if r := c.Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK || !strings.Contains(r.Message, "can record ops") {
+			t.Fatalf("result = %v %q, want OK, the store can record ops", r.Status, r.Message)
+		}
+	})
+	t.Run("SQLite store records", func(t *testing.T) {
+		r := defaulted(newOpSweepSQLiteStore(t), opSweepT0).Run(&doctor.CheckContext{})
 		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "can record ops") {
 			t.Fatalf("result = %v %q, want OK, the store can record ops", r.Status, r.Message)
 		}

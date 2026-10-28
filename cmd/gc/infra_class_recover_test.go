@@ -93,14 +93,14 @@ func runStrandedRecovery(t *testing.T, cityPath string, cfg *config.City, stdout
 // strandedIDs returns the ids the containment check currently calls stranded.
 func strandedIDs(t *testing.T, cityPath string, target infraBindingTarget) []string {
 	t.Helper()
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
-		t.Fatalf("readInfraCopyManifest: %v", err)
+		t.Fatalf("readInfraCopyManifestRecord: %v", err)
 	}
 	if !recorded {
 		t.Fatal("the city has no proven-copy manifest; the containment check is off and this assertion means nothing")
 	}
-	gap, err := classifyInfraContainmentGap(cityPath, target, proven)
+	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
 	if err != nil {
 		t.Fatalf("classifyInfraContainmentGap: %v", err)
 	}

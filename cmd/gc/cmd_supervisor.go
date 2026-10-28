@@ -2450,6 +2450,13 @@ func startOneCity(
 		}))
 		return runtimeErr
 	}); err != nil {
+		// The recorder is this city's rotation owner: left open, its
+		// [events.mirror] copier would hold the mirror lock for the life of
+		// the supervisor, and every retry's copier would wait on it.
+		cityCancel()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
 		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 		recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 		return
@@ -2707,8 +2714,8 @@ func startOneCity(
 				if err := shutdownBeadsProvider(p); err != nil {
 					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
 				}
-				// Close the file recorder (only on panic — normal exit
-				// leaves it for the external caller via mc.closer).
+				// Close the file recorder. A normal exit leaves it to the
+				// stop that removed the city (mc.closer), unless none did.
 				if cityFr != nil {
 					cityFr.Close() //nolint:errcheck
 				}
@@ -2742,6 +2749,7 @@ func startOneCity(
 			} else {
 				// Normal exit (context canceled) — reset panic counter
 				// and remove from map in a single critical section.
+				removed := false
 				cr.BatchUpdate(func(
 					cities map[string]*managedCity,
 					_ map[string]cityInitProgress,
@@ -2749,8 +2757,17 @@ func startOneCity(
 					panicHistory map[string]*panicRecord,
 				) {
 					delete(panicHistory, p)
-					deleteManagedCityIfCurrent(cities, p, mc)
+					removed = deleteManagedCityIfCurrent(cities, p, mc)
 				})
+				// A stop removes the city from the map before it cancels
+				// it, then closes the recorder via mc.closer. A city canceled
+				// in place (its controller socket's stop) removed itself
+				// just now, so no stop will: close the recorder here, outside
+				// the registry lock, or its [events.mirror] copier holds the
+				// mirror lock for the life of the supervisor.
+				if removed && cityFr != nil {
+					cityFr.Close() //nolint:errcheck
+				}
 			}
 			// Signal completion last — ensures all cleanup is done before
 			// waiters (shutdown/unregister paths) proceed.
@@ -2781,6 +2798,7 @@ func startOneCity(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+	warnBdInventoryAtControllerStart(path, cfg, rec)
 }
 
 func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {

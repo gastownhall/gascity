@@ -132,6 +132,7 @@ const (
 	TraceSiteReconcilerCircuitTrip               TraceSiteCode = "reconciler.session.circuit_trip"
 	TraceSiteReconcilerProviderHealthGate        TraceSiteCode = "reconciler.session.provider_health_gate"
 	TraceSiteReconcilerBeadReassignCycle         TraceSiteCode = "reconciler.session.bead_reassign_cycle"
+	TraceSiteReconcilerFinishInterruptedClose    TraceSiteCode = "reconciler.session.finish_interrupted_close"
 	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
 	TraceSiteLifecycleStartCapacityRefused       TraceSiteCode = "reconciler.start.capacity_refused"
@@ -211,6 +212,7 @@ const (
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
+	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
 )
 
 type TraceOutcomeCode string

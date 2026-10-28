@@ -2285,11 +2285,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Skip beads with unrecognized states. This enables forward-compatible
-		// rollback: if a newer version writes "draining" or "archived", the
-		// older reconciler ignores those beads rather than crashing. The skip is
-		// preserved; the previously per-tick stderr line is now a throttled,
+		// rollback: a newer version's states, and this binary's own archived and
+		// draining rows, are ignored rather than crashing the reconciler. An
+		// interrupted close of this binary's own (a close code left on an open
+		// row when the status Close was lost) is finished first instead, or
+		// rolled back to asleep when its gate now refuses it, and the next tick
+		// takes the asleep row (finishInterruptedClose). The skip is a throttled,
 		// durable session.unknown_state signal (folded onto the tick snapshot).
 		if !isKnownStateInfo(info) {
+			if gate, ok := interruptedCloseGate(info); ok {
+				fold, closed := finishInterruptedClose(cityPath, store, sw, sp, cfg, dt, info, gate, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, trace, clk, stderr)
+				if closed {
+					tick.markClosed(id)
+					continue
+				}
+				if fold != nil {
+					tick.apply(id, fold)
+					continue
+				}
+			}
 			if fold := emitSessionUnknownStateDiagnostic(store, info, snapshot, rec, clk, stderr); fold != nil {
 				tick.apply(id, fold)
 			}
@@ -5766,8 +5780,10 @@ const unknownStateEscalationAge = 30 * time.Minute
 // emitSessionUnknownStateDiagnostic surfaces a session bead whose metadata
 // state the reconciler does not recognize. The caller preserves the
 // forward-compatible skip (an older reconciler ignores a newer writer's state
-// rather than crashing); this turns the previously per-tick stderr line into a
-// throttled signal. It logs and records events.SessionUnknownState only on
+// rather than crashing) and finishes this binary's own interrupted closes
+// before it (finishInterruptedClose), so a half-closed row the finisher closes
+// never reaches it. This turns the per-tick stderr line into a throttled
+// signal. It logs and records events.SessionUnknownState only on
 // first sight or when the raw state changes to a different unrecognized value,
 // then re-records once with escalated=true after the bead has sat unrecognized
 // past unknownStateEscalationAge. Throttle state is read off the projected typed

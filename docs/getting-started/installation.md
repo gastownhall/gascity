@@ -26,18 +26,19 @@ for you; the other methods require manual installation.
 | tmux | Yes | — | `brew install tmux` | `apt install tmux` | Session management |
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
-| dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
+| dolt | Yes | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
 | bd (Beads CLI) | Yes | 1.3.0 minimum; 1.3.2 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
-| Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| Go 1.27.3+ | Source only | 1.27.3 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
 
-Use a final Dolt 2.1.0 or newer. Gas City's managed Dolt checks reject older
+Use a final Dolt 2.6.0 or newer. Gas City's managed Dolt checks reject older
 and pre-release builds because they are below the managed bd/Dolt compatibility
-floor; releases before 1.86.2 can also miss the upstream GC/writer deadlock
-fix in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync`
-under heavy write load.
+floor: 2.6.0 is the first Dolt built with a Go toolchain that distrusts the
+compromised eMudhra CA intermediates. Releases before 1.86.2 can also miss the
+upstream GC/writer deadlock fix in dolthub/dolt commit `ccf7bde206`, which can
+hang `dolt_backup sync` under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
@@ -203,7 +204,7 @@ using direct download. Homebrew handles this automatically.
 
 ## Build from source
 
-Requires `make` and Go 1.26+ (pinned in `go.mod` as 1.26.4).
+Requires `make` and Go 1.27.3+ (pinned in `go.mod` as 1.27.3).
 
 ```bash
 git clone https://github.com/gastownhall/gascity.git

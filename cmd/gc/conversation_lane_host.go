@@ -83,7 +83,10 @@ const (
 	// laneHostScanLimit caps each page of the scan's keyed lists.
 	laneHostScanLimit = 500
 	// The busy re-probe backoff (DES-O1 §4.3): 2 s for the first 30 s, then
-	// 5 s, then 10 s.
+	// 5 s, then 10 s. It is the fallback for a busy boundary with no known
+	// deadline: a keystroke boundary that names its quiescence deadline
+	// (opjournal.Probe.BoundaryAt) is passed again there, when that is
+	// sooner, and the backoff only bounds the wait from above.
 	laneBusyFirst    = 2 * time.Second
 	laneBusyFirstFor = 30 * time.Second
 	laneBusyNext     = 5 * time.Second

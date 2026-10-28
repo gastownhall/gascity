@@ -57,6 +57,10 @@ const (
 	ReasonNoGeneration         = "no_generation"
 	ReasonUnreadableTarget     = "unreadable_target"
 	ReasonProposeError         = "propose_error"
+	// ReasonNotRecordedByDefault is a request a builtin-default auto gate
+	// leaves unrecorded because its sessions store is not SQLite-backed
+	// (opjournal.NotRecordedByDefaultError).
+	ReasonNotRecordedByDefault = "not_recorded_by_default"
 )
 
 // Degrade reason classes, the ops.recording_degraded event's reason.
@@ -66,6 +70,11 @@ const (
 	DegradeNoNamespace                  = "no_namespace"
 	DegradeStoreError                   = "store_error"
 	DegradeContention                   = "contention"
+	// DegradeNotRecordedByDefault is an op store a builtin-default auto gate
+	// did not open because the sessions store is not SQLite-backed
+	// (opjournal.NotRecordedByDefaultError). Only an opener under such a gate
+	// returns it, and that gate treats it as off (CannotRecord).
+	DegradeNotRecordedByDefault = "not_recorded_by_default"
 )
 
 // Degrade is one store failure a recorder degraded past: in auto the request
@@ -82,10 +91,16 @@ type Degrade struct {
 }
 
 // CannotRecord reports whether a degrade of reason is a store that cannot
-// record ops at all as it is set up: no conditional writes, or no namespace.
-// A store error, contention or an unregistered op type is a fault, not that.
+// record ops at all as it is set up: no conditional writes, no namespace, or
+// a store the builtin default does not record on (not SQLite-backed). A store
+// error, contention or an unregistered op type is a fault, not that.
 func CannotRecord(reason string) bool {
-	return reason == DegradeConditionalWritesUnsupported || reason == DegradeNoNamespace
+	switch reason {
+	case DegradeConditionalWritesUnsupported, DegradeNoNamespace, DegradeNotRecordedByDefault:
+		return true
+	default:
+		return false
+	}
 }
 
 // StoreCannotRecord reports whether d is an op store that did not open

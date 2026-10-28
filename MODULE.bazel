@@ -204,7 +204,7 @@ register_toolchains("@llvm_toolchain//:all")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.26.10",
+    version = "1.27.3",
 )
 use_repo(go_sdk, "go_sdk")
 
@@ -360,8 +360,8 @@ go_deps.module(
 # pins. go-cmp is the one gofumpt requirement gc's go.mod lacks.
 go_deps.module(
     path = "mvdan.cc/gofumpt",
-    sum = "h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=",
-    version = "v0.9.2",
+    sum = "h1:1Lbudkz2kpM9Cjz2pL4M19u7q+GaEhCTNf7N9mfpcho=",
+    version = "v0.12.0",
 )
 go_deps.module(
     indirect = True,
@@ -432,9 +432,9 @@ exports_files(["bd"])
 )
 
 http_archive(
-    name = "dolt_bin_v2_2_0",
-    urls = ["https://github.com/dolthub/dolt/releases/download/v2.2.0/dolt-linux-amd64.tar.gz"],
-    sha256 = "1f7ad8c2622995789420a3fb0f2d16b4aa7430000a825dd91d5938f36480cbf6",
+    name = "dolt_bin_v2_6_0",
+    urls = ["https://github.com/dolthub/dolt/releases/download/v2.6.0/dolt-linux-amd64.tar.gz"],
+    sha256 = "a8d4c2e2e94b85fd3592cb80748044f846ccfd03d25a536ed1f754baf7da6401",
     build_file_content = """
 exports_files(["dolt-linux-amd64/bin/dolt"])
 """,

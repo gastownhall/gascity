@@ -935,3 +935,67 @@ func interruptReq() Request {
 		StartBy:  t0.Add(2 * time.Hour), FinishBy: t0.Add(3 * time.Hour),
 	}
 }
+
+// TestPlanTakeBoundaryHint proves a busy boundary's known deadline
+// (Probe.BoundaryAt) schedules the wait: it folds into Next only while the
+// content waits for the boundary alone and the deadline is still ahead.
+func TestPlanTakeBoundaryHint(t *testing.T) {
+	now := t0.Add(time.Hour)
+	cases := []struct {
+		name  string
+		probe func(*Probe)
+		want  time.Time
+		busy  bool
+	}{
+		{name: "future deadline", probe: func(p *Probe) { p.BoundaryAt = now.Add(1500 * time.Millisecond) }, want: now.Add(1500 * time.Millisecond), busy: true},
+		{name: "no hint", probe: func(*Probe) {}, busy: true},
+		{name: "deadline now", probe: func(p *Probe) { p.BoundaryAt = now }, busy: true},
+		{name: "deadline passed", probe: func(p *Probe) { p.BoundaryAt = now.Add(-time.Second) }, busy: true},
+		{name: "boundary unknown", probe: func(p *Probe) { p.Boundary = TriUnknown; p.BoundaryAt = now.Add(time.Second) }, busy: true},
+		{name: "content block", probe: func(p *Probe) { p.ContentBlock = "restart_pending"; p.BoundaryAt = now.Add(time.Second) }},
+		{name: "pending interaction", probe: func(p *Probe) { p.Pending = "req-1"; p.BoundaryAt = now.Add(time.Second) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanner(t)
+			op := p.op(laneMsg("a", RoleNotice, "x"))
+			probe := idleProbe()
+			probe.Boundary = TriNo
+			tc.probe(&probe)
+			rp := planRules(snapOf(op), view(), now, "lane:ctl")
+			tp, err := planTake(rp, probe, view(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tp.take != nil {
+				t.Fatalf("took %v with the boundary %v", takenOf(tp), probe.Boundary)
+			}
+			if !tp.next.Equal(tc.want) {
+				t.Fatalf("next %s, want %s (waits %v)", tp.next, tc.want, tp.waits)
+			}
+			if tp.busy != tc.busy {
+				t.Fatalf("busy %v, want %v", tp.busy, tc.busy)
+			}
+		})
+	}
+}
+
+// TestPlanTakeBoundaryHintIgnoredOnceTaken proves a hint schedules nothing
+// when the batch forms anyway (a steer joins a busy turn): the content does
+// not wait for the boundary, so its deadline is no wake.
+func TestPlanTakeBoundaryHintIgnoredOnceTaken(t *testing.T) {
+	now := t0.Add(time.Hour)
+	p := newPlanner(t)
+	op := p.op(laneMsg("a", RoleNotice, "x", withWhen(WhenSteer)))
+	probe := idleProbe()
+	probe.Boundary, probe.BoundaryAt = TriNo, now.Add(time.Second)
+	probe.Caps.Steer = true
+	rp := planRules(snapOf(op), view(), now, "lane:ctl")
+	tp, err := planTake(rp, probe, view(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(takenOf(tp), []string{op.ID}) || !tp.next.IsZero() || tp.busy {
+		t.Fatalf("plan %+v, want a steer take with no deadline", tp)
+	}
+}
