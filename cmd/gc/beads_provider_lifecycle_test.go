@@ -1327,6 +1327,140 @@ printf 'status=%s\n' "$status"
 	}
 }
 
+// gcBeadsBdDoltClientCall is one dolt client invocation the fake dolt binary
+// recorded: its argv and its DOLT_CLI_PASSWORD as "set:<value>" or "unset:".
+type gcBeadsBdDoltClientCall struct {
+	argv []string
+	env  string
+}
+
+// runGcBeadsBdDoltClientCalls runs every dolt SQL client call in the bundled
+// gc-beads-bd.sh prelude against a fake dolt that records each invocation, and
+// returns the recorded calls plus the harness output.
+func runGcBeadsBdDoltClientCalls(t *testing.T, extraEnv ...string) ([]gcBeadsBdDoltClientCall, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	materializeBuiltinPacksForTest(t, cityPath)
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	binDir := t.TempDir()
+	callsFile := filepath.Join(t.TempDir(), "dolt-calls")
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+set -eu
+{
+  printf 'call\0'
+  printf '%s\0' "$@"
+  if [ "${DOLT_CLI_PASSWORD+set}" = set ]; then
+    printf 'env=set:%s\0' "$DOLT_CLI_PASSWORD"
+  else
+    printf 'env=unset:\0'
+  fi
+} >> "$CALLS_FILE"
+case "$*" in
+  *"SHOW DATABASES"*) printf 'Database\nbeads\n' ;;
+  *) printf 'cnt\n1\n' ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(dolt): %v", err)
+	}
+
+	harness := filepath.Join(t.TempDir(), "dolt-client-calls.sh")
+	body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+set +e
+do_query_probe
+server_sql "SELECT 1" >/dev/null
+bd_runtime_bd_table_count beads >/dev/null
+bd_runtime_schema_cursor beads >/dev/null
+bd_runtime_schema_migration_count beads >/dev/null
+printf 'connections=%s\n' "$(get_connection_count)"
+check_read_only
+set -e
+if [ "${DOLT_CLI_PASSWORD+set}" = set ]; then
+  printf 'shell=set:%s\n' "$DOLT_CLI_PASSWORD"
+else
+  printf 'shell=unset:\n'
+fi
+`
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := append(sanitizedBaseEnv(
+		"CALLS_FILE="+callsFile,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	), "GC_BIN=")
+	out := runShHarness(t, harness, "dolt client calls", append(env, extraEnv...))
+
+	data, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(calls): %v", err)
+	}
+	var calls []gcBeadsBdDoltClientCall
+	for _, field := range strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00") {
+		switch {
+		case field == "call":
+			calls = append(calls, gcBeadsBdDoltClientCall{})
+		case len(calls) == 0:
+			t.Fatalf("dolt calls file does not start with a call marker: %q", data)
+		case strings.HasPrefix(field, "env="):
+			calls[len(calls)-1].env = strings.TrimPrefix(field, "env=")
+		default:
+			calls[len(calls)-1].argv = append(calls[len(calls)-1].argv, field)
+		}
+	}
+	return calls, string(out)
+}
+
+// TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv pins issue #8376: every
+// dolt SQL client call in gc-beads-bd.sh hands the password to dolt through a
+// per-call DOLT_CLI_PASSWORD, never in argv where any local user can read it
+// through ps.
+func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
+	const secret = "s3cr3t-dolt-pw"
+	const wantCalls = 10
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		wantEnv string
+	}{
+		{name: "configured", env: []string{"GC_DOLT_PASSWORD=" + secret}, wantEnv: "set:" + secret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, out := runGcBeadsBdDoltClientCalls(t, append([]string{"DOLT_CLI_PASSWORD=other-pw"}, tc.env...)...)
+			if len(calls) != wantCalls {
+				t.Fatalf("recorded %d dolt client calls, want %d:\n%+v\noutput:\n%s", len(calls), wantCalls, calls, out)
+			}
+			if !strings.Contains(out, "connections=1\n") {
+				t.Errorf("get_connection_count output not parsed through the env prefix:\n%s", out)
+			}
+			for i, call := range calls {
+				for _, arg := range call.argv {
+					if arg == "--password" || strings.HasPrefix(arg, "--password=") {
+						t.Errorf("call %d passes a password flag in argv: %q", i, call.argv)
+					}
+					if strings.Contains(arg, secret) {
+						t.Errorf("call %d carries the password in argv: %q", i, call.argv)
+					}
+				}
+				if call.env != tc.wantEnv {
+					t.Errorf("call %d DOLT_CLI_PASSWORD = %q, want %q (argv %q)", i, call.env, tc.wantEnv, call.argv)
+				}
+			}
+		})
+	}
+}
+
 func TestGcBeadsBdHealthNoUserDatabaseWarnsAndContinues(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
