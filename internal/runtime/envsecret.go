@@ -39,11 +39,13 @@ var envArgvSafe = map[string]bool{
 	// string as GC_AGENT (session.RuntimeEnvWithSessionContext sets both from
 	// AssigneeIdentifier), so listing one and not the other would route an
 	// already-public value through the private-file path and blank it out of
-	// diagnostics for nothing.
+	// diagnostics for nothing. GC_CITY_NAME is the same case: by default it is
+	// the basename of GC_CITY_PATH, and every session env carries it.
 	"BEADS_ACTOR":      true,
 	"GC_AGENT":         true,
 	"GC_ALIAS":         true,
 	"GC_CITY":          true,
+	"GC_CITY_NAME":     true,
 	"GC_CITY_PATH":     true,
 	"GC_PROVIDER":      true,
 	"GC_RIG":           true,
