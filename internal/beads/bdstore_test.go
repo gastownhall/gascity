@@ -2910,27 +2910,51 @@ func TestBdStoreReadyReturnsParseErrorOnMalformedJSON(t *testing.T) {
 // --- Status mapping ---
 
 func TestBdStoreStatusMapping(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	future := time.Now().UTC().Add(24 * time.Hour)
+	now := time.Now().UTC()
 	tests := []struct {
 		bdStatus           string
+		bdDeferUntil       *time.Time
 		wantStatus         string
 		wantIndefiniteHold bool
 	}{
-		{"open", "open", false},
-		{"in_progress", "in_progress", false},
-		{"blocked", "open", false},
-		{"deferred", "open", true},
-		{"review", "open", false},
-		{"testing", "open", false},
-		{"closed", "closed", false},
+		{"open", nil, "open", false},
+		{"in_progress", nil, "in_progress", false},
+		{"blocked", nil, "open", false},
+		{"deferred", nil, "open", true},
+		// bd's deferred status is a deferral in its own right, dated or not
+		// (#6207): the date only says when bd's sweep may lift it, so both
+		// dated rows stay deferred until the store records the wake.
+		{"deferred", &past, "open", true},
+		{"deferred", &future, "open", true},
+		// A raw-open row keeps governing a deferral through the date alone.
+		{"open", &past, "open", false},
+		{"review", nil, "open", false},
+		{"testing", nil, "open", false},
+		{"closed", nil, "closed", false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.bdStatus, func(t *testing.T) {
+		name := tt.bdStatus
+		if tt.bdDeferUntil != nil {
+			if tt.bdDeferUntil.After(now) {
+				name += "+future-defer_until"
+			} else {
+				name += "+past-defer_until"
+			}
+		}
+		t.Run(name, func(t *testing.T) {
+			row := fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"`, tt.bdStatus)
+			if tt.bdDeferUntil != nil {
+				row += fmt.Sprintf(`,"defer_until":%q`, tt.bdDeferUntil.Format(time.RFC3339Nano))
+			}
+			row += `}]`
 			runner := fakeRunner(map[string]struct {
 				out []byte
 				err error
 			}{
 				`bd show --json bd-x`: {
-					out: []byte(fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`, tt.bdStatus)),
+					out: []byte(row),
 				},
 			})
 			s := beads.NewBdStore("/city", runner)
@@ -2943,6 +2967,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			}
 			if b.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantIndefiniteHold)
+			}
+			if beads.IsDeferred(b, now) != tt.wantIndefiniteHold {
+				t.Errorf("IsDeferred(status %q, defer %v) = %v, want %v", tt.bdStatus, tt.bdDeferUntil, beads.IsDeferred(b, now), tt.wantIndefiniteHold)
 			}
 			if b.SourceStatus != tt.bdStatus {
 				t.Errorf("SourceStatus = %q, want bd's %q", b.SourceStatus, tt.bdStatus)

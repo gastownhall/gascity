@@ -12,9 +12,9 @@ import (
 var ErrBeadEventIdentityMismatch = errors.New("bead event subject does not match payload bead id")
 
 // EncodeBeadEventPayload marshals a canonical raw bead-event snapshot. A bd
-// status-based indefinite deferral is restored only for its normalized open
-// state; explicit Gas City transitions such as close or claim must win over a
-// stale internal marker.
+// status-based deferral is restored only for its normalized open state;
+// explicit Gas City transitions such as close or claim must win over a stale
+// internal marker.
 func EncodeBeadEventPayload(b Bead) (json.RawMessage, error) {
 	if b.Status == "open" && b.IndefinitelyDeferred {
 		b.Status = "deferred"
@@ -28,12 +28,16 @@ func EncodeBeadEventPayload(b Bead) (json.RawMessage, error) {
 // tolerance can never drift apart on a future cleanup.
 //
 // Canonical shape = a raw bead snapshot. EncodeBeadEventPayload restores an
-// internal indefinite deferral as status="deferred" on this wire; every
-// consumer that decodes through this package normalizes it again here. A
-// reader that consumes the stored bytes directly does not — see
-// Bead.IndefinitelyDeferred, which documents that a direct .gc/events.jsonl
-// reader sees the status="deferred" this wire carries. Do not widen the
-// encoder's rewrite without auditing those raw readers. The wrapped
+// internal deferral as status="deferred" on this wire; every consumer that
+// decodes through this package normalizes it again here. A reader that
+// consumes the stored bytes directly does not — see Bead.IndefinitelyDeferred,
+// which documents that a direct .gc/events.jsonl reader sees the
+// status="deferred" this wire carries. Do not widen the encoder's rewrite
+// without auditing those raw readers; the #6207 widening (dated deferrals
+// now re-emit status="deferred" with their date, as before) audited the
+// direct readers — cmd/gc/cmd_events.go, cmd/gc/hook_claim_bead_events.go,
+// cmd/gc/cmd_analyze_reliability.go, and internal/api/dashboardbff — and
+// none carries status-specific logic. The wrapped
 // {"bead":<snapshot>} shape (the registered BeadEventPayload contract) is
 // accepted as a tolerant fallback so a producer that ever emits it does not
 // silently starve consumers. A payload with an empty id, undecodable bytes, or
@@ -75,7 +79,7 @@ func decodeRawBead(data json.RawMessage) (Bead, bool) {
 	// Only bd's deferred status needs re-derivation here; leaving every other
 	// raw status untouched keeps the ga-3mv5d3 collapse off the event path.
 	if b.Status == "deferred" {
-		b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status, b.DeferUntil)
+		b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status)
 	}
 	if b.Type == "" {
 		var compat struct {

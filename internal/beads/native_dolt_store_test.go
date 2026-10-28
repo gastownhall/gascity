@@ -239,27 +239,47 @@ func TestNativeDoltStoreConvertsDefaultPriorityAsUnset(t *testing.T) {
 }
 
 func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	future := time.Now().UTC().Add(24 * time.Hour)
+	now := time.Now().UTC()
 	tests := []struct {
 		upstream           beadslib.Status
+		upstreamDeferUntil *time.Time
 		want               string
 		wantIndefiniteHold bool
 	}{
-		{beadslib.StatusOpen, "open", false},
-		{beadslib.StatusInProgress, "in_progress", false},
-		{beadslib.StatusClosed, "closed", false},
-		{beadslib.Status("blocked"), "open", false},
-		{beadslib.Status("deferred"), "open", true},
-		{beadslib.Status("pinned"), "open", false},
-		{beadslib.Status("hooked"), "open", false},
+		{beadslib.StatusOpen, nil, "open", false},
+		{beadslib.StatusInProgress, nil, "in_progress", false},
+		{beadslib.StatusClosed, nil, "closed", false},
+		{beadslib.Status("blocked"), nil, "open", false},
+		{beadslib.Status("deferred"), nil, "open", true},
+		// bd's deferred status is a deferral in its own right, dated or not
+		// (#6207): the date only says when bd's sweep may lift it, so both
+		// dated rows stay deferred until the store records the wake.
+		{beadslib.Status("deferred"), &past, "open", true},
+		{beadslib.Status("deferred"), &future, "open", true},
+		// A raw-open row keeps governing a deferral through the date alone.
+		{beadslib.StatusOpen, &past, "open", false},
+		{beadslib.Status("pinned"), nil, "open", false},
+		{beadslib.Status("hooked"), nil, "open", false},
 	}
 
 	for _, tt := range tests {
-		t.Run(string(tt.upstream), func(t *testing.T) {
+		name := string(tt.upstream)
+		if tt.upstreamDeferUntil != nil {
+			if tt.upstreamDeferUntil.After(now) {
+				name += "+future-defer_until"
+			} else {
+				name += "+past-defer_until"
+			}
+		}
+		t.Run(name, func(t *testing.T) {
 			bead, err := beadFromNativeIssue(&beadslib.Issue{
-				ID:        "gc-status",
-				Title:     "status mapping",
-				Status:    tt.upstream,
-				IssueType: beadslib.TypeTask,
+				ID:         "gc-status",
+				Title:      "status mapping",
+				Status:     tt.upstream,
+				IssueType:  beadslib.TypeTask,
+				DeferUntil: tt.upstreamDeferUntil,
 			})
 			if err != nil {
 				t.Fatalf("beadFromNativeIssue: %v", err)
@@ -269,6 +289,9 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 			}
 			if bead.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Fatalf("IndefinitelyDeferred = %v, want %v", bead.IndefinitelyDeferred, tt.wantIndefiniteHold)
+			}
+			if IsDeferred(bead, now) != tt.wantIndefiniteHold {
+				t.Fatalf("IsDeferred(status %q, defer %v) = %v, want %v", tt.upstream, tt.upstreamDeferUntil, IsDeferred(bead, now), tt.wantIndefiniteHold)
 			}
 			if bead.SourceStatus != string(tt.upstream) {
 				t.Fatalf("SourceStatus = %q, want bd's %q", bead.SourceStatus, tt.upstream)

@@ -3398,7 +3398,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status), issue.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status))
 	b := Bead{
 		ID:                   issue.ID,
 		Title:                issue.Title,

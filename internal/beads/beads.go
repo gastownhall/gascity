@@ -211,8 +211,10 @@ type Bead struct {
 	NoHistory bool `json:"no_history,omitempty"`
 	// DeferUntil hides the bead from ready/claimable views until this time,
 	// mirroring bd's defer_until column (a future value means "not yet ready";
-	// nil or past means ready). Create paths preserve it; UpdateOpts does not
-	// mutate it.
+	// nil or past means ready — for a row the store does not record as
+	// deferred: a store-recorded deferred status defers the bead through
+	// IndefinitelyDeferred until the store itself lifts the deferral). Create
+	// paths preserve it; UpdateOpts does not mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
 	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
 	// means the store did not provide it and cached ready falls back to
@@ -225,10 +227,13 @@ type Bead struct {
 	// stamped before closing, the same value BdStore and NativeDoltStore
 	// forward to their close. Reopening clears it.
 	CloseReason string `json:"close_reason,omitempty"`
-	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
-	// after richer statuses normalize to Gas City's three-state model. Cache
-	// notifications restore status="deferred" on the event wire so another
-	// process can reconstruct it; other JSON surfaces remain unchanged.
+	// IndefinitelyDeferred preserves bd's status-based deferral after richer
+	// statuses normalize to Gas City's three-state model. It is set whenever
+	// the store records bd's deferred status, dated or not: defer_until only
+	// names when bd's own sweep may lift the deferral, and gc honors the lift
+	// once the store records it (#6207). Cache notifications restore
+	// status="deferred" on the event wire so another process can reconstruct
+	// it; other JSON surfaces remain unchanged.
 	//
 	// No read surface exposes it, so the two projections of the same bead
 	// disagree by design: a direct .gc/events.jsonl reader sees the
@@ -932,8 +937,9 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
-// status or temporarily by a future defer_until.
+// IsDeferred reports whether a bead is hidden by bd's deferred status (dated
+// or not, until the store itself lifts the deferral) or by a future
+// defer_until on a row the store does not record as deferred.
 // cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
 // operates on raw bd JSON before this normalization.
 func IsDeferred(b Bead, now time.Time) bool {
