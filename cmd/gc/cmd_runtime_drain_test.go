@@ -1489,6 +1489,97 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 	}
 }
 
+// unrecordedAckDrainOps reports a successful ack write that never landed:
+// setDrainAck returns nil without recording, so a read-back finds nothing.
+type unrecordedAckDrainOps struct {
+	*fakeDrainOps
+}
+
+func (u *unrecordedAckDrainOps) setDrainAck(string) error { return nil }
+
+// The legacy reconciler's ack write can return nil while GC_DRAIN_ACK never
+// reached the session (issue #8116: the write addressed a server that was
+// not the one hosting the session). The ack must not report success.
+func TestDoRuntimeDrainAckFailsWhenAckDidNotPersist(t *testing.T) {
+	pokes := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error {
+		pokes++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := &unrecordedAckDrainOps{fakeDrainOps: newFakeDrainOps()}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, must not report an acknowledgement", got)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "did not persist") {
+		t.Errorf("stderr = %q, want it to say the ack did not persist", got)
+	}
+	if !strings.Contains(got, `"worker"`) {
+		t.Errorf("stderr = %q, want it to name the session", got)
+	}
+	if pokes != 0 {
+		t.Errorf("poke called %d times, want 0", pokes)
+	}
+}
+
+// noServerDrainAckProvider answers every meta write and read with the bare
+// no-server failure tmux emits when nothing listens at the addressed socket
+// path: the writes are swallowed as gone-session leaves, and the read-back
+// cannot confirm the ack landed anywhere.
+type noServerDrainAckProvider struct {
+	*runtime.Fake
+}
+
+func (p *noServerDrainAckProvider) SetMeta(_, _, _ string) error {
+	return errors.New("no tmux server running")
+}
+
+func (p *noServerDrainAckProvider) RemoveMeta(_, _ string) error {
+	return errors.New("no tmux server running")
+}
+
+func (p *noServerDrainAckProvider) GetMeta(name, key string) (string, error) {
+	return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, errors.New("no tmux server running"))
+}
+
+func TestDoRuntimeDrainAckFailsWhenNoServerAnswersTheReadBack(t *testing.T) {
+	pokes := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error {
+		pokes++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newDrainOps(&noServerDrainAckProvider{Fake: runtime.NewFake()})
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, must not report an acknowledgement", got)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "could not be verified") {
+		t.Errorf("stderr = %q, want it to say the ack could not be verified", got)
+	}
+	if !strings.Contains(got, `"worker"`) {
+		t.Errorf("stderr = %q, want it to name the session", got)
+	}
+	if pokes != 0 {
+		t.Errorf("poke called %d times, want 0", pokes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // newDrainOps factory tests
 // ---------------------------------------------------------------------------

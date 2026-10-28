@@ -4190,7 +4190,8 @@ carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
 to the incarnation the command read. A missing or stale token, or a store
 that is unreachable or keeps changing, exits 1 with nothing acknowledged.
-Under the legacy reconciler the ack behaves as it always has.
+Under the legacy reconciler the ack is read back after it is written, and
+an ack that did not persist on the session exits 1.
 
 ```
 gc runtime drain-ack [name] [flags]
