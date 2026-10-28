@@ -1396,10 +1396,17 @@ fi
 		t.Fatal(err)
 	}
 
-	env := append(sanitizedBaseEnv(
+	// Each case decides whether the caller inherits DOLT_CLI_PASSWORD.
+	var env []string
+	for _, kv := range sanitizedBaseEnv(
 		"CALLS_FILE="+callsFile,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-	), "GC_BIN=")
+	) {
+		if !strings.HasPrefix(kv, "DOLT_CLI_PASSWORD=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "GC_BIN=")
 	out := runShHarness(t, harness, "dolt client calls", append(env, extraEnv...))
 
 	data, err := os.ReadFile(callsFile)
@@ -1425,23 +1432,26 @@ fi
 // TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv pins issue #8376: every
 // dolt SQL client call in gc-beads-bd.sh hands the password to dolt through a
 // per-call DOLT_CLI_PASSWORD, never in argv where any local user can read it
-// through ps.
+// through ps. The script's own DOLT_CLI_PASSWORD must stay as inherited: dolt
+// sql-server also reads it and refuses to start with a password but no user.
 func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 	const secret = "s3cr3t-dolt-pw"
 	const wantCalls = 10
 	for _, tc := range []struct {
-		name    string
-		env     []string
-		wantEnv string
+		name      string
+		env       []string
+		wantEnv   string
+		wantShell string
 	}{
-		{name: "configured", env: []string{"GC_DOLT_PASSWORD=" + secret}, wantEnv: "set:" + secret},
+		{name: "configured", env: []string{"DOLT_CLI_PASSWORD=other-pw", "GC_DOLT_PASSWORD=" + secret}, wantEnv: "set:" + secret, wantShell: "set:other-pw"},
 		// An unset DOLT_CLI_PASSWORD makes dolt prompt on a TTY and fail under a
 		// non-interactive caller, so the empty password still travels as set.
-		{name: "empty", env: []string{"GC_DOLT_PASSWORD="}, wantEnv: "set:"},
-		{name: "unset", wantEnv: "set:"},
+		{name: "empty", env: []string{"DOLT_CLI_PASSWORD=other-pw", "GC_DOLT_PASSWORD="}, wantEnv: "set:", wantShell: "set:other-pw"},
+		{name: "unset", env: []string{"DOLT_CLI_PASSWORD=other-pw"}, wantEnv: "set:", wantShell: "set:other-pw"},
+		{name: "configured_not_inherited", env: []string{"GC_DOLT_PASSWORD=" + secret}, wantEnv: "set:" + secret, wantShell: "unset:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			calls, out := runGcBeadsBdDoltClientCalls(t, append([]string{"DOLT_CLI_PASSWORD=other-pw"}, tc.env...)...)
+			calls, out := runGcBeadsBdDoltClientCalls(t, tc.env...)
 			if len(calls) != wantCalls {
 				t.Fatalf("recorded %d dolt client calls, want %d:\n%+v\noutput:\n%s", len(calls), wantCalls, calls, out)
 			}
@@ -1460,6 +1470,9 @@ func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 				if call.env != tc.wantEnv {
 					t.Errorf("call %d DOLT_CLI_PASSWORD = %q, want %q (argv %q)", i, call.env, tc.wantEnv, call.argv)
 				}
+			}
+			if want := "shell=" + tc.wantShell + "\n"; !strings.Contains(out, want) {
+				t.Errorf("script DOLT_CLI_PASSWORD after the client calls changed, want %q:\n%s", want, out)
 			}
 		})
 	}
