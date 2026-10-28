@@ -748,7 +748,7 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    dialog.question.promptText(),
+			Prompt:    dialog.question.Question,
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}

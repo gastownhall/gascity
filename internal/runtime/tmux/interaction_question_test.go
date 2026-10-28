@@ -816,3 +816,56 @@ func TestNudgeSessionRefusesQuestionDialogAppearingAfterThePaste(t *testing.T) {
 	}
 	keysAfterSwap(t, ex)
 }
+
+// Pending reports the question page's own text as the prompt, and a request
+// ID that follows the page, not the pane dressing: the ☐/☒ chips and the
+// focused option change while the dialog is the same page (a multiSelect
+// toggle flips a chip, arrows move the cursor), so the ID must not hash them.
+func TestProviderPendingQuestionRequestIDAndPrompt(t *testing.T) {
+	const multiSelectPage = ` ←  ☐ Tags  ☐ Scope  ✔ Submit  →
+Which features should the change cover?
+❯ 1. Tags
+  2. Scope
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+	const multiSelectAfterToggle = ` ←  ☒ Tags  ☐ Scope  ✔ Submit  →
+Which features should the change cover?
+  1. Tags
+❯ 2. Scope
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+	pendingFor := func(pane string) *runtime.PendingInteraction {
+		tm, _ := questionTmux(pane)
+		pending, err := (&Provider{tm: tm}).Pending("auq")
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if pending == nil {
+			t.Fatal("Pending = nil for a live question page")
+		}
+		return pending
+	}
+
+	pending := pendingFor(multiSelectPage)
+	if pending.Prompt != "Which features should the change cover?" {
+		t.Errorf("Prompt = %q, want the question text itself", pending.Prompt)
+	}
+	if len(pending.Options) != 0 {
+		t.Errorf("Options = %q, want none: a question is answered by a human, not by a verb", pending.Options)
+	}
+
+	again := pendingFor(multiSelectPage)
+	if again.RequestID != pending.RequestID {
+		t.Errorf("RequestID moved between two polls of the same page: %q vs %q", pending.RequestID, again.RequestID)
+	}
+	toggled := pendingFor(multiSelectAfterToggle)
+	if toggled.RequestID != pending.RequestID {
+		t.Errorf("RequestID %q changed with the page's chips/cursor (%q); the ID must follow the page, not the pane dressing",
+			pending.RequestID, toggled.RequestID)
+	}
+
+	next := pendingFor(strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n")
+	if next.RequestID == pending.RequestID {
+		t.Errorf("RequestID %q is the same on the next page; it must move with the page", pending.RequestID)
+	}
+}

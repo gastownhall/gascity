@@ -254,9 +254,12 @@ func (q *parsedQuestion) promptText() string {
 	return text
 }
 
-// requestID is the stable ID of the dialog: the same on every look while it
-// stays open, whichever option is focused.
+// requestID is the stable ID of the page on screen: the same on every look
+// while the page stays open, and different on the next one. It covers the
+// question and the choices, never the header's ☐/☒ chips or the focused
+// option, which change while the dialog is the same page — a multiSelect
+// toggle flips a chip, arrows move the cursor.
 func (q *parsedQuestion) requestID() string {
-	h := sha256.Sum256([]byte(q.Header + "\x00" + q.Question + "\x00" + strings.Join(q.Choices, "\x00")))
+	h := sha256.Sum256([]byte(q.Question + "\x00" + strings.Join(q.Choices, "\x00")))
 	return fmt.Sprintf("tmux-question-%x", h[:8])
 }
