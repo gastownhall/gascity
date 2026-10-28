@@ -111,3 +111,50 @@ func TestTargetHasNoNamedAgentIgnoresAKindOnlyName(t *testing.T) {
 		t.Error(`targetHasNoNamedAgent("alpha") = true; alpha is registered by name`)
 	}
 }
+
+// A session really registered under a kind-shaped name owns that name: gc
+// must resolve it to its own pane — directly through `agent get` and through
+// the list fallback after a not-found answer — and never to another pane
+// that merely runs the kind.
+func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
+	t.Run("agent get answers directly", func(t *testing.T) {
+		script := "#!/bin/sh\n" +
+			"case \"$*\" in\n" +
+			"  *'agent get'*)\n" +
+			"    echo '{\"result\":{\"agent\":{\"agent\":\"opencode\",\"name\":\"opencode\",\"pane_id\":\"w5:p1\",\"agent_status\":\"idle\"}}}'\n" +
+			"    ;;\n" +
+			"esac\n" +
+			"exit 0\n"
+		c := &client{session: "gc-test", bin: writeFakeHerdr(t, script)}
+		a, ok, err := c.getAgent(context.Background(), "opencode")
+		if err != nil || !ok || a.PaneID != "w5:p1" {
+			t.Fatalf("getAgent(opencode) = (%+v, %v, %v); want the registered session's own pane w5:p1", a, ok, err)
+		}
+	})
+
+	t.Run("list fallback after not-found", func(t *testing.T) {
+		list := `{"result":{"agents":[` +
+			`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+			`{"agent":"opencode","name":"alpha","pane_id":"w1:p1","agent_status":"working"},` +
+			`{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"working"},` +
+			`{"agent":"opencode","name":"opencode","pane_id":"w5:p1","agent_status":"idle"}]}}`
+		script := "#!/bin/sh\n" +
+			"case \"$*\" in\n" +
+			"  *'agent get'*)\n" +
+			"    echo '{\"error\":{\"code\":\"agent_not_found\",\"message\":\"agent not found\"}}'\n" +
+			"    ;;\n" +
+			"  *'agent list'*)\n" +
+			"    echo '" + list + "'\n" +
+			"    ;;\n" +
+			"esac\n" +
+			"exit 0\n"
+		c := &client{session: "gc-test", bin: writeFakeHerdr(t, script)}
+		a, ok, err := c.getAgent(context.Background(), "opencode")
+		if err != nil {
+			t.Fatalf("getAgent(opencode): %v", err)
+		}
+		if !ok || a.PaneID != "w5:p1" {
+			t.Fatalf("getAgent(opencode) = (%+v, %v); want the registered session's own pane w5:p1, never the unnamed kind pane w3:p1", a, ok)
+		}
+	})
+}
