@@ -255,3 +255,83 @@ func TestTraceStoreAppendAfterRolledBackWriteContinuesSegment(t *testing.T) {
 		}
 	})
 }
+
+func TestTraceStoreFailedRollbackAbandonsSegment(t *testing.T) {
+	for _, reopen := range []bool{false, true} {
+		name := "same store"
+		if reopen {
+			name = "store reopened after the failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+			if err != nil {
+				t.Fatalf("new store: %v", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			now := time.Now().UTC()
+			if err := store.AppendBatch([]SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-a", now)}, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch a: %v", err)
+			}
+			seqBefore, err := store.LatestSeq()
+			if err != nil {
+				t.Fatalf("LatestSeq: %v", err)
+			}
+			abandoned := store.currentPath
+			// Fail after the first record line and partway into the second,
+			// so a complete uncommitted line and a torn line stay on disk.
+			failed := []SessionReconcilerTraceRecord{
+				traceStoreTestRecord("cycle-b", now.Add(time.Second)),
+				traceStoreTestRecord("cycle-b", now.Add(time.Second)),
+			}
+			failedCommitSeq := seqBefore + uint64(len(failed)) + 1
+			cutInSecondLine := func(p []byte) int { return bytes.IndexByte(p, '\n') + 1 + 20 }
+			injectTraceWriteFailure(t, store, cutInSecondLine, errors.New("truncate refused"))
+			if err := store.AppendBatch(failed, TraceDurabilityDurable); !errors.Is(err, syscall.ENOSPC) {
+				t.Fatalf("append batch b error = %v, want ENOSPC", err)
+			}
+			if reopen {
+				if err := store.Close(); err != nil {
+					t.Fatalf("close: %v", err)
+				}
+				store, err = newSessionReconcilerTraceStore(cityDir, io.Discard)
+				if err != nil {
+					t.Fatalf("reopen store: %v", err)
+				}
+			}
+			next := []SessionReconcilerTraceRecord{traceStoreTestRecord("cycle-c", now.Add(2*time.Second))}
+			if err := store.AppendBatch(next, TraceDurabilityDurable); err != nil {
+				t.Fatalf("append batch c: %v", err)
+			}
+
+			root := traceStoreTestRoot(cityDir)
+			segments := traceStoreTestSegments(t, root)
+			if len(segments) != 2 || segments[0] != abandoned {
+				t.Fatalf("segments = %v, want %s plus a newer one", segments, abandoned)
+			}
+			fresh, err := os.ReadFile(segments[1])
+			if err != nil {
+				t.Fatalf("read fresh segment: %v", err)
+			}
+			if !bytes.Contains(fresh, []byte("cycle-c")) || bytes.Contains(fresh, []byte("cycle-b")) {
+				t.Fatalf("segment %s should hold batch c and nothing of batch b:\n%s", segments[1], fresh)
+			}
+
+			records, err := ReadTraceRecords(root, TraceFilter{})
+			if err != nil {
+				t.Fatalf("ReadTraceRecords: %v", err)
+			}
+			assertTraceSeqsUnique(t, records)
+			counts := traceRecordCounts(records)
+			if counts["cycle-a"] != 2 || counts["cycle-c"] != 2 || counts["cycle-b"] != 0 {
+				t.Fatalf("records by trace = %v, want cycle-a=2 cycle-c=2 and no cycle-b", counts)
+			}
+			for _, rec := range records {
+				if rec.TraceID == "cycle-c" && rec.Seq <= failedCommitSeq {
+					t.Fatalf("batch c seq %d does not pass the failed batch's commit seq %d", rec.Seq, failedCommitSeq)
+				}
+			}
+		})
+	}
+}

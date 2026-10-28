@@ -427,7 +427,7 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 	writeBuf = append(writeBuf, commitLine...)
 
 	if _, err := s.currentFile.Write(writeBuf); err != nil {
-		s.discardFailedWriteLocked()
+		s.discardFailedWriteLocked(seq)
 		return err
 	}
 	s.seq = seq
@@ -449,9 +449,25 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 // discardFailedWriteLocked removes what a failed batch write left in the
 // segment. currentBytes ends on the last batch commit, so cutting back to it
 // lets the next batch start on its own line and reuse the failed batch's seqs.
-func (s *SessionReconcilerTraceStore) discardFailedWriteLocked() {
-	if err := s.currentFile.Truncate(s.currentBytes); err != nil && s.stderr != nil {
-		fmt.Fprintf(s.stderr, "trace: rolling back failed write to %s: %v\n", s.currentPath, err) //nolint:errcheck
+// If the cut fails, the torn bytes stay as the segment's tail: the segment is
+// abandoned so the next batch starts a new one, and the seqs up to lastSeq are
+// retired so no later record reuses a seq still on disk.
+func (s *SessionReconcilerTraceStore) discardFailedWriteLocked(lastSeq uint64) {
+	truncErr := s.currentFile.Truncate(s.currentBytes)
+	if truncErr == nil {
+		return
+	}
+	if s.stderr != nil {
+		fmt.Fprintf(s.stderr, "trace: rolling back failed write to %s: %v; starting a new segment\n", s.currentPath, truncErr) //nolint:errcheck
+	}
+	_ = s.currentFile.Close()
+	s.currentFile = nil
+	s.currentPath = ""
+	s.currentBytes = 0
+	s.currentBatches = 0
+	s.seq = lastSeq
+	if err := s.saveHeadLocked(); err != nil && s.stderr != nil {
+		fmt.Fprintf(s.stderr, "trace: save head: %v\n", err) //nolint:errcheck
 	}
 }
 
