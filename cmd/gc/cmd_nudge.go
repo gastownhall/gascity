@@ -1657,10 +1657,7 @@ func nudgeObservationBusy(obs worker.LiveObservation) bool {
 }
 
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
-	return store != nil &&
-		strings.TrimSpace(target.cityPath) != "" &&
-		target.sessionID != "" &&
-		nudgeCityUsesManagedReconciler(target.cityPath)
+	return managedNudgeWakeSkipReason(target, store != nil) == ""
 }
 
 // queueManagedSessionNudgeWake queues a nudge for a managed session that is
@@ -1725,23 +1722,29 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) (sess
 		if nudgeWarningWriter != nil {
 			fmt.Fprintf(nudgeWarningWriter, //nolint:errcheck // best-effort warning
 				"gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
-				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront))
+				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront.Backed()))
 		}
 		return 0, nil
 	}
 	return sessFront.RequestWakeUnlessHeld(target.sessionID, false, time.Now().UTC())
 }
 
-// managedNudgeWakeSkipReason names which precondition of the managed wake was
-// missing, so the downgrade line is actionable rather than merely present.
-func managedNudgeWakeSkipReason(target nudgeTarget, sessFront *session.Store) string {
+// managedNudgeWakeSkipReason names the first missing precondition of the
+// managed wake, or "" when it can be requested, so a downgrade line is
+// actionable rather than merely present. backed reports whether a store backs
+// the command. It probes the city's controller at most once.
+func managedNudgeWakeSkipReason(target nudgeTarget, backed bool) string {
 	switch {
-	case !sessFront.Backed():
+	case !backed:
 		return "no session store is backing this command"
 	case target.sessionID == "":
 		return "the target resolved to no session bead id"
+	case strings.TrimSpace(target.cityPath) == "":
+		return "the target resolved to no city"
+	case !nudgeCityUsesManagedReconciler(target.cityPath):
+		return fmt.Sprintf("no controller or supervisor was detected for %s", target.cityPath)
 	default:
-		return "unknown"
+		return ""
 	}
 }
 
@@ -2142,7 +2145,11 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			}
 		}
 	}
-	if !obs.Running && canRequestManagedNudgeWake(target, store) {
+	skipped := ""
+	if !obs.Running {
+		skipped = managedNudgeWakeSkipReason(target, store != nil)
+	}
+	if !obs.Running && skipped == "" {
 		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
 		outcome, err := enqueueManagedNudgeThenWake(target, store, item)
 		if err != nil {
@@ -2152,9 +2159,7 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			return true, nil // a held session keeps the nudge queued; no poke
 		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
-			if nudgeWarningWriter != nil {
-				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
-			}
+			warnMailNotify("warning: poke failed after managed wake: %v", err)
 		}
 		return true, nil
 	}
@@ -2163,8 +2168,18 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 	}
 	if obs.Running {
 		maybeStartNudgePoller(target)
+	} else {
+		warnMailNotify("queued for %s but no managed wake was requested (%s); it is delivered when the session next runs", target.agentKey(), skipped)
 	}
 	return true, nil
+}
+
+// warnMailNotify writes one "gc mail notify:" line to nudgeWarningWriter: what
+// a city-site mail notice did when it did not simply record a wake.
+func warnMailNotify(format string, args ...any) {
+	if nudgeWarningWriter != nil {
+		fmt.Fprintf(nudgeWarningWriter, "gc mail notify: "+format+"\n", args...) //nolint:errcheck // best-effort warning
+	}
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {

@@ -560,6 +560,123 @@ func TestSendMailNotifyToHeldSessionQueuesWithoutPoke(t *testing.T) {
 	}
 }
 
+// mailNotifyWakeCity is a file-backed city with one non-running managed
+// session, the controller probe and poke stubbed, and nudgeWarningWriter
+// captured, for the city-site mail notify's wake-outcome lines.
+type mailNotifyWakeCity struct {
+	dir      string
+	store    beads.Store
+	fake     *runtime.Fake
+	mgr      *session.Manager
+	id       string
+	target   nudgeTarget
+	pokes    int
+	warnings bytes.Buffer
+}
+
+func newMailNotifyWakeCity(t *testing.T, managed bool) *mailNotifyWakeCity {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	c := &mailNotifyWakeCity{dir: t.TempDir(), fake: runtime.NewFake()}
+	c.store = openNudgeBeadStore(c.dir)
+	c.mgr = newSessionManagerWithConfig(c.dir, c.store, c.fake, nil)
+	c.target = c.addSession(t, "worker")
+	c.id = c.target.sessionID
+	prevManaged, prevPoke, prevWarn := nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return managed && cityPath == c.dir }
+	nudgePokeController = func(string, reconcilekey.Key) error { c.pokes++; return nil }
+	nudgeWarningWriter = &c.warnings
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter = prevManaged, prevPoke, prevWarn
+	})
+	return c
+}
+
+// addSession creates a manual, never-started session of template name and
+// returns its nudge target.
+func (c *mailNotifyWakeCity) addSession(t *testing.T, name string) nudgeTarget {
+	t.Helper()
+	info, err := c.mgr.CreateSession(context.Background(), session.CreateOptions{Template: name, Title: name, Command: "claude", WorkDir: c.dir, Provider: "claude", Hints: runtime.Config{WorkDir: c.dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create(%s): %v", name, err)
+	}
+	agent := config.Agent{Name: name, Provider: "claude"}
+	return nudgeTarget{cityPath: c.dir, cfg: &config.City{Agents: []config.Agent{agent}}, alias: name, sessionID: info.ID, sessionName: info.SessionName, identity: name, agent: agent}
+}
+
+// notify sends the target a mail notice and requires it to succeed, which
+// is what makes gc mail send exit 0 with notified=true.
+func (c *mailNotifyWakeCity) notify(t *testing.T) {
+	t.Helper()
+	if err := sendMailNotifyWithWorker(c.target, c.store, c.fake, ""); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+}
+
+// notifyLines returns the captured stderr lines a mail notice wrote.
+func (c *mailNotifyWakeCity) notifyLines() []string {
+	var lines []string
+	for _, line := range strings.Split(c.warnings.String(), "\n") {
+		if strings.HasPrefix(line, "gc mail notify:") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func (c *mailNotifyWakeCity) wakeRequest(t *testing.T) string {
+	t.Helper()
+	got, err := c.store.Get(c.id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return got.Metadata["wake_request"]
+}
+
+func (c *mailNotifyWakeCity) requireOneQueued(t *testing.T) {
+	t.Helper()
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(c.dir, c.target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// requireOneNotifyLine asserts exactly one mail-notify line, naming the
+// target and carrying every want.
+func (c *mailNotifyWakeCity) requireOneNotifyLine(t *testing.T, want ...string) {
+	t.Helper()
+	lines := c.notifyLines()
+	if len(lines) != 1 {
+		t.Fatalf("gc mail notify lines = %q, want exactly one; stderr: %q", lines, c.warnings.String())
+	}
+	for _, w := range append([]string{c.target.agentKey()}, want...) {
+		if !strings.Contains(lines[0], w) {
+			t.Fatalf("gc mail notify line = %q, want it to contain %q", lines[0], w)
+		}
+	}
+}
+
+// TestSendMailNotifyWithoutControllerReportsSkippedWake: with no controller
+// or supervisor detected, a mail notice to an asleep, unheld session is a
+// plain enqueue that requests no wake, and the line names the missing
+// precondition.
+func TestSendMailNotifyWithoutControllerReportsSkippedWake(t *testing.T) {
+	c := newMailNotifyWakeCity(t, false)
+	if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), c.id, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sleepUnheld(t, c.store, c.id)
+	c.notify(t)
+	c.requireOneQueued(t)
+	if got := c.wakeRequest(t); c.pokes != 0 || got != "" {
+		t.Fatalf("pokes = %d, wake_request = %q; want neither without a controller", c.pokes, got)
+	}
+	c.requireOneNotifyLine(t, "no managed wake was requested", "no controller or supervisor was detected")
+}
+
 // sleepUnheld turns a suspended row into one nothing holds: asleep, with no
 // suspension, so a background nudge may still wake it (CONTRACT v5.9 D8).
 func sleepUnheld(t *testing.T, store beads.Store, id string) {
