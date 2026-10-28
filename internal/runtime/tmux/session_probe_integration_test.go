@@ -47,3 +47,24 @@ func TestProbeSessionAnswersFromARealServer(t *testing.T) {
 		})
 	}
 }
+
+// TestProbeSessionAcrossTmuxTmpdirsIsUnobservable starts a server while
+// TMUX_TMPDIR names one directory and probes it while TMUX_TMPDIR names
+// another: the prober cannot see that server, so the session is
+// unobservable, never dead.
+func TestProbeSessionAcrossTmuxTmpdirsIsUnobservable(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	name := privateSocketName("ps")
+	t.Setenv("TMUX_TMPDIR", shortResolvedDir(t))
+	served := realServerSocketPath(t, name)
+	t.Setenv("TMUX_TMPDIR", shortResolvedDir(t))
+	if SocketPath(name) == served {
+		t.Fatalf("SocketPath(%s) = %s under both TMUX_TMPDIRs", name, served)
+	}
+	got, err := ProbeSession(context.Background(), name, "keep")
+	if got != PresenceUnobservable || err == nil {
+		t.Fatalf("ProbeSession(%s, keep) = %v, %v; want unobservable with an error", name, got, err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,11 @@ func parseDetachedProbeSpec(spec string) (detachedProbeSpec, error) {
 	}
 	if socket == "" || session == "" {
 		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: socket and session are required", spec)
+	}
+	// A socket is a -L name or an absolute -S path; a relative path would
+	// resolve against whatever directory the controller runs in.
+	if strings.Contains(socket, "/") && !filepath.IsAbs(socket) {
+		return detachedProbeSpec{}, fmt.Errorf("parsing detached probe spec %q: socket %q must be a name or an absolute path", spec, socket)
 	}
 	// tmux never names a session with ':' or '.', so such a session could
 	// only ever read as dead.

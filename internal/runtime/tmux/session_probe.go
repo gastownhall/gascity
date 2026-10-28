@@ -72,10 +72,11 @@ func probeSessionWith(ctx context.Context, socketRef, session string, deps sessi
 		return PresenceUnobservable, fmt.Errorf("probing tmux session %q: %w", session, observation)
 	}
 
-	// list-sessions, not has-session: a -t target also matches by prefix and
-	// pattern, and its exit 1 does not tell a missing session from a server
-	// that never answered.
-	listing, err := deps.run(ctx, []string{"-L", socketRef, "list-sessions", "-F", "#{session_name}"})
+	// -S pins the client to the path just observed live. list-sessions, not
+	// has-session: a -t target also matches by prefix and pattern, and its
+	// exit 1 does not tell a missing session from a server that never
+	// answered. -u keeps session names verbatim in the listing.
+	listing, err := deps.run(ctx, []string{"-u", "-S", path, "list-sessions", "-F", "#{session_name}"})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return PresenceUnobservable, fmt.Errorf("probing tmux session %q at %s: %w", session, path, ctxErr)

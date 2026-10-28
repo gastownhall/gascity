@@ -30,6 +30,20 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 			},
 		},
 		{
+			name: "absolute socket path",
+			spec: "tmux:/run/gc/tmux.sock:soak-loop",
+			want: detachedProbeSpec{
+				Kind:    "tmux",
+				Socket:  "/run/gc/tmux.sock",
+				Session: "soak-loop",
+			},
+		},
+		{
+			name:    "relative socket path",
+			spec:    "tmux:run/tmux.sock:soak-loop",
+			wantErr: true,
+		},
+		{
 			name:    "session with a colon tmux cannot name",
 			spec:    "tmux:gascity:scope:soak-loop",
 			wantErr: true,
@@ -99,7 +113,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := filepath.Join(t.TempDir(), "args")
-			listenDetachedProbeServer(t, "gascity")
+			socketPath := listenDetachedProbeServer(t, "gascity")
 			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; printf '`+tt.sessions+`'; exit `+tt.exitCode)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
@@ -111,7 +125,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read fake tmux args: %v", err)
 			}
-			wantArgs := "-L\ngascity\nlist-sessions\n-F\n#{session_name}\n"
+			wantArgs := "-u\n-S\n" + socketPath + "\nlist-sessions\n-F\n#{session_name}\n"
 			if string(args) != wantArgs {
 				t.Fatalf("tmux args = %q, want %q", string(args), wantArgs)
 			}
@@ -213,8 +227,9 @@ func useDetachedProbeSocketDir(t *testing.T, name string) string {
 
 // listenDetachedProbeServer stands in for a live tmux server on socket name:
 // a unix listener at the path the detached probe resolves, so the probe
-// reaches its tmux client call, which installFakeTmux answers.
-func listenDetachedProbeServer(t *testing.T, name string) {
+// reaches its tmux client call, which installFakeTmux answers. It returns
+// that path.
+func listenDetachedProbeServer(t *testing.T, name string) string {
 	t.Helper()
 	path := useDetachedProbeSocketDir(t, name)
 	ln, err := net.Listen("unix", path)
@@ -222,6 +237,7 @@ func listenDetachedProbeServer(t *testing.T, name string) {
 		t.Fatalf("listen %s: %v", path, err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	return path
 }
 
 func installFakeTmux(t *testing.T, body string) {

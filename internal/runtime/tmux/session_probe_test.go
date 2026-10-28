@@ -140,14 +140,16 @@ func probeSocketPath(t *testing.T, name string) string {
 }
 
 // listenProbeSocket binds a listener where name resolves, standing in for a
-// live tmux server.
-func listenProbeSocket(t *testing.T, name string) {
+// live tmux server, and returns that path.
+func listenProbeSocket(t *testing.T, name string) string {
 	t.Helper()
-	ln, err := net.Listen("unix", probeSocketPath(t, name))
+	path := probeSocketPath(t, name)
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	return path
 }
 
 func plainFileInfo(t *testing.T) os.FileInfo {
@@ -176,7 +178,7 @@ func sequenceLstat(infos ...os.FileInfo) func(string) (os.FileInfo, error) {
 // AC-2: a server that answers is read by exact session name, so a session
 // sharing only a prefix or matching as a pattern does not keep it alive.
 func TestProbeSessionReadsTheServerListingExactly(t *testing.T) {
-	listenProbeSocket(t, "gc-probe")
+	path := listenProbeSocket(t, "gc-probe")
 	tests := []struct {
 		name    string
 		listing string
@@ -202,10 +204,42 @@ func TestProbeSessionReadsTheServerListingExactly(t *testing.T) {
 			if got != tt.want || err != nil {
 				t.Fatalf("ProbeSession = %v, %v; want %v", got, err, tt.want)
 			}
-			wantArgs := []string{"-L", "gc-probe", "list-sessions", "-F", "#{session_name}"}
+			wantArgs := []string{"-u", "-S", path, "list-sessions", "-F", "#{session_name}"}
 			if fmt.Sprint(gotArgs) != fmt.Sprint(wantArgs) {
 				t.Fatalf("tmux args = %q, want %q", gotArgs, wantArgs)
 			}
 		})
+	}
+}
+
+// AC-3: the tmux client is pinned to the socket path the probe observed, so
+// the answer comes from the server at that path whatever tmux would resolve.
+func TestProbeSessionAsksTheObservedSocketPath(t *testing.T) {
+	named := listenProbeSocket(t, "gc-probe")
+	abs := filepath.Join(filepath.Dir(named), "abs.sock")
+	ln, err := net.Listen("unix", abs)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	for _, tt := range []struct{ ref, want string }{
+		{ref: "gc-probe", want: named},
+		{ref: abs, want: abs},
+	} {
+		var gotArgs []string
+		got, err := probeSessionWith(context.Background(), tt.ref, "soak-loop", sessionProbeDeps{
+			lstat: os.Lstat,
+			dial:  dialUnixSocket,
+			run: func(_ context.Context, args []string) (string, error) {
+				gotArgs = args
+				return "soak-loop\n", nil
+			},
+		})
+		if got != PresenceAlive || err != nil {
+			t.Fatalf("ProbeSession(%s) = %v, %v; want alive", tt.ref, got, err)
+		}
+		if len(gotArgs) < 3 || gotArgs[0] != "-u" || gotArgs[1] != "-S" || gotArgs[2] != tt.want {
+			t.Fatalf("ProbeSession(%s) tmux args = %q, want -u -S %s", tt.ref, gotArgs, tt.want)
+		}
 	}
 }
