@@ -2343,6 +2343,48 @@ func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) 
 	}
 }
 
+// TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache is the orphan
+// sweep's twin of the watchdog test above: over the production stack (policy
+// wrapper over a fully-primed CachingStore), a tracking bead written straight
+// to the backing after the prime is closed by sweepOrphanedOrderTrackingLimit.
+func TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(cached, &config.City{})
+	written, err := backing.Create(beads.Bead{
+		Title:  "order:digest",
+		Labels: []string{"order-run:digest", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cachedList, err := store.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	for _, b := range cachedList {
+		if b.ID == written.ID {
+			t.Fatalf("vacuity guard failed: snapshot already lists %s", written.ID)
+		}
+	}
+
+	if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingLimit: %v", err)
+	}
+
+	got, err := backing.Get(written.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", written.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("tracking bead written behind the cache: status = %s, want closed by the orphan sweep", got.Status)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{

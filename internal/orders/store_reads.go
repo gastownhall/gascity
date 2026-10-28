@@ -19,9 +19,9 @@ import (
 //
 // Read tiers are declared per method and preserved from the ops they replace:
 //   - RecentRunsAll / OpenRuns (the dispatch cooldown/single-flight index) and
-//     StaleOpenRuns (the stale sweep) read the LIVE tier — cache-bypass is the
-//     duplicate-dispatch guarantee: a tracking bead written behind the
-//     controller's cache is a jam the sweep must clear.
+//     StaleOpenRuns / OrphanedOpenRuns (the stale/orphan sweeps) read the LIVE
+//     tier — cache-bypass is the duplicate-dispatch guarantee: a tracking bead
+//     written behind the controller's cache is a jam the sweep must clear.
 //   - LastRun / Cursor preserve the dispatcher's pre-existing bare-List tier so
 //     the migration is behavior-preserving.
 //   - Get / RunDetail are the by-id detail reads (bare Get).
@@ -179,15 +179,29 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 
 // OrphanedOpenRuns lists every OPEN tracking bead EXCEPT pre-dispatch
 // trigger-env-failure markers (which the open-work gate intentionally keeps open
-// until the normal stale sweep), decoded into OrderRun across both tiers. It is
-// the typed read half of the orphaned-order-tracking startup sweep; the caller
-// closes the returned runs via CloseRuns. Names are best-effort (the sweep closes
-// by ID and does not resolve names).
+// until the normal stale sweep), decoded into OrderRun across both tiers. It
+// reads the LIVE tier — cache-bypass is the duplicate-dispatch guarantee: a
+// tracking bead written straight to the backing behind the controller's cache
+// is exactly the jam this sweep exists to clear (ga-v5vnyp) — and returns them
+// oldest-first (created ascending, ties by id ascending) so the caller's close
+// budget drains the oldest jam first. It is the typed read half of the
+// orphaned-order-tracking startup sweep; the caller closes the returned runs
+// via CloseRuns. Names are best-effort (the sweep closes by ID and does not
+// resolve names).
 func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	// Not-closed rather than Status: "open": an in_progress tracking bead is an
+	// open-work jam the sweep must clear, and no backing limit: the marker
+	// post-filter runs before the caller's close budget, so a truncated backing
+	// read would starve it.
+	all, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+		Label:         labelOrderTracking,
+		IncludeClosed: false,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
 	if err != nil {
 		return nil, err
 	}
