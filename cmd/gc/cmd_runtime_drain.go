@@ -1119,7 +1119,7 @@ func doRuntimeRequestRestart(r rowFirstRestart, rec events.Recorder, stdout io.W
 	})
 	switch r.notifyController() {
 	case restartNotified:
-		fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
+		fmt.Fprint(stdout, "Restart requested; controller notified; it restarts this session at its next reconcile.\n") //nolint:errcheck // best-effort stdout
 	case restartRemote:
 		fmt.Fprint(stdout, "Restart requested; the remote controller restarts this session at its next reconcile.\n") //nolint:errcheck // best-effort stdout
 	default:

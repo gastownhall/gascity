@@ -209,7 +209,7 @@ func TestRowFirstRestartNotifiedLines(t *testing.T) {
 		wantStdout string
 		wantStderr string
 	}{
-		{"notified", nil, "Restart requested; controller notified for immediate reconcile.\n", ""},
+		{"notified", nil, "Restart requested; controller notified; it restarts this session at its next reconcile.\n", ""},
 		{
 			"worker site", errWorkerSiteNoController, "Restart requested; the remote controller restarts this session at its next reconcile.\n",
 			"gc runtime request-restart: " + errWorkerSiteNoController.Error() + "\n",

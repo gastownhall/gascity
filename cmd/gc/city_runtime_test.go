@@ -4107,7 +4107,7 @@ func TestCityRuntimeBeadReconcileTick_SessionQueryPartialDoesNotReleaseAssignedW
 	}
 }
 
-func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
+func TestWispGCLanePass_LogsPurgeCountWithNonFatalError(t *testing.T) {
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
@@ -4126,10 +4126,8 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 		},
 	}
 
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	var pressureSkips int
+	cr.runWispGCLanePass(&pressureSkips)
 
 	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
 		t.Fatalf("stderr = %q, want wisp gc error", stderr.String())
@@ -4139,7 +4137,7 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
+func TestWispGCLanePass_PrefixesEachJoinedErrorLine(t *testing.T) {
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
 	cr := &CityRuntime{
@@ -4162,10 +4160,8 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 		},
 	}
 
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	var pressureSkips int
+	cr.runWispGCLanePass(&pressureSkips)
 
 	got := stderr.String()
 	for _, want := range []string{

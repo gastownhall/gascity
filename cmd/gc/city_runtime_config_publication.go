@@ -11,7 +11,9 @@ import (
 // on the same accepted revision. The controller state decides first: a
 // rejection means a newer config (an API mutation or an on-disk edit) won
 // while this reload was preparing its candidate, so none of the loop's
-// config/provider pointers may advance to the stale candidate.
+// config/provider pointers may advance to the stale candidate. The wisp GC
+// is built from the same config and published in the same lock section, so
+// the wisp GC lane never pairs a new config with the old GC policy.
 func (cr *CityRuntime) publishRuntimeConfig(
 	cfg *config.City,
 	sp runtime.Provider,
@@ -21,10 +23,12 @@ func (cr *CityRuntime) publishRuntimeConfig(
 	if cr.cs != nil && !cr.cs.updateFromRuntime(cfg, sp, revision) {
 		return false
 	}
+	wg := newWispGCForConfig(cfg)
 	cr.serviceStateMu.Lock()
 	cr.cfg = cfg
 	cr.sp = sp
 	cr.dops = dops
+	cr.wg = wg
 	cr.publishedRev = revision
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil

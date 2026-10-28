@@ -158,7 +158,7 @@ type CityRuntime struct {
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
 	adt                     assignedWorkDeferTracker
-	wg                      wispGC
+	wg                      wispGC // read by the wisp GC lane; publishRuntimeConfig replaces it with cfg under serviceStateMu
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
@@ -934,6 +934,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// on its own lane with only the controller (pending_interaction_lane.go).
 	// Its event-log rebuild runs on that lane too, so it never delays a tick.
 	defer cr.startPendingInteractionLane(ctx)()
+	// The expired-molecule purge runs on its own lane (wisp_gc_lane.go), so a
+	// long purge never delays a session decision of the tick.
+	defer cr.startWispGCLane(ctx)()
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {
@@ -1362,7 +1365,6 @@ var legacyTickPhases = []tickPhase{
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},
 	{name: "retire_suspended_rig_scopes", run: (*CityRuntime).tickRetireSuspendedRigScopes},
 	{name: "reconcile_execution_completions", run: (*CityRuntime).tickReconcileExecutionCompletions},
-	{name: "wisp_gc", run: (*CityRuntime).tickWispGC},
 	{name: "workspace_service_tick", run: (*CityRuntime).tickWorkspaceService},
 	{name: "auto_suspend_chat_sessions", session: true, run: (*CityRuntime).tickAutoSuspendChatSessions},
 	{name: "process_convergence_requests", run: (*CityRuntime).tickProcessConvergenceRequests},
@@ -1387,8 +1389,8 @@ func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
 }
 
 // tick performs one reconciliation tick: pool death detection, config
-// reload (if dirty), agent reconciliation, wisp GC, and order
-// dispatch. Its steps are legacyTickPhases, in order.
+// reload (if dirty) and agent reconciliation. Order dispatch and wisp GC run
+// on their own lanes. Its steps are legacyTickPhases, in order.
 func (cr *CityRuntime) tick(
 	ctx context.Context,
 	dirty *atomic.Bool,
@@ -1854,32 +1856,6 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 		sweptAt, sweptReason, swept := completionsLane.lastSweep()
 		addBackstopAgeFields(completionFields, sweptAt, sweptReason, swept)
 		p.recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, completionFields)
-	}
-	return false
-}
-
-// tickWispGC purges expired closed molecules. The molecule/wisp/workflow
-// purge arm routes through the typed graph-class store; the read-message
-// retention arm through the typed messaging-class store. Both collapse to the
-// city store today, so the GC is byte-identical. The closed session purge arm
-// gets the sessions class only when it is relocated onto a SQLite infra
-// ledger; on an unsplit city it gets nothing and never touches the work store.
-func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
-	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
-		phaseStart := time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
-		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
-		if gcErr != nil {
-			for _, line := range strings.Split(gcErr.Error(), "\n") {
-				if line == "" {
-					continue
-				}
-				fmt.Fprintf(cr.stderr, "%s: wisp gc: %s\n", cr.logPrefix, line) //nolint:errcheck // best-effort stderr
-			}
-		}
-		if purged > 0 {
-			fmt.Fprintf(cr.stdout, "Bead GC: purged %d expired bead(s)\n", purged) //nolint:errcheck // best-effort stdout
-		}
 	}
 	return false
 }
@@ -2919,8 +2895,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
-
-	cr.wg = newWispGCForConfig(nextCfg)
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's
