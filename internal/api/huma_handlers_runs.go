@@ -354,7 +354,7 @@ func (s *Server) forgetRunProjectionMiss(ctx context.Context, runID string) {
 
 // runCanceledCloseReason is the close_reason stamped on beads wound down by a run
 // cancel, distinguishing an operator cancel from a skip-directive teardown.
-const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+const runCanceledCloseReason = sourceworkflow.RunCanceledCloseReason
 
 // humaHandleRunCancel is the Huma-typed handler for
 // POST /v0/city/{cityName}/runs/{run_id}/cancel. Its first write marks the run

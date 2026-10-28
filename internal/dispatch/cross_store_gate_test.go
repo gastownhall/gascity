@@ -3,6 +3,7 @@ package dispatch
 import (
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // sqliteGraphStore opens a real SQLite binding minting gcg-.
@@ -75,11 +77,27 @@ func TestEnsureCrossStoreGateIsIdempotentUnderARace(t *testing.T) {
 // conditional writes are resolved, so every gate write is a revision CAS.
 func gateStores(t *testing.T) map[string]beads.Store {
 	return map[string]beads.Store{
-		"sqlite (pinned id)":          sqliteGraphStore(t),
-		"native dolt (pinned id)":     splittest.NewNativeWorkStore(t, "gcw"),
-		"memstore (minted ids)":       beads.NewMemStoreFrom(1000, nil, nil),
-		"memstore (conditional, CAS)": conditionalMemStore(t),
+		"sqlite (pinned id)":              sqliteGraphStore(t),
+		"native dolt (pinned id)":         splittest.NewNativeWorkStore(t, "gcw"),
+		"memstore (minted ids)":           beads.NewMemStoreFrom(1000, nil, nil),
+		"memstore (conditional, CAS)":     conditionalMemStore(t),
+		"sqlite (stamped require, CAS)":   stampedGateStore(t, sqliteGraphStore(t), "SQLiteStore", gate.Require),
+		"native dolt (stamped auto, CAS)": stampedGateStore(t, splittest.NewNativeWorkStore(t, "gcn"), "NativeWorkStore", gate.Auto),
 	}
+}
+
+// stampedGateStore stamps a real engine's conditional-writes mode as the
+// factory stamps a production binding, and checks that gate writes then take
+// the revision-checked path.
+func stampedGateStore(t *testing.T, store beads.Store, kind string, mode gate.Mode) beads.Store {
+	t.Helper()
+	if err := beads.StampOpenedStore(store, kind, mode, false, nil, nil); err != nil {
+		t.Fatalf("stamping %s conditional writes %q: %v", kind, mode, err)
+	}
+	if w, _, err := beads.ResolveConditionalWriter(store); err != nil || w == nil {
+		t.Fatalf("%s stamped %q resolves no conditional writer (%v): gate writes would not be revision-checked", kind, mode, err)
+	}
+	return store
 }
 
 // conditionalMemStore is a MemStore whose conditional writes resolve
@@ -919,5 +937,463 @@ func TestReleaseCASRefusesAWriteOverAnOperatorClose(t *testing.T) {
 	}
 	if state := mustGetBead(t, mem, gateID).Metadata[beadmeta.CrossStoreGateStateMetadataKey]; state != "" {
 		t.Fatalf("gate state = %q; a release was written over the operator's close", state)
+	}
+}
+
+// undecidedResolver answers every blocker undecided: a store that may hold it
+// could not be read (or is suspended).
+func undecidedResolver(ids []string) (map[string][]beads.Bead, map[string]bool, error) {
+	undecided := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		undecided[id] = true
+	}
+	return nil, undecided, nil
+}
+
+// TestAReopenedDrainHoldsAGateTheReleasePassNeverReleased: a gate the pass
+// never released — its blocker held by no store (unresolved), or by a store
+// the pass cannot read (undecided) — is retired when its drain control
+// closes. The control is reopened: the drain hands the gate back by reopening
+// it, so the item is held again and the pass judges the gate afresh. Marking
+// it released would let the item run on a judgement the pass never made.
+func TestAReopenedDrainHoldsAGateTheReleasePassNeverReleased(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		resolver       CrossStoreBlockerResolver
+		wantUnresolved bool
+	}{
+		{name: "blocker no store holds (unresolved)", resolver: storesResolver(beads.NewMemStore()), wantUnresolved: true},
+		{name: "blocker in an unreadable or suspended store (undecided)", resolver: undecidedResolver},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for name, graph := range gateStores(t) {
+				t.Run(name, func(t *testing.T) {
+					control := newGateControl(t, graph)
+					gateID, err := ensureCrossStoreGate(graph, control, "rg-9", false)
+					if err != nil || gateID == "" {
+						t.Fatalf("mint: %q, %v", gateID, err)
+					}
+					if _, err := ReleaseCrossStoreGates(graph, tc.resolver); err != nil {
+						t.Fatal(err)
+					}
+					if err := graph.Close(control.ID); err != nil {
+						t.Fatal(err)
+					}
+					if report, err := ReleaseCrossStoreGates(graph, tc.resolver); err != nil || !slices.Equal(report.Retired, []string{gateID}) {
+						t.Fatalf("control closed: %+v, %v; want the gate retired", report, err)
+					}
+					if g := mustGetBead(t, graph, gateID); g.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey] != "open" {
+						t.Fatalf("retired gate metadata = %v; want it to record it was retired from open", g.Metadata)
+					}
+					if err := graph.Reopen(control.ID); err != nil {
+						t.Fatal(err)
+					}
+					for tick := 0; tick < 3; tick++ {
+						got, err := ensureCrossStoreGate(graph, mustGetBead(t, graph, control.ID), "rg-9", false)
+						if err != nil || got != gateID {
+							t.Fatalf("tick %d: drain = %q, %v; want the gate %s holding the item", tick, got, err, gateID)
+						}
+						report, err := ReleaseCrossStoreGates(graph, tc.resolver)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if len(report.Released) != 0 || len(report.Retired) != 0 {
+							t.Fatalf("tick %d: pass = %+v; want the gate left holding", tick, report)
+						}
+						if got := slices.Contains(report.Unresolved, gateID); got != tc.wantUnresolved {
+							t.Fatalf("tick %d: unresolved = %v; want %v", tick, report.Unresolved, tc.wantUnresolved)
+						}
+					}
+					g := mustGetBead(t, graph, gateID)
+					if g.Status != "open" || g.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey] != "" || g.Metadata["close_reason"] != "" {
+						t.Fatalf("gate = %s %v; want open with its retirement cleared", g.Status, g.Metadata)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestAReopenedDrainHandsAGateRetiredFromReleasedBackAsReleased: a gate the
+// pass had released (its blocker closed in a rig the drain cannot see) and
+// then retired goes back to released, with a close_reason that says so, in one
+// write; it stays released tick after tick (no write per tick).
+func TestAReopenedDrainHandsAGateRetiredFromReleasedBackAsReleased(t *testing.T) {
+	for name, graph := range gateStores(t) {
+		t.Run(name, func(t *testing.T) {
+			rig := beads.NewMemStore()
+			rig.HonorExplicitIDs = true
+			if _, err := rig.Create(beads.Bead{ID: "rg-9", Title: "rig blocker", Type: "task"}); err != nil {
+				t.Fatal(err)
+			}
+			control := newGateControl(t, graph)
+			gateID, err := ensureCrossStoreGate(graph, control, "rg-9", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := rig.Close("rg-9"); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := ReleaseCrossStoreGates(graph, storesResolver(rig)); err != nil || len(report.Released) != 1 {
+				t.Fatalf("release: %+v, %v", report, err)
+			}
+			if err := graph.Close(control.ID); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := ReleaseCrossStoreGates(graph, storesResolver(rig)); err != nil || len(report.Retired) != 1 {
+				t.Fatalf("retire: %+v, %v", report, err)
+			}
+			if g := mustGetBead(t, graph, gateID); g.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey] != CrossStoreGateStateReleased {
+				t.Fatalf("retired gate metadata = %v; want retired_from released", g.Metadata)
+			}
+			if err := graph.Reopen(control.ID); err != nil {
+				t.Fatal(err)
+			}
+			var revs []int64
+			for tick := 0; tick < 3; tick++ {
+				got, err := ensureCrossStoreGate(graph, mustGetBead(t, graph, control.ID), "rg-9", false)
+				if err != nil || got != "" {
+					t.Fatalf("tick %d: drain = %q, %v; want the released gate left released", tick, got, err)
+				}
+				if _, err := ReleaseCrossStoreGates(graph, storesResolver(rig)); err != nil {
+					t.Fatal(err)
+				}
+				revs = append(revs, mustGetBead(t, graph, gateID).Revision)
+			}
+			g := mustGetBead(t, graph, gateID)
+			if g.Status != "closed" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != CrossStoreGateStateReleased ||
+				g.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey] != "" || !strings.Contains(g.Metadata["close_reason"], "handed back") {
+				t.Fatalf("gate = %s %v; want released, retirement cleared, close_reason restamped", g.Status, g.Metadata)
+			}
+			if revs[0] != revs[2] {
+				t.Fatalf("gate revisions per tick = %v; want no write once handed back", revs)
+			}
+			// The blocker reopens: the pass reopens the handed-back gate.
+			if err := rig.Reopen("rg-9"); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := ReleaseCrossStoreGates(graph, storesResolver(rig)); err != nil || !slices.Equal(report.Reopened, []string{gateID}) {
+				t.Fatalf("blocker reopened: %+v, %v; want the gate reopened", report, err)
+			}
+		})
+	}
+}
+
+// TestEveryControllerSubtreeCloseReadsAsAControllerClose runs each real close
+// path that reaches a gate (a gate carries its drain's root, so every subtree
+// close of that root closes it) and checks the gate reads as closed by the
+// controller — a drain that finds its blocker open reopens it — never as an
+// operator's final override. Paths outside this package call the same
+// function with the same reason; wisp GC and the run-cancel handler are also
+// pinned in their own packages.
+func TestEveryControllerSubtreeCloseReadsAsAControllerClose(t *testing.T) {
+	finalize := func(cancel bool) func(t *testing.T, store beads.Store, rootID string) {
+		return func(t *testing.T, store beads.Store, rootID string) {
+			t.Helper()
+			if cancel {
+				if err := store.SetMetadata(rootID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "Finalize workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": rootID},
+			})
+			mustDepAdd(t, store, rootID, finalizer.ID, "blocks")
+			if _, err := ProcessControl(store, finalizer, ProcessOptions{}); err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		close func(t *testing.T, store beads.Store, rootID string)
+	}{
+		{"sling attachment of a molecule (molecule.CloseSubtree)", func(t *testing.T, store beads.Store, rootID string) {
+			if _, err := molecule.CloseSubtree(store, rootID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"sling, gc formula, drain teardown, workflow attachment (sourceworkflow.CloseWorkflowSubtree)", func(t *testing.T, store beads.Store, rootID string) {
+			if _, err := sourceworkflow.CloseWorkflowSubtree(store, rootID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"wisp GC repair of a closed root", func(t *testing.T, store beads.Store, rootID string) {
+			if _, err := molecule.CloseSubtreeWithMetadata(store, rootID, map[string]string{
+				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"workflow finalizer, pass", finalize(false)},
+		{"workflow finalizer, canceled run", finalize(true)},
+		{"POST /runs/{id}/cancel", func(t *testing.T, store beads.Store, rootID string) {
+			if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(store, rootID, beadmeta.OutcomeCanceled,
+				sourceworkflow.RunCanceledCloseReason, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, nil); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			root := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "workflow",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			})
+			control := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "drain",
+				Type:     "task",
+				Metadata: map[string]string{"gc.kind": "drain", beadmeta.RootBeadIDMetadataKey: root.ID},
+			})
+			gateID, err := ensureCrossStoreGate(store, control, "rg-9", true)
+			if err != nil || gateID == "" {
+				t.Fatalf("mint: %q, %v", gateID, err)
+			}
+			tc.close(t, store, root.ID)
+			g := mustGetBead(t, store, gateID)
+			if g.Status != "closed" {
+				t.Fatalf("gate %s after the close = %s %v; the path does not reach gates", gateID, g.Status, g.Metadata)
+			}
+			if !IsControllerClosedCrossStoreGate(g) {
+				t.Fatalf("gate closed with close_reason %q reads as an operator close (final)", g.Metadata["close_reason"])
+			}
+			if got, err := ensureCrossStoreGate(store, mustGetBead(t, store, control.ID), "rg-9", true); err != nil || got != gateID {
+				t.Fatalf("drain finding the blocker open = %q, %v; want the gate reopened", got, err)
+			}
+		})
+	}
+}
+
+// raceOnGet runs race just before the on-th live read of id, so the write
+// that read precedes sees the gate as the race left it.
+type raceOnGet struct {
+	*beads.MemStore
+	id   string
+	on   int
+	n    int
+	race func()
+}
+
+func (s *raceOnGet) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.n++
+		if s.n == s.on && s.race != nil {
+			s.race()
+		}
+	}
+	return s.MemStore.Get(id)
+}
+
+// gateInState mints a gate on a fresh MemStore and leaves it closed (or open)
+// with meta, returning the store, the control and the gate as read.
+func gateInState(t *testing.T, closed bool, meta map[string]string) (*beads.MemStore, beads.Bead, beads.Bead) {
+	t.Helper()
+	mem := beads.NewMemStore()
+	control := newGateControl(t, mem)
+	gateID, err := ensureCrossStoreGate(mem, control, "rg-9", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed {
+		if _, err := mem.CloseAll([]string{gateID}, meta); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := mem.SetMetadataBatch(gateID, meta); err != nil {
+		t.Fatal(err)
+	}
+	return mem, control, mustGetBead(t, mem, gateID)
+}
+
+func setGateMeta(t *testing.T, mem *beads.MemStore, id string, meta map[string]string) func() {
+	return func() {
+		if err := mem.SetMetadataBatch(id, meta); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func reopenGateRaw(t *testing.T, mem *beads.MemStore, id string) func() {
+	return func() {
+		open := "open"
+		if err := mem.Update(id, beads.UpdateOpts{Status: &open, Metadata: map[string]string{beadmeta.CrossStoreGateStateMetadataKey: ""}}); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// TestGateWritesReCheckTheirPremiseOnTheLiveRow: each drain-side gate write
+// re-reads the gate and writes only while its premise still holds; when it no
+// longer does, the drain answers from the live row.
+func TestGateWritesReCheckTheirPremiseOnTheLiveRow(t *testing.T) {
+	const (
+		stateKey = beadmeta.CrossStoreGateStateMetadataKey
+		fromKey  = beadmeta.CrossStoreGateRetiredFromMetadataKey
+	)
+	overridden := map[string]string{stateKey: CrossStoreGateStateOverridden}
+	for _, tc := range []struct {
+		name      string
+		gateMeta  map[string]string
+		foundOpen bool
+		race      func(t *testing.T, mem *beads.MemStore, id string) func()
+		wantID    bool
+		want      func(g beads.Bead) bool
+	}{
+		{
+			name:     "hand-back of a gate retired from released: another hand-back reopened it",
+			gateMeta: map[string]string{stateKey: CrossStoreGateStateRetired, fromKey: CrossStoreGateStateReleased},
+			race:     reopenGateRaw,
+			wantID:   true,
+			want:     func(g beads.Bead) bool { return g.Status == "open" && g.Metadata[stateKey] == "" },
+		},
+		{
+			name:     "hand-back of a gate retired from open: an operator overrode it",
+			gateMeta: map[string]string{stateKey: CrossStoreGateStateRetired, fromKey: "open"},
+			race: func(t *testing.T, mem *beads.MemStore, id string) func() {
+				return setGateMeta(t, mem, id, overridden)
+			},
+			want: func(g beads.Bead) bool {
+				return g.Status == "closed" && g.Metadata[stateKey] == CrossStoreGateStateOverridden
+			},
+		},
+		{
+			name:      "reopen on a found-open blocker: an operator closed it with a reason",
+			gateMeta:  map[string]string{stateKey: CrossStoreGateStateReleased, "close_reason": "blocker rg-9 closed"},
+			foundOpen: true,
+			race: func(t *testing.T, mem *beads.MemStore, id string) func() {
+				return setGateMeta(t, mem, id, map[string]string{stateKey: "", "close_reason": "operator: not needed"})
+			},
+			want: func(g beads.Bead) bool {
+				return g.Status == "closed" && g.Metadata["close_reason"] == "operator: not needed"
+			},
+		},
+		{
+			name:      "reopen on a found-open blocker: the release pass reopened it first",
+			gateMeta:  map[string]string{stateKey: CrossStoreGateStateReleased, "close_reason": "blocker rg-9 closed"},
+			foundOpen: true,
+			race:      reopenGateRaw,
+			wantID:    true,
+			want:      func(g beads.Bead) bool { return g.Status == "open" },
+		},
+		{
+			name:     "recording an override: the gate became controller-closed",
+			gateMeta: map[string]string{"close_reason": "operator: not needed"},
+			race: func(t *testing.T, mem *beads.MemStore, id string) func() {
+				return setGateMeta(t, mem, id, map[string]string{stateKey: CrossStoreGateStateReleased})
+			},
+			want: func(g beads.Bead) bool { return g.Metadata[stateKey] == CrossStoreGateStateReleased },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem, _, gate := gateInState(t, true, tc.gateMeta)
+			store := &raceOnGet{MemStore: mem, id: gate.ID, on: 1, race: tc.race(t, mem, gate.ID)}
+			got, err := gateAnswer(store, gate, tc.foundOpen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got != "") != tc.wantID {
+				t.Fatalf("answer = %q; want holding=%v from the live row", got, tc.wantID)
+			}
+			if g := mustGetBead(t, mem, gate.ID); !tc.want(g) {
+				t.Fatalf("gate = %s %v; the write ignored the race", g.Status, g.Metadata)
+			}
+		})
+	}
+}
+
+// TestReleasePassWritesReCheckTheirPremiseAndReportOnlyWhatTheyWrote: the
+// pass's retire and reopen of a released gate write only while the gate is
+// still released, and report only the gates they wrote.
+func TestReleasePassWritesReCheckTheirPremiseAndReportOnlyWhatTheyWrote(t *testing.T) {
+	released := map[string]string{beadmeta.CrossStoreGateStateMetadataKey: CrossStoreGateStateReleased, "close_reason": "blocker rg-9 closed"}
+	overridden := map[string]string{beadmeta.CrossStoreGateStateMetadataKey: CrossStoreGateStateOverridden}
+	for _, tc := range []struct {
+		name        string
+		closeDrain  bool
+		wantNothing func(r CrossStoreGateReport) bool
+	}{
+		{name: "retire of a finished drain's released gate", closeDrain: true, wantNothing: func(r CrossStoreGateReport) bool { return len(r.Retired) == 0 }},
+		{name: "reopen of a live drain's released gate", wantNothing: func(r CrossStoreGateReport) bool { return len(r.Reopened) == 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem, control, gate := gateInState(t, true, released)
+			if tc.closeDrain {
+				if err := mem.Close(control.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rig := beads.NewMemStore()
+			rig.HonorExplicitIDs = true
+			if _, err := rig.Create(beads.Bead{ID: "rg-9", Title: "open blocker", Type: "task"}); err != nil {
+				t.Fatal(err)
+			}
+			store := &raceOnGet{MemStore: mem, id: gate.ID, on: 1, race: setGateMeta(t, mem, gate.ID, overridden)}
+			report, err := ReleaseCrossStoreGates(store, storesResolver(rig))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantNothing(report) {
+				t.Fatalf("report = %+v; it lists a write that never happened", report)
+			}
+			if g := mustGetBead(t, mem, gate.ID); g.Status != "closed" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != CrossStoreGateStateOverridden {
+				t.Fatalf("gate = %s %v; the pass wrote over the operator's override", g.Status, g.Metadata)
+			}
+		})
+	}
+}
+
+// casBump moves the gate's revision (an unrelated metadata write) right after
+// the first live read, so the revision-checked write that read feeds loses.
+type casBump struct {
+	*beads.MemStore
+	id    string
+	fired bool
+}
+
+func (s *casBump) Get(id string) (beads.Bead, error) {
+	b, err := s.MemStore.Get(id)
+	if err == nil && id == s.id && !s.fired {
+		s.fired = true
+		if serr := s.SetMetadata(id, "note", "touched"); serr != nil {
+			return beads.Bead{}, serr
+		}
+	}
+	return b, err
+}
+
+// TestReleaseRetriesALostCASWhosePremiseStillHolds: a revision-checked write
+// that loses to an unrelated write re-reads the gate and, its premise still
+// holding, writes in the same pass.
+func TestReleaseRetriesALostCASWhosePremiseStillHolds(t *testing.T) {
+	mem := beads.NewMemStoreFrom(1000, nil, nil)
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	control := newGateControl(t, mem)
+	gateID, err := ensureCrossStoreGate(mem, control, "rg-9", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig := beads.NewMemStore()
+	rig.HonorExplicitIDs = true
+	if _, err := rig.Create(beads.Bead{ID: "rg-9", Title: "blocker", Type: "task", Status: "closed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.Close("rg-9"); err != nil {
+		t.Fatal(err)
+	}
+	store := &casBump{MemStore: mem, id: gateID}
+	report, err := ReleaseCrossStoreGates(store, storesResolver(rig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.fired || !slices.Equal(report.Released, []string{gateID}) {
+		t.Fatalf("fired=%v report=%+v; want the lost CAS retried and the gate released this pass", store.fired, report)
+	}
+	if g := mustGetBead(t, mem, gateID); g.Status != "closed" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != CrossStoreGateStateReleased {
+		t.Fatalf("gate = %s %v", g.Status, g.Metadata)
 	}
 }

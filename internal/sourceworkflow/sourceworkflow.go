@@ -67,6 +67,13 @@ const WorkflowSpecSidecarClosedReason = "workflow cleanup: generated spec sideca
 // validator; gc.outcome carries the semantic.
 const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed via skip directive"
 
+// RunCanceledCloseReason is the close_reason POST /runs/{id}/cancel stamps on
+// every open bead of the run's workflow subtrees it winds down, distinguishing
+// an operator cancel from a skip-directive teardown. It lives here, beside the
+// other subtree-close reasons, so a reader that must tell a controller close
+// from an operator close (dispatch's cross-store gates) can name it.
+const RunCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+
 // IsWorkflowRoot reports whether a bead is a source-workflow root. It must
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
 // legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.

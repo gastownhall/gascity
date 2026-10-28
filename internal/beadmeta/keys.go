@@ -137,9 +137,15 @@ const (
 	CrossStoreGateOwnerMetadataKey = "gc.cross_store_gate_owner"
 	// CrossStoreGateStateMetadataKey records a cross-store gate's state:
 	// "unresolved" (open; no store holds its blocker), "released" (closed by
-	// the controller; reopened if its blocker opens again) or "overridden"
+	// the controller; reopened if its blocker opens again), "retired" (closed
+	// by the controller because its drain control finished) or "overridden"
 	// (closed by an operator; final).
 	CrossStoreGateStateMetadataKey = "gc.cross_store_gate_state"
+	// CrossStoreGateRetiredFromMetadataKey records, on a retired cross-store
+	// gate, the state it was retired from: "open" (the release pass never
+	// released it) or "released". A drain control that is reopened hands the
+	// gate back accordingly.
+	CrossStoreGateRetiredFromMetadataKey = "gc.cross_store_gate_retired_from"
 	// CrossStoreGateUnresolvedAtMetadataKey is when a cross-store gate was
 	// first found unresolved (RFC3339): the persisted anchor its control.stalled
 	// event reports as first_seen.
@@ -560,6 +566,7 @@ var KnownMetadataKeys = []string{
 	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CrossStoreBlockerMetadataKey,
 	CrossStoreGateOwnerMetadataKey,
+	CrossStoreGateRetiredFromMetadataKey,
 	CrossStoreGateStateMetadataKey,
 	CrossStoreGateUnresolvedAtMetadataKey,
 	CurrentRunIDMetadataKey,

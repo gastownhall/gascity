@@ -1387,6 +1387,7 @@ go_test(
         "convoy_chargolden_test.go",
         "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",
+        "cross_store_gate_close_paths_test.go",
         "cross_store_gate_lane_test.go",
         "cross_store_parent_contract_test.go",
         "cross_store_pipeline_test.go",
