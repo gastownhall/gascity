@@ -425,11 +425,11 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 		if markers, err := s.PersistedMarkers(sessionID); err == nil {
 			if epoch := markers.ContinuationEpoch; epoch != "" {
 				meta["registered_epoch"] = epoch
-				if sessionResetPending(markers) {
-					meta[waitRegisteredResetPendingKey] = "true"
-				} else {
-					delete(meta, waitRegisteredResetPendingKey)
-				}
+			}
+			if sessionResetPending(markers) {
+				meta[waitRegisteredResetPendingKey] = "true"
+			} else {
+				delete(meta, waitRegisteredResetPendingKey)
 			}
 			if meta["session_name"] == "" {
 				meta["session_name"] = markers.SessionName

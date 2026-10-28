@@ -433,7 +433,8 @@ func TestRetryClosedWait_PreservesNonDepsMetadata(t *testing.T) {
 
 // TestRetryClosedWait_RefreshesResetPendingMarker proves the retry refreshes
 // registered_reset_pending together with registered_epoch from the live
-// session: set while a reset is pending, dropped when none is, and carried
+// session: set while a reset is pending, dropped when none is (also when the
+// session records no epoch, which keeps the carried one), and carried
 // unchanged with the epoch when the session read fails.
 func TestRetryClosedWait_RefreshesResetPendingMarker(t *testing.T) {
 	for _, kind := range []string{"deps", "probe"} {
@@ -456,6 +457,19 @@ func TestRetryClosedWait_RefreshesResetPendingMarker(t *testing.T) {
 				session:   map[string]string{"continuation_epoch": "3"},
 				carried:   map[string]string{"registered_epoch": "2", "registered_reset_pending": "true"},
 				wantEpoch: "3",
+			},
+			{
+				name:      "empty-epoch-no-reset-drops-carried-flag",
+				session:   map[string]string{},
+				carried:   map[string]string{"registered_epoch": "2", "registered_reset_pending": "true"},
+				wantEpoch: "2",
+			},
+			{
+				name:        "empty-epoch-reset-pending-sets-flag",
+				session:     map[string]string{"continuation_reset_pending": "true"},
+				carried:     map[string]string{"registered_epoch": "2"},
+				wantEpoch:   "2",
+				wantPending: "true",
 			},
 			{
 				name:        "session-read-fails-carries-pair",

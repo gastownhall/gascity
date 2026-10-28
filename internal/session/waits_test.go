@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestWaitInfoFromBead_ProjectsAllFields(t *testing.T) {
@@ -776,26 +778,87 @@ func TestWaitInfoContinuationStale(t *testing.T) {
 }
 
 func TestWaitInfoHeldForPendingReset(t *testing.T) {
+	const committedAt = "2026-10-24T16:07:00Z"
 	for _, tc := range []struct {
-		name         string
-		flagged      bool
-		sessionEpoch string
-		resetPending string
-		want         bool
+		name             string
+		flagged          bool
+		sessionEpoch     string
+		resetPending     string
+		restartRequested string
+		resetCommittedAt string
+		want             bool
 	}{
-		{name: "flagged/outgoing-incarnation", flagged: true, sessionEpoch: "2", resetPending: "true", want: true},
+		{name: "flagged/outgoing-incarnation", flagged: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true", want: true},
+		{name: "flagged/outgoing-incarnation-after-handoff", flagged: true, sessionEpoch: "2", resetPending: "true", resetCommittedAt: committedAt, want: true},
+		{name: "flagged/marker-without-restart", flagged: true, sessionEpoch: "2", resetPending: "true"},
 		{name: "flagged/reset-withdrawn", flagged: true, sessionEpoch: "2"},
-		{name: "flagged/started", flagged: true, sessionEpoch: "3"},
-		{name: "flagged/blank-marker", flagged: true, sessionEpoch: "2", resetPending: "  "},
-		{name: "unflagged/reset-pending", sessionEpoch: "2", resetPending: "true"},
+		{name: "flagged/reset-withdrawn-after-handoff", flagged: true, sessionEpoch: "2", resetCommittedAt: committedAt},
+		{name: "flagged/started", flagged: true, sessionEpoch: "3", resetCommittedAt: committedAt},
+		{name: "flagged/second-reset-at-next-epoch", flagged: true, sessionEpoch: "3", resetPending: "true", restartRequested: "true"},
+		{name: "flagged/blank-marker", flagged: true, sessionEpoch: "2", resetPending: "  ", restartRequested: "true"},
+		{name: "unflagged/reset-pending", sessionEpoch: "2", resetPending: "true", restartRequested: "true"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := WaitInfo{RegisteredEpoch: "2", RegisteredResetPending: tc.flagged}
-			s := Info{ContinuationEpoch: tc.sessionEpoch, ContinuationResetPending: tc.resetPending}
+			s := Info{
+				ContinuationEpoch:        tc.sessionEpoch,
+				ContinuationResetPending: tc.resetPending,
+				RestartRequested:         tc.restartRequested,
+				ResetCommittedAt:         tc.resetCommittedAt,
+			}
 			if got := w.HeldForPendingReset(s); got != tc.want {
-				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q) = %v, want %v",
-					tc.flagged, tc.sessionEpoch, tc.resetPending, got, tc.want)
+				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q restart_requested=%q reset_committed_at=%q) = %v, want %v",
+					tc.flagged, tc.sessionEpoch, tc.resetPending, tc.restartRequested, tc.resetCommittedAt, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHeldForPendingResetAfterAManagerStartConsumedTheReset drives the
+// Manager paths through a restart handoff whose committed reset a message's
+// start consumed, then a resume that dies during startup: the stale-key
+// recovery relaunches the session at the new epoch and leaves the reset marker
+// for the next start. No restart is in flight, so the reminder of a wait
+// registered there is not held.
+func TestHeldForPendingResetAfterAManagerStartConsumedTheReset(t *testing.T) {
+	ctx := context.Background()
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store, "session_key", "k-1", "resume_flag", "--resume")
+	sp := &mintSeeingProvider{Fake: runtime.NewFake(), store: store, id: b.ID}
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	by := testActor(mgr, ActorOperator)
+
+	// An operator's fresh restart that the controller handed off: the
+	// runtime is stopped and the reset committed.
+	if err := mgr.RequestFreshRestart(b.ID); err != nil {
+		t.Fatalf("RequestFreshRestart: %v", err)
+	}
+	if err := store.SetMetadataBatch(b.ID, RestartRequestPatchAt("", mintT0)); err != nil {
+		t.Fatal(err)
+	}
+	// A message starts the session before the controller does.
+	if _, err := mgr.Send(ctx, by, b.ID, "hello", "claude", runtime.Config{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if meta := rowMeta(t, store, b.ID); meta["continuation_epoch"] != "3" || meta["continuation_reset_pending"] != "" || meta[ResetCommittedAtKey] != "" {
+		t.Fatalf("row after the start that consumed the reset = %v; want epoch 3, the reset and its commit time cleared", meta)
+	}
+
+	// Stopped again, its resume dies during startup: the stale-key recovery
+	// relaunches it at epoch 3 and records the reset marker for the next start.
+	if err := mgr.Suspend(ctx, by, b.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.failFirst = len(sp.seen) + 1
+	if _, err := mgr.Send(ctx, by, b.ID, "hello again", "claude --resume k-1", runtime.Config{}); err != nil {
+		t.Fatalf("Send after the stop: %v", err)
+	}
+	info := infoOf(t, store, b.ID)
+	if info.ContinuationEpoch != "3" || info.ContinuationResetPending != "true" || info.RestartRequested != "" || info.ResetCommittedAt != "" {
+		t.Fatalf("session after the stale-key recovery: epoch %q, reset pending %q, restart requested %q, reset_committed_at %q; want 3, true, none, none",
+			info.ContinuationEpoch, info.ContinuationResetPending, info.RestartRequested, info.ResetCommittedAt)
+	}
+	if w := (WaitInfo{RegisteredEpoch: "3", RegisteredResetPending: true}); w.HeldForPendingReset(info) {
+		t.Fatal("a wait registered after the stale-key recovery is held, though no restart is in flight to consume the reset")
 	}
 }

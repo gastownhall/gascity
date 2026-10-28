@@ -186,11 +186,17 @@ func (w WaitInfo) ContinuationStale(s Info) bool {
 // HeldForPendingReset reports whether the wait's reminder must wait for the
 // start that consumes the session's pending reset: the wait was registered for
 // the conversation that start opens, and the session is still the outgoing
-// incarnation at the registered epoch with the reset not yet consumed.
+// incarnation at the registered epoch with a restart in flight. A restart is in
+// flight while the reset is pending and either requested (restart_requested) or
+// committed by the handoff (reset_committed_at), the reading the awake set
+// takes. The reset marker alone does not hold the reminder: the Manager's
+// stale-key recovery leaves it on the session it relaunched at the same epoch,
+// with no start coming to consume it.
 func (w WaitInfo) HeldForPendingReset(s Info) bool {
 	return w.RegisteredResetPending &&
 		s.ContinuationEpoch == w.RegisteredEpoch &&
-		strings.TrimSpace(s.ContinuationResetPending) != ""
+		strings.TrimSpace(s.ContinuationResetPending) != "" &&
+		(strings.TrimSpace(s.RestartRequested) == "true" || strings.TrimSpace(s.ResetCommittedAt) != "")
 }
 
 // splitWaitDepIDs splits a comma-separated dep_ids value into trimmed, non-empty

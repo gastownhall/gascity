@@ -681,31 +681,36 @@ func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, std
 }
 
 func writeWaitDetail(w sessionpkg.WaitInfo, stdout io.Writer) {
+	epoch := w.RegisteredEpoch
+	if w.RegisteredResetPending {
+		epoch += " (registered during a pending reset)"
+	}
 	fmt.Fprintf(stdout, "Wait:       %s\n", w.ID)                                        //nolint:errcheck
 	fmt.Fprintf(stdout, "Session:    %s\n", w.SessionID)                                 //nolint:errcheck
 	fmt.Fprintf(stdout, "State:      %s\n", w.State)                                     //nolint:errcheck
 	fmt.Fprintf(stdout, "Kind:       %s\n", w.Kind)                                      //nolint:errcheck
 	fmt.Fprintf(stdout, "Deps:       %s (%s)\n", strings.Join(w.DepIDs, ","), w.DepMode) //nolint:errcheck
-	fmt.Fprintf(stdout, "Epoch:      %s\n", w.RegisteredEpoch)                           //nolint:errcheck
+	fmt.Fprintf(stdout, "Epoch:      %s\n", epoch)                                       //nolint:errcheck
 	fmt.Fprintf(stdout, "Attempt:    %s\n", w.DeliveryAttempt)                           //nolint:errcheck
 	fmt.Fprintf(stdout, "Nudge:      %s\n", w.NudgeID)                                   //nolint:errcheck
 	fmt.Fprintf(stdout, "Note:       %s\n", w.Note)                                      //nolint:errcheck
 }
 
 type waitJSON struct {
-	ID              string   `json:"id"`
-	SessionID       string   `json:"session_id"`
-	SessionName     string   `json:"session_name,omitempty"`
-	State           string   `json:"state"`
-	Kind            string   `json:"kind"`
-	DepIDs          []string `json:"dep_ids,omitempty"`
-	DepMode         string   `json:"dep_mode,omitempty"`
-	RegisteredEpoch string   `json:"registered_epoch,omitempty"`
-	DeliveryAttempt string   `json:"delivery_attempt,omitempty"`
-	NudgeID         string   `json:"nudge_id,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	Status          string   `json:"status"`
-	CreatedAt       string   `json:"created_at,omitempty"`
+	ID                     string   `json:"id"`
+	SessionID              string   `json:"session_id"`
+	SessionName            string   `json:"session_name,omitempty"`
+	State                  string   `json:"state"`
+	Kind                   string   `json:"kind"`
+	DepIDs                 []string `json:"dep_ids,omitempty"`
+	DepMode                string   `json:"dep_mode,omitempty"`
+	RegisteredEpoch        string   `json:"registered_epoch,omitempty"`
+	RegisteredResetPending bool     `json:"registered_reset_pending,omitempty"`
+	DeliveryAttempt        string   `json:"delivery_attempt,omitempty"`
+	NudgeID                string   `json:"nudge_id,omitempty"`
+	Note                   string   `json:"note,omitempty"`
+	Status                 string   `json:"status"`
+	CreatedAt              string   `json:"created_at,omitempty"`
 }
 
 type waitListJSONEnvelope struct {
@@ -722,19 +727,20 @@ type waitInspectJSONEnvelope struct {
 
 func waitJSONFromInfo(w sessionpkg.WaitInfo) waitJSON {
 	return waitJSON{
-		ID:              w.ID,
-		SessionID:       w.SessionID,
-		SessionName:     w.SessionName,
-		State:           w.State,
-		Kind:            w.Kind,
-		DepIDs:          w.DepIDs,
-		DepMode:         w.DepMode,
-		RegisteredEpoch: w.RegisteredEpoch,
-		DeliveryAttempt: w.DeliveryAttempt,
-		NudgeID:         w.NudgeID,
-		Note:            w.Note,
-		Status:          w.Status,
-		CreatedAt:       formatOptionalTime(w.CreatedAt),
+		ID:                     w.ID,
+		SessionID:              w.SessionID,
+		SessionName:            w.SessionName,
+		State:                  w.State,
+		Kind:                   w.Kind,
+		DepIDs:                 w.DepIDs,
+		DepMode:                w.DepMode,
+		RegisteredEpoch:        w.RegisteredEpoch,
+		RegisteredResetPending: w.RegisteredResetPending,
+		DeliveryAttempt:        w.DeliveryAttempt,
+		NudgeID:                w.NudgeID,
+		Note:                   w.Note,
+		Status:                 w.Status,
+		CreatedAt:              formatOptionalTime(w.CreatedAt),
 	}
 }
 

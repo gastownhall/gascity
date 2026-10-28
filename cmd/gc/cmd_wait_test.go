@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -482,6 +483,37 @@ func TestWriteWaitDetail_RendersWaitInfo(t *testing.T) {
 		"Note:       Continue after review closes.\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("writeWaitDetail =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestWaitInspectSurfacesRegisteredResetPending pins how `gc wait inspect` and
+// `gc wait list` show a wait registered during a pending reset: the JSON
+// carries registered_reset_pending and the Epoch line says so, while an
+// unflagged wait's JSON omits the key.
+func TestWaitInspectSurfacesRegisteredResetPending(t *testing.T) {
+	flagged := sessionpkg.WaitInfoFromBead(beads.Bead{ID: "gc-wait-1", Metadata: map[string]string{
+		"registered_epoch":         "2",
+		"registered_reset_pending": "true",
+	}})
+	data, err := json.Marshal(waitJSONFromInfo(flagged))
+	if err != nil {
+		t.Fatalf("Marshal flagged: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"registered_reset_pending":true`)) {
+		t.Fatalf("flagged wait JSON = %s, want registered_reset_pending true", data)
+	}
+	var buf bytes.Buffer
+	writeWaitDetail(flagged, &buf)
+	if want := "Epoch:      2 (registered during a pending reset)\n"; !strings.Contains(buf.String(), want) {
+		t.Fatalf("writeWaitDetail =\n%s\nwant the line %q", buf.String(), want)
+	}
+
+	unflagged := sessionpkg.WaitInfoFromBead(beads.Bead{ID: "gc-wait-2", Metadata: map[string]string{"registered_epoch": "2"}})
+	if data, err = json.Marshal(waitJSONFromInfo(unflagged)); err != nil {
+		t.Fatalf("Marshal unflagged: %v", err)
+	}
+	if bytes.Contains(data, []byte("registered_reset_pending")) {
+		t.Fatalf("unflagged wait JSON = %s, want no registered_reset_pending key", data)
 	}
 }
 
@@ -4282,26 +4314,30 @@ func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 // typed and legacy mocks carry created_at at RFC3339Nano (as the real server and
 // the bead encoder do), the local rung reads the persisted store; the CLI's
 // ascending created-time sort must resolve the tie identically on every rung.
+// One wait was registered during a pending reset, so every rung must also
+// render its registered_reset_pending.
 func TestRouteWaitList_ThreeRungByteIdentical(t *testing.T) {
 	cityDir, store := setupWaitJSONTestCity(t)
 
 	// The store assigns CreatedAt=now on Create, so two back-to-back creates land
 	// sub-second apart in (almost always) the same second — the tie the
 	// truncation bug broke. The skip guard below covers the rare second-straddle.
-	seed := func() {
+	seed := func(extra map[string]string) {
+		meta := map[string]string{"session_id": "s-1", "session_name": "demo", "kind": "deps", "state": waitStateReady, "registered_epoch": "2"}
+		maps.Copy(meta, extra)
 		if _, err := store.Create(beads.Bead{
 			Title:       "wait:demo",
 			Type:        waitBeadType,
 			Status:      "open",
 			Description: "wait for deps",
 			Labels:      []string{waitBeadLabel, "session:s-1"},
-			Metadata:    map[string]string{"session_id": "s-1", "session_name": "demo", "kind": "deps", "state": waitStateReady},
+			Metadata:    meta,
 		}); err != nil {
 			t.Fatalf("seed wait: %v", err)
 		}
 	}
-	seed()
-	seed()
+	seed(map[string]string{"registered_reset_pending": "true"})
+	seed(nil)
 
 	// Read the persisted waits back the way the local rung will (reopened store),
 	// so the mock wire values match the local rung's CreatedAt exactly.
@@ -4338,16 +4374,21 @@ func TestRouteWaitList_ThreeRungByteIdentical(t *testing.T) {
 		}
 	}
 	waitView := func(b beads.Bead) map[string]any {
-		return map[string]any{
-			"id":           b.ID,
-			"session_id":   b.Metadata["session_id"],
-			"session_name": b.Metadata["session_name"],
-			"kind":         b.Metadata["kind"],
-			"state":        b.Metadata["state"],
-			"status":       b.Status,
-			"note":         b.Description,
-			"created_at":   b.CreatedAt.UTC().Format(time.RFC3339Nano),
+		view := map[string]any{
+			"id":               b.ID,
+			"session_id":       b.Metadata["session_id"],
+			"session_name":     b.Metadata["session_name"],
+			"kind":             b.Metadata["kind"],
+			"state":            b.Metadata["state"],
+			"registered_epoch": b.Metadata["registered_epoch"],
+			"status":           b.Status,
+			"note":             b.Description,
+			"created_at":       b.CreatedAt.UTC().Format(time.RFC3339Nano),
 		}
+		if b.Metadata["registered_reset_pending"] == "true" { // omitempty, as WaitView encodes it
+			view["registered_reset_pending"] = true
+		}
+		return view
 	}
 
 	// Typed /v0/waits mock returns created-DESC (as the real server does).
@@ -4392,6 +4433,9 @@ func TestRouteWaitList_ThreeRungByteIdentical(t *testing.T) {
 
 	if typed != legacy || typed != local {
 		t.Fatalf("--json differs across rungs:\n typed=%s\n legacy=%s\n local=%s", typed, legacy, local)
+	}
+	if strings.Count(typed, `"registered_reset_pending":true`) != 1 {
+		t.Fatalf("want the one flagged wait rendered with registered_reset_pending: %s", typed)
 	}
 	// Sanity: the tie resolved chronologically (oldest wait first in the array).
 	if !strings.Contains(typed, persisted[1].ID) || !strings.Contains(typed, persisted[0].ID) {
@@ -4924,17 +4968,31 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 // TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset covers the
 // reminder of a wait registered while a fresh restart was pending: it is meant
 // for the conversation that restart starts, so the dispatcher holds it while
-// the outgoing incarnation is live and enqueues it once after the start.
+// the outgoing incarnation is live with the restart in flight (requested, or
+// committed by the handoff) and enqueues it once after the start. A reset
+// marker with no restart behind it holds nothing: no start is coming, so the
+// reminder goes to the live conversation as before.
 func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testing.T) {
+	// Manager.RequestFreshRestart's markers.
+	requested := map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}
+	// The restart handoff (RestartRequestPatch) consumes the request and
+	// commits the reset.
+	committed := map[string]string{"continuation_reset_pending": "true", "reset_committed_at": "2026-10-24T16:07:00Z"}
+	// The Manager's stale-key recovery relaunches at the same epoch and leaves
+	// the marker for the next start (TestEnsureRunning_RetriesAfterStartupDeathError).
+	markerOnly := map[string]string{"continuation_reset_pending": "true"}
 	for _, tc := range []struct {
-		name        string
-		flagged     bool
-		withdraw    bool
-		wantInReset int
+		name            string
+		reset           map[string]string
+		flagged         bool
+		withdraw        bool
+		wantBeforeStart int
 	}{
-		{name: "flagged-held-until-start", flagged: true},
-		{name: "flagged-released-when-reset-withdrawn", flagged: true, withdraw: true, wantInReset: 1},
-		{name: "unflagged-nudged-as-before", wantInReset: 1},
+		{name: "flagged-held-until-start", reset: requested, flagged: true},
+		{name: "flagged-held-after-handoff-until-start", reset: committed, flagged: true},
+		{name: "flagged-released-when-reset-withdrawn", reset: requested, flagged: true, withdraw: true, wantBeforeStart: 1},
+		{name: "flagged-nudged-when-no-restart-is-in-flight", reset: markerOnly, flagged: true, wantBeforeStart: 1},
+		{name: "unflagged-nudged-as-before", reset: requested, wantBeforeStart: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setWaitTestFileBeads(t)
@@ -4943,17 +5001,17 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 			if err != nil {
 				t.Fatalf("openCityStoreAt: %v", err)
 			}
+			sessionMeta := map[string]string{
+				"session_name":       "worker",
+				"agent_name":         "worker",
+				"continuation_epoch": "2",
+				"state":              string(sessionpkg.StateActive),
+			}
+			maps.Copy(sessionMeta, tc.reset)
 			sessionBead, err := store.Create(beads.Bead{
-				Type:   sessionBeadType,
-				Labels: []string{sessionBeadLabel},
-				Metadata: map[string]string{
-					"session_name":               "worker",
-					"agent_name":                 "worker",
-					"continuation_epoch":         "2",
-					"state":                      string(sessionpkg.StateActive),
-					"restart_requested":          "true",
-					"continuation_reset_pending": "true",
-				},
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel},
+				Metadata: sessionMeta,
 			})
 			if err != nil {
 				t.Fatalf("create session bead: %v", err)
@@ -5008,11 +5066,11 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 				}
 			}
 
-			dispatch("inside the reset window")
-			if got := queued("inside the reset window"); len(got) != tc.wantInReset {
-				t.Fatalf("inside the reset window: queued %d nudges, want %d", len(got), tc.wantInReset)
+			dispatch("before the start")
+			if got := queued("before the start"); len(got) != tc.wantBeforeStart {
+				t.Fatalf("before the start: queued %d nudges, want %d", len(got), tc.wantBeforeStart)
 			}
-			if tc.wantInReset != 0 {
+			if tc.wantBeforeStart != 0 {
 				return
 			}
 
