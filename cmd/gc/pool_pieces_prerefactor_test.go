@@ -364,20 +364,24 @@ func resolveNamedSessionBeadNamePreRefactor(beads []AwakeSessionBead, ns AwakeNa
 	if sn := findNamedSessionNamePreRefactor(beads, ns.Identity); sn != "" {
 		return sn
 	}
-	if ns.RuntimeName == "" {
-		return ""
+	if bead := findBeadBySessionName(beads, ns.RuntimeName); ns.RuntimeName != "" && bead != nil && bead.ConfiguredNamedSession &&
+		(ns.Template == "" || bead.Template == ns.Template) &&
+		(bead.NamedIdentity == "" || bead.NamedIdentity == ns.Identity) {
+		return bead.SessionName
 	}
-	bead := findBeadBySessionName(beads, ns.RuntimeName)
-	if bead == nil || !bead.ConfiguredNamedSession {
-		return ""
+	// gascity#5957: the one configured named bead stored under the bare
+	// identity.
+	bare := ""
+	for _, b := range beads {
+		if ns.BareIdentity == "" || !b.ConfiguredNamedSession || b.NamedIdentity != ns.BareIdentity || b.SessionName == "" {
+			continue
+		}
+		if bare != "" {
+			return ""
+		}
+		bare = b.SessionName
 	}
-	if ns.Template != "" && bead.Template != ns.Template {
-		return ""
-	}
-	if bead.NamedIdentity != "" && bead.NamedIdentity != ns.Identity {
-		return ""
-	}
-	return bead.SessionName
+	return bare
 }
 
 func countMinActiveCoveredPreRefactor(beads []AwakeSessionBead, desired map[string]string, template string, now time.Time) int {

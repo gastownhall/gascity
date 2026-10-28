@@ -353,3 +353,31 @@ func TestBornQualifiedNamedSessionRowDoesNotOwnBareAssignee(t *testing.T) {
 		t.Errorf("AssigneeIdentities = %v, want no %q", ids, requalifiedBare)
 	}
 }
+
+// AC-7: ComputeAwakeSet wakes the pre-adopt row, under its bare runtime, as
+// the always-mode requalified session, and adds no qualified-runtime entry;
+// an ambiguous bare identity resolves no row.
+func TestComputeAwakeSetResolvesRequalifiedNamedSessionToBareRow(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ambiguous bool
+		wantAwake bool
+	}{
+		{name: "unique", wantAwake: true},
+		{name: "ambiguous_leaf", ambiguous: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := requalifiedCity(t, "always", tc.ambiguous)()
+			info := sessionInfoFromBead(preAdoptRow("always"))
+			input := buildAwakeInputFromReconciler(cfg, "", []session.Info{info}, nil, nil, nil, nil, nil, nil, nil, nil, nil, now)
+			result := computeAwakeSetChecked(t, input)
+			if _, ok := result[requalifiedRuntime]; ok {
+				t.Errorf("ComputeAwakeSet added a %s entry: %+v", requalifiedRuntime, result[requalifiedRuntime])
+			}
+			d := result[requalifiedBare]
+			if awake := d.ShouldWake && d.Reason == "named-always"; awake != tc.wantAwake {
+				t.Errorf("%s: wake %v reason %q, want named-always awake %v", requalifiedBare, d.ShouldWake, d.Reason, tc.wantAwake)
+			}
+		})
+	}
+}

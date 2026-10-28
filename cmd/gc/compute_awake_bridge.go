@@ -169,10 +169,11 @@ func newAwakeInputFromSnapshot(
 		ns := &cfg.NamedSessions[i]
 		identity := ns.QualifiedName()
 		input.NamedSessions = append(input.NamedSessions, AwakeNamedSession{
-			Identity:    identity,
-			Template:    ns.TemplateQualifiedName(),
-			Mode:        ns.Mode,
-			RuntimeName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
+			Identity:     identity,
+			Template:     ns.TemplateQualifiedName(),
+			Mode:         ns.Mode,
+			RuntimeName:  config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
+			BareIdentity: config.NamedSessionBareIdentity(cfg, ns),
 		})
 	}
 

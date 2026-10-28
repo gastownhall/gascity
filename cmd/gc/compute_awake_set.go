@@ -103,6 +103,10 @@ type AwakeNamedSession struct {
 	Template    string // agent template name
 	Mode        string // "always" or "on_demand"
 	RuntimeName string // computed runtime session_name (e.g. "hello-world--refinery")
+	// BareIdentity is the binding-free name that denotes this session alone
+	// (config.NamedSessionBareIdentity), "" when there is none: a row stored
+	// under it predates the binding that qualified the session (gascity#5957).
+	BareIdentity string
 }
 
 // AwakeSessionBead represents an open session bead from the store.
@@ -758,6 +762,10 @@ func findNamedSessionBead(beads []AwakeSessionBead, identity string) *AwakeSessi
 // must be handled separately. Without this fallback, ComputeAwakeSet
 // silently drops the bead from `desired` and the session stays asleep
 // forever even though the config says mode=always. See #1493.
+//
+// The last resort is the one configured named bead whose NamedIdentity is
+// the session's BareIdentity: a row created before a rig binding qualified
+// the session (gascity#5957), which keeps its bare runtime name.
 func resolveNamedSessionBeadName(beads []AwakeSessionBead, ns AwakeNamedSession) string {
 	if bead := resolveNamedSessionBead(beads, ns); bead != nil {
 		return bead.SessionName
@@ -771,6 +779,15 @@ func resolveNamedSessionBead(beads []AwakeSessionBead, ns AwakeNamedSession) *Aw
 	if bead := findNamedSessionBead(beads, ns.Identity); bead != nil && bead.SessionName != "" {
 		return bead
 	}
+	if bead := resolveNamedSessionRuntimeBead(beads, ns); bead != nil {
+		return bead
+	}
+	return findBareNamedSessionBead(beads, ns.BareIdentity)
+}
+
+// resolveNamedSessionRuntimeBead is the configured named bead under ns's
+// runtime name whose template and identity, where set, are ns's, or nil.
+func resolveNamedSessionRuntimeBead(beads []AwakeSessionBead, ns AwakeNamedSession) *AwakeSessionBead {
 	if ns.RuntimeName == "" {
 		return nil
 	}
@@ -785,6 +802,32 @@ func resolveNamedSessionBead(beads []AwakeSessionBead, ns AwakeNamedSession) *Aw
 		return nil
 	}
 	return bead
+}
+
+// findBareNamedSessionBead is the one configured named bead with a session
+// name whose NamedIdentity is bare, or nil when bare is "" or names no bead
+// or several.
+func findBareNamedSessionBead(beads []AwakeSessionBead, bare string) *AwakeSessionBead {
+	if bare == "" {
+		return nil
+	}
+	var found *AwakeSessionBead
+	for i := range beads {
+		if !isBareNamedSessionBead(beads[i], bare) {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = &beads[i]
+	}
+	return found
+}
+
+// isBareNamedSessionBead reports whether bead is a configured named bead
+// with a session name stored under the bare identity.
+func isBareNamedSessionBead(bead AwakeSessionBead, bare string) bool {
+	return bare != "" && bead.ConfiguredNamedSession && bead.NamedIdentity == bare && bead.SessionName != ""
 }
 
 func findBeadBySessionName(beads []AwakeSessionBead, name string) *AwakeSessionBead {
@@ -985,7 +1028,8 @@ func isAlwaysNamedSession(named []AwakeNamedSession, bead AwakeSessionBead) bool
 // + matching runtime name + template) mirrors resolveNamedSessionBeadName
 // so a bead with missing/stale NamedIdentity is still recognized as named —
 // otherwise idle-sleep suppression and on-demand keep-awake silently lose
-// their exemption for affected beads. See #1493.
+// their exemption for affected beads. See #1493. A bead stored under the
+// session's BareIdentity (gascity#5957) matches too.
 func namedSessionMatches(named []AwakeNamedSession, bead AwakeSessionBead, mode string) bool {
 	for _, ns := range named {
 		if ns.Mode != mode {
@@ -997,6 +1041,9 @@ func namedSessionMatches(named []AwakeNamedSession, bead AwakeSessionBead, mode 
 		if bead.NamedIdentity == "" && bead.ConfiguredNamedSession &&
 			ns.RuntimeName != "" && ns.RuntimeName == bead.SessionName &&
 			(ns.Template == "" || ns.Template == bead.Template) {
+			return true
+		}
+		if isBareNamedSessionBead(bead, ns.BareIdentity) {
 			return true
 		}
 	}
