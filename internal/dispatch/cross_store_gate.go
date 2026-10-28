@@ -81,17 +81,23 @@ import (
 // with an operator's reason — was closed by an operator: that close is final,
 // and it is recorded as overridden the first time the drain sees it.
 //
-// A drain control that is reopened after its gates were retired meets them
-// again. A retired gate records the state it was retired from
+// A drain control that is reopened after its gates were closed by the
+// controller meets them again — retired by the pass, or closed by a teardown
+// (a run cancel, the finalizer, wisp GC) with a controller reason. A retired
+// gate records the state it was retired from
 // (gc.cross_store_gate_retired_from), and a drain that does not find its
-// blocker hands it back to the release pass, which reads every store:
+// blocker hands the gate back to the release pass, which reads every store
+// (classifyHandBack):
 //
-//   - retired from released: the pass had released it, so it goes back to
-//     released, and the pass reopens it if its blocker opens again;
-//   - retired from open: the pass never released it (its blocker was open,
-//     unresolved, or in a store it could not read), so it is reopened with
-//     its state cleared, and the pass judges it afresh. Marking it released
-//     would let the item run on a judgement the pass never made.
+//   - released, or retired from released: the pass had released it, so it is
+//     (or goes back to) released, and the pass reopens it if its blocker
+//     opens again;
+//   - anything else — retired from open, or closed by a teardown with no
+//     marker or while unresolved: the pass never released it (its blocker was
+//     open, unresolved, or in a store it could not read), so it is reopened
+//     with its state cleared, and the pass judges it afresh. The pass lists
+//     only open and released gates; left closed, the gate would let the item
+//     run on a judgement the pass never made.
 //
 // Every state change — release, reopen, retire — is ONE write carrying the
 // status and the marker together, so no failure between two writes can leave
@@ -143,7 +149,7 @@ const (
 	// CrossStoreGateStateRetired: the controller closed the gate because its
 	// drain control is closed or gone, recording the state it was retired
 	// from. The release pass no longer reads it; a reopened drain hands it
-	// back (handBackRetiredGate), and one that finds its blocker open reopens
+	// back (handBackGate), and one that finds its blocker open reopens
 	// it.
 	CrossStoreGateStateRetired = "retired"
 )
@@ -186,16 +192,21 @@ func crossStoreGateID(store beads.Store, control beads.Bead, blockerID string) s
 //   - wisp GC's repair of closed roots and the workflow finalizer's sweep on
 //     pass or fail (WorkflowSkippedCloseReason);
 //   - the finalizer's sweep of a canceled run (workflowCanceledMemberCloseReason);
-//   - POST /runs/{id}/cancel (sourceworkflow.RunCanceledCloseReason).
+//   - POST /runs/{id}/cancel (sourceworkflow.RunCanceledCloseReason);
+//   - gc hook --claim's skip of a workflow whose input is already done, and
+//     the order-tracking sweep of stale order wisp subtrees (both close by
+//     gc.root_bead_id).
 //
 // A scope abort (scopeAbortSkippedCloseReason) closes only the members of one
 // scope, which a gate never is.
 var controllerCloseReasons = map[string]bool{
-	molecule.SubtreeClosedReason:               true,
-	sourceworkflow.WorkflowSubtreeClosedReason: true,
-	sourceworkflow.WorkflowSkippedCloseReason:  true,
-	sourceworkflow.RunCanceledCloseReason:      true,
-	workflowCanceledMemberCloseReason:          true,
+	molecule.SubtreeClosedReason:                   true,
+	sourceworkflow.WorkflowSubtreeClosedReason:     true,
+	sourceworkflow.WorkflowSkippedCloseReason:      true,
+	sourceworkflow.RunCanceledCloseReason:          true,
+	workflowCanceledMemberCloseReason:              true,
+	sourceworkflow.HookSkipDoneWorkflowCloseReason: true,
+	sourceworkflow.StaleOrderWispCloseReason:       true,
 }
 
 // IsControllerClosedCrossStoreGate reports whether gate is a closed
@@ -223,8 +234,9 @@ func controllerClosed(gate beads.Bead) bool {
 // foundOpen reports whether the drain FOUND the blocker open (rather than not
 // finding it at all). An open gate holds. A controller-closed gate is reopened
 // on that evidence; otherwise a released gate is left as the release pass left
-// it, and a RETIRED gate, whose drain is live again, is handed back to the
-// release pass (handBackRetiredGate). An operator-closed gate is final, and its
+// it, and any other controller-closed gate (retired, or closed by a teardown),
+// whose drain is live again, is handed back to the release pass
+// (handBackGate). An operator-closed gate is final, and its
 // override is recorded the first time it is seen. It returns the gate's id when
 // it holds the item, "" when it does not.
 func gateAnswer(store beads.Store, gate beads.Bead, foundOpen bool) (string, error) {
@@ -233,10 +245,7 @@ func gateAnswer(store beads.Store, gate beads.Bead, foundOpen bool) (string, err
 	}
 	if controllerClosed(gate) {
 		if !foundOpen {
-			if gate.Metadata[beadmeta.CrossStoreGateStateMetadataKey] == CrossStoreGateStateRetired {
-				return handBackRetiredGate(store, gate)
-			}
-			return "", nil
+			return handBackGate(store, gate)
 		}
 		wrote, err := reopenCrossStoreGate(store, gate.ID)
 		if err != nil {
@@ -258,26 +267,58 @@ func gateAnswer(store beads.Store, gate beads.Bead, foundOpen bool) (string, err
 	return "", nil
 }
 
-// handBackRetiredGate returns a retired gate of a live drain to the release
-// pass in ONE write, according to the state it was retired from: a gate the
-// pass had released goes back to released (it does not hold the item); any
-// other — retired while open, or with no record — is reopened with its state
-// cleared (it holds the item until the pass judges it afresh).
-func handBackRetiredGate(store beads.Store, gate beads.Bead) (string, error) {
-	retiredFrom := func(b beads.Bead) string {
-		return b.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey]
+// gateHandBack is what a drain that did not find the blocker does with a
+// controller-closed gate of its live control.
+type gateHandBack int
+
+const (
+	// handBackNone: the pass released the gate; leave it to the pass.
+	handBackNone gateHandBack = iota
+	// handBackReleased: a gate the pass had released and then retired goes
+	// back to released.
+	handBackReleased
+	// handBackReopen: a gate whose blocker the pass never judged released —
+	// retired while open, closed by a controller teardown (cancel, finalize,
+	// wisp GC) with no marker or while unresolved — is reopened with its
+	// state cleared, so it holds the item until the pass judges it afresh.
+	handBackReopen
+)
+
+// classifyHandBack decides the hand-back of a gate by its live row. Both
+// hand-back writes use it as their premise, so a gate whose classification
+// moved between the drain's read and its write (another drain or a pass
+// changed it) is never written on a stale judgement.
+func classifyHandBack(b beads.Bead) gateHandBack {
+	if b.Status != "closed" || !controllerClosed(b) {
+		return handBackNone
 	}
-	retired := func(b beads.Bead) bool {
-		return b.Status == "closed" && b.Metadata[beadmeta.CrossStoreGateStateMetadataKey] == CrossStoreGateStateRetired
+	switch b.Metadata[beadmeta.CrossStoreGateStateMetadataKey] {
+	case CrossStoreGateStateReleased:
+		return handBackNone
+	case CrossStoreGateStateRetired:
+		if b.Metadata[beadmeta.CrossStoreGateRetiredFromMetadataKey] == CrossStoreGateStateReleased {
+			return handBackReleased
+		}
 	}
-	if retiredFrom(gate) == CrossStoreGateStateReleased {
+	return handBackReopen
+}
+
+// handBackGate returns a controller-closed gate of a live drain to the release
+// pass in ONE write (classifyHandBack): a gate the pass had released goes back
+// to released (it does not hold the item); a gate the pass never released is
+// reopened with its state cleared (it holds the item until the pass judges it
+// afresh). The release pass lists only open and released gates, so a gate
+// left closed any other way would let the item run on a judgement nobody made.
+func handBackGate(store beads.Store, gate beads.Bead) (string, error) {
+	kind := classifyHandBack(gate)
+	still := func(b beads.Bead) bool { return classifyHandBack(b) == kind }
+	switch kind {
+	case handBackReleased:
 		reason := "released by the release pass; handed back to it when its drain control was reopened"
 		if blocker := gateBlocker(gate); blocker != "" {
 			reason = fmt.Sprintf("blocker %s closed; handed back to the release pass when its drain control was reopened", blocker)
 		}
-		wrote, err := writeGateIfStill(store, gate.ID, func(b beads.Bead) bool {
-			return retired(b) && retiredFrom(b) == CrossStoreGateStateReleased
-		}, beads.UpdateOpts{Metadata: map[string]string{
+		wrote, err := writeGateIfStill(store, gate.ID, still, beads.UpdateOpts{Metadata: map[string]string{
 			beadmeta.CrossStoreGateStateMetadataKey:       CrossStoreGateStateReleased,
 			beadmeta.CrossStoreGateRetiredFromMetadataKey: "",
 			"close_reason": reason,
@@ -289,17 +330,17 @@ func handBackRetiredGate(store beads.Store, gate beads.Bead) (string, error) {
 			return reReadGateAnswer(store, gate.ID)
 		}
 		return "", nil
+	case handBackReopen:
+		wrote, err := writeGateIfStill(store, gate.ID, still, reopenGateOpts(), false)
+		if err != nil {
+			return "", fmt.Errorf("reopening cross-store gate %s for the release pass: %w", gate.ID, err)
+		}
+		if !wrote {
+			return reReadGateAnswer(store, gate.ID)
+		}
+		return gate.ID, nil
 	}
-	wrote, err := writeGateIfStill(store, gate.ID, func(b beads.Bead) bool {
-		return retired(b) && retiredFrom(b) != CrossStoreGateStateReleased
-	}, reopenGateOpts(), false)
-	if err != nil {
-		return "", fmt.Errorf("reopening retired cross-store gate %s for the release pass: %w", gate.ID, err)
-	}
-	if !wrote {
-		return reReadGateAnswer(store, gate.ID)
-	}
-	return gate.ID, nil
+	return "", nil
 }
 
 // reReadGateAnswer answers from the gate's live row after a write whose
