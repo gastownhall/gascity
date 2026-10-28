@@ -93,10 +93,12 @@ func Poll(t *testing.T, what string, bound time.Duration, cond func() (bool, str
 
 // ReportAgent forces an agent status through herdr's report-agent API, retrying
 // until the pane binding exists (pane resolves it, returning "" until it does).
-// On herdr 0.8.0 the first call also CREATES the pane's agent registration, so
-// --agent carries the gc session name rather than a reporter label: the event
-// stream builds its pane-to-session map from that registry, and a registration
-// under any other name leaves every frame for the pane unattributed.
+// report-agent only sets the pane's agent label; the registered name — the
+// identity gc reads — is set right after with `agent rename <pane> <name>`,
+// which herdr refuses on a pane with no label yet and clears when a later
+// report changes the label. --agent therefore carries the gc session name on
+// every call and the rename re-asserts the same name, so a registration under
+// any other label can never leave the pane unattributed.
 //
 // The subprocess lives here rather than in each live test so the live tier has
 // one place that shells out to herdr.
@@ -109,16 +111,11 @@ func ReportAgent(t *testing.T, herdrSession, agentName, state string, pane func(
 			last = fmt.Sprintf("no pane binding recorded for %q yet", agentName)
 			return false, last
 		}
-		out, err := func() ([]byte, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), reportAgentAttemptBound)
-			defer cancel()
-			return reportAgentCmd(ctx, herdrSession, paneID, agentName, state).CombinedOutput()
-		}()
-		if err == nil {
-			return true, ""
+		if err := reportAndRename(herdrSession, paneID, agentName, state); err != nil {
+			last = err.Error()
+			return false, last
 		}
-		last = fmt.Sprintf("pane report-agent %s %s: %v: %s", paneID, state, err, out)
-		return false, last
+		return true, ""
 	})
 }
 
@@ -129,9 +126,24 @@ func ReportAgentBestEffort(herdrSession, agentName, state string, pane func() st
 	if paneID == "" {
 		return
 	}
+	_ = reportAndRename(herdrSession, paneID, agentName, state)
+}
+
+// reportAndRename reports the pane's agent state and then registers the gc
+// session name on it: report-agent sets the label, `agent rename` sets the
+// registered name, and herdr refuses the rename on a pane with no label yet,
+// so the report runs first and every call re-asserts the same --agent value
+// (a report with a different label would clear the registered name).
+func reportAndRename(herdrSession, paneID, agentName, state string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), reportAgentAttemptBound)
 	defer cancel()
-	_ = reportAgentCmd(ctx, herdrSession, paneID, agentName, state).Run()
+	if out, err := reportAgentCmd(ctx, herdrSession, paneID, agentName, state).CombinedOutput(); err != nil {
+		return fmt.Errorf("pane report-agent %s %s: %w: %s", paneID, state, err, out)
+	}
+	if out, err := exec.CommandContext(ctx, "herdr", "--session", herdrSession, "agent", "rename", paneID, agentName).CombinedOutput(); err != nil {
+		return fmt.Errorf("herdr agent rename %s %s: %w: %s", paneID, agentName, err, out)
+	}
+	return nil
 }
 
 // reportAgentAttemptBound bounds ONE report-agent invocation. Without it the

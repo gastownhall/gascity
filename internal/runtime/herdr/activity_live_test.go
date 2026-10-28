@@ -40,12 +40,15 @@ func TestActivityLive(t *testing.T) {
 	t.Cleanup(func() { _ = p.Stop("act-a") })
 
 	// herdr does not list, and therefore cannot name, a pane until something
-	// reports an agent onto it (`pane report-agent`/`pane report-agent-session`).
-	// A bare integration-less pane sits in `pane list` with no name field at
-	// all, so name-keyed queries (agent.list/agent.get, and this tracker) have
-	// nothing to seed from until the first report. Resolve the pane id via
-	// `pane list` (name-independent) and report once to establish identity —
-	// this mirrors what any real herdr-integrated agent does on attach.
+	// reports an agent onto it (`pane report-agent`/`pane report-agent-session`)
+	// and the name is registered. A bare integration-less pane sits in
+	// `pane list` with no name field at all, so name-keyed queries
+	// (agent.list/agent.get, and this tracker) have nothing to seed from until
+	// the first report. Resolve the pane id via `pane list` (name-independent),
+	// report the label, then register the name with `agent rename` — herdr
+	// refuses the rename on a pane with no label and clears the name when a
+	// later report changes the label, so every report keeps the same --agent
+	// value. This mirrors what any real herdr-integrated agent does on attach.
 	paneID := firstPaneID(t, session)
 	report := func(state string) {
 		t.Helper()
@@ -53,6 +56,9 @@ func TestActivityLive(t *testing.T) {
 			"--source", "gctest", "--agent", "act-a", "--state", state).CombinedOutput()
 		if err != nil {
 			t.Fatalf("pane report-agent %s: %v: %s", state, err, out)
+		}
+		if out, err := exec.Command("herdr", "--session", session, "agent", "rename", paneID, "act-a").CombinedOutput(); err != nil {
+			t.Fatalf("agent rename act-a: %v: %s", err, out)
 		}
 	}
 	report("idle")
