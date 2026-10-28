@@ -44,3 +44,23 @@ func TestValidateExecEnvOverridesRejectsBdContributorRouting(t *testing.T) {
 		t.Fatal("ValidateExecEnvOverrides() = nil, want error for reserved BD_ROUTING_MODE override")
 	}
 }
+
+// TestReservedExecEnvKeysIncludeCityName guards upstream #8151: the
+// controller writes GC_CITY_NAME into every exec order's env from the city's
+// own runtime identity, so an order's [order.env] must not be able to pin it
+// to another city's name.
+func TestReservedExecEnvKeysIncludeCityName(t *testing.T) {
+	if !IsReservedExecEnvKey("GC_CITY_NAME") {
+		t.Error("IsReservedExecEnvKey(\"GC_CITY_NAME\") = false, want true")
+	}
+}
+
+// TestValidateExecEnvOverridesRejectsCityName confirms the reservation is
+// enforced end-to-end through the order validation path (dispatch and
+// `gc doctor` both call it).
+func TestValidateExecEnvOverridesRejectsCityName(t *testing.T) {
+	order := Order{Name: "o", Env: map[string]string{"GC_CITY_NAME": "neighbor-city"}}
+	if err := ValidateExecEnvOverrides(order); err == nil {
+		t.Fatal("ValidateExecEnvOverrides() = nil, want error for reserved GC_CITY_NAME override")
+	}
+}
