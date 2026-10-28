@@ -4127,7 +4127,7 @@ func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T)
 		t.Fatalf("n = %d, want 2", n)
 	}
 	if fs.listCalls != 1 {
-		t.Fatalf("ListByLabel calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
+		t.Fatalf("order-tracking list calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
 	}
 }
 
@@ -6746,7 +6746,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Fail the first 2 ListByLabel calls, succeed on the 3rd.
+	// Fail the first 2 order-tracking list reads, succeed on the 3rd.
 	fs := &countFailStore{Store: inner, failCount: 2}
 	closed, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
 	if err != nil {
@@ -6756,7 +6756,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 		t.Fatalf("closed = %d, want 1", closed)
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("order-tracking list calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -6777,7 +6777,7 @@ func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
 		t.Fatal("expected error when retries exhausted")
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("order-tracking list calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -6809,23 +6809,29 @@ func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
 		t.Fatalf("n = %d, want 3 (accumulated across retries)", n)
 	}
 	if fs.listCalls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3 (retry on partial close)", fs.listCalls)
+		t.Fatalf("order-tracking list calls = %d, want 3 (retry on partial close)", fs.listCalls)
 	}
 }
 
-// countFailStore wraps a Store and fails the first N ListByLabel calls.
+// countFailStore wraps a Store and fails the first N order-tracking list
+// reads. The injection sits on List because the sweep reads through
+// beads.HandlesFor(store).Live.List; an override on ListByLabel would never
+// fire and leave the retry loop untested.
 type countFailStore struct {
 	beads.Store
 	failCount int
 	calls     int
 }
 
-func (f *countFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+func (f *countFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label != labelOrderTracking {
+		return f.Store.List(query)
+	}
 	f.calls++
 	if f.calls <= f.failCount {
 		return nil, fmt.Errorf("connection refused")
 	}
-	return f.Store.ListByLabel(label, limit, opts...)
+	return f.Store.List(query)
 }
 
 // closeFailStore wraps a Store and always fails CloseAll with a
@@ -6836,9 +6842,12 @@ type closeFailStore struct {
 	closeN    int // number of beads "closed" before error
 }
 
-func (f *closeFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	f.listCalls++
-	return f.Store.ListByLabel(label, limit, opts...)
+// List counts the sweep's order-tracking reads, which go through Live.List.
+func (f *closeFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == labelOrderTracking {
+		f.listCalls++
+	}
+	return f.Store.List(query)
 }
 
 func (f *closeFailStore) CloseAll(_ []string, _ map[string]string) (int, error) {

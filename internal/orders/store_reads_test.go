@@ -462,6 +462,35 @@ func TestStaleOpenRunsBypassCache(t *testing.T) {
 	}
 }
 
+// TestOrphanedOpenRunsBypassCache proves the startup orphan sweep's read sees a
+// tracking bead written to the backing after the cache was primed — the sweep
+// runs inside the very process whose cache never absorbed the orphans — while
+// still excluding the trigger-env-failure markers.
+func TestOrphanedOpenRunsBypassCache(t *testing.T) {
+	mem := beads.NewMemStore()
+	primed, err := mem.Create(beads.Bead{Title: "order:primed", Labels: []string{"order-run:primed", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, behind := primedCacheWithBackingOnlyTracking(t, mem)
+	marker, err := mem.Create(beads.Bead{Title: "order:env", Labels: []string{"order-run:env", labelOrderTracking, labelTriggerEnvFail}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := NewStore(beads.OrdersStore{Store: cache}).OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	got := runIDs(runs)
+	if !slices.Contains(got, primed.ID) || !slices.Contains(got, behind.ID) {
+		t.Fatalf("OrphanedOpenRuns() = %v, want both %s and the backing-only %s", got, primed.ID, behind.ID)
+	}
+	if slices.Contains(got, marker.ID) {
+		t.Fatalf("OrphanedOpenRuns() = %v, must exclude trigger-env-failed marker %s", got, marker.ID)
+	}
+}
+
 // TestClosedRunsForRetentionBestEffortName proves closed tracking beads are
 // returned including those with no resolvable order name (Scoped ""), so the
 // caller can route them to the legacy retention bucket.

@@ -2318,6 +2318,36 @@ func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) 
 	}
 }
 
+// TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache is the same
+// proof for the startup orphan sweep. The boot path opens its own store from
+// cityPath, so this drives the sweep function directly over the
+// production-shaped store: what it pins is the reader.
+func TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := newPrimedPolicyCacheStore(t, backing, &config.City{Workspace: config.Workspace{Name: "test-city"}})
+
+	orphan, err := backing.Create(beads.Bead{
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(orphan): %v", err)
+	}
+	requireSnapshotMisses(t, store, orphan.ID)
+
+	if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
+	}
+
+	got, err := backing.Get(orphan.ID)
+	if err != nil {
+		t.Fatalf("Get(orphan): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("orphaned tracking status = %s, want closed (the startup sweep read a cache snapshot that never held this bead)", got.Status)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	store := beads.NewMemStore()
 	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)
