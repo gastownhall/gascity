@@ -57,6 +57,35 @@ func TestWaitInfoFromBead_ProjectsAllFields(t *testing.T) {
 	}
 }
 
+// TestWaitInfoFromBead_DecodesRegisteredResetPending proves the codec decodes
+// the reset-window flag with the fence key's own semantics: any non-empty
+// value means true, an absent key means false.
+func TestWaitInfoFromBead_DecodesRegisteredResetPending(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "absent key reads false", raw: "", want: false},
+		{name: "true reads true", raw: "true", want: true},
+		{name: "any non-empty value reads true", raw: "1", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{"session_id": "gc-session", "registered_epoch": "2"}
+			if tc.raw != "" {
+				meta["registered_reset_pending"] = tc.raw
+			}
+			got := WaitInfoFromBead(beads.Bead{Type: WaitBeadType, Metadata: meta})
+			if got.RegisteredResetPending != tc.want {
+				t.Fatalf("RegisteredResetPending = %v, want %v", got.RegisteredResetPending, tc.want)
+			}
+			if got.RegisteredEpoch != "2" {
+				t.Fatalf("RegisteredEpoch = %q, want 2", got.RegisteredEpoch)
+			}
+		})
+	}
+}
+
 func TestWaitInfoFromBead_DepIDsSplitTrimEmpty(t *testing.T) {
 	cases := []struct {
 		name   string

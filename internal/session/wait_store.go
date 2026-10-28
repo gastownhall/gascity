@@ -24,6 +24,13 @@ import (
 const (
 	waitStatePending = "pending"
 	waitStateReady   = "ready"
+
+	// waitRegisteredResetPendingKey marks a wait registered while its session
+	// had a continuation reset pending: the wait belongs to the conversation
+	// the pending start opens, so its registered_epoch (the epoch that start
+	// retires) must not fence it out. Shared by the CreateWait/RetryClosedWait
+	// writers here and the WaitInfoFromBead codec in waits.go.
+	waitRegisteredResetPendingKey = "registered_reset_pending"
 )
 
 // ErrNotAWait reports that a bead exists but is not a durable session wait. It
@@ -326,6 +333,14 @@ func (s *Store) CreateWait(spec WaitSpec) (WaitInfo, error) {
 		"created_by_session": spec.CreatedBySession,
 		"created_at":         spec.Now.Format(time.RFC3339),
 	}
+	// A wait registered inside a fresh-restart window belongs to the
+	// conversation the pending start opens; the flag keeps the retiring epoch
+	// from fencing it out when the start rotates the epoch (issue #8406). The
+	// predicate mirrors deferredSubmitEpoch (submit.go), which treats the same
+	// window as not-yet-rotated for deferred submits.
+	if strings.TrimSpace(markers.ContinuationResetPending) != "" {
+		meta[waitRegisteredResetPendingKey] = "true"
+	}
 	created, err := s.store.Create(beads.Bead{
 		Title:       "wait:" + markers.Title,
 		Type:        WaitBeadType,
@@ -360,6 +375,7 @@ func retryableWaitMetadata(src map[string]string) map[string]string {
 		"dep_ids",
 		"dep_mode",
 		"registered_epoch",
+		waitRegisteredResetPendingKey,
 		"created_by_session",
 		"expires_at",
 	}
@@ -408,6 +424,15 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 		if markers, err := s.PersistedMarkers(sessionID); err == nil {
 			if epoch := markers.ContinuationEpoch; epoch != "" {
 				meta["registered_epoch"] = epoch
+			}
+			// The reset-pending flag refreshes together with the epoch so the
+			// fence pair never splits: set while the session's reset is still
+			// pending, dropped once none is. A failed marker read keeps the
+			// carried pair as the epoch refresh above does.
+			if strings.TrimSpace(markers.ContinuationResetPending) != "" {
+				meta[waitRegisteredResetPendingKey] = "true"
+			} else {
+				delete(meta, waitRegisteredResetPendingKey)
 			}
 			if meta["session_name"] == "" {
 				meta["session_name"] = markers.SessionName

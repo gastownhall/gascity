@@ -266,6 +266,43 @@ func TestCreateWait_ProducesLiteralBeadShape(t *testing.T) {
 	}
 }
 
+// TestCreateWait_MarksRegistrationDuringPendingReset proves a wait registered
+// while the session has a pending continuation reset is stamped with both
+// fence keys: registered_epoch N (the epoch the start retires) plus
+// registered_reset_pending, so the wake pass can tell it apart from a wait of
+// the outgoing conversation (issue #8406). It is the literal-shape sibling of
+// TestCreateWait_ProducesLiteralBeadShape, which keeps guarding the no-reset
+// shape.
+func TestCreateWait_MarksRegistrationDuringPendingReset(t *testing.T) {
+	sess := sessionBeadFixture("gc-session", "open", map[string]string{
+		"__title":                    "worker",
+		"session_name":               "worker-1",
+		"continuation_epoch":         "2",
+		"continuation_reset_pending": "true",
+	})
+	s, rec := recordingWaitStore(t, sess)
+
+	_, err := s.CreateWait(WaitSpec{
+		SessionID:        "gc-session",
+		Kind:             "deps",
+		DepIDs:           []string{"gc-1"},
+		DepMode:          "all",
+		Note:             "Pick up the next step.",
+		CreatedBySession: "gc-origin",
+		Now:              waitStoreNow,
+	})
+	if err != nil {
+		t.Fatalf("CreateWait: %v", err)
+	}
+	created := rec.CallsForOp("Create")[0].Bead
+	if got := created.Metadata["registered_epoch"]; got != "2" {
+		t.Errorf("registered_epoch = %q, want the retiring epoch 2", got)
+	}
+	if got := created.Metadata["registered_reset_pending"]; got != "true" {
+		t.Errorf("registered_reset_pending = %q, want true", got)
+	}
+}
+
 // --- RetryClosedWait: ported oracles from cmd/gc TestRetryClosedWait_* ---
 
 func TestRetryClosedWait_CreatesReplacement(t *testing.T) {
@@ -378,6 +415,69 @@ func TestRetryClosedWait_PreservesNonDepsMetadata(t *testing.T) {
 	meta := rec.CallsForOp("Create")[0].Bead.Metadata
 	if meta["kind"] != "probe" || meta["probe_name"] != "github-pr-approval" || meta["probe_target"] != "owner/repo#123" {
 		t.Fatalf("non-deps metadata not preserved: %#v", meta)
+	}
+}
+
+// TestRetryClosedWait_RefreshesResetPendingMarker proves the retry clone
+// refreshes registered_reset_pending together with registered_epoch from the
+// session's live markers: set while a reset is pending, dropped when none is,
+// and carried with the epoch when the session read fails (so the fence pair
+// never splits). Covers deps (allowlisted keys) and non-deps (all keys) kinds.
+func TestRetryClosedWait_RefreshesResetPendingMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		kind      string
+		pending   bool
+		carryFlag bool
+		wantFlag  string
+		wantEpoch string
+		noSession bool
+	}{
+		{name: "deps reset pending sets flag", kind: "deps", pending: true, wantFlag: "true", wantEpoch: "2"},
+		{name: "deps no reset drops carried flag", kind: "deps", carryFlag: true, wantFlag: "", wantEpoch: "2"},
+		{name: "deps session read fails carries pair", kind: "deps", carryFlag: true, noSession: true, wantFlag: "true", wantEpoch: "1"},
+		{name: "probe reset pending sets flag", kind: "probe", pending: true, wantFlag: "true", wantEpoch: "2"},
+		{name: "probe no reset drops carried flag", kind: "probe", carryFlag: true, wantFlag: "", wantEpoch: "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seed []beads.Bead
+			sessionID := "gc-session"
+			if !tc.noSession {
+				sessMeta := map[string]string{
+					"session_name":       "worker",
+					"continuation_epoch": "2",
+				}
+				if tc.pending {
+					sessMeta["continuation_reset_pending"] = "true"
+				}
+				seed = append(seed, sessionBeadFixture(sessionID, "open", sessMeta))
+			}
+			waitMeta := map[string]string{
+				"__title":          "wait:worker",
+				"session_name":     "worker",
+				"kind":             tc.kind,
+				"state":            "failed",
+				"registered_epoch": "1",
+				"delivery_attempt": "1",
+			}
+			if tc.carryFlag {
+				waitMeta["registered_reset_pending"] = "true"
+			}
+			wait := waitBeadFixture("w-1", "closed", sessionID, waitMeta)
+			seed = append(seed, wait)
+			s, rec := recordingWaitStore(t, seed...)
+
+			if _, err := s.RetryClosedWait("w-1", "2", waitStoreNow); err != nil {
+				t.Fatalf("RetryClosedWait: %v", err)
+			}
+			meta := rec.CallsForOp("Create")[0].Bead.Metadata
+			if got := meta["registered_epoch"]; got != tc.wantEpoch {
+				t.Errorf("registered_epoch = %q, want %q", got, tc.wantEpoch)
+			}
+			if got := meta["registered_reset_pending"]; got != tc.wantFlag {
+				t.Errorf("registered_reset_pending = %q, want %q", got, tc.wantFlag)
+			}
+		})
 	}
 }
 

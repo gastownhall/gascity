@@ -113,6 +113,11 @@ type WaitInfo struct {
 	DepMode string
 	// RegisteredEpoch is the session continuation epoch at registration (metadata registered_epoch).
 	RegisteredEpoch string
+	// RegisteredResetPending reports that the wait was registered while the
+	// session had a continuation reset pending (metadata registered_reset_pending;
+	// any non-empty value means true): the wait belongs to the conversation the
+	// pending start opens, so it stays current across that start's epoch rotation.
+	RegisteredResetPending bool
 	// DeliveryAttempt is the current delivery attempt counter (metadata delivery_attempt).
 	DeliveryAttempt string
 	// NudgeID is the shadow wait-nudge ID once dispatched (metadata nudge_id).
@@ -136,21 +141,22 @@ type WaitInfo struct {
 // and decision paths previously performed inline.
 func WaitInfoFromBead(b beads.Bead) WaitInfo {
 	return WaitInfo{
-		ID:              b.ID,
-		SessionID:       b.Metadata["session_id"],
-		SessionName:     b.Metadata["session_name"],
-		Kind:            b.Metadata["kind"],
-		State:           b.Metadata["state"],
-		DepIDs:          splitWaitDepIDs(b.Metadata["dep_ids"]),
-		DepMode:         b.Metadata["dep_mode"],
-		RegisteredEpoch: b.Metadata["registered_epoch"],
-		DeliveryAttempt: b.Metadata["delivery_attempt"],
-		NudgeID:         b.Metadata["nudge_id"],
-		ExpiresAt:       b.Metadata["expires_at"],
-		Note:            b.Description,
-		Status:          b.Status,
-		CreatedAt:       b.CreatedAt,
-		Labels:          b.Labels,
+		ID:                     b.ID,
+		SessionID:              b.Metadata["session_id"],
+		SessionName:            b.Metadata["session_name"],
+		Kind:                   b.Metadata["kind"],
+		State:                  b.Metadata["state"],
+		DepIDs:                 splitWaitDepIDs(b.Metadata["dep_ids"]),
+		DepMode:                b.Metadata["dep_mode"],
+		RegisteredEpoch:        b.Metadata["registered_epoch"],
+		RegisteredResetPending: b.Metadata[waitRegisteredResetPendingKey] != "",
+		DeliveryAttempt:        b.Metadata["delivery_attempt"],
+		NudgeID:                b.Metadata["nudge_id"],
+		ExpiresAt:              b.Metadata["expires_at"],
+		Note:                   b.Description,
+		Status:                 b.Status,
+		CreatedAt:              b.CreatedAt,
+		Labels:                 b.Labels,
 	}
 }
 
