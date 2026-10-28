@@ -1498,6 +1498,13 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 // ahead of any real routed work waiting in the same batch (#4419) -- not by
 // race, by construction, since this function runs before
 // claimFirstEligibleHookCandidate ever sees the routed candidates.
+//
+// The generated work query now withholds message rows at the query layer
+// (excludeMailMessagesJQClause), so on the default query this is the backstop:
+// a tier that short-circuited on a message bead starved the routed tiers the
+// script never ran (#5815), which a Go-side batch filter cannot recover. It
+// still covers custom work_query overrides, which are returned verbatim and
+// never rewritten.
 func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
 }
