@@ -7072,7 +7072,10 @@ func writeMaintenanceBdStub(t *testing.T, path string) {
 //   - backup status reports the timestamp in $BEADS_DIR/backup/backup_state.json
 //     (written by writeFreshBackupState) or BD_BACKUP_STATUS_JSON verbatim;
 //     BD_BACKUP_STATUS_FAIL makes it fail with that text.
-//   - close/update/delete succeed unless BD_CLOSE_FAIL is set.
+//   - close/update/delete succeed unless BD_CLOSE_FAIL is set. delete --json
+//     answers in bd's two shapes: one unique id takes bd's single-id path
+//     ({"deleted":"<id>"}, no deleted_count); more take its batch path
+//     ({"deleted":[...],"deleted_count":N}).
 //
 // maintenanceBdPurgeAndBackupVerbs answers `bd prune`, `bd purge` and `bd backup status`
 // the way maintenanceBdStubBody does, for test-specific bd doubles that
@@ -7158,10 +7161,15 @@ case "$1" in
     while [ $# -gt 0 ]; do
       if [ "$1" = "--from-file" ]; then
         n=$(grep -c . "$2")
+        first=$(grep -m1 . "$2")
       fi
       shift
     done
-    printf '{"deleted_count":%s}\n' "$n"
+    if [ "$n" = "1" ]; then
+      printf '{"deleted":"%s","dependencies_removed":0,"references_updated":0,"schema_version":1}\n' "$first"
+    else
+      printf '{"deleted_count":%s}\n' "$n"
+    fi
     ;;
 esac
 exit 0
