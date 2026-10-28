@@ -1686,7 +1686,7 @@ func (s *Server) answerLaneMessage(st *opjournal.Store, op opjournal.Op, owned b
 	s.pokeConversationLane(op.Conversation)
 	go func() {
 		defer finish()
-		s.emitLaneMessageResult(st, op, req.operation, string(req.intent))
+		s.emitLaneMessageResult(op, req.operation, string(req.intent))
 	}()
 	return asyncAcceptedBody{Status: "accepted", RequestID: op.ID, EventCursor: cursor, IdempotencyKey: key, Op: conversationOpWire(op)}, nil
 }
@@ -1710,7 +1710,7 @@ func (s *Server) cancelLaneMessage(st *opjournal.Store, id, why string) {
 // emits its request's terminal event for operation: the result, queued
 // false, once it closed succeeded; request.failed once it closed otherwise;
 // the result, queued true, while it is still open.
-func (s *Server) emitLaneMessageResult(st *opjournal.Store, op opjournal.Op, operation, intent string) {
+func (s *Server) emitLaneMessageResult(op opjournal.Op, operation, intent string) {
 	cur, err := s.awaitLaneOp(context.Background(), op.Conversation, op.ID, laneSubmitSettle)
 	if err != nil {
 		s.ops.logf("api: op %s: reading its outcome for the request's result: %v", op.ID, err)
