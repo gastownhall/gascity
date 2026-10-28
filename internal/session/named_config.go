@@ -987,7 +987,33 @@ func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (In
 			return aliasCanonical, true
 		}
 	}
-	return Info{}, false
+	return bareIdentityCanonicalNamedSessionInfo(candidates, spec)
+}
+
+// bareIdentityCanonicalNamedSessionInfo is the Info form of
+// bareIdentityCanonicalNamedSessionBead: the one live, continuity-eligible
+// configured-named Info whose identity is spec.BareIdentity, or none.
+func bareIdentityCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
+	bare := NormalizeNamedSessionTarget(spec.BareIdentity)
+	if bare == "" {
+		return Info{}, false
+	}
+	var match Info
+	count := 0
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+			continue
+		}
+		if !IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != bare {
+			continue
+		}
+		count++
+		match = i
+	}
+	if count != 1 {
+		return Info{}, false
+	}
+	return match, true
 }
 
 // FindClosedNamedSessionBead finds the newest closed bead for a named session identity.

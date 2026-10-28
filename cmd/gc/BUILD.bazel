@@ -1618,6 +1618,7 @@ go_test(
         "mysql_driver_log_test.go",
         "named_session_demand_class_binding_test.go",
         "named_session_materialization_test.go",
+        "named_session_requalify_test.go",
         "native_dolt_env_cfg_reuse_test.go",
         "native_dolt_rebind_integration_test.go",
         "native_reopen_wiring_test.go",

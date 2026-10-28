@@ -352,6 +352,18 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backin
 	return sn == sessionName || sn == identity
 }
 
+// namedSessionBeadRequalifiedTo reports whether b is a configured named
+// session row whose stored identity config now resolves to identity: a row
+// created before a rig binding qualified its session (gascity#5957), which
+// the desired entry adopts and renames in place.
+func namedSessionBeadRequalifiedTo(cfg *config.City, b beads.Bead, identity string) bool {
+	if !isNamedSessionBead(b) {
+		return false
+	}
+	named := config.FindNamedSession(cfg, namedSessionIdentity(b))
+	return named != nil && named.QualifiedName() == identity
+}
+
 func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName string) bool {
 	if cfg == nil || !isNamedSessionBead(b) {
 		return false
@@ -2214,7 +2226,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			continue
 		}
 
-		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn, tp.TemplateName) {
+		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) &&
+			!canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn, tp.TemplateName) &&
+			!namedSessionBeadRequalifiedTo(cfg, b, tp.ConfiguredNamedIdentity) {
 			fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
 			continue
 		}
@@ -2739,17 +2753,18 @@ func syncQualifiedTemplate(tp TemplateParams) string {
 	return tp.TemplateName
 }
 
-// queueAliasChangeDriftRebaseline moves a started pool session's config-drift
+// queueAliasChangeDriftRebaseline moves a started session's config-drift
 // baseline onto its post-rename config. A pool alias change re-renders the
-// alias-derived pre_start, which would otherwise trip the reconciler's
+// alias-derived pre_start (gastownhall/gascity#2234), and a named session
+// requalified by a rig binding resolves under its bound template
+// (gastownhall/gascity#5957); either would otherwise trip the reconciler's
 // CoreFingerprint drift check and drain the session. Unstarted sessions (no
 // started_config_hash) are skipped — the start path baselines them.
-// See gastownhall/gascity#2234.
 func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
 	if strings.TrimSpace(b.Metadata["started_config_hash"]) == "" {
 		return
 	}
-	// Rare alias-CHANGE lane (only when a started pool session's alias is renamed):
+	// Rare alias-CHANGE lane (only when a started session's alias is renamed):
 	// re-read the session through the front door for its typed Info. The Get contract
 	// (ErrSessionNotFound / "loading session %q" wrap / non-IsSessionBeadOrRepairable
 	// rejection) is bridged as a best-effort skip — a vanished or damaged bead simply
