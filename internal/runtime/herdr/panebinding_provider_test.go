@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,7 +25,8 @@ import (
 // raw commands are typed into the pane and never register anything. State
 // files drive the scenario (registered / pane_gone / busy / name_taken /
 // agent_blocked, plus the startup-delivery verdicts prompt_stalled /
-// prompt_times_out / prompt_blocked and wait_times_out), and calls.log records every verb so
+// prompt_times_out / prompt_blocked and wait_times_out; agents.json, when
+// present, is printed verbatim for `agent list`), and calls.log records every verb so
 // tests can assert what was — and crucially was NOT — issued (the spawn storm
 // was one placement per reconcile tick).
 
@@ -60,7 +63,11 @@ agent_get)
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
-  printf '%s' '{"result":{"agents":[]}}' ;;
+  if [ -e "$STATE/agents.json" ]; then
+    cat "$STATE/agents.json"
+  else
+    printf '%s' '{"result":{"agents":[]}}'
+  fi ;;
 agent_start)
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
@@ -508,5 +515,43 @@ func TestListRunningSkipsGonePanes(t *testing.T) {
 	got, err := p.ListRunning("gastown__")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("ListRunning = %v, %v; want empty", got, err)
+	}
+}
+
+// ListRunning lists bound sessions and named foreign agents, never a registry
+// entry without a registered name: herdr reports such a pane under its
+// detected kind, which is no session at all, and the startup adoption barrier
+// would otherwise adopt it on every supervisor start.
+func TestListRunningOmitsUnnamedRegistryEntries(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	for _, name := range []string{"alpha", "beta"} {
+		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agents := `{"result":{"agents":[` +
+		`{"agent":"opencode","name":"alpha","pane_id":"%5","agent_status":"working"},` +
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"manual-1","pane_id":"w4:p1","agent_status":"idle"}]}}`
+	if err := os.WriteFile(filepath.Join(state, "agents.json"), []byte(agents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	sort.Strings(got)
+	if want := []string{"alpha", "beta", "manual-1"}; !slices.Equal(got, want) {
+		t.Errorf("ListRunning(\"\") = %q; want exactly %q", got, want)
+	}
+	got, err = p.ListRunning("op")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListRunning(%q) = %q; want empty", "op", got)
 	}
 }
