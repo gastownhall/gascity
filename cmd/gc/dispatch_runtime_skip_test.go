@@ -3,15 +3,19 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // serveQueueCallCap bounds the stubbed serve queue so a drain that spins on a
@@ -219,5 +223,56 @@ func TestDrainWorkflowServeWorkSkipBesidePendingReportsPending(t *testing.T) {
 	}
 	if result.processedAny || !result.pendingAny {
 		t.Errorf("drain result = %+v, want pending and not processed", result)
+	}
+}
+
+// TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps: a --follow loop whose
+// every drain sees only a stale non-open control bead is idle, so its sleep
+// doubles from the 1s floor up to workflowServeMaxIdleSleep.
+func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
+	store := beads.NewMemStore()
+	cityDir := newSkipDispatchCity(t, store)
+	stale := createNonOpenScopeCheck(t, store, "closed")
+	stubServeQueue(t, func() []hookBead { return []hookBead{controlQueueRow(stale)} })
+	dispatches := countServeDispatches(t)
+
+	ep := newTestProvider(t, t.TempDir())
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	t.Cleanup(func() {
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+	})
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+
+	type waitCall struct {
+		idleSweeps int
+		sleepDur   time.Duration
+	}
+	var waitCalls []waitCall
+	stopErr := fmt.Errorf("stop after four sweeps")
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+		waitCalls = append(waitCalls, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
+		if len(waitCalls) == 4 {
+			return false, stopErr
+		}
+		return false, nil
+	}
+
+	err := runWorkflowServeFollow(config.Agent{Name: "control-dispatcher"}, cityDir, cityDir, "bd ready", nil, io.Discard)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+	want := []waitCall{
+		{idleSweeps: 0, sleepDur: 1 * time.Second},
+		{idleSweeps: 1, sleepDur: 2 * time.Second},
+		{idleSweeps: 2, sleepDur: 4 * time.Second},
+		{idleSweeps: 3, sleepDur: workflowServeMaxIdleSleep},
+	}
+	if !slices.Equal(waitCalls, want) {
+		t.Fatalf("wait calls = %+v, want %+v", waitCalls, want)
+	}
+	if got := dispatches[stale.ID]; got != 4 {
+		t.Fatalf("closed control bead dispatched %d times, want once per sweep (4)", got)
 	}
 }
