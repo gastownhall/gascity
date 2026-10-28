@@ -11126,3 +11126,80 @@ func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
 		t.Fatalf("index summary %+v, want no run of digest", summary)
 	}
 }
+
+// TestOrderExecEnvCarriesItsOwnCityName covers upstream #8151 for exec
+// orders: the production runner spawns with
+// mergeOrderExecEnv(cmd.Environ(), env), which keeps every ambient key the
+// order env does not name — so a supervisor's GC_CITY_NAME naming a
+// different city leaked into every exec order and its condition checks.
+func TestOrderExecEnvCarriesItsOwnCityName(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	stamped := &config.City{ResolvedWorkspaceName: "own-city"}
+
+	// mergedOrderExecEnv reproduces what shellExecRunner hands the child.
+	mergedOrderExecEnv := func(env []string) []string {
+		cmd := exec.Command("sh", "-c", "true")
+		return mergeOrderExecEnv(cmd.Environ(), env)
+	}
+	singleGCCityName := func(t *testing.T, env []string, want string) {
+		t.Helper()
+		count := 0
+		for _, entry := range env {
+			if strings.HasPrefix(entry, "GC_CITY_NAME=") {
+				count++
+				if entry != "GC_CITY_NAME="+want {
+					t.Fatalf("order sees %s, want exactly GC_CITY_NAME=%s", entry, want)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("order sees %d GC_CITY_NAME entries (%v), want exactly one GC_CITY_NAME=%s", count, env, want)
+		}
+	}
+
+	t.Run("stamped identity", func(t *testing.T) {
+		target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+		a := orders.Order{Name: "runtime-identity", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+		env, err := orderExecEnvWithError(cityDir, stamped, target, a, nil)
+		if err != nil {
+			t.Fatalf("orderExecEnvWithError: %v", err)
+		}
+		singleGCCityName(t, mergedOrderExecEnv(env), "own-city")
+	})
+
+	t.Run("rig-scoped target", func(t *testing.T) {
+		rigDir := t.TempDir()
+		target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "pr", RigName: "myrig"}
+		a := orders.Order{Name: "rig-identity", Trigger: "cooldown", Interval: "1m", Exec: "true", Rig: "myrig"}
+		env, err := orderExecEnvWithError(cityDir, stamped, target, a, nil)
+		if err != nil {
+			t.Fatalf("orderExecEnvWithError: %v", err)
+		}
+		singleGCCityName(t, mergedOrderExecEnv(env), "own-city")
+	})
+
+	t.Run("nil cfg falls back to basename", func(t *testing.T) {
+		target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+		a := orders.Order{Name: "basename-identity", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+		env, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+		if err != nil {
+			t.Fatalf("orderExecEnvWithError: %v", err)
+		}
+		singleGCCityName(t, mergedOrderExecEnv(env), filepath.Base(cityDir))
+	})
+
+	t.Run("condition check", func(t *testing.T) {
+		target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+		a := orders.Order{Name: "condition-identity", Trigger: "condition", Check: "true", Exec: "true"}
+		opts, err := orderTriggerOptionsForTarget(cityDir, stamped, target, a)
+		if err != nil {
+			t.Fatalf("orderTriggerOptionsForTarget: %v", err)
+		}
+		singleGCCityName(t, mergedOrderExecEnv(opts.ConditionEnv), "own-city")
+	})
+}
