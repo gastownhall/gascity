@@ -393,3 +393,56 @@ func TestReleaseOrphanedPoolAssignments_BdStoreKeepsRawDeferredRow(t *testing.T)
 		t.Fatalf("row = status %q assignee %q defer %v, want it untouched", got.Status, got.Assignee, got.DeferUntil)
 	}
 }
+
+// TestReleaseOrphanedPoolAssignments_BdStoreReleasesAfterStoreWakesRow pins
+// the other half of the same residue: once the store itself has returned the
+// row to open with the date cleared (what bd's WakeExpiredDefersInTx sweep or
+// `bd undefer` writes), the same sweep sees it in the raw-status live re-read
+// and the existing guarded release clears the dead assignee.
+func TestReleaseOrphanedPoolAssignments_BdStoreReleasesAfterStoreWakesRow(t *testing.T) {
+	ledger := newBdGuardLedger("open", "worker-dead", nil)
+	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+
+	wb, err := store.Get("bd-7")
+	if err != nil {
+		t.Fatalf("snapshot Get: %v", err)
+	}
+	if beads.IsDeferred(wb, time.Now().UTC()) {
+		t.Fatalf("snapshot read a woken row as deferred: %+v", wb)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{wb},
+		[]beads.Store{store},
+		[]string{""},
+		nil, nil, nil, nil,
+	)
+	if len(released) != 1 || released[0].ID != "bd-7" {
+		t.Fatalf("released = %+v, want the woken row's dead assignee released", released)
+	}
+	if len(ledger.updates) != 1 {
+		t.Fatalf("bd updates = %v, want exactly one guarded write", ledger.updates)
+	}
+	got := ledger.row()
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("row = status %q assignee %q, want open and unassigned", got.Status, got.Assignee)
+	}
+
+	// The woken, released row reads ready through the same door the pool
+	// claim query answers through.
+	stored, err := store.Get("bd-7")
+	if err != nil {
+		t.Fatalf("Get after release: %v", err)
+	}
+	if beads.IsDeferred(stored, time.Now().UTC()) {
+		t.Fatalf("released row still deferred: %+v", stored)
+	}
+	if !beads.IsReadyCandidate(stored, time.Now().UTC()) {
+		t.Fatalf("released row is not a ready candidate: %+v", stored)
+	}
+}
