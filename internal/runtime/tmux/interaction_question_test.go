@@ -591,3 +591,67 @@ func TestAskUserQuestionPagesAreNotIdle(t *testing.T) {
 		})
 	}
 }
+
+// requireQuestionRefusal fails unless err is a nudge refusal of an open
+// question dialog: runtime.ErrPendingInteraction, saying "question dialog",
+// with the dialog's tmux-question- request ID.
+func requireQuestionRefusal(t *testing.T, call string, err error) {
+	t.Helper()
+	if !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("%s = %v, want runtime.ErrPendingInteraction", call, err)
+	}
+	for _, want := range []string{"question dialog", "tmux-question-"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("%s refusal %q does not carry %q", call, err.Error(), want)
+		}
+	}
+}
+
+// Every nudge path refuses every question page shape, whenever the page
+// shows up: at NudgeNow's first check, under the nudge lock, or after the
+// paste (before the Enter). Nothing reaches the dialog: no text, Ctrl-U,
+// Escape or Enter. The wait-idle Nudge refuses before its idle wait.
+func TestNudgePathsSendNoKeyIntoAnyAskUserQuestionPage(t *testing.T) {
+	for _, tc := range askUserQuestionPageCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("NudgeSession", func(t *testing.T) {
+				tm, ex := questionTmux(tc.pane)
+				requireQuestionRefusal(t, "NudgeSession", tm.NudgeSession("auq", "hello"))
+				requireNoKeys(t, ex.calls, false)
+			})
+			for _, when := range []struct {
+				name  string
+				setup func(*fakeClaudePane)
+			}{
+				{"on screen at the first check", func(p *fakeClaudePane) { p.promptOnCapture = 1 }},
+				{"appears under the nudge lock", func(p *fakeClaudePane) { p.promptOnCapture = 2 }},
+				{"appears after the paste", func(p *fakeClaudePane) { p.promptAfterPaste = true }},
+			} {
+				t.Run("NudgeNow "+when.name, func(t *testing.T) {
+					pane := newFakeClaudePane("")
+					pane.prompt = tc.pane
+					when.setup(pane)
+					requireQuestionRefusal(t, "NudgeNow", nudgeNowText(t, pane, "run the tests"))
+					if len(pane.promptKeys) != 0 {
+						t.Fatalf("the question dialog received %q, want nothing", pane.promptKeys)
+					}
+					if len(pane.submitted) != 0 {
+						t.Fatalf("submitted %q, want nothing", pane.submitted)
+					}
+				})
+			}
+			t.Run("wait-idle Nudge", func(t *testing.T) {
+				cfg := DefaultConfig()
+				cfg.NudgeIdleTimeout = 5 * time.Second
+				ex := &paneExecutor{pane: tc.pane, inMode: "0"}
+				p := &Provider{tm: &Tmux{cfg: cfg, exec: ex}}
+				start := time.Now()
+				requireQuestionRefusal(t, "Nudge", p.Nudge("auq", runtime.TextContent("hello")))
+				if elapsed := time.Since(start); elapsed > 2*time.Second {
+					t.Fatalf("Nudge took %s to refuse; it waited for idle instead of refusing at once", elapsed)
+				}
+				requireNoKeys(t, ex.calls, false)
+			})
+		})
+	}
+}
