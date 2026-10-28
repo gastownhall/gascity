@@ -1244,12 +1244,12 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 	// A reset the controller will not act on is refused before anything is
 	// written: a queued fresh restart would never run, or would run later
 	// under a controller that manages the row's state.
-	if refuser, ok := s.state.(ResetRefuser); ok {
+	if refuser, ok := s.state.(UnknownStateRefuser); ok {
 		info, err := session.NewStore(store).Get(id)
 		if err != nil {
 			return syncAnswer{}, humaSessionManagerError(err)
 		}
-		if why := refuser.ResetRefusal(info); why != "" {
+		if why := refuser.UnknownStateRefusal(info); why != "" {
 			return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be reset: " + why)
 		}
 	}
@@ -1480,6 +1480,14 @@ func (s *Server) wakeSessionOp(ctx context.Context, target, key string) (syncAns
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
+	// A wake the controller will not act on because it skips the row's state
+	// is refused before anything is written, as a reset is: the wake's writes
+	// (the explicit wake request, its cleared blockers and archive stamp, its
+	// canceled waits) would take effect at once, and the request would fire
+	// later, under a controller that manages the state.
+	if why := s.wakeUnknownStateRefusal(store, id); why != "" {
+		return syncAnswer{}, apierr.SessionConflict.Msg("session " + id + " cannot be woken: " + why)
+	}
 	req := syncOpRequest{kind: opjournal.KindWake, conv: id, key: key}
 	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
 		err := s.wakeSession(store, id)
@@ -1534,6 +1542,27 @@ func (s *Server) wakeSession(store beads.SessionStore, id string) error {
 		return &wakeWillNotStartError{message: "wake recorded for session " + id + ", but it will not start: " + strings.TrimPrefix(why, "wake recorded for session "+id+", but it will not start: ")}
 	}
 	return nil
+}
+
+// wakeUnknownStateRefusal is why the controller will not act on a wake of
+// session id because it skips the stored row's state, or "" when it does not
+// skip it or the State does not say (UnknownStateRefuser). A row the wake
+// refuses on its own (closed, closing, archived without continuity:
+// session.LifecycleWakeConflictState) keeps that answer, and a row that does
+// not read is left to the wake, which reports it.
+func (s *Server) wakeUnknownStateRefusal(store beads.SessionStore, id string) string {
+	refuser, ok := s.state.(UnknownStateRefuser)
+	if !ok {
+		return ""
+	}
+	info, row, err := session.NewStore(store).GetPersistedResponse(id)
+	if err != nil {
+		return ""
+	}
+	if _, conflict := session.LifecycleWakeConflictState(row.Status, row.Metadata); conflict {
+		return ""
+	}
+	return refuser.UnknownStateRefusal(info)
 }
 
 // --- Session Rename ---

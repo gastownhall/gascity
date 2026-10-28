@@ -1053,3 +1053,25 @@ func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode: a closed
+// row whose state carries a close code the controller does not manage (the
+// pool sweep's gc_swept) is answered "session is closed", as any closed row
+// is, not refused as a row the controller skips: a close of it does nothing.
+// Kills a refusal that sends an operator to close an already-closed row.
+func TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, map[string]string{"state": "gc_swept"})
+	if err := c.store.Close(c.bead.ID); err != nil {
+		t.Fatalf("Close(%s): %v", c.bead.ID, err)
+	}
+	startSessionResetTestController(t, c.dir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{c.bead.ID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "session is closed") || strings.Contains(stderr.String(), "skips it") {
+		t.Fatalf("stderr = %q, want the closed answer, not the skipped-state refusal", stderr.String())
+	}
+}

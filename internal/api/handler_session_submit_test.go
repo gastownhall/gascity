@@ -589,6 +589,47 @@ func TestHandleSessionSubmitWithoutResumeLeavesStartToController(t *testing.T) {
 	}
 }
 
+// skippedStateWillStartState is a controller that skips the row's state:
+// its will-not-start predicate refuses with the skip reason first, as the
+// controller's does, and it names the same reason for the state it skips.
+type skippedStateWillStartState struct {
+	*fakeState
+	refusal string
+}
+
+func (s *skippedStateWillStartState) WakeStartRefusal(session.Info) (string, bool) {
+	return s.refusal, true
+}
+
+func (s *skippedStateWillStartState) UnknownStateRefusal(session.Info) string {
+	return s.refusal
+}
+
+// TestHandleSessionSubmitToASkippedStateNamesOnlyTheClose: a message queued
+// without resume: true to a row whose state the controller skips (a padded
+// asleep, which the wake request reads as dormant) answers will_start false
+// with the skip reason alone. Resume does not change the row's state, so the
+// resume hint the other will-not-start reasons carry would contradict the
+// close the reason names. Kills a deferral that tells the caller to resend
+// with resume: true for a row only a close releases.
+func TestHandleSessionSubmitToASkippedStateNamesOnlyTheClose(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Padded")
+	refusal := "its state \" asleep\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"
+	state := &skippedStateWillStartState{fakeState: fs, refusal: refusal}
+	h := newTestCityHandlerWith(t, state, New(state))
+	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": " asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {
+		t.Fatal(err)
+	}
+	success := submitWithoutResume(t, fs, h, info.ID, `{"message":"hello"}`)
+	if !success.Queued || success.WillStart == nil || *success.WillStart || success.WillNotStartReason != refusal {
+		t.Fatalf("queued = %v, will_start = %v, reason %q; want queued, will_start false and the skip reason alone", success.Queued, success.WillStart, success.WillNotStartReason)
+	}
+}
+
 // TestHandleSessionSubmitRecordsNoWakeForOtherQueues is review finding C-1:
 // only a queue the resume policy caused on a dormant row records a wake. A
 // follow_up queued behind a running session's turn, and a message to a row

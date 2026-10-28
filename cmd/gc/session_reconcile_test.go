@@ -3998,8 +3998,9 @@ func TestHealState_KilledRuntimeExitPreservesResumeIdentity(t *testing.T) {
 // managed, and the rest (this binary's own archived, closing and plain
 // draining rows, a padded state, a newer version's state) are skipped. The
 // census flag v2 acts on and the v2-migration count agree with it, and
-// unknownStateRefusal refuses exactly the skipped rows, naming the raw state
-// and the close that releases the row.
+// unknownStateRefusal refuses each skipped row and no managed one, naming the
+// raw state and the close that releases the row (the rows it spares beyond
+// these: TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip).
 func TestIsUnknownStateInfo(t *testing.T) {
 	var rows []sessionpkg.Info
 	for state := range knownSessionStates {
@@ -4028,5 +4029,45 @@ func TestIsUnknownStateInfo(t *testing.T) {
 		if want && (!strings.Contains(why, fmt.Sprintf("%q", info.MetadataState)) || !strings.Contains(why, "gc session close gc-1")) {
 			t.Errorf("unknownStateRefusal(state=%q) = %q, want the raw state and `gc session close gc-1` named", info.MetadataState, why)
 		}
+	}
+}
+
+// TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip: the refusal
+// answers only an open row the reconciler leaves alone. A closed row is
+// answered as closed, whatever close code its state carries, and an open
+// interrupted close of this binary's own (a gated close code, or a
+// passthrough sleep reason in the shape its pool close writes) is finished,
+// or rolled back to asleep, rather than skipped, though the census still
+// counts it unknown (v2 refuses to boot over one). The same passthrough code
+// on a configured named row is no interrupted close: the reconciler skips it,
+// and it is refused. Kills a refusal that sends an operator to close an
+// already-closed row, or a session the reconciler is about to restore.
+func TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip(t *testing.T) {
+	for _, state := range []string{"gc_swept", "future-state"} {
+		if why := unknownStateRefusal(sessionpkg.Info{ID: "gc-1", MetadataState: state, Closed: true}); why != "" {
+			t.Errorf("unknownStateRefusal(closed, state=%q) = %q, want none", state, why)
+		}
+	}
+	interrupted := []sessionpkg.Info{{ID: "gc-1", MetadataState: "idle", SleepReason: "idle", PoolManaged: true}}
+	for code := range interruptedCloseGates {
+		interrupted = append(interrupted, sessionpkg.Info{ID: "gc-1", MetadataState: code})
+	}
+	for _, info := range interrupted {
+		if _, ok := interruptedCloseGate(info); !ok {
+			t.Fatalf("fixture state=%q is not an interrupted close", info.MetadataState)
+		}
+		if !isUnknownStateInfo(info) || !newCensusRow(rowKey{}, info).UnknownState {
+			t.Errorf("interrupted close state=%q not counted unknown by the census", info.MetadataState)
+		}
+		if why := unknownStateRefusal(info); why != "" {
+			t.Errorf("unknownStateRefusal(interrupted close state=%q) = %q, want none", info.MetadataState, why)
+		}
+	}
+	named := sessionpkg.Info{ID: "gc-1", MetadataState: "idle", SleepReason: "idle", PoolManaged: true, ConfiguredNamedSession: true}
+	if _, ok := interruptedCloseGate(named); ok {
+		t.Fatal("fixture: a configured named row's passthrough code reads as an interrupted close")
+	}
+	if why := unknownStateRefusal(named); !strings.Contains(why, `"idle"`) || !strings.Contains(why, "gc session close gc-1") {
+		t.Errorf("unknownStateRefusal(named row, state=%q) = %q, want the state and `gc session close gc-1` named", named.MetadataState, why)
 	}
 }

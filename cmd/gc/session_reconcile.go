@@ -1587,21 +1587,28 @@ func isKnownStateInfo(i sessionpkg.Info) bool {
 }
 
 // isUnknownStateInfo returns true if the session's raw metadata state is one
-// this gc version's controller does not manage — exactly the rows the
-// reconciler skips, the census counts as unknown, and the v2 migration gate
-// refuses to boot over. A drain-ack stop-pending row is excluded: the
-// drain-ack stop-pending handler owns it outright and continues before the
-// skip. It keys off the RAW metadata state (Info.MetadataState, untrimmed),
-// like isKnownStateInfo.
+// this gc version's controller does not manage: the rows the census counts as
+// unknown, which v2 skips (A5) and its migration gate refuses to boot over. A
+// drain-ack stop-pending row is excluded: the drain-ack stop-pending handler
+// owns it outright and continues before the skip. The legacy reconciler skips
+// these rows too, except an interrupted close of this binary's own, which it
+// finishes, or rolls back, first (interruptedCloseGate). It keys off the RAW
+// metadata state (Info.MetadataState, untrimmed), like isKnownStateInfo.
 func isUnknownStateInfo(i sessionpkg.Info) bool {
 	return !isKnownStateInfo(i) && !isDrainAckStopPendingInfo(i)
 }
 
 // unknownStateRefusal is the operator-facing reason the controller will not
 // act on a wake, reset or kill of info's row because it skips the row's state,
-// or "" when it does not skip it.
+// or "" when it does not skip it. A closed row is not refused, whatever close
+// code its state carries: the verb answers it as closed, and a close of it
+// does nothing. Nor is an interrupted close: the reconciler finishes it, or
+// rolls it back to asleep, rather than skip it, and v2 never runs over one.
 func unknownStateRefusal(i sessionpkg.Info) string {
-	if !isUnknownStateInfo(i) {
+	if i.Closed || !isUnknownStateInfo(i) {
+		return ""
+	}
+	if _, interrupted := interruptedCloseGate(i); interrupted {
 		return ""
 	}
 	return fmt.Sprintf("its state %q is not one this gc version's controller manages, so the controller skips it; `gc session close %s` releases it", i.MetadataState, i.ID)

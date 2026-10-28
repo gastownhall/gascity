@@ -206,15 +206,15 @@ func TestHandleSessionResetRequiresCSRFHeader(t *testing.T) {
 	}
 }
 
-// resetRefusingState is a controller that names why it will not act on a
-// recorded reset.
-type resetRefusingState struct {
+// unknownStateRefusingState is a controller that skips the session's state:
+// it names why it will not act on a wake or a reset of the row.
+type unknownStateRefusingState struct {
 	*fakeState
 	refusal string
 	seen    session.Info
 }
 
-func (s *resetRefusingState) ResetRefusal(info session.Info) string {
+func (s *unknownStateRefusingState) UnknownStateRefusal(info session.Info) string {
 	s.seen = info
 	return s.refusal
 }
@@ -227,7 +227,7 @@ func (s *resetRefusingState) ResetRefusal(info session.Info) string {
 func TestHandleSessionResetRefusedByTheController(t *testing.T) {
 	e := newControlOpsEnv(t, "auto", "auto")
 	info := e.session(t, "Skipped")
-	refuser := &resetRefusingState{fakeState: e.fs, refusal: "its state \"future-state\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"}
+	refuser := &unknownStateRefusingState{fakeState: e.fs, refusal: "its state \"future-state\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"}
 	e.resolver.state = refuser
 	pokesBefore := e.fs.pokeCount
 

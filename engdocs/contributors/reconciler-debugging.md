@@ -133,7 +133,7 @@ there holds its pool slot (or its named row) until someone releases it.
 **Listing them.**
 
 ```bash
-gc doctor --check v2-session-migration --verbose   # runs in either mode; lists the IDs
+gc doctor --check v2-session-migration --verbose   # runs in either mode; lists up to ten IDs per state
 ```
 
 or read the `session.unknown_state` events.
@@ -141,12 +141,18 @@ or read the `session.unknown_state` events.
 **Causes.**
 
 - A newer or older gc writer in a mixed-version fleet: the skip is what makes
-  forward-compatible rollback safe.
+  forward-compatible rollback safe. A pre-#1912 build, for one, skips this
+  version's `failed-create` rows.
 - This version's own archived rows (retired named duplicates, removed named
   sessions), parked open on purpose — their signal is expected.
-- A close whose `state=<close code>` landed but whose status write failed on
-  a store without the atomic close.
-- Pre-#1912 builds' `failed-create` rows.
+
+A close code of this version's own in `state` (`gc_swept`, `dead-runtime`,
+`duplicate`, …) on an open row is an interrupted close instead: the close's
+status write was lost on a store without the atomic close. The legacy
+reconciler finishes it, or rolls the row back to asleep, once the session's
+runtime is gone, so it signals only while the runtime still runs, and the
+wake and reset below do not refuse it. The doctor check counts it, and v2
+refuses to boot over one.
 
 **Recovery.**
 
@@ -157,9 +163,12 @@ gc session close <id>
 A pool seat's slot is freed and the pool spawns a replacement; a configured
 named session gets a fresh canonical row. Or run the gc version that wrote
 the state. `gc session wake` and `gc session reset` (and the API wake and
-reset) refuse such rows by design — the recorded wake aside, nothing takes
-effect until the row is released — and `gc session kill` on one answers
-"session is not active" and names the close.
+reset) refuse such rows by design, before writing anything, and name the
+close. `gc session kill` of an unnamed row whose runtime is already gone
+answers "session is not active" and names the close too. A kill of a
+configured named session, or of a row whose runtime still runs, acts: it
+stops the runtime and moves the row to asleep (`sleep_reason=killed`), which
+takes the row out of the skip.
 
 ## Acceptance And Integration Failures
 

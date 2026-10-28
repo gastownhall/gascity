@@ -459,7 +459,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 			"When it does not, the answer is 503 with detail prefix write_unconfirmed: the close may still land, so re-read the session or retry the close."))
 	cityPost(sm, "/session/{id}/wake", (*Server).humaHandleSessionWake, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. "+
-			"409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, an idle latch, or a state the controller skips, whose remedy is `gc session close`); the detail names the remedy. "+
+			"409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. "+
+			"409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. "+
 			"`gc session wake` applies the same rules."))
 	cityPost(sm, "/session/{id}/pin", (*Server).humaHandleSessionPin, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Pins the session awake (pin_awake), as gc session pin does; a configured named session not yet materialized is. 409 on a closed session."))

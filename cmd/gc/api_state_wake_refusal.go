@@ -34,11 +34,13 @@ type wakeVerdictDeps struct {
 // WakeVerdict): why the controller will not start info's session on its
 // recorded explicit wake, or "" when it will. info is the row after the wake
 // was recorded. A row in a state the controller skips is refused first, with
-// or without a city config. It refuses only on gates that outlive the wake; a
-// gate it cannot read (a work store, a dynamic provider or capacity gate)
-// never refuses. certain is false when it does not refuse but cannot tell: a
-// controller pool seat starts only for pool demand, which it cannot see
-// (legacy drops a seat without demand whatever its pin).
+// or without a city config (the wakes refuse such a row before recording
+// anything; this answers a row whose state changed under the wake). It
+// refuses only on gates that outlive the wake; a gate it cannot read (a work
+// store, a dynamic provider or capacity gate) never refuses. certain is false
+// when it does not refuse but cannot tell: a controller pool seat starts only
+// for pool demand, which it cannot see (legacy drops a seat without demand
+// whatever its pin).
 func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (why string, certain bool) {
 	if why := unknownStateRefusal(info); why != "" {
 		return why, true

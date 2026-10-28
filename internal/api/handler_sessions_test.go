@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2047,6 +2048,73 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+}
+
+// TestHandleSessionWakeRefusedForASkippedStateBeforeWriting: when the
+// controller skips the session's state, the API wake answers 409
+// session-conflict naming that reason, judged on the stored row, before
+// anything is written: no wake request, no cleared wake blockers, no wake op
+// and no reconcile poke. Kills a wake that records the wake, and clears the
+// row's blockers, before refusing it.
+func TestHandleSessionWakeRefusedForASkippedStateBeforeWriting(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "auto")
+	info := e.session(t, "Skipped")
+	if err := e.fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "future-state", "wake_attempts": "3", "churn_count": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := e.fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := maps.Clone(stored.Metadata)
+	refuser := &unknownStateRefusingState{fakeState: e.fs, refusal: "its state \"future-state\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"}
+	e.resolver.state = refuser
+	pokesBefore := e.fs.pokeCount
+
+	rec := e.post(t, "/session/"+info.ID+"/wake", "", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	for _, want := range []string{"session-conflict", "session " + info.ID + " cannot be woken: ", `\"future-state\"`, "gc session close " + info.ID} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("body missing %q: %s", want, rec.Body.String())
+		}
+	}
+	if refuser.seen.ID != info.ID || refuser.seen.MetadataState != "future-state" {
+		t.Fatalf("refuser read %+v, want the stored row %s", refuser.seen, info.ID)
+	}
+	after, err := e.fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(after.Metadata, before) {
+		t.Fatalf("metadata = %v, want it unchanged: %v", after.Metadata, before)
+	}
+	if rows := e.opRows(t); len(rows) != 0 {
+		t.Fatalf("op rows = %d, want none", len(rows))
+	}
+	if e.fs.pokeCount != pokesBefore {
+		t.Fatalf("pokeCount = %d, want %d", e.fs.pokeCount, pokesBefore)
+	}
+}
+
+// TestHandleSessionWakeKeepsItsConflictAnswerOverTheSkip: a row the wake
+// refuses on its own keeps that answer, though the controller skips its state
+// too: an archived row without continuity is "session <id> is archived", not
+// the skipped-state refusal. Kills a skip check that pre-empts the wake's
+// lifecycle conflicts.
+func TestHandleSessionWakeKeepsItsConflictAnswerOverTheSkip(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "auto")
+	info := e.session(t, "Archived")
+	if err := e.fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "archived", "continuity_eligible": "false"}); err != nil {
+		t.Fatal(err)
+	}
+	e.resolver.state = &unknownStateRefusingState{fakeState: e.fs, refusal: "its state \"archived\" is not one this gc version's controller manages"}
+
+	rec := e.post(t, "/session/"+info.ID+"/wake", "", "")
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "session "+info.ID+" is archived") || strings.Contains(rec.Body.String(), "cannot be woken") {
+		t.Fatalf("wake status = %d, body: %s; want 409 naming the session archived", rec.Code, rec.Body.String())
 	}
 }
 

@@ -783,8 +783,15 @@ func (s *Server) deferToController(store beads.Store, id string) (*bool, string)
 		return nil, ""
 	}
 	certain := true
-	if refuser, ok := s.state.(WakeStartRefuser); ok {
-		if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+	if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+		// Resume does not change a state the controller skips: that refusal
+		// names only its own remedy, the close.
+		if refuser, ok := s.state.(UnknownStateRefuser); ok {
+			if why := refuser.UnknownStateRefusal(info); why != "" {
+				return &no, why
+			}
+		}
+		if refuser, ok := s.state.(WakeStartRefuser); ok {
 			var why string
 			if why, certain = refuser.WakeStartRefusal(info); why != "" {
 				return &no, why + "; resend with resume: true to start it now"

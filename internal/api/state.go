@@ -306,13 +306,13 @@ type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
-// ResetRefuser is an optional State capability: the controller names why it
-// will not act on a fresh-restart request for a session (a state the
-// controller skips), or "" when it will. info is the stored row before the
-// reset writes anything. Optional for the same reason as
+// UnknownStateRefuser is an optional State capability: the controller names
+// why it will not act on a wake or a fresh-restart request for a session in a
+// state it skips, or "" when it does not skip the row. info is the stored row
+// before the wake or reset writes anything. Optional for the same reason as
 // WebhookDispatchProvider.
-type ResetRefuser interface {
-	ResetRefusal(info session.Info) string
+type UnknownStateRefuser interface {
+	UnknownStateRefusal(info session.Info) string
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live

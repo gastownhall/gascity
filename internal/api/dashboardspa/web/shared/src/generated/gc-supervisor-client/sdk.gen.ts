@@ -1213,7 +1213,7 @@ export const postV0CityByCityNameSessionByIdUnpin = <ThrowOnError extends boolea
 /**
  * Post v0 city by city name session by ID wake
  *
- * Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, an idle latch, or a state the controller skips, whose remedy is `gc session close`); the detail names the remedy. `gc session wake` applies the same rules.
+ * Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. 409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. `gc session wake` applies the same rules.
  */
 export const postV0CityByCityNameSessionByIdWake = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdWakeData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdWakeResponses, PostV0CityByCityNameSessionByIdWakeErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/wake', ...options });
 
