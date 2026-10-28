@@ -528,40 +528,30 @@ func assignedWorkOwnerStore(cfg *config.City, cityStore beads.Store, rigStores m
 	return storeForPoolAssignment(cfg, cityStore, rigStores, wb)
 }
 
+// detachedProbeAllowsOrphanRelease gates the pool's orphan release on the
+// detached-probe contract: only an attested death may release the claim and
+// clear gc.detached. An alive session keeps its claim, and so does a namespace
+// the probe cannot observe — error or timeout, over however many consecutive
+// evaluations: reachability is never death. The hold log is rate-throttled per
+// bead so a namespace that stays unobservable cannot flood the controller
+// log; the hold itself repeats every pass.
 func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
 	spec := strings.TrimSpace(wb.Metadata[detachedProbeMetadataKey])
 	if spec == "" {
-		clearDetachedProbeErrorCount(wb.ID)
 		return true, false
 	}
 
 	result := probeDetachedWork(context.Background(), spec)
 	switch result.Status {
 	case detachedProbeAlive:
-		clearDetachedProbeErrorCount(wb.ID)
 		log.Printf("releaseOrphanedPoolAssignments: skipping release: detached probe alive for %s: %s", wb.ID, spec)
 		return false, false
 	case detachedProbeDead:
-		clearDetachedProbeErrorCount(wb.ID)
 		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe dead: %s", wb.ID, spec)
 		return true, true
-	case detachedProbeError, detachedProbeTimeout:
-		count := incrementDetachedProbeErrorCount(wb.ID)
-		if count < detachedProbeErrorThreshold {
-			log.Printf("releaseOrphanedPoolAssignments: detached probe %s for %s: %v (error %d/%d)", result.Status, wb.ID, result.Err, count, detachedProbeErrorThreshold)
-			return false, false
-		}
-		clearDetachedProbeErrorCount(wb.ID)
-		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe %s after %d errors: %v", wb.ID, result.Status, count, result.Err)
-		return true, true
 	default:
-		count := incrementDetachedProbeErrorCount(wb.ID)
-		if count < detachedProbeErrorThreshold {
-			log.Printf("releaseOrphanedPoolAssignments: detached probe unknown result for %s: %q (error %d/%d)", wb.ID, result.Status, count, detachedProbeErrorThreshold)
-			return false, false
-		}
-		clearDetachedProbeErrorCount(wb.ID)
-		return true, true
+		logDetachedProbeHold(wb.ID, "releaseOrphanedPoolAssignments: holding %s: detached probe %s: %v", wb.ID, result.Status, result.Err)
+		return false, false
 	}
 }
 

@@ -173,9 +173,9 @@ are not in the desired set:
 Work beads may carry `gc.detached` when a controller/operator path has
 deliberately detached tmux-backed work from its owning session and still needs
 the controller to distinguish "live elsewhere" from "orphaned or stranded."
-The value is `tmux:<socket>:<session>`, where `<socket>` is the tmux socket name
-passed to `tmux -L` and `<session>` is the tmux session target passed to
-`has-session -t`.
+The value is `tmux:<socket>:<session>`, where `<socket>` is a bare tmux `-L`
+socket name (or an absolute `-S` path) and `<session>` is a bare tmux session
+name, classified by an exact match against the server's `list-sessions` output.
 
 This field is controller-owned work metadata, not user role behavior. The only
 valid producer is code that has just created or adopted detached tmux-backed
@@ -184,14 +184,22 @@ consumer-side protection and tests for the metadata but no in-repo producer;
 follow-up bead `ga-a3oya` tracks wiring the first producer or retiring the
 metadata if it is no longer needed.
 
-Consumers treat the field conservatively:
+The probe resolves the socket the way tmux itself does — the realpath of
+`TMUX_TMPDIR` (falling back to `/tmp` when it names no existing directory),
+never `TMPDIR` — and classifies the socket before asking the server anything.
+
+Consumers treat the field conservatively — only an attested death is
+destructive:
 - Alive probe: preserve the assignment and suppress stranded diagnostics for
   that work.
-- Dead probe: clear `gc.detached` and let normal orphan/stranded handling
-  proceed.
-- Probe error or timeout: orphan release waits for three consecutive probe
-  failures before releasing, while stranded diagnostics emit immediately and
-  preserve `gc.detached`.
+- Attested dead probe (a stable refused socket, or a live server that answers
+  without the session): clear `gc.detached` and let normal orphan/stranded
+  handling proceed.
+- Probe error or timeout: the namespace is unobservable, which is never
+  evidence of death. Orphan release holds the work — over any number of
+  consecutive evaluations, with no error-count strike release — logging the
+  hold rate-throttled per bead, while stranded diagnostics emit immediately
+  and preserve `gc.detached`.
 
 Orphan release clears `gc.detached` in the same store update that reopens the
 work. If the release update fails, the detached guard remains on the work bead

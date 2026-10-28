@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,7 +19,10 @@ const (
 	// engdocs/architecture/health-patrol.md. Values use tmux:<socket>:<session>.
 	detachedProbeMetadataKey    = beadmeta.DetachedMetadataKey
 	detachedProbeDefaultTimeout = time.Second
-	detachedProbeErrorThreshold = 3
+	// detachedHoldLogInterval bounds how often one bead's unobservable-namespace
+	// hold is logged: the hold repeats every patrol pass, but a namespace that
+	// stays broken must not flood the controller log.
+	detachedHoldLogInterval = 5 * time.Minute
 )
 
 type detachedProbeStatus string
@@ -42,11 +46,26 @@ type detachedProbeResult struct {
 	Err    error
 }
 
-var detachedProbeErrorCounts = struct {
+var detachedHoldLog = struct {
 	sync.Mutex
-	byBead map[string]int
+	lastByBead map[string]time.Time
 }{
-	byBead: make(map[string]int),
+	lastByBead: make(map[string]time.Time),
+}
+
+// logDetachedProbeHold reports a hold on work whose detached namespace stays
+// unobservable at most once per detachedHoldLogInterval per bead, so the log
+// keeps one diagnostic per stuck namespace instead of one per patrol pass.
+func logDetachedProbeHold(id, format string, args ...any) {
+	now := time.Now()
+	detachedHoldLog.Lock()
+	if last, ok := detachedHoldLog.lastByBead[id]; ok && now.Sub(last) < detachedHoldLogInterval {
+		detachedHoldLog.Unlock()
+		return
+	}
+	detachedHoldLog.lastByBead[id] = now
+	detachedHoldLog.Unlock()
+	log.Printf(format, args...)
 }
 
 func parseDetachedProbeSpec(spec string) (detachedProbeSpec, error) {
@@ -112,26 +131,4 @@ func probeDetachedWorkWithTimeout(ctx context.Context, spec string, timeout time
 		}
 		return detachedProbeResult{Status: detachedProbeError, Spec: parsed, Err: err}
 	}
-}
-
-func incrementDetachedProbeErrorCount(id string) int {
-	detachedProbeErrorCounts.Lock()
-	defer detachedProbeErrorCounts.Unlock()
-	if detachedProbeErrorCounts.byBead == nil {
-		detachedProbeErrorCounts.byBead = make(map[string]int)
-	}
-	detachedProbeErrorCounts.byBead[id]++
-	return detachedProbeErrorCounts.byBead[id]
-}
-
-func clearDetachedProbeErrorCount(id string) {
-	detachedProbeErrorCounts.Lock()
-	defer detachedProbeErrorCounts.Unlock()
-	delete(detachedProbeErrorCounts.byBead, id)
-}
-
-func resetDetachedProbeErrorCountsForTest() {
-	detachedProbeErrorCounts.Lock()
-	defer detachedProbeErrorCounts.Unlock()
-	detachedProbeErrorCounts.byBead = make(map[string]int)
 }
