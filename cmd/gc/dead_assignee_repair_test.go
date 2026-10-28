@@ -226,7 +226,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsHumanAssignee(t *testing.T) {
 		"",
 		nil,
 		[]beads.Bead{work},
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("human assignee must not be released, got %v", released)
