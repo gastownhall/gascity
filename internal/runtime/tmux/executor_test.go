@@ -1351,3 +1351,41 @@ func TestRunPinsCallerServerFromTMUX(t *testing.T) {
 		t.Fatalf("args = %v, want %v", got, want)
 	}
 }
+
+// Outside a pane of the city's named server, argv is unchanged: the pin only
+// corrects the socket directory of a $TMUX that names this server's socket
+// in the current user's tmux directory.
+func TestRunKeepsSocketNameWhenTMUXIsNotThisServer(t *testing.T) {
+	uid := os.Getuid()
+	tests := []struct {
+		name   string
+		tmux   string
+		socket string
+		want   []string
+	}{
+		{"outside_tmux", "", "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"other_socket_name", fmt.Sprintf("/run/user/%d/tmux-%d/default,4242,0", uid, uid), "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"not_a_tmux_uid_dir", fmt.Sprintf("/run/user/%d/x/bright-lights,4242,0", uid), "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"other_uid_dir", fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights,4242,0", uid, uid+1), "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"relative_path", fmt.Sprintf("tmux-%d/bright-lights,4242,0", uid), "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"unclean_path", fmt.Sprintf("/run/user/%d/../%d/tmux-%d/bright-lights,4242,0", uid, uid, uid), "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"comma_leading", ",4242,0", "bright-lights", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"default_socket", pinnedTestSocket() + ",4242,0", "", []string{"-u", "list-sessions"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TMUX", tt.tmux)
+			t.Setenv("TMUX_TMPDIR", t.TempDir())
+			fe := &fakeExecutor{}
+			tm := &Tmux{cfg: Config{SocketName: tt.socket}, exec: fe}
+			_, _ = tm.run("list-sessions")
+
+			if len(fe.calls) != 1 {
+				t.Fatalf("expected 1 call, got %d", len(fe.calls))
+			}
+			if got := fe.calls[0]; !slices.Equal(got, tt.want) {
+				t.Fatalf("args = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
