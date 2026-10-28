@@ -112,3 +112,107 @@ func TestReleaseOrphanedPoolAssignments_HandsClosedSeatClaimToUniqueSuccessor(t 
 		t.Fatalf("work status after sweep = %q, want in_progress (the hand-over moves the claim; it does not reopen the work)", got.Status)
 	}
 }
+
+// TestSeatHandover_PreservesEveryFieldExceptAssignee pins the AC-2 contract:
+// the hand-over writes Assignee and nothing else. Status, the claim projection
+// (gc.session_id, gc.session_name, gc.claimed_at), the routing keys and every
+// other metadata field must survive byte for byte — the successor rebinds the
+// claim projection itself, on its next `gc hook --claim`, and a release that
+// rewrote anything else would race that adoption. (Revision and UpdatedAt are
+// store bookkeeping that any Update bumps, including the hand-over's own.)
+func TestSeatHandover_PreservesEveryFieldExceptAssignee(t *testing.T) {
+	cfg := seatHandoverConfig()
+	store := beads.NewMemStore()
+	predecessor := seatRow(t, store, "predecessor", "worker-mc-old", "corner")
+	successor := seatRow(t, store, "successor", "worker-mc-new", "corner")
+
+	priority := 2
+	work, err := store.Create(beads.Bead{
+		Title:    "field-preserving work",
+		Type:     "task",
+		Priority: &priority,
+		Labels:   []string{"convoy:abc"},
+		Assignee: predecessor.ID,
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:    "worker",
+			beadmeta.SessionIDMetadataKey:   predecessor.ID,
+			beadmeta.SessionNameMetadataKey: "worker-mc-old",
+			beadmeta.ClaimedAtMetadataKey:   "2026-10-01T00:00:00Z",
+			"gc.workflow.id":                "wf-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	closed := "closed"
+	if err := store.Update(predecessor.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close predecessor: %v", err)
+	}
+	before, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("re-read work: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		cfg,
+		"",
+		sessionInfosFromBeads([]beads.Bead{successor}),
+		[]beads.Bead{before},
+		nil, nil, nil, nil, nil, nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released %v, want none", released)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("re-read work after sweep: %v", err)
+	}
+	if got.Assignee != successor.ID {
+		t.Fatalf("work assignee after sweep = %q, want the successor's bead ID %q (the one field the hand-over writes)", got.Assignee, successor.ID)
+	}
+	if got.Status != before.Status {
+		t.Fatalf("work status = %q, want %q", got.Status, before.Status)
+	}
+	if got.Title != before.Title {
+		t.Fatalf("work title = %q, want %q", got.Title, before.Title)
+	}
+	if got.Type != before.Type {
+		t.Fatalf("work type = %q, want %q", got.Type, before.Type)
+	}
+	if !sameIntPtr(got.Priority, before.Priority) {
+		t.Fatalf("work priority = %v, want %v", got.Priority, before.Priority)
+	}
+	if len(got.Labels) != len(before.Labels) {
+		t.Fatalf("work labels = %v, want %v", got.Labels, before.Labels)
+	}
+	for i, label := range before.Labels {
+		if got.Labels[i] != label {
+			t.Fatalf("work labels = %v, want %v", got.Labels, before.Labels)
+		}
+	}
+	if got.CreatedAt != before.CreatedAt {
+		t.Fatalf("work created_at changed: %v -> %v", before.CreatedAt, got.CreatedAt)
+	}
+	if len(got.Metadata) != len(before.Metadata) {
+		t.Fatalf("work metadata = %v, want %v", got.Metadata, before.Metadata)
+	}
+	for key, want := range before.Metadata {
+		if got.Metadata[key] != want {
+			t.Fatalf("work metadata %q = %q, want %q", key, got.Metadata[key], want)
+		}
+	}
+}
+
+// sameIntPtr compares two optional bead priorities for equality.
+func sameIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
