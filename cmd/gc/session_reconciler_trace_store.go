@@ -685,6 +685,9 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 	var maxSeq uint64
 	var batchRecords []SessionReconcilerTraceRecord
 	var batchCRC uint32
+	// resyncing is set by a mid-file line that does not parse, until the
+	// next batch commit.
+	resyncing := false
 	reader := bufio.NewReader(f)
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -703,29 +706,48 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 		}
 		var rec SessionReconcilerTraceRecord
 		if parseErr := json.Unmarshal(line, &rec); parseErr != nil {
+			if readErr == nil {
+				// A write that failed partway left a torn line, and the next
+				// batch was appended onto it. The batch being buffered never
+				// committed, and the glued batch lost its first record. Drop
+				// the buffered records and resync at the next line.
+				batchRecords = batchRecords[:0]
+				batchCRC = 0
+				resyncing = true
+				continue
+			}
 			if tolerateTail && readErr == io.EOF {
 				break
 			}
 			return nil, 0, fmt.Errorf("unmarshal trace record %s: %w", path, parseErr)
 		}
 		if rec.RecordType == TraceRecordBatchCommit {
-			if rec.RecordCount != len(batchRecords) {
-				return nil, 0, fmt.Errorf("trace batch %s: commit record_count=%d does not match buffered records=%d", path, rec.RecordCount, len(batchRecords))
+			var verifyErr error
+			switch {
+			case rec.RecordCount != len(batchRecords):
+				verifyErr = fmt.Errorf("trace batch %s: commit record_count=%d does not match buffered records=%d", path, rec.RecordCount, len(batchRecords))
+			case rec.BatchCRC32 != batchCRC:
+				verifyErr = fmt.Errorf("trace batch %s: crc32 mismatch", path)
 			}
-			if rec.BatchCRC32 != batchCRC {
-				return nil, 0, fmt.Errorf("trace batch %s: crc32 mismatch", path)
+			// A commit that does not verify is corruption, unless it closes
+			// the batch that lost its first record to a torn line.
+			if verifyErr != nil && !resyncing {
+				return nil, 0, verifyErr
 			}
-			for _, buffered := range batchRecords {
-				if matchesTraceFilter(buffered, filter) {
-					out = append(out, buffered)
+			if verifyErr == nil {
+				for _, buffered := range batchRecords {
+					if matchesTraceFilter(buffered, filter) {
+						out = append(out, buffered)
+					}
 				}
-			}
-			if matchesTraceFilter(rec, filter) {
-				out = append(out, rec)
+				if matchesTraceFilter(rec, filter) {
+					out = append(out, rec)
+				}
 			}
 			if rec.Seq > maxSeq {
 				maxSeq = rec.Seq
 			}
+			resyncing = false
 			batchRecords = batchRecords[:0]
 			batchCRC = 0
 			if readErr == io.EOF {

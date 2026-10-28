@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -331,6 +333,119 @@ func TestTraceStoreFailedRollbackAbandonsSegment(t *testing.T) {
 				if rec.TraceID == "cycle-c" && rec.Seq <= failedCommitSeq {
 					t.Fatalf("batch c seq %d does not pass the failed batch's commit seq %d", rec.Seq, failedCommitSeq)
 				}
+			}
+		})
+	}
+}
+
+// traceTestBatchLines renders a committed batch the way AppendBatch writes
+// it: n record lines with seqs from firstSeq, then the batch_commit line.
+func traceTestBatchLines(t *testing.T, traceID string, firstSeq uint64, n int) [][]byte {
+	t.Helper()
+	ts := time.Date(2026, 10, 15, 2, 38, 20, 0, time.UTC).Add(time.Duration(firstSeq) * time.Second)
+	marshal := func(rec SessionReconcilerTraceRecord) []byte {
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal trace record: %v", err)
+		}
+		return append(line, '\n')
+	}
+	var lines [][]byte
+	var crc uint32
+	seq := firstSeq
+	for i := 0; i < n; i++ {
+		rec := traceStoreTestRecord(traceID, ts)
+		rec.Seq = seq
+		rec.RecordID = stableTraceRecordID(traceID, seq, i)
+		line := marshal(rec)
+		crc = crc32.Update(crc, crc32.IEEETable, bytes.TrimSpace(line))
+		lines = append(lines, line)
+		seq++
+	}
+	commit := newTraceRecord(TraceRecordBatchCommit)
+	commit.TraceID = traceID
+	commit.TickID = traceID + "-tick"
+	commit.RecordID = stableTraceRecordID(traceID, seq, n)
+	commit.Ts = ts
+	commit.Seq = seq
+	commit.FirstSeq = firstSeq
+	commit.LastSeq = seq - 1
+	commit.RecordCount = n
+	commit.DurabilityTier = TraceDurabilityDurable
+	commit.BatchCRC32 = crc
+	commit.TraceMode = TraceModeBaseline
+	commit.TraceSource = TraceSourceAlwaysOn
+	return append(lines, marshal(commit))
+}
+
+// legacyPoisonedTraceSegment builds the shape issue #7954 reports: committed
+// batch a (seqs 1-3); batch b (seqs 4-6) cut inside its second record; batch
+// c reusing b's seqs with its first line glued onto the torn bytes; then, if
+// tail is set, committed batches d (7-9) and e (10-11). gluedRecords is the
+// size of batch c.
+func legacyPoisonedTraceSegment(t *testing.T, gluedRecords int, tail bool) []byte {
+	t.Helper()
+	a := traceTestBatchLines(t, "cycle-a", 1, 2)
+	b := traceTestBatchLines(t, "cycle-b", 4, 2)
+	c := traceTestBatchLines(t, "cycle-c", 4, gluedRecords)
+	var data []byte
+	data = append(data, bytes.Join(a, nil)...)
+	data = append(data, b[0]...)
+	data = append(data, b[1][:30]...)
+	data = append(data, bytes.Join(c, nil)...)
+	if tail {
+		data = append(data, bytes.Join(traceTestBatchLines(t, "cycle-d", 7, 2), nil)...)
+		data = append(data, bytes.Join(traceTestBatchLines(t, "cycle-e", 10, 1), nil)...)
+	}
+	return data
+}
+
+// writeTraceSegmentFile writes data as segment-000001 of today's day dir
+// under root and returns its path.
+func writeTraceSegmentFile(t *testing.T, root string, data []byte) string {
+	t.Helper()
+	dayDir := traceDayDir(filepath.Join(root, sessionReconcilerTraceSegments), time.Now().UTC())
+	if err := os.MkdirAll(dayDir, sessionReconcilerTraceOwnerDirPerm); err != nil {
+		t.Fatalf("mkdir day dir: %v", err)
+	}
+	path := filepath.Join(dayDir, traceSegmentFileName(1))
+	if err := os.WriteFile(path, data, sessionReconcilerTraceOwnerFilePerm); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	return path
+}
+
+func TestTraceReaderSkipsTornBatchGluedToNextBatch(t *testing.T) {
+	cases := []struct {
+		name         string
+		gluedRecords int
+	}{
+		{"glued batch of two records", 2},
+		// The glued line swallows the only record, so the commit sees none.
+		{"glued batch of one record", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTraceSegmentFile(t, root, legacyPoisonedTraceSegment(t, tc.gluedRecords, true))
+
+			records, err := ReadTraceRecords(root, TraceFilter{})
+			if err != nil {
+				t.Fatalf("ReadTraceRecords: %v", err)
+			}
+			assertTraceSeqsUnique(t, records)
+			want := map[string]int{"cycle-a": 3, "cycle-d": 3, "cycle-e": 2}
+			if got := traceRecordCounts(records); len(got) != len(want) || got["cycle-a"] != 3 || got["cycle-d"] != 3 || got["cycle-e"] != 2 {
+				t.Fatalf("records by trace = %v, want %v", got, want)
+			}
+
+			records, err = ReadTraceRecords(root, TraceFilter{SeqAfter: 3})
+			if err != nil {
+				t.Fatalf("ReadTraceRecords SeqAfter=3: %v", err)
+			}
+			want = map[string]int{"cycle-d": 3, "cycle-e": 2}
+			if got := traceRecordCounts(records); len(got) != len(want) || got["cycle-d"] != 3 || got["cycle-e"] != 2 {
+				t.Fatalf("records after seq 3 by trace = %v, want %v", got, want)
 			}
 		})
 	}
