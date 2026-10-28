@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -48,7 +49,7 @@ type reapOrphanResult struct {
 // must be left alone. Molecules with zero descendants are skipped too, since
 // that shape means instantiation has not finished yet rather than that the
 // molecule is orphaned.
-func reapOrphanMolecules(store beads.Store, opts reapOrphansOptions, stdout io.Writer) ([]reapOrphanResult, error) {
+func reapOrphanMolecules(store beads.Store, _ events.Recorder, opts reapOrphansOptions, stdout io.Writer) ([]reapOrphanResult, error) {
 	candidates, err := store.List(beads.ListQuery{Type: "molecule"})
 	if err != nil {
 		return nil, fmt.Errorf("listing open molecules: %w", err)
@@ -161,7 +162,7 @@ orphaned subtree. Use --dry-run to preview without closing anything.
 			if err != nil {
 				return fmt.Errorf("opening store: %w", err)
 			}
-			results, err := reapOrphanMolecules(store, reapOrphansOptions{DryRun: dryRun}, stdout)
+			results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{DryRun: dryRun}, stdout)
 			if err != nil {
 				return err
 			}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // orphanShape builds a zero-progress orphan molecule matching the live shape
@@ -53,7 +54,7 @@ func TestReapOrphans_ZeroProgressOrphanIsClosed(t *testing.T) {
 	rootID, stepIDs := orphanShape(t, store, 3)
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestReapOrphans_ZeroProgressOrphanIsClosed(t *testing.T) {
 	}
 
 	out.Reset()
-	results2, err := reapOrphanMolecules(store, reapOrphansOptions{}, &out)
+	results2, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("second reapOrphanMolecules: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestReapOrphans_DryRunClosesNothing(t *testing.T) {
 	rootID, stepIDs := orphanShape(t, store, 2)
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, reapOrphansOptions{DryRun: true}, &out)
+	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{DryRun: true}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestReapOrphans_TouchedOpenStepIsNotReaped(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -177,7 +178,7 @@ func TestReapOrphans_NoTargetBeadIsNotReaped(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -210,11 +211,115 @@ func TestReapOrphans_OpenTargetIsNotReaped(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
 	if len(results) != 0 {
 		t.Fatalf("results = %+v, want none (open target means still in flight)", results)
+	}
+}
+
+// TestReapOrphans_PublishesClosedAndResolvedEvents pins layering invariant #3:
+// a reaped molecule root is announced on the event bus with the same
+// bead.closed / molecule.resolved pair the autoclose path emits
+// (announceClosedMolecule), carrying the session attribution stamped on the
+// root and the reap close_reason.
+func TestReapOrphans_PublishesClosedAndResolvedEvents(t *testing.T) {
+	store := beads.NewMemStore()
+	rootID, _ := orphanShape(t, store, 3)
+	if err := store.SetMetadataBatch(rootID, map[string]string{
+		beadmeta.SessionNameMetadataKey: "polecat-gc-42",
+		beadmeta.SessionIDMetadataKey:   "gc-42",
+		beadmeta.WorkDirMetadataKey:     "/home/ds/gascity-worktrees/polecat-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	var out bytes.Buffer
+	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{}, &out); err != nil {
+		t.Fatalf("reapOrphanMolecules: %v", err)
+	}
+
+	closed := eventsOfType(rec.Events, events.BeadClosed)
+	if len(closed) != 1 || closed[0].Subject != rootID {
+		t.Fatalf("bead.closed events = %+v, want exactly one for root %s", closed, rootID)
+	}
+	if closed[0].Actor == "" {
+		t.Errorf("bead.closed Actor empty, want eventActor() identity")
+	}
+
+	resolved := eventsOfType(rec.Events, events.MoleculeResolved)
+	if len(resolved) != 1 || resolved[0].Subject != rootID {
+		t.Fatalf("molecule.resolved events = %+v, want exactly one for root %s", resolved, rootID)
+	}
+	p := decodeMoleculeResolvedPayload(t, resolved[0])
+	if p.IssueID != rootID {
+		t.Errorf("IssueID = %q, want %q", p.IssueID, rootID)
+	}
+	if p.FromStatus != "open" || p.ToStatus != "closed" {
+		t.Errorf("status transition = %q -> %q, want open -> closed", p.FromStatus, p.ToStatus)
+	}
+	if p.CloseReason != reapOrphanCloseReason {
+		t.Errorf("CloseReason = %q, want %q", p.CloseReason, reapOrphanCloseReason)
+	}
+	if p.SessionName != "polecat-gc-42" || p.SessionID != "gc-42" || p.WorkDir != "/home/ds/gascity-worktrees/polecat-1" {
+		t.Errorf("session attribution = %q/%q/%q, want the values stamped on the root", p.SessionName, p.SessionID, p.WorkDir)
+	}
+	if p.Ts.IsZero() {
+		t.Errorf("Ts is zero, want a resolution timestamp")
+	}
+
+	// A second run finds nothing, so it must publish nothing more.
+	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{}, &out); err != nil {
+		t.Fatalf("second reapOrphanMolecules: %v", err)
+	}
+	if n := len(rec.Events); n != 2 {
+		t.Errorf("event count after idempotent re-run = %d, want 2", n)
+	}
+}
+
+// TestReapOrphans_DryRunPublishesNoEvents pins that a preview closes nothing
+// and therefore announces nothing.
+func TestReapOrphans_DryRunPublishesNoEvents(t *testing.T) {
+	store := beads.NewMemStore()
+	orphanShape(t, store, 2)
+
+	rec := events.NewFake()
+	var out bytes.Buffer
+	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{DryRun: true}, &out); err != nil {
+		t.Fatalf("reapOrphanMolecules: %v", err)
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("dry-run published %d events, want 0: %+v", len(rec.Events), rec.Events)
+	}
+}
+
+// TestReapOrphans_NonOrphanPublishesNoEvents pins that a molecule left alone
+// (an open target keeps it parked) is not announced as resolved.
+func TestReapOrphans_NonOrphanPublishesNoEvents(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "mol-tdd-build", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "live target",
+		Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "step", Type: "step", ParentID: root.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	var out bytes.Buffer
+	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{}, &out); err != nil {
+		t.Fatalf("reapOrphanMolecules: %v", err)
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("non-orphan published %d events, want 0: %+v", len(rec.Events), rec.Events)
 	}
 }
