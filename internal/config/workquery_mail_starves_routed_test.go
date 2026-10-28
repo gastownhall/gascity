@@ -163,3 +163,30 @@ func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 		})
 	}
 }
+
+// TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier pins the no-work
+// outcome: with only mail assigned to the seat, the query prints an empty
+// frontier instead of a row the hook will refuse. The dependency_count > 0
+// reply exercises the slow path's bd show enrichment.
+func TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	env := mailStarvationSessionEnv()
+
+	for _, tc := range []struct {
+		name            string
+		dependencyCount string
+	}{
+		{name: "no dependencies", dependencyCount: "0"},
+		{name: "reply with dependencies", dependencyCount: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mail := `{"id":"gcg-mail-1","status":"open","issue_type":"message","assignee":"` + env["GC_SESSION_ID"] + `","ephemeral":true,"dependency_count":` + tc.dependencyCount + `,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+				fakeBdEphemeralSnapshots(mail, ""))
+			if got := strings.TrimSpace(out); got != "[]" {
+				t.Fatalf("mail-only store: work query served %q, want the empty frontier []", got)
+			}
+		})
+	}
+}
