@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -669,6 +670,92 @@ printf 'rc=%s\n' "$status"
 		if got := strings.TrimSpace(string(rest)); got != "" {
 			t.Fatalf("sleep-signal pipe read %q after the harness exited, want EOF", got)
 		}
+	})
+}
+
+// expectPipeEOF fails unless r reports EOF within timeout, which proves that
+// every process holding the pipe's write end has exited.
+func expectPipeEOF(t *testing.T, r *os.File, timeout time.Duration, what string) {
+	t.Helper()
+	if err := r.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set %s deadline: %v", what, err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("%s: write end still held open after %s (read %q): %v", what, timeout, data, err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("%s: read %q, want EOF", what, data)
+	}
+}
+
+// runWithTimeoutInGroup runs harness under shell as the leader of a new
+// process group, with extraFiles as fds 3 and up, and returns its stdout and
+// wall time. It fails the test when the harness exits non-zero or outlives
+// budget. stderr is not checked: dash reports a TERM-killed job there.
+func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Duration, extraFiles ...*os.File) (string, time.Duration, int) {
+	t.Helper()
+	env := journalRecoveryEnv{binDir: t.TempDir(), shell: shell}
+	cmd := env.command(harness)
+	cmd.ExtraFiles = extraFiles
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start run_with_timeout harness: %v", err)
+	}
+	for _, f := range extraFiles {
+		_ = f.Close()
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s", elapsed, err, stderr.String())
+		}
+		return stdout.String(), elapsed, cmd.Process.Pid
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatalf("run_with_timeout harness still running after %s", budget)
+		return "", 0, 0
+	}
+}
+
+// expectProcessGroupGone fails when any process of group pgid still runs:
+// after the harness exits, a member can only be something a call left behind.
+func expectProcessGroupGone(t *testing.T, pgid int) {
+	t.Helper()
+	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("process group %d still has members after the harness exited (kill -0 = %v), want ESRCH", pgid, err)
+	}
+}
+
+func TestRunWithTimeoutLeavesNothingAfterInstantCommands(t *testing.T) {
+	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
+		heldR, heldW := newRunWithTimeoutPipe(t, "held-descriptor")
+		harness := "set -eu\n" + runWithTimeoutFunction(t) + `
+i=0
+while [ "$i" -lt 200 ]; do
+	run_with_timeout 2 true
+	i=$((i + 1))
+done
+printf 'calls=%s\n' "$i"
+`
+		out, _, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout+3*2*time.Second, heldW)
+		if want := "calls=200\n"; out != want {
+			t.Errorf("harness output = %q, want %q", out, want)
+		}
+		expectProcessGroupGone(t, pgid)
+		expectPipeEOF(t, heldR, time.Second, "caller fd 3")
 	})
 }
 
