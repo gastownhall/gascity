@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -77,6 +79,20 @@ func resultQueued(t *testing.T, e events.Event) bool {
 		t.Fatalf("decoding %s: %v", e.Payload, err)
 	}
 	return p.Queued
+}
+
+// willStartOf decodes a lane message result's will_start and
+// will_not_start_reason.
+func willStartOf(t *testing.T, e events.Event) (*bool, string) {
+	t.Helper()
+	var p struct {
+		WillStart          *bool  `json:"will_start"`
+		WillNotStartReason string `json:"will_not_start_reason"`
+	}
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatalf("decoding %s: %v", e.Payload, err)
+	}
+	return p.WillStart, p.WillNotStartReason
 }
 
 func TestSubmitUnderLaneProposesAMessageOp(t *testing.T) {
@@ -609,17 +625,22 @@ func willStartText(v *bool) string {
 // standing beside it, and offers the resend for the suspend, when the
 // resend lifts the suspend alone; and otherwise names the holds the resend
 // leaves standing (an agent's wait, a quarantine), also to a request that
-// carried resume: true. A dormant row whose runtime has not stopped yet is
-// held by its wait as the lane host reads it. A pool seat waiting on
-// demand, and a running session the message waits on for its boundary, an
-// agent's heartbeat keeping it up included, say neither. Nothing here
-// records a wake or asks the controller to reconcile, on /submit and
-// /messages alike. Kills a lane result with no will_start, one that records
-// the wake or pokes the controller itself, one that offers resume: true to
-// start a session the controller will not start or to lift a hold it does
-// not lift, one that names only the holds a resend leaves, hiding a
-// suspend the resend lifts (the message would wait on it after the other
-// holds end), one that reads a dormant row's lingering runtime (it would
+// carried resume: true. A suspend placed before the message on a session a
+// drain is stopping names every hold and the drain, and offers the resend
+// once the drain is done, which lifts the suspend then. A dormant row whose
+// runtime has not stopped yet is held by its wait as the lane host reads
+// it. A pool seat waiting on demand, and a running session the message
+// waits on for its boundary, an agent's heartbeat keeping it up included,
+// say neither. Nothing here records a wake or asks the controller to
+// reconcile, on /submit and /messages alike. Kills a lane result with no
+// will_start, one that records the wake or pokes the controller itself,
+// one that offers resume: true to start a session the controller will not
+// start or to lift a hold it does not lift, one that names only the holds
+// a resend leaves, hiding a suspend the resend lifts (the message would
+// wait on it after the other holds end), one that reads the drain's
+// refusal of a resume as a suspend the resend never lifts (the client
+// would never resend, and the message would wait on an indefinite
+// suspend), one that reads a dormant row's lingering runtime (it would
 // promise a start the lane host's held wake request never asks for), and
 // one that reads every row as not running (a busy session under a
 // heartbeat would read held).
@@ -653,6 +674,8 @@ func TestLaneMessageResultSaysWhetherItWillStart(t *testing.T) {
 		"suspended over a wait":            {suspend: true, meta: map[string]string{"wait_hold": "true"}, want: &no, reason: laneSuspendedHeldByReason([]string{"an agent's wait"})},
 		"suspended over a quarantine":      {suspend: true, meta: map[string]string{"quarantined_until": later}, want: &no, reason: laneSuspendedHeldByReason([]string{"a quarantine until " + later})},
 		"suspended over a wait, resumed":   {suspend: true, meta: map[string]string{"wait_hold": "true"}, resume: true, want: &no, reason: laneHeldByReason([]string{"an agent's wait"})},
+		"suspended, a drain stopping it":   {suspend: true, meta: map[string]string{"state": string(session.StateDraining)}, want: &no, reason: laneDrainingReason([]string{"a suspend"})},
+		"suspended over a wait, draining":  {suspend: true, meta: map[string]string{"state": string(session.StateDraining), "wait_hold": "true"}, want: &no, reason: laneDrainingReason([]string{"a suspend", "an agent's wait"})},
 		"quarantined":                      {suspend: true, meta: over(asleep, map[string]string{"quarantined_until": later}), want: &no, reason: laneHeldByReason([]string{"a quarantine until " + later})},
 		"waiting, its runtime not stopped": {meta: over(asleep, wait), want: &no, reason: laneHeldByReason([]string{"an agent's wait"})},
 		"running":                          {},
@@ -749,6 +772,189 @@ func TestSubmitUnderLaneSameKeyRetryReplays(t *testing.T) {
 	}
 	if rows := e.opRows(t); len(rows) != 1 {
 		t.Fatalf("op rows = %d, want one", len(rows))
+	}
+}
+
+// The result of a lane message that waits on a suspend placed before it
+// offers a resend with resume: true under the idempotency_key of its 202,
+// the client's or one the server minted, and that resend, served by the
+// same API process, is answered from the op under the key: accepted again,
+// not replayed, its resume consuming the suspend and recording the
+// session's wake, with no second op, and its result saying the session
+// will start. Kills an Idempotency-Key LRU that answers the resend from
+// the first request's 202: 422 idempotency_mismatch for a body it hashed
+// with resume false, or a replay that never runs the resume and leaves the
+// message waiting on the suspend.
+func TestLaneMessageResumeResendOnTheSameProcessConsumesTheHold(t *testing.T) {
+	for _, path := range []string{"/submit", "/messages"} {
+		for name, key := range map[string]string{"client key": "k-resend", "minted key": ""} {
+			t.Run(name+" "+path, func(t *testing.T) {
+				e, st := laneMessageEnv(t, nil)
+				shortSettle(t)
+				info := e.session(t, "Resend")
+				sessions := session.NewStore(e.fs.SessionsBeadStore())
+				wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
+				first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+path, key, `{"message":"go"}`).Body)
+				if _, reason := willStartOf(t, waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)[0]); reason != laneSuspendedReason {
+					t.Fatalf("first result's will_not_start_reason = %q, want %q", reason, laneSuspendedReason)
+				}
+				rec := e.post(t, "/session/"+info.ID+path, first.IdempotencyKey, `{"message":"go","resume":true}`)
+				wantStatus(t, "resend with resume: true", rec, http.StatusAccepted)
+				acc := decodeAsyncAccepted(t, rec.Body)
+				if acc.RequestID != first.RequestID || acc.Replayed {
+					t.Fatalf("resend = %+v, want op %s accepted again, not replayed", acc, first.RequestID)
+				}
+				if got, err := sessions.Get(info.ID); err != nil || got.State != session.StateAsleep || got.WakeRequest != string(session.WakeCauseExplicit) {
+					t.Fatalf("session after the resend = %+v, %v; want the hold consumed and its wake recorded", got, err)
+				}
+				if op, err := st.ops.Get(first.RequestID); err != nil || op.Status == opjournal.StatusClosed {
+					t.Fatalf("op = %+v, %v; want it open for the lane", op, err)
+				}
+				if rows := e.opRows(t); len(rows) != 1 {
+					t.Fatalf("op rows = %d, want the one op", len(rows))
+				}
+				if willStart, reason := willStartOf(t, waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2)[1]); willStart == nil || !*willStart || reason != "" {
+					t.Fatalf("resend's result: will_start %s, will_not_start_reason %q; want will_start true", willStartText(willStart), reason)
+				}
+			})
+		}
+	}
+}
+
+// Under lane authority the Idempotency-Key LRU keeps no answer of /submit
+// or /messages, and holds the key only while its request runs: a same-key
+// request then is 409 in_flight, as the LRU answers one on every path,
+// rather than a second acceptance of an op the running request may still
+// cancel. Once the first request answered, a same-key retry is answered
+// from the op under the key: accepted again, its result after its own
+// cursor. Kills an LRU that keeps a lane answer (the retry would replay
+// the first 202 and emit nothing) and one skipped outright under lane
+// authority (the concurrent request would be accepted).
+func TestSubmitUnderLaneKeyIsBusyOnlyWhileItsRequestRuns(t *testing.T) {
+	e, st := laneMessageEnv(t, nil)
+	shortSettle(t)
+	info := e.session(t, "Busy key")
+	parked, release := make(chan struct{}), make(chan struct{})
+	var unpark sync.Once
+	t.Cleanup(func() { unpark.Do(func() { close(release) }) })
+	e.store.set(func(s *opsTestStore) {
+		s.onOpCreate = func() {
+			close(parked)
+			<-release
+		}
+	})
+	path := "/session/" + info.ID + "/submit"
+	answer := e.postAsync(t, path, "k-busy", `{"message":"go"}`)
+	select {
+	case <-parked:
+	case <-time.After(testEventTimeout):
+		t.Fatal("the first request never wrote its op")
+	}
+	var busy *httptest.ResponseRecorder
+	select {
+	case busy = <-e.postAsync(t, path, "k-busy", `{"message":"go"}`):
+	case <-time.After(testEventTimeout):
+		t.Fatal("a same-key request while the first runs did not answer")
+	}
+	unpark.Do(func() { close(release) })
+	if busy.Code != http.StatusConflict || !strings.Contains(busy.Body.String(), "in_flight") {
+		t.Fatalf("same-key request while the first runs = %d: %s, want 409 in_flight", busy.Code, busy.Body.String())
+	}
+	rec := <-answer
+	wantStatus(t, "first request", rec, http.StatusAccepted)
+	first := decodeAsyncAccepted(t, rec.Body)
+	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	retry := decodeAsyncAccepted(t, e.post(t, path, "k-busy", `{"message":"go"}`).Body)
+	if retry.RequestID != first.RequestID || retry.Replayed {
+		t.Fatalf("retry = %+v, want op %s accepted again, not replayed", retry, first.RequestID)
+	}
+	if evs := waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2); evs[1].Seq <= mustSeq(t, retry.EventCursor) {
+		t.Fatalf("results %+v, want the retry's after its cursor %s", evs, retry.EventCursor)
+	}
+	if op, err := st.ops.Get(first.RequestID); err != nil || op.Status == opjournal.StatusClosed {
+		t.Fatalf("op = %+v, %v; want it open for the lane", op, err)
+	}
+	if rows := e.opRows(t); len(rows) != 1 {
+		t.Fatalf("op rows = %d, want the one op", len(rows))
+	}
+}
+
+// An answer the Idempotency-Key LRU kept before the city's lane host
+// executed message still replays a same-key retry once it does, in the
+// same API process: the legacy path delivered that request and recorded no
+// op (every ops gate is off), so the op journal cannot answer the retry,
+// and a lane op proposed for it would deliver the message twice. Kills an
+// LRU skipped outright under lane authority.
+func TestSubmitUnderLaneReplaysAnAnswerKeptBeforeTheLaneRan(t *testing.T) {
+	e, st := laneMessageEnv(t, nil)
+	kinds := st.kinds
+	st.kinds = nil // the lane host has not started yet
+	info := e.session(t, "Before the lane")
+	path := "/session/" + info.ID + "/submit"
+	first := decodeAsyncAccepted(t, e.post(t, path, "k-before", `{"message":"hello"}`).Body)
+	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	st.kinds = kinds // the lane host starts
+	rec := e.post(t, path, "k-before", `{"message":"hello"}`)
+	wantStatus(t, "same-key retry once the lane runs", rec, http.StatusAccepted)
+	if retry := decodeAsyncAccepted(t, rec.Body); retry.RequestID != first.RequestID {
+		t.Fatalf("retry = %+v, want the first answer %s replayed", retry, first.RequestID)
+	}
+	if rows := e.opRows(t); len(rows) != 0 {
+		t.Fatalf("op rows = %d, want no lane op for the retry", len(rows))
+	}
+	if got := deliveredCalls(e.fs.sp, info.SessionName); len(got) != 1 {
+		t.Fatalf("delivered %d, want the legacy delivery's one", len(got))
+	}
+}
+
+// Under lane authority the op under a request's key answers it before the
+// pending-interaction check, which only a request no op answers passes
+// (request_id rule 8): while the session waits on an approval, a same-key
+// retry, on the same API process, endpoint and spelling, on another
+// spelling and on the other endpoint, is answered from the op, a delivered
+// message's replay or a waiting one's acceptance, with no second op, and a
+// new key is still 409 pending_interaction, writing nothing. Kills a front
+// door that checks the pending interaction first: the Idempotency-Key LRU
+// keeps no lane answer, so the retry would be told to answer the approval
+// before sending text its 202 already accepted.
+func TestSubmitUnderLaneRetryIsAnsweredPastAPendingInteraction(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		closeWith func(opjournal.Op) *opjournal.Outcome
+		replayed  bool
+	}{
+		{"delivered", outcome(opjournal.ArmSucceeded, ""), true},
+		{"waiting", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := laneMessageEnv(t, tc.closeWith)
+			shortSettle(t)
+			info := e.session(t, "Front door")
+			body := `{"message":"hi"}`
+			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-front", body).Body)
+			waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+			e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+				RequestID: "approval-1", Kind: "approval", Prompt: "Bash: date", Options: []string{"Yes", "No"},
+			})
+			for i, retry := range []string{info.ID + "/submit", info.SessionName + "/submit", info.ID + "/messages"} {
+				rec := e.post(t, "/session/"+retry, "k-front", body)
+				wantStatus(t, "retry "+retry, rec, http.StatusAccepted)
+				if acc := decodeAsyncAccepted(t, rec.Body); acc.RequestID != first.RequestID || acc.Replayed != tc.replayed {
+					t.Fatalf("retry %s = %+v, want op %s with replayed %t", retry, acc, first.RequestID, tc.replayed)
+				}
+				waitTerminalEvents(t, e.fs.eventProv, first.RequestID, i+2)
+			}
+			rec := e.post(t, "/session/"+info.ID+"/submit", "k-other", body)
+			var problem struct {
+				Detail string `json:"detail"`
+			}
+			if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &problem) != nil || !strings.HasPrefix(problem.Detail, "pending_interaction: ") {
+				t.Fatalf("a new key: status %d, want 409 pending_interaction: %s", rec.Code, rec.Body.String())
+			}
+			if rows := e.opRows(t); len(rows) != 1 {
+				t.Fatalf("op rows = %d, want the first request's op alone", len(rows))
+			}
+		})
 	}
 }
 
@@ -942,46 +1148,64 @@ func TestSubmitUnderLanePreFlipKeyAnswersOnlyItsRequest(t *testing.T) {
 // as: interrupt_now its own, and follow_up default, since the lane delivers
 // a follow_up at the session's boundary as it does a default. The two are
 // one request under a key: a retry with the other of them replays the op,
-// where interrupt_now under a default's key is 422. Kills a live result
-// that reports the caller's follow_up while its replay says default.
+// where interrupt_now under a default's key is 422, whether the API
+// process that answered the first request serves the retry or a new one
+// does. Kills a live result that reports the caller's follow_up while its
+// replay says default, and an Idempotency-Key LRU that answers the retry
+// on the first request's process: 422 for the other of the two, whose body
+// it hashed apart, or the first 202 again, which replays nothing.
 func TestSubmitUnderLaneReportsTheIntentItRuns(t *testing.T) {
-	for _, tc := range []struct {
-		name, first, retry string
-		want               session.SubmitIntent
-	}{
-		{"interrupt_now", `{"message":"stop","intent":"interrupt_now"}`, `{"message":"stop","intent":"interrupt_now"}`, session.SubmitIntentInterruptNow},
-		{"follow_up", `{"message":"later","intent":"follow_up"}`, `{"message":"later","intent":"follow_up"}`, session.SubmitIntentDefault},
-		{"follow_up retried as default", `{"message":"later","intent":"follow_up"}`, `{"message":"later"}`, session.SubmitIntentDefault},
-		{"default retried as follow_up", `{"message":"later"}`, `{"message":"later","intent":"follow_up"}`, session.SubmitIntentDefault},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, process := range []struct {
+		name    string
+		restart bool
+	}{{"same process", false}, {"after a restart", true}} {
+		// retryProcess is the API process a retry reaches: the one that
+		// answered the first request, or a new one.
+		retryProcess := func(t *testing.T, e *opsEnv, st *lanePokeState) {
+			t.Helper()
+			if process.restart {
+				e.restart(t)
+				e.resolver.state = st
+			}
+		}
+		for _, tc := range []struct {
+			name, first, retry string
+			want               session.SubmitIntent
+		}{
+			{"interrupt_now", `{"message":"stop","intent":"interrupt_now"}`, `{"message":"stop","intent":"interrupt_now"}`, session.SubmitIntentInterruptNow},
+			{"follow_up", `{"message":"later","intent":"follow_up"}`, `{"message":"later","intent":"follow_up"}`, session.SubmitIntentDefault},
+			{"follow_up retried as default", `{"message":"later","intent":"follow_up"}`, `{"message":"later"}`, session.SubmitIntentDefault},
+			{"default retried as follow_up", `{"message":"later"}`, `{"message":"later","intent":"follow_up"}`, session.SubmitIntentDefault},
+		} {
+			t.Run(process.name+"/"+tc.name, func(t *testing.T) {
+				e, st := laneMessageEnv(t, outcome(opjournal.ArmSucceeded, ""))
+				info := e.session(t, "Intent")
+				first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-intent", tc.first).Body)
+				waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+				retryProcess(t, e, st)
+				if replay := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-intent", tc.retry).Body); !replay.Replayed || replay.RequestID != first.RequestID {
+					t.Fatalf("retry = %+v, want op %s replayed", replay, first.RequestID)
+				}
+				for _, ev := range waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2) {
+					var p struct {
+						Intent string `json:"intent"`
+					}
+					if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Intent != string(tc.want) {
+						t.Fatalf("terminal event %s %s, want intent %s", ev.Type, ev.Payload, tc.want)
+					}
+				}
+			})
+		}
+		t.Run(process.name+"/interrupt_now under a default's key", func(t *testing.T) {
 			e, st := laneMessageEnv(t, outcome(opjournal.ArmSucceeded, ""))
 			info := e.session(t, "Intent")
-			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-intent", tc.first).Body)
+			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-now", `{"message":"stop"}`).Body)
 			waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
-			e.restart(t)
-			e.resolver.state = st
-			if replay := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-intent", tc.retry).Body); !replay.Replayed || replay.RequestID != first.RequestID {
-				t.Fatalf("retry = %+v, want op %s replayed", replay, first.RequestID)
-			}
-			for _, ev := range waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2) {
-				var p struct {
-					Intent string `json:"intent"`
-				}
-				if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Intent != string(tc.want) {
-					t.Fatalf("terminal event %s %s, want intent %s", ev.Type, ev.Payload, tc.want)
-				}
+			retryProcess(t, e, st)
+			if rec := e.post(t, "/session/"+info.ID+"/submit", "k-now", `{"message":"stop","intent":"interrupt_now"}`); rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("interrupt_now under a default's key: %d %s, want 422", rec.Code, rec.Body.String())
 			}
 		})
-	}
-	e, st := laneMessageEnv(t, outcome(opjournal.ArmSucceeded, ""))
-	info := e.session(t, "Intent")
-	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k-now", `{"message":"stop"}`).Body)
-	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
-	e.restart(t)
-	e.resolver.state = st
-	if rec := e.post(t, "/session/"+info.ID+"/submit", "k-now", `{"message":"stop","intent":"interrupt_now"}`); rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("interrupt_now under a default's key: %d %s, want 422", rec.Code, rec.Body.String())
 	}
 }
 

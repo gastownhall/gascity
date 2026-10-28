@@ -1480,14 +1480,18 @@ func LaneMessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 // delivers, and answers 202 once the op is committed, its request_id the op
 // id. A configured named session's row is materialized before the Propose.
 // resume: true consumes the session's operator hold once the op is proposed
-// (resumeLaneSession), else a held session keeps the op waiting. A resume
-// the session's row alone refuses (a closed session, or one a drain is
-// stopping) is refused before the op is written, so the key stays free
-// (checkLaneResume); a proposal that fails leaves the hold in place; and a
-// resume refused once the op is written cancels the op this request wrote,
-// its error saying the key is spent, and to resend under a new key only
-// when the cancel closed the op (laneKeySpent). A same-key retry is
-// answered from the op under the key (answerLaneMessage): a closed op
+// (resumeLaneSession), else a held session keeps the op waiting. A request
+// no op under its key answers is refused before the op is written, so the
+// key stays free, while the session waits on a pending interaction, or
+// when the session's row alone refuses its resume, as for a closed session
+// or one a drain is stopping (checkNewLaneMessage); a proposal that fails
+// leaves the hold in place; and a resume refused once the op is written
+// cancels the op this request wrote, its error saying the key is spent,
+// and to resend under a new key only when the cancel closed the op
+// (laneKeySpent). A same-key retry, on the API process that answered the
+// first request too (the Idempotency-Key LRU keeps no lane answer:
+// withMessageIdempotency), and whatever the session waits on, is answered
+// from the op under the key (answerLaneMessage): a closed op
 // replays (OJ-2b's path), an open legacy op is 409 in_flight, and an open
 // lane op is accepted again once its resume runs again, since the request
 // that proposed it may have died before its own; a resume refused there
@@ -1543,8 +1547,8 @@ func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *
 		}
 		return s.answerLaneMessage(store, st, prior, false, req, ep, key, cursor)
 	}
-	if !found && req.resume {
-		if err := checkLaneResume(store, conv); err != nil {
+	if !found {
+		if err := s.checkNewLaneMessage(ctx, store, conv, req.resume); err != nil {
 			return asyncAcceptedBody{}, err
 		}
 	}
@@ -1585,6 +1589,23 @@ func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *
 // refusals are laneResumeError's.
 func (s *Server) resumeLaneSession(store beads.Store, id string, proposed time.Time) error {
 	return laneResumeError(id, session.NewStore(beads.SessionStore{Store: store}).ResumeHeld(id, proposed, time.Now().UTC()))
+}
+
+// checkNewLaneMessage refuses, writing nothing, a lane message to session
+// id that no op under its key answers: while the session waits on a pending
+// interaction, as the front door refuses a legacy message
+// (rejectPendingInteraction), and for resume: true when the session's row
+// alone refuses the resume (checkLaneResume). A same-key retry is not
+// checked: its op answers it whatever the session waits on, such as an
+// approval its message raised (request_id rule 8).
+func (s *Server) checkNewLaneMessage(ctx context.Context, store beads.Store, id string, resume bool) error {
+	if err := s.rejectPendingInteraction(ctx, store, id); err != nil {
+		return err
+	}
+	if !resume {
+		return nil
+	}
+	return checkLaneResume(store, id)
 }
 
 // checkLaneResume refuses, writing nothing, a resume: true that session id's
@@ -1760,8 +1781,10 @@ func (s *Server) emitLaneMessageResult(store beads.Store, op opjournal.Op, opera
 // laneSuspendedReason is will_not_start_reason for a lane message waiting
 // on a session that only a suspend stamped by the message's proposal holds.
 // The lane host's wake request cannot pass it; a resend of the request with
-// resume: true consumes it (session.Store.ResumeHeld).
-const laneSuspendedReason = "the session is suspended, so the message waits until it is resumed; resending this request with resume: true under the same Idempotency-Key resumes it"
+// resume: true consumes it (session.Store.ResumeHeld). The resend names the
+// request by the idempotency_key of its 202, the client's or one the server
+// minted: under another key it would be a second message.
+const laneSuspendedReason = "the session is suspended, so the message waits until it is resumed; resending this request with resume: true under the idempotency_key of its 202 resumes it"
 
 // laneHeldByReason is will_not_start_reason for a lane message waiting on
 // holds, named, that a resend of the request with resume: true leaves
@@ -1776,7 +1799,18 @@ func laneHeldByReason(holds []string) string {
 // resume: true leaves standing: the resend consumes the suspend, and the
 // message then waits until the others end.
 func laneSuspendedHeldByReason(holds []string) string {
-	return "the session is suspended and held by " + strings.Join(holds, " and ") + "; resending this request with resume: true under the same Idempotency-Key resumes it, and the message then waits until the hold ends"
+	return "the session is suspended and held by " + strings.Join(holds, " and ") + "; resending this request with resume: true under the idempotency_key of its 202 resumes it, and the message then waits until the hold ends"
+}
+
+// laneDrainingReason is will_not_start_reason for a lane message waiting on
+// holds, named, among them a suspend stamped by the message's proposal on a
+// session a drain is stopping (session.ErrSessionStopping): the drain's stop
+// owns the runtime and refuses a resume, 409 session_stopping, until it is
+// done; then a resend of the request with resume: true lifts the suspend
+// (session.Store.ResumeHeld), and the message waits until any other hold
+// ends.
+func laneDrainingReason(holds []string) string {
+	return "the session is held by " + strings.Join(holds, " and ") + ", and a drain is stopping it, so the message waits until the hold ends; once the drain is done, resending this request with resume: true under the idempotency_key of its 202 lifts the suspend"
 }
 
 // laneHeldReason is will_not_start_reason for a lane message proposed at
@@ -1785,14 +1819,19 @@ func laneSuspendedHeldByReason(holds []string) string {
 // true would leave (session.ResumeHeldPreview, read as the lane host reads
 // the row: laneWakeVerdict): laneSuspendedReason when that row is unheld or
 // carries no hold; laneSuspendedHeldByReason when the resend lifts the
-// suspend, the one hold a resume lifts, and other holds stand; else the
-// holds that resend leaves standing (laneHeldByReason): a wait, a
-// quarantine, a heartbeat, a suspend stamped after the proposal, or one
-// whose drain refuses the resume.
+// suspend, the one hold a resume lifts, and other holds stand; the row's
+// holds and the drain (laneDrainingReason) when a drain stopping the
+// session refuses the resend for now, though it lifts the suspend once the
+// drain is done; else the holds that resend leaves standing
+// (laneHeldByReason): a wait, a quarantine, a heartbeat or a suspend
+// stamped after the proposal.
 func laneHeldReason(info session.Info, persisted session.PersistedResponse, live bool, proposed, now time.Time) string {
 	holds := session.DecodeDisposition(persisted.Metadata).ConsumeHolds(now)
 	resumed, after, err := session.ResumeHeldPreview(info, persisted, proposed, now)
-	if err != nil {
+	switch {
+	case errors.Is(err, session.ErrSessionStopping):
+		return laneDrainingReason(holds)
+	case err != nil:
 		return laneHeldByReason(holds)
 	}
 	outcome, err := laneWakeVerdict(resumed, after, live, now)

@@ -583,6 +583,12 @@ type messageOpRequest struct {
 	intent session.SubmitIntent
 	// resume is the request's resume: true.
 	resume bool
+	// lane is whether the city's lane host executes message for this
+	// request, read once (withMessageIdempotency): it is proposed as a lane
+	// op (acceptMessageLane), checked for a pending interaction only when
+	// no op under its key answers it, and the Idempotency-Key LRU keeps no
+	// answer of it.
+	lane bool
 	// operation is the endpoint's request operation, the one its terminal
 	// events name.
 	operation string
@@ -694,13 +700,24 @@ func (s *Server) storedReplayAnswer(op opjournal.Op, key, operation, cursor stri
 // withMessageIdempotency is withIdempotency for /submit and /messages: a
 // retry the LRU answers from its cached 202 is answered busy while that
 // request's terminal event is kept, as replayAnswer answers one the LRU
-// misses, so the 202 has its event after its cursor.
-func (s *Server) withMessageIdempotency(path, key string, body any, accept func() (asyncAcceptedBody, error)) (asyncAcceptedBody, error) {
+// misses, so the 202 has its event after its cursor. It reads once whether
+// the city's lane host executes message, and tells accept (lane): the LRU
+// keeps no answer of a request the lane accepts (withIdempotencyKeeping),
+// so a same-key retry whose target still resolves reaches the op under the
+// key (acceptMessageLane), which answers it whatever the session waits on,
+// runs a resend's resume: true and answers follow_up and default as one
+// request, where a kept 202, its body hashed whole, would refuse such a
+// resend 422 or replay it without its resume.
+// The LRU still holds the key while the request runs, so a concurrent
+// same-key request is 409 in_flight, and still replays an answer it kept
+// before the lane host ran, which the op journal may not have recorded.
+func (s *Server) withMessageIdempotency(path, key string, body any, accept func(lane bool) (asyncAcceptedBody, error)) (asyncAcceptedBody, error) {
+	lane := s.laneExecutes(opjournal.KindMessage)
 	cached := true
-	v, err := withIdempotency(s.idem, path, key, body, func() (asyncAcceptedBody, error) {
+	v, err := withIdempotencyKeeping(s.idem, path, key, body, func() (asyncAcceptedBody, error) {
 		cached = false
-		return accept()
-	})
+		return accept(lane)
+	}, func(asyncAcceptedBody) bool { return !lane })
 	if err != nil || !cached || s.ops == nil {
 		return v, err
 	}

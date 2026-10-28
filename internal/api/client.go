@@ -1483,9 +1483,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 }
 
 // SubmitSessionWithKey is SubmitSession under an Idempotency-Key. When the
-// server records both requests (a recording ops.content mode), a retry with
-// the same key against the same session gets the first request's outcome
-// instead of a second delivery. Otherwise only a retry the server's
+// server records both requests (a recording ops.content mode, or lane
+// authority: message listed in [ops] authoritative), a retry with the same
+// key against the same session gets the first request's outcome instead of
+// a second delivery. Otherwise only a retry the server's
 // Idempotency-Key cache answers gets it (the same id spelling, at most 30
 // minutes later, and not across a restart); any other retry delivers again
 // (request_id rules 3 and 6 in engdocs/design/async-request-result.md). A
@@ -1496,7 +1497,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 // was not delivered. A replay runs nothing, so this call's resume does not
 // start a session the first request only queued for (request_id rule 6); a
 // replayed success says so in the response's Replayed and Message, a replayed
-// failure in its error. An empty key sends none, as SubmitSession does.
+// failure in its error. Under lane authority a retry of a message still
+// waiting is no replay: it is accepted again, and its resume consumes an
+// operator hold placed before the message (request_id rule 6). An empty key
+// sends none, as SubmitSession does.
 func (c *Client) SubmitSessionWithKey(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
 	return c.submitSession(id, message, intent, key)
 }

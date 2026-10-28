@@ -480,13 +480,17 @@ adopts it.
   of the op gets the result from the op as accepted, queued true: a
   `request.failed` would invite a resend of a message the lane may still
   deliver, and the op's fate is `op.changed`'s. A held
-  session's reason offers the same-key `resume: true` resend when that
-  resend lifts every hold (`session.ResumeHeldPreview`: a suspend stamped
-  by the op's `created_at`); when it lifts that suspend and other holds
-  stand, the reason names the suspend and those holds and offers the
-  resend for the suspend; and otherwise it names the holds the resend
-  leaves standing (`session.Disposition.ConsumeHolds`: a wait, a
-  quarantine, a heartbeat, a later suspend); a refusal carries no
+  session's reason offers the same-key `resume: true` resend, under the
+  `idempotency_key` of the request's 202 (the client's or a minted one),
+  when that resend lifts every hold (`session.ResumeHeldPreview`: a
+  suspend stamped by the op's `created_at`); when it lifts that suspend
+  and other holds stand, the reason names the suspend and those holds and
+  offers the resend for the suspend; when a drain is stopping the session,
+  whose stop refuses the resume 409 `session_stopping` until it is done,
+  the reason names the holds and the drain and offers the resend once the
+  drain is done (`laneDrainingReason`); and otherwise it names the holds
+  the resend leaves standing (`session.Disposition.ConsumeHolds`: a wait,
+  a quarantine, a heartbeat, a later suspend); a refusal carries no
   `resume: true` hint, as resume starts nothing under the lane. A
   `/submit` result says the intent the op's policy runs
   (`submitIntentForWhen`), as its replay does: follow_up is the default
@@ -501,7 +505,22 @@ adopts it.
   op's `created_at` stands); a resume refused there leaves the op open, as
   an earlier answer may have accepted it. An open legacy op is 409
   `in_flight`. A legacy op the key names from before the flip answers only
-  the request it recorded (`sameLegacyMessage`). A
+  the request it recorded (`sameLegacyMessage`). The `Idempotency-Key`
+  LRU keeps no answer of a request the lane accepts
+  (`withMessageIdempotency`, which reads `laneExecutes` once per request
+  and hands that reading to `acceptMessageOp`), so a same-key retry
+  reaches the op on the API process that answered the first request too:
+  a resend that adds `resume: true`, or sends follow_up for default, is
+  answered from the op, where the LRU, which hashes the whole body, would
+  refuse it 422 or replay the first 202 without running its resume. The
+  op answers a same-key retry whatever the session waits on: only a
+  request no op under its key answers is refused 409 `pending_interaction`,
+  writing nothing (`checkNewLaneMessage`), so a retry of a message that
+  raised an approval is not told to answer it before sending text its 202
+  already accepted (request_id rule 8). The
+  LRU still holds the key while the request runs (a concurrent same-key
+  request is 409 `in_flight`), and still replays an answer it kept before
+  the lane host ran, which the journal may not have recorded. A
   message over `opjournal.MaxInlinePayload` (16 KiB) is 422
   `payload_too_large`. extmsg member notices are lane notices from
   `gc:extmsg`, their inbound text cut to fit that limit (`extmsgNotice`). A
