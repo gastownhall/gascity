@@ -236,6 +236,11 @@ var parityFindings = map[string]parityEntry{
 		"C6b1, C6b2 (A20, A4; owner to add a §12.2 row)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch and delivers the wait's nudge with the start; v2 drains and restarts it the same way, a pass or more later (drain-stop-lag)",
 		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
+
+	"reset-committed-at-followup-wake": {
+		"fix #4067 (mc-rci01)", "legacy's dead-runtime heal now also stamps reset_committed_at on the same continuation-reset re-arm that finishes an idle-stop-pending sleep (#4067's fix). That extra write makes once()'s first tick register as changed, which triggers an immediate follow-up tick before the row's own idle-sleep recovery (recoverPendingIdleSleepInfo) gets to persist. On a row with no registered runtime at all (this fixture never declares one), the follow-up's healAliveConfirmer re-check reads the gap as a fresh wake, so the row transiently re-opens and persistSleepPolicyMetadataInfo recomputes the latch instead of keeping the preserved value; v2's single-pass arm never re-opens the row, so it keeps the preserved value and never re-clears the provider env",
+		[]string{"sleep_policy_fingerprint"},
+	},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
@@ -1483,8 +1488,13 @@ func parityFixtures() []parityFixture {
 			Name: "an idle stop pending with its runtime gone finishes the sleep", Behaviors: []string{"SESS-532"}, City: chatOnDemand,
 			// A keyed conversation woken 10s ago: a continuation reset or a
 			// rapid-crash accrual would show.
-			Rows:    []parityRow{onDemand("last_woke_at", at(-10*time.Second), "session_key", "k-1", "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
-			Explain: latchCompared(chatStanding),
+			Rows: []parityRow{onDemand("last_woke_at", at(-10*time.Second), "session_key", "k-1", "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
+			Explain: func() map[string]string {
+				out := latchCompared(chatStanding)
+				out["row:gc-c:sleep_policy_fingerprint"] = "reset-committed-at-followup-wake"
+				out["provider:RemoveMeta chat"] = "reset-committed-at-followup-wake"
+				return out
+			}(),
 		},
 		{
 			Name: "an empty row type is repaired", Behaviors: []string{"SESS-701"},
@@ -1633,8 +1643,11 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			Name: "an asleep named row's drift is repaired", Behaviors: []string{"SESS-566", "SESS-568"}, City: chatOnDemand,
-			Rows:    []parityRow{onDemand("state", "asleep", "started_config_hash", drifted, "session_key", "conversation-1")},
-			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+			Rows: []parityRow{onDemand("state", "asleep", "started_config_hash", drifted, "session_key", "conversation-1")},
+			Explain: map[string]string{
+				"row:gc-c:*policy":         "sleep-policy-keys",
+				"provider:RemoveMeta chat": "reset-committed-at-followup-wake",
+			},
 		},
 		// A wanted one (always): legacy repairs it, its key rotated, then
 		// starts it on a fresh conversation; v2's start carries the repair in
