@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -460,4 +462,83 @@ func linesNaming(logs, id string) int {
 		}
 	}
 	return n
+}
+
+// TestSeatHandOverIsAdoptedBySuccessorHook (AC-6): after the sweep hands the
+// closed row's bead to its seat successor, the successor's own
+// `gc hook --claim` adopts it as its existing assignment, rebinds
+// gc.session_id/gc.session_name to itself, keeps the write-once gc.claimed_at,
+// and records work_started for the bead.
+func TestSeatHandOverIsAdoptedBySuccessorHook(t *testing.T) {
+	store := beads.NewMemStore()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", map[string]string{"session_name": "reviewer-next"}))
+
+	if released := sweepSeatWork(store, seatHandoverCity(), []beads.Bead{successor}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+
+	var started []string
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			b := getSeatBead(t, store, work.ID)
+			out, err := json.Marshal([]beads.Bead{b})
+			return string(out), err
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Error("Claim must not be called: the bead is already the successor's")
+			return beads.Bead{}, false, nil
+		},
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string, patch map[string]string) error {
+			return store.SetMetadataBatch(beadID, patch)
+		},
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+			return store.Get(beadID)
+		},
+		RecordWorkStarted: func(sessionID string, _ hookStartedFence, key hookStartedKey, _ string) (hookStartedResult, error) {
+			started = append(started, sessionID+":"+key.Bead)
+			return hookStartedRecorded, nil
+		},
+		ReadWorkStarted:   noStartedClaims,
+		DrainPending:      func(string) (bool, error) { return false, nil },
+		StoreRef:          func(string) string { return "" },
+		StampSessionClaim: noopStampSessionClaim,
+		PublishRunMap:     noopPublishRunMap,
+	}
+	env := []string{
+		"GC_SESSION_ID=" + successor.ID,
+		"GC_SESSION_NAME=reviewer-next",
+		"GC_INSTANCE_TOKEN=tok-successor",
+		"GC_RUNTIME_EPOCH=1",
+	}
+	opts := hookClaimOptions{
+		Assignee:           successor.ID,
+		IdentityCandidates: []string{successor.ID, "reviewer-next", "reviewer"},
+		SessionID:          successor.ID,
+		RouteTargets:       []string{"worker"},
+		Env:                env,
+		StartedFence:       hookStartedFenceOf(env),
+		JSON:               true,
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	result := decodeTurnBoundResult(t, stdout.String())
+	if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != work.ID {
+		t.Fatalf("result = %+v, want %s adopted as the successor's existing assignment; stderr=%s", result, work.ID, stderr.String())
+	}
+	got := getSeatBead(t, store, work.ID)
+	if got.Metadata[beadmeta.SessionIDMetadataKey] != successor.ID || got.Metadata[beadmeta.SessionNameMetadataKey] != "reviewer-next" {
+		t.Fatalf("claim projection = %s/%s, want the successor %s/reviewer-next",
+			got.Metadata[beadmeta.SessionIDMetadataKey], got.Metadata[beadmeta.SessionNameMetadataKey], successor.ID)
+	}
+	if got.Metadata[beadmeta.ClaimedAtMetadataKey] != seatHandoverClaimedAt {
+		t.Fatalf("gc.claimed_at = %q, want the original %q", got.Metadata[beadmeta.ClaimedAtMetadataKey], seatHandoverClaimedAt)
+	}
+	if want := []string{successor.ID + ":" + work.ID}; !reflect.DeepEqual(started, want) {
+		t.Fatalf("work_started records = %v, want %v", started, want)
+	}
 }
