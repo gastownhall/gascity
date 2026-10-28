@@ -730,3 +730,47 @@ func TestWakeSessionRecordsExplicitWakeForContinuityEligibleArchivedBead(t *test
 		t.Fatalf("wait status/state = %q/%q, want closed/canceled", updatedWait.Status, updatedWait.Metadata["state"])
 	}
 }
+
+func TestWaitInfoFromBead_DecodesRegisteredResetPending(t *testing.T) {
+	flagged := WaitInfoFromBead(beads.Bead{Metadata: map[string]string{
+		"registered_epoch":         "2",
+		"registered_reset_pending": "true",
+	}})
+	if !flagged.RegisteredResetPending {
+		t.Fatal("RegisteredResetPending = false, want true for registered_reset_pending=true")
+	}
+	unflagged := WaitInfoFromBead(beads.Bead{Metadata: map[string]string{"registered_epoch": "2"}})
+	if unflagged.RegisteredResetPending {
+		t.Fatal("RegisteredResetPending = true, want false when registered_reset_pending is absent")
+	}
+}
+
+func TestWaitInfoContinuationStale(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		registered   string
+		flagged      bool
+		sessionEpoch string
+		want         bool
+	}{
+		{name: "unflagged/equal", registered: "2", sessionEpoch: "2"},
+		{name: "unflagged/different", registered: "2", sessionEpoch: "3", want: true},
+		{name: "unflagged/empty-registered", sessionEpoch: "3"},
+		{name: "unflagged/empty-session", registered: "2"},
+		{name: "flagged/at-registered-epoch", registered: "2", flagged: true, sessionEpoch: "2"},
+		{name: "flagged/at-next-epoch", registered: "2", flagged: true, sessionEpoch: "3"},
+		{name: "flagged/two-epochs-on", registered: "2", flagged: true, sessionEpoch: "4", want: true},
+		{name: "flagged/epoch-before", registered: "2", flagged: true, sessionEpoch: "1", want: true},
+		{name: "flagged/non-numeric-session", registered: "2", flagged: true, sessionEpoch: "x", want: true},
+		{name: "flagged/non-numeric-registered", registered: "x", flagged: true, sessionEpoch: "3", want: true},
+		{name: "flagged/empty-session", registered: "2", flagged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
+			if got := w.ContinuationStale(Info{ContinuationEpoch: tc.sessionEpoch}); got != tc.want {
+				t.Fatalf("ContinuationStale(registered=%q flagged=%v, session=%q) = %v, want %v",
+					tc.registered, tc.flagged, tc.sessionEpoch, got, tc.want)
+			}
+		})
+	}
+}

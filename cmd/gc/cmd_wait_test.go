@@ -4661,3 +4661,208 @@ func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
 		}
 	}
 }
+
+// resetWindowFixture drives one session through a fresh-restart window: a
+// reset request (Manager.RequestFreshRestart markers), wait registration
+// through CreateWait, starts that publish a new epoch (PreWakePatch), and wake
+// passes over the in-memory store.
+type resetWindowFixture struct {
+	t         *testing.T
+	store     beads.Store
+	sf        *sessionpkg.Store
+	sessionID string
+	depID     string
+	waitID    string
+	now       time.Time
+}
+
+func newResetWindowFixture(t *testing.T) *resetWindowFixture {
+	t.Helper()
+	store := beads.NewMemStore()
+	dep, err := store.Create(beads.Bead{Title: "upstream step", Type: "task"})
+	if err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	sess, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "2",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return &resetWindowFixture{
+		t:         t,
+		store:     store,
+		sf:        sessionFrontDoor(store),
+		sessionID: sess.ID,
+		depID:     dep.ID,
+		now:       time.Date(2026, 10, 24, 16, 7, 0, 0, time.UTC),
+	}
+}
+
+func (fx *resetWindowFixture) tick() time.Time {
+	fx.now = fx.now.Add(time.Minute)
+	return fx.now
+}
+
+func (fx *resetWindowFixture) patch(p sessionpkg.MetadataPatch) {
+	fx.t.Helper()
+	if err := fx.sf.ApplyPatch(fx.sessionID, p); err != nil {
+		fx.t.Fatalf("ApplyPatch(%v): %v", p, err)
+	}
+}
+
+func (fx *resetWindowFixture) requestReset() {
+	fx.t.Helper()
+	fx.patch(sessionpkg.MetadataPatch{
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	})
+}
+
+func (fx *resetWindowFixture) register() {
+	fx.t.Helper()
+	w, err := fx.sf.CreateWait(sessionpkg.WaitSpec{
+		SessionID:        fx.sessionID,
+		Kind:             "deps",
+		DepIDs:           []string{fx.depID},
+		DepMode:          "all",
+		Note:             "pick up the next step",
+		CreatedBySession: "coordinator",
+		Now:              fx.tick(),
+	})
+	if err != nil {
+		fx.t.Fatalf("CreateWait: %v", err)
+	}
+	fx.waitID = w.ID
+}
+
+func (fx *resetWindowFixture) closeDep() {
+	fx.t.Helper()
+	if err := fx.store.Close(fx.depID); err != nil {
+		fx.t.Fatalf("close dep: %v", err)
+	}
+}
+
+// startCreating writes the PreWake patch that consumes the pending reset and
+// publishes epoch, leaving the session creating.
+func (fx *resetWindowFixture) startCreating(epoch int) {
+	fx.t.Helper()
+	p := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+		Generation:        epoch,
+		InstanceToken:     fmt.Sprintf("tok-%d", epoch),
+		ContinuationEpoch: epoch,
+		Now:               fx.tick(),
+	})
+	p["restart_requested"] = ""
+	fx.patch(p)
+}
+
+// start runs a start that consumes the pending reset through to active.
+func (fx *resetWindowFixture) start(epoch int) {
+	fx.t.Helper()
+	fx.startCreating(epoch)
+	fx.patch(sessionpkg.MetadataPatch{"state": string(sessionpkg.StateActive)})
+}
+
+func (fx *resetWindowFixture) wakePass() {
+	fx.t.Helper()
+	if _, err := prepareWaitWakeState(fx.store, fx.tick()); err != nil {
+		fx.t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+}
+
+func (fx *resetWindowFixture) wait() beads.Bead {
+	fx.t.Helper()
+	b, err := fx.store.Get(fx.waitID)
+	if err != nil {
+		fx.t.Fatalf("Get wait: %v", err)
+	}
+	return b
+}
+
+func (fx *resetWindowFixture) requireNotCanceled(stage string) {
+	fx.t.Helper()
+	if b := fx.wait(); b.Status == "closed" || b.Metadata["state"] == waitStateCanceled {
+		fx.t.Fatalf("%s: wait status=%q state=%q last_error=%q, want it still open",
+			stage, b.Status, b.Metadata["state"], b.Metadata["last_error"])
+	}
+}
+
+func (fx *resetWindowFixture) requireReady(stage string) {
+	fx.t.Helper()
+	fx.requireNotCanceled(stage)
+	if got := fx.wait().Metadata["state"]; got != waitStateReady {
+		fx.t.Fatalf("%s: wait state = %q, want %q", stage, got, waitStateReady)
+	}
+}
+
+func (fx *resetWindowFixture) requireCanceled(stage, reason string) {
+	fx.t.Helper()
+	b := fx.wait()
+	if b.Status != "closed" || b.Metadata["state"] != waitStateCanceled || b.Metadata["last_error"] != reason {
+		fx.t.Fatalf("%s: wait status=%q state=%q last_error=%q, want closed canceled %q",
+			stage, b.Status, b.Metadata["state"], b.Metadata["last_error"], reason)
+	}
+}
+
+// TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset covers a wait
+// registered after a fresh restart was requested but before a start consumed
+// it (#8406): it belongs to the conversation that start opens, so the epoch
+// rotation must not cancel it continuation-stale.
+func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(fx *resetWindowFixture)
+	}{
+		{
+			name: "dep-closes-after-start",
+			run: func(fx *resetWindowFixture) {
+				fx.requestReset()
+				fx.register()
+				fx.wakePass()
+				fx.requireNotCanceled("inside the reset window")
+				fx.start(3)
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireReady("after the start")
+			},
+		},
+		{
+			name: "dep-closes-before-start",
+			run: func(fx *resetWindowFixture) {
+				fx.requestReset()
+				fx.register()
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireReady("inside the reset window")
+				fx.start(3)
+				fx.wakePass()
+				fx.requireReady("after the start")
+			},
+		},
+		{
+			name: "flagged-wait-on-closed-session-is-session-closed",
+			run: func(fx *resetWindowFixture) {
+				fx.requestReset()
+				fx.register()
+				if err := fx.store.Close(fx.sessionID); err != nil {
+					fx.t.Fatalf("close session: %v", err)
+				}
+				fx.wakePass()
+				fx.requireCanceled("after the session closed", "session-closed")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.run(newResetWindowFixture(t))
+		})
+	}
+}
