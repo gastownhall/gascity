@@ -2285,8 +2285,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Skip beads with unrecognized states. This enables forward-compatible
-		// rollback: a newer version's states, and this binary's own archived and
-		// draining rows, are ignored rather than crashing the reconciler. An
+		// rollback: a newer gc version's states, and this binary's own parked
+		// rows it does not manage (archived, closing, a draining without its
+		// drain-ack reason), are ignored rather than crashing the reconciler. An
 		// interrupted close of this binary's own (a close code left on an open
 		// row when the status Close was lost) is finished first instead, or
 		// rolled back to asleep when its gate now refuses it, and the next tick

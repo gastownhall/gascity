@@ -3261,6 +3261,55 @@ func TestIsKnownState_UnknownStates(t *testing.T) {
 	}
 }
 
+// TestIsUnknownStateRefusal_PinsTheSkippedPopulation is the operator-facing
+// projection of the reconciler's skip (issue #1497): every state the
+// controller manages, plus the drain-ack stop-pending row its own handler
+// finishes before the skip, is not refused; every row the controller skips
+// (another gc version's state, or this version's own parked rows) is
+// refused, naming the raw state and the close that releases it. The census
+// and the v2 migration gate judge the same population through
+// isUnknownStateInfo.
+func TestIsUnknownStateRefusal_PinsTheSkippedPopulation(t *testing.T) {
+	managed := []string{
+		"active", "asleep", "awake", "stopped", "suspended", "orphaned",
+		"closed", "quarantined", string(sessionpkg.StateStartPending), "creating",
+		"drained", string(sessionpkg.StateFailedCreate), "",
+	}
+	for _, state := range managed {
+		info := sessionpkg.Info{ID: "gc-1", MetadataState: state}
+		if isUnknownStateInfo(info) {
+			t.Errorf("state %q: isUnknownStateInfo = true, want false", state)
+		}
+		if why := unknownStateRefusal(info); why != "" {
+			t.Errorf("state %q: unknownStateRefusal = %q, want empty", state, why)
+		}
+	}
+	// A drain-ack stop-pending row is owned by the drain-ack handler, which
+	// continues before the skip, so it is not part of the skipped population
+	// even though its raw state is "draining".
+	stopPending := sessionpkg.Info{ID: "gc-1", MetadataState: string(sessionpkg.StateDraining), StateReason: sessionpkg.DrainAckStopPendingReason}
+	if isUnknownStateInfo(stopPending) {
+		t.Error("a drain-ack stop-pending row is managed, want it not refused")
+	}
+	if why := unknownStateRefusal(stopPending); why != "" {
+		t.Errorf("drain-ack stop-pending refusal = %q, want empty", why)
+	}
+	skipped := []string{"archived", "closing", "draining", " active ", "future-state"}
+	for _, state := range skipped {
+		info := sessionpkg.Info{ID: "gc-1", MetadataState: state}
+		if !isUnknownStateInfo(info) {
+			t.Errorf("state %q: isUnknownStateInfo = false, want true", state)
+		}
+		why := unknownStateRefusal(info)
+		if !strings.Contains(why, fmt.Sprintf("%q", state)) {
+			t.Errorf("state %q: refusal %q does not name the raw state", state, why)
+		}
+		if !strings.Contains(why, "gc session close gc-1") {
+			t.Errorf("state %q: refusal %q does not name `gc session close`", state, why)
+		}
+	}
+}
+
 func TestForwardCompatibility_UnknownState(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
