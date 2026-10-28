@@ -139,6 +139,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//examples/bd:assets/scripts/dolt-enospc.sh",
         "//internal/bootstrap/packs/core:pack_files",
     ] + select({
         "//:gotags_integration": [

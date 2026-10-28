@@ -2471,6 +2471,38 @@ wait_for_managed_pid_ready() {
     return 1
 }
 
+# launch_dolt_sql_server_detached starts dolt sql-server for the start path
+# that runs without the gc helper and prints the server PID. The server is
+# city infrastructure, not part of whatever process ran the start, so it is
+# detached the way the managed start detaches it: it leads its own session
+# (setsid) or, where setsid is missing, its own process group (job control),
+# so a kill aimed at the caller's process group leaves it running; and it
+# drops the per-session identity variables, so a process-table sweep keyed on
+# GC_SESSION_ID does not count it as the caller's. The variable list mirrors
+# managedDoltSessionScopedEnvKeys in cmd/gc/dolt_start_managed.go. Close the
+# startup lock fd in the child so the flock is released when this starter
+# exits.
+launch_dolt_sql_server_detached() {
+    (
+        for key in GC_HOOK_DEADLINE GC_SESSION_ID GC_SESSION_NAME GC_ALIAS \
+            GC_AGENT GC_TEMPLATE GC_SESSION_ORIGIN GC_RUNTIME_EPOCH \
+            GC_CONTINUATION_EPOCH GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN \
+            BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
+            unset "$key"
+        done
+        if command -v setsid >/dev/null 2>&1; then
+            # Without job control the background child is not a process
+            # group leader, so setsid(1) calls setsid(2) in place and the
+            # PID below is the server's.
+            nohup setsid sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        else
+            set -m
+            nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        fi
+        echo "$!"
+    )
+}
+
 load_start_managed_from_gc() {
     local gc_bin host output key value status parsed=false
     host=$(connect_host)
@@ -3571,10 +3603,8 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
-        # Start dolt sql-server with config file. Close the startup lock fd in
-        # the child so the flock is released when this starter exits.
-        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
-        local server_pid=$!
+        local server_pid
+        server_pid=$(launch_dolt_sql_server_detached)
 
         # Write PID file.
         echo "$server_pid" > "$PID_FILE"
@@ -4724,7 +4754,26 @@ else
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
+        enospc_disk_has_headroom && return 1
         return 0
+    }
+
+    enospc_disk_has_headroom() {
+        enospc_dir="${DATA_DIR:-}"
+        if [ -z "$enospc_dir" ] || [ ! -d "$enospc_dir" ]; then
+            enospc_dir=$(dirname "$LOG_FILE")
+        fi
+        enospc_floor="${GC_DOLT_WARN_FREE_BYTES:-2147483648}"
+        case "$enospc_floor" in
+            ''|*[!0-9]*) enospc_floor=2147483648 ;;
+        esac
+        # 0 means "no disk warning" to gc; it must not switch the skip off.
+        [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
+        enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+        case "$enospc_avail_kb" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$enospc_avail_kb" -ge $((enospc_floor / 1024)) ]
     }
 fi
 
@@ -4741,7 +4790,8 @@ op_recover() {
     # itself amplifies the failure: each restart triggers a conjoin/backup
     # sync that writes another partial table file to the backup remote.
     # Require manual intervention (free disk space) before recovery
-    # resumes. See gastownhall/gascity#2158.
+    # resumes; the skip lifts once the data dir is back above the free-space
+    # floor (see dolt-enospc.sh). See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2

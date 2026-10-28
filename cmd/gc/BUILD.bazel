@@ -1514,6 +1514,8 @@ go_test(
         "gc_beads_bd_bind_host_test.go",
         "gc_beads_bd_config_commit_test.go",
         "gc_beads_bd_config_value_test.go",
+        "gc_beads_bd_detached_launch_test.go",
+        "gc_beads_bd_enospc_test.go",
         "gc_beads_bd_force_reinit_guard_test.go",
         "gc_beads_bd_gc_bin_guard_test.go",
         "gc_beads_bd_identity_test.go",
