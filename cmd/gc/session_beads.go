@@ -2573,20 +2573,33 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if isNamedSessionBead(b) {
 				identity := namedSessionIdentity(b)
 				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
-					if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, stderr) {
-						if idx, ok := indexBySessionName[sn]; ok {
-							openBeads[idx].Status = "open"
-							if openBeads[idx].Metadata == nil {
-								openBeads[idx].Metadata = map[string]string{}
-							}
-							fold := session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity)
-							maps.Copy(fold, session.Cell(openBeads[idx].Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
-							for k, v := range fold {
-								openBeads[idx].Metadata[k] = v
+					// An identity that still matches two configured named
+					// sessions (a bare leaf two bindings claim) resolves to
+					// neither (gastownhall/gascity#5957): keep the row out of
+					// the retire path and let the work-gated orphan handling
+					// below decide — a live row with open assigned work stays.
+					if candidates := config.NamedSessionBareCandidates(cfg, identity); len(candidates) >= 2 {
+						names := make([]string, len(candidates))
+						for i, c := range candidates {
+							names[i] = c.QualifiedName()
+						}
+						fmt.Fprintf(stderr, "session beads: keeping %s: named identity %q matches %d configured named sessions (%s)\n", b.ID, identity, len(candidates), strings.Join(names, ", ")) //nolint:errcheck
+					} else {
+						if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, stderr) {
+							if idx, ok := indexBySessionName[sn]; ok {
+								openBeads[idx].Status = "open"
+								if openBeads[idx].Metadata == nil {
+									openBeads[idx].Metadata = map[string]string{}
+								}
+								fold := session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity)
+								maps.Copy(fold, session.Cell(openBeads[idx].Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
+								for k, v := range fold {
+									openBeads[idx].Metadata[k] = v
+								}
 							}
 						}
+						continue
 					}
-					continue
 				}
 			}
 			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {

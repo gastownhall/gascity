@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -90,6 +91,80 @@ func requalifySeedWork(t *testing.T, store beads.Store) beads.Bead {
 		t.Fatalf("claiming work: %v", err)
 	}
 	return w
+}
+
+// requalifyAmbiguousCity is the config in which the bare leaf maps to two
+// configured named sessions: the forward bare rule cannot choose between
+// them, so neither direction may resolve the bare row.
+func requalifyAmbiguousCity(mode string) *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "contentbuild", Path: "contentbuild"}},
+		Agents: []config.Agent{
+			{Name: requalifyBare, Dir: "contentbuild", BindingName: "lane", StartCommand: "true"},
+			{Name: requalifyBare, Dir: "contentbuild", BindingName: "ops", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: requalifyBare, Dir: "contentbuild", BindingName: "lane", Mode: mode},
+			{Template: requalifyBare, Dir: "contentbuild", BindingName: "ops", Mode: mode},
+		},
+	}
+}
+
+// AC-4: an ambiguous leaf keeps the bare row untouched. With two bindings
+// claiming the bare identity the row is neither selected nor migrated, it is
+// not stopped, closed, retired or unclaimed, and the tick logs a line naming
+// both candidates.
+func TestLegacyAmbiguousLeafKeepsTheBareRow(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := requalifyAmbiguousCity("on_demand")
+	row := requalifySeedRow(t, store, "on_demand")
+	work := requalifySeedWork(t, store)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), requalifyBare, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := t.TempDir()
+	clk := &clock.Fake{Time: namedEffectNow}
+	var stderr bytes.Buffer
+	requalifyTick(t, cityPath, cfg, store, transportFake{sp}, clk, &stderr)
+
+	got, err := store.Get(row.ID)
+	if err != nil {
+		t.Fatalf("reading the row: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("the row was closed: %v", got.Metadata)
+	}
+	m := got.Metadata
+	if m[namedSessionIdentityMetadata] != requalifyBare || m["alias"] != requalifyBare || m["session_name"] != requalifyBare {
+		t.Errorf("the row was migrated: identity=%q alias=%q session_name=%q, want all three bare", m[namedSessionIdentityMetadata], m["alias"], m["session_name"])
+	}
+	if s := stderr.String(); !strings.Contains(s, fmt.Sprintf("named identity %q matches 2 configured named sessions", requalifyBare)) ||
+		!strings.Contains(s, requalifyQualified) || !strings.Contains(s, "contentbuild/ops."+requalifyBare) {
+		t.Errorf("tick stderr does not name both candidates: %s", s)
+	}
+	if s := stderr.String(); strings.Contains(s, "retiring") || strings.Contains(s, "unclaim") {
+		t.Errorf("tick stderr retired the row: %s", s)
+	}
+	for _, b := range requalifyOpenRows(t, store) {
+		if b.ID != row.ID {
+			t.Errorf("a second open row %s exists: session_name=%q", b.ID, b.Metadata["session_name"])
+		}
+	}
+	w, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("reading work: %v", err)
+	}
+	if w.Status != "in_progress" || w.Assignee != requalifyBare {
+		t.Errorf("work = %s/%q, want in_progress assigned %q", w.Status, w.Assignee, requalifyBare)
+	}
+	if !liveOpenSessionAssignmentExists(store, requalifyBare) {
+		t.Error("liveOpenSessionAssignmentExists(golden-hon) = false, want the bare row to still own its work")
+	}
+	if !sp.IsRunning(requalifyBare) {
+		t.Error("the runtime was stopped")
+	}
 }
 
 // requalifyTick runs one legacy reconciler tick — the desired-state build
