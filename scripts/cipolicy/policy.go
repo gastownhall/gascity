@@ -385,9 +385,7 @@ const (
 )
 
 // requiredFilterPaths pins the paths each of ci.yml's changes filters must
-// keep. The advisory probes' mail and beads filters left with them for
-// advisory-probes.yml, whose paths scripts/advisory_probes_workflow_test.go
-// pins.
+// keep. scripts/advisory_probes_workflow_test.go pins advisory-probes.yml's.
 var requiredFilterPaths = map[string][]string{
 	"packs": {
 		"examples/gastown/**",

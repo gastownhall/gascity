@@ -1,8 +1,8 @@
 name: Advisory probes
 
-# Live probes of upstream HEADs that must never block a merge: the contract
-# radar (gc HEAD against beads main HEAD) and MCP mail conformance (against
-# the pinned mcp_agent_mail). No required check waits on them.
+# Advisory live probes of upstream code that must never block a merge: the
+# contract radar (gc HEAD against beads main HEAD) and MCP mail conformance
+# (against the pinned mcp_agent_mail). No required check waits on them.
 #
 # They run in this workflow, not in ci.yml beside the required Check and
 # CI / required (ga-ylpbsy.55). GitHub reports a red Check or CI / required
@@ -12,9 +12,9 @@ name: Advisory probes
 # feeds CI / required (scripts/ci_required_coverage_test.go); an advisory job
 # belongs here.
 #
-# Only the workflow changed: the triggers, path filters, runners and check
-# names are ci.yml's (scripts/advisory_probes_workflow_test.go), and RC Gate
-# calls this workflow beside ci.yml.
+# The triggers, path filters and runners are ci.yml's
+# (scripts/advisory_probes_workflow_test.go), and RC Gate calls this
+# workflow beside ci.yml.
 on:
   workflow_call:
     inputs:

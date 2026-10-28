@@ -30,9 +30,10 @@ jobs:
       force_blacksmith: true
     secrets: inherit
 
-  # The advisory live probes (contract radar, MCP mail conformance) left
-  # ci.yml for their own workflow, so RC calls it beside CI parity. They read
-  # no secret. RC summary fails on a red radar, as it did inside CI parity.
+  # The advisory live probes (contract radar, MCP mail conformance) run in
+  # their own workflow, beside CI parity, and read no secret. RC summary
+  # needs them, so a red radar fails the gate; the acceptance, integration
+  # and tutorial chain waits on CI parity only, so it still runs.
   probes_parity:
     name: Advisory probes parity
     permissions:

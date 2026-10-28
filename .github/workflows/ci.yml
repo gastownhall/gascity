@@ -146,7 +146,7 @@ jobs:
   #     this tree.
   # Check and CI / required keep their names for branch protection and the
   # main ruleset; both fan in exactly those gating jobs, and every job here
-  # feeds CI / required. The advisory live probes of upstream HEADs (contract
+  # feeds CI / required. The advisory live probes of upstream code (contract
   # radar against beads main HEAD, MCP mail conformance) run in
   # advisory-probes.yml, so a red probe never shares a run with the required
   # checks.

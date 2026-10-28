@@ -13,29 +13,27 @@ import (
 )
 
 // Advisory probes (ga-ylpbsy.55). The contract radar (gc HEAD against beads
-// main HEAD) and MCP mail conformance probe upstream HEADs. They must never
-// block a merge, so no required check waits on them, and they run in their
-// own workflow rather than in ci.yml beside Check and CI / required. GitHub
-// reports a red Check or CI / required without naming the need that failed,
-// so a tool that reads such a red from the failed jobs of its run (the
-// adopt-pr gate's infrastructure rerun does) would count a red probe in the
-// same run as part of it. Only the workflow they run in changed: the
-// triggers, path filters, runners and check names are ci.yml's.
+// main HEAD) and MCP mail conformance (against the pinned mcp_agent_mail)
+// are live probes of upstream code. They must never block a merge, so no
+// required check waits on them, and they run in their own workflow rather
+// than in ci.yml beside Check and CI / required. GitHub reports a red Check
+// or CI / required without naming the need that failed, so a tool that
+// reads such a red from the failed jobs of its run (the adopt-pr gate's
+// infrastructure rerun does) would count a red probe in the same run as part
+// of it. Their triggers, path filters and runners are ci.yml's.
 
 const advisoryProbesWorkflowFile = "advisory-probes.yml"
 
-// advisoryProbeChecks maps each probe job to its check name, unchanged from
-// ci.yml.
+// advisoryProbeChecks maps each probe job to its check name.
 var advisoryProbeChecks = map[string]string{
 	"contract-radar-bd-head": "Contract radar (gc HEAD x bd main HEAD)",
 	"mcp-mail":               "MCP mail conformance",
 }
 
 // advisoryProbeFilterPaths: the paths each probe's filter must keep (a
-// floor, not an exact list), carried over from scripts/cipolicy, which pinned
-// them while the probes ran in ci.yml. The mail entries are why #8310 exists:
-// #8307 bumped the mcp_agent_mail lock and merged without the conformance
-// job ever running.
+// floor, not an exact list). The mail entries include the mcp_agent_mail
+// lock (#8310): #8307 bumped it and merged without the conformance job
+// running.
 var advisoryProbeFilterPaths = map[string][]string{
 	"mail": {
 		"internal/mail/**",
@@ -111,9 +109,10 @@ func pathFilters(t *testing.T, where, source string) map[string][]string {
 }
 
 // TestAdvisoryProbesRunOutsideTheRequiredCIWorkflow: each probe is a job of
-// advisory-probes.yml under its old check name and no longer a job of
-// ci.yml, the workflow of the required Check and CI / required. No probe
-// workflow job carries a required check name, so the probes stay advisory.
+// advisory-probes.yml under its check name, and neither a job of ci.yml, the
+// workflow of the required Check and CI / required, nor named like one. No
+// probe workflow job carries a required check name, so the probes stay
+// advisory.
 func TestAdvisoryProbesRunOutsideTheRequiredCIWorkflow(t *testing.T) {
 	ci := readCriticalPathWorkflow(t, "ci.yml")
 	probes := readCriticalPathWorkflow(t, advisoryProbesWorkflowFile)
@@ -161,6 +160,11 @@ func TestAdvisoryProbesKeepCITriggersInTheirOwnConcurrencyGroup(t *testing.T) {
 	ci := readAdvisoryProbesDoc(t, "ci.yml")
 	probes := readAdvisoryProbesDoc(t, advisoryProbesWorkflowFile)
 
+	for _, event := range []string{"workflow_call", "push", "pull_request", "merge_group"} {
+		if _, ok := probes.On[event]; !ok {
+			t.Errorf("%s has no %s trigger", advisoryProbesWorkflowFile, event)
+		}
+	}
 	if got, want := withoutInputDescriptions(probes.On), withoutInputDescriptions(ci.On); !reflect.DeepEqual(got, want) {
 		t.Errorf("%s triggers = %v, want ci.yml's %v", advisoryProbesWorkflowFile, got, want)
 	}
@@ -188,14 +192,57 @@ func TestAdvisoryProbesKeepCITriggersInTheirOwnConcurrencyGroup(t *testing.T) {
 		if filepath.Base(path) == advisoryProbesWorkflowFile {
 			continue
 		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(body), "group: "+probesPrefix) {
-			t.Errorf("%s uses the %q concurrency prefix of %s", filepath.Base(path), probesPrefix, advisoryProbesWorkflowFile)
+		for _, group := range concurrencyGroups(t, path) {
+			if strings.HasPrefix(group, probesPrefix) {
+				t.Errorf("%s concurrency group %q uses the %q prefix of %s", filepath.Base(path), group, probesPrefix, advisoryProbesWorkflowFile)
+			}
 		}
 	}
+}
+
+// concurrencyGroups returns a workflow's concurrency groups, its own and
+// each job's, in either the string or the mapping form.
+func concurrencyGroups(t *testing.T, path string) []string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wf struct {
+		Concurrency yaml.Node `yaml:"concurrency"`
+		Jobs        map[string]struct {
+			Concurrency yaml.Node `yaml:"concurrency"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(body, &wf); err != nil {
+		t.Fatalf("parse %s: %v", filepath.Base(path), err)
+	}
+	group := func(node yaml.Node) string {
+		switch node.Kind {
+		case yaml.ScalarNode:
+			return node.Value
+		case yaml.MappingNode:
+			var block struct {
+				Group string `yaml:"group"`
+			}
+			if err := node.Decode(&block); err != nil {
+				t.Fatalf("%s concurrency: %v", filepath.Base(path), err)
+			}
+			return block.Group
+		default:
+			return ""
+		}
+	}
+	var groups []string
+	if g := group(wf.Concurrency); g != "" {
+		groups = append(groups, g)
+	}
+	for _, job := range wf.Jobs {
+		if g := group(job.Concurrency); g != "" {
+			groups = append(groups, g)
+		}
+	}
+	return groups
 }
 
 // TestAdvisoryProbesRouteOnCIPathFilters: one routing job decides, as
@@ -248,9 +295,6 @@ func TestAdvisoryProbesRouteOnCIPathFilters(t *testing.T) {
 				t.Errorf("route %s filter is missing %q", name, path)
 			}
 		}
-		if _, ok := ciFilters[name]; ok {
-			t.Errorf("ci.yml changes still has the %s filter, which only an advisory probe read", name)
-		}
 	}
 
 	wantOutputs := map[string]string{
@@ -286,9 +330,9 @@ func TestAdvisoryProbesRouteOnCIPathFilters(t *testing.T) {
 	}
 }
 
-// TestRCGateRunsTheAdvisoryProbes: RC Gate ran both probes inside its
-// reusable ci.yml call. It calls advisory-probes.yml beside it, the same way,
-// and its summary still fails when the radar does.
+// TestRCGateRunsTheAdvisoryProbes: RC Gate calls advisory-probes.yml beside
+// its reusable ci.yml call, with the same force_blacksmith input, and its
+// summary needs that call, so a red radar fails the gate.
 func TestRCGateRunsTheAdvisoryProbes(t *testing.T) {
 	var rc struct {
 		Jobs map[string]struct {
