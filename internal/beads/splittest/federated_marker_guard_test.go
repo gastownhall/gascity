@@ -66,7 +66,7 @@ var reviewedMarkers = map[string]reviewedMarker{
 	"internal/api/huma_handlers_convoys.go (*Server).humaDeleteWorkflow":       {"relic", 1, "workflowStores root probe in workflow teardown"},
 	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                  {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
 	"cmd/gc/cmd_convoy_dispatch.go cmdWorkflowDelete":                          {"relic", 1, "workflow delete sweeps the retained scope-store copies beside the binding"},
-	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).collect":    {"relic", 1, "source-workflow walk over scope stores and the binding"},
+	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).scanStore":  {"relic", 1, "the source-workflow walk's root probe over scope stores and the binding (child sources are ratcheted, not marked)"},
 	"cmd/gc/cmd_convoy_dispatch.go assessZeroMatchSourceWorkflowScan":          {"relic", 1, "zero-match re-scan over the same views"},
 	"internal/api/convoy_event_stream.go workflowEventBeadFromSubject":         {"relic", 1, "workflowStores residence probe (graph, city, rigs)"},
 	"internal/api/convoy_event_stream.go workflowEventRoot":                    {"relic", 1, "workflowStores root scan (graph, city, rigs)"},
@@ -122,6 +122,10 @@ func scanMarkerUses(fset *token.FileSet, rel string, src []byte) ([]markerUse, e
 		case imp.Name.Name != "_":
 			local = imp.Name.Name
 		}
+	}
+	// Inside internal/beads the markers are the package's own identifiers.
+	if file.Name.Name == "beads" && strings.HasPrefix(rel, "internal/beads/") && !strings.Contains(strings.TrimPrefix(rel, "internal/beads/"), "/") {
+		dot = true
 	}
 	if local == "" && !dot {
 		return nil, nil
@@ -209,6 +213,19 @@ func shadowed(beads int) { _ = beads }
 	}
 }
 
+func TestScanMarkerUsesSeesBareMarkersInsideInternalBeads(t *testing.T) {
+	src := `package beads
+func probe(s Store) { _, _ = FederatedGet(s, "x") }
+`
+	uses, err := scanMarkerUses(token.NewFileSet(), "internal/beads/probe.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uses) != 1 || uses[0].fn != "probe" || uses[0].kind != "federated" {
+		t.Fatalf("uses = %+v, want one federated use in probe", uses)
+	}
+}
+
 func TestReadMarkersAreReviewed(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -233,8 +250,8 @@ func TestReadMarkersAreReviewed(t *testing.T) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, "internal/beads/") && !strings.Contains(strings.TrimPrefix(rel, "internal/beads/"), "/") {
-			return nil // the markers' own package
+		if rel == "internal/beads/federated_read.go" {
+			return nil // the markers' own definitions
 		}
 		src, err := os.ReadFile(path)
 		if err != nil {
