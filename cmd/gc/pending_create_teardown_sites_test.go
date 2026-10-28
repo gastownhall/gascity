@@ -492,6 +492,15 @@ func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testin
 	}{
 		{name: "row unchanged", wantStop: true},
 		{
+			name: "row closed",
+			after: func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
+				if err := env.store.Close(session.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantStop: true,
+		},
+		{
 			name: "start committed",
 			after: func(_ *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
 				env.setSessionMetadata(session, map[string]string{"state": string(sessionpkg.StateActive), "pending_create_claim": ""})

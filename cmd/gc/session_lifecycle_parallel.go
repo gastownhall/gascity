@@ -4349,8 +4349,10 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 // decision made from the older read (#7751). So it re-reads the row from store
 // and tears down only while the fresh row still matches the snapshot
 // (teardownSnapshotCurrent); otherwise it holds without a stop, and the next
-// tick decides from a fresh snapshot. A read does not bump the row's
-// revision. The identity reads and the post-stop confirmation are held
+// tick decides from a fresh snapshot. A bead-scoped pool row that has closed
+// is still torn down: its name embeds its bead ID, so no successor starts
+// under it and nothing else addresses a box left there (ga-vcjr9). A read
+// does not bump the row's revision. The identity reads and the post-stop confirmation are held
 // to postStartObservationBound each, so a wedged backend costs a tick at most
 // one unbounded Stop per held row; a read that does not answer in time holds.
 func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
@@ -4390,7 +4392,9 @@ func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessi
 				"session reconciler: holding pending create %s open: re-reading it before tearing down its runtime %q: %v", info.ID, name, err))
 			return false
 		}
-		if !teardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
+		fresh := sessionInfoFromBead(b)
+		closedPoolRow := pool && fresh.Closed
+		if !closedPoolRow && !teardownSnapshotCurrent(info, fresh) {
 			return false
 		}
 	}
