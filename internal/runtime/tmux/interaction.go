@@ -716,7 +716,9 @@ func (d *approvalDedup) clear(session string) {
 
 // Pending checks the tmux pane for an active Claude Code approval prompt,
 // Codex approval overlay or AskUserQuestion dialog (Kind "question", which
-// offers no options: it is answered in the terminal).
+// offers no options: it is answered in the terminal). A question's Prompt is
+// its question text, bounded; its choices reach a client only in the text of
+// a refused nudge or Respond.
 // Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	dialog, err := t.dialogInPane(name)
@@ -748,7 +750,7 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    dialog.question.Question,
+			Prompt:    boundPromptText(dialog.question.Question),
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}

@@ -39,9 +39,9 @@ import (
 //	2. Cancel
 //
 // Its key is its own bottom-most block: the two-option "Submit answers /
-// Cancel" menu directly under "Ready to submit your answers?", anchored
-// higher up by "Review your answers" or the ✔ Submit tab strip. One Enter on
-// this page submits every answer.
+// Cancel" menu under "Ready to submit your answers?", blank rows between them
+// allowed, anchored higher up by "Review your answers" or the ✔ Submit tab
+// strip. One Enter on this page submits every answer.
 //
 // The dialog is live only while the footer is the last thing on screen. Once
 // it is answered the frame stays in scrollback with the agent's output (or
@@ -74,16 +74,18 @@ var (
 )
 
 const (
-	// askUserQuestionFooterWrapRows is how many non-blank rows from the pane's
-	// bottom the select footer may span: its own row plus the rows a narrow
-	// pane wraps it onto, joined to match askUserQuestionFooterRe.
+	// askUserQuestionFooterWrapRows is how many rows from the pane's bottom
+	// the select footer may span: its own row plus the adjacent rows a
+	// narrow pane wraps it onto, joined to match askUserQuestionFooterRe.
 	askUserQuestionFooterWrapRows = 3
 
 	// questionDialogMaxRows bounds how far above the footer the question
 	// page's header row may sit.
 	questionDialogMaxRows = 60
 
-	// askUserQuestionPromptMax bounds the prompt text a client is shown, in runes.
+	// askUserQuestionPromptMax bounds, in runes, the text a client is shown
+	// for a question: the prompt Pending reports and the description a
+	// refusal carries.
 	askUserQuestionPromptMax = 400
 )
 
@@ -158,27 +160,25 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 	return q
 }
 
-// questionFooterRow returns the index in block of the row the select footer
-// starts on, or -1. The footer must own the pane's bottom: its rows are the
-// bottom-most non-blank ones, so a footer with a composer or output standing
-// below it does not match, however it is wrapped.
+// questionFooterRow returns the index in block, which ends in a non-blank
+// row, of the row the select footer starts on, or -1. The footer must own the
+// pane's bottom: its rows are block's last ones, so a footer with a composer
+// or output standing below it does not match, however it is wrapped. A wrap
+// puts the footer on adjacent rows, so a blank row ends it.
 func questionFooterRow(block []string) int {
-	var tail []int
-	for i := len(block) - 1; i >= 0 && len(tail) < askUserQuestionFooterWrapRows; i-- {
-		if strings.TrimSpace(block[i]) != "" {
-			tail = append([]int{i}, tail...)
-		}
+	top := len(block)
+	for top > 0 && len(block)-top < askUserQuestionFooterWrapRows && strings.TrimSpace(block[top-1]) != "" {
+		top--
 	}
 	// Bottom-most candidate first: the footer's own row, then any row it
 	// wrapped onto above it.
-	for k := len(tail) - 1; k >= 0; k-- {
-		start := tail[k]
+	for start := len(block) - 1; start >= top; start-- {
 		if !strings.HasPrefix(strings.TrimSpace(block[start]), "Enter to select") {
 			continue
 		}
-		joined := make([]string, 0, len(tail)-k)
-		for _, j := range tail[k:] {
-			joined = append(joined, strings.TrimSpace(block[j]))
+		joined := make([]string, 0, len(block)-start)
+		for _, row := range block[start:] {
+			joined = append(joined, strings.TrimSpace(row))
 		}
 		if askUserQuestionFooterRe.MatchString(strings.Join(joined, " ")) {
 			return start
@@ -197,18 +197,35 @@ func trimTrailingBlankRows(lines []string) []string {
 	return lines[:end]
 }
 
+// lastNonBlankRows returns the indexes of the last n non-blank rows of lines,
+// top first, or of as many as lines holds.
+func lastNonBlankRows(lines []string, n int) []int {
+	rows := make([]int, n)
+	k := n
+	for i := len(lines) - 1; i >= 0 && k > 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			k--
+			rows[k] = i
+		}
+	}
+	return rows[k:]
+}
+
 // parseReviewPage returns the dialog's review page — the pane's bottom-most
-// block is the "Submit answers / Cancel" menu directly under "Ready to submit
-// your answers?" — or nil. One Enter on this page submits every answer.
+// non-blank rows are the "Submit answers / Cancel" menu under "Ready to submit
+// your answers?" — or nil. Blank rows may stand between the three, as they do
+// between a question page's question and its options. One Enter on this page
+// submits every answer.
 func parseReviewPage(lines []string) *parsedQuestion {
-	block := trimTrailingBlankRows(lines)
-	if len(block) < 3 || strings.TrimSpace(block[len(block)-3]) != "Ready to submit your answers?" {
+	rows := lastNonBlankRows(lines, 3)
+	if len(rows) < 3 || strings.TrimSpace(lines[rows[0]]) != "Ready to submit your answers?" {
 		return nil
 	}
+	prompt := rows[0]
 	q := &parsedQuestion{Question: "Ready to submit your answers?"}
 	labels := []string{"Submit answers", "Cancel"}
-	for k, row := range []string{block[len(block)-2], block[len(block)-1]} {
-		m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(row))
+	for k, row := range rows[1:] {
+		m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(lines[row]))
 		if m == nil || m[2] != fmt.Sprint(k+1) || strings.TrimSpace(m[3]) != labels[k] {
 			return nil
 		}
@@ -221,8 +238,8 @@ func parseReviewPage(lines []string) *parsedQuestion {
 	// is live only with its anchor above: the "Review your answers" heading
 	// or the ✔ Submit tab strip with its ☐/☒ chips.
 	anchored := false
-	for i := len(block) - 4; i >= 0 && (len(block)-3-i) <= questionDialogMaxRows; i-- {
-		row := block[i]
+	for i := prompt - 1; i >= 0 && prompt-i <= questionDialogMaxRows; i-- {
+		row := lines[i]
 		if askUserQuestionHeaderRe.MatchString(row) && q.Header == "" {
 			q.Header = strings.TrimSpace(askUserQuestionHeaderRe.FindStringSubmatch(row)[1])
 		}
@@ -248,10 +265,16 @@ func (q *parsedQuestion) promptText() string {
 	if len(q.Choices) > 0 {
 		text += " [" + strings.Join(q.Choices, " | ") + "]"
 	}
-	if utf8.RuneCountInString(text) > askUserQuestionPromptMax {
-		text = string([]rune(text)[:askUserQuestionPromptMax-1]) + "…"
+	return boundPromptText(text)
+}
+
+// boundPromptText cuts text a client is shown for a question to
+// askUserQuestionPromptMax runes, ending a cut one in an ellipsis.
+func boundPromptText(text string) string {
+	if utf8.RuneCountInString(text) <= askUserQuestionPromptMax {
+		return text
 	}
-	return text
+	return string([]rune(text)[:askUserQuestionPromptMax-1]) + "…"
 }
 
 // requestID is the stable ID of the page on screen: the same on every look

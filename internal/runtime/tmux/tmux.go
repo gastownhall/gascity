@@ -3440,10 +3440,10 @@ func isLookRefusal(err error) bool {
 
 // nudgePromptGuard takes a nudge's looks for a permission prompt (#2892) or
 // question dialog (#8150): under the nudge lock before the first key,
-// immediately before the paste, and immediately before every submit key. A look
-// that finds one, or cannot read the pane, aborts the nudge with no further
-// keys sent: text typed into a prompt is read as menu input, and Enter picks
-// its highlighted option.
+// immediately before every key of the composer clear, immediately before the
+// paste, and immediately before every submit key. A look that finds one, or
+// cannot read the pane, aborts the nudge with no further keys sent: text typed
+// into a prompt is read as menu input, and Enter picks its highlighted option.
 type nudgePromptGuard struct {
 	session, target string
 	// look returns a refusal (see isLookRefusal) when a prompt is on screen
@@ -3483,8 +3483,9 @@ func (g *nudgePromptGuard) refused(err error) error {
 }
 
 // noPendingPrompt, when set, is checked under the nudge lock before the first
-// key, immediately before the paste, and immediately before every submit key;
-// its error aborts the nudge with no further keys sent.
+// key, immediately before every key of the composer clear, immediately before
+// the paste, and immediately before every submit key; its error aborts the
+// nudge with no further keys sent.
 //
 // guardTurn makes a nudge whose submit keys would interrupt a running turn
 // (Codex's Escape-led submit, see submitSequenceInterrupts) wait for the
@@ -3599,8 +3600,13 @@ func (t *Tmux) nudgeSession(
 	// tell: a human may be mid-keystroke, and silently wiping their
 	// in-progress input is worse than the concatenation this clear otherwise
 	// prevents (#5192).
+	//
+	// Every key of the clear is preceded by a look for a permission prompt
+	// or question dialog: one that opened since the look above owns the
+	// pane's input, and a Ctrl-U meant for the input box would reach it
+	// (#8150).
 	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
-		if err := t.clearInputBeforePaste(ctx, session, target); err != nil {
+		if err := t.clearInputBeforePaste(ctx, session, target, prompt.check); err != nil {
 			return err
 		}
 	}

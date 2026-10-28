@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -155,6 +156,8 @@ func questionTmux(pane string) (*Tmux, *paneExecutor) {
 //     Code 2.1.304, macOS, tmux runtime).
 //   - question-multi-wrapped-footer-40x18.txt: a reconstruction of the C1 page
 //     at a width that wraps the select footer onto two rows.
+//   - review-page-blank-rows.txt: a reconstruction of the review page spaced
+//     the way the C1 page is, with blank rows between its prompt and its menu.
 func TestParseQuestionDialog_Fixtures(t *testing.T) {
 	cases := []struct {
 		fixture string
@@ -229,6 +232,15 @@ func TestParseQuestionDialog_Fixtures(t *testing.T) {
 			wantChoices:  []string{"Submit answers", "Cancel"},
 			wantFocused:  "Submit answers",
 		},
+		{
+			// The review page with a blank row between its prompt and its
+			// menu, as the 2.1.304 question page spaces its question and
+			// options.
+			fixture:      "review-page-blank-rows.txt",
+			wantQuestion: "Ready to submit your answers?",
+			wantChoices:  []string{"Submit answers", "Cancel"},
+			wantFocused:  "Submit answers",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -273,10 +285,12 @@ func TestProviderPendingReportsAskUserQuestionDialog(t *testing.T) {
 	if !strings.HasPrefix(pending.RequestID, "tmux-question-") {
 		t.Errorf("RequestID = %q, want the tmux-question- prefix", pending.RequestID)
 	}
-	for _, want := range []string{"be-tx30v", "How do you want to proceed?"} {
-		if !strings.Contains(pending.Prompt, want) {
-			t.Errorf("Prompt = %q, want it to carry %q", pending.Prompt, want)
-		}
+	const wantPrompt = "Push deploy/be-tx30v-gate to headfork and open the PR against gastownhall/beads. How do you want to proceed?"
+	if pending.Prompt != wantPrompt {
+		t.Errorf("Prompt = %q, want the question text %q", pending.Prompt, wantPrompt)
+	}
+	if pending.Metadata["header"] != "be-tx30v" {
+		t.Errorf("Metadata[header] = %q, want be-tx30v", pending.Metadata["header"])
 	}
 	if pending.Metadata["source"] != "tmux" {
 		t.Errorf("Metadata[source] = %q, want tmux", pending.Metadata["source"])
@@ -551,6 +565,9 @@ func TestPendingRejectsNonDialogPanes(t *testing.T) {
 		{"answered frame above an idle composer", answeredAskUserQuestionPane},
 		{"answered frame above working output", answeredAskUserQuestionWorkingPane},
 		{"control frame with an idle composer under it", control + "\n❯ \n  ? for shortcuts\n"},
+		// A wrapped footer's rows are adjacent: output lines that only start
+		// and end like the footer, with blank rows between them, are not one.
+		{"footer words on blank-separated rows", "Enter to select the files you want\n\nreview them\n\nEsc to cancel\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := pendingFor(tc.pane)
@@ -695,38 +712,54 @@ func TestProviderPendingReportsReviewPageAsQuestion(t *testing.T) {
 
 // Every nudge path must refuse the review page before any key: NudgeSession
 // (hence every queued, backstop and sling delivery), NudgeNow, and the
-// wait-idle Nudge before it spends its idle wait.
+// wait-idle Nudge before it spends its idle wait. The idle scan must not read
+// its "❯ 1." row as an idle composer either. Blank rows between its prompt and
+// its menu change none of that.
 func TestNudgeRefusesReviewPage(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.NudgeIdleTimeout = 5 * time.Second
-	ex := &paneExecutor{pane: reviewPagePane(t), inMode: "0"}
-	p := &Provider{tm: &Tmux{cfg: cfg, exec: ex}}
+	for _, fixture := range []string{"review-page-ga-ngrme8.txt", "review-page-blank-rows.txt"} {
+		t.Run(fixture, func(t *testing.T) {
+			lines := readQuestionFixture(t, fixture)
+			if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+				t.Fatal("PaneShowsIdlePrompt = true for the review page; a nudge's Enter would submit every answer")
+			}
 
-	start := time.Now()
-	if err := p.Nudge("auq", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("Nudge = %v, want runtime.ErrPendingInteraction", err)
+			cfg := DefaultConfig()
+			cfg.NudgeIdleTimeout = 5 * time.Second
+			ex := &paneExecutor{pane: strings.Join(lines, "\n") + "\n", inMode: "0"}
+			p := &Provider{tm: &Tmux{cfg: cfg, exec: ex}}
+
+			start := time.Now()
+			if err := p.Nudge("auq", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("Nudge = %v, want runtime.ErrPendingInteraction", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("Nudge took %s to refuse; it waited for idle instead of refusing at once", elapsed)
+			}
+			if err := p.NudgeNow("auq", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("Nudge took %s to refuse; it waited for idle instead of refusing at once", elapsed)
-	}
-	if err := p.NudgeNow("auq", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
-	}
-	requireNoKeys(t, ex.calls, false)
 }
 
-// stagedPaneExecutor serves capture-pane with screens[0] until a call matches
-// trigger, and screens[1] afterwards: the pane changes under the nudge's feet
-// between two of its looks. swapIndex is the index of the first call answered
-// with screens[1] context, so a test can check what was keyed before and after
-// the change.
+// stagedPaneExecutor plays the agent pane of session, an unattached Claude
+// Code session whose screen changes under the nudge's feet: capture-pane
+// answers screens[0] until a call matches trigger, and screens[1] from that
+// call on. swapIndex is the index of the call that matched, -1 until one
+// did, so a test can check what was keyed once the screen changed. Being
+// unattached, the session gets the composer clear before the paste; being
+// Claude, it gets no Escape before the submit.
 type stagedPaneExecutor struct {
 	calls     [][]string
 	screens   [2]string
 	trigger   func(args []string) bool
-	inMode    string
-	swapped   bool
+	session   string
 	swapIndex int
+}
+
+func newStagedPaneExecutor(session string, screens [2]string, trigger func(args []string) bool) *stagedPaneExecutor {
+	return &stagedPaneExecutor{screens: screens, trigger: trigger, session: session, swapIndex: -1}
 }
 
 func (e *stagedPaneExecutor) execute(args []string) (string, error) {
@@ -734,15 +767,19 @@ func (e *stagedPaneExecutor) execute(args []string) (string, error) {
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
-	if slices.Contains(args, "#{pane_in_mode}") {
-		return e.inMode, nil
+	switch {
+	case slices.Contains(args, "#{pane_in_mode}"):
+		return "0", nil
+	case slices.Contains(args, "#{session_name}|#{session_attached}"):
+		return e.session + "|0", nil
+	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_PROVIDER"):
+		return "GC_PROVIDER=claude", nil
 	}
-	if !e.swapped && e.trigger(args) {
-		e.swapped = true
+	if e.swapIndex < 0 && e.trigger(args) {
+		e.swapIndex = len(e.calls) - 1
 	}
 	if slices.Contains(args, "capture-pane") {
-		if e.swapped {
-			e.swapIndex = len(e.calls) - 1
+		if e.swapIndex >= 0 {
 			return e.screens[1], nil
 		}
 		return e.screens[0], nil
@@ -754,12 +791,16 @@ func (e *stagedPaneExecutor) executeCtx(_ context.Context, args []string) (strin
 	return e.execute(args)
 }
 
-// keysAfterSwap fails when the nudge sent keys once the swapped-in screen was
-// on the pane: whatever the dialog is, no text, Ctrl-U, Escape or Enter may
-// reach it.
+// keysAfterSwap fails when the nudge sent keys after the call that changed the
+// screen: whatever the dialog is, no text, Ctrl-U, Ctrl-K, Escape or Enter may
+// reach it. A screen that never changed fails too, so the check cannot pass
+// vacuously.
 func keysAfterSwap(t *testing.T, e *stagedPaneExecutor) {
 	t.Helper()
-	for _, call := range e.calls[e.swapIndex:] {
+	if e.swapIndex < 0 {
+		t.Fatal("the screen never changed: no call matched the trigger")
+	}
+	for _, call := range e.calls[e.swapIndex+1:] {
 		if sendsKeys(call) {
 			t.Fatalf("sent keys while the question dialog was on screen: %q", call)
 		}
@@ -767,31 +808,38 @@ func keysAfterSwap(t *testing.T, e *stagedPaneExecutor) {
 }
 
 // A dialog that appears while the nudge holds the lock — after the first look,
-// before the paste — must stop it there: the paste and its Enter would land
-// on the dialog and answer it (#8150).
+// before the paste — must stop it before any key (#8150). The session is
+// unattached, so the nudge clears the input box first: a dialog with no input
+// box on screen would take the clear's bare Ctrl-U, and one under a stale
+// draft that the 120-row capture still shows would take Ctrl-U Ctrl-K. The
+// paste and its Enter would answer it.
 func TestNudgeSessionRefusesQuestionDialogAppearingUnderTheLock(t *testing.T) {
 	afterEnter := strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n"
-	ex := &stagedPaneExecutor{
-		screens: [2]string{"❯ \n", afterEnter},
-		inMode:  "0",
-		// The mid-session dismissal peek is the visible-only capture (no
-		// "-S"): the dialog appears right after the nudge's first look.
-		trigger: func(args []string) bool {
-			return slices.Contains(args, "capture-pane") && !slices.Contains(args, "-S")
-		},
+	rule := strings.Repeat("─", 60)
+	for name, dialog := range map[string]string{
+		"dialog alone":               afterEnter,
+		"dialog under a stale draft": rule + "\n❯ fix the flaky test\n" + rule + "\n" + afterEnter,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The mid-session dismissal peek is the visible-only capture (no
+			// "-S"): the dialog appears right after the nudge's first look.
+			ex := newStagedPaneExecutor("auq", [2]string{"❯ \n", dialog}, func(args []string) bool {
+				return slices.Contains(args, "capture-pane") && !slices.Contains(args, "-S")
+			})
+			tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+			err := tm.NudgeSession("auq", "hello")
+			if !errors.Is(err, runtime.ErrPendingInteraction) {
+				t.Fatalf("NudgeSession = %v, want runtime.ErrPendingInteraction", err)
+			}
+			if !strings.Contains(err.Error(), "question dialog") || !strings.Contains(err.Error(), "tmux-question-") {
+				t.Fatalf("refusal %q must say it is a question dialog and carry the tmux-question- request ID", err)
+			}
+			if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") >= 0 {
+				t.Fatal("the message was pasted after the dialog appeared")
+			}
+			keysAfterSwap(t, ex)
+		})
 	}
-	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
-	err := tm.NudgeSession("auq", "hello")
-	if !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("NudgeSession = %v, want runtime.ErrPendingInteraction", err)
-	}
-	if !strings.Contains(err.Error(), "question dialog") || !strings.Contains(err.Error(), "tmux-question-") {
-		t.Fatalf("refusal %q must say it is a question dialog and carry the tmux-question- request ID", err)
-	}
-	if callIndexWithTokens(ex.calls, "send-keys", "-l", "hello") >= 0 {
-		t.Fatal("the message was pasted after the dialog appeared")
-	}
-	keysAfterSwap(t, ex)
 }
 
 // A dialog that appears after the paste must stop the nudge before its Enter:
@@ -799,11 +847,9 @@ func TestNudgeSessionRefusesQuestionDialogAppearingUnderTheLock(t *testing.T) {
 // dialog, so it is never sent.
 func TestNudgeSessionRefusesQuestionDialogAppearingAfterThePaste(t *testing.T) {
 	afterEnter := strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n"
-	ex := &stagedPaneExecutor{
-		screens: [2]string{"❯ \n", afterEnter},
-		inMode:  "0",
-		trigger: func(args []string) bool { return sendsKeys(args) && slices.Contains(args, "-l") },
-	}
+	ex := newStagedPaneExecutor("auq", [2]string{"❯ \n", afterEnter}, func(args []string) bool {
+		return sendsKeys(args) && slices.Contains(args, "-l")
+	})
 	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
 	err := tm.NudgeSession("auq", "hello")
 	if !errors.Is(err, runtime.ErrPendingInteraction) {
@@ -869,17 +915,30 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 	if next.RequestID == pending.RequestID {
 		t.Errorf("RequestID %q is the same on the next page; it must move with the page", pending.RequestID)
 	}
+
+	// The prompt is bounded like every text a client is shown for the dialog.
+	longQuestion := strings.Repeat("Which of these many options ", 20) + "should the change cover?"
+	long := pendingFor(" ←  ☐ Scope  ✔ Submit  →\n" + longQuestion + "\n❯ 1. Small\n  2. Large\n" +
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel\n")
+	if n := utf8.RuneCountInString(long.Prompt); n != askUserQuestionPromptMax ||
+		!strings.HasSuffix(long.Prompt, "…") || !strings.HasPrefix(longQuestion, strings.TrimSuffix(long.Prompt, "…")) {
+		t.Errorf("Prompt = %q (%d runes), want the question cut to %d runes ending in …", long.Prompt, n, askUserQuestionPromptMax)
+	}
 }
 
 // A question dialog is answered by a human in the terminal, never by Respond:
 // its numbered options are its own, and even an action whose approval meaning
 // would pick one of them is refused with ErrInteractionActionUnavailable —
 // with or without a request ID, and whatever the request ID names. That
-// includes a question whose text reads "Do you want to …?": the approval
-// parser's question key matches it, so the question-first read of the pane is
-// what keeps respond from typing "1" into a human's question.
+// includes a question whose text reads "Do you want to …?", which the
+// approval parser's question key matches; the read of the pane is
+// question-first, so the page is refused as a question whatever the approval
+// parser makes of it.
 func TestRespondRefusesEveryQuestionDialogLookalike(t *testing.T) {
-	// No cursor: at the old detector this page parsed as an approval prompt.
+	// The approval parser rejects this page too: it has no cursor, and its
+	// select footer is not a menu row. Respond on a page no detector reads
+	// sends no key but does not refuse either (nil, or ErrInteractionGone for
+	// a named request ID); this pins the explicit refusal.
 	const approvalLookalikeQuestionPage = ` ←  ☐ Scope  ✔ Submit  →
 Do you want to include the regression tests?
   1. Yes, the full suite
