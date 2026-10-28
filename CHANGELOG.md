@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Session shells no longer receive `GC_TRIGGER_BEAD_ID`,
+  `GC_TRIGGER_WORK_BEAD_ID`, `GC_TRIGGER_BEAD_STORE_REF` or
+  `GC_TRIGGER_WORK_STORE_REF`.** Under pull, the trigger id named the row the
+  controller counted, not the bead the seat claimed, and the copy was frozen
+  at exec, so a script that read it could close another session's bead
+  (#5738). A script that needs its own bead id should run
+  `gc hook current --id-only`. To tell that a seat was demand-spawned, check
+  `GC_SPAWN_ORIGIN=demand`. The shipped `mol-do-work` and `mol-dog-stale-db`
+  formulas no longer read these variables.
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state

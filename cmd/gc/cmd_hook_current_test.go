@@ -177,4 +177,7 @@ func TestHookCurrentDocIdiomPrefersClaimOverTriggerHint(t *testing.T) {
 	if strings.Contains(long, "${GC_TRIGGER_BEAD_ID:-$(gc hook current") {
 		t.Error("documented idiom still consults the frozen GC_TRIGGER_BEAD_ID hint before the claim")
 	}
+	if strings.Contains(long, "GC_TRIGGER_BEAD_ID") {
+		t.Errorf("help names GC_TRIGGER_BEAD_ID, which no session shell carries; got:\n%s", long)
+	}
 }
