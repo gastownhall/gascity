@@ -3,7 +3,9 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +254,53 @@ func TestStopHandler_ForceCloseKeepsAlreadyClosedDescendant(t *testing.T) {
 	}
 	assertClosedBeforeWisp(t, store, "step-a", "step-b", "step-b1", "step-c1")
 
+	assertLoopStopped(t, store)
+}
+
+func TestStopHandler_ForceCloseDescendantErrorLeavesLoopActive(t *testing.T) {
+	handler, store, emitter := setupActiveHandler(t, "in_progress", nil)
+	addActiveWispSteps(store)
+	store.CloseDescendantErrFunc = func(id string) error {
+		if id == "step-b" {
+			return errors.New("store unavailable")
+		}
+		return nil
+	}
+
+	_, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err == nil {
+		t.Fatal("expected error when a descendant close fails")
+	}
+	if !strings.Contains(err.Error(), "wisp-iter-2") {
+		t.Errorf("error = %q, want it to name wisp-iter-2", err)
+	}
+	for _, id := range []string{"step-b", "wisp-iter-2", "root-1"} {
+		info, _ := store.GetBead(id)
+		if info.Status == "closed" {
+			t.Errorf("%s closed after failed stop, want still open", id)
+		}
+	}
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateActive {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateActive)
+	}
+	if meta[FieldTerminalReason] != "" {
+		t.Errorf("terminal_reason = %q, want empty", meta[FieldTerminalReason])
+	}
+	if _, ok := emitter.findEvent(EventTerminated); ok {
+		t.Error("EventTerminated emitted after failed stop")
+	}
+
+	store.CloseDescendantErrFunc = nil
+	if _, err := handler.StopHandler(context.Background(), "root-1", "alice", ""); err != nil {
+		t.Fatalf("retry stop: unexpected error: %v", err)
+	}
+	for _, id := range []string{"step-a", "step-b", "step-b1", "wisp-iter-2"} {
+		info, _ := store.GetBead(id)
+		if info.Status != "closed" {
+			t.Errorf("after retry %s status = %q, want closed", id, info.Status)
+		}
+	}
 	assertLoopStopped(t, store)
 }
 
