@@ -37,6 +37,7 @@ go_library(
         "scan_darwin.go",
         "scan_darwin_command.go",
         "scan_linux.go",
+        "scan_scope_other.go",
         "scan_stub.go",
         "scan_windows.go",
     ],

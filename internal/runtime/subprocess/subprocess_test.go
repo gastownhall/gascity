@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,32 @@ func shortTempDir(t *testing.T) string {
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
+}
+
+func TestSeamScanScopeForwarding(t *testing.T) {
+	raw := newTestProvider(t)
+	var got []string
+	raw.ops.scan = func(id string, executables []string) ([]runtime.LiveRuntime, error) {
+		if id != "S" {
+			t.Fatalf("scan session = %q", id)
+		}
+		got = executables
+		return nil, nil
+	}
+	p := seamBack(raw)
+	names := []string{"custom-agent"}
+	p.SetScanExecutables(names)
+	names[0] = "mutated"
+	if _, err := p.FindRuntimesBySessionID("S"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"custom-agent"}) {
+		t.Fatalf("scanner did not receive the configured immutable scope: %v", got)
+	}
+	p.SetScanExecutables(nil)
+	if _, err := p.FindRuntimesBySessionID("S"); err != nil || len(got) != 0 {
+		t.Fatalf("strict-scope refresh was lost: %v, %v", got, err)
+	}
 }
 
 // waitExited blocks until the named session stops reporting as running.

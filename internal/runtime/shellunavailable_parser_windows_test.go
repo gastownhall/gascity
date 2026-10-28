@@ -113,8 +113,49 @@ func TestPowerShellCommandScannerMatchesParser(t *testing.T) {
 				if !reflect.DeepEqual(got, want[i]) {
 					t.Errorf("commandPrograms(%q) = %q, %s parser reported %q", input, got, filepath.Base(shell), want[i])
 				}
+				if scope := ShellCommandPrograms(input); scope != nil {
+					for _, name := range want[i] {
+						if !slices.Contains(scope, name) {
+							t.Errorf("ShellCommandPrograms(%q) omitted parser command %q: %q", input, name, scope)
+						}
+					}
+				}
 			}
 		})
+	}
+}
+
+func TestShellCommandProgramsMatchesParser(t *testing.T) {
+	inputs := []string{
+		"known-agent & child-agent",
+		`known-agent; { & 'C:\x\child-agent.exe' }.Invoke()`,
+		"known-agent @{ run = (child-agent) }",
+		`ii 'C:\x\child-agent.exe'`,
+		`Invoke-Item 'C:\x\child-agent.exe'`,
+		"known-agent 2>&1",
+		"known-agent 2>&1; child-agent",
+		"known-agent >&1 | child-agent",
+		"known-agent '&' child-agent",
+		"known-agent `& child-agent",
+	}
+	for _, shell := range powerShells(t) {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			want := powerShellParserCommandSets(t, shell, inputs)
+			for i, input := range inputs {
+				scope := ShellCommandPrograms(input)
+				if scope == nil {
+					continue
+				}
+				for _, name := range want[i] {
+					if !slices.Contains(scope, name) {
+						t.Errorf("ShellCommandPrograms(%q) omitted parser command %q: %q", input, name, scope)
+					}
+				}
+			}
+		})
+	}
+	if scope := ShellCommandPrograms("known-agent 2>&1"); !reflect.DeepEqual(scope, []string{"known-agent"}) {
+		t.Errorf("stream redirection must preserve the resolved scope: %q", scope)
 	}
 }
 

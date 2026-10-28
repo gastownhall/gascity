@@ -118,6 +118,9 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
+	processScanScope            []string
+	processScanScopeInitialized bool
+
 	dops                    drainOps
 	ct                      crashTracker
 	it                      idleTracker
@@ -2265,6 +2268,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	cr.serviceStateMu.Lock()
+	cr.refreshProcessTableScan(nextSp, nextCfg)
 	cr.cfg = nextCfg
 	cr.sp = nextSp
 	cr.dops = nextDops

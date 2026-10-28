@@ -463,6 +463,51 @@ func TestProcessTableReportsProcessesItCouldNotInspect(t *testing.T) {
 	}
 }
 
+func TestProcessTableRuntimeInspectionScope(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		image       string
+		executables []string
+		wantError   bool
+	}{
+		{"unrelated unreadable process", "desktop-helper.exe", []string{"agent"}, false},
+		{"matching unreadable process", "AGENT.EXE", []string{`C:\tools\agent`}, true},
+		{"matching shell", "pwsh.exe", []string{"agent", "pwsh"}, true},
+		{"unknown image", "", []string{"agent"}, true},
+		{"unscoped scan", "desktop-helper.exe", nil, true},
+		{"whitespace-only scope", "desktop-helper.exe", []string{" \t "}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			table, err := processTableFromRows([]windowsProcess{
+				{pid: 100, image: "self.exe", env: map[string]string{}, envOK: true, inspection: inspected},
+				{pid: 200, image: tt.image, inspection: inspectionFailed, inspectionErr: errors.New("access denied")},
+				{pid: 300, image: "other-tool.exe", env: map[string]string{"GC_SESSION_ID": "S"}, envOK: true, inspection: inspected},
+				{pid: 400, image: "unrelated-helper.exe", inspection: inspectionFailed, inspectionErr: errors.New("access denied")},
+			}, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = table.incompleteForExecutables(tt.executables)
+			if errors.Is(err, ErrScanIncomplete) != tt.wantError {
+				t.Fatalf("incompleteForExecutables() = %v; want incomplete=%v", err, tt.wantError)
+			}
+			if tt.wantError && !strings.Contains(err.Error(), "PID 200") {
+				t.Fatalf("missing unreadable process identity: %v", err)
+			}
+			if tt.wantError && len(tt.executables) > 0 && tt.name != "whitespace-only scope" &&
+				strings.Contains(err.Error(), "PID 400") {
+				t.Fatalf("scoped error included unrelated unreadable image: %v", err)
+			}
+			if found := scanTableBySessionID(table, "S"); len(found) != 1 || found[0].PID != 300 {
+				t.Fatalf("readable orphan outside executable scope lost: %+v", found)
+			}
+			if !errors.Is(table.incomplete(), ErrScanIncomplete) {
+				t.Fatal("scoped scan weakened the unscoped host-table check")
+			}
+		})
+	}
+}
+
 // enrichedRow reads the host table and returns pid's row as enrichment leaves
 // it.
 func enrichedRow(t *testing.T, pid int) windowsProcess {

@@ -50,13 +50,15 @@ type Provider struct {
 	// channel closed once that Stop has finished. Start and Stop wait on it,
 	// so no replacement starts, and no second Stop reports success, while the
 	// first is still confirming the tree gone.
-	stopping map[string]chan struct{}
+	stopping        map[string]chan struct{}
+	scanExecutables []string
 }
 
 type providerOps struct {
 	// start launches cmd as the owner of its process tree and returns the
 	// group identity captured at spawn.
 	start func(*exec.Cmd) (int, error)
+	scan  func(string, []string) ([]runtime.LiveRuntime, error)
 }
 
 const (
@@ -123,6 +125,7 @@ func newProvider(dir string) *Provider {
 		procs:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		ops: providerOps{
+			scan: proctable.ScanBySessionIDForExecutables,
 			start: func(cmd *exec.Cmd) (int, error) {
 				// Sessions outlive the CLI invocation that started them and
 				// are stopped through the control socket, so releasing
@@ -438,7 +441,10 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	found, scanErr := proctable.ScanBySessionID(id)
+	p.mu.Lock()
+	executables := append([]string(nil), p.scanExecutables...)
+	p.mu.Unlock()
+	found, scanErr := p.ops.scan(id, executables)
 
 	p.mu.Lock()
 	trackedBySessionID := make(map[string]string)
@@ -459,6 +465,14 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		}
 	}
 	return found, scanErr
+}
+
+// SetScanExecutables supplies the city's runtime executable names for Windows
+// unreadable-process classification. It does not filter readable roots.
+func (p *Provider) SetScanExecutables(executables []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scanExecutables = append([]string(nil), executables...)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].

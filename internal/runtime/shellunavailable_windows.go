@@ -74,10 +74,24 @@ func commandPrograms(command string) []string {
 	return scanner.programs
 }
 
+// ShellCommandPrograms returns literal program names in PowerShell command
+// positions, or nil if any command position cannot be resolved statically.
+// Programs launched inside scripts still require configured process names and
+// interpreter hosts.
+func ShellCommandPrograms(command string) []string {
+	scanner := powerShellCommandScanner{command: normalizePowerShellCommandScannerInput(command)}
+	scanner.scanStatements(0)
+	if scanner.unresolved {
+		return nil
+	}
+	return scanner.programs
+}
+
 type powerShellCommandScanner struct {
-	command  string
-	position int
-	programs []string
+	command    string
+	position   int
+	programs   []string
+	unresolved bool
 }
 
 func (s *powerShellCommandScanner) scanStatements(stop byte) {
@@ -125,6 +139,8 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 			program, static, ok := s.readQuotedString(s.command[s.position])
 			if afterCall && ok && static {
 				s.addProgramIfCommand(program)
+			} else {
+				s.unresolved = true
 			}
 			atCommand = false
 			afterCall = false
@@ -133,6 +149,8 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 			if afterCall {
 				if program, ok := s.readParenthesizedConstantString(); ok {
 					s.addProgramIfCommand(program)
+				} else {
+					s.unresolved = true
 				}
 			} else {
 				s.position++
@@ -142,6 +160,7 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 			afterCall = false
 
 		case '@':
+			s.unresolved = true
 			if s.position+1 < len(s.command) && (s.command[s.position+1] == '(' || s.command[s.position+1] == '{') {
 				s.position++
 				if s.command[s.position] == '(' {
@@ -157,6 +176,7 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 			afterCall = false
 
 		case '[':
+			s.unresolved = true
 			s.skipBalanced('[', ']')
 			atCommand = false
 			afterCall = false
@@ -166,6 +186,7 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 			if afterCall {
 				s.scanStatements('}')
 			} else {
+				s.unresolved = true
 				s.position--
 				s.skipBalanced('{', '}')
 			}
@@ -173,6 +194,7 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 			afterCall = false
 
 		case '$':
+			s.unresolved = true
 			program := s.readVariableCommandToken()
 			if strings.ContainsAny(program, `/\`) {
 				s.addProgramIfCommand(program)
@@ -197,6 +219,7 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 				afterCall = false
 				continue
 			case "function", "filter", "workflow", "configuration":
+				s.unresolved = true
 				s.scanFunctionDefinition()
 				atCommand = true
 				afterCall = false
@@ -224,8 +247,15 @@ func (s *powerShellCommandScanner) scanStatements(stop byte) {
 }
 
 func (s *powerShellCommandScanner) addProgramIfCommand(program string) {
+	switch strings.ToLower(filepath.Base(program)) {
+	case "invoke-expression", "iex", "start-process", "start", "saps", "invoke-item", "ii",
+		"invoke-command", "icm", "set-alias", "new-alias": // icm: built-in alias of Invoke-Command
+		s.unresolved = true
+	}
 	if powerShellCommandNameCanBeLiteral(program) {
 		s.programs = append(s.programs, program)
+	} else {
+		s.unresolved = true
 	}
 }
 
@@ -293,6 +323,9 @@ func (s *powerShellCommandScanner) skipNonCommandToken(atCommand *bool, afterCal
 	if s.consumeStatementSeparator(atCommand, afterCall) {
 		return
 	}
+	if s.command[s.position] == '&' && (s.position == 0 || s.command[s.position-1] != '>') {
+		s.unresolved = true
+	}
 	s.skipExpressionToken()
 }
 
@@ -318,6 +351,7 @@ func (s *powerShellCommandScanner) skipExpressionToken() {
 				s.position++
 				s.scanStatements(')')
 			} else {
+				s.unresolved = true
 				s.skipBalanced('{', '}')
 			}
 		} else {

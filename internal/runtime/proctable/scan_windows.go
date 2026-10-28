@@ -17,7 +17,8 @@ import (
 //
 // A process this user could open but not read is reported as an error
 // alongside the roots that were found: it might be the very session being
-// looked for, so the scan cannot claim to have found everything.
+// looked for, so this unscoped scan cannot claim to have found everything.
+// ScanBySessionIDForExecutables limits only unreadable-process uncertainty.
 //
 // Unlike Linux, where /proc/<pid>/environ freezes the environment a process was
 // started with, the Windows environment block read here is the live one:
@@ -25,6 +26,13 @@ import (
 // variable set after startup is visible and no separate merge of this process's
 // own environment is needed.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionIDForExecutables(id, nil)
+}
+
+// ScanBySessionIDForExecutables preserves all readable roots, but limits
+// unreadable-process errors to the supplied runtime executable names.
+// An empty scope retains the strict host-wide completeness check.
+func ScanBySessionIDForExecutables(id string, executables []string) ([]runtime.LiveRuntime, error) {
 	if err := windowsScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
@@ -32,7 +40,7 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return scanTableBySessionID(table, id), table.incomplete()
+	return scanTableBySessionID(table, id), table.incompleteForExecutables(executables)
 }
 
 // IsScanRoot reports whether pid should be treated as an agent root. A root

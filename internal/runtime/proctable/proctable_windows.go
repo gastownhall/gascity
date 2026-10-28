@@ -28,13 +28,16 @@ package proctable
 // process means the mechanism itself is unavailable, and readProcessTable
 // refuses rather than hand back a table that looks like an idle host. And a
 // process this user could open but still not read might be exactly the session
-// a caller is looking for, so a scan that meets one reports itself incomplete.
+// a caller is looking for, so an unscoped scan reports itself incomplete.
+// A city-scoped runtime scan can exclude unrelated unreadable image names.
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"strings"
@@ -204,6 +207,40 @@ func (t processTable) incomplete() error {
 	}
 	return fmt.Errorf("%w: %d process(es) could be opened but not read: %s",
 		ErrScanIncomplete, len(t.uninspected), strings.Join(details, "; "))
+}
+
+var reportedNonRuntimeImages sync.Map
+
+func (t processTable) incompleteForExecutables(executables []string) error {
+	names := make(map[string]bool)
+	for _, name := range executables {
+		if strings.TrimSpace(name) != "" {
+			names[executableImageName(name)] = true
+		}
+	}
+	if len(names) == 0 {
+		return t.incomplete()
+	}
+	pending := processTable{}
+	for _, row := range t.uninspected {
+		image := executableImageName(row.image)
+		if strings.TrimSpace(row.image) == "" || names[image] {
+			pending.uninspected = append(pending.uninspected, row)
+			continue
+		}
+		// Processes gc creates inherit the creator's default DACL and remain
+		// readable. An unrelated unreadable image is not evidence of an orphan;
+		// configured runtimes and their hosts still fail closed on read denial.
+		// Readable roots are never filtered by executable name.
+		if _, reported := reportedNonRuntimeImages.LoadOrStore(image, struct{}{}); !reported {
+			log.Printf("proctable: warning: skipping unreadable non-runtime process PID %d (%s): %v", row.pid, row.image, row.inspectionErr)
+		}
+	}
+	return pending.incomplete()
+}
+
+func executableImageName(name string) string {
+	return processNameKey(filepath.Base(strings.TrimSpace(name)))
 }
 
 // parent returns child's parent row, and false when Windows cannot vouch for

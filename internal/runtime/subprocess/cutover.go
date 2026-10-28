@@ -20,8 +20,9 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider            = (*seamBackedProvider)(nil)
-	_ runtime.ProcessTableScanner = (*seamBackedProvider)(nil)
+	_ runtime.Provider                          = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner               = (*seamBackedProvider)(nil)
+	_ interface{ SetScanExecutables([]string) } = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked returns a subprocess provider served through the seams, storing
@@ -42,6 +43,11 @@ func seamBack(raw *Provider) *seamBackedProvider {
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return s.raw.FindRuntimesBySessionID(id)
+}
+
+// SetScanExecutables passes the city scan scope to the underlying provider.
+func (s *seamBackedProvider) SetScanExecutables(executables []string) {
+	s.raw.SetScanExecutables(executables)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner] (non-seam).

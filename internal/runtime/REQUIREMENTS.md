@@ -117,6 +117,29 @@ differs, fix code and prove the row with a test.
 | RUNTIME-CONTRACT-006 | T3 listing fails closed on total observation failure | When the T3 bridge snapshot is transiently unavailable or still initializing, `ListRunning` returns no names with an error wrapping `ErrRuntimeUnavailable`; it never returns authoritative empty success. Absence-consuming callers therefore defer until the bridge can provide a complete snapshot. | `internal/runtime/t3bridge/provider.go`; `internal/runtime/t3bridge/provider_test.go` `TestListRunningSoftUnavailableIsRuntimeUnavailable` |
 | RUNTIME-CONTRACT-007 | Liveness observation preserves uncertainty | Lifecycle consumers can distinguish confirmed live, confirmed absent, and unavailable observations through the optional `LivenessObserverWithError` contract. Legacy providers remain compatible with error-free observations; seam and routing decorators preserve the richer result. T3 returns confirmed absence only from a reachable empty snapshot and wraps snapshot/activity failures with `ErrRuntimeUnavailable`. | `internal/runtime/liveness.go`; `internal/runtime/liveness_test.go`; `internal/runtime/t3bridge/provider_test.go` `TestSeamBackedLivenessObservationPreservesSnapshotUncertainty`, `TestSeamBackedLastActivityPreservesSnapshotUncertainty`; `internal/runtime/{auto,hybrid}/*liveness*test.go` |
 
+### Windows Runtime Scanning
+
+With a statically resolved city executable scope, subprocess scans skip unrelated
+unreadable images, but refuse matching or unknown images. Missing or unresolved
+scope remains strict. Config reload unions the scope with all earlier scopes in
+the controller's lifetime, including when the runtime provider is replaced.
+Once any applied config requires strict scanning, reload cannot narrow it.
+Readable roots, unscoped snapshots and kill checks are not filtered. Custom
+providers should declare `process_names` for interpreter or alias target images;
+dynamic command positions retain strict scanning. The diagnostic identifies the
+unresolved config field without logging its command contents.
+
+The scope history is not persisted across controller restarts or standalone CLI
+invocations. Keep old executable names in `process_names` until earlier sessions
+are stopped; otherwise an unreadable orphan of a removed command can fall outside
+the new controller's scope.
+
+Evidence: `TestProcessTableRuntimeInspectionScope`, `TestConfigureProcessTableScan`,
+`TestCityRuntimeExecutablesRefusesDynamicCommands`,
+`TestCityRuntimeExecutablesReportsUnresolvedCommand`,
+`TestCityRuntimeReloadRefreshesScanScope`, `TestSeamScanScopeForwarding`,
+`TestShellCommandProgramsMatchesParser`.
+
 ### RPP v0 (Exec Protocol)
 
 | ID | Scenario | Required behavior | Evidence |

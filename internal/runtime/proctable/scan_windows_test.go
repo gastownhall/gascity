@@ -35,6 +35,9 @@ func TestScanBySessionIDRefusesTheLiveTableWithoutTheOptIn(t *testing.T) {
 	if _, err := ScanBySessionID(""); err == nil {
 		t.Fatal("ScanBySessionID enumerated the live process table under `go test`; the safety guard did not fire")
 	}
+	if _, err := ScanBySessionIDForExecutables("", []string{"agent"}); err == nil {
+		t.Fatal("an executable scope must not lift the live-host scan guard")
+	}
 	if IsScanRoot(4) {
 		t.Fatal("IsScanRoot consulted the live process table under `go test`; expected the safety guard to short-circuit to false")
 	}
