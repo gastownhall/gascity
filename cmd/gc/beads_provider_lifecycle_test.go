@@ -14690,6 +14690,8 @@ func TestGcBeadsBdScriptNeverPassesPasswordInArgv(t *testing.T) {
 // password through DOLT_CLI_PASSWORD on the single dolt invocation (never a
 // --password flag, which any local user can read via ps), and must not let
 // a caller's already-set DOLT_CLI_PASSWORD win.
+// With the password empty or unset the variable must still be set (empty)
+// so dolt does not fall back to a TTY prompt.
 func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
@@ -14702,7 +14704,7 @@ func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 		t.Fatal("gc-beads-bd script missing main marker")
 	}
 
-	// row exercises the configured-password shape a caller can present.
+	// rows exercises the three GC_DOLT_PASSWORD shapes a caller can present.
 	rows := []struct {
 		name    string
 		secret  string // non-empty only when a password is configured
@@ -14710,6 +14712,8 @@ func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
 		env     []string
 	}{
 		{name: "configured", secret: "s3cr3t-dolt-pw", wantEnv: "set:s3cr3t-dolt-pw", env: []string{"GC_DOLT_PASSWORD=s3cr3t-dolt-pw"}},
+		{name: "empty", wantEnv: "set:", env: []string{"GC_DOLT_PASSWORD="}},
+		{name: "unset", wantEnv: "set:"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
