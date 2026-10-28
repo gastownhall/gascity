@@ -559,3 +559,62 @@ func TestResolveTemplateScrubsControllerTokenFromOperatorEnv(t *testing.T) {
 		t.Errorf("OperatorEnv[%s] = %q, want empty (a config-authored literal must not survive into the fingerprint hash-preimage)", convergence.TokenEnvVar, val)
 	}
 }
+
+func TestResolveTemplateGivesTheSessionItsOwnCityName(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	// The supervisor's ambient env names a different city; a session that
+	// omits the key inherits it through the tmux server or os.Environ().
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+
+	params := &agentBuildParams{
+		cityName:   "own-city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "runner"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_CITY_NAME"]; got != params.cityName {
+		t.Fatalf("GC_CITY_NAME = %q, want own-city %q (the same name the beacon uses)", got, params.cityName)
+	}
+}
+
+func TestResolveTemplatePinsEmptyCityNameOverAmbient(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+
+	params := &agentBuildParams{
+		cityName:   "", // no resolved name: still must not inherit the neighbor
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "runner"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	got, ok := tp.Env["GC_CITY_NAME"]
+	if !ok || got != "" {
+		t.Fatalf("GC_CITY_NAME = %q (present=%v), want present and empty so the adapters withhold the ambient value", got, ok)
+	}
+}
