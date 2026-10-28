@@ -984,20 +984,35 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 // AwakeNamedSession fields.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
 	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
+	raw = append(raw, configuredNamedFallbackIdentities(sessionBead, cfg)...)
+	return compactSessionAssignmentIdentifiers(raw)
+}
+
+// configuredNamedFallbackIdentities returns the configured named identities a
+// configured named session bead answers to when it is missing
+// configured_named_identity: those whose runtime name is the bead's
+// session_name and whose backing template matches the bead's template.
+func configuredNamedFallbackIdentities(sessionBead beads.Bead, cfg *config.City) []string {
 	if cfg == nil ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
-		return compactSessionAssignmentIdentifiers(raw)
-	}
-
-	sessionName := strings.TrimSpace(sessionBead.Metadata["session_name"])
-	if sessionName == "" {
-		return compactSessionAssignmentIdentifiers(raw)
+		return nil
 	}
 	template := normalizedSessionTemplate(sessionBead, cfg)
 	if template == "" {
 		template = strings.TrimSpace(sessionBead.Metadata["template"])
 	}
+	return configuredNamedIdentitiesForRuntimeName(cfg, strings.TrimSpace(sessionBead.Metadata["session_name"]), template)
+}
+
+// configuredNamedIdentitiesForRuntimeName returns the configured named
+// identities whose runtime name is sessionName and whose backing template is
+// template (an empty template on either side matches).
+func configuredNamedIdentitiesForRuntimeName(cfg *config.City, sessionName, template string) []string {
+	if sessionName == "" {
+		return nil
+	}
+	var identities []string
 	cityName := config.EffectiveCityName(cfg, "")
 	for i := range cfg.NamedSessions {
 		identity := cfg.NamedSessions[i].QualifiedName()
@@ -1011,9 +1026,9 @@ func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.C
 		if template != "" && backingTemplate != "" && template != backingTemplate {
 			continue
 		}
-		raw = append(raw, identity)
+		identities = append(identities, identity)
 	}
-	return compactSessionAssignmentIdentifiers(raw)
+	return identities
 }
 
 func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
@@ -1031,36 +1046,23 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 // byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
 func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
 	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg))
+	raw = append(raw, configuredNamedFallbackIdentitiesInfo(info, cfg)...)
+	return compactSessionAssignmentIdentifiers(raw)
+}
+
+// configuredNamedFallbackIdentitiesInfo is the session.Info form of
+// configuredNamedFallbackIdentities.
+func configuredNamedFallbackIdentitiesInfo(info session.Info, cfg *config.City) []string {
 	if cfg == nil ||
 		!info.ConfiguredNamedSession ||
 		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
-		return compactSessionAssignmentIdentifiers(raw)
-	}
-
-	sessionName := strings.TrimSpace(info.SessionNameMetadata)
-	if sessionName == "" {
-		return compactSessionAssignmentIdentifiers(raw)
+		return nil
 	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = strings.TrimSpace(info.Template)
 	}
-	cityName := config.EffectiveCityName(cfg, "")
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		if identity == "" {
-			continue
-		}
-		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) != sessionName {
-			continue
-		}
-		backingTemplate := cfg.NamedSessions[i].TemplateQualifiedName()
-		if template != "" && backingTemplate != "" && template != backingTemplate {
-			continue
-		}
-		raw = append(raw, identity)
-	}
-	return compactSessionAssignmentIdentifiers(raw)
+	return configuredNamedIdentitiesForRuntimeName(cfg, strings.TrimSpace(info.SessionNameMetadata), template)
 }
 
 func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
