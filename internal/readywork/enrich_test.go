@@ -535,3 +535,59 @@ func TestCutOfTheWholeWindowIsTheUntilUnblockedRead(t *testing.T) {
 		t.Fatalf("ReadUntilUnblocked = %v, want the two gated claims and the first unblocked one", rowIDs(got))
 	}
 }
+
+// untilUnblockedAndWhole reads the window cut (ReadUntilUnblocked) and whole
+// (Read), and checks the cut is the whole answer's CutUntilUnblocked: the CLI
+// cuts the controller's whole window exactly so.
+func untilUnblockedAndWhole(t *testing.T, legs []Leg) []ReadyBead {
+	t.Helper()
+	cut, err := readUntilUnblocked(legs, 20)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked): %v", err)
+	}
+	whole, err := Read(legs, inProgressWindow(20))
+	if err != nil {
+		t.Fatalf("Read(whole window): %v", err)
+	}
+	if got, want := rowIDs(cut), rowIDs(CutUntilUnblocked(whole)); !slices.Equal(got, want) {
+		t.Fatalf("cut %v != CutUntilUnblocked(whole window) %v", got, want)
+	}
+	return cut
+}
+
+// TestUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity pins that the
+// crash-recovery tier's cut read judges blockers by the split-city rule, as
+// the whole-window read does: a claim blocked by a bead no store holds, by an
+// open graph bead in the binding, or by an external: ref to it is gated, so
+// the tier never resumes it; the cut stops at the first clean claim, and moves
+// earlier once the graph bead closes.
+func TestUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
+	work := beads.NewMemStore()
+	binding := sqliteBinding(t)
+	graphBlocker := mustCreate(t, binding, beads.Bead{Title: "graph blocker", Type: "task"})
+	unresolvable := inProgressRow(t, work, "blocked by a bead no store holds", 0, "gcg-zz404")
+	byGraph := inProgressRow(t, work, "blocked by an open graph bead", 1, graphBlocker.ID)
+	byExternal := inProgressRow(t, work, "blocked by an external: ref to it", 2, "external:"+graphBlocker.ID)
+	clean := inProgressRow(t, work, "clean claim", 3)
+	inProgressRow(t, work, "past the cut", 4, "gcg-zz405")
+	legs := splitLegs(work, binding)
+
+	cut := untilUnblockedAndWhole(t, legs)
+	if got, want := rowIDs(cut), []string{unresolvable.ID, byGraph.ID, byExternal.ID, clean.ID}; !slices.Equal(got, want) {
+		t.Fatalf("split cut = %v, want %v: every gated claim, then the first clean one", got, want)
+	}
+	for _, row := range cut[:3] {
+		if !hasOpenBlocker(row.BlockedBy) {
+			t.Fatalf("row %s is unblocked on a split city (blocked_by %+v); the tier would resume it", row.ID, row.BlockedBy)
+		}
+	}
+	if got := cut[0].BlockedBy; len(got) != 1 || got[0].Status != BlockerUnresolved {
+		t.Fatalf("unresolvable row blocked_by = %+v, want one %s blocker", got, BlockerUnresolved)
+	}
+
+	closeBead(t, binding, graphBlocker.ID)
+	cut = untilUnblockedAndWhole(t, legs)
+	if got, want := rowIDs(cut), []string{unresolvable.ID, byGraph.ID}; !slices.Equal(got, want) {
+		t.Fatalf("after the graph bead closed: split cut = %v, want %v", got, want)
+	}
+}

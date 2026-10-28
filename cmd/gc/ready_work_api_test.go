@@ -1112,3 +1112,95 @@ func TestReadyFallsBackWhenTheControllerHangs(t *testing.T) {
 		t.Fatalf("stdout = %q, want the in-process answer", stdout.String())
 	}
 }
+
+// TestReadyUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity is the cmd/gc
+// twin of readywork's split-city cut test, over the split fixture: the
+// in-process --until-unblocked read and the CLI's cut of the controller's
+// whole window agree, and both gate a claim blocked by a bead no store holds,
+// by an open graph bead in the binding, or by an external: ref to it; the cut
+// stops at the first clean claim and moves earlier once the graph bead closes.
+func TestReadyUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
+	f := newReadyWorkSplitFixture(t)
+	graphBlocker := mustCreateReadyBead(t, f.binding, beads.Bead{Title: "graph blocker", Type: "task"})
+	graphPrefix, _, _ := strings.Cut(graphBlocker.ID, "-")
+	inProgress := readywork.StatusInProgress
+	assignee := "sess-g"
+	strict, ok := f.city.(*splittest.StrictStore)
+	if !ok {
+		t.Fatalf("city store %T is not the strict fixture", f.city)
+	}
+	raw := strict.Store
+	claim := func(title string, priority int, blockers ...string) beads.Bead {
+		b := mustCreateReadyBead(t, f.city, beads.Bead{Title: title, Type: "task", Priority: readyPriority(priority)})
+		if err := f.city.Update(b.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+			t.Fatalf("claim %s: %v", b.ID, err)
+		}
+		for _, blocker := range blockers {
+			// The strict fixture refuses a new cross-namespace edge; these are
+			// the edges a city already holds (written before the guard), so
+			// they go to the leaf store directly.
+			if err := raw.DepAdd(b.ID, blocker, "blocks"); err != nil {
+				t.Fatalf("dep %s -> %s: %v", b.ID, blocker, err)
+			}
+		}
+		return b
+	}
+	unresolvable := claim("blocked by a bead no store holds", 0, graphPrefix+"-zz404")
+	byGraph := claim("blocked by an open graph bead", 1, graphBlocker.ID)
+	byExternal := claim("blocked by an external: ref to it", 2, "external:"+graphBlocker.ID)
+	clean := claim("clean claim", 3)
+	claim("past the cut", 4, graphPrefix+"-zz405")
+	window := readywork.Query{Status: readywork.StatusInProgress, Assignee: assignee, Limit: 20}
+
+	serving, err := readyServingRigs(f.cfg, f.cityPath)
+	if err != nil {
+		t.Fatalf("readyServingRigs: %v", err)
+	}
+	rigStores := make(map[string]beads.Store, len(serving))
+	for _, rig := range serving {
+		rigStores[rig.Name] = f.rigs[rig.Name]
+	}
+	legs, err := readyFederationLegsOverBinding(f.cityName, f.city, rigStores, f.binding)
+	if err != nil {
+		t.Fatalf("legs: %v", err)
+	}
+	cs := f.controller()
+	cutBoth := func() []readywork.ReadyBead {
+		t.Helper()
+		cut, err := readywork.ReadUntilUnblocked(context.Background(), legs, window)
+		if err != nil {
+			t.Fatalf("in-process --until-unblocked: %v", err)
+		}
+		whole, err := cs.ReadyWork(context.Background(), window)
+		if err != nil {
+			t.Fatalf("controller window: %v", err)
+		}
+		if got, want := readyWireIDs(cut), readyWireIDs(readywork.CutUntilUnblocked(whole)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("in-process cut %v != the CLI's cut of the controller's window %v", got, want)
+		}
+		return cut
+	}
+
+	cut := cutBoth()
+	if got, want := readyWireIDs(cut), []string{unresolvable.ID, byGraph.ID, byExternal.ID, clean.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("split cut = %v, want %v: every gated claim, then the first clean one", got, want)
+	}
+	for _, row := range cut[:3] {
+		open := false
+		for _, b := range row.BlockedBy {
+			if b.Status != "closed" {
+				open = true
+			}
+		}
+		if !open {
+			t.Fatalf("claim %s is unblocked on a split city (blocked_by %+v); the crash-recovery tier would resume it", row.ID, row.BlockedBy)
+		}
+	}
+
+	if err := f.binding.Close(graphBlocker.ID); err != nil {
+		t.Fatalf("close %s: %v", graphBlocker.ID, err)
+	}
+	if got, want := readyWireIDs(cutBoth()), []string{unresolvable.ID, byGraph.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after the graph bead closed: split cut = %v, want %v", got, want)
+	}
+}
