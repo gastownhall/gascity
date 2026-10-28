@@ -142,6 +142,45 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	return append(args, "attach-session", "-t", target)
 }
 
+// pinnedServerSocket returns the server socket path named by $TMUX when
+// that path is this provider's own named socket: same basename as
+// SocketName, inside the tmux-<uid> directory that -L itself resolves
+// under some TMUX_TMPDIR. The pin corrects the directory — the part of the
+// path a caller's environment controls — and never the name, which is the
+// city's identity, so it can only ever select a server -L could have
+// reached. Empty otherwise, and always for an empty SocketName.
+func (t *Tmux) pinnedServerSocket() string {
+	if t.cfg.SocketName == "" {
+		return ""
+	}
+	path, _, _ := strings.Cut(os.Getenv("TMUX"), ",")
+	if path == "" || !filepath.IsAbs(path) || path != filepath.Clean(path) {
+		return ""
+	}
+	if filepath.Base(path) != t.cfg.SocketName {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(path)) != fmt.Sprintf("tmux-%d", os.Getuid()) {
+		return ""
+	}
+	return path
+}
+
+// socketArgs returns the tmux connection flags for the server this provider
+// addresses: -S with the socket path pinned from $TMUX when a pane's own
+// server names this city's socket (a command run inside a pane must reach
+// the server hosting that pane whatever TMUX_TMPDIR it inherited), -L
+// otherwise, and nothing for the default socket.
+func (t *Tmux) socketArgs() []string {
+	if t.cfg.SocketName == "" {
+		return nil
+	}
+	if pinned := t.pinnedServerSocket(); pinned != "" {
+		return []string{"-S", pinned}
+	}
+	return []string{"-L", t.cfg.SocketName}
+}
+
 // namedSocketPath resolves the exact path tmux uses for a named -L socket.
 // tmux honors TMUX_TMPDIR here; TMPDIR is deliberately not a fallback.
 func namedSocketPath(socketName string) string {

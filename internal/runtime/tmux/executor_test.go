@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -1318,6 +1320,97 @@ func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
 				}
 			case !tc.wantIndeterminate && err != nil:
 				t.Errorf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// A gc command run inside a pane of the city's named server must reach that
+// same server. With -L, tmux builds the socket path from the caller's
+// TMUX_TMPDIR, which can differ from the controller's, so the server named
+// by $TMUX has to be pinned explicitly with -S (issue #8116). The pin holds
+// only when $TMUX names this provider's own socket: same basename, inside
+// the tmux-<uid> directory -L itself would resolve under some TMUX_TMPDIR.
+// Every other $TMUX shape keeps today's -L, and an empty SocketName keeps
+// the default server.
+func TestRunPinsCallerServerFromTMUX(t *testing.T) {
+	uid := os.Getuid()
+	pinned := fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights", uid, uid)
+	cases := []struct {
+		name       string
+		socketName string
+		tmux       string
+		want       []string
+	}{
+		{
+			name:       "inside_the_named_server",
+			socketName: "bright-lights",
+			tmux:       pinned + ",4242,0",
+			want:       []string{"-u", "-S", pinned, "list-sessions"},
+		},
+		{
+			name:       "outside_tmux",
+			socketName: "bright-lights",
+			tmux:       "",
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "other_socket_name",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/tmux-%d/default,4242,0", uid, uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "not_a_tmux_uid_dir",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/x/bright-lights,4242,0", uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "other_uid_dir",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights,4242,0", uid, uid+1),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "relative_path",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("tmux-%d/bright-lights,4242,0", uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "comma_leading",
+			socketName: "bright-lights",
+			tmux:       ",4242,0",
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "default_socket",
+			socketName: "",
+			tmux:       pinned + ",4242,0",
+			want:       []string{"-u", "list-sessions"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmux)
+			t.Setenv("TMUX_TMPDIR", "/tmp/elsewhere")
+			fe := &fakeExecutor{}
+			tm := &Tmux{cfg: Config{SocketName: tc.socketName}, exec: fe}
+			if _, err := tm.run("list-sessions"); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(fe.calls) != 1 {
+				t.Fatalf("expected 1 call, got %d", len(fe.calls))
+			}
+			got := fe.calls[0]
+			if len(got) != len(tc.want) {
+				t.Fatalf("args = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("args = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}

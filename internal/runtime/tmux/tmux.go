@@ -166,8 +166,11 @@ type Config struct {
 	DebounceMs       int
 	DisplayMs        int
 	// SocketName specifies the tmux socket name for per-city isolation.
-	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. Empty means use the default tmux server.
+	// When set, all tmux commands address a dedicated server: "tmux -L
+	// <socket>" normally, or "tmux -S <path>" with the path pinned from
+	// $TMUX when the caller is a pane of that same server, so a pane whose
+	// TMUX_TMPDIR differs from the controller's still reaches the server
+	// hosting it. Empty means use the default tmux server.
 	SocketName string
 	// RuntimeDir is the city runtime root under which per-session
 	// diagnostics are persisted. Production sets it to
@@ -558,17 +561,17 @@ func (t *Tmux) runCtxRaw(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
 	defer cancel()
 	allArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
-	}
+	allArgs = append(allArgs, t.socketArgs()...)
 	allArgs = append(allArgs, args...)
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
 // run executes a tmux command and returns stdout. All commands include -u
-// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
-// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
-// Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
+// for UTF-8 regardless of locale; when SocketName is set, the server is
+// addressed after -u: -L <socket> normally, or -S with the socket path
+// pinned from $TMUX when the caller is a pane of that same server (see
+// https://github.com/steveyegge/gastown/issues/1219). Every invocation is
+// bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
 }
