@@ -1927,3 +1927,81 @@ func TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkipped(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncWritesNoOutcomeWhenNoDatabaseSkipped covers the no-declaration
+// contract: a run with no remote-policy skip must leave the outcome file
+// empty and print no all-skipped summary. That holds when every database
+// syncs, when only deliberate .no-sync opt-outs exist, and when the data
+// directory holds no databases at all.
+func TestSyncWritesNoOutcomeWhenNoDatabaseSkipped(t *testing.T) {
+	t.Parallel()
+	t.Run("every database syncs", func(t *testing.T) {
+		t.Parallel()
+		cityPath := t.TempDir()
+		dataDir := filepath.Join(cityPath, "data")
+		writeSyncCLIDatabase(t, dataDir, "app", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+		binDir := t.TempDir()
+		_ = writeSyncFakeDolt(t, binDir)
+		_ = writeSyncFakeBeadsBD(t, cityPath)
+		outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+		out, err := runSync(t, binDir, cityPath, []string{outcomeEnv, "GC_DOLT_REMOTE_APP="})
+		if err != nil {
+			t.Fatalf("healthy sync failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "app: pushed") {
+			t.Fatalf("expected the database to push:\n%s", out)
+		}
+		assertNoCompactOutcome(t, outcomeFile)
+		if strings.Contains(out, "skipped, nothing synced") {
+			t.Fatalf("a run with no skips must not print the all-skipped summary:\n%s", out)
+		}
+	})
+
+	t.Run("only no-sync opt-outs", func(t *testing.T) {
+		t.Parallel()
+		cityPath := t.TempDir()
+		dataDir := filepath.Join(cityPath, "data")
+		writeSyncCLIDatabase(t, dataDir, "app", `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`)
+		if err := os.WriteFile(filepath.Join(dataDir, "app", ".no-sync"), nil, 0o644); err != nil {
+			t.Fatalf("write .no-sync marker: %v", err)
+		}
+		binDir := t.TempDir()
+		_ = writeSyncFakeDolt(t, binDir)
+		_ = writeSyncFakeBeadsBD(t, cityPath)
+		outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+		out, err := runSync(t, binDir, cityPath, []string{outcomeEnv})
+		if err != nil {
+			t.Fatalf("a run with only opt-outs is not a failure: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "app: skipped (.no-sync)") {
+			t.Fatalf("expected the .no-sync opt-out line:\n%s", out)
+		}
+		assertNoCompactOutcome(t, outcomeFile)
+		if strings.Contains(out, "skipped, nothing synced") {
+			t.Fatalf("deliberate opt-outs are configured policy, not missed work:\n%s", out)
+		}
+	})
+
+	t.Run("no databases", func(t *testing.T) {
+		t.Parallel()
+		cityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityPath, "data"), 0o755); err != nil {
+			t.Fatalf("mkdir data dir: %v", err)
+		}
+		binDir := t.TempDir()
+		_ = writeSyncFakeDolt(t, binDir)
+		_ = writeSyncFakeBeadsBD(t, cityPath)
+		outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+		out, err := runSync(t, binDir, cityPath, []string{outcomeEnv})
+		if err != nil {
+			t.Fatalf("an empty data directory is not a failure: %v\n%s", err, out)
+		}
+		assertNoCompactOutcome(t, outcomeFile)
+		if strings.Contains(out, "skipped, nothing synced") {
+			t.Fatalf("a run with nothing to do must not print the all-skipped summary:\n%s", out)
+		}
+	})
+}
