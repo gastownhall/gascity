@@ -219,6 +219,15 @@ func TestParseQuestionDialog_Fixtures(t *testing.T) {
 			wantChoices:  []string{"Small", "Medium", "Chat about this"},
 			wantFocused:  "Small",
 		},
+		{
+			// The review page: no footer, the Submit answers / Cancel menu
+			// directly under "Ready to submit your answers?". One Enter here
+			// submits every answer, so it is in scope for #8150.
+			fixture:      "review-page-ga-ngrme8.txt",
+			wantQuestion: "Ready to submit your answers?",
+			wantChoices:  []string{"Submit answers", "Cancel"},
+			wantFocused:  "Submit answers",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -609,4 +618,68 @@ func TestDismissersLeaveAskUserQuestionDialogAlone(t *testing.T) {
 		_ = tm.DismissKnownDialogs(context.Background(), "auq", 300*time.Millisecond)
 		requireNoKeys(t, ex.calls, false)
 	})
+}
+
+// reviewPagePane is the review-page capture as a pane string.
+func reviewPagePane(t *testing.T) string {
+	t.Helper()
+	return strings.Join(readQuestionFixture(t, "review-page-ga-ngrme8.txt"), "\n") + "\n"
+}
+
+// The review page is the dialog's second shape: no select footer, just the
+// Submit answers / Cancel menu under "Ready to submit your answers?". One
+// Enter on it submits every answer, so it must read as a live question — not
+// as the idle composer its "❯ 1." row resembles — and its pending question
+// must differ from the dialog's question pages.
+func TestProviderPendingReportsReviewPageAsQuestion(t *testing.T) {
+	tm, _ := questionTmux(reviewPagePane(t))
+	pending, err := (&Provider{tm: tm}).Pending("auq")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending == nil || pending.Kind != "question" {
+		t.Fatalf("Pending = %+v; want a pending question — a nudge's Enter would submit every answer", pending)
+	}
+	if !strings.HasPrefix(pending.RequestID, "tmux-question-") {
+		t.Errorf("RequestID = %q, want the tmux-question- prefix", pending.RequestID)
+	}
+
+	questionTm, _ := questionTmux(strings.Join(readQuestionFixture(t, "question-page-ga-ngrme8.txt"), "\n") + "\n")
+	questionPending, err := (&Provider{tm: questionTm}).Pending("auq")
+	if err != nil || questionPending == nil {
+		t.Fatalf("Pending on the question page = %+v, %v", questionPending, err)
+	}
+	if questionPending.RequestID == pending.RequestID {
+		t.Errorf("review page RequestID %q equals the question page's; the ID must move with the page", pending.RequestID)
+	}
+
+	lines := readQuestionFixture(t, "review-page-ga-ngrme8.txt")
+	if PaneShowsIdlePrompt(lines, DefaultReadyPromptPrefix) {
+		t.Error("PaneShowsIdlePrompt = true for the review page; a nudge's Enter would submit every answer")
+	}
+	if idle, err := ClassifyIdlePane(lines, DefaultReadyPromptPrefix); err == nil && idle {
+		t.Error("ClassifyIdlePane(review page) = (true, nil), want not idle")
+	}
+}
+
+// Every nudge path must refuse the review page before any key: NudgeSession
+// (hence every queued, backstop and sling delivery), NudgeNow, and the
+// wait-idle Nudge before it spends its idle wait.
+func TestNudgeRefusesReviewPage(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NudgeIdleTimeout = 5 * time.Second
+	ex := &paneExecutor{pane: reviewPagePane(t), inMode: "0"}
+	p := &Provider{tm: &Tmux{cfg: cfg, exec: ex}}
+
+	start := time.Now()
+	if err := p.Nudge("auq", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("Nudge = %v, want runtime.ErrPendingInteraction", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Nudge took %s to refuse; it waited for idle instead of refusing at once", elapsed)
+	}
+	if err := p.NudgeNow("auq", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
+	}
+	requireNoKeys(t, ex.calls, false)
 }

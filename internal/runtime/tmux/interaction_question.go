@@ -28,7 +28,20 @@ import (
 // bottom-most block: focus in the "Type something." row draws no ❯ cursor,
 // an answered question's chip reads ☒ instead of ☐, and neither the header
 // row nor the question text is stable across releases. The rows above the
-// footer are display fields only.
+// footer are display fields only. A wrapped-around questionnaire shows a
+// second shape first, the review page, which has no footer:
+//
+//	 ←  ☒ Q1  ☒ Q2  ☒ Q3  ☒ Q4  ✔ Submit  →
+//	Review your answers
+//	 …
+//	Ready to submit your answers?
+//	❯ 1. Submit answers
+//	2. Cancel
+//
+// Its key is its own bottom-most block: the two-option "Submit answers /
+// Cancel" menu directly under "Ready to submit your answers?", anchored
+// higher up by "Review your answers" or the ✔ Submit tab strip. One Enter on
+// this page submits every answer.
 //
 // The dialog is live only while the footer is the last thing on screen. Once
 // it is answered the frame stays in scrollback with the agent's output (or
@@ -86,9 +99,12 @@ type parsedQuestion struct {
 }
 
 // parseQuestionDialog returns the open AskUserQuestion dialog the pane lines
-// show, or nil when they show none.
+// show — its question page or its review page — or nil when they show none.
 func parseQuestionDialog(lines []string) *parsedQuestion {
-	return parseQuestionPage(lines)
+	if q := parseQuestionPage(lines); q != nil {
+		return q
+	}
+	return parseReviewPage(lines)
 }
 
 // parseQuestionPage returns the question dialog whose select footer is the
@@ -179,6 +195,47 @@ func trimTrailingBlankRows(lines []string) []string {
 		end--
 	}
 	return lines[:end]
+}
+
+// parseReviewPage returns the dialog's review page — the pane's bottom-most
+// block is the "Submit answers / Cancel" menu directly under "Ready to submit
+// your answers?" — or nil. One Enter on this page submits every answer.
+func parseReviewPage(lines []string) *parsedQuestion {
+	block := trimTrailingBlankRows(lines)
+	if len(block) < 3 || strings.TrimSpace(block[len(block)-3]) != "Ready to submit your answers?" {
+		return nil
+	}
+	q := &parsedQuestion{Question: "Ready to submit your answers?"}
+	labels := []string{"Submit answers", "Cancel"}
+	for k, row := range []string{block[len(block)-2], block[len(block)-1]} {
+		m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(row))
+		if m == nil || m[2] != fmt.Sprint(k+1) || strings.TrimSpace(m[3]) != labels[k] {
+			return nil
+		}
+		q.Choices = append(q.Choices, labels[k])
+		if m[1] != "" {
+			q.Focused = labels[k]
+		}
+	}
+	// The menu alone could be quoted history at the pane's bottom; the page
+	// is live only with its anchor above: the "Review your answers" heading
+	// or the ✔ Submit tab strip with its ☐/☒ chips.
+	anchored := false
+	for i := len(block) - 4; i >= 0 && (len(block)-3-i) <= questionDialogMaxRows; i-- {
+		row := block[i]
+		if askUserQuestionHeaderRe.MatchString(row) && q.Header == "" {
+			q.Header = strings.TrimSpace(askUserQuestionHeaderRe.FindStringSubmatch(row)[1])
+		}
+		if strings.Contains(row, "Review your answers") ||
+			(strings.Contains(row, "✔ Submit") && (strings.Contains(row, "☐") || strings.Contains(row, "☒"))) {
+			anchored = true
+			break
+		}
+	}
+	if !anchored {
+		return nil
+	}
+	return q
 }
 
 // promptText renders the description a client shows for the pending question:
