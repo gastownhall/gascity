@@ -1183,6 +1183,147 @@ func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
 	}
 }
 
+const stopCloseRoutedFormula = `formula = "routed-flow"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+assignee = "worker"
+metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/worker" }
+`
+
+// TestConvergenceStop_ClosesActiveWispSteps asserts that after `gc converge
+// stop`, every step bead of the stopped loop's active wisp is closed with the
+// manual-supersede reason, stamped gc.outcome=skipped, and no longer offered
+// by Ready() to the routed worker. The manual-gate case covers a first
+// iteration poured with its assignee and routes up front; the condition-gate
+// case covers a second iteration whose speculative wisp was activated, so its
+// step is a task in Ready() (ga-i4s7ce, issue #8386).
+func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		params     map[string]string
+		iterations int // wisps closed by the "agent" before the stop
+	}{
+		{"manual-gate/iteration-1", map[string]string{}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, store := setupConvergenceRuntime(t)
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "routed-flow.toml"), []byte(stopCloseRoutedFormula), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cond := filepath.Join(dir, "never-converged.sh")
+			if err := os.WriteFile(cond, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cr.convScopes[""] = cr.newConvergenceScope("", store, cr.cityPath, []string{dir}, false)
+
+			params := map[string]string{"formula": "routed-flow", "target": "worker", "max_iterations": "5"}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			if params["gate_mode"] == "condition" {
+				params["gate_condition"] = cond
+			}
+			reply := sendAndReceive(t, cr, convergenceRequest{Command: "create", Params: params})
+			if reply.Error != "" {
+				t.Fatalf("create: %s", reply.Error)
+			}
+			var created convergence.CreateResult
+			if err := json.Unmarshal(reply.Result, &created); err != nil {
+				t.Fatal(err)
+			}
+			if err := hqScope(t, cr).adapter.populateIndex(); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.iterations; i++ {
+				meta, err := store.Get(created.BeadID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				active := meta.Metadata[convergence.FieldActiveWisp]
+				kids, err := store.Children(active)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, k := range kids {
+					if err := store.Close(k.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := store.Close(active); err != nil {
+					t.Fatal(err)
+				}
+				cr.convergenceTick(context.Background())
+			}
+			root, err := store.Get(created.BeadID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wispID := root.Metadata[convergence.FieldActiveWisp]
+			steps, err := store.Children(wispID)
+			if err != nil || len(steps) == 0 {
+				t.Fatalf("wisp %s steps: %v (n=%d)", wispID, err, len(steps))
+			}
+
+			if r := sendAndReceive(t, cr, convergenceRequest{Command: "stop", BeadID: created.BeadID, User: "op"}); r.Error != "" {
+				t.Fatalf("stop: %s", r.Error)
+			}
+
+			wisp, err := store.Get(wispID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wisp.Status != "closed" {
+				t.Errorf("wisp %s status = %q, want closed", wispID, wisp.Status)
+			}
+			loop, err := store.Get(created.BeadID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loop.Status != "closed" || loop.Metadata[convergence.FieldState] != convergence.StateTerminated {
+				t.Errorf("loop %s status = %q state = %q, want closed and terminated",
+					loop.ID, loop.Status, loop.Metadata[convergence.FieldState])
+			}
+			if loop.Metadata[convergence.FieldTerminalReason] != convergence.TerminalStopped {
+				t.Errorf("loop %s terminal_reason = %q, want %q",
+					loop.ID, loop.Metadata[convergence.FieldTerminalReason], convergence.TerminalStopped)
+			}
+
+			ready, err := store.Ready(beads.ReadyQuery{Assignee: "worker"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inReady := map[string]bool{}
+			for _, b := range ready {
+				inReady[b.ID] = true
+			}
+			for _, s := range steps {
+				got, err := store.Get(s.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status != "closed" {
+					t.Errorf("step %s of the stopped loop's wisp is still %q", got.ID, got.Status)
+				}
+				if got.Metadata["close_reason"] != convergence.CloseReasonManualSupersede {
+					t.Errorf("step %s close_reason = %q, want %q",
+						got.ID, got.Metadata["close_reason"], convergence.CloseReasonManualSupersede)
+				}
+				if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+					t.Errorf("step %s gc.outcome = %q, want %q",
+						got.ID, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+				}
+				if inReady[got.ID] {
+					t.Errorf("step %s of the stopped loop is still offered by Ready(assignee=worker)", got.ID)
+				}
+			}
+		})
+	}
+}
+
 func TestConvergenceStoreRejectsGraphV2Wisp(t *testing.T) {
 	dir := t.TempDir()
 	formulaText := `formula = "graph-flow"
