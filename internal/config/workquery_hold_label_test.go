@@ -12,7 +12,9 @@ import (
 // shell-generator level: route-scoped, unassigned pool-demand queries (Tier
 // 3, and the reconciler's count-form) must exclude beads carrying a
 // beadmeta.DispatchHoldLabels value, while the assignee-scoped ephemeral
-// probe (Tier 1/2) stays hold-transparent.
+// probe (Tier 1/2) stays hold-transparent. The assigned-ready reader's own
+// dispatch-hold exclusion (#8010) is pinned in
+// workquery_assigned_ready_hold_test.go.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
 	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})

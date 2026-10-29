@@ -900,10 +900,17 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+//
+// The read excludes beadmeta.DispatchHoldLabels (never the human label) before
+// its --limit=1. Its callers serve the first row and exit the query, so a held
+// row it returned would be stripped by the hook's held-candidate filter and
+// starve every tier below (#8010); filtering ahead of the limit also keeps a
+// held head from hiding an unheld assignment for the same identity.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1)` +
+		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
+		` --json --limit=1)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -1215,6 +1222,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // output). Roles that need different behavior still opt in via an explicit
 // work_query in their agent config; that custom query is returned unchanged
 // above.
+//
+// The assigned-ready reader skips dispatch-held rows (never the human
+// label), so a held assignment is neither served nor able to mask other work.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
