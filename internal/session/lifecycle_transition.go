@@ -698,13 +698,34 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 // orphaned, drained, failed-create, ...) is silently rejected by the
 // validator, leaving close_reason/closed_at stamped on an OPEN bead and
 // triggering reconciler flap as the next tick clears them.
+//
+// Every close except a failed create also carries UsageClosePatch: the close
+// commits status=closed with it, so the row leaves the open set the usage lane
+// scans, and the marker is what keeps the interval it ended accounted. A failed
+// create never confirmed a start, so it has no interval and writes neither key.
 func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
-	return MetadataPatch{
+	patch := MetadataPatch{
 		"state":        stateCode,
 		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,
+	}
+	if stateCode != string(StateFailedCreate) {
+		maps.Copy(patch, UsageClosePatch(now))
+	}
+	return patch
+}
+
+// UsageClosePatch marks a closing row as possibly holding an awake interval
+// the usage lane has not accounted. usage_close_pending is the equality the
+// lane lists closed rows by; usage_closed_at is the interval's end, kept apart
+// from closed_at because a named-session reopen clears closed_at before the
+// lane may have run. The lane clears both once the interval is settled.
+func UsageClosePatch(now time.Time) MetadataPatch {
+	return MetadataPatch{
+		MetadataKeyUsageClosePending: "true",
+		MetadataKeyUsageClosedAt:     now.UTC().Format(time.RFC3339Nano),
 	}
 }
 
