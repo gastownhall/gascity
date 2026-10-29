@@ -241,6 +241,20 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
+	// Accept startup dialogs (workspace trust, bypass permissions, …) the
+	// freshly launched agent may be parked on, when the config asks for them —
+	// herdr's "Step 3", mirroring tmux's doStartSession dialog step. Runs
+	// BEFORE the idle wait below: an agent blocked on a dialog never reports
+	// idle, so the wait would burn its whole 60s budget first. Runs OUTSIDE
+	// the adopted guard and the startupText/session_setup gate of the tail:
+	// an adopted holder is a live session whose winning Start already
+	// answered its dialogs (and the matcher's rate-limit phase could otherwise
+	// select "Stop" on an in-session dialog and exit a working agent), while a
+	// session with no startup text must still clear its trust dialog or a
+	// later out-of-band nudge lands on it and is lost (#7027).
+	if !adopted && info.PaneID != "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+		p.acceptStartupDialogs(ctx, name, info.PaneID, workDir)
+	}
 	// Post-launch steps mirror tmux's doStartSession ordering: wait for
 	// readiness, run session_setup (Step 5.5), then deliver the startup nudge
 	// (Step 6).
@@ -899,11 +913,7 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	if err != nil || pid == "" {
 		return nil
 	}
-	hk := make([]string, len(keys))
-	for i, k := range keys {
-		hk[i] = translateKey(k)
-	}
-	return p.c.sendKeys(ctx, pid, hk...)
+	return p.c.sendKeys(ctx, pid, translateKeys(keys)...)
 }
 
 // Capabilities reports which optional provider features this backend supports.
@@ -1202,6 +1212,16 @@ func effectiveWorkDir(cfg runtime.Config, cityRoot string) (string, error) {
 		return root, nil
 	}
 	return cityRoot, nil
+}
+
+// translateKeys maps a batch of tmux-style key names to herdr key-combo
+// strings, sharing translateKey with SendKeys and the startup-dialog step.
+func translateKeys(keys []string) []string {
+	hk := make([]string, len(keys))
+	for i, k := range keys {
+		hk[i] = translateKey(k)
+	}
+	return hk
 }
 
 // translateKey maps tmux-style key names (SendKeys uses "Enter"/"C-c"/"Down")

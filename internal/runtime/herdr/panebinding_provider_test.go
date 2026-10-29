@@ -23,7 +23,9 @@ import (
 // raw commands are typed into the pane and never register anything. State
 // files drive the scenario (registered / pane_gone / busy / name_taken /
 // agent_blocked, plus the startup-delivery verdicts prompt_stalled /
-// prompt_times_out / prompt_blocked and wait_times_out), and calls.log records every verb so
+// prompt_times_out / prompt_blocked and wait_times_out, and the
+// startup-dialog states trust_dialog / trust_stuck / trusted /
+// pane_read_fails), and calls.log records every verb so
 // tests can assert what was — and crucially was NOT — issued (the spawn storm
 // was one placement per reconcile tick).
 
@@ -125,6 +127,41 @@ agent_prompt)
 pane_run)
   : > "$STATE/busy"
   printf '%s' "$4" | sed -e 's|^exec /bin/sh -c ||' -e "s/^'//" -e "s/'\$//" > "$STATE/rawcmd"
+  exit 0 ;;
+pane_read)
+  if [ -e "$STATE/pane_read_fails" ]; then
+    # A transport-level read failure for the dialog step's error path.
+    echo '{"error":{"code":"pane_read_failed","message":"pane unreadable"}}' >&2
+    exit 1
+  elif [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trusted" ]; then
+    # Claude's workspace-trust dialog (issue #7027). trust_stuck parks the
+    # cursor on "No, exit" and ignores movement keys, so the matcher can never
+    # confirm from the trust row (ErrWorkspaceTrustUnconfirmed). Otherwise the
+    # cursor starts on the trust row and the frame stays up until enter lands.
+    if [ -e "$STATE/trust_stuck" ]; then
+      printf '%s\n' \
+        'Quick safety check: Is this a project you created or one you trust?' \
+        '  1. Yes, I trust this folder' \
+        '❯ 2. No, exit'
+    else
+      printf '%s\n' \
+        'Quick safety check: Is this a project you created or one you trust?' \
+        '❯ 1. Yes, I trust this folder' \
+        '  2. No, exit'
+    fi
+  else
+    # A ready prompt: every dialog phase early-returns on it.
+    printf '%s\n' '❯ '
+  fi ;;
+pane_send-keys)
+  # Confirming the trust dialog flips the pane to its ready frame. trust_stuck
+  # never lets the cursor reach the trust row, so enter must never arrive —
+  # creating "trusted" there would mask an unconfirmed-dialog regression.
+  if [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trust_stuck" ]; then
+    case "$*" in
+      *enter*) : > "$STATE/trusted" ;;
+    esac
+  fi
   exit 0 ;;
 pane_process-info)
   if [ -e "$STATE/pane_gone" ]; then

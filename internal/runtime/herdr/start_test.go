@@ -7,6 +7,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -279,5 +280,77 @@ func TestStartRunsSessionSetupAfterLaunch(t *testing.T) {
 	// The readiness wait precedes setup, mirroring tmux's ready→setup→nudge.
 	if waitIdx < 0 || waitIdx >= setupIdx {
 		t.Errorf("expected an idle wait before session_setup; log:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestStartAcceptsWorkspaceTrustDialog pins startup-dialog parity with tmux
+// (adapter.go Step 3): when ShouldAcceptStartupDialogs(cfg) is true and the
+// freshly-launched agent's pane shows Claude's workspace-trust dialog, Start
+// must confirm it through the pane (`pane send-keys`) instead of leaving the
+// agent stalled at the dialog until a human attaches (issue #7027).
+func TestStartAcceptsWorkspaceTrustDialog(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("fake herdr CLI is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "herdr")
+	logPath := filepath.Join(dir, "invocations.log")
+	script := `#!/bin/sh
+shift 2 # drop --session <name>
+printf '%s\n' "$*" >> '` + logPath + `'
+case "$1 $2" in
+"agent list") printf '{"result":{"agents":[]}}' ;;
+"agent start") printf '{"result":{"agent":{"name":"%s","pane_id":"p1"}}}' "$3" ;;
+"agent get") printf '{"error":{"code":"not_found","message":"no such agent"}}' ;;
+"pane process-info") printf '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[]}}}' ;;
+"pane read") printf '%s\n' \
+	'Quick safety check: Is this a project you created or one you trust?' \
+	'' \
+	' ❯ 1. Yes, I trust this folder' \
+	'   2. No, exit' \
+	'' \
+	' Enter to confirm · Esc to cancel' ;;
+"workspace list") printf '{"result":{"workspaces":[]}}' ;;
+"workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"p1"}}}' ;;
+"tab list") printf '{"result":{"tabs":[]}}' ;;
+"tab create") printf '{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"p1"}}}' ;;
+*) printf '{"result":{}}' ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake herdr: %v", err)
+	}
+	f := &fakeHerdr{bin: bin, log: logPath}
+	p := newFakeStartProvider(t, f)
+
+	accept := true
+	cfg := runtime.Config{
+		WorkDir:              t.TempDir(),
+		Command:              "claude",
+		AcceptStartupDialogs: &accept,
+	}
+	if !runtime.ShouldAcceptStartupDialogs(cfg) {
+		t.Fatal("test setup: ShouldAcceptStartupDialogs(cfg) must be true")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := p.start(ctx, "gastown__worker", cfg); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	lines := f.logLines(t)
+	startIdx := logIndex(lines, "agent start")
+	if startIdx < 0 {
+		t.Fatalf("agent was never started; log:\n%s", strings.Join(lines, "\n"))
+	}
+	sent := false
+	for _, l := range lines[startIdx+1:] {
+		if strings.HasPrefix(l, "pane send-keys p1") {
+			sent = true
+			break
+		}
+	}
+	if !sent {
+		t.Errorf("Start never sent keys to confirm the workspace-trust dialog shown after launch; log:\n%s", strings.Join(lines, "\n"))
 	}
 }
