@@ -187,11 +187,32 @@ func TestTemplateResolverNamedMatchesLegacyWithoutRebind(t *testing.T) {
 			if cleared := lc.info(t, info.ID).TriggerBeadID == ""; cleared != parked {
 				t.Fatalf("legacy cleared the trigger = %v, want %v", cleared, parked)
 			}
-			if parked {
-				if got.TP.Env["GC_TRIGGER_BEAD_ID"] != info.TriggerBeadID || want.TP.Env["GC_TRIGGER_BEAD_ID"] != "" {
-					t.Fatalf("trigger env: resolver %q, legacy %q; want the row's stamp and none", got.TP.Env["GC_TRIGGER_BEAD_ID"], want.TP.Env["GC_TRIGGER_BEAD_ID"])
+			// Neither named path may export an id-shaped trigger key
+			// (gastownhall/gascity#5738): a named singleton keeps its stamp for
+			// its whole life, so a shell copy would be an exec-frozen foreign
+			// bead id one close chain away from closing someone else's work.
+			for _, side := range []struct {
+				name string
+				tp   TemplateParams
+			}{{"resolver", got.TP}, {"legacy", want.TP}} {
+				for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+					if _, ok := side.tp.Env[key]; ok {
+						t.Fatalf("%s named-session env carries %s, want no session shell to receive a controller-chosen bead id", side.name, key)
+					}
 				}
-				for _, k := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID"} {
+			}
+			// The presence marker tracks each side's own view of the stamp:
+			// the resolver never writes the row, so its marker survives the
+			// parked case too; legacy clears a parked stamp, so its marker
+			// goes with it.
+			if got := got.TP.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+				t.Fatalf("resolver GC_SPAWN_ORIGIN = %q, want demand (the resolver never clears the stamp)", got)
+			}
+			if got, wantLegacy := want.TP.Env["GC_SPAWN_ORIGIN"], map[bool]string{true: "", false: "demand"}[parked]; got != wantLegacy {
+				t.Fatalf("legacy GC_SPAWN_ORIGIN = %q, want %q (the marker follows the stamp the refresh keeps or clears)", got, wantLegacy)
+			}
+			if parked {
+				for _, k := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
 					delete(got.TP.Env, k)
 				}
 			}

@@ -9384,11 +9384,75 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	if got := prepared.cfg.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
 		t.Errorf("launched GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a parked target", got)
 	}
+	if got, ok := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; ok {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want absent: the stamp the marker tracks is cleared", got)
+	}
 	after, err := store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("Get session bead after prepare: %v", err)
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// TestPrepareStartCandidateForCity_DemandMarkerSurvivesWithLiveNamedTrigger is
+// the surviving-stamp half of the named-session contract (#5738): a named
+// session whose trigger target is still workable keeps its durable stamp
+// through the start-time refresh, and its launch env carries exactly the
+// presence marker — never the stamp's bead id, which on a named singleton
+// would be an exec-frozen foreign bead id for the seat's whole life.
+func TestPrepareStartCandidateForCity_DemandMarkerSurvivesWithLiveNamedTrigger(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	work, err := store.Create(beads.Bead{Title: "live work", Status: "open"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "worker")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"session_name":                    sessionName,
+			namedSessionMetadataKey:           "true",
+			namedSessionIdentityMetadata:      "worker",
+			namedSessionModeMetadata:          "on_demand",
+			beadmeta.TriggerBeadIDMetadataKey: work.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
+		order: 0,
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want demand: the stamp survived the refresh", got)
+	}
+	for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+		if got, ok := prepared.cfg.Env[key]; ok {
+			t.Errorf("launched %s = %q, want absent (no session shell receives a controller-chosen bead id)", key, got)
+		}
+	}
+	after, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after prepare: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != work.ID {
+		t.Errorf("durable trigger stamp = %q, want kept (%s)", v, work.ID)
 	}
 }
