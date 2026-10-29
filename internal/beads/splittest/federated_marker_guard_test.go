@@ -77,6 +77,18 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"one leg of the stepless-root holder walk (S3a): the graph store, then every work leg; a holder lives in one",
 	},
+	"cmd/gc/cmd_convoy.go closeCompletedConvoyAcross": {
+		"federated", 2,
+		"the two legs of a work convoy's legacy-child union (S3c): a graph child poured under it lives in the binding, a work child on the convoy's ledger",
+	},
+	"cmd/gc/molecule_autoclose.go autocloseLocate": {
+		"federated", 2,
+		"a two-store residence probe for an autoclose parent or root (S3a, S3c): the second store answers when the first misses",
+	},
+	"internal/orders/store_reads.go (*Store).LastRun": {
+		"federated", 1,
+		"one leg of the last-run read (S3a, S3c): run evidence is a tracking bead (orders), a graph root, or a v1 poured root on the work leg",
+	},
 	"cmd/gc/api_state.go liveCloseOwner": {
 		"federated", 1,
 		"first-owner close probe (S3a R4): the prefix route and the binding the residence probe proved holds a relic id",

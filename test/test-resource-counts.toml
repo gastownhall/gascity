@@ -2901,11 +2901,6 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
-path = "test/acceptance/helpers/tool_home_test.go"
-resource = "subprocess"
-calls = 4
-
-[[count]]
 path = "test/acceptance/import_named_sessions_regression_test.go"
 resource = "fixed_sleep"
 calls = 1

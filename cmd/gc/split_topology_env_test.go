@@ -515,6 +515,9 @@ type wispOpts struct {
 	// metadata is merged over the defaults (kind=wisp, routedTo) last, so a
 	// scenario can layer extra keys.
 	metadata map[string]string
+	// parentID is the legacy parent the wisp is poured under ("" for none),
+	// as a graph root poured with a parent carries its attach target.
+	parentID string
 }
 
 // mintWisp creates a wisp root bead through the graph-class front door, the way
@@ -546,6 +549,7 @@ func (e splitEnv) mintWispWith(t *testing.T, opts wispOpts) beads.Bead {
 	b := beads.Bead{
 		Title:    opts.title,
 		Type:     "task", // graph.v2 wisps materialize as issue_type "task"
+		ParentID: opts.parentID,
 		Metadata: md,
 	}
 	front := e.graphStore()
@@ -618,9 +622,17 @@ func (e splitEnv) mintWispWith(t *testing.T, opts wispOpts) beads.Bead {
 //     that class is relocated to this same binding.
 func mintEphemeralGraphBead(t *testing.T, e splitEnv, title string) beads.Bead {
 	t.Helper()
+	return mintEphemeralGraphChild(t, e, title, "")
+}
+
+// mintEphemeralGraphChild is mintEphemeralGraphBead for a bead poured under a
+// legacy parent (parentID; "" for none), such as a graph root a convoy
+// tracks as its child.
+func mintEphemeralGraphChild(t *testing.T, e splitEnv, title, parentID string) beads.Bead {
+	t.Helper()
 	front := e.graphStore()
 	if e.policyWrapped(front) {
-		return e.mintWispWith(t, wispOpts{title: title})
+		return e.mintWispWith(t, wispOpts{title: title, parentID: parentID})
 	}
 	store, ok := front.(beads.StorageCreateStore)
 	if !ok {
@@ -630,6 +642,7 @@ func mintEphemeralGraphBead(t *testing.T, e splitEnv, title string) beads.Bead {
 		ID:       splitWispID(),
 		Title:    title,
 		Type:     "task", // graph.v2 wisps materialize as issue_type "task"
+		ParentID: parentID,
 		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp},
 	}, beads.StorageEphemeral)
 	if err != nil {

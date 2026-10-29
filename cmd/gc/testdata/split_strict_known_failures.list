@@ -8,8 +8,6 @@
 # The nightly downward ratchet (--check) fails on an entry that now passes.
 TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen	fails under the gate: drain fence fails closed = false, want true (probe error: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found)
 TestAnUnknownClassNameStaysOnTheWorkLedger	fails under the gate: unknown class resolved to 0x6315ef68e20, want the work store 0x6315cefe540
-TestApplyBeadEventToStoresDefersAnUnconfirmableClose	fails under the gate: convoy open after the sweep, want closed
-TestApplyBeadEventToStoresRevalidatesInferredCloses	fails under the gate: convoy status = "open", want "closed"
 TestAttachGitHubPRRepairWorkflowStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: the repair workflow's wisp root is not in the one store a single-store city has
 TestAutocloseLeavesAPersistentlyRefusedCloseToTheSweep	fails under the gate: convoy closed; every close was refused
 TestAutocloseSweepClosesMoleculeForALostStepClose	fails under the gate: molecule root open after the sweep, want closed
@@ -117,15 +115,12 @@ TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge	fails under the gate: pen
 TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL	fails under the gate: openStoreAtForCity returned *splittest.view, want policy-wrapped *beads.BdStore
 TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeCodexHookPersistsProviderSessionKeyFromHookStdin	fails under the gate: bead "gcg-1" is not in this store: bead not found
-TestDoPrimeGeminiHookPersistsProviderSessionKey	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider	fails under the gate: bead "gcg-1" is not in this store: bead not found
-TestDoPrimeHookPersistsGenericProviderSessionKey	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeHookWarnsWhenRequiredProviderSessionKeyMissing	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoorbellRetriesARowALocalWriteFenced	fails under the gate: rows waiting after the fence lifted = 1 (retry running true), want none and the retry ended
 TestDoorbellRowWaitsOutAQuiescentCity	fails under the gate: rows waiting after the city resumed = 1 (retry running true), want none and the retry ended
 TestExecutorIdentityResidueCheckSingleStoreCityComparesStoresByEngine	fails under the gate: sameStoreEngine(*main.beadPolicyGraphStore, *splittest.view) = false, want true: both serve the one city engine
 TestFindUniqueBeadAcrossStoresViewRefusesABindingRigCollision	fails under the gate: a binding/rig collision resolved to city (class binding); the write that follows lands on one ledger and not the other
-TestForeignBeadClosedTakesTheFactFromTheLiveRead	fails under the gate: convoy open after a confirmed close, want closed
 TestFormulaBeadResolverSkipsSuspendedRigs	fails under the gate: resolving gc-9003 in the serving rig = {ID: Title: Status: Type: Priority:<nil> CreatedAt:0001-01-01 00:00:00 +0000 UTC UpdatedAt:0001-01-01 00:00:00 +0000 UTC 
 TestFormulaCookAttachEmitsTheWorkAssociation	fails under the gate: gc formula cook graph-work: --attach cc-1: cc-1 lives in this rig's own store (a tree created before the rig's graph beads moved to the city binding), and a gra
 TestFormulaCookAttachFailedMetaStampReportsTheLiveGraft	fails under the gate: attached root cc-2: bead "cc-2" is not in this store: bead not found
@@ -250,7 +245,6 @@ TestPrimeHookAsksForTheStepReminderBeforeProvingItsSession	fails under the gate:
 TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow	fails under the gate: get session bead: bead "gcg-1" is not in this store: bead not found
 TestPrimeHookReadsItsSessionStartMailWhileTheStepReminderIsOutstanding	fails under the gate: session beads = 0, want 1
 TestPrimeHookReapsPollersAlongsideItsReads	fails under the gate: session beads = 0, want 1
-TestQuiescentCloseReadsNothingAndConvergesAfterResume	fails under the gate: convoy open after resume, want closed
 TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity	fails under the gate: default backend: the refresh path's sessions store must be the identical value cr.cityBeadStore() returns
 TestRefusedCityNeverPlacesAClassOnTheWorkLedger	fails under the gate: work resolved to 0x13992869ec00 on a refused city, want the work store
 TestRelicEditQuiescesWithTheBindingCacheEqualToTheEngine	fails under the gate: city store is *splittest.storageCacheView

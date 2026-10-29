@@ -1272,7 +1272,7 @@ func buildPreparedStartWithTranscript(
 	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, repairStore); err != nil {
 		return nil, candidate.info, err
 	}
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver, dispatchSources.trigger); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
@@ -1699,20 +1699,31 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
+// trigger, when non-nil, is the residency-correct by-id reader the start path
+// reads trigger beads through (withTriggerBeadResolver). store is the SESSIONS
+// store: on a split city the trigger's drain source is a work bead on the work
+// ledger, and the item step and its root are graph rows, so only the resolver
+// reaches all three. Without one, store answers, as it always has on a
+// single-store city.
 func resolvePreparedTaskWorkDir(
 	candidate startCandidate,
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
+	trigger warmClaimTriggerResolver,
 ) string {
 	// Prepared drain items only: the item step's copied metadata can still name
 	// the launcher checkout before prepare-worktree runs. Deliberately NOT the
 	// full resolveTaskBeadWorkDir chain — that would put the trigger bead ahead
 	// of the snapshot resolver for every pool session.
-	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && store != nil {
-		if trigger, err := store.Get(triggerID); err == nil {
-			if workDir := resolveDrainSourceWorkDir(cityPath, store, trigger); workDir != "" {
+	get := trigger
+	if get == nil && store != nil {
+		get = store.Get
+	}
+	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && get != nil {
+		if bead, err := get(triggerID); err == nil {
+			if workDir := resolveDrainSourceWorkDirWith(cityPath, get, bead); workDir != "" {
 				return workDir
 			}
 		}
