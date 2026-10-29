@@ -42,6 +42,12 @@ const usageModelSweptAtKey = "usage_model_swept_at"
 // cursor-guarded sweep bills the whole batch pending at the moment it next runs.
 const liveModelSweepMinInterval = 30 * time.Second
 
+// closedIntervalSweepGiveUp is how long a closed row's trailing model-usage
+// sweep may stay unsettled before the settle gives up on it: past this
+// deadline the compute interval is committed without the trailing model
+// facts, which a keyed transcript that never appeared can no longer yield.
+const closedIntervalSweepGiveUp = 15 * time.Minute
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -392,8 +398,12 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 // marker and the closed lane's settle markers, only once the sweep has
 // settled and the fact is durably recorded (or the interval was already
 // recorded). An unsettled sweep or a sink Record failure keeps every marker,
-// so the next pass retries idempotently. The settle markers this batch clears
-// are no-ops on a row that was never marked.
+// so the next pass retries idempotently — floored at liveModelSweepMinInterval
+// per session, like the live lane's attempts; and a closed row's unsettled
+// sweep gives up at usage_closed_at + closedIntervalSweepGiveUp, committing
+// the compute marker and clearing the settle markers without the swept
+// marker. The settle markers this batch clears are no-ops on a row that was
+// never marked.
 func (cr *CityRuntime) accountTerminalInterval(
 	ctx context.Context,
 	sink usage.Sink,
@@ -406,12 +416,26 @@ func (cr *CityRuntime) accountTerminalInterval(
 ) {
 	meta := b.Metadata
 	awakeStart := strings.TrimSpace(meta["awake_started_at"])
+	// A marked row is a closed-interval settle (issue #6672): its retries are
+	// floored and eventually given up (below). An unmarked row is the open
+	// terminal lane, whose per-tick sweep retry P2-2 pins — the floor and the
+	// give-up do not apply to it.
+	marked := strings.TrimSpace(meta[session.MetadataKeyUsageClosePending]) == "true"
 	// sweepSettled defaults true so a nil factory / already-swept interval
 	// never blocks the commit.
 	sweepSettled := true
 	if factory := modelSweepFactory(); factory != nil && awakeStart != "" &&
 		strings.TrimSpace(meta[usageModelSweptAtKey]) != awakeStart {
 		memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(meta["session_key"]))
+		// A marked row's attempt is floored per session
+		// (liveModelSweepMinInterval), the same floor the live lane takes: a
+		// pass inside the floor makes no attempt — no sweep, no compute
+		// record, no marker write — so an unsettled closed interval retries at
+		// most once per floor window per session (issue #6672's AC-6). A
+		// fresh memo's zero floor never blocks the first attempt.
+		if marked && now.Before(memo.nextSweepAt) {
+			return
+		}
 		var serr error
 		if memo.path != "" {
 			_, sweepSettled, serr = factory.SweepSessionModelUsageAtPath(ctx, b.ID, meta, memo.path, now)
@@ -421,13 +445,34 @@ func (cr *CityRuntime) accountTerminalInterval(
 		if serr != nil {
 			logf("usage: model-usage sweep for session %s failed; will retry: %v", b.ID, serr)
 		}
+		// Take the floor before deciding anything else, marked rows only.
+		// settledMiss is deliberately NOT recorded here: the transcript may
+		// have flushed since (the drain-ack turn), so a miss is retried,
+		// floored, until the give-up deadline below.
+		if marked {
+			memo.nextSweepAt = now.Add(liveModelSweepMinInterval)
+			cr.storeLiveSweepMemo(b.ID, memo)
+		}
 	}
 	// Record the compute fact without committing the interval: the fact is
 	// idempotent (ComputeIdempotencyKey), so an unsettled sweep retries the
 	// record next pass at zero cost.
 	recorded := emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, false)
 	already := awakeStart != "" && strings.TrimSpace(meta[usageComputeEmittedAtKey]) == awakeStart
-	if !sweepSettled || !recorded && !already {
+	// A closed row gives up on an unsettled sweep at usage_closed_at +
+	// closedIntervalSweepGiveUp: past that deadline the compute marker is
+	// committed (and the settle markers cleared) without the swept marker,
+	// since a keyed transcript that never appeared can no longer yield the
+	// trailing model facts. An open row takes no give-up — its interval has
+	// no deadline, and the next pass simply retries, floored.
+	giveUp := false
+	if anchorRaw := strings.TrimSpace(meta[session.MetadataKeyUsageClosedAt]); anchorRaw != "" {
+		if anchor, aerr := time.Parse(time.RFC3339Nano, anchorRaw); aerr == nil &&
+			!now.Before(anchor.Add(closedIntervalSweepGiveUp)) {
+			giveUp = true
+		}
+	}
+	if !sweepSettled && !giveUp || !recorded && !already {
 		return
 	}
 	batch := map[string]string{

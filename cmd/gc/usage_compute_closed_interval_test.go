@@ -502,3 +502,209 @@ func TestSettledRowIsNotRevisitedOnLaterPass(t *testing.T) {
 		t.Fatalf("raw compute facts after later passes = %d, want 1 (settled row records nothing)", got)
 	}
 }
+
+// closedIntervalFailSink is a usage sink whose Record always fails: the
+// settle must keep every marker so the next pass retries the fact.
+type closedIntervalFailSink struct{}
+
+func (closedIntervalFailSink) Record(_ context.Context, _ usage.Fact) error {
+	return errors.New("sink down")
+}
+
+// TestClosedIntervalUnsettledSweepRetriesFlooredThenGivesUp pins AC-6 of
+// issue #6672: a closed row whose trailing model-usage sweep cannot settle (a
+// keyed codex rollout that never appeared) records its compute fact per
+// attempt without committing, keeps its markers, and retries at most once per
+// liveModelSweepMinInterval per session; the first attempt at or after
+// usage_closed_at + 15m commits the compute marker and clears the markers
+// even though the sweep never settled.
+func TestClosedIntervalUnsettledSweepRetriesFlooredThenGivesUp(t *testing.T) {
+	codexRoot := t.TempDir()
+	startRaw := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339Nano)
+
+	t.Run("before the deadline: records without committing, floors the retry", func(t *testing.T) {
+		cityPath := t.TempDir()
+		sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+		store := beads.NewMemStore()
+		// The close sits in the past but its give-up deadline in the future,
+		// so every attempt in this subtest is before the deadline.
+		closedAt := time.Now().UTC().Add(-5 * time.Minute)
+		b, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Status: "open",
+			Title:  "codex worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"state":            "drained",
+				"session_name":     "worker-1",
+				"awake_started_at": startRaw,
+				// A keyed codex session whose rollout never appears: the
+				// keyed miss stays transient, so the sweep never settles.
+				"session_key":      codexSweepSessionKey,
+				"provider":         "codex",
+				"builtin_ancestor": "codex",
+				"molecule_id":      "run-I",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+		cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+		cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if got := rawSinkComputeFactCount(t, sinkPath); got != 1 {
+			t.Fatalf("raw compute facts after the first attempt = %d, want 1 (recorded without committing)", got)
+		}
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := got.Metadata[usageComputeEmittedAtKey]; v != "" {
+			t.Errorf("usage_compute_emitted_at = %q, want unset (not committed)", v)
+		}
+		if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "true" {
+			t.Errorf("usage_close_pending = %q, want kept (markers survive an unsettled attempt)", v)
+		}
+		// The pass inside the retry floor makes no attempt: nothing more is
+		// recorded and nothing changes.
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if got := rawSinkComputeFactCount(t, sinkPath); got != 1 {
+			t.Fatalf("raw compute facts after a floored pass = %d, want 1 (at most one attempt per 30s per session)", got)
+		}
+		got, err = store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := got.Metadata[usageComputeEmittedAtKey]; v != "" {
+			t.Errorf("usage_compute_emitted_at after a floored pass = %q, want unset", v)
+		}
+		if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "true" {
+			t.Errorf("usage_close_pending after a floored pass = %q, want kept", v)
+		}
+	})
+
+	t.Run("at the deadline: an unsettled attempt commits and clears", func(t *testing.T) {
+		cityPath := t.TempDir()
+		sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+		store := beads.NewMemStore()
+		// The close sits past the give-up deadline, so the first attempt is
+		// already at it.
+		closedAt := time.Now().UTC().Add(-20 * time.Minute)
+		b, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Status: "open",
+			Title:  "codex worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"state":            "drained",
+				"session_name":     "worker-1",
+				"awake_started_at": startRaw,
+				"session_key":      codexSweepSessionKey,
+				"provider":         "codex",
+				"builtin_ancestor": "codex",
+				"molecule_id":      "run-J",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+		cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+		cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if got := rawSinkComputeFactCount(t, sinkPath); got != 1 {
+			t.Fatalf("raw compute facts = %d, want 1", got)
+		}
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata[usageComputeEmittedAtKey] != startRaw {
+			t.Errorf("usage_compute_emitted_at = %q, want %q (committed past the give-up deadline)",
+				got.Metadata[usageComputeEmittedAtKey], startRaw)
+		}
+		if v := got.Metadata[usageModelSweptAtKey]; v != "" {
+			t.Errorf("usage_model_swept_at = %q, want unset (the sweep never settled)", v)
+		}
+		if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "" {
+			t.Errorf("usage_close_pending = %q, want cleared", v)
+		}
+		if v := got.Metadata[session.MetadataKeyUsageClosedAt]; v != "" {
+			t.Errorf("usage_closed_at = %q, want cleared", v)
+		}
+	})
+}
+
+// TestClosedIntervalSinkFailureKeepsMarkers pins AC-6 of issue #6672: a sink
+// Record failure never clears the close markers — the next pass retries the
+// fact idempotently — and never commits the interval.
+func TestClosedIntervalSinkFailureKeepsMarkers(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	store := beads.NewMemStore()
+	start := time.Now().UTC().Add(-30 * time.Minute)
+	closedAt := time.Now().UTC().Add(-20 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex worker",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     "worker-1",
+			"awake_started_at": startRaw,
+			// Keyless: the sweep settles a definitive miss, so only the sink
+			// stands between the attempt and the commit.
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-K",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: closedIntervalFailSink{}, cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Metadata[usageComputeEmittedAtKey]; v != "" {
+		t.Errorf("usage_compute_emitted_at = %q, want unset (a failed record never commits)", v)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "true" {
+		t.Errorf("usage_close_pending = %q, want kept (a failed record never clears the markers)", v)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosedAt]; v == "" {
+		t.Error("usage_closed_at cleared, want kept (a failed record never clears the markers)")
+	}
+}
