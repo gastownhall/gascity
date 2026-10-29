@@ -55,3 +55,39 @@ func TestStartAcceptsWorkspaceTrustDialogBeforeFirstTurn(t *testing.T) {
 		t.Fatalf("dialog acceptance must precede the readiness wait and the first turn; log:\n%s", strings.Join(lines, "\n"))
 	}
 }
+
+// AC-2: with acceptance off — no managed hints, or an explicit false — the
+// dialog step issues no pane reads and no send-keys, leaving the herdr call
+// sequence unchanged. Regression guard for the gate.
+func TestStartSkipsStartupDialogsWhenNotEnabled(t *testing.T) {
+	disabled := false
+	cases := []struct {
+		name string
+		cfg  runtime.Config
+	}{
+		{"no managed hints", runtime.Config{Command: "claude", Nudge: "do work"}},
+		{"accept explicitly false", runtime.Config{
+			Command:              "claude",
+			ProcessNames:         []string{"claude"},
+			AcceptStartupDialogs: &disabled,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "trust_dialog")
+			if runtime.ShouldAcceptStartupDialogs(tc.cfg) {
+				t.Fatal("test setup: dialog acceptance must be off")
+			}
+
+			if err := p.Start(context.Background(), "gastown__witness", tc.cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if strings.Contains(calls, "pane read") || strings.Contains(calls, "pane send-keys") {
+				t.Fatalf("dialog step ran with acceptance disabled; log:\n%s", calls)
+			}
+		})
+	}
+}
