@@ -1371,7 +1371,7 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 // before.
 func (cs *controllerState) autocloseParentHome(store beads.Store) func(id string) beads.Store {
 	city := cs.CityBeadStore()
-	rigs := cs.BeadStores()
+	rigs := cs.BeadStores() // residency:allow — the controller's own work stores, compared against store and keyed by rig name for the prefix table below; no leg list is built
 	if store == nil || sameBeadStore(store, city) {
 		return nil
 	}
@@ -1391,7 +1391,7 @@ func (cs *controllerState) autocloseParentHome(store beads.Store) func(id string
 	}
 	cs.mu.RUnlock()
 	return func(id string) beads.Store {
-		if bdIDIsClassReserved(id) {
+		if bdIDIsClassReserved(id) { // residency:allow — a binding-minted parent id has no work-ledger home; the by-id read stays on the row's own store
 			return nil
 		}
 		for prefix, name := range prefixes {
