@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
 
@@ -173,4 +174,61 @@ func TestRecordArmingReadinessCoversEveryScope(t *testing.T) {
 	if len(warnings) != 2 || !strings.Contains(warnings[0], "rig/missing") || !strings.Contains(warnings[1], "binding/infra") {
 		t.Fatalf("warnings = %q; want one warning each for rig/missing and binding/infra", warnings)
 	}
+}
+
+func twoEngineRoutes(first, rest beads.Store) *storageRoutes {
+	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: "infra"}
+	assigned := false
+	for _, class := range coordclass.Classes() {
+		if !class.IsInfrastructure() {
+			continue
+		}
+		if !assigned {
+			routes.stores[class] = first
+			assigned = true
+			continue
+		}
+		routes.stores[class] = rest
+	}
+	return routes
+}
+
+func TestRecordArmingReadinessBindingRefusalIsStickyAcrossEngines(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first beads.Store
+		rest  beads.Store
+	}{
+		{"capable then incapable", beads.NewMemStore(), memStoreWithoutFencing()},
+		{"incapable then capable", memStoreWithoutFencing(), beads.NewMemStore()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &controllerState{rolloutFlags: armingFlags(t, requireGates(), nil)}
+			cs.cityBeadStore = beads.NewMemStore()
+			cs.storageRoutes = twoEngineRoutes(tc.first, tc.rest)
+			if got := len(cs.storageRoutes.distinctEngines()); got != 2 {
+				t.Fatalf("distinct engines = %d; want 2", got)
+			}
+			cs.rolloutLogf = func(string, ...any) {}
+
+			cs.recordArmingReadiness()
+
+			assertArmingRefusal(t, cs.ArmingReadiness("binding/infra"), "binding/infra", "cannot fence")
+		})
+	}
+}
+
+func TestRecordArmingReadinessScopeNamespacesDoNotCollide(t *testing.T) {
+	cs := &controllerState{rolloutFlags: armingFlags(t, requireGates(), nil)}
+	cs.cityBeadStore = beads.NewMemStore()
+	cs.beadStores = map[string]beads.Store{"infra": beads.NewMemStore()}
+	cs.storageRoutes = messagingSplitRoutes(memStoreWithoutFencing())
+	cs.rolloutLogf = func(string, ...any) {}
+
+	cs.recordArmingReadiness()
+
+	if err := cs.ArmingReadiness("rig/infra"); err != nil {
+		t.Fatalf("rig/infra refused: %v", err)
+	}
+	assertArmingRefusal(t, cs.ArmingReadiness("binding/infra"), "binding/infra", "cannot fence")
 }
