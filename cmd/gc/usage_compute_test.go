@@ -1290,3 +1290,61 @@ func TestEmitDueComputeFactsSweepsClosedIntervalTrailingTurns(t *testing.T) {
 		t.Fatalf("usage_model_swept_at = %q, want %q", v, t0.Format(time.RFC3339))
 	}
 }
+
+// TestEmitDueComputeFactsSettlesReopenedNamedSessionInterval covers a
+// configured named session closed straight from active (dead-runtime) and
+// reopened by the sync phase before the usage lane runs: the row is open again,
+// not yet awake, and still carries the close marker. The same tick's pass must
+// account the old interval, ending at the close, and clear the markers.
+func TestEmitDueComputeFactsSettlesReopenedNamedSessionInterval(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	t1 := time.Now().UTC().Truncate(time.Second)
+	t0 := t1.Add(-10 * time.Minute)
+	workDir, codexRoot := t.TempDir(), t.TempDir()
+	writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+	id := awakeCodexSession(t, env, t0, workDir)
+	if err := env.store.SetMetadataBatch(id, session.ClosePatch(t1, "dead-runtime")); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.Close(id); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := env.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.Reopen(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.SetMetadataBatch(id, reopenNamedSessionBatch(closed, "creating", t1.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+
+	cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+	cr.emitDueComputeFacts(context.Background(), []session.Info{env.sessionInfo(id)}, false)
+
+	if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts recorded = %d, want 1 for the interval the close ended", got)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute && f.WallSeconds != 600 {
+			t.Fatalf("compute WallSeconds = %v, want 600 (ending at usage_closed_at)", f.WallSeconds)
+		}
+	}
+	got, err := env.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{session.MetadataKeyUsageClosePending, session.MetadataKeyUsageClosedAt} {
+		if v := got.Metadata[key]; v != "" {
+			t.Fatalf("%s = %q after settling, want cleared before the session re-wakes", key, v)
+		}
+	}
+	if v := got.Metadata[usageComputeEmittedAtKey]; v != t0.Format(time.RFC3339) {
+		t.Fatalf("usage_compute_emitted_at = %q, want %q", v, t0.Format(time.RFC3339))
+	}
+}

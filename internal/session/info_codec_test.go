@@ -110,6 +110,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		SuspendedAt:                b.Metadata["suspended_at"],
 		AwakeStartedAt:             b.Metadata["awake_started_at"],
 		UsageComputeEmittedAt:      b.Metadata["usage_compute_emitted_at"],
+		UsageClosePending:          b.Metadata[MetadataKeyUsageClosePending],
 		StateReason:                b.Metadata["state_reason"],
 		CreationCompleteAt:         b.Metadata["creation_complete_at"],
 		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],
