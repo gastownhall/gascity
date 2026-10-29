@@ -1,6 +1,8 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +59,20 @@ func TestRevParseVerifyCommit(t *testing.T) {
 	// A tree-ish that is not a commit must be rejected.
 	if _, err := g.RevParseVerifyCommit(sha + "^{tree}"); err == nil {
 		t.Error("RevParseVerifyCommit of a tree object succeeded, want error")
+	}
+}
+
+// TestRevParseVerifyCommitCtx pins that the lookup runs under ctx: one whose
+// ctx is already done fails with that ctx's error instead of resolving.
+func TestRevParseVerifyCommitCtx(t *testing.T) {
+	g := New(initTestRepo(t))
+	if _, err := g.RevParseVerifyCommitCtx(context.Background(), "HEAD"); err != nil {
+		t.Fatalf("RevParseVerifyCommitCtx(HEAD): %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := g.RevParseVerifyCommitCtx(canceled, "HEAD"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RevParseVerifyCommitCtx(canceled ctx) err = %v, want context.Canceled", err)
 	}
 }
 
@@ -306,5 +322,69 @@ func TestIsHexObjectIDAcceptsBothObjectFormats(t *testing.T) {
 		if isHexObjectID(bad) {
 			t.Fatalf("isHexObjectID(%q) = true, want false", bad)
 		}
+	}
+}
+
+// TestWorktreeAddNoHooks pins that NoHooks keeps every hook of the repository
+// out of both worktree adds, with the same hooks failing a plain add.
+func TestWorktreeAddNoHooks(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	runGit(t, dir, "branch", "existing", base)
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	for _, hook := range []string{"post-checkout", "reference-transaction"} {
+		script := "#!/bin/sh\necho " + hook + " >> '" + marker + "'\nexit 3\n"
+		if err := os.WriteFile(filepath.Join(hooks, hook), []byte(script), 0o755); err != nil {
+			t.Fatalf("write %s hook: %v", hook, err)
+		}
+	}
+	runGit(t, dir, "config", "core.hooksPath", hooks)
+	quiet := WorktreeAddOptions{NoHooks: true}
+	root := t.TempDir()
+
+	if err := g.WorktreeAddNewBranchCtx(context.Background(), filepath.Join(root, "new"), "fresh", base, quiet); err != nil {
+		t.Fatalf("WorktreeAddNewBranchCtx(NoHooks): %v", err)
+	}
+	if err := g.WorktreeAddExistingBranchCtx(context.Background(), filepath.Join(root, "existing"), "existing", quiet); err != nil {
+		t.Fatalf("WorktreeAddExistingBranchCtx(NoHooks): %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("stat hook marker: %v, want no hook to have run", err)
+	}
+	if err := g.WorktreeAddNewBranch(filepath.Join(root, "loud"), "loud", base); err == nil {
+		t.Fatal("WorktreeAddNewBranch with failing hooks succeeded, want the hook's failure")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stat hook marker: %v, want the hooks to have run without NoHooks", err)
+	}
+}
+
+// TestWorktreeAddNoTrack pins that NoTrack gives a branch cut from a
+// remote-tracking branch no upstream, which git's default autoSetupMerge
+// gives one cut without it.
+func TestWorktreeAddNoTrack(t *testing.T) {
+	dir := initTestRepo(t)
+	runGit(t, dir, "remote", "add", "origin", t.TempDir())
+	runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	runGit(t, dir, "config", "branch.autoSetupMerge", "true")
+	g := New(dir)
+	root := t.TempDir()
+
+	if err := g.WorktreeAddNewBranchCtx(context.Background(), filepath.Join(root, "quiet"), "quiet", "refs/remotes/origin/main", WorktreeAddOptions{NoTrack: true}); err != nil {
+		t.Fatalf("WorktreeAddNewBranchCtx(NoTrack): %v", err)
+	}
+	if out, err := runGitAllowFail(t, dir, "config", "--get", "branch.quiet.merge"); err == nil {
+		t.Fatalf("branch quiet upstream = %q, want none", strings.TrimSpace(out))
+	}
+	if err := g.WorktreeAddNewBranch(filepath.Join(root, "tracking"), "tracking", "refs/remotes/origin/main"); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	if got := strings.TrimSpace(runGit(t, dir, "config", "--get", "branch.tracking.merge")); got != "refs/heads/main" {
+		t.Fatalf("branch tracking upstream = %q, want refs/heads/main without NoTrack", got)
 	}
 }

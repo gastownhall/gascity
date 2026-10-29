@@ -916,16 +916,35 @@ at runtime.
 
 A rig-scoped `shared` drain with `member_access = "exclusive"` works every
 item in one orchestrator-provisioned git worktree per drain control, on the
-branch `gc/drain/<drain id>` cut from the rig's HEAD. The worktree lives under
-the worktrees root — `GC_WORKTREES_DIR`, else `T3CODE_WORKTREES_DIR`, else
+branch `gc/drain/<drain id>` cut from origin's default branch, with no
+upstream: the rig's `default_branch`, else the branch
+`refs/remotes/origin/HEAD` names, as last fetched. A rig with no such branch
+fails the drain; the worktree is never cut from the rig checkout's HEAD. A rig
+whose path is not the top level of a git repository (none at all, or a
+directory inside another repository's checkout) runs the drain with no
+worktree. The worktree lives under the worktrees root —
+`GC_WORKTREES_DIR`, else `T3CODE_WORKTREES_DIR`, else
 `$T3CODE_HOME/worktrees`, else `<city>/.gc/worktrees` — which must lie outside
-the rig checkout. The drain lends the worktree to each member it reserves as
-the member's `work_dir`, unless the member already has a `work_dir` no drain
-lent it. When the drain closes it takes the worktree back from every member
-still open; a member its item closed keeps it as its `work_dir`. Item steps
-must leave the worktree checked out on its branch, or the next item fails the
-drain. Exec checks of the item steps run in the worktree, but a relative check
-`path` resolves from the rig root, never from the worktree. If the worktree
+the rig checkout, and the orchestrator checks it out with the rig's git hooks
+disabled. The drain provisions the worktree once and lends it to each member
+it reserves as the member's `work_dir`, unless the member already has a
+`work_dir` no drain lent it; each item finds the worktree as the item before
+it left it, branch included. When the drain finishes (it passes or fails), or
+a scope abort skips it, it takes the worktree back from every member still
+open; a member its item closed keeps it as its `work_dir`. If that member is
+reopened, another drain's item steps do not inherit the worktree, and the next
+drain to reserve the member exclusively takes it back. A drain closed without
+finishing (its run canceled, its workflow root already closed or deleted, or
+its control bead quarantined) takes back neither the worktree nor its member
+reservations: they stay on the members still open until an operator clears
+`work_dir`, `gc.work_dir`, `gc.drain_workspace_control` and
+`gc.exclusive_drain_reservation`, and until then another exclusive drain over
+those members fails. A re-run over the same convoy skips the
+members an earlier run closed and lends the rest a new worktree, without the
+commits the earlier items left on the earlier drain's branch. Exec checks of
+the item steps run in the worktree, but a relative check `path` resolves from
+the rig root, never from the worktree, and a check whose `work_dir` is no
+longer the worktree the drain lent errors instead of running. If the worktree
 cannot be provisioned, the drain closes failed with
 `gc.failure_reason = shared_workspace_unavailable`. Closing the drain removes
 neither the worktree nor its branch.

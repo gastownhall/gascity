@@ -49,10 +49,11 @@ type ProcessOptions struct {
 	// SharedDrainWorkspace returns the absolute directory every item of a
 	// shared drain control works in. advanceSharedDrain calls it when it
 	// reserves an exclusive-access member that has no work_dir, or one
-	// another drain lent. ("", nil) means the control's scope has no
-	// workspace to provision. Any error fails the drain hard: it carries
-	// git's output, not a store outage the dispatcher could wait out. Nil
-	// disables provisioning.
+	// another drain lent, and the drain has lent no workspace yet; later
+	// members are lent the one the manifest records, as earlier items left
+	// it. ("", nil) means the control's scope has no workspace to provision.
+	// Any error fails the drain hard: it carries git's output, not a store
+	// outage the dispatcher could wait out. Nil disables provisioning.
 	SharedDrainWorkspace func(control beads.Bead) (string, error)
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
@@ -661,7 +662,7 @@ func abortScope(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, 
 func abortScopeWith(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, traceID string, closeBody scopeBodyCloser) (int, error) {
 	bodyID := snapshot.body.ID
 	skipped, err := tracePhase(opts, traceID, "skip-open-members", func() (int, error) {
-		return snapshot.skipOpenScopeMembers(store, traceID)
+		return snapshot.skipOpenScopeMembers(store, traceID, opts)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("%s: aborting scope: %w", traceID, err)
@@ -915,7 +916,7 @@ func (s scopeSnapshot) resolveScopeOutputJSON(subject beads.Bead) (string, error
 	return candidate, nil
 }
 
-func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID string) (int, error) {
+func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID string, opts ProcessOptions) (int, error) {
 	all := s.all
 	if !s.allComplete {
 		loaded, err := beads.DirectMembers(store, s.rootID)
@@ -965,6 +966,11 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 				continue
 			}
 			return skipped, fmt.Errorf("unable to skip remaining scope members: %s", describeStuckScopeMembers(pending, depsByID))
+		}
+		// A drain closed as skipped never runs its own terminal close, which
+		// takes back what it holds on its members.
+		if err := releaseSkippedDrains(store, skippable, pending, opts); err != nil {
+			return skipped, err
 		}
 		closed, err := skipScopeMembers(store, skippable)
 		if err != nil {
@@ -2113,12 +2119,15 @@ func closeWorkflowRoot(store beads.Store, rootID, outcome string) error {
 // setOutcomeAndClose, so this relies on the store being read-after-write
 // consistent (true for MemStore today). If a future store becomes eventually
 // consistent, pass the in-memory closed bead directly instead of re-reading.
-func ReconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
-	return reconcileClosedScopeMember(store, beadID)
+// memberStores is the work-class store tail (ProcessOptions.MemberStores): a
+// failed close aborts the bead's scope, and the abort takes back what each
+// drain it skips holds on its members, which are work beads.
+func ReconcileClosedScopeMember(store beads.Store, beadID string, memberStores ...beads.Store) (ControlResult, error) {
+	return reconcileClosedScopeMember(store, beadID, memberStores...)
 }
 
-func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
-	return reconcileClosedScopeMemberWithOptions(store, beadID, ProcessOptions{})
+func reconcileClosedScopeMember(store beads.Store, beadID string, memberStores ...beads.Store) (ControlResult, error) {
+	return reconcileClosedScopeMemberWithOptions(store, beadID, ProcessOptions{MemberStores: memberStores})
 }
 
 func reconcileClosedScopeMemberWithOptions(store beads.Store, beadID string, opts ProcessOptions) (ControlResult, error) {

@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -978,5 +980,75 @@ func TestRollbackAfterFailedCreateKeepsWorktreeWithUnreadableProvenance(t *testi
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Errorf("rival worktree removed on inconclusive ownership: %v", statErr)
+	}
+}
+
+// writeFailingHooks points repo's core.hooksPath at hooks that append to the
+// returned marker file and exit non-zero, as a hook of the main checkout that
+// cannot run in a new worktree does.
+func writeFailingHooks(t *testing.T, repo string) string {
+	t.Helper()
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	for _, hook := range []string{"post-checkout", "reference-transaction"} {
+		script := "#!/bin/sh\necho " + hook + " >> '" + marker + "'\nexit 3\n"
+		if err := os.WriteFile(filepath.Join(hooks, hook), []byte(script), 0o755); err != nil {
+			t.Fatalf("writing %s hook: %v", hook, err)
+		}
+	}
+	runGit(t, repo, "config", "core.hooksPath", hooks)
+	return marker
+}
+
+func TestEnsureNoHooksRunsNoRepositoryHook(t *testing.T) {
+	repo, base := initTestRepo(t)
+	marker := writeFailingHooks(t, repo)
+	root := t.TempDir()
+
+	rep, err := Ensure(Spec{RepoDir: repo, Path: filepath.Join(root, "quiet"), Branch: "quiet", Base: base, NoHooks: true})
+	if err != nil {
+		t.Fatalf("Ensure(NoHooks): %v", err)
+	}
+	if !rep.Created {
+		t.Fatalf("report = %+v, want Created", rep)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stat hook marker: %v, want no hook to have run", err)
+	}
+
+	// The same hooks fail an Ensure that keeps them, so the one above ran
+	// with them disabled rather than with none installed.
+	if _, err := Ensure(Spec{RepoDir: repo, Path: filepath.Join(root, "loud"), Branch: "loud", Base: base}); err == nil {
+		t.Fatal("Ensure with failing hooks succeeded, want the hook's failure")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stat hook marker: %v, want the hooks to have run without NoHooks", err)
+	}
+}
+
+// TestEnsureContextBoundsTheCheckout pins that ctx reaches the `git worktree
+// add`: a checkout whose smudge filter outlasts the deadline fails with the
+// deadline instead of holding the caller until the filter finishes.
+func TestEnsureContextBoundsTheCheckout(t *testing.T) {
+	repo, base := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("slow.txt filter=slow\n"), 0o644); err != nil {
+		t.Fatalf("writing .gitattributes: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "slow.txt"), []byte("slow\n"), 0o644); err != nil {
+		t.Fatalf("writing slow.txt: %v", err)
+	}
+	runGit(t, repo, "config", "filter.slow.clean", "cat")
+	runGit(t, repo, "add", ".gitattributes", "slow.txt")
+	runGit(t, repo, "commit", "-m", "slow file")
+	// The filter drops git's stderr so, once git is killed, it holds no pipe
+	// of the caller's open.
+	runGit(t, repo, "config", "filter.slow.smudge", "exec 2>/dev/null; sleep 30; cat")
+	root := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := EnsureContext(ctx, managedSpec(repo, root, filepath.Join(root, "gc-test"), "work/gc-test", base))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("EnsureContext err = %v, want the checkout cut short by the deadline", err)
 	}
 }

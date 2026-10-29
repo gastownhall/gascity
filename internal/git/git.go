@@ -41,6 +41,33 @@ func (g *Git) IsRepoCtx(ctx context.Context) bool {
 	return err == nil
 }
 
+// ProbeRepoRootCtx reports whether workDir is the top level of a git
+// repository, for a caller that must tell "no" from "no answer". It is
+// (false, nil) for git's own reply that it found no repository in workDir or
+// any parent, and for a workDir below the top level of an enclosing
+// repository: a directory inside another repository's checkout is not a
+// repository of its own. A workDir that does not exist, a repository git
+// cannot open (a .git file naming a missing git dir, a safe.directory
+// refusal), a git that cannot run, or a probe ctx cut short is returned as an
+// error: none of them says there is no repository.
+func (g *Git) ProbeRepoRootCtx(ctx context.Context) (bool, error) {
+	if _, err := os.Stat(g.workDir); err != nil {
+		return false, fmt.Errorf("probing %q for a git repository: %w", g.workDir, err)
+	}
+	// LC_ALL=C keeps git's reply untranslated, so it can be recognized.
+	// --show-prefix prints workDir's path below the top level, and nothing at
+	// the top level itself.
+	prefix, err := g.runCtxEnv(ctx, []string{"LC_ALL=C"}, "rev-parse", "--show-prefix")
+	if err == nil {
+		return strings.TrimSpace(prefix) == "", nil
+	}
+	var exitErr *exec.ExitError
+	if ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.ExitCode() == 128 && strings.Contains(err.Error(), "not a git repository (or any") {
+		return false, nil
+	}
+	return false, fmt.Errorf("probing %q for a git repository: %w", g.workDir, err)
+}
+
 // CurrentBranch returns the current branch name. Returns "HEAD" if detached.
 func (g *Git) CurrentBranch() (string, error) {
 	return g.CurrentBranchCtx(context.Background())
@@ -527,13 +554,18 @@ const gitWaitDelay = 2 * time.Second
 // A failure on a ctx that is done also wraps ctx.Err(), so callers can tell a
 // missed deadline from an ordinary non-zero exit.
 func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
+	return g.runCtxEnv(ctx, nil, args...)
+}
+
+// runCtxEnv is runCtx with extraEnv set on top of the cleaned environment.
+func (g *Git) runCtxEnv(ctx context.Context, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	if _, ok := ctx.Deadline(); ok {
 		cmd.WaitDelay = gitWaitDelay
 	}
 	// Build clean env: inherit everything except git-specific vars.
-	cmd.Env = sanitizeGitEnv(os.Environ())
+	cmd.Env = append(sanitizeGitEnv(os.Environ()), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
