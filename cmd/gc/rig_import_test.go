@@ -559,7 +559,8 @@ func TestRigImportReleasesAndRetiresItsGatesThroughTheS3bLane(t *testing.T) {
 
 // TestRigImportResumesAfterACrashAtEveryStep kills the import at every step
 // boundary and re-runs it: the end state is the clean run's, with no row
-// twice, and a pending clear holds boot until the re-run finishes it.
+// twice, the backup marks a dropped boundary edge as dropped whichever run
+// wrote it, and a pending clear holds boot until the re-run finishes it.
 func TestRigImportResumesAfterACrashAtEveryStep(t *testing.T) {
 	points := []string{"prepared", "copying", "rows", "verified", "manifest", "marker", "reserved", "backup", "pending", "deleting"}
 	for _, point := range points {
@@ -575,6 +576,7 @@ func TestRigImportResumesAfterACrashAtEveryStep(t *testing.T) {
 				}
 			}
 			rows = append(rows, workRow("gp-w1", "open"))
+			deps = append(deps, beads.Dep{IssueID: "gp-s001", DependsOnID: "gp-w1", Type: "related"})
 			f.seed("packs", rows, deps)
 
 			crashed := false
@@ -621,6 +623,17 @@ func TestRigImportResumesAfterACrashAtEveryStep(t *testing.T) {
 			backup, _, err := readInfraRetainedBackupAt(loc.BackupPath())
 			if err != nil || len(backup) != 300 {
 				t.Errorf("backup = %d entries (%v), want 300", len(backup), err)
+			}
+			disposition := "no backup edge"
+			for _, e := range backup {
+				for _, d := range e.Deps {
+					if e.Bead.ID == "gp-s001" && d.DependsOnID == "gp-w1" {
+						disposition = d.Disposition
+					}
+				}
+			}
+			if disposition != rigEdgeDropped {
+				t.Errorf("the backup marks gp-s001's boundary edge to gp-w1 as %q, want %q (what the import did with it)", disposition, rigEdgeDropped)
 			}
 			if !f.relicFree("packs") {
 				t.Error("a resumed import does not read as relic-free")

@@ -160,6 +160,11 @@ type rigImportPlan struct {
 	Gates []rigImportGate
 	// Records are the boundary edges not copied, keyed by moved row.
 	Records map[string][]rigCrossEdgeRecord
+	// RetainedRecords are the boundary edges an earlier run of the import did
+	// not copy, keyed by retained row, as that run recorded them on the
+	// binding copy (gc.migrated_cross_edges): the clear's backup marks those
+	// edges with what was done with them, not as copied.
+	RetainedRecords map[string][]rigCrossEdgeRecord
 	// Annotated names the moved rows stamped with gc.root_store_ref because
 	// they carried none.
 	Annotated []string
@@ -203,10 +208,6 @@ type rigPlanContext struct {
 	// ElsewhereUnread names the stores that could not be read for those
 	// blockers: a blocker none of the read stores holds may be in one.
 	ElsewhereUnread []string
-	// PayloadsUnreadable reports a rig store that cannot report the payload
-	// on an edge (the bd CLI store): copying an edge from it would drop the
-	// payload, so the plan refuses before anything is written.
-	PayloadsUnreadable bool
 	// ForeignClaimant reports an assignee this city could not have minted
 	// and holds no session record for (#7895's rule): an open row it claims
 	// belongs to another city sharing the rig store.
@@ -217,7 +218,7 @@ type rigPlanContext struct {
 // or another rig, or that another city's agent claims, refuses.
 func planRigImport(ctx rigPlanContext) rigImportPlan {
 	rig, cityName, snap, manifest, held := ctx.Rig, ctx.CityName, ctx.Snap, ctx.Manifest, ctx.Held
-	plan := rigImportPlan{Rig: rig, Generation: coordclass.CurrentGeneration, Records: map[string][]rigCrossEdgeRecord{}}
+	plan := rigImportPlan{Rig: rig, Generation: coordclass.CurrentGeneration, Records: map[string][]rigCrossEdgeRecord{}, RetainedRecords: map[string][]rigCrossEdgeRecord{}}
 	if manifest != nil {
 		plan.Generation = manifest.Generation
 	}
@@ -225,7 +226,7 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 	infra := map[string]bool{}
 	moved := map[string]bool{}
 	inBinding := map[string]bool{} // rows that are (or will be) binding rows
-	var collisions, reused, foreign, claimed []string
+	var collisions, reused, foreign, claimed, unheld, unreadable []string
 	for _, b := range snap.rows {
 		if coordclass.ClassifyAt(b, plan.Generation) == coordclass.ClassWork {
 			continue
@@ -234,12 +235,26 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 		plan.Infra++
 		h, holds := held[b.ID]
 		if manifest != nil && manifest.Carried(b) {
-			if holds && h.Metadata[infraMigrationStampKey] != stamp {
+			switch {
+			case !holds:
+				// The rig holds the only copy. It is never read as absent
+				// (an edge onto it recorded as onto a bead no store holds).
+				unheld = append(unheld, b.ID)
+				continue
+			case h.Metadata[infraMigrationStampKey] != stamp:
 				collisions = append(collisions, b.ID)
 				continue
 			}
+			if raw := strings.TrimSpace(h.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]); raw != "" {
+				var recs []rigCrossEdgeRecord
+				if err := json.Unmarshal([]byte(raw), &recs); err != nil {
+					unreadable = append(unreadable, fmt.Sprintf("%s (%v)", b.ID, err))
+					continue
+				}
+				plan.RetainedRecords[b.ID] = recs
+			}
 			plan.Retained = append(plan.Retained, b)
-			inBinding[b.ID] = holds
+			inBinding[b.ID] = true
 			continue
 		}
 		if ref := strings.TrimSpace(b.Metadata[beadmeta.RootStoreRefMetadataKey]); rigScopeIsForeign(ref, rig, cityName) {
@@ -280,6 +295,22 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 		if strings.TrimSpace(b.Metadata[beadmeta.RootStoreRefMetadataKey]) == "" {
 			plan.Annotated = append(plan.Annotated, b.ID)
 		}
+	}
+	if len(unheld) > 0 {
+		sort.Strings(unheld)
+		plan.Refusals = append(plan.Refusals, rigImportRefusal{
+			IDs:    unheld,
+			Reason: "the rig's manifest records each of these rows as carried into the city binding, but the binding no longer holds it, so the rig row may be the only copy",
+			Remedy: "restore the binding database from its backup, or, if the binding removed a row on purpose since the import, remove the rig row too, then re-run",
+		})
+	}
+	if len(unreadable) > 0 {
+		sort.Strings(unreadable)
+		plan.Refusals = append(plan.Refusals, rigImportRefusal{
+			IDs:    unreadable,
+			Reason: "the binding copy of each of these rows carries a gc.migrated_cross_edges record that does not parse, so the clear's backup cannot say what the import did with the row's boundary edges",
+			Remedy: "restore each binding row's gc.migrated_cross_edges from the binding database's backup, then re-run",
+		})
 	}
 	if len(collisions) > 0 {
 		sort.Strings(collisions)
@@ -363,21 +394,6 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 		return plan.Copy[i].DependsOnID < plan.Copy[j].DependsOnID
 	})
 	sort.Strings(plan.Annotated)
-	if ctx.PayloadsUnreadable {
-		var edges []string
-		for _, e := range plan.Copy {
-			if !strings.HasPrefix(e.DependsOnID, "external:") {
-				edges = append(edges, e.IssueID+" -> "+e.DependsOnID)
-			}
-		}
-		if len(edges) > 0 {
-			plan.Refusals = append(plan.Refusals, rigImportRefusal{
-				IDs:    []string{infraStrandedIDList(edges)},
-				Reason: fmt.Sprintf("the rig store cannot report the payload on an edge (the bd CLI store), and the import would copy %d edge(s), dropping any payload they carry", len(edges)),
-				Remedy: "open the rig through a native Dolt transport (beads.native_transport) so its edge payloads can be read, then re-run; nothing was written",
-			})
-		}
-	}
 	return plan
 }
 

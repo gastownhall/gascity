@@ -177,8 +177,9 @@ func TestReviewClearedNoteWithoutMarkerRefuses(t *testing.T) {
 	}
 }
 
-// MF3: a resumed clear re-proves every row against the binding first: a rig
-// row whose binding copy is gone is named and not deleted.
+// MF3: a resumed import proves every carried row against the binding first:
+// a rig row whose binding copy is gone is named and not deleted (the plan
+// refuses it; the clear's re-proof checks again just before it deletes).
 func TestReviewResumedClearKeepsRowsTheBindingLacks(t *testing.T) {
 	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil), graphRow("gp-b", "gp-a", "closed", nil)}, nil)
@@ -245,59 +246,45 @@ func TestReviewBlockerHeldInAnotherStoreIsGated(t *testing.T) {
 	})
 }
 
-// MF5: the clear removes the boundary edges before it deletes, so bd's delete
-// finds no surviving neighbor and rewrites no work row's text to
-// "[deleted:<id>]".
+// MF5: the clear removes the boundary edges before it deletes, so the delete
+// bd's storage runs finds no surviving neighbor and rewrites no work row's
+// text to "[deleted:<id>]". It runs on a native Dolt rig, the delete bd's CLI
+// runs too: a bd CLI rig with an edge on a row it moves is refused before
+// anything is written (TestReviewBdRigWithEdgesRefusesBeforeAnyWrite), so it
+// never reaches the clear.
 func TestReviewClearLeavesSurvivingWorkTextUnchanged(t *testing.T) {
 	if testing.Short() {
-		t.Skip("real bd rig")
+		t.Skip("real Dolt rig")
 	}
-	rig, dir := newRealBdRigStore(t)
-	d, err := rig.Create(beads.Bead{Title: "a drained step", Type: "task", Metadata: beads.StringMap{"gc.kind": "task", beadmeta.RootBeadIDMetadataKey: "self"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	desc := "drain unit for " + d.ID + "; see " + d.ID + " for the run"
-	w, err := rig.Create(beads.Bead{Title: "a drain-unit convoy", Type: "task", Description: desc})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rig.DepAdd(w.ID, d.ID, "tracks"); err != nil {
+	rig := newRealDoltRigStore(t)
+	desc := "drain unit for gd-d; see gd-d for the run"
+	desc2 := "context for gd-d"
+	seedRealDoltRow(t, rig, graphRow("gd-d", "gd-d", "", nil), false)
+	seedRealDoltRow(t, rig, beads.Bead{ID: "gd-w", Title: "a drain-unit convoy", Type: "task", Description: desc}, false)
+	seedRealDoltRow(t, rig, beads.Bead{ID: "gd-w2", Title: "a note", Type: "task", Description: desc2}, false)
+	if err := rig.DepAdd("gd-w", "gd-d", "tracks"); err != nil {
 		t.Fatal(err)
 	}
 	// And a work row the moved row points AT (D -> W2): bd treats both ends
 	// of an edge as neighbors.
-	desc2 := "context for " + d.ID
-	w2, err := rig.Create(beads.Bead{Title: "a note", Type: "task", Description: desc2})
-	if err != nil {
+	if err := rig.DepAdd("gd-d", "gd-w2", "related"); err != nil {
 		t.Fatal(err)
 	}
-	if err := rig.DepAdd(d.ID, w2.ID, "related"); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"gd-d", "gd-w"} {
+		if err := rig.Close(id); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := rig.Close(d.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := rig.Close(w.ID); err != nil {
-		t.Fatal(err)
-	}
-	f := newRigImportFixture(t, config.Rig{Name: "bdrig", Prefix: "tst", Path: dir})
-	f.fixed["bdrig"] = rig
-	prevHash := rigImportHashConfigOpener
-	rigImportHashConfigOpener = func(string, *config.City, config.Rig) (rigHashLengthConfig, error) { return rig, nil }
-	t.Cleanup(func() { rigImportHashConfigOpener = prevHash })
+	f := newRigImportFixture(t, config.Rig{Name: "dolt", Prefix: "gd"})
+	f.fixed["dolt"] = nonClosingStore{rig}
 	if code, o, e := f.importRigs(); code != 0 {
 		t.Fatalf("import = %d: %s %s", code, o, e)
 	}
-	got, err := rig.Get(w.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Description != desc {
-		t.Errorf("the clear rewrote the surviving work row's text:\n got %q\nwant %q", got.Description, desc)
-	}
-	if got2, err := rig.Get(w2.ID); err != nil || got2.Description != desc2 {
-		t.Errorf("the clear rewrote the text of the work row the moved row pointed at: %q %v", got2.Description, err)
+	for id, want := range map[string]string{"gd-w": desc, "gd-w2": desc2} {
+		got, err := rig.Get(id)
+		if err != nil || got.Description != want {
+			t.Errorf("the clear rewrote surviving work row %s's text:\n got %q (%v)\nwant %q", id, got.Description, err, want)
+		}
 	}
 }
 
@@ -685,6 +672,28 @@ func TestReviewCorruptedBindingCopyStopsTheImport(t *testing.T) {
 			t.Fatalf("a binding copy missing its edge did not stop the clear: %d %s", code, stderr)
 		}
 	})
+	t.Run("a binding copy gone at clear time", func(t *testing.T) {
+		f := twoStepRig(t)
+		prev := rigImportCrashPoint
+		rigImportCrashPoint = func(s string) error {
+			if s != "reserved" {
+				return nil
+			}
+			binding, err := openInfraDestination(f.target)
+			if err != nil {
+				return err
+			}
+			defer closeBeadStoreHandle(binding) //nolint:errcheck
+			return binding.Delete("gp-a")
+		}
+		t.Cleanup(func() { rigImportCrashPoint = prev })
+		if code, _, stderr := f.importRigs(); code == 0 || !strings.Contains(stderr, "gp-a") || !strings.Contains(stderr, "only copy") {
+			t.Fatalf("a binding copy removed under the clear did not stop it: %d %s", code, stderr)
+		}
+		if _, err := f.rig("packs").Get("gp-a"); err != nil {
+			t.Errorf("the clear removed gp-a, whose binding copy is gone: %v", err)
+		}
+	})
 }
 
 // Re-review M12: a marker whose rig still holds rows its import carried is
@@ -807,4 +816,292 @@ func TestReviewUnresolvedDoltEndpointComparesByPinnedDatabase(t *testing.T) {
 			t.Errorf("an unresolved endpoint with no readable database pin was imported: %s", stderr)
 		}
 	})
+	// Iteration-1 major: the importing rig is the unresolved side and pins
+	// no database. It cannot be told apart from another city's Dolt rig, so
+	// it is compared and refused, not skipped as a file store is.
+	t.Run("this rig unresolved with no pin: refuses", func(t *testing.T) {
+		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+		f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+		writeScope(t, f.rigPaths["packs"], "gc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\n", "")
+		if self := rigImportScopeDoltTarget(f.request.CityPath, rigStoreRoot(f.request.CityPath, f.cfg.Rigs[0])); !self.Unresolved || self.Database != "" {
+			t.Fatalf("precondition: this rig's identity = %+v, want unresolved with no database", self)
+		}
+		other := t.TempDir()
+		theirs := filepath.Join(other, "rigs", "theirs")
+		toml := fmt.Sprintf("[workspace]\nname = \"other\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"theirs\"\npath = %q\n", theirs)
+		if err := os.WriteFile(filepath.Join(other, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeScope(t, theirs, "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: 127.0.0.1\ndolt.port: 3307\n", `{"backend":"dolt","dolt_mode":"server","dolt_database":"gp"}`)
+		if id := rigImportScopeDoltTarget(other, theirs); id.Unresolved || id.Database != "gp" {
+			t.Fatalf("precondition: their identity = %+v, want database gp, resolved", id)
+		}
+		f.otherCities = []string{other}
+		code, _, stderr := f.importRigs()
+		if code == 0 || !strings.Contains(stderr, "pins no dolt_database") {
+			t.Errorf("an importing rig with an unresolved endpoint and no database pin was imported: %d %s", code, stderr)
+		}
+		if n := len(rigTestList(t, f.binding())); n != 0 {
+			t.Errorf("the refused import wrote %d binding row(s)", n)
+		}
+	})
+}
+
+// payloadlessLeaf is a rig store with no edge-payload read, as the bd CLI
+// store has none: the embedded interface hides the file store's DepMetadata.
+type payloadlessLeaf struct{ beads.Store }
+
+// Iteration-1 blocker: every production open hands the importer its rig
+// store wrapped in the bead policy layer, which implements DepMetadataReader
+// whatever its leaf can do. A rig whose leaf cannot read a payload (the bd CLI
+// store the default proxied-server topology opens, DoltLite, an exec store) is
+// refused by reading the payloads first, before anything is written: for an
+// edge the import copies, and for a boundary edge only the clear's backup
+// records. Every re-run refuses the same way, boot is not held, and preflight
+// reports the refusal.
+func TestReviewPolicyWrappedPayloadlessRigRefusesBeforeAnyWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []beads.Bead
+		deps []beads.Dep
+	}{
+		{
+			name: "an edge the import copies",
+			rows: []beads.Bead{graphRow("gp-a", "gp-a", "open", nil), graphRow("gp-b", "gp-a", "open", nil)},
+			deps: []beads.Dep{{IssueID: "gp-b", DependsOnID: "gp-a", Type: "blocks"}},
+		},
+		{
+			name: "a boundary edge only the backup records",
+			rows: []beads.Bead{graphRow("gp-d", "gp-d", "closed", nil), workRow("gp-w", "open")},
+			deps: []beads.Dep{{IssueID: "gp-w", DependsOnID: "gp-d", Type: "related"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+			f.seed("packs", tc.rows, tc.deps)
+			f.open["packs"] = func() (beads.Store, error) {
+				store, err := f.openFileRig("packs")
+				if err != nil {
+					return nil, err
+				}
+				return wrapStoreWithBeadPolicies(payloadlessLeaf{store}, f.cfg), nil
+			}
+			for run := 1; run <= 2; run++ {
+				if code, _, stderr := f.importRigs(); code == 0 || !strings.Contains(stderr, "cannot report the payload") {
+					t.Fatalf("run %d: a policy-wrapped rig with no payload read was not refused up front: %d %s", run, code, stderr)
+				}
+			}
+			if n := len(rigTestList(t, f.binding())); n != 0 {
+				t.Errorf("the refused import wrote %d binding row(s)", n)
+			}
+			loc := f.loc("packs")
+			for _, path := range []string{loc.InFlightPath(), loc.MarkerPath(), loc.NotePath()} {
+				if fileExists(path) {
+					t.Errorf("the refused import left %s", path)
+				}
+			}
+			if err := rigBootRefusal(f.request.CityPath, f.target); err != nil {
+				t.Errorf("boot refuses after an import that wrote nothing: %v", err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := doStoragePreflight(f.request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "cannot report the payload") {
+				t.Errorf("preflight did not report the payload refusal: %d %s %s", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// Iteration-1 major: a row the manifest records as carried that the binding
+// no longer holds refuses the plan before an incremental import copies its
+// new rows. The rig holds the only copy; an edge onto it from a new row would
+// otherwise be recorded as onto a bead "absent from every store" and committed
+// with the copy and the manifest before the clear's re-proof refused.
+func TestReviewCarriedRowTheBindingLacksRefusesTheIncrementalCopy(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	crashOnceAt(t, "pending")
+	_, _, _ = f.importRigs()
+	binding, err := openInfraDestination(f.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.Delete("gp-a"); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	f.seed("packs", []beads.Bead{graphRow("gp-n", "gp-a", "open", nil)}, []beads.Dep{{IssueID: "gp-n", DependsOnID: "gp-a", Type: "blocks"}})
+	code, _, stderr := f.importRigs()
+	if code == 0 || !strings.Contains(stderr, "gp-a") || !strings.Contains(stderr, "only copy") {
+		t.Fatalf("a carried row the binding lacks did not refuse the import: %d %s", code, stderr)
+	}
+	if _, err := f.binding().Get("gp-n"); err == nil {
+		t.Error("the refused import copied gp-n, recording its edge onto gp-a as onto a bead no store holds")
+	}
+	if manifest, _, err := f.loc("packs").readManifest(); err != nil || manifest == nil || manifest.IDs["gp-n"] {
+		t.Errorf("the refused import rewrote the manifest: %v %v", manifest, err)
+	}
+	for _, id := range []string{"gp-a", "gp-n"} {
+		if _, err := f.rig("packs").Get(id); err != nil {
+			t.Errorf("the refused import removed %s from the rig: %v", id, err)
+		}
+	}
+}
+
+// Iteration-1 minor: "nothing to import" never drops the in-flight record
+// over an interrupted incremental attempt's copies whose rows have since left
+// the rig: the binding may hold their only copy, without their edges, and the
+// record is what keeps boot from serving them.
+func TestReviewNothingToImportKeepsAnInterruptedIncrementalHalfCopyHeld(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	if code, o, e := f.importRigs(); code != 0 {
+		t.Fatalf("first import = %d: %s %s", code, o, e)
+	}
+	f.seed("packs", []beads.Bead{graphRow("gp-x", "gp-x", "open", nil), graphRow("gp-y", "gp-x", "open", nil)},
+		[]beads.Dep{{IssueID: "gp-y", DependsOnID: "gp-x", Type: "blocks"}})
+	crashOnceAt(t, "rows")
+	_, _, _ = f.importRigs()
+	rig := f.rig("packs")
+	for _, id := range []string{"gp-y", "gp-x"} {
+		if err := rig.Delete(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, stdout, stderr := f.importRigs()
+	if code == 0 || !strings.Contains(stderr, "gp-x, gp-y") || !strings.Contains(stderr, "only copy") {
+		t.Fatalf("the re-run over an unrecorded half copy = %d: %s %s", code, stdout, stderr)
+	}
+	if !fileExists(f.loc("packs").InFlightPath()) {
+		t.Error("the re-run removed the in-flight record over binding rows without their edges")
+	}
+	if err := rigBootRefusal(f.request.CityPath, f.target); err == nil {
+		t.Error("boot serves the binding's unrecorded half copy")
+	}
+}
+
+// Iteration-1 major: a clear stopped between two delete batches resumes on a
+// Dolt rig. bd's delete rewrites each surviving neighbor's text that cites a
+// deleted id to "[deleted:<id>]", finding the neighbors by their edges, so a
+// chain longer than a batch would leave the next batch's first row unequal to
+// its binding copy, and every resume's re-proof would refuse it. The edges a
+// batch boundary cuts are removed before the first delete.
+func TestReviewDoltClearStoppedBetweenDeleteBatchesResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real Dolt rig")
+	}
+	prevChunk := rigImportDeleteChunk
+	rigImportDeleteChunk = 4
+	t.Cleanup(func() { rigImportDeleteChunk = prevChunk })
+	rig := newRealDoltRigStore(t)
+	const n = 10
+	id := func(i int) string { return fmt.Sprintf("gd-s%02d", i) }
+	want := map[string]string{}
+	for i := 0; i < n; i++ {
+		b := graphRow(id(i), id(0), "", nil)
+		if i > 0 {
+			b.Description = "runs after " + id(i-1)
+		}
+		want[b.ID] = b.Description
+		seedRealDoltRow(t, rig, b, false)
+	}
+	for i := 1; i < n; i++ {
+		if err := rig.DepAdd(id(i), id(i-1), "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newRigImportFixture(t, config.Rig{Name: "dolt", Prefix: "gd"})
+	f.fixed["dolt"] = nonClosingStore{rig}
+	crashOnceAt(t, "deleting")
+	if code, _, stderr := f.importRigs(); code == 0 || !strings.Contains(stderr, "killed at deleting") {
+		t.Fatalf("the crash between delete batches did not stop the import: %d %s", code, stderr)
+	}
+	left := rigTestList(t, rig)
+	if len(left) == 0 || len(left) == n {
+		t.Fatalf("precondition: the crash should fall between batches; the rig holds %v", rigTestIDs(left))
+	}
+	for _, b := range left {
+		if b.Description != want[b.ID] {
+			t.Errorf("deleting the first batch rewrote surviving %s's text to %q", b.ID, b.Description)
+		}
+	}
+	if code, stdout, stderr := f.importRigs(); code != 0 {
+		t.Fatalf("the resume after a crash between delete batches = %d: %s %s", code, stdout, stderr)
+	}
+	if left := rigTestList(t, rig); len(left) != 0 {
+		t.Errorf("the rig holds %v after the resume, want none", rigTestIDs(left))
+	}
+	binding := f.binding()
+	for i := 0; i < n; i++ {
+		got, err := binding.Get(id(i))
+		if err != nil || got.Description != want[id(i)] {
+			t.Errorf("binding %s = %q (%v), want %q", id(i), got.Description, err, want[id(i)])
+		}
+		if i == 0 {
+			continue
+		}
+		if deps, err := binding.DepList(id(i), "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != id(i-1) {
+			t.Errorf("binding %s's edges = %v (%v), want its edge to %s", id(i), deps, err, id(i-1))
+		}
+	}
+	if err := rigBootRefusal(f.request.CityPath, f.target); err != nil {
+		t.Errorf("boot refuses a finished import: %v", err)
+	}
+}
+
+// rigClearChunks keeps each edge-connected group in one delete batch when it
+// fits, and names only the edges a batch boundary cuts.
+func TestRigClearChunksKeepsGroupsWhole(t *testing.T) {
+	prev := rigImportDeleteChunk
+	rigImportDeleteChunk = 4
+	t.Cleanup(func() { rigImportDeleteChunk = prev })
+	rows := func(ids ...string) []beads.Bead {
+		out := make([]beads.Bead, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, beads.Bead{ID: id})
+		}
+		return out
+	}
+	edge := func(from, to string) beads.Dep { return beads.Dep{IssueID: from, DependsOnID: to, Type: "blocks"} }
+	render := func(chunks [][]string, cut []beads.Dep) string {
+		parts := make([]string, 0, len(chunks))
+		for _, c := range chunks {
+			parts = append(parts, strings.Join(c, " "))
+		}
+		edges := make([]string, 0, len(cut))
+		for _, d := range cut {
+			edges = append(edges, d.IssueID+">"+d.DependsOnID)
+		}
+		return strings.Join(parts, " | ") + " ; cut " + strings.Join(edges, " ")
+	}
+	for _, tc := range []struct {
+		name string
+		rows []beads.Bead
+		down map[string][]beads.Dep
+		want string
+	}{
+		{
+			name: "a group that fits the next batch whole is not split",
+			rows: rows("a", "b", "c", "x", "y", "z"),
+			down: map[string][]beads.Dep{"b": {edge("b", "a")}, "x": {edge("x", "y"), edge("x", "z")}, "y": {edge("y", "z")}},
+			want: "a b c | x y z ; cut ",
+		},
+		{
+			name: "a chain longer than a batch is cut once per boundary",
+			rows: rows("s1", "s2", "s3", "s4", "s5", "s6"),
+			down: map[string][]beads.Dep{"s2": {edge("s2", "s1")}, "s3": {edge("s3", "s2")}, "s4": {edge("s4", "s3")}, "s5": {edge("s5", "s4")}, "s6": {edge("s6", "s5")}},
+			want: "s1 s2 s3 s4 | s5 s6 ; cut s5>s4",
+		},
+		{
+			name: "edges to rows that stay are not internal",
+			rows: rows("a", "b"),
+			down: map[string][]beads.Dep{"a": {edge("a", "w")}, "b": {edge("b", "external:x")}},
+			want: "a b ; cut ",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := render(rigClearChunks(tc.rows, tc.down)); got != tc.want {
+				t.Errorf("rigClearChunks = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

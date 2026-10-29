@@ -189,7 +189,7 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 		ctx := rigPlanContext{Rig: rig.Name, CityName: cityName, Snap: snap, Manifest: manifest}
 		if present, _ := infraPathExists(target.Database); present {
 			if binding, oerr := openInfraBindingReadOnly(target); oerr == nil {
-				if c, cerr := rigImportPlanContext(env, rig, snap, manifest, binding, store); cerr == nil {
+				if c, cerr := rigImportPlanContext(env, rig, snap, manifest, binding); cerr == nil {
 					ctx = c
 				} else {
 					row.Err = cerr
@@ -199,7 +199,13 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 				row.Err = fmt.Errorf("opening the city binding: %w", oerr)
 			}
 		}
-		plan := planRigImport(ctx)
+		if row.Err != nil {
+			// A plan over a binding that could not be read would name the
+			// rows the import carried as gone from it; the error is the
+			// answer.
+			return row
+		}
+		plan := planRigImportReadingPayloads(ctx, store)
 		if err := rigImportSharedStoreRefusal(env, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "give the rig a store of its own"})
 		}

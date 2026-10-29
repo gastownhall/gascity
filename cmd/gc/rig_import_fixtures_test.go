@@ -338,34 +338,10 @@ func TestRigImportFromARealDoltRig(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real Dolt rig")
 	}
-	ctx := context.Background()
-	scopeRoot := t.TempDir()
-	seed, err := beadslib.OpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
-	if err != nil {
-		t.Skipf("embedded Dolt unavailable: %v", err)
-	}
-	if err := seed.SetConfig(ctx, "issue_prefix", "gd"); err != nil {
-		t.Fatal(err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatal(err)
-	}
-	rig, err := beads.OpenNativeDoltStoreAt(ctx, scopeRoot, nil)
-	if err != nil {
-		t.Skipf("native Dolt store unavailable: %v", err)
-	}
-	t.Cleanup(func() { _ = rig.CloseStore() })
-	creator := beads.ForeignIDCreator(rig)
+	rig := newRealDoltRigStore(t)
 	mk := func(b beads.Bead, closed bool) {
 		t.Helper()
-		if _, err := creator.CreateWithForeignID(b); err != nil {
-			t.Fatalf("seeding %s: %v", b.ID, err)
-		}
-		if closed {
-			if err := rig.Close(b.ID); err != nil {
-				t.Fatal(err)
-			}
-		}
+		seedRealDoltRow(t, rig, b, closed)
 	}
 	mk(graphRow("gd-root", "gd-root", "", map[string]string{"gc.kind": "workflow", beadmeta.RootStoreRefMetadataKey: "rig:dolt"}), true)
 	for i := 0; i < 6; i++ {
@@ -403,6 +379,45 @@ func TestRigImportFromARealDoltRig(t *testing.T) {
 		t.Errorf("the chain edge did not cross: %v %v", deps, err)
 	}
 	assertNoCrossStoreEdge(t, binding)
+}
+
+// newRealDoltRigStore stands up a native Dolt rig store (embedded Dolt, the
+// engine bd stores rows in) with the id prefix gd, skipping the test where
+// embedded Dolt is unavailable.
+func newRealDoltRigStore(t *testing.T) *beads.NativeDoltStore {
+	t.Helper()
+	ctx := context.Background()
+	scopeRoot := t.TempDir()
+	seed, err := beadslib.OpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	if err != nil {
+		t.Skipf("embedded Dolt unavailable: %v", err)
+	}
+	if err := seed.SetConfig(ctx, "issue_prefix", "gd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig, err := beads.OpenNativeDoltStoreAt(ctx, scopeRoot, nil)
+	if err != nil {
+		t.Skipf("native Dolt store unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = rig.CloseStore() })
+	return rig
+}
+
+// seedRealDoltRow writes b into a native Dolt rig under its own id, closing
+// it when closed is set.
+func seedRealDoltRow(t *testing.T, rig *beads.NativeDoltStore, b beads.Bead, closed bool) {
+	t.Helper()
+	if _, err := beads.ForeignIDCreator(rig).CreateWithForeignID(b); err != nil {
+		t.Fatalf("seeding %s: %v", b.ID, err)
+	}
+	if closed {
+		if err := rig.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // nonClosingStore keeps the test's own handle on a real store open across the

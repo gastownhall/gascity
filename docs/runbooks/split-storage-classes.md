@@ -239,9 +239,14 @@ until the re-run finishes it.
 clear, or holds rows written after its import.
 
 The import refuses, before writing anything, a rig store another registered
-city also uses (shared or company stores wait for the single-writer
-attestation), rows scoped to another rig or city, open rows another city's
-agent claims, and a bd CLI rig whose edges it would have to copy. While an
+city also uses or that it cannot rule out as one (shared or company stores wait
+for the single-writer attestation; a Dolt rig whose endpoint does not resolve
+and that pins no database name cannot be compared), rows scoped to another rig
+or city, open rows another city's agent claims, rows its manifest says it
+carried that the binding no longer holds, and a rig whose store cannot read the
+payload of an edge the import copies or backs up. A bd CLI rig with an edge on
+a row it moves is such a rig; a proxied-server rig reads payloads natively with
+`GC_BEADS_PROXIED_NATIVE=1`. While an
 import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
 every gc command refuse; re-run the import to finish it. If a rig store is
 gone for good after its import wrote its marker, `gc storage migrate

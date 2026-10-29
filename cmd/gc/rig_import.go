@@ -71,8 +71,8 @@ func rigImportAllInstruction() string {
 
 // rigImportDeleteChunk bounds one batched delete. The design measured about
 // 30 ms per row for one Dolt commit per row and 1.0 s for 1,000 rows deleted
-// in chunks of 250.
-const rigImportDeleteChunk = 250
+// in chunks of 250. A var so a test can force several chunks with few rows.
+var rigImportDeleteChunk = 250
 
 // rigImportLocation is where one rig's import records live: the manifest,
 // marker, clean record and backup beside the city's infra.migrated at the
@@ -369,19 +369,30 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	}
 	defer closeBinding()
 
-	ctx, err := rigImportPlanContext(env, rig, snap, manifest, binding, rigStore)
+	ctx, err := rigImportPlanContext(env, rig, snap, manifest, binding)
 	if err != nil {
 		return fail(err)
 	}
-	plan := planRigImport(ctx)
+	plan := planRigImportReadingPayloads(ctx, rigStore)
 	result.OpenRouted = plan.OpenRouted
 	if len(plan.Refusals) > 0 {
 		result.Outcome, result.Refusals = rigImportRefused, plan.Refusals
 		return result
 	}
 	if len(plan.Move) == 0 && len(plan.Retained) == 0 && !resuming {
-		closeBinding()
 		if manifest != nil {
+			// An interrupted incremental attempt's copies whose rows have
+			// since left the rig: the binding may hold their only copy,
+			// without their edges, and only the in-flight record keeps boot
+			// from serving them.
+			unrecorded, err := rigUnrecordedImportRows(binding, rig.Name, manifest)
+			closeBinding()
+			if err != nil {
+				return fail(err)
+			}
+			if len(unrecorded) > 0 {
+				return refuse(fmt.Errorf("rig %s: the binding holds %d row(s) stamped as this rig's import that its manifest does not record, and the rig no longer holds them (an interrupted incremental import whose rows have since left the rig), so the binding may hold their only copy, without their edges: %s. Nothing was removed and the in-flight record %s stays. Restore those rows to the rig store from a backup and re-run, or remove each binding copy once it is confirmed unwanted", rig.Name, len(unrecorded), infraStrandedIDList(unrecorded), loc.InFlightPath()))
+			}
 			_ = os.Remove(loc.InFlightPath())
 			result.Outcome = rigImportNothing
 			if notePresent && note.Complete {
@@ -393,6 +404,7 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 			}
 			return result
 		}
+		closeBinding()
 		if plan.Infra == 0 {
 			if fileExists(loc.InFlightPath()) {
 				return refuse(fmt.Errorf("rig %s holds no infrastructure row but an interrupted import's record %s is present: the binding may hold the only copy of rows it moved. Restore the rig store, or its records, then re-run", rig.Name, loc.InFlightPath()))
@@ -536,9 +548,8 @@ func (l rigImportLocation) storeIdentityRefusal(storeRoot string) error {
 
 // rigImportPlanContext gathers what the plan reads: the binding's rows under
 // the ids it asks about, every copy of an open moved row's blocker held in
-// another store, whether the rig store can report edge payloads, and the
-// claimant rule for shared stores.
-func rigImportPlanContext(env rigImportEnv, rig config.Rig, snap rigSnapshot, manifest *infraCopyManifest, binding, rigStore beads.Store) (rigPlanContext, error) {
+// another store, and the claimant rule for shared stores.
+func rigImportPlanContext(env rigImportEnv, rig config.Rig, snap rigSnapshot, manifest *infraCopyManifest, binding beads.Store) (rigPlanContext, error) {
 	gen := coordclass.CurrentGeneration
 	if manifest != nil {
 		gen = manifest.Generation
@@ -552,13 +563,68 @@ func rigImportPlanContext(env rigImportEnv, rig config.Rig, snap rigSnapshot, ma
 	if ids := elsewhereCandidates(snap, gen, held); len(ids) > 0 {
 		ctx.Elsewhere, ctx.ElsewhereUnread = probeElsewhere(env, rig, ids)
 	}
-	_, ctx.PayloadsUnreadable = rigStore.(beads.DepMetadataReader)
-	ctx.PayloadsUnreadable = !ctx.PayloadsUnreadable
 	if env.Cfg != nil {
 		gate := newForeignClaimGate(env.Cfg, beads.SessionStore{Store: binding})
 		ctx.ForeignClaimant = func(assignee string) bool { return !gate.observable(assignee) }
 	}
 	return ctx, nil
+}
+
+// planRigImportReadingPayloads is the plan the import and `gc storage
+// preflight` both run: planRigImport over the gathered context, refused as
+// well when the rig store cannot read an edge payload the import needs
+// (rigImportPayloadRefusal).
+func planRigImportReadingPayloads(ctx rigPlanContext, rigStore beads.Store) rigImportPlan {
+	plan := planRigImport(ctx)
+	if refusal, refused := rigImportPayloadRefusal(rigStore, ctx.Snap, plan); refused {
+		plan.Refusals = append(plan.Refusals, refusal)
+	}
+	return plan
+}
+
+// rigImportPayloadRefusal reads, through the rig store, the payload on every
+// edge the import reads one from: each edge it copies, and each edge the
+// clear's backup records, which is every edge of a row it moves or clears.
+// Those reads happen after the binding is touched, where a failure stops an
+// import holding its in-flight record or a pending clear (and boot with it)
+// on every re-run; read here first, a failure refuses before anything is
+// written.
+//
+// Only a read can tell. The bead policy wrapper every production open
+// returns implements beads.DepMetadataReader whatever its leaf is, and so do
+// the caching and proxied stores; each answers with an error when the store
+// beneath it cannot read a payload (the bd CLI store, which the default
+// proxied-server topology opens; DoltLite; an exec store). The probe stops at
+// the first edge whose read fails.
+func rigImportPayloadRefusal(rigStore beads.Store, snap rigSnapshot, plan rigImportPlan) (rigImportRefusal, bool) {
+	touched := make(map[string]bool, len(plan.Move)+len(plan.Retained))
+	for _, b := range plan.Move {
+		touched[b.ID] = true
+	}
+	for _, b := range plan.Retained {
+		touched[b.ID] = true
+	}
+	var edges []beads.Dep
+	for _, b := range snap.rows {
+		for _, d := range snap.down[b.ID] {
+			if d.IssueID == "" {
+				d.IssueID = b.ID
+			}
+			if touched[d.IssueID] || touched[d.DependsOnID] {
+				edges = append(edges, d)
+			}
+		}
+	}
+	for _, d := range edges {
+		if _, err := infraReadEdgePayload(rigStore, d.IssueID, d.DependsOnID); err != nil {
+			return rigImportRefusal{
+				IDs:    []string{d.IssueID, d.DependsOnID},
+				Reason: fmt.Sprintf("the rig store cannot report the payload on edge %s -> %s (%v), and the import reads the payload of each of the %d edge(s) it copies or backs up: an edge copied or cleared without its payload loses it", d.IssueID, d.DependsOnID, err, len(edges)),
+				Remedy: "serve the rig from a store that reads edge payloads (a native Dolt open; a proxied-server rig opens natively with GC_BEADS_PROXIED_NATIVE=1), or re-run if the read failed transiently; nothing was written",
+			}, true
+		}
+	}
+	return rigImportRefusal{}, false
 }
 
 // probeElsewhere reads ids from every store other than rig's and the
@@ -709,6 +775,11 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 	}
 	selfRoot := rigStoreRoot(env.CityPath, rig)
 	self := rigImportScopeDoltTarget(env.CityPath, selfRoot)
+	// A rig with no Dolt database (a file store) shares none. One whose
+	// endpoint cannot be resolved and which pins no database name cannot be
+	// told apart from any other city's Dolt rig, so it is compared, and
+	// refused, rather than skipped.
+	noDatabase := self.Database == "" && !self.Unresolved
 	for _, otherPath := range others {
 		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(otherPath, io.Discard)
 		if err == nil && cfg == nil {
@@ -725,7 +796,7 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 			if samePath(root, selfRoot) {
 				return fmt.Errorf("rig %s's store %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, selfRoot, otherPath, other.Name)
 			}
-			if self.Database == "" {
+			if noDatabase {
 				continue
 			}
 			theirs := rigImportScopeDoltTarget(otherPath, root)
@@ -733,6 +804,8 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 				continue
 			}
 			switch {
+			case self.Unresolved && self.Database == "":
+				return fmt.Errorf("rig %s's Dolt endpoint cannot be resolved (%w) and its .beads/metadata.json pins no dolt_database, so it cannot be ruled out as city %s's rig %s's database: start this rig's Dolt server so its endpoint resolves, or pin its database name, then re-run; nothing was written", rig.Name, self.Err, otherPath, other.Name)
 			case self.Unresolved || theirs.Unresolved:
 				if theirs.Database != "" && theirs.Database != self.Database {
 					continue
@@ -1149,11 +1222,20 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 	if err := rigImportCrashPoint("pending"); err != nil {
 		return 0, err
 	}
-	// The boundary edges go first. bd's delete rewrites every neighbor's
-	// text that names a deleted id to "[deleted:<id>]", and it finds the
-	// neighbors by their edges: a work row that tracks a moved row would
-	// have its own description rewritten. With the edges removed, no row
-	// that stays is a neighbor. The backup above records every one.
+	// Every edge a delete would follow to a row that outlives it goes first.
+	// bd's delete rewrites each surviving neighbor's text that names a
+	// deleted id to "[deleted:<id>]" (bumping its updated_at), and it finds
+	// the neighbors by their edges. That is every boundary edge (a work row
+	// that tracks a moved row would have its own description rewritten), and
+	// every edge between two cleared rows deleted in different batches: the
+	// row of the later batch would no longer match its binding copy, so a
+	// clear stopped between the two batches could never be re-proved and
+	// resumed. rigClearChunks keeps each edge-connected group of rows in one
+	// batch where it fits, so few edges cross one. With the edges removed, no
+	// row that outlives a batch is its neighbor. The backup above records
+	// every edge, and the binding holds the copies of those among cleared
+	// rows.
+	chunks, cut := rigClearChunks(toClear, snap.down)
 	for _, b := range toClear {
 		for _, d := range snap.down[b.ID] {
 			if clearing[d.DependsOnID] {
@@ -1172,14 +1254,15 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 			}
 		}
 	}
+	for _, d := range cut {
+		if err := rigStore.DepRemove(d.IssueID, d.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return 0, fmt.Errorf("removing edge %s -> %s from rig %s before the clear (its ends are deleted in different batches): %w", d.IssueID, d.DependsOnID, loc.Rig, err)
+		}
+	}
 	if err := rigImportCrashPoint("unlinked"); err != nil {
 		return 0, err
 	}
-	ids := make([]string, 0, len(toClear))
-	for _, b := range toClear {
-		ids = append(ids, b.ID)
-	}
-	if err := deleteInBatchesWithCrash(rigStore, ids); err != nil {
+	if err := deleteChunks(rigStore, chunks, func() error { return rigImportCrashPoint("deleting") }); err != nil {
 		return 0, fmt.Errorf("removing rig %s's imported copies: %w (the cleared note is pending; boot refuses until `%s` finishes the clear)", loc.Rig, err, rigImportInstruction(loc.Rig))
 	}
 	after, err := rigStore.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
@@ -1295,20 +1378,23 @@ func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.St
 	return nil
 }
 
-// rigEdgeDispositions maps each planned edge to what the import did with it,
-// keyed "from\x00to".
+// rigEdgeDispositions maps each edge the import decided to what it did with
+// it, keyed "from\x00to": this run's planned edges, and the boundary edges an
+// earlier run recorded on the rows it carried.
 func rigEdgeDispositions(plan rigImportPlan) map[string]string {
 	out := map[string]string{}
 	for _, e := range plan.Copy {
 		out[e.IssueID+"\x00"+e.DependsOnID] = rigEdgeCopied
 	}
-	for id, recs := range plan.Records {
-		for _, r := range recs {
-			key := id + "\x00" + r.Other
-			if r.Dir == "in" {
-				key = r.Other + "\x00" + id
+	for _, records := range []map[string][]rigCrossEdgeRecord{plan.RetainedRecords, plan.Records} {
+		for id, recs := range records {
+			for _, r := range recs {
+				key := id + "\x00" + r.Other
+				if r.Dir == "in" {
+					key = r.Other + "\x00" + id
+				}
+				out[key] = r.Action
 			}
-			out[key] = r.Action
 		}
 	}
 	return out
@@ -1343,18 +1429,13 @@ func rigBackupEntry(rigStore beads.Store, b beads.Bead, down, up []beads.Dep, cl
 	return entry, nil
 }
 
+// rigBackupEdge is one edge of a cleared row as the backup records it: its
+// payload, read through the rig store (the plan proved every such read
+// answers), and what the import did with it.
 func rigBackupEdge(rigStore beads.Store, d beads.Dep, disposition map[string]string) (infraBackupEdge, error) {
 	action := disposition[d.IssueID+"\x00"+d.DependsOnID]
 	if action == "" {
 		action = rigEdgeCopied
-	}
-	if _, readable := rigStore.(beads.DepMetadataReader); !readable {
-		// A store that cannot report payloads (the bd CLI store) has none the
-		// import could read; the plan refused any edge it would have copied,
-		// so every edge recorded here is a boundary edge the import drops.
-		// The backup records that its payload was unreadable rather than
-		// claiming it had none.
-		return infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type, Disposition: action + "; payload unreadable"}, nil
 	}
 	edge, err := infraBackupEdgeFor(rigStore, d)
 	if err != nil {
@@ -1364,50 +1445,119 @@ func rigBackupEdge(rigStore beads.Store, d beads.Dep, disposition map[string]str
 	return edge, nil
 }
 
-// deleteInBatches removes ids through the store's batched delete in chunks,
-// falling back to one delete per id.
-func deleteInBatches(store beads.Store, ids []string) error {
-	return deleteInBatchesStep(store, ids, nil)
-}
-
-// deleteInBatchesWithCrash is deleteInBatches with the importer's crash seam
-// between chunks.
-func deleteInBatchesWithCrash(store beads.Store, ids []string) error {
-	return deleteInBatchesStep(store, ids, func() error { return rigImportCrashPoint("deleting") })
-}
-
-func deleteInBatchesStep(store beads.Store, ids []string, between func() error) error {
-	if len(ids) == 0 {
-		return nil
+// rigClearChunks splits the rows the clear removes into delete batches of at
+// most rigImportDeleteChunk ids, and returns the edges between two of them
+// that fall into different batches. Each edge-connected group of rows is
+// taken in turn (groups by their least id, each breadth-first from it, so a
+// chain or tree stays contiguous), and a group that fits a batch but not what
+// is left of the current one starts the next, so only a group larger than a
+// batch has edges that cross one.
+func rigClearChunks(toClear []beads.Bead, down map[string][]beads.Dep) ([][]string, []beads.Dep) {
+	ids := make([]string, 0, len(toClear))
+	clearing := make(map[string]bool, len(toClear))
+	for _, b := range toClear {
+		ids = append(ids, b.ID)
+		clearing[b.ID] = true
 	}
-	batcher, batched := store.(beads.BatchDeleter)
-	for start := 0; start < len(ids); start += rigImportDeleteChunk {
-		end := start + rigImportDeleteChunk
-		if end > len(ids) {
-			end = len(ids)
-		}
-		chunk := ids[start:end]
-		if batched {
-			err := batcher.DeleteBatch(chunk)
-			if err == nil {
-				if between != nil && end < len(ids) {
-					if err := between(); err != nil {
-						return err
-					}
-				}
+	sort.Strings(ids)
+	var internal []beads.Dep
+	adjacent := map[string][]string{}
+	for _, id := range ids {
+		for _, d := range down[id] {
+			if !clearing[d.DependsOnID] || d.DependsOnID == id {
 				continue
 			}
-			if !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			internal = append(internal, beads.Dep{IssueID: id, DependsOnID: d.DependsOnID, Type: d.Type})
+			adjacent[id] = append(adjacent[id], d.DependsOnID)
+			adjacent[d.DependsOnID] = append(adjacent[d.DependsOnID], id)
+		}
+	}
+	for id := range adjacent {
+		sort.Strings(adjacent[id])
+	}
+	var chunks [][]string
+	var current []string
+	flush := func() {
+		if len(current) > 0 {
+			chunks = append(chunks, current)
+			current = nil
+		}
+	}
+	visited := make(map[string]bool, len(ids))
+	for _, start := range ids {
+		if visited[start] {
+			continue
+		}
+		visited[start] = true
+		group := []string{start}
+		for i := 0; i < len(group); i++ {
+			for _, next := range adjacent[group[i]] {
+				if !visited[next] {
+					visited[next] = true
+					group = append(group, next)
+				}
+			}
+		}
+		if len(group) <= rigImportDeleteChunk && len(current)+len(group) > rigImportDeleteChunk {
+			flush()
+		}
+		for _, id := range group {
+			current = append(current, id)
+			if len(current) == rigImportDeleteChunk {
+				flush()
+			}
+		}
+	}
+	flush()
+	chunkOf := make(map[string]int, len(ids))
+	for i, chunk := range chunks {
+		for _, id := range chunk {
+			chunkOf[id] = i
+		}
+	}
+	var cut []beads.Dep
+	for _, d := range internal {
+		if chunkOf[d.IssueID] != chunkOf[d.DependsOnID] {
+			cut = append(cut, d)
+		}
+	}
+	return chunks, cut
+}
+
+// deleteInBatches removes ids through the store's batched delete in chunks
+// of rigImportDeleteChunk, falling back to one delete per id.
+func deleteInBatches(store beads.Store, ids []string) error {
+	var chunks [][]string
+	for start := 0; start < len(ids); start += rigImportDeleteChunk {
+		chunks = append(chunks, ids[start:min(start+rigImportDeleteChunk, len(ids))])
+	}
+	return deleteChunks(store, chunks, nil)
+}
+
+// deleteChunks removes each chunk through the store's batched delete, one
+// call per chunk, falling back to one delete per id, and calls between after
+// every chunk but the last.
+func deleteChunks(store beads.Store, chunks [][]string, between func() error) error {
+	batcher, batched := store.(beads.BatchDeleter)
+	for i, chunk := range chunks {
+		if batched {
+			err := batcher.DeleteBatch(chunk)
+			switch {
+			case err == nil:
+			case errors.Is(err, beads.ErrBatchDeleteUnsupported):
+				batched = false
+			default:
 				return err
 			}
-			batched = false
 		}
-		for _, id := range chunk {
-			if err := store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return fmt.Errorf("deleting %s: %w", id, err)
+		if !batched {
+			for _, id := range chunk {
+				if err := store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("deleting %s: %w", id, err)
+				}
 			}
 		}
-		if between != nil && end < len(ids) {
+		if between != nil && i < len(chunks)-1 {
 			if err := between(); err != nil {
 				return err
 			}
@@ -1720,23 +1870,16 @@ func doStorageAbandonRigStore(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	held, err := beads.GetMany(binding, sortedMapKeys(manifest.IDs))
-	var stamped []beads.Bead
+	var unrecorded []string
 	if err == nil {
-		stamped, err = binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(rigName)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+		unrecorded, err = rigUnrecordedImportRows(binding, rigName, manifest)
 	}
 	_ = closeBeadStoreHandle(binding)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: reading the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	var unrecorded []string
-	for _, b := range stamped {
-		if !manifest.IDs[b.ID] && !manifest.Gates[b.ID] {
-			unrecorded = append(unrecorded, b.ID)
-		}
-	}
 	if len(unrecorded) > 0 {
-		sort.Strings(unrecorded)
 		fmt.Fprintf(stderr, "%s: the binding holds %d row(s) stamped as rig %s's import that its manifest does not record (an interrupted incremental import): %s. Only the import can prove or undo them; restore the rig store and run `%s`\n", logPrefix, len(unrecorded), rigName, infraStrandedIDList(unrecorded), rigImportInstruction(rigName)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1758,6 +1901,24 @@ func doStorageAbandonRigStore(ctx context.Context, request storageOperatorReques
 	}
 	fmt.Fprintf(stdout, "rig %s: store abandoned; the binding holds all %d row(s) its import recorded, and the clear is recorded complete\n", rigName, manifest.Len()) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// rigUnrecordedImportRows names, sorted, the binding rows stamped as rig's
+// import that its manifest records neither as a row nor as a gate: an
+// interrupted incremental attempt's copies, which may lack their edges.
+func rigUnrecordedImportRows(binding beads.Store, rig string, manifest *infraCopyManifest) ([]string, error) {
+	stamped, err := binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(rig)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing the binding's rows from rig %s: %w", rig, err)
+	}
+	var unrecorded []string
+	for _, b := range stamped {
+		if !manifest.IDs[b.ID] && !manifest.Gates[b.ID] {
+			unrecorded = append(unrecorded, b.ID)
+		}
+	}
+	sort.Strings(unrecorded)
+	return unrecorded, nil
 }
 
 // rigImportRigNamed returns the configured rig named name.
