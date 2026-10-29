@@ -11,9 +11,9 @@ import (
 // This file expresses the ga-x9kptu / ga-5736js acceptance criteria at the
 // shell-generator level: route-scoped, unassigned pool-demand queries (Tier
 // 3, and the reconciler's count-form) must exclude beads carrying a
-// beadmeta.DispatchHoldLabels value, while the assignee-scoped ephemeral
-// probe (Tier 1/2) stays hold-transparent. The assigned-ready reader's own
-// dispatch-hold exclusion (#8010) is pinned in
+// beadmeta.DispatchHoldLabels value. The generated assignee-scoped tiers serve
+// work as well, so they exclude the dispatch holds too but never the human
+// label; the assigned-ready tier's exclusion (#8010) is pinned in
 // workquery_assigned_ready_hold_test.go.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
@@ -48,10 +48,18 @@ func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesDispatchHoldLabels(t *
 	}
 }
 
-func TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels(t *testing.T) {
+// The bd-1.0.4 assigned-ready wisp probe serves its first row and exits the
+// work query, so its jq selection drops every dispatch hold (#8010); the
+// behavior is pinned in workquery_assigned_ready_hold_test.go.
+func TestEphemeralAssignedReadyProbeScriptExcludesDispatchHoldLabels(t *testing.T) {
 	got := ephemeralAssignedReadyProbeScript("cand", QueryTopology{})
-	if strings.Contains(got, "--exclude-label") || strings.Contains(got, ".labels") {
-		t.Errorf("ephemeralAssignedReadyProbeScript() = %q, assignee-scoped tier must stay hold-transparent", got)
+	if !strings.Contains(got, ".labels") {
+		t.Errorf("ephemeralAssignedReadyProbeScript() = %q, missing a .labels reference", got)
+	}
+	for _, label := range beadmeta.DispatchHoldLabels {
+		if !strings.Contains(got, `"`+label+`"`) {
+			t.Errorf("ephemeralAssignedReadyProbeScript() = %q, missing hold label %q", got, label)
+		}
 	}
 }
 

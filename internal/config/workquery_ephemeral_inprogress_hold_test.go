@@ -23,10 +23,9 @@ import (
 // the generated shell against a fake `bd` on PATH so they pin observable
 // behavior rather than the script's spelling.
 //
-// Scope note (ga-5736js): only the in_progress WORK-SERVING probe is
-// hold-gated. ephemeralAssignedReadyProbeScript stays hold-transparent by
-// design — pinned by
-// TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels.
+// Scope note: the open tier's wisp probe, ephemeralAssignedReadyProbeScript,
+// serves work the same way and drops held rows the same way (#8010); its
+// coverage is in workquery_assigned_ready_hold_test.go.
 
 // heldEphemeralInProgressRow is the ephemeral-store crash-recovery row for a
 // bead parked on label, as `bd query 'ephemeral=true AND status=in_progress'`

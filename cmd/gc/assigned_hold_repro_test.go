@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -100,6 +101,9 @@ func assignedHoldTopology(federated bool) config.QueryTopology {
 // and returns its stdout and the reader call log.
 func assignedHoldRunWorkQuery(t *testing.T, topo config.QueryTopology, rows []assignedHoldRow) (string, string) {
 	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required to run the generated work query")
+	}
 	a := config.Agent{
 		Name:              "worker",
 		Dir:               "example",

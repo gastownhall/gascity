@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,22 +11,31 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-// Coverage for #8010: the assigned-ready read serves its first row and exits
+// Coverage for #8010: the assigned-ready tier serves its first row and exits
 // the work query, so a dispatch-held OPEN assignment it returns starves every
-// tier below it. The read excludes beadmeta.DispatchHoldLabels (never the human
-// label) before its --limit=1, so a held row is neither served nor able to
+// tier below it. Its ready read excludes beadmeta.DispatchHoldLabels (never the
+// human label) before its --limit=1, and its bd-1.0.4 wisp probe drops the same
+// labels before its `.[:1]` cut, so a held row is neither served nor able to
 // shadow an unheld assignment. These tests EXECUTE the generated query against a
 // fake reader that honors the filter flags, so they pin observable behavior.
 
 // fakeFilteringReader stands in for both `bd` and `gc`. `ready` and `list`
 // filter the rows in $FAKE_ROWS by --status (default open), --assignee,
 // --unassigned, every --metadata-field key=value and every --exclude-label,
-// then apply --limit, in file order; `show` reports no dependencies; anything
-// else is empty. Every call is logged to $FAKE_READ_LOG as "<binary> <args>".
+// then apply --limit, in file order; `query` answers the ephemeral tier with
+// the rows in $FAKE_WISPS whose status is the one its expression names; `show`
+// reports no dependencies; anything else is empty. Every call is logged to
+// $FAKE_READ_LOG as "<binary> <args>".
 const fakeFilteringReader = `#!/bin/sh
 printf '%s %s\n' "${0##*/}" "$*" >> "$FAKE_READ_LOG"
 case "$1" in
   ready|list) ;;
+  query)
+    st=open
+    for arg in "$@"; do
+      case "$arg" in *status=*) st=${arg##*status=} ;; esac
+    done
+    jq -c --arg st "$st" '[.[] | select(.status == $st)]' "$FAKE_WISPS"; exit 0 ;;
   show) printf '[{"dependencies":[]}]'; exit 0 ;;
   *) printf '[]'; exit 0 ;;
 esac
@@ -62,20 +72,42 @@ const (
 )
 
 type fakeReaderRow struct {
-	ID       string            `json:"id"`
-	Status   string            `json:"status"`
-	Type     string            `json:"issue_type"`
-	Assignee string            `json:"assignee"`
-	Labels   []string          `json:"labels,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
+	ID              string            `json:"id"`
+	Status          string            `json:"status"`
+	Type            string            `json:"issue_type"`
+	Assignee        string            `json:"assignee"`
+	Labels          []string          `json:"labels,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CreatedAt       string            `json:"created_at,omitempty"`
+	DependencyCount int               `json:"dependency_count,omitempty"`
 }
 
 func assignedOpenRow(id, assignee string, labels ...string) fakeReaderRow {
 	return fakeReaderRow{ID: id, Status: "open", Type: "task", Assignee: assignee, Labels: labels}
 }
 
-func routedOpenRow(id, target string) fakeReaderRow {
-	return fakeReaderRow{ID: id, Status: "open", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target}}
+// assignedOpenWisp is an OPEN ephemeral assignment as `bd query` reports it. A
+// nonzero dependencyCount sends it down the wisp probe's dependency-enriched
+// path instead of the fast one.
+func assignedOpenWisp(id, assignee string, dependencyCount int, labels ...string) fakeReaderRow {
+	row := assignedOpenRow(id, assignee, labels...)
+	row.DependencyCount = dependencyCount
+	return row
+}
+
+// inCreationOrder stamps rows with ascending created_at, the wisp probe's sort
+// key, so the probe sees them in the order given.
+func inCreationOrder(rows ...fakeReaderRow) []fakeReaderRow {
+	for i := range rows {
+		rows[i].CreatedAt = fmt.Sprintf("2026-01-%02dT00:00:00Z", i+1)
+	}
+	return rows
+}
+
+// routedOpenRow is the unassigned "routed" step routed to the seat's alias:
+// the work the routed tier serves once the assigned tiers have none.
+func routedOpenRow() fakeReaderRow {
+	return fakeReaderRow{ID: "routed", Status: "open", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: assignedHoldTestAlias}}
 }
 
 func assignedHoldPoolAgent() *Agent {
@@ -94,6 +126,22 @@ func assignedHoldTopologies() map[string]QueryTopology {
 	}
 }
 
+// bd104WispTopologies are the topologies whose assigned-ready tier still runs
+// the wisp probe behind its ready read: bd-1.0.4 `bd ready` cannot ask for the
+// ephemeral tier, so the probe reads it with `bd query`, on either reader.
+func bd104WispTopologies() map[string]QueryTopology {
+	return map[string]QueryTopology{
+		"bd104":           {},
+		"bd104/federated": {FederatedReady: true},
+	}
+}
+
+// wispProbePaths names the wisp probe's two candidate paths by the
+// dependency_count that selects them.
+func wispProbePaths() map[string]int {
+	return map[string]int{"fast": 0, "enriched": 1}
+}
+
 func assignedHoldSeatEnv() map[string]string {
 	return map[string]string{
 		"GC_SESSION_ID":     assignedHoldTestSessionID,
@@ -107,18 +155,35 @@ func assignedHoldSeatEnv() map[string]string {
 // output rows and the reader call log.
 func runFilteredQuery(t *testing.T, command string, env map[string]string, rows []fakeReaderRow) ([]fakeReaderRow, string) {
 	t.Helper()
+	return runFilteredQueryWithWisps(t, command, env, rows, nil)
+}
+
+// runFilteredQueryWithWisps is runFilteredQuery with wisps as the ephemeral
+// tier `bd query` reports.
+func runFilteredQueryWithWisps(t *testing.T, command string, env map[string]string, rows, wisps []fakeReaderRow) ([]fakeReaderRow, string) {
+	t.Helper()
 	requireJQ(t)
 	tmp := t.TempDir()
-	data, err := json.Marshal(rows)
-	if err != nil {
-		t.Fatalf("marshal rows: %v", err)
-	}
-	rowsPath := filepath.Join(tmp, "rows.json")
-	if err := os.WriteFile(rowsPath, data, 0o644); err != nil {
-		t.Fatalf("write rows: %v", err)
+	writeRows := func(name string, set []fakeReaderRow) string {
+		if set == nil {
+			set = []fakeReaderRow{}
+		}
+		data, err := json.Marshal(set)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		path := filepath.Join(tmp, name)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
 	}
 	logPath := filepath.Join(tmp, "reads.log")
-	queryEnv := map[string]string{"FAKE_ROWS": rowsPath, "FAKE_READ_LOG": logPath}
+	queryEnv := map[string]string{
+		"FAKE_ROWS":     writeRows("rows.json", rows),
+		"FAKE_WISPS":    writeRows("wisps.json", wisps),
+		"FAKE_READ_LOG": logPath,
+	}
 	for k, v := range env {
 		queryEnv[k] = v
 	}
@@ -145,22 +210,27 @@ func assertServed(t *testing.T, got []fakeReaderRow, wantID string) {
 	}
 }
 
-// TestAssignedReadyHeldOnlyFallsThroughToRoutedTier: a held OPEN assignment on
-// any seat identity, for either hold and every reader shape, yields an empty
-// assigned-ready page, so the routed step below is served.
-func TestAssignedReadyHeldOnlyFallsThroughToRoutedTier(t *testing.T) {
-	identities := map[string]string{
+// assignedHoldSeatIdentities are the seat's three identities, by the variable
+// that carries each.
+func assignedHoldSeatIdentities() map[string]string {
+	return map[string]string{
 		"GC_SESSION_ID":   assignedHoldTestSessionID,
 		"GC_SESSION_NAME": assignedHoldTestSessionName,
 		"GC_ALIAS":        assignedHoldTestAlias,
 	}
+}
+
+// TestAssignedReadyHeldOnlyFallsThroughToRoutedTier: a held OPEN assignment on
+// any seat identity, for either hold and every reader shape, yields an empty
+// assigned-ready page, so the routed step below is served.
+func TestAssignedReadyHeldOnlyFallsThroughToRoutedTier(t *testing.T) {
 	for topoName, topo := range assignedHoldTopologies() {
-		for identityName, identity := range identities {
+		for identityName, identity := range assignedHoldSeatIdentities() {
 			for _, hold := range beadmeta.DispatchHoldLabels {
 				t.Run(topoName+"/"+identityName+"/"+hold, func(t *testing.T) {
 					got, log := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
 						assignedOpenRow("held", identity, hold),
-						routedOpenRow("routed", assignedHoldTestAlias),
+						routedOpenRow(),
 					})
 					assertServed(t, got, "routed")
 					if !strings.Contains(log, "--assignee="+identity+" --exclude-label hold:mayor --exclude-label hold:external --json --limit=1") {
@@ -222,7 +292,7 @@ func TestAssignedReadyServesUnheldAssignmentBehindHeldHead(t *testing.T) {
 			got, log := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
 				assignedOpenRow("held-head", assignedHoldTestAlias, beadmeta.HoldMayorLabel),
 				assignedOpenRow("unheld", assignedHoldTestAlias),
-				routedOpenRow("routed", assignedHoldTestAlias),
+				routedOpenRow(),
 			})
 			if len(got) != 1 || got[0].ID != "unheld" {
 				t.Fatalf("query served %+v, want only the unheld assignment", got)
@@ -243,10 +313,110 @@ func TestAssignedReadyStaysHumanTransparent(t *testing.T) {
 			t.Run(topoName+"/"+label, func(t *testing.T) {
 				got, _ := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
 					assignedOpenRow("labeled", assignedHoldTestAlias, label),
-					routedOpenRow("routed", assignedHoldTestAlias),
+					routedOpenRow(),
 				})
 				if len(got) != 1 || got[0].ID != "labeled" {
 					t.Fatalf("query served %+v, want the %s-labeled assignment ahead of the routed step", got, label)
+				}
+			})
+		}
+	}
+}
+
+// TestAssignedReadyHeldWispFallsThroughToRoutedTier is the #8010 regression on
+// the bd-1.0.4 wisp probe, which serves its first row and exits like the ready
+// read ahead of it: a held OPEN wisp assigned to any seat identity, on the
+// probe's fast path or its dependency-enriched one, is not served, so the
+// routed step below is.
+func TestAssignedReadyHeldWispFallsThroughToRoutedTier(t *testing.T) {
+	for topoName, topo := range bd104WispTopologies() {
+		for identityName, identity := range assignedHoldSeatIdentities() {
+			for pathName, dependencyCount := range wispProbePaths() {
+				for _, hold := range beadmeta.DispatchHoldLabels {
+					t.Run(topoName+"/"+identityName+"/"+pathName+"/"+hold, func(t *testing.T) {
+						got, log := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
+							[]fakeReaderRow{routedOpenRow()},
+							[]fakeReaderRow{assignedOpenWisp("held-wisp", identity, dependencyCount, hold)})
+						assertServed(t, got, "routed")
+						if !strings.Contains(log, "bd query") {
+							t.Errorf("the wisp probe never read the ephemeral tier; reads:\n%s", log)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestAssignedReadyServesUnheldWispBehindHeldHead: the wisp probe drops the
+// holds ahead of its `.[:1]` cut, so a held wisp that sorts first cannot hide an
+// unheld one for the same identity, on either path or across them, and the
+// assigned tier answers without reaching the routed tier.
+func TestAssignedReadyServesUnheldWispBehindHeldHead(t *testing.T) {
+	cases := map[string][]fakeReaderRow{
+		"fast": inCreationOrder(
+			assignedOpenWisp("held-head", assignedHoldTestAlias, 0, beadmeta.HoldMayorLabel),
+			assignedOpenWisp("unheld", assignedHoldTestAlias, 0)),
+		"enriched": inCreationOrder(
+			assignedOpenWisp("held-head", assignedHoldTestAlias, 1, beadmeta.HoldExternalLabel),
+			assignedOpenWisp("unheld", assignedHoldTestAlias, 1)),
+		"held fast, unheld enriched": inCreationOrder(
+			assignedOpenWisp("held-head", assignedHoldTestAlias, 0, beadmeta.HoldMayorLabel),
+			assignedOpenWisp("unheld", assignedHoldTestAlias, 1)),
+	}
+	for topoName, topo := range bd104WispTopologies() {
+		for name, wisps := range cases {
+			t.Run(topoName+"/"+name, func(t *testing.T) {
+				got, log := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
+					[]fakeReaderRow{routedOpenRow()}, wisps)
+				if len(got) != 1 || got[0].ID != "unheld" {
+					t.Fatalf("query served %+v, want only the unheld wisp", got)
+				}
+				if strings.Contains(log, beadmeta.RoutedToMetadataKey+"=") {
+					t.Errorf("the routed tier ran although the assigned tier had work; reads:\n%s", log)
+				}
+			})
+		}
+	}
+}
+
+// TestLegacyControlAssignedReadyServesUnheldWispBehindHeldHead covers the wisp
+// probe in the control dispatcher's candidate loop, which runs it for the
+// legacy workflow-control alias too: a held wisp is skipped, and an unheld one
+// behind it is served.
+func TestLegacyControlAssignedReadyServesUnheldWispBehindHeldHead(t *testing.T) {
+	const legacyAlias = "rig/workflow-control"
+	for topoName, topo := range bd104WispTopologies() {
+		for pathName, dependencyCount := range wispProbePaths() {
+			for _, hold := range beadmeta.DispatchHoldLabels {
+				t.Run(topoName+"/"+pathName+"/"+hold, func(t *testing.T) {
+					script := legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`
+					got, _ := runFilteredQueryWithWisps(t, script, map[string]string{"GC_ALIAS": "rig/" + ControlDispatcherAgentName}, nil,
+						inCreationOrder(
+							assignedOpenWisp("held", legacyAlias, dependencyCount, hold),
+							assignedOpenWisp("unheld", legacyAlias, dependencyCount)))
+					if len(got) != 1 || got[0].ID != "unheld" {
+						t.Fatalf("legacy candidate loop served %+v, want the held workflow-control wisp skipped for the unheld one", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestAssignedReadyWispStaysHumanTransparent: the wisp probe drops the dispatch
+// holds and nothing else, so a wisp assigned to the seat that carries bd's
+// human label, or a non-canonical hold:human label, is still served ahead of
+// routed work.
+func TestAssignedReadyWispStaysHumanTransparent(t *testing.T) {
+	for topoName, topo := range bd104WispTopologies() {
+		for _, label := range []string{beadmeta.HumanLabel, "hold:human"} {
+			t.Run(topoName+"/"+label, func(t *testing.T) {
+				got, _ := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
+					[]fakeReaderRow{routedOpenRow()},
+					[]fakeReaderRow{assignedOpenWisp("labeled", assignedHoldTestAlias, 0, label)})
+				if len(got) != 1 || got[0].ID != "labeled" {
+					t.Fatalf("query served %+v, want the %s-labeled wisp ahead of the routed step", got, label)
 				}
 			})
 		}

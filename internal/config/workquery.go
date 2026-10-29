@@ -188,9 +188,10 @@ func excludeLabelsJQClause(labels []string) string {
 }
 
 // excludeHoldLabelsJQClause is excludeLabelsJQClause over the
-// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
-// probes: they must drop a held bead and nothing else, so they never take the
-// pool-demand serve rules' wider label set.
+// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped probes (the
+// in_progress ones and the bd-1.0.4 assigned-ready wisp probe): they must drop
+// a held bead and nothing else, so they never take the pool-demand serve rules'
+// wider label set.
 func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
 }
@@ -778,14 +779,12 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // ready queue. The hold dimension is the same defect class as the dependency
 // dimension above, so it shares the same fall-through.
 //
-// Scope (ga-5736js): the hold check is the WORK-SERVING decision only. The
-// assignee-scoped probes that answer "does a session still need to exist" —
-// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
-// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
-// assignment still keeps its owner visible to demand and recovery accounting.
-// Those callers pass checkHold=false, which omits every `.labels` reference
-// from the generated script — TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels
-// pins the omission, not just the outcome.
+// Scope (ga-5736js): the hold check is the WORK-SERVING decision only, and it
+// reads the candidate row after the tier's read has cut it to one. The wisp
+// probes (ephemeralAssignedInProgressProbeScript and
+// ephemeralAssignedReadyProbeScript) drop held rows inside their own jq
+// selection, ahead of their `.[:1]` cut, so they pass checkHold=false: the
+// count here would always read zero for them.
 //
 // Enrichment is fail-open: a failed or unparseable `bd show`, or an
 // unparseable `bd list` row, degrades to the stock behavior of serving the
@@ -905,7 +904,9 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // its --limit=1. Its callers serve the first row and exit the query, so a held
 // row it returned would be stripped by the hook's held-candidate filter and
 // starve every tier below (#8010); filtering ahead of the limit also keeps a
-// held head from hiding an unheld assignment for the same identity.
+// held head from hiding an unheld assignment for the same identity. On bd-1.0.4
+// the wisp probe behind it (ephemeralAssignedReadyProbeScript) filters the same
+// way.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
@@ -989,8 +990,8 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // this probe's jq consumes the `bd query` snapshot, never raw stdout, so it
 // never serves an unparseable row. An unparseable or failed scan does not fall
 // through as an empty tier either: the snapshot read itself fails the query
-// (ephemeralStatusSnapshotShell). The hold-transparent existence
-// probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
+// (ephemeralStatusSnapshotShell). The open tier's wisp probe,
+// ephemeralAssignedReadyProbeScript, drops held rows the same way (#8010).
 //
 // It must also apply the same inProgressBlockedByEnrichmentScript gate before
 // serving a surviving candidate, or a blocked in_progress wisp step is
@@ -1035,19 +1036,25 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 // front door put the wisp somewhere a plain read cannot see it, which is the
 // single-store city.
 //
+// It is the wisp half of the assigned-ready tier: like assignedReadyTierCommand
+// ahead of it, it serves its first row and exits the query. So it drops
+// beadmeta.DispatchHoldLabels (never the human label) inside its jq selection,
+// before the `.[:1]` cut. A held wisp it served would be stripped by the hook's
+// held-candidate filter and starve every tier below it (#8010), and filtering
+// ahead of the cut keeps a held wisp from hiding an unheld one assigned to the
+// same identity.
+//
 // It tries the fast dependency_count == 0 candidate first, then falls back to
 // a dependency_count > 0 candidate enriched via a real bd show --json call,
 // so a step whose dependencies have since all closed is still reachable —
-// see ephemeralReadyDependencyCandidateFilterJQ. The enrichment call passes
-// checkHold=false: this is an assignee-scoped existence probe, not the
-// in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
-// pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
+// see ephemeralReadyDependencyCandidateFilterJQ.
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	selector := `select((.assignee // "") == $id)` + excludeHoldLabelsJQClause()
+	fastFilter := legacyEphemeralReadyFilterJQ(selector, 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, 1, false)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -1055,8 +1062,9 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		// federated=false: this row comes from `bd query`, which never
 		// carries a resolved blocked_by, so skip straight to the bd show
-		// fallback. checkHold=false: ga-5736js, this probe must stay
-		// hold-transparent.
+		// fallback. checkHold=false: the selector above already excludes
+		// held candidates before the `.[:1]` truncation, so the
+		// post-truncation nheld check here would always read zero.
 		inProgressBlockedByEnrichmentScript(false, false) +
 		`fi; `
 }
@@ -1223,8 +1231,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // work_query in their agent config; that custom query is returned unchanged
 // above.
 //
-// The assigned-ready reader skips dispatch-held rows (never the human
-// label), so a held assignment is neither served nor able to mask other work.
+// The assigned-ready tier skips dispatch-held rows (never the human label),
+// in its ready read and in its bd-1.0.4 wisp probe alike, so a held assignment
+// is neither served nor able to mask other work.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
