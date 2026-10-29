@@ -147,3 +147,25 @@ func TestGetAgentNeverResolvesAKindOrEmptyTarget(t *testing.T) {
 		}
 	}
 }
+
+// A session whose registered name happens to be a kind is still a session:
+// it resolves to exactly its own pane, whether `agent get` answers directly or
+// the not-found list scan has to find it past an unnamed pane of that kind.
+func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
+	const opencodeEntry = `{"agent":"opencode","name":"opencode","pane_id":"w5:p1","agent_status":"idle"}`
+	for _, tc := range []struct {
+		leg string
+		get string
+	}{
+		{"agent get answers", opencodeEntry},
+		{"list scan after not-found", ""},
+	} {
+		t.Run(tc.leg, func(t *testing.T) {
+			c, _ := lookupFake(t, tc.get, unnamedOpencodeEntry, alphaEntry, betaEntry, opencodeEntry)
+			a, ok, err := c.getAgent(context.Background(), "opencode")
+			if err != nil || !ok || a.PaneID != "w5:p1" {
+				t.Errorf("getAgent(%q) = (%+v, %v, %v); want its own pane w5:p1", "opencode", a, ok, err)
+			}
+		})
+	}
+}
