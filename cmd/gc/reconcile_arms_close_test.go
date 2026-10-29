@@ -674,6 +674,36 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("settlement %+v, want the marker stamped", s)
 		}
 	})
+	t.Run("a detached probe that observed nothing leaves the slot unsearched and unstamped (AC-6)", func(t *testing.T) {
+		for _, p := range []struct {
+			name  string
+			setup func(t *testing.T)
+		}{
+			{"error: no server socket", func(t *testing.T) {
+				t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+				installFakeTmux(t, "exit 1")
+			}},
+			{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "exit 2") }},
+			{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "sleep 2") }},
+		} {
+			t.Run(p.name, func(t *testing.T) {
+				p.setup(t)
+				k := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+				k.work(t, "in_progress", detachedClaim())
+				w := *k.w
+				w.Env = &reconcileEnv{Cfg: k.cfg}
+				v := txView{It: k.decide(), World: &w, Row: k.w.Census.Rows[k.k].Info, Fence: txFence{Work: &txWork{}}}
+				got, err := strandedProbe(context.Background(), effectReads{legs: testWorkLegs(w.CityPath, k.cfg, k.store, nil)}, v)
+				if err != nil || got.searched || len(got.ids) != 0 {
+					t.Fatalf("probe = %+v, %v: want unsearched with nothing listed stranded", got, err)
+				}
+				s := k.run(t, gone().tmux())
+				if b := k.row(t); s.Cause != causeStranded || b.Metadata[strandedEventEmittedKey] != "" || len(s.Facts.Events) != 0 {
+					t.Fatalf("settlement %+v marker %q, want refused stranded with no marker and no event", s, b.Metadata[strandedEventEmittedKey])
+				}
+			})
+		}
+	})
 	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
 		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff")) // the claim's detached probe is alive
 		c := orphan(t)

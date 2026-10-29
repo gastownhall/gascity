@@ -182,10 +182,10 @@ func killCorpse(ctx context.Context, _ txCaps, k corpseKill) (corpseKilled, erro
 }
 
 // strandedWork is the stranded branch's probe: the unmarked pool slot's
-// assigned work through the read-only legs, filtered by legacy's detached
-// probes (filterDetachedStrandedDiagnosticWork, without its metadata clear:
-// the legs refuse writes, and the release clears it). Not searched, the
-// branch refuses: no stamp rests on a probe that did not answer.
+// assigned work through the read-only legs, filtered by its detached probes
+// (as filterDetachedStrandedDiagnosticWork, without its metadata clear: the
+// legs refuse writes, and the release clears it). Not searched, the branch
+// refuses: no stamp rests on a probe that did not answer.
 type strandedWork struct {
 	ids      []string
 	alive    bool // every claim read reports a detached probe alive
@@ -195,9 +195,10 @@ type strandedWork struct {
 // strandedProbe reads the stranded branch's work, only when it applies: L5
 // found work on a pool slot that is not killed and carries no marker. The
 // detached probes run concurrently after the read, each on its own bound
-// (detachedProbeDefaultTimeout) apart from the read's; a probe that times
-// out reads not alive, as legacy's does. One the Probe's own bound cut
-// short leaves the work unsearched, so this attempt refuses.
+// (detachedProbeDefaultTimeout) apart from the read's. Only work whose probe
+// attests dead, or that carries none, is stranded: a probe that observed
+// nothing (error or timeout), or the Probe's own bound cutting the read
+// short, leaves the work unsearched, so this attempt refuses.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	if c.Kind != closePoolSlot || c.Killed || v.Fence.Work == nil || v.Fence.Work.Free ||
@@ -205,14 +206,15 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 		return strandedWork{}, nil
 	}
 	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
-	alive := make([]bool, len(work))
+	status := make([]detachedProbeStatus, len(work))
 	var wg sync.WaitGroup
 	for i, item := range work {
+		status[i] = detachedProbeDead
 		if spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				alive[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status == detachedProbeAlive
+				status[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status
 			}()
 		}
 	}
@@ -222,8 +224,12 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	}
 	out := strandedWork{searched: true}
 	for i, item := range work {
-		if !alive[i] {
+		switch status[i] {
+		case detachedProbeAlive:
+		case detachedProbeDead:
 			out.ids = append(out.ids, item.bead.ID)
+		default:
+			return strandedWork{}, nil
 		}
 	}
 	out.alive = err == nil && len(work) > 0 && len(out.ids) == 0

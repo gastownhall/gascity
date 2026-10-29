@@ -198,7 +198,8 @@ Consumers treat the field conservatively:
 - Probe error or timeout: nothing was observed, so orphan release keeps the
   assignment and `gc.detached` on every tick until a probe attests alive or
   dead, while stranded diagnostics emit immediately and preserve
-  `gc.detached`.
+  `gc.detached`. A pool slot's close does not stamp `session.stranded` on such
+  a probe: it refuses that attempt and lists no work it could not observe.
 
 Orphan release clears `gc.detached` in the same store update that reopens the
 work. If the release update fails, the detached guard remains on the work bead
