@@ -67,6 +67,15 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// A ProcessControl no-op (a control bead that is no longer open)
+			// is neither progress nor pending: it must let the backoff grow.
+			name:            "not-processed skip is idle",
+			serveErr:        errControlNotProcessed,
+			wantPendingAny:  false,
+			wantProcessed:   false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {
