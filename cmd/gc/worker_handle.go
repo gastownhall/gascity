@@ -110,6 +110,7 @@ func workerFactoryWithAttribution(
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		ResolveLaunchEnv:        workerLaunchEnvResolverWithConfig(cityPath, cfg),
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
@@ -732,14 +733,16 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// Reseed the city-anchored identity vars (GC_CITY, GC_CITY_PATH,
 	// GC_CITY_RUNTIME_DIR) on top of the provider env. Without this,
 	// session restart paths drop the city anchor and the spawned shell
-	// cannot locate its city. Rig-scoped env remains a create-time
-	// contract owned by template_resolve.go.
+	// cannot locate its city. This env stays the reduced handle env —
+	// rig-scoped and generated launch env is regenerated at start time by
+	// workerLaunchEnvResolverWithConfig (#8184), so a projection error
+	// there cannot fail handle construction or a non-start read.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
 	//
 	// Identity-only (no GC_CONTROL_DISPATCHER_TRACE_DEFAULT): the
 	// dispatcher trace path is per-dispatcher-qualified and must not be
-	// overwritten with the city-uniform default here. template_resolve.go
-	// owns the qualified override for the CLI create path.
+	// overwritten with the city-uniform default here. The launch-env
+	// resolver owns the qualified override at start.
 	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
@@ -997,17 +1000,90 @@ func resolveWorkerRuntimeProviderWithConfig(cfg *config.City, info session.Info,
 	return resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
 }
 
+// agentTemplateProviderForAgentSession returns the configured agent and its
+// resolved provider when info's provider was resolved from the agent
+// template — the same decision resolveWorkerRuntimeProviderWithConfigAndMetadata
+// makes, factored out so the launch-env resolver describes the same agent the
+// runtime resolver did. Provider-kind and ad-hoc sessions answer false.
+func agentTemplateProviderForAgentSession(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.Agent, *config.ResolvedProvider, bool) {
+	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
+	if !session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
+		return nil, nil, false
+	}
+	if !foundAgent {
+		return nil, nil, false
+	}
+	resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath)
+	if err != nil {
+		return nil, nil, false
+	}
+	return &found, resolved, true
+}
+
+// workerLaunchEnvResolverWithConfig regenerates the generated agent launch
+// env for a resumed session (#8184): the layer the create-time resolver
+// (resolveTemplate) built and the reduced handle env omits. It returns nil —
+// today's env — when the city or config is missing, or when the session's
+// provider was not resolved from an agent template; gating on the shared
+// agent-template decision (not findAgentByTemplate alone) keeps rig scope off
+// a provider-kind session whose template string happens to match an agent.
+// Only a start that must launch a runtime consults it; handle construction
+// (logs, peek, stop, kill, nudge) never does, so a projection error cannot
+// fail a non-start read.
+func workerLaunchEnvResolverWithConfig(cityPath string, cfg *config.City) worker.LaunchEnvResolver {
+	if cfg == nil {
+		return nil
+	}
+	return func(info session.Info, sessionKind string, metadata map[string]string) (map[string]string, error) {
+		if strings.TrimSpace(cityPath) == "" {
+			return nil, nil
+		}
+		agent, resolved, ok := agentTemplateProviderForAgentSession(cfg, info, sessionKind, metadata)
+		if !ok {
+			return nil, nil
+		}
+		qualifiedName := firstNonEmptyGCString(info.AgentName, info.Template)
+		// Rig identity comes from the configured session identity — the same
+		// derivation resolveTemplate and the session_live bridge use — never
+		// from the recorded work_dir or the caller environment.
+		sc := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agent, cfg.Rigs)
+		workDir := strings.TrimSpace(info.WorkDir)
+		if workDir == "" {
+			workDir = cityPath
+		}
+		in := agentLaunchEnvInput{
+			CityPath:      cityPath,
+			Rigs:          cfg.Rigs,
+			Workspace:     &cfg.Workspace,
+			Upstreams:     cfg.Upstreams,
+			Agent:         agent,
+			Resolved:      resolved,
+			QualifiedName: qualifiedName,
+			WorkDir:       workDir,
+			Rig:           sc.Rig,
+			RigRoot:       sc.RigRoot,
+		}
+		scope, err := agentScopeLaunchEnv(in)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
+		}
+		// Resume must not use passthroughEnv(): that sweeps the caller's GC_*
+		// context into the session. providerProcessPassthroughEnv keeps the
+		// launch env to the generated layer over the process baseline.
+		env, _, err := composeAgentLaunchEnv(providerProcessPassthroughEnv(), scope, in)
+		if err != nil {
+			return nil, err
+		}
+		return env, nil
+	}
+}
+
 func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string) {
 	if cfg == nil {
 		return nil, ""
 	}
-	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
-	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
-		if foundAgent {
-			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
-				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved)
-			}
-		}
+	if agent, resolved, ok := agentTemplateProviderForAgentSession(cfg, info, sessionKind, metadata); ok {
+		return resolved, config.ResolveSessionCreateTransport(agent.Session, resolved)
 	}
 	for _, providerName := range []string{info.Provider, info.Template} {
 		providerName = strings.TrimSpace(providerName)
