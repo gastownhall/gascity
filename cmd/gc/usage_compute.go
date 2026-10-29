@@ -42,6 +42,13 @@ const usageModelSweptAtKey = "usage_model_swept_at"
 // cursor-guarded sweep bills the whole batch pending at the moment it next runs.
 const liveModelSweepMinInterval = 30 * time.Second
 
+// closedIntervalSweepGiveUp bounds how long a closed interval's unsettled
+// model-usage sweep is retried past usage_closed_at: the first attempt at or
+// after the deadline commits the compute fact and clears the close markers
+// even when the sweep has still not settled, so a transcript that never
+// resolves cannot keep the row listed forever.
+const closedIntervalSweepGiveUp = 15 * time.Minute
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -273,7 +280,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		sweepFactory = f
 		return sweepFactory
 	}
-	now := time.Now().UTC()
+	now := cr.usageClock().UTC()
 	liveLane := !bootReconcile
 	processSessionBead := func(b beads.Bead) {
 		if b.Metadata == nil {
@@ -379,7 +386,9 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 // through an open terminal state, so the terminal branch never sees it. It
 // sweeps the interval's model usage and records its compute fact, ending at
 // usage_closed_at, then commits the interval and clears the close markers in
-// one write once the sweep has settled.
+// one write once the sweep has settled, or at the first attempt at or after
+// usage_closed_at + closedIntervalSweepGiveUp. Attempts run at most once per
+// liveModelSweepMinInterval per session; a sink failure keeps the markers.
 //
 // A marked row with nothing to account only has its markers cleared: one with
 // no awake interval, one whose interval is already committed, an open row awake
@@ -414,6 +423,17 @@ func (cr *CityRuntime) settleClosedInterval(
 			return
 		}
 	}
+	// One attempt per liveModelSweepMinInterval per session; the first is never
+	// floored, whatever the live lane's memo for the interval says.
+	memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(b.Metadata["session_key"]))
+	if memo.settleAttempted && now.Before(memo.nextSweepAt) {
+		return
+	}
+	memo.settleAttempted = true
+	memo.nextSweepAt = now.Add(liveModelSweepMinInterval)
+	cr.storeLiveSweepMemo(b.ID, memo)
+	closedAt, closedErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(b.Metadata[session.MetadataKeyUsageClosedAt]))
+	giveUp := closedErr != nil || !now.Before(closedAt.Add(closedIntervalSweepGiveUp))
 	sweepSettled, swept := true, false
 	if factory := modelSweepFactory(); factory != nil &&
 		strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) != awakeStart {
@@ -423,8 +443,14 @@ func (cr *CityRuntime) settleClosedInterval(
 		}
 		sweepSettled, swept = settled, settled
 	}
-	if !emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, false) || !sweepSettled {
+	if !emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, false) {
 		return
+	}
+	if !sweepSettled {
+		if !giveUp {
+			return
+		}
+		logf("usage: model-usage sweep for closed session %s did not settle within %s of its close; committing its compute fact without it", b.ID, closedIntervalSweepGiveUp)
 	}
 	patch := map[string]string{
 		usageComputeEmittedAtKey:             awakeStart,
@@ -452,6 +478,14 @@ func clearUsageCloseMarkers(store beads.Store, id string, logf func(string, ...a
 	}
 }
 
+// usageClock is the usage lane's clock: usageNow when set, else time.Now.
+func (cr *CityRuntime) usageClock() time.Time {
+	if cr.usageNow != nil {
+		return cr.usageNow()
+	}
+	return time.Now()
+}
+
 // liveSweepMemo is one awake session's live model-usage sweep state, held for
 // the process lifetime because the worker factory is rebuilt every tick.
 //
@@ -471,8 +505,11 @@ type liveSweepMemo struct {
 	// nextSweepAt floors the sweep cadence (liveModelSweepMinInterval). It also
 	// backs off an unsettled discovery miss, so a session whose transcript cannot
 	// be resolved yet re-attempts discovery on that same floor instead of on
-	// every tick forever.
+	// every tick forever, and floors a closed interval's settle retries.
 	nextSweepAt time.Time
+	// settleAttempted records that the closed interval's settle has run once,
+	// so its first attempt is never floored by the live lane's cadence.
+	settleAttempted bool
 }
 
 // sweepLiveSessionModelUsage incrementally records model usage for an awake
