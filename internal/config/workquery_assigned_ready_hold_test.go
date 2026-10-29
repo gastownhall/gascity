@@ -211,3 +211,25 @@ func TestAssignedReadyScriptsExcludeDispatchHoldsNotHuman(t *testing.T) {
 		}
 	}
 }
+
+// TestAssignedReadyServesUnheldAssignmentBehindHeldHead: the exclusion rides
+// the reader ahead of its --limit=1, so a held assignment that sorts first
+// cannot hide an unheld one for the same identity, and the assigned tier
+// answers without reaching the routed tier.
+func TestAssignedReadyServesUnheldAssignmentBehindHeldHead(t *testing.T) {
+	for topoName, topo := range map[string]QueryTopology{"bd": singleStoreTopology(), "federated": federatedTopology()} {
+		t.Run(topoName, func(t *testing.T) {
+			got, log := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
+				assignedOpenRow("held-head", assignedHoldTestAlias, beadmeta.HoldMayorLabel),
+				assignedOpenRow("unheld", assignedHoldTestAlias),
+				routedOpenRow("routed", assignedHoldTestAlias),
+			})
+			if len(got) != 1 || got[0].ID != "unheld" {
+				t.Fatalf("query served %+v, want only the unheld assignment", got)
+			}
+			if strings.Contains(log, beadmeta.RoutedToMetadataKey+"=") {
+				t.Errorf("the routed tier ran although the assigned tier had work; reads:\n%s", log)
+			}
+		})
+	}
+}
