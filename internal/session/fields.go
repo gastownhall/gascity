@@ -234,7 +234,7 @@ func with(fields []Field, asClear bool, site Site, keys ...string) []Field {
 // fields is the registry, grouped by class, then v2's writers: A7's
 // identity (M1), A8's baseline (M2), and the create (C1) and named reopen
 // effects, which stamp a row's whole starting state.
-var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftRepair"),
+var fields = with(withObserved(with(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftRepair"),
 	"config_drift_deferred_at", "config_drift_deferred_key", "attached_config_drift_deferred_at", "attached_config_drift_deferred_key", "session_key"), false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
 	"template", "session_origin", "pool_managed", "pool_slot", "agent_name", "dependency_only", NamedSessionMetadataKey,
 	NamedSessionIdentityMetadata, NamedSessionModeMetadata, "alias", "alias_history", "pool_alias_conflict", "pool_alias_conflict_count",
@@ -257,7 +257,10 @@ var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2
 	"pending_create_claim", "pending_create_started_at", PrimedAtMetadataKey, PrimingAttemptedAtMetadataKey, PromptHashMetadataKey,
 	"sleep_reason", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state", "state_reason", "synced_at",
 	"churn_count", "held_until", "quarantined_until", "sleep_intent", "wait_hold", "wake_attempts", "wake_refused_event_at",
-	beadmeta.BoundStepIDMetadataKey, "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts", "startup_kickoff_last_nudge_at"))
+	beadmeta.BoundStepIDMetadataKey, "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts", "startup_kickoff_last_nudge_at")),
+	// The usage lane's closed-interval settle step clears the close markers
+	// once the closed interval's compute fact is accounted (issue #6672).
+	true, legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval"), MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt)
 
 // fieldIndex finds an entry by exact key, familyIndex the open-world ones.
 var fieldIndex, familyIndex = func() (map[string]int, []int) {
@@ -521,7 +524,7 @@ var registry = slices.Concat([]Field{
 	// The closed-interval settle markers (issue #6672): stamped by every close
 	// except a failed-create (ClosePatch, and the operator's CloseDetailed),
 	// cleared by the usage lane's settle step once the closed interval's
-	// compute fact is accounted.
+	// compute fact is accounted (the with chain below adds the clearer).
 	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed")),
 		MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts")), "usage_model_swept_at"),

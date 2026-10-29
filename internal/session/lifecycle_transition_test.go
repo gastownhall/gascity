@@ -1012,3 +1012,58 @@ func TestCloseDetailedStampsUsageCloseMarkers(t *testing.T) {
 		t.Errorf("usage_closed_at = %q, not an RFC3339 time: %v", closedAt, err)
 	}
 }
+
+// TestUsageIntervalEnd (issue #6672, AC-1): a close that stamped
+// usage_closed_at after the interval's start anchors the interval end —
+// slept_at still wins when the interval slept before the close, and without
+// a usable anchor the rule is unchanged (slept_at after start, else now).
+func TestUsageIntervalEnd(t *testing.T) {
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	now := start.Add(time.Hour)
+	slept := start.Add(30 * time.Minute)
+	closed := start.Add(10 * time.Minute)
+	ts := func(t time.Time) string { return t.Format(time.RFC3339Nano) }
+	tests := []struct {
+		name string
+		meta map[string]string
+		want time.Time
+	}{
+		{
+			name: "close anchor ends the interval",
+			meta: map[string]string{MetadataKeyUsageClosedAt: ts(closed)},
+			want: closed,
+		},
+		{
+			name: "slept before the close wins",
+			meta: map[string]string{MetadataKeyUsageClosedAt: ts(closed), "slept_at": ts(start.Add(5 * time.Minute))},
+			want: start.Add(5 * time.Minute),
+		},
+		{
+			name: "slept after the close is rejected",
+			meta: map[string]string{MetadataKeyUsageClosedAt: ts(closed), "slept_at": ts(now)},
+			want: closed,
+		},
+		{
+			name: "no anchor: slept_at after start",
+			meta: map[string]string{"slept_at": ts(slept)},
+			want: slept,
+		},
+		{
+			name: "no anchor: now",
+			meta: map[string]string{},
+			want: now,
+		},
+		{
+			name: "anchor before the start is ignored",
+			meta: map[string]string{MetadataKeyUsageClosedAt: ts(start.Add(-time.Minute)), "slept_at": ts(slept)},
+			want: slept,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UsageIntervalEnd(tc.meta, start, now); !got.Equal(tc.want) {
+				t.Errorf("UsageIntervalEnd = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

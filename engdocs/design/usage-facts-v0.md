@@ -207,7 +207,11 @@ yet settled.
   re-emits next tick, and `IdempotencyKey` collapses the duplicate at read time
   (fix double-count, not under-count). The scan only sees the open set, so a
   session closed directly from active without first reaching an open terminal
-  state (asleep/drained/archived/suspended/quarantined) is a known under-count.
+  state (asleep/drained/archived/suspended/quarantined) is settled by the
+  closed-interval lane instead: every close stamps `usage_close_pending` and
+  `usage_closed_at` (issue #6672), and the usage pass lists the marked closed
+  rows and accounts their intervals with the same end-of-interval sweep and
+  compute-fact commit, anchored at `usage_closed_at`.
   The single-key marker sidesteps open question 3 (`beads.Tx` validation across
   store impls).
 - **The awake epoch is `awake_started_at` at nanosecond precision**, stamped

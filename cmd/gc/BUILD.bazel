@@ -2182,6 +2182,8 @@ go_test(
         "typedclass_edge_guard_test.go",
         "upstream_wiring_test.go",
         "usage_compute_class_routing_test.go",
+        "usage_compute_closed_interval_test.go",
+        "usage_compute_drain_ack_repro_test.go",
         "usage_compute_test.go",
         "usage_sink_test.go",
         "v2_bench_city_test.go",

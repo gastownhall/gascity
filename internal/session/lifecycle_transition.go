@@ -712,6 +712,43 @@ func UsageClosePatch(now time.Time) MetadataPatch {
 	}
 }
 
+// UsageIntervalEnd returns the wall-clock end of the awake interval that
+// started at start on the row carrying meta, for usage accounting.
+//
+// When the close that stamped usage_closed_at fell after the start, that
+// anchor ends the interval: a close straight from an awake state (a drain-ack
+// close, issue #6672) never passes through an open terminal state, so the
+// close time is the only end the row records. slept_at still wins when the
+// interval genuinely slept before that close. Without a usable anchor the
+// rule is unchanged: slept_at when it falls after the start (the
+// graceful-sleep end), else now (best-effort for other terminal
+// transitions).
+func UsageIntervalEnd(meta map[string]string, start, now time.Time) time.Time {
+	var slept time.Time
+	sleptAfterStart := false
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["slept_at"])); err == nil && t.After(start) {
+		slept, sleptAfterStart = t, true
+	}
+	anchorRaw := strings.TrimSpace(meta[MetadataKeyUsageClosedAt])
+	if anchorRaw == "" {
+		if sleptAfterStart {
+			return slept
+		}
+		return now
+	}
+	anchor, err := time.Parse(time.RFC3339Nano, anchorRaw)
+	if err == nil && anchor.After(start) {
+		if sleptAfterStart && !slept.After(anchor) {
+			return slept
+		}
+		return anchor
+	}
+	if sleptAfterStart {
+		return slept
+	}
+	return now
+}
+
 // ClosePatch records terminal close metadata before the bead status is closed.
 //
 // state retains the canonical short stateCode (used by reconciler logic and

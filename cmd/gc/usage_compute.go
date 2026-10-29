@@ -48,8 +48,9 @@ const liveModelSweepMinInterval = 30 * time.Second
 // idle-sleep (asleep), controller drain (drained), retirement (archived),
 // operator suspend (suspended), and crash-loop quarantine (quarantined). A
 // session closed directly from active without first passing through one of
-// these open states is the known v0 scan limitation (see
-// engdocs/design/usage-facts-v0.md).
+// these open states never shows here; its interval is settled by the
+// closed-interval lane (settleClosedInterval, issue #6672), which the close's
+// usage_close_pending marker feeds.
 func isComputeTerminalState(state string) bool {
 	switch session.State(strings.TrimSpace(state)) {
 	case session.StateAsleep, session.StateDrained, session.StateArchived,
@@ -88,8 +89,10 @@ func isLiveModelSweepState(state string) bool {
 // SessionID is stamped from bead.ID so compute facts carry the same session
 // bead join key as model facts.
 //
-// wall_seconds is measured from awake_started_at to slept_at when present (the
-// graceful-sleep end), else to now (best-effort for other terminal transitions).
+// wall_seconds is measured from awake_started_at to the interval end
+// session.UsageIntervalEnd picks from the bead's metadata: the close anchor
+// when the row's close ended the interval, else slept_at when present (the
+// graceful-sleep end), else now (best-effort for other terminal transitions).
 //
 // RunID is resolved from the session bead's own run chain (workflow_id ||
 // molecule_id || gc.root_bead_id-or-self || bead id). Per-work-bead attribution
@@ -114,18 +117,13 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	if err != nil {
 		return false
 	}
-	// Prefer the recorded sleep time as the interval end, but only when it falls
-	// after this interval's start. slept_at is refreshed by both SleepPatch and
-	// AcknowledgeDrainPatch, so for a drained session the end is the drain-ack
-	// time rather than the reconcile tick's now — more accurate, and the After
-	// guard still rejects a slept_at carried over from a PRIOR awake interval
-	// (archive and quarantine exits still don't refresh it). Otherwise use now.
-	end := now
-	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
-		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil && t.After(startedAt) {
-			end = t
-		}
-	}
+	// The end follows session.UsageIntervalEnd: the close anchor when the
+	// row's close ended this interval, else slept_at when it falls after the
+	// start (the drain-ack and graceful-sleep ends, more accurate than the
+	// tick's now), else now. The After guards reject a slept_at carried over
+	// from a PRIOR awake interval (archive and quarantine exits don't refresh
+	// it) and an anchor from a prior interval a reopen kept.
+	end := session.UsageIntervalEnd(meta, startedAt, now)
 	wall := end.Sub(startedAt).Seconds()
 	if wall < 0 {
 		wall = 0
@@ -211,8 +209,10 @@ func liveModelSweepCandidate(info session.Info) bool {
 // run-chain keys, and neither slept_at nor the transcript cursor is projected onto
 // session.Info), so this is the usage lane's OWN edge read rather than a snapshot
 // raw-half read. A steady fleet of parked sessions whose intervals are already
-// accounted issues zero Gets. Best-effort: it never blocks or fails the reconcile
-// tick.
+// accounted issues zero Gets. It also settles the awake intervals a close ended
+// straight from an awake state (issue #6672), on closed rows the close marked —
+// a listing filtered by that marker, not closed history. Best-effort: it never
+// blocks or fails the reconcile tick.
 //
 // bootReconcile disables the live lane. The terminal lane's cost is unchanged by
 // boot — it is gated by a persisted per-interval marker, so it fires once per
@@ -299,40 +299,9 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		if !isComputeTerminalState(state) {
 			return
 		}
-		awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
-		// Model-usage lane FIRST, symmetric to and beside the compute fact: recover the
-		// terminal interval's trailing model-token usage that the prompt-op seam never
-		// recorded (pool-routed, hook-self-driven agents self-drive after the claim
-		// nudge). It runs before the compute commit so its settle result gates whether
-		// the interval closes this tick. Best-effort — a sweep error never
-		// fails the reconcile tick; overlap with the prompt-op seam is collapsed at read
-		// time by the shared usage.ModelIdempotencyKey.
-		//
-		// The sweep is gated by its OWN per-interval marker (usageModelSweptAtKey),
-		// distinct from the compute marker, so a transient miss retries on a later tick
-		// instead of being lost. sweepSettled defaults true so a nil factory / no-op
-		// sink never blocks the compute commit.
-		sweepSettled := true
-		if factory := modelSweepFactory(); factory != nil && awakeStart != "" &&
-			strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) != awakeStart {
-			_, settled, serr := factory.SweepSessionModelUsage(ctx, b.ID, b.Metadata, now)
-			if serr != nil {
-				logf("usage: model-usage sweep for session %s failed; will retry: %v", b.ID, serr)
-			}
-			sweepSettled = settled
-			if settled {
-				if merr := store.SetMetadata(b.ID, usageModelSweptAtKey, awakeStart); merr != nil {
-					logf("usage: marking model-usage swept for session %s failed; may re-sweep (deduped by idempotency key): %v", b.ID, merr)
-				}
-			}
-		}
-		// Commit the interval (stamp usage_compute_emitted_at) only once the sweep
-		// has settled — an unsettled sweep leaves the interval a
-		// candidate so both lanes retry next tick. The compute fact itself is always
-		// recorded (idempotent), so wall-time accounting is never delayed by a pending
-		// sweep.
-		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
+		cr.accountTerminalInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
 	}
+	processed := make(map[string]bool)
 	for _, info := range sessions {
 		// A canceled tick (controller shutdown, reconcile deadline) stops here
 		// rather than working through the rest of the fleet: every remaining
@@ -349,7 +318,151 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			logf("usage: loading session %s for usage facts failed: %v", info.ID, err)
 			continue
 		}
+		processed[info.ID] = true
 		processSessionBead(b)
+	}
+	// Closed rows a close marked (issue #6672): a drain-ack (or other) close
+	// from an awake state closes the bead in one commit, so the open snapshot
+	// never holds it and the open lanes above cannot account its interval.
+	// The listing is filtered by the equality marker, so its cost follows
+	// UNSETTLED marked rows only — never closed history — and is capped at
+	// 64 rows oldest-first per pass.
+	rows, err := store.List(beads.ListQuery{
+		Type:          session.BeadType,
+		Status:        "closed",
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Metadata:      map[string]string{session.MetadataKeyUsageClosePending: "true"},
+		Sort:          beads.SortCreatedAsc,
+		Limit:         64,
+	})
+	if err != nil {
+		logf("usage: listing closed sessions with pending usage markers failed: %v", err)
+		return
+	}
+	for _, b := range rows {
+		// A canceled tick stops between rows rather than working through the
+		// rest of the listing: remaining rows are picked up idempotently by
+		// the next pass.
+		if ctx.Err() != nil {
+			return
+		}
+		// A row the open pass above already settled or attempted this tick.
+		if processed[b.ID] {
+			continue
+		}
+		cr.settleClosedInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
+	}
+}
+
+// accountTerminalInterval records a completed awake interval — the trailing
+// model-usage sweep, the compute fact, and the interval-closing marker batch —
+// for a session bead whose interval has ended, whether the row sits open in a
+// compute-terminal state (the open terminal lane) or was closed straight from
+// an awake state (the closed-interval settle lane, issue #6672).
+//
+// The sweep runs FIRST, symmetric to and beside the compute fact: it recovers
+// the terminal interval's trailing model-token usage that the prompt-op seam
+// never recorded (pool-routed, hook-self-driven agents self-drive after the
+// claim nudge), gated by its OWN per-interval marker (usageModelSweptAtKey) so
+// a transient miss retries on a later tick instead of being lost. A live
+// sweep memo's resolved transcript path is reused when it describes the same
+// awake epoch and conversation; a memo that settled a discovery miss is never
+// trusted, because the transcript may have flushed since (the drain-ack
+// turn). Best-effort — a sweep error never fails the reconcile tick; overlap
+// with the prompt-op seam is collapsed at read time by the shared
+// usage.ModelIdempotencyKey.
+//
+// The compute fact is always recorded with commit=false; its interval-closing
+// side effects land in ONE SetMetadataBatch below, atomically with the sweep
+// marker and the closed lane's settle markers, only once the sweep has
+// settled and the fact is durably recorded (or the interval was already
+// recorded). An unsettled sweep or a sink Record failure keeps every marker,
+// so the next pass retries idempotently. The settle markers this batch clears
+// are no-ops on a row that was never marked.
+func (cr *CityRuntime) accountTerminalInterval(
+	ctx context.Context,
+	sink usage.Sink,
+	store beads.Store,
+	b beads.Bead,
+	runtimeKind string,
+	now time.Time,
+	logf func(string, ...any),
+	modelSweepFactory func() *worker.Factory,
+) {
+	meta := b.Metadata
+	awakeStart := strings.TrimSpace(meta["awake_started_at"])
+	// sweepSettled defaults true so a nil factory / already-swept interval
+	// never blocks the commit.
+	sweepSettled := true
+	if factory := modelSweepFactory(); factory != nil && awakeStart != "" &&
+		strings.TrimSpace(meta[usageModelSweptAtKey]) != awakeStart {
+		memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(meta["session_key"]))
+		var serr error
+		if memo.path != "" {
+			_, sweepSettled, serr = factory.SweepSessionModelUsageAtPath(ctx, b.ID, meta, memo.path, now)
+		} else {
+			_, sweepSettled, serr = factory.SweepSessionModelUsage(ctx, b.ID, meta, now)
+		}
+		if serr != nil {
+			logf("usage: model-usage sweep for session %s failed; will retry: %v", b.ID, serr)
+		}
+	}
+	// Record the compute fact without committing the interval: the fact is
+	// idempotent (ComputeIdempotencyKey), so an unsettled sweep retries the
+	// record next pass at zero cost.
+	recorded := emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, false)
+	already := awakeStart != "" && strings.TrimSpace(meta[usageComputeEmittedAtKey]) == awakeStart
+	if !sweepSettled || !recorded && !already {
+		return
+	}
+	batch := map[string]string{
+		usageComputeEmittedAtKey:             awakeStart,
+		session.MetadataKeyUsageClosePending: "",
+		session.MetadataKeyUsageClosedAt:     "",
+	}
+	if sweepSettled {
+		batch[usageModelSweptAtKey] = awakeStart
+	}
+	if err := store.SetMetadataBatch(b.ID, batch); err != nil {
+		logf("usage: closing interval markers for session %s failed; will retry (deduped by idempotency keys): %v", b.ID, err)
+		return
+	}
+	// The interval is accounted; the memo (a live-epoch discovery) is spent.
+	cr.liveSweepMemos.Delete(b.ID)
+}
+
+// settleClosedInterval settles the awake interval a close ended straight from
+// an awake state (issue #6672) on a row the close marked with
+// usage_close_pending. Such a row never sits open in a compute-terminal
+// state, so the open-snapshot scan cannot account it; this lane does. A row
+// with nothing to account — no confirmed start, or an already-recorded
+// interval — has its markers cleared so the listing stops returning it;
+// otherwise the interval is accounted through the shared terminal block,
+// which clears the markers on commit.
+func (cr *CityRuntime) settleClosedInterval(
+	ctx context.Context,
+	sink usage.Sink,
+	store beads.Store,
+	b beads.Bead,
+	runtimeKind string,
+	now time.Time,
+	logf func(string, ...any),
+	modelSweepFactory func() *worker.Factory,
+) {
+	meta := b.Metadata
+	awakeStart := strings.TrimSpace(meta["awake_started_at"])
+	if awakeStart != "" && strings.TrimSpace(meta[usageComputeEmittedAtKey]) != awakeStart {
+		cr.accountTerminalInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
+		return
+	}
+	// Nothing to account. Clear the markers so the closed listing stops
+	// returning the row.
+	if err := store.SetMetadataBatch(b.ID, map[string]string{
+		session.MetadataKeyUsageClosePending: "",
+		session.MetadataKeyUsageClosedAt:     "",
+	}); err != nil {
+		logf("usage: clearing close markers for session %s failed; will retry: %v", b.ID, err)
 	}
 }
 
@@ -413,8 +526,10 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 		// shares it — note an unambiguous claude session whose transcript is merely
 		// not written yet is NOT settled, so the live lane keeps rediscovering it).
 		// Record it so the scan is never repeated; the session's usage is
-		// still recovered by the terminal sweep when its interval ends, and a re-wake
-		// starts a fresh epoch that discovers again.
+		// still recovered by the terminal sweep when its interval ends — open
+		// in a terminal state, or closed straight from awake by the
+		// closed-interval lane — and a re-wake starts a fresh epoch that
+		// discovers again.
 		path, settled := factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)
 		memo.path = path
 		memo.settledMiss = path == "" && settled
